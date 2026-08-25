@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { rootLogger } from '../src/observability/logger.js'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
 
 /** The write shape the admin routes hand to the gateway. */
@@ -12,15 +13,37 @@ type SecretWrite = {
   data?: Record<string, string>
 }
 
+function writeSummary(body: SecretWrite) {
+  return {
+    name: body.name,
+    namespace: body.namespace || 'mcp-server',
+    keys: [
+      ...new Set([...Object.keys(body.data ?? {}), ...Object.keys(body.stringData ?? {})]),
+    ].sort((a, b) => a.localeCompare(b)),
+  }
+}
+
 /**
  * Minimal mock gateway with methods used by the POST /admin/mcp-secrets handler.
  */
 function createGateway() {
   return {
     listSecrets: vi.fn(async () => []),
-    createSecret: vi.fn(async (body: unknown) => body),
-    updateSecret: vi.fn(async (body: unknown) => body),
-    deleteSecret: vi.fn(async (_name: string, _namespace?: string) => ({ deleted: true })),
+    createSecret: vi.fn(async (body: SecretWrite) => ({
+      ...writeSummary(body),
+      metadata: {
+        name: body.name,
+        namespace: body.namespace || 'mcp-server',
+        uid: `uid-${body.name}`,
+        resourceVersion: '1',
+      },
+    })),
+    updateSecret: vi.fn(async (body: SecretWrite) => writeSummary(body)),
+    deleteSecret: vi.fn(async (name: string, namespace?: string) => ({
+      name,
+      namespace: namespace || 'mcp-server',
+      deleted: true as const,
+    })),
     getSecret: vi.fn(
       async (
         name: string,
@@ -34,7 +57,13 @@ function createGateway() {
         }
         data: Record<string, string>
       }> => ({
-        metadata: { name, namespace, labels: {} },
+        metadata: {
+          name,
+          namespace,
+          uid: `uid-${name}`,
+          resourceVersion: '1',
+          labels: {},
+        },
         // base64 of 'old-value' — the stored form of an existing key.
         data: { EXISTING_KEY: 'b2xkLXZhbHVl' },
       })
@@ -43,7 +72,17 @@ function createGateway() {
     // Secret, values included. A handler that echoed this back would leak
     // every stored credential, so the leak assertions below are meaningful.
     mergeSecret: vi.fn(async (body: SecretWrite) => ({
-      metadata: { name: body.name, namespace: 'mcp-server' },
+      name: body.name,
+      namespace: body.namespace || 'mcp-server',
+      metadata: {
+        name: body.name,
+        namespace: body.namespace || 'mcp-server',
+        uid: `uid-${body.name}`,
+        resourceVersion: '2',
+      },
+      keys: ['EXISTING_KEY', ...Object.keys(body.stringData ?? {})].sort((a, b) =>
+        a.localeCompare(b)
+      ),
       data: Object.fromEntries(
         Object.entries(body.stringData ?? {}).map(([key, value]) => [
           key,
@@ -353,21 +392,80 @@ describe('DELETE /admin/mcp-secrets/:name', () => {
     const gateway = createGateway()
     const app = makeApp(gateway)
 
-    const res = await request(app).delete('/admin/mcp-secrets/my-db-creds').expect(200)
+    const res = await request(app)
+      .delete('/admin/mcp-secrets/my-db-creds')
+      .send({ uid: 'uid-my-db-creds', resourceVersion: '1' })
+      .expect(200)
 
-    expect(res.body).toEqual({ deleted: true })
+    expect(res.body).toEqual({
+      name: 'my-db-creds',
+      namespace: 'mcp-server',
+      deleted: true,
+    })
     expect(gateway.deleteSecret).toHaveBeenCalledOnce()
-    expect(gateway.deleteSecret).toHaveBeenCalledWith('my-db-creds', 'mcp-server')
+    expect(gateway.deleteSecret).toHaveBeenCalledWith('my-db-creds', 'mcp-server', {
+      uid: 'uid-my-db-creds',
+      resourceVersion: '1',
+    })
   })
 
   it('always targets config.mcpServersNamespace (ignores any caller intent)', async () => {
     const gateway = createGateway()
     const app = makeApp(gateway)
 
-    await request(app).delete('/admin/mcp-secrets/orphan-secret').expect(200)
+    await request(app)
+      .delete('/admin/mcp-secrets/orphan-secret')
+      .send({ uid: 'uid-orphan-secret', resourceVersion: '1' })
+      .expect(200)
 
     const [, ns] = gateway.deleteSecret.mock.calls[0]
     expect(ns).toBe('mcp-server')
+  })
+
+  it('refuses to delete a Secret owned by a WorkflowRecipe', async () => {
+    const gateway = createGateway()
+    gateway.getSecret.mockResolvedValueOnce({
+      metadata: {
+        name: 'recipe-creds',
+        namespace: 'mcp-server',
+        labels: { 'clerum.io/recipe-secret': 'true' },
+        uid: 'uid-recipe-creds',
+        resourceVersion: '1',
+      },
+    })
+    const app = makeApp(gateway)
+
+    const res = await request(app)
+      .delete('/admin/mcp-secrets/recipe-creds')
+      .send({ uid: 'uid-recipe-creds', resourceVersion: '1' })
+      .expect(409)
+
+    expect(res.body.error).toContain('WorkflowRecipe')
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('binds deletion to the object observed by the ownership check', async () => {
+    const gateway = createGateway()
+    gateway.getSecret.mockResolvedValueOnce({
+      metadata: {
+        name: 'versioned-creds',
+        namespace: 'mcp-server',
+        labels: {},
+        uid: 'secret-uid',
+        resourceVersion: '17',
+      },
+    })
+    const app = makeApp(gateway)
+
+    await request(app)
+      .delete('/admin/mcp-secrets/versioned-creds')
+      .send({ uid: 'secret-uid', resourceVersion: '17' })
+      .expect(200)
+
+    expect(gateway.deleteSecret).toHaveBeenCalledWith('versioned-creds', 'mcp-server', {
+      uid: 'secret-uid',
+      resourceVersion: '17',
+    })
   })
 
   it('returns 500 when gateway.deleteSecret throws', async () => {
@@ -375,7 +473,10 @@ describe('DELETE /admin/mcp-secrets/:name', () => {
     gateway.deleteSecret.mockRejectedValueOnce(new Error('K8s API timeout'))
     const app = makeApp(gateway)
 
-    const res = await request(app).delete('/admin/mcp-secrets/any-name').expect(500)
+    const res = await request(app)
+      .delete('/admin/mcp-secrets/any-name')
+      .send({ uid: 'uid-any-name', resourceVersion: '1' })
+      .expect(500)
 
     expect(res.body.error).toContain('K8s API timeout')
   })
@@ -414,6 +515,8 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
     expect(res.body.keys).toEqual(['EXISTING_KEY', 'LINEAR_API_KEY'])
     expect(res.body.name).toBe('linear-credentials')
     expect(res.body.namespace).toBe('mcp-server')
+    expect(res.body.uid).toBe('uid-linear-credentials')
+    expect(res.body.resourceVersion).toBe('2')
   })
 
   it('preserves Registry catalog annotations while rotating managed credentials', async () => {
@@ -422,6 +525,8 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
       metadata: {
         name: 'linear-credentials',
         namespace: 'mcp-server',
+        uid: 'uid-linear-credentials',
+        resourceVersion: '1',
         labels: { 'clerum.io/managed-by': 'control-api' },
         annotations: {
           'clerum.io/catalog-id': 'linear',
@@ -444,7 +549,14 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
         stringData: { LINEAR_API_KEY: 'rotated-value' },
       }),
       {
-        allowExistingPlatformAnnotationKeys: ['clerum.io/catalog-id', 'clerum.io/catalog-version'],
+        allowExistingPlatformAnnotationKeys: [
+          'clerum.io/catalog-id',
+          'clerum.io/catalog-version',
+          'clerum.io/registry-operation-id',
+        ],
+      },
+      {
+        uid: 'uid-linear-credentials',
       }
     )
   })
@@ -678,17 +790,42 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
     // The rotation itself succeeds; only the secondary affectedConnectors
     // lookup fails. The operator must see the rotation as the success it is,
     // not a 500 that suggests the credential is unchanged.
-    gateway.listResource.mockRejectedValueOnce(new Error('mcpservers list forbidden'))
+    const sentinel = 'RP231_NESTED_ERROR_SENTINEL'
+    gateway.listResource.mockRejectedValueOnce(
+      Object.assign(new Error('mcpservers list forbidden'), {
+        response: { body: { value: sentinel } },
+      })
+    )
+    const warnSpy = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
     const app = makeApp(gateway)
 
-    const res = await request(app)
-      .put('/admin/mcp-secrets/linear-credentials')
-      .send({ data: { LINEAR_API_KEY: 'rotated-value' } })
-      .expect(200)
+    try {
+      const res = await request(app)
+        .put('/admin/mcp-secrets/linear-credentials')
+        .send({ data: { LINEAR_API_KEY: 'rotated-value' } })
+        .expect(200)
 
-    expect(gateway.mergeSecret).toHaveBeenCalledOnce()
-    expect(res.body.name).toBe('linear-credentials')
-    expect(res.body.affectedConnectors).toEqual([])
+      expect(gateway.mergeSecret).toHaveBeenCalledOnce()
+      expect(res.body.name).toBe('linear-credentials')
+      expect(res.body.affectedConnectors).toEqual([])
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'mcp-secret-rotated-affected-connectors-unavailable',
+          name: 'linear-credentials',
+          namespace: 'mcp-server',
+        }),
+        'Affected connectors unavailable after MCP Secret rotation'
+      )
+      const [fields] = warnSpy.mock.calls[0]
+      expect(fields).toEqual(
+        expect.objectContaining({
+          err: { name: 'Error', message: 'mcpservers list forbidden' },
+        })
+      )
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain(sentinel)
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 
   it('returns 500 when gateway.mergeSecret throws', async () => {
@@ -702,5 +839,67 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
       .expect(500)
 
     expect(res.body.error).toContain('K8s API timeout')
+  })
+})
+
+describe('DELETE /admin/mcp-secrets/:name (identity and dependency guard)', () => {
+  it('requires both server-issued identity values', async () => {
+    const gateway = createGateway()
+    const app = makeApp(gateway)
+
+    await request(app).delete('/admin/mcp-secrets/linear-credentials').send({}).expect(428)
+
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('refuses to delete a Secret referenced by a live connector', async () => {
+    const gateway = createGateway()
+    gateway.listResource.mockResolvedValueOnce([
+      {
+        metadata: { name: 'linear', namespace: 'mcp-server' },
+        spec: { envSecret: { name: 'linear-credentials' } },
+      },
+    ])
+    const app = makeApp(gateway)
+
+    const res = await request(app)
+      .delete('/admin/mcp-secrets/linear-credentials')
+      .send({ uid: 'uid-linear-credentials', resourceVersion: '1' })
+      .expect(409)
+
+    expect(res.body).toMatchObject({ error: 'mcp_secret_in_use', outcome: 'repair_required' })
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when the dependency graph cannot be read', async () => {
+    const gateway = createGateway()
+    gateway.listResource.mockRejectedValueOnce(new Error('connector list unavailable'))
+    const app = makeApp(gateway)
+
+    const res = await request(app)
+      .delete('/admin/mcp-secrets/linear-credentials')
+      .send({ uid: 'uid-linear-credentials', resourceVersion: '1' })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'mcp_secret_reference_check_unavailable',
+      outcome: 'repair_required',
+    })
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('deletes an unreferenced Secret with its identity precondition', async () => {
+    const gateway = createGateway()
+    const app = makeApp(gateway)
+
+    await request(app)
+      .delete('/admin/mcp-secrets/linear-credentials')
+      .send({ uid: 'uid-linear-credentials', resourceVersion: '1' })
+      .expect(200)
+
+    expect(gateway.deleteSecret).toHaveBeenCalledWith('linear-credentials', 'mcp-server', {
+      uid: 'uid-linear-credentials',
+      resourceVersion: '1',
+    })
   })
 })

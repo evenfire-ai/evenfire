@@ -1,5 +1,6 @@
 import * as k8s from '@kubernetes/client-node'
 import { config } from './config.js'
+import { rootLogger } from './observability/logger.js'
 import { HostEnvService } from './services/hostEnvService.js'
 import { HostOverviewService } from './services/hostOverviewService.js'
 import {
@@ -8,18 +9,17 @@ import {
 } from './services/llmAllowedModelsConfigMap.js'
 import { ResourceService, mergeAnnotationsForReplace } from './services/resourceService.js'
 import type { SecretConstraintOptions } from './services/secretConstraints.js'
-import type {
-  SecretRepository,
-  SecretResource,
-  SecretSnapshot,
-} from './services/secretRepository.js'
-import { SecretService } from './services/secretService.js'
+import type { SecretSnapshot } from './services/secretRepository.js'
+import { type DeleteSecretSummary, SecretService } from './services/secretService.js'
 import {
   ClerumResourceType,
   HostOverview,
+  ResourcePreconditions,
   SecretPreconditions,
   SecretUpsertRequest,
 } from './types.js'
+
+const logger = rootLogger.child({ module: 'k8s-gateway' })
 
 /**
  * Namespaces where exec operations are permitted.
@@ -166,7 +166,7 @@ export function validateExecParams(namespace: string, pathOrDir: string): void {
 export class K8sGateway {
   private readonly namespace: string
   private readonly resources: ResourceService
-  private readonly secrets: SecretRepository
+  private readonly secrets: SecretService
   private readonly hostOverviews: HostOverviewService
   private readonly hostEnvSvc: HostEnvService
   private readonly llmAllowedModelsCmWriter: LlmAllowedModelsConfigMapWriter
@@ -263,6 +263,7 @@ export class K8sGateway {
       metadata?: {
         labels?: Record<string, string>
         annotations?: Record<string, string>
+        uid?: string
         resourceVersion?: string
       }
       spec: Record<string, unknown>
@@ -389,9 +390,10 @@ export class K8sGateway {
   async deleteResource(
     plural: ClerumResourceType,
     name: string,
-    namespace?: string
+    namespace?: string,
+    precondition?: ResourcePreconditions
   ): Promise<unknown> {
-    return this.resources.deleteResource(plural, name, namespace)
+    return this.resources.deleteResource(plural, name, namespace, precondition)
   }
 
   async listSecrets(namespace = this.secretsNamespace): Promise<unknown[]> {
@@ -403,15 +405,18 @@ export class K8sGateway {
    * client so callers can branch on statusCode. Used by admin POST handlers
    * to validate envSecret references before creating broken CRDs.
    */
-  async getSecret(name: string, namespace?: string): Promise<SecretResource> {
+  async getSecret(name: string, namespace?: string): Promise<unknown> {
     return this.secrets.getSecret(name, namespace)
   }
 
+  // SecretService's public write methods are names-only. Registry and rollback
+  // need an internal snapshot for UID/RV CAS and restoration; those snapshots
+  // are never serialized by an HTTP route.
   async createSecret(
     req: SecretUpsertRequest,
     opts?: SecretConstraintOptions
   ): Promise<SecretSnapshot> {
-    return this.secrets.createSecret(req, opts)
+    return this.secrets.createSecretSnapshot(req, opts)
   }
 
   /** `precondition` makes the replace ownership-bound; see `SecretPreconditions`. */
@@ -420,22 +425,26 @@ export class K8sGateway {
     precondition?: SecretPreconditions,
     opts?: SecretConstraintOptions
   ): Promise<SecretSnapshot> {
-    return this.secrets.updateSecret(req, precondition, opts)
+    return this.secrets.updateSecretSnapshot(req, precondition, opts)
   }
 
   async mergeSecret(
     req: SecretUpsertRequest,
-    opts?: SecretConstraintOptions
+    opts?: SecretConstraintOptions,
+    precondition?: SecretPreconditions
   ): Promise<SecretSnapshot> {
-    return this.secrets.mergeSecret(req, opts)
+    return this.secrets.mergeSecretSnapshot(req, opts, precondition)
   }
 
-  async removeSecretKey(req: {
-    name: string
-    namespace?: string
-    key: string
-  }): Promise<SecretSnapshot> {
-    return this.secrets.removeSecretKey(req)
+  async removeSecretKey(
+    req: {
+      name: string
+      namespace?: string
+      key: string
+    },
+    precondition?: SecretPreconditions
+  ): Promise<SecretSnapshot> {
+    return this.secrets.removeSecretKeySnapshot(req, precondition)
   }
 
   /** `precondition` binds the delete to a specific object; see `SecretPreconditions`. */
@@ -443,7 +452,7 @@ export class K8sGateway {
     name: string,
     namespace?: string,
     precondition?: SecretPreconditions
-  ): Promise<unknown> {
+  ): Promise<DeleteSecretSummary> {
     return this.secrets.deleteSecret(name, namespace, precondition)
   }
 
@@ -570,9 +579,18 @@ export class K8sGateway {
       if (isExecOutputLimitError(findError)) throw findError
       // BusyBox find (Alpine/node images) lacks -printf. Keep -type f in the
       // fallback so directories and symlinks do not become downloadable entries.
-      console.warn(
-        'find -printf failed, falling back to find -type f:',
-        findError instanceof Error ? findError.message : String(findError)
+      logger.warn(
+        {
+          event: 'artifact-listing-find-printf-unsupported',
+          podName,
+          namespace,
+          containerName,
+          err: {
+            name: findError instanceof Error ? findError.name : typeof findError,
+            message: findError instanceof Error ? findError.message : String(findError),
+          },
+        },
+        'find -printf failed; falling back to find -type f'
       )
       return this.execRaw(
         podName,
@@ -701,13 +719,15 @@ export function extractHttpStatus(err: unknown): number | null {
   const maybe = err as {
     statusCode?: number
     code?: number | string
-    status?: number
     httpStatus?: number
     response?: { statusCode?: number; status?: number }
   }
   if (typeof maybe.statusCode === 'number') return maybe.statusCode
   if (typeof maybe.code === 'number') return maybe.code
   if (typeof maybe.code === 'string' && /^\d+$/.test(maybe.code)) return Number(maybe.code)
+  if (typeof (maybe as { status?: unknown }).status === 'number') {
+    return (maybe as { status: number }).status
+  }
   // `.httpStatus` mirrors extractK8sError's chain (http/k8sError.ts): the
   // service-layer K8sNotFoundError/K8sConflictError expose their status only
   // there, so read it after code/statusCode or their 404/409 collapses to null.
@@ -715,7 +735,6 @@ export function extractHttpStatus(err: unknown): number | null {
   if (maybe.response && typeof maybe.response.statusCode === 'number')
     return maybe.response.statusCode
   if (maybe.response && typeof maybe.response.status === 'number') return maybe.response.status
-  if (typeof maybe.status === 'number') return maybe.status
   return null
 }
 
@@ -746,9 +765,9 @@ export async function listRecipePodsAcrossNamespaces(
       } catch (err) {
         const status = extractHttpStatus(err)
         if (status === 403 || status === 404) {
-          console.warn(
-            `listPodsForRecipe: skipping namespace "${namespace}" (HTTP ${status}) — ` +
-              'control-api lacks pod list RBAC there or the namespace does not exist'
+          logger.warn(
+            { namespace, status, recipeName },
+            'Skipping recipe pod namespace without list access'
           )
           return []
         }

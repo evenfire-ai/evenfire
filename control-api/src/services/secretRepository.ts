@@ -45,8 +45,15 @@ export interface SecretRepository {
     precondition?: SecretPreconditions,
     opts?: SecretConstraintOptions
   ): Promise<SecretSnapshot>
-  mergeSecret(req: SecretUpsertRequest, opts?: SecretConstraintOptions): Promise<SecretSnapshot>
-  removeSecretKey(req: { name: string; namespace?: string; key: string }): Promise<SecretSnapshot>
+  mergeSecret(
+    req: SecretUpsertRequest,
+    opts?: SecretConstraintOptions,
+    precondition?: SecretPreconditions
+  ): Promise<SecretSnapshot>
+  removeSecretKey(
+    req: { name: string; namespace?: string; key: string },
+    precondition?: SecretPreconditions
+  ): Promise<SecretSnapshot>
   deleteSecret(
     name: string,
     namespace?: string,

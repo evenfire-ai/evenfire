@@ -17,14 +17,32 @@ import request from 'supertest'
 import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '@clerum/workflow-runtime-core'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
 
+function writeSummary(body: unknown) {
+  const write = body as {
+    name: string
+    namespace?: string
+    data?: Record<string, string>
+    stringData?: Record<string, string>
+  }
+  return {
+    name: write.name,
+    namespace: write.namespace || 'mcp-server',
+    keys: [...new Set([...Object.keys(write.data ?? {}), ...Object.keys(write.stringData ?? {})])],
+  }
+}
+
 function createGateway() {
   return {
     listSecrets: vi.fn(async () => []),
     listResource: vi.fn(async () => [] as unknown[]),
     getSecret: vi.fn(async () => null),
-    createSecret: vi.fn(async (body: unknown) => body),
-    updateSecret: vi.fn(async (body: unknown) => body),
-    deleteSecret: vi.fn(async (_name: string, _namespace?: string) => ({ deleted: true })),
+    createSecret: vi.fn(async (body: unknown) => writeSummary(body)),
+    updateSecret: vi.fn(async (body: unknown) => writeSummary(body)),
+    deleteSecret: vi.fn(async (name: string, namespace?: string) => ({
+      name,
+      namespace: namespace || 'mcp-server',
+      deleted: true as const,
+    })),
   }
 }
 
@@ -99,7 +117,10 @@ describe('platform-managed Secret name is reserved', () => {
       type: 'kubernetes.io/dockerconfigjson',
       data: { '.dockerconfigjson': 'e30=' },
     })) as never
-    const mergeSecret = vi.fn(async (body: unknown) => body)
+    const mergeSecret = vi.fn(async (body: unknown) => ({
+      ...writeSummary(body),
+      metadata: { uid: 'uid-platform-test', resourceVersion: '2' },
+    }))
     ;(gateway as unknown as { mergeSecret: unknown }).mergeSecret = mergeSecret
 
     const res = await request(makeApp(gateway))
@@ -114,11 +135,19 @@ describe('platform-managed Secret name is reserved', () => {
   it('still merges into an ordinary connector Secret whose name merely resembles it', async () => {
     const gateway = createGateway()
     gateway.getSecret = vi.fn(async () => ({
-      metadata: { name: `${EVENFIRE_REGISTRY_PULL_SECRET_NAME}-backup`, namespace: 'mcp-server' },
+      metadata: {
+        name: `${EVENFIRE_REGISTRY_PULL_SECRET_NAME}-backup`,
+        namespace: 'mcp-server',
+        uid: 'uid-backup',
+        resourceVersion: '1',
+      },
       type: 'Opaque',
       data: {},
     })) as never
-    const mergeSecret = vi.fn(async (body: unknown) => body)
+    const mergeSecret = vi.fn(async (body: unknown) => ({
+      ...writeSummary(body),
+      metadata: { uid: 'uid-backup', resourceVersion: '2' },
+    }))
     ;(gateway as unknown as { mergeSecret: unknown }).mergeSecret = mergeSecret
 
     await request(makeApp(gateway))
@@ -131,14 +160,25 @@ describe('platform-managed Secret name is reserved', () => {
 
   it('still deletes an ordinary connector Secret whose name merely resembles it', async () => {
     const gateway = createGateway()
+    gateway.getSecret = vi.fn(async () => ({
+      metadata: {
+        name: `${EVENFIRE_REGISTRY_PULL_SECRET_NAME}-backup`,
+        namespace: 'mcp-server',
+        labels: {},
+        uid: 'uid-backup',
+        resourceVersion: '1',
+      },
+    })) as never
 
     await request(makeApp(gateway))
       .delete(`/admin/mcp-secrets/${EVENFIRE_REGISTRY_PULL_SECRET_NAME}-backup`)
+      .send({ uid: 'uid-backup', resourceVersion: '1' })
       .expect(200)
 
     expect(gateway.deleteSecret).toHaveBeenCalledWith(
       `${EVENFIRE_REGISTRY_PULL_SECRET_NAME}-backup`,
-      'mcp-server'
+      'mcp-server',
+      { uid: 'uid-backup', resourceVersion: '1' }
     )
   })
 })

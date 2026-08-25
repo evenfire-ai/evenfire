@@ -18,16 +18,30 @@ export function isInfrastructureAnnotationKey(key: string): boolean {
   return INFRA_ANNOTATION_PREFIXES.some(prefix => key.startsWith(prefix))
 }
 
+export function isPlatformAnnotationKey(key: string): boolean {
+  return PLATFORM_ANNOTATION_PREFIXES.some(prefix => key.startsWith(prefix))
+}
+
 /** Platform metadata that a public rotation route may preserve, but never set. */
 export const REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS = [
   'clerum.io/catalog-id',
   'clerum.io/catalog-version',
 ] as const
 
+/** Operation marker used only by the internal Registry mutation capability. */
+export const REGISTRY_SECRET_OPERATION_ID_ANNOTATION = 'clerum.io/registry-operation-id'
+
+/** Platform keys a public Registry credential rotation may preserve, never assign. */
+export const REGISTRY_SECRET_ROTATION_PRESERVED_ANNOTATION_KEYS = [
+  ...REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS,
+  REGISTRY_SECRET_OPERATION_ID_ANNOTATION,
+] as const
+
 /** Additional metadata owned by the internal Registry credential writer. */
 const REGISTRY_CREDENTIAL_WRITABLE_ANNOTATION_KEYS = [
   ...REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS,
   'clerum.io/trust-level',
+  REGISTRY_SECRET_OPERATION_ID_ANNOTATION,
 ] as const
 
 export type SecretWriteCapability = 'registryCredential' | 'registryPullSecret'
@@ -140,7 +154,13 @@ export function assertValidSecretAnnotations(
   for (const key of Object.keys(annotations)) {
     const isUnchangedInfrastructureMetadata =
       isInfrastructureAnnotationKey(key) && existingAnnotations?.[key] === annotations[key]
-    if (!isUnchangedInfrastructureMetadata && isBlockedAnnotationKey(key, opts)) {
+    const isUnchangedPlatformMetadata =
+      isPlatformAnnotationKey(key) && existingAnnotations?.[key] === annotations[key]
+    if (
+      !isUnchangedInfrastructureMetadata &&
+      !isUnchangedPlatformMetadata &&
+      isBlockedAnnotationKey(key, opts)
+    ) {
       throw new DangerousAnnotationError(key, reservedPrefixes())
     }
   }
@@ -155,12 +175,14 @@ export function assertValidExistingSecretAnnotations(
   annotations: Record<string, string> | undefined,
   opts?: SecretConstraintOptions
 ): void {
-  if (!annotations) return
-  for (const key of Object.keys(annotations)) {
-    if (existingSecretAnnotationKeyReason(key, opts) !== null) {
-      throw new DangerousAnnotationError(key, reservedPrefixes())
-    }
-  }
+  // Existing platform metadata is opaque state owned by the component that
+  // wrote it. A data-only mutation does not claim or rewrite that metadata, so
+  // an unknown/future `clerum.io/` key must not brick future rotations. The
+  // transition validator above still rejects a caller that introduces or
+  // changes a reserved key; this function intentionally validates no existing
+  // key in isolation.
+  void annotations
+  void opts
 }
 
 export function assertValidSecretConstraints(
@@ -186,4 +208,42 @@ export function assertValidEffectiveSecretConstraints(
     assertValidSecretType(req.type)
   }
   assertValidExistingSecretAnnotations(req.annotations, opts)
+}
+
+/**
+ * Resolve the annotation map a full replacement is allowed to leave behind.
+ * Caller-owned keys retain full-replace semantics. Infrastructure metadata is
+ * transport-only, while platform metadata is either capability-owned or an
+ * exact existing-key preservation granted to a narrow partial writer.
+ */
+export function resolveSecretAnnotationsForReplace(
+  existingAnnotations: Record<string, string> | undefined,
+  requestedAnnotations: Record<string, string> | undefined,
+  opts?: SecretConstraintOptions
+): Record<string, string> | undefined {
+  if (requestedAnnotations === undefined) {
+    return existingAnnotations
+  }
+
+  assertValidSecretAnnotations(requestedAnnotations, opts, existingAnnotations)
+  assertValidExistingSecretAnnotations(existingAnnotations, opts)
+
+  const resolved: Record<string, string> = { ...requestedAnnotations }
+  for (const [key, value] of Object.entries(existingAnnotations ?? {})) {
+    if (isInfrastructureAnnotationKey(key)) {
+      if (requestedAnnotations[key] === undefined) resolved[key] = value
+      continue
+    }
+
+    if (isPlatformAnnotationKey(key) && requestedAnnotations[key] === undefined) {
+      const allowPreserve = opts?.allowExistingPlatformAnnotationKeys?.includes(key)
+      const capabilityOwnsKey = allowedPlatformAnnotationKeys(opts).has(key)
+      // Unknown/future platform metadata is immutable to public writers and is
+      // carried forward. A declared capability may explicitly remove only its
+      // own keys; a preservation allowlist keeps the narrow partial-writer
+      // contract for the public rotation path.
+      if (allowPreserve || !capabilityOwnsKey) resolved[key] = value
+    }
+  }
+  return resolved
 }

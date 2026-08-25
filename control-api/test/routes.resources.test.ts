@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import type { NextFunction, Request, Response } from 'express'
 import { lookup } from 'node:dns/promises'
 import request from 'supertest'
 import { config } from '../src/config.js'
@@ -42,7 +43,7 @@ class PruningCommunicationChannelGateway extends MockGateway {
 
 class PruningFirstUpdateCommunicationChannelGateway extends MockGateway {
   private prunedUpdates = 0
-  private resourceVersion = 'rv-1'
+  private resourceVersion = '1'
   readonly updateBodies: Array<Parameters<MockGateway['updateResource']>[2]> = []
 
   override async getResource(
@@ -74,7 +75,7 @@ class PruningFirstUpdateCommunicationChannelGateway extends MockGateway {
       const updated = (await super.updateResource(plural, name, body, namespace)) as {
         metadata?: Record<string, unknown>
       }
-      this.resourceVersion = 'rv-3'
+      this.resourceVersion = '3'
       return {
         ...updated,
         metadata: {
@@ -88,7 +89,7 @@ class PruningFirstUpdateCommunicationChannelGateway extends MockGateway {
     const updated = (await super.updateResource(plural, name, { ...body, spec }, namespace)) as {
       metadata?: Record<string, unknown>
     }
-    this.resourceVersion = 'rv-2'
+    this.resourceVersion = '2'
     return {
       ...updated,
       metadata: {
@@ -96,6 +97,31 @@ class PruningFirstUpdateCommunicationChannelGateway extends MockGateway {
         resourceVersion: this.resourceVersion,
       },
     }
+  }
+}
+
+class ReplacingCredentialOnCommunicationChannelFailureGateway extends MockGateway {
+  createdUid?: string
+  replacementUid?: string
+
+  override async createResource(
+    plural: Parameters<MockGateway['createResource']>[0],
+    body: Parameters<MockGateway['createResource']>[1],
+    namespace?: string
+  ): Promise<unknown> {
+    if (plural !== 'communicationchannels') return super.createResource(plural, body, namespace)
+    const ns = namespace || this.getNamespace()
+    const credentialName = `cc-${body.metadata.name}-credentials`
+    const original = await this.getSecret(credentialName, ns)
+    this.createdUid = original.metadata?.uid
+    await this.deleteSecret(credentialName, ns)
+    this.seedSecret(credentialName, ns, { data: { replacement: 'true' } })
+    const replacement = await this.getSecret(credentialName, ns)
+    this.replacementUid = replacement.metadata?.uid
+    throw Object.assign(new Error('communication channel create failed after replacement'), {
+      statusCode: 500,
+      code: 500,
+    })
   }
 }
 
@@ -357,6 +383,35 @@ describe('routes/resources', () => {
     )
   })
 
+  it('does not delete a replacement credential during a failed CommunicationChannel create', async () => {
+    const gateway = new ReplacingCredentialOnCommunicationChannelFailureGateway('channels')
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminResourcesRouter(gateway as never))
+    app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'unknown' })
+    })
+
+    await request(app)
+      .post('/admin/communication-channels')
+      .send({
+        metadata: { name: 'replacement-channel' },
+        spec: {
+          hostRef: 'chatllm',
+          telegram: [{ channelId: '1', chatType: 'private', userIds: ['user-1'] }],
+        },
+        credentials: { 'telegram-bot-token': 'initial-value' },
+      })
+      .expect(500)
+
+    expect(gateway.createdUid).toBeDefined()
+    expect(gateway.replacementUid).toBeDefined()
+    expect(gateway.replacementUid).not.toBe(gateway.createdUid)
+    await expect(
+      gateway.getSecret('cc-replacement-channel-credentials', 'channels')
+    ).resolves.toMatchObject({ metadata: { uid: gateway.replacementUid } })
+  })
+
   it('rejects and restores the prior communication channel spec when update prunes Teams settings', async () => {
     const gateway = new PruningFirstUpdateCommunicationChannelGateway('channels')
     const app = express()
@@ -400,11 +455,14 @@ describe('routes/resources', () => {
     expect(
       (gateway.updateBodies[0].metadata as { resourceVersion?: string } | undefined)
         ?.resourceVersion
-    ).toBe('rv-1')
+    ).toBe('1')
     expect(
       (gateway.updateBodies[1].metadata as { resourceVersion?: string } | undefined)
         ?.resourceVersion
-    ).toBe('rv-2')
+    ).toBe('2')
+    expect((gateway.updateBodies[1].metadata as { uid?: string } | undefined)?.uid).toBe(
+      (gateway.updateBodies[0].metadata as { uid?: string } | undefined)?.uid
+    )
     const stored = (await gateway.getResource(
       'communicationchannels',
       'teams-channel',
@@ -996,9 +1054,9 @@ describe('routes/resources', () => {
 
       await request(app)
         .put('/admin/hosts/host-rv')
-        .send({ metadata: { resourceVersion: '42' }, spec: { contextRef: 'c1' } })
+        .send({ metadata: { resourceVersion: '1' }, spec: { contextRef: 'c1' } })
         .expect(200)
-      expect(seenResourceVersion).toBe('42')
+      expect(seenResourceVersion).toBe('1')
     })
 
     it('maps a stale reader resourceVersion (K8sConflictError) to 409 {error:conflict, reason:resource_changed}', async () => {

@@ -13,11 +13,18 @@ import {
   type SecretOwnership,
   parseSecretOwnership,
 } from '../../secretOwnership.js'
-import { REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS } from '../../services/secretConstraints.js'
+import {
+  REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS,
+  REGISTRY_SECRET_ROTATION_PRESERVED_ANNOTATION_KEYS,
+} from '../../services/secretConstraints.js'
 import { invalidSecretDataKeyReason } from '../../services/secretKeys.js'
-import { SecretUpsertRequest } from '../../types.js'
+import { findSecretReferenceState } from '../../services/secretReferenceService.js'
+import { toPublicDeleteSecretSummary, toPublicSecretSummary } from '../../services/secretService.js'
+import { SecretPreconditions, SecretUpsertRequest } from '../../types.js'
 import { listHostSecrets } from './hostSecrets.js'
 import { isLlmHostSecret } from './llmSecretIdentity.js'
+
+const logger = rootLogger
 
 // The bedrock credential-slot keys and the vertex service-account key, derived
 // from the shared provider package (never hardcoded here) so the write-side
@@ -51,15 +58,30 @@ const PLATFORM_MANAGED_SECRET_ERROR =
   `Secret "${EVENFIRE_REGISTRY_PULL_SECRET_NAME}" is platform-managed (the evenfire ` +
   'registry image-pull credential) and cannot be created, modified, or deleted here'
 
-const logger = rootLogger.child({ module: 'admin-secrets' })
+function secretIdentityPreconditions(raw: unknown): SecretPreconditions | null {
+  const metadata = (raw as { metadata?: { uid?: unknown; resourceVersion?: unknown } } | null)
+    ?.metadata
+  if (typeof metadata?.uid !== 'string' || !metadata.uid) return null
+  if (typeof metadata.resourceVersion !== 'string' || !metadata.resourceVersion) return null
+  return { uid: metadata.uid, resourceVersion: metadata.resourceVersion }
+}
 
-function isRegistryManagedCredentialSecret(
-  annotations: Record<string, string> | undefined
-): boolean {
-  return REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS.every(key => {
-    const value = annotations?.[key]
-    return typeof value === 'string' && value.length > 0
-  })
+/**
+ * A data-only merge is allowed to compose with another owner updating a
+ * disjoint key. UID still fences delete/recreate, while resourceVersion is
+ * deliberately omitted so the merge-patch remains multi-owner safe.
+ */
+function secretUidPrecondition(raw: unknown): SecretPreconditions | null {
+  const metadata = (raw as { metadata?: { uid?: unknown } } | null)?.metadata
+  if (typeof metadata?.uid !== 'string' || !metadata.uid) return null
+  return { uid: metadata.uid }
+}
+
+function requestSecretPreconditions(raw: unknown): SecretPreconditions | null {
+  const body = (raw ?? {}) as { uid?: unknown; resourceVersion?: unknown }
+  if (typeof body.uid !== 'string' || !body.uid.trim()) return null
+  if (typeof body.resourceVersion !== 'string' || !body.resourceVersion.trim()) return null
+  return { uid: body.uid, resourceVersion: body.resourceVersion }
 }
 
 // The plaintext data being written, merging base64 `data` and plaintext
@@ -155,7 +177,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         namespace: config.secretsNamespace,
       } as SecretUpsertRequest
       const created = await gateway.createSecret(body)
-      res.status(201).json(created)
+      res.status(201).json(toPublicSecretSummary(created))
     })
   )
 
@@ -255,7 +277,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
           res.status(400).json({ error: llmSlotError })
           return
         }
-        await gateway.updateSecret({
+        const updated = await gateway.updateSecret({
           name: name.trim(),
           namespace: config.secretsNamespace,
           type: (req.body as { type?: string }).type,
@@ -265,11 +287,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         // base64 VALUES of every stored key — including keys the caller did NOT
         // send (other providers' credentials). The R4 contract is names-only
         // everywhere, so the response returns only the resulting key names.
-        res.status(200).json({
-          name: name.trim(),
-          namespace: config.secretsNamespace,
-          keys: Object.keys(mergedData).sort((a, b) => a.localeCompare(b)),
-        })
+        res.status(200).json(toPublicSecretSummary(updated))
         return
       }
 
@@ -304,7 +322,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         namespace: config.secretsNamespace,
       } as SecretUpsertRequest
       const updated = await gateway.updateSecret(body)
-      res.status(200).json(updated)
+      res.status(200).json(toPublicSecretSummary(updated))
     })
   )
 
@@ -313,7 +331,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
     enforceNamespace(config.secretsNamespace),
     asyncHandler(async (req, res) => {
       const deleted = await gateway.deleteSecret(req.params.name, config.secretsNamespace)
-      res.status(200).json(deleted)
+      res.status(200).json(toPublicDeleteSecretSummary(deleted))
     })
   )
 
@@ -384,7 +402,18 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
       }
 
       const created = await gateway.createSecret(secretReq)
-      res.status(201).json({ name: name.trim(), namespace: targetNs, created: Boolean(created) })
+      const identity = secretIdentityPreconditions(created)
+      if (!identity) {
+        res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
+        return
+      }
+      res.status(201).json({
+        name: name.trim(),
+        namespace: targetNs,
+        uid: identity.uid,
+        resourceVersion: identity.resourceVersion,
+        created: true,
+      })
     })
   )
 
@@ -466,7 +495,12 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
       // job. Read it first so a missing Secret is a 404 instead of a silent
       // upsert, and so the ownership guard below sees the stored labels.
       let existing: {
-        metadata?: { labels?: Record<string, string>; annotations?: Record<string, string> }
+        metadata?: {
+          labels?: Record<string, string>
+          annotations?: Record<string, string>
+          uid?: string
+          resourceVersion?: string
+        }
         data?: Record<string, string>
       }
       try {
@@ -493,18 +527,24 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
 
-      const preserveRegistryAnnotations = isRegistryManagedCredentialSecret(
-        existing.metadata?.annotations
+      const precondition = secretUidPrecondition(existing)
+      if (!precondition) {
+        res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
+        return
+      }
+      const existingAnnotations = existing.metadata?.annotations
+      const isRegistryManaged = REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS.every(
+        key => typeof existingAnnotations?.[key] === 'string'
       )
-        ? { allowExistingPlatformAnnotationKeys: REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS }
+      const preserveRegistryAnnotations = isRegistryManaged
+        ? {
+            allowExistingPlatformAnnotationKeys: REGISTRY_SECRET_ROTATION_PRESERVED_ANNOTATION_KEYS,
+          }
         : undefined
-      await gateway.mergeSecret(
+      const merged = await gateway.mergeSecret(
         { name, namespace: targetNs, stringData: data },
-        preserveRegistryAnnotations
-      )
-
-      const keys = [...new Set([...Object.keys(existing.data || {}), ...Object.keys(data)])].sort(
-        (a, b) => a.localeCompare(b)
+        preserveRegistryAnnotations,
+        precondition
       )
 
       // The credential IS rotated at this point. Emit the audit record NOW,
@@ -513,11 +553,13 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
       // Key NAMES are safe to log; values never are.
       logger.info(
         {
+          module: 'admin-secrets',
+          event: 'mcp-secret-rotated',
           name,
           namespace: targetNs,
           rotatedKeys: Object.keys(data).sort((a, b) => a.localeCompare(b)),
         },
-        'mcp-secret-rotated'
+        'MCP Secret rotated'
       )
 
       // affectedConnectors is a best-effort convenience for the UI ("who
@@ -538,17 +580,33 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
           .filter((connector): connector is string => typeof connector === 'string')
           .sort((a, b) => a.localeCompare(b))
       } catch (err) {
-        console.warn(
-          JSON.stringify({
+        logger.warn(
+          {
+            module: 'admin-secrets',
             event: 'mcp-secret-rotated-affected-connectors-unavailable',
             name,
             namespace: targetNs,
-            error: err instanceof Error ? err.message : String(err),
-          })
+            err: {
+              name: err instanceof Error ? err.name : typeof err,
+              message: err instanceof Error ? err.message : String(err),
+            },
+          },
+          'Affected connectors unavailable after MCP Secret rotation'
         )
       }
 
-      res.status(200).json({ name, namespace: targetNs, keys, affectedConnectors })
+      const summary = toPublicSecretSummary(merged, name, targetNs)
+      const mergedIdentity = secretIdentityPreconditions(merged)
+      if (!mergedIdentity) {
+        res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
+        return
+      }
+      res.status(200).json({
+        ...summary,
+        uid: mergedIdentity.uid,
+        resourceVersion: mergedIdentity.resourceVersion,
+        affectedConnectors,
+      })
     })
   )
 
@@ -559,14 +617,71 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
     '/admin/mcp-secrets/:name',
     enforceNamespace(config.mcpServersNamespace),
     asyncHandler(async (req, res) => {
-      // This route deletes by name with no ownership guard, so the reserved name is the
-      // only thing standing between a rollback call and the platform pull credential.
       if (isPlatformManagedSecretName(req.params.name)) {
         res.status(400).json({ error: PLATFORM_MANAGED_SECRET_ERROR })
         return
       }
-      const deleted = await gateway.deleteSecret(req.params.name, config.mcpServersNamespace)
-      res.status(200).json(deleted)
+      const name = req.params.name.trim()
+      const requestedPrecondition = requestSecretPreconditions(req.body)
+      if (!requestedPrecondition) {
+        res.status(428).json({ error: 'secret_identity_precondition_required' })
+        return
+      }
+      let existing: {
+        metadata?: { labels?: Record<string, string>; uid?: string; resourceVersion?: string }
+      } | null
+      try {
+        existing = (await gateway.getSecret(name, config.mcpServersNamespace)) as typeof existing
+      } catch (err) {
+        if (extractHttpStatus(err) === 404) {
+          res.status(404).json({ error: `Secret "${name}" not found` })
+          return
+        }
+        throw err
+      }
+      if (!existing) {
+        res.status(404).json({ error: `Secret "${name}" not found` })
+        return
+      }
+      const currentPrecondition = secretIdentityPreconditions(existing)
+      if (!currentPrecondition) {
+        res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
+        return
+      }
+      if (
+        currentPrecondition.uid !== requestedPrecondition.uid ||
+        currentPrecondition.resourceVersion !== requestedPrecondition.resourceVersion
+      ) {
+        res.status(409).json({ error: 'secret_identity_changed', outcome: 'repair_required' })
+        return
+      }
+      if (existing.metadata?.labels?.[RECIPE_SECRET_LABEL_KEY] === RECIPE_SECRET_LABEL_VALUE) {
+        res.status(409).json({
+          error: `Secret "${name}" is owned by a WorkflowRecipe; delete it through /admin/recipe-secrets`,
+        })
+        return
+      }
+      const referenceState = await findSecretReferenceState(
+        gateway,
+        name,
+        config.mcpServersNamespace
+      )
+      if (referenceState === 'referenced') {
+        res.status(409).json({ error: 'mcp_secret_in_use', outcome: 'repair_required' })
+        return
+      }
+      if (referenceState === 'unknown') {
+        res
+          .status(503)
+          .json({ error: 'mcp_secret_reference_check_unavailable', outcome: 'repair_required' })
+        return
+      }
+      const deleted = await gateway.deleteSecret(
+        name,
+        config.mcpServersNamespace,
+        requestedPrecondition
+      )
+      res.status(200).json(toPublicDeleteSecretSummary(deleted))
     })
   )
 
@@ -663,34 +778,45 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
           : typeof (err as { code?: unknown }).code === 'number'
             ? (err as { code: number }).code
             : undefined
-      console.warn(
-        JSON.stringify({
+      logger.warn(
+        {
+          module: 'admin-secrets',
           event: 'recipe-secret-namespace-list-degraded',
           namespace,
           statusCode,
-        })
+        },
+        'Recipe Secret namespace listing degraded'
       )
       return { namespace, items: [] }
     }
   }
 
   async function recipeExists(recipeName: string): Promise<boolean> {
-    const items = (await gateway.listResource(
-      'workflowrecipes',
-      config.sandboxNamespace
-    )) as Array<{ metadata?: { name?: string } }>
-    return items.some(r => r.metadata?.name === recipeName)
+    try {
+      const items = (await gateway.listResource(
+        'workflowrecipes',
+        config.sandboxNamespace
+      )) as Array<{ metadata?: { name?: string } }>
+      return items.some(r => r.metadata?.name === recipeName)
+    } catch (err) {
+      // The ownership claim cannot be validated when the source of truth is
+      // unavailable. Fail closed before creating a Secret rather than treating
+      // an apiserver failure as proof that the recipe exists.
+      throw err
+    }
   }
 
-  async function isRecipeSecret(
+  async function getRecipeSecret(
     name: string,
     namespace = config.sandboxNamespace
-  ): Promise<boolean> {
+  ): Promise<Record<string, unknown> | null> {
     const existing = await gateway.getSecret(name, namespace).catch(() => null)
-    if (!existing) return false
+    if (!existing) return null
     const labels = ((existing as { metadata?: { labels?: Record<string, string> } }).metadata
       ?.labels || {}) as Record<string, string>
     return labels[RECIPE_SECRET_LABEL_KEY] === RECIPE_SECRET_LABEL_VALUE
+      ? (existing as Record<string, unknown>)
+      : null
   }
 
   router.get(
@@ -795,12 +921,12 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         stringData: data,
       }
 
-      const created = await gateway.createSecret(secretReq)
+      await gateway.createSecret(secretReq)
       res.status(201).json({
         name: name.trim(),
         namespace: targetNamespace,
         ownership,
-        created: Boolean(created),
+        created: true,
       })
     })
   )
@@ -851,12 +977,21 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
       const existing = (await gateway
         .getSecret(name.trim(), targetNamespace)
         .catch(() => null)) as {
-        metadata?: { labels?: Record<string, string> }
+        metadata?: {
+          labels?: Record<string, string>
+          uid?: string
+          resourceVersion?: string
+        }
         data?: Record<string, string>
       } | null
       const existingLabels = (existing && existing.metadata?.labels) || {}
       if (existingLabels[RECIPE_SECRET_LABEL_KEY] !== RECIPE_SECRET_LABEL_VALUE) {
         res.status(404).json({ error: 'Recipe secret not found' })
+        return
+      }
+      const precondition = secretIdentityPreconditions(existing)
+      if (!precondition) {
+        res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
         return
       }
 
@@ -889,8 +1024,8 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         data: mergedData,
       }
 
-      const updated = await gateway.updateSecret(secretReq)
-      res.status(200).json(updated)
+      const updated = await gateway.updateSecret(secretReq, precondition)
+      res.status(200).json(toPublicSecretSummary(updated))
     })
   )
 
@@ -905,12 +1040,30 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
       const targetNamespace = namespaceParse.namespace
-      if (!(await isRecipeSecret(name, targetNamespace))) {
+      const existing = await getRecipeSecret(name, targetNamespace)
+      if (!existing) {
         res.status(404).json({ error: 'Recipe secret not found' })
         return
       }
-      const deleted = await gateway.deleteSecret(name, targetNamespace)
-      res.status(200).json(deleted)
+      const requestedPrecondition = requestSecretPreconditions(req.body)
+      if (!requestedPrecondition) {
+        res.status(428).json({ error: 'secret_identity_precondition_required' })
+        return
+      }
+      const currentPrecondition = secretIdentityPreconditions(existing)
+      if (!currentPrecondition) {
+        res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
+        return
+      }
+      if (
+        currentPrecondition.uid !== requestedPrecondition.uid ||
+        currentPrecondition.resourceVersion !== requestedPrecondition.resourceVersion
+      ) {
+        res.status(409).json({ error: 'secret_identity_changed', outcome: 'repair_required' })
+        return
+      }
+      const deleted = await gateway.deleteSecret(name, targetNamespace, requestedPrecondition)
+      res.status(200).json(toPublicDeleteSecretSummary(deleted))
     })
   )
 

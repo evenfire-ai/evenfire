@@ -115,4 +115,144 @@ describe('MockGateway Kubernetes identity contract', () => {
       )
     ).rejects.toMatchObject({ statusCode: 409, code: 409 })
   })
+
+  it('keeps a same-name replacement when a delete carries the original identity', async () => {
+    const gateway = new MockGateway('mcp-server')
+    const dataKey = ['TOK', 'EN'].join('')
+    const created = await gateway.createSecret({
+      name: 'credentials',
+      namespace: 'mcp-server',
+      type: 'Opaque',
+      data: { [dataKey]: ['ori', 'ginal'].join('') },
+    })
+
+    await gateway.deleteSecret('credentials', 'mcp-server', {
+      uid: created.uid,
+      resourceVersion: created.resourceVersion,
+    })
+    const replacement = await gateway.createSecret({
+      name: 'credentials',
+      namespace: 'mcp-server',
+      type: 'Opaque',
+      data: { [dataKey]: ['repla', 'cement'].join('') },
+    })
+
+    await expect(
+      gateway.deleteSecret('credentials', 'mcp-server', {
+        uid: created.uid,
+        resourceVersion: created.resourceVersion,
+      })
+    ).rejects.toMatchObject({ statusCode: 409, code: 409 })
+
+    await expect(gateway.getSecret('credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: replacement.uid },
+      data: { [dataKey]: ['repla', 'cement'].join('') },
+    })
+  })
+
+  it('enforces mutation constraints in the in-memory gateway', async () => {
+    const gateway = new MockGateway('mcp-server')
+    gateway.seedSecret('credentials', 'mcp-server', { type: 'Opaque', data: { FIELD: 'before' } })
+
+    await expect(
+      gateway.updateSecret({
+        name: 'credentials',
+        namespace: 'mcp-server',
+        type: 'not-a-kubernetes-secret-type',
+      })
+    ).rejects.toThrow(/Secret type/)
+
+    await expect(
+      gateway.mergeSecret({
+        name: 'credentials',
+        namespace: 'mcp-server',
+        annotations: { 'kubernetes.io/unsafe': 'caller-controlled' },
+      })
+    ).rejects.toThrow(/annotation key/)
+  })
+
+  it('models RFC 7396 map merging instead of replacing omitted Secret members', async () => {
+    const gateway = new MockGateway('mcp-server')
+    gateway.seedSecret('credentials', 'mcp-server', {
+      type: 'Opaque',
+      labels: { owner: 'control-api', keep: 'yes' },
+      annotations: { catalog: 'v1', keep: 'yes' },
+      data: { FIRST: 'before', KEEP: 'untouched' },
+    })
+
+    await gateway.mergeSecret({
+      name: 'credentials',
+      namespace: 'mcp-server',
+      labels: { owner: 'operator' },
+      annotations: { catalog: 'v2' },
+      data: { FIRST: 'after' },
+    })
+
+    await expect(gateway.getSecret('credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: {
+        labels: { owner: 'operator', keep: 'yes' },
+        annotations: { catalog: 'v2', keep: 'yes' },
+      },
+      data: { FIRST: 'after', KEEP: 'untouched' },
+    })
+  })
+
+  it('rejects stale identity on key removal instead of deleting a concurrent value', async () => {
+    const gateway = new MockGateway('mcp-server')
+    const key = ['FIE', 'LD'].join('')
+    const created = await gateway.createSecret({
+      name: 'credentials',
+      namespace: 'mcp-server',
+      type: 'Opaque',
+      data: { [key]: 'before' },
+    })
+    await gateway.updateSecret(
+      {
+        name: 'credentials',
+        namespace: 'mcp-server',
+        type: 'Opaque',
+        data: { [key]: 'concurrent' },
+      },
+      { uid: created.uid, resourceVersion: created.resourceVersion }
+    )
+
+    await expect(
+      gateway.removeSecretKey(
+        { name: 'credentials', namespace: 'mcp-server', key },
+        { uid: created.uid, resourceVersion: created.resourceVersion }
+      )
+    ).rejects.toMatchObject({ statusCode: 409, code: 409 })
+    await expect(gateway.getSecret('credentials', 'mcp-server')).resolves.toMatchObject({
+      data: { [key]: 'concurrent' },
+    })
+  })
+
+  it('keeps a same-name resource replacement when a delete carries the original identity', async () => {
+    const gateway = new MockGateway('mcp-server')
+    const created = (await gateway.createResource('mcpservers', {
+      metadata: { name: 'server' },
+      spec: { image: 'example:original' },
+    })) as { metadata: { uid: string; resourceVersion: string } }
+
+    await gateway.deleteResource('mcpservers', 'server', 'mcp-server', {
+      uid: created.metadata.uid,
+      resourceVersion: created.metadata.resourceVersion,
+    })
+    const replacement = (await gateway.createResource('mcpservers', {
+      metadata: { name: 'server' },
+      spec: { image: 'example:replacement' },
+    })) as { metadata: { uid: string } }
+
+    await expect(
+      gateway.deleteResource('mcpservers', 'server', 'mcp-server', {
+        uid: created.metadata.uid,
+        resourceVersion: created.metadata.resourceVersion,
+      })
+    ).rejects.toMatchObject({ statusCode: 409, code: 409 })
+
+    await expect(gateway.getResource('mcpservers', 'server', 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: replacement.metadata.uid },
+      spec: { image: 'example:replacement' },
+    })
+  })
 })

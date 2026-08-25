@@ -90,6 +90,78 @@ describe('ResourceService.getResource', () => {
 })
 
 describe('ResourceService.updateResource', () => {
+  it('forwards UID together with resourceVersion for an identity-bound replacement', async () => {
+    const customApi = {
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: {
+          name: 'cc-a',
+          namespace: 'channels',
+          uid: 'uid-original',
+          resourceVersion: '10',
+        },
+        spec: { enabled: true },
+      }),
+      replaceNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: {
+          name: 'cc-a',
+          namespace: 'channels',
+          uid: 'uid-original',
+          resourceVersion: '11',
+        },
+      }),
+      listNamespacedCustomObject: vi.fn(),
+    }
+    const service = new ResourceService(customApi as never, 'control-plane', {
+      communicationchannels: 'channels',
+    })
+
+    await service.updateResource(
+      'communicationchannels',
+      'cc-a',
+      {
+        metadata: { uid: 'uid-original', resourceVersion: '10' },
+        spec: { enabled: false },
+      },
+      'channels'
+    )
+
+    const replaceArgs = customApi.replaceNamespacedCustomObject.mock.calls[0][0]
+    expect(replaceArgs.body.metadata.uid).toBe('uid-original')
+    expect(replaceArgs.body.metadata.resourceVersion).toBe('10')
+  })
+
+  it('fails closed before replacement when the identity precondition names a replacement object', async () => {
+    const customApi = {
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: {
+          name: 'cc-a',
+          namespace: 'channels',
+          uid: 'uid-replacement',
+          resourceVersion: '10',
+        },
+        spec: { enabled: true },
+      }),
+      replaceNamespacedCustomObject: vi.fn(),
+      listNamespacedCustomObject: vi.fn(),
+    }
+    const service = new ResourceService(customApi as never, 'control-plane', {
+      communicationchannels: 'channels',
+    })
+
+    await expect(
+      service.updateResource(
+        'communicationchannels',
+        'cc-a',
+        {
+          metadata: { uid: 'uid-original', resourceVersion: '10' },
+          spec: { enabled: false },
+        },
+        'channels'
+      )
+    ).rejects.toBeInstanceOf(K8sConflictError)
+    expect(customApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+  })
+
   it('refetches and retries once when Kubernetes reports a resourceVersion conflict', async () => {
     const customApi = {
       getNamespacedCustomObject: vi
@@ -130,6 +202,32 @@ describe('ResourceService.updateResource', () => {
     const secondReplace = customApi.replaceNamespacedCustomObject.mock.calls[1][0]
     expect(firstReplace.body.metadata.resourceVersion).toBe('10')
     expect(secondReplace.body.metadata.resourceVersion).toBe('11')
+  })
+})
+
+describe('ResourceService.deleteResource', () => {
+  it('forwards UID and resourceVersion preconditions to Kubernetes', async () => {
+    const customApi = {
+      deleteNamespacedCustomObject: vi.fn(async () => ({ deleted: true })),
+      listNamespacedCustomObject: vi.fn(),
+    }
+    const service = new ResourceService(customApi as never, 'control-plane', {
+      mcpservers: 'mcp-server',
+    })
+
+    await service.deleteResource('mcpservers', 'mcp-a', 'mcp-server', {
+      uid: 'uid-a',
+      resourceVersion: '7',
+    })
+
+    expect(customApi.deleteNamespacedCustomObject).toHaveBeenCalledWith({
+      group: 'clerum.io',
+      version: 'v1alpha1',
+      namespace: 'mcp-server',
+      plural: 'mcpservers',
+      name: 'mcp-a',
+      body: { preconditions: { uid: 'uid-a', resourceVersion: '7' } },
+    })
   })
 })
 

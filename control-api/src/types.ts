@@ -14,6 +14,7 @@ export type ClerumResourceType =
 export interface Metadata {
   name: string
   namespace?: string
+  uid?: string
   labels?: Record<string, string>
   annotations?: Record<string, string>
   resourceVersion?: string
@@ -78,6 +79,16 @@ export interface SecretUpsertRequest {
  * want the last-writer-wins default.
  */
 export interface SecretPreconditions {
+  uid?: string
+  resourceVersion?: string
+}
+
+/**
+ * Optimistic-concurrency preconditions for deleting a namespaced custom
+ * resource.  A UID prevents a delete/recreate race; resourceVersion prevents
+ * deleting the original object after another writer changed it.
+ */
+export interface ResourcePreconditions {
   uid?: string
   resourceVersion?: string
 }

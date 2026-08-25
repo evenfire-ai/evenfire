@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import type { K8sGateway } from '../src/k8s.js'
-import { createAdminResourcesRouter } from '../src/routes/admin/resources.js'
+import { adminResourcesLogger, createAdminResourcesRouter } from '../src/routes/admin/resources.js'
 
 // vi.fn() arrays mirror the pattern in routes.adminChannelSecrets.test.ts —
 // minimal hand-crafted gateway double that exposes only the K8sGateway methods
@@ -160,7 +160,11 @@ describe('admin communicationchannels — credentials cascade', () => {
   })
 
   it('POST communicationchannels with credentials creates Secret + CC and injects credentialsSecretRef', async () => {
-    gatewayMock.createSecret.mockResolvedValue({ name: 'cc-foo-credentials' })
+    gatewayMock.createSecret.mockResolvedValue({
+      name: 'cc-foo-credentials',
+      uid: 'uid-cc-foo-credentials',
+      resourceVersion: '1',
+    })
     gatewayMock.createResource.mockResolvedValue({
       metadata: { name: 'foo', namespace: 'channels' },
       spec: {
@@ -204,7 +208,11 @@ describe('admin communicationchannels — credentials cascade', () => {
   })
 
   it('POST: rolls back Secret if CC create fails', async () => {
-    gatewayMock.createSecret.mockResolvedValue({ name: 'cc-foo-credentials' })
+    gatewayMock.createSecret.mockResolvedValue({
+      name: 'cc-foo-credentials',
+      uid: 'uid-cc-foo-credentials',
+      resourceVersion: '1',
+    })
     gatewayMock.createResource.mockRejectedValue(new Error('CC create failed'))
     gatewayMock.deleteSecret.mockResolvedValue({})
 
@@ -220,7 +228,10 @@ describe('admin communicationchannels — credentials cascade', () => {
       })
 
     expect(res.status).toBeGreaterThanOrEqual(500)
-    expect(gatewayMock.deleteSecret).toHaveBeenCalledWith('cc-foo-credentials', 'channels')
+    expect(gatewayMock.deleteSecret).toHaveBeenCalledWith('cc-foo-credentials', 'channels', {
+      uid: 'uid-cc-foo-credentials',
+      resourceVersion: '1',
+    })
   })
 
   it('PUT /admin/communication-channels/:name/credentials patches existing Secret', async () => {
@@ -228,23 +239,99 @@ describe('admin communicationchannels — credentials cascade', () => {
       metadata: { name: 'foo', namespace: 'channels' },
       spec: { hostRef: 'h1', credentialsSecretRef: { name: 'cc-foo-credentials' } },
     })
-    gatewayMock.mergeSecret.mockResolvedValue({})
+    gatewayMock.mergeSecret.mockResolvedValue({
+      name: 'cc-foo-credentials',
+      namespace: 'channels',
+      keys: ['slack-bot-token', 'telegram-bot-token'],
+    })
 
     const res = await request(makeApp())
       .put('/admin/communication-channels/foo/credentials')
-      .send({ 'telegram-bot-token': 'new-token' })
+      .send({ 'telegram-bot-token': 'new-token', 'slack-bot-token': 'slack-token' })
 
     expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      name: 'foo',
+      secretName: 'cc-foo-credentials',
+      namespace: 'channels',
+      rotated: true,
+      rotatedKeys: ['slack-bot-token', 'telegram-bot-token'],
+    })
     expect(gatewayMock.mergeSecret).toHaveBeenCalledWith(
       expect.objectContaining({
         name: 'cc-foo-credentials',
         namespace: 'channels',
-        stringData: { 'telegram-bot-token': 'new-token' },
+        stringData: { 'telegram-bot-token': 'new-token', 'slack-bot-token': 'slack-token' },
       })
     )
     // Existing-ref branch must NOT recreate the Secret or rewrite the CC.
     expect(gatewayMock.createSecret).not.toHaveBeenCalled()
     expect(gatewayMock.updateResource).not.toHaveBeenCalled()
+  })
+
+  it('SECURITY: PUT credentials (rotated:true) response is names-only and leaks no secret VALUE', async () => {
+    // Regression for a pre-existing confidentiality leak (blame 5d663a4): the
+    // rotated:true branch used to respond `result: merged`, and `merged` is the
+    // full k8s Secret returned by patchNamespacedSecret — its `.data` carries
+    // the base64 VALUES of every stored key, INCLUDING keys the caller never
+    // sent. Those values then travel in the HTTP response body into surfaces
+    // that don't protect secrets (access logs, proxies, error trackers,
+    // DevTools). The route must mirror the #223 policy (secrets.ts): names-only.
+    //
+    // Mutation guard: mock mergeSecret to return exactly such a populated Secret
+    // and assert NO secret value appears at any depth. This test goes RED if the
+    // handler ever echoes the Secret object again (e.g. `result: merged`).
+    gatewayMock.getResource.mockResolvedValue({
+      metadata: { name: 'foo', namespace: 'channels' },
+      spec: { hostRef: 'h1', credentialsSecretRef: { name: 'cc-foo-credentials' } },
+    })
+    const NEW_TOKEN_PLAIN = 'tg-new-token'
+    const SLACK_TOKEN_PLAIN = 'xoxb-super-secret'
+    const EMAIL_PW_PLAIN = 'hunter2'
+    const NEW_TOKEN_B64 = Buffer.from(NEW_TOKEN_PLAIN, 'utf8').toString('base64')
+    const SLACK_TOKEN_B64 = Buffer.from(SLACK_TOKEN_PLAIN, 'utf8').toString('base64')
+    const EMAIL_PW_B64 = Buffer.from(EMAIL_PW_PLAIN, 'utf8').toString('base64')
+    gatewayMock.mergeSecret.mockResolvedValue({
+      apiVersion: 'v1',
+      kind: 'Secret',
+      metadata: { name: 'cc-foo-credentials', namespace: 'channels' },
+      type: 'Opaque',
+      data: {
+        'telegram-bot-token': NEW_TOKEN_B64,
+        // Keys the caller did NOT send — over-return must never bring these back.
+        'slack-bot-token': SLACK_TOKEN_B64,
+        'email-password': EMAIL_PW_B64,
+      },
+    })
+
+    const res = await request(makeApp()).put('/admin/communication-channels/foo/credentials').send({
+      'telegram-bot-token': NEW_TOKEN_PLAIN,
+      'slack-bot-token': SLACK_TOKEN_PLAIN,
+    })
+
+    expect(res.status).toBe(200)
+    // Names-only contract: metadata + the rotated key NAMES the caller sent.
+    expect(res.body).toEqual({
+      name: 'foo',
+      secretName: 'cc-foo-credentials',
+      namespace: 'channels',
+      rotated: true,
+      rotatedKeys: ['slack-bot-token', 'telegram-bot-token'],
+    })
+    expect(res.body).not.toHaveProperty('result')
+    // Belt-and-suspenders: no secret value (base64 or plaintext) at ANY depth,
+    // including the caller-sent token in either encoding.
+    const serialized = JSON.stringify(res.body)
+    for (const needle of [
+      NEW_TOKEN_B64,
+      NEW_TOKEN_PLAIN,
+      SLACK_TOKEN_B64,
+      EMAIL_PW_B64,
+      SLACK_TOKEN_PLAIN,
+      EMAIL_PW_PLAIN,
+    ]) {
+      expect(serialized).not.toContain(needle)
+    }
   })
 
   it('PUT credentials on CC without credentialsSecretRef creates Secret + patches CC', async () => {
@@ -253,18 +340,31 @@ describe('admin communicationchannels — credentials cascade', () => {
       spec: { hostRef: 'h1' },
     })
     gatewayMock.createSecret.mockResolvedValue({})
-    gatewayMock.updateResource.mockResolvedValue({})
+    gatewayMock.updateResource.mockResolvedValue({
+      metadata: { name: 'foo', namespace: 'channels' },
+      spec: { hostRef: 'h1', credentialsSecretRef: { name: 'cc-foo-credentials' } },
+    })
 
     const res = await request(makeApp())
       .put('/admin/communication-channels/foo/credentials')
-      .send({ 'telegram-bot-token': 'tok' })
+      .send({ 'telegram-bot-token': 'tok', 'slack-bot-token': 'slack-tok' })
 
     expect(res.status).toBe(200)
+    // Names-only for the rotated:false branch too: return the written key NAMES,
+    // never the raw CRD object.
+    expect(res.body).toEqual({
+      name: 'foo',
+      secretName: 'cc-foo-credentials',
+      namespace: 'channels',
+      rotated: false,
+      rotatedKeys: ['slack-bot-token', 'telegram-bot-token'],
+    })
+    expect(res.body).not.toHaveProperty('result')
     expect(gatewayMock.createSecret).toHaveBeenCalledWith(
       expect.objectContaining({
         name: 'cc-foo-credentials',
         namespace: 'channels',
-        stringData: { 'telegram-bot-token': 'tok' },
+        stringData: { 'telegram-bot-token': 'tok', 'slack-bot-token': 'slack-tok' },
       })
     )
     expect(gatewayMock.updateResource).toHaveBeenCalledWith(
@@ -353,7 +453,7 @@ describe('admin communicationchannels — credentials cascade', () => {
     const e500 = Object.assign(new Error('boom'), { statusCode: 500 })
     gatewayMock.deleteSecret.mockRejectedValue(e500)
     gatewayMock.deleteResource.mockResolvedValue({ deleted: true })
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(adminResourcesLogger, 'error').mockImplementation(() => undefined)
 
     const res = await request(makeApp()).delete('/admin/communicationchannels/foo')
 

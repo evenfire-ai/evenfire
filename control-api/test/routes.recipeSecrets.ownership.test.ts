@@ -4,35 +4,71 @@ import request from 'supertest'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
 
 interface MockSecret {
-  metadata?: { name?: string; labels?: Record<string, string> }
+  metadata?: {
+    name?: string
+    uid?: string
+    resourceVersion?: string
+    labels?: Record<string, string>
+  }
   keys?: string[]
   data?: Record<string, string>
+}
+
+type MockWrite = {
+  name: string
+  namespace?: string
+  labels?: Record<string, string>
+  data?: Record<string, string>
+  stringData?: Record<string, string>
+}
+
+function writeSummary(body: MockWrite) {
+  return {
+    name: body.name,
+    namespace: body.namespace || 'default',
+    keys: [
+      ...new Set([...Object.keys(body.data ?? {}), ...Object.keys(body.stringData ?? {})]),
+    ].sort((a, b) => a.localeCompare(b)),
+  }
 }
 
 function createGateway(opts: { recipes?: string[]; secrets?: MockSecret[] } = {}) {
   const recipes = opts.recipes ?? []
   const secrets = new Map<string, MockSecret>(
-    (opts.secrets ?? []).map(s => [String(s.metadata?.name ?? ''), s])
+    (opts.secrets ?? []).map(s => {
+      const name = String(s.metadata?.name ?? '')
+      return [
+        name,
+        {
+          ...s,
+          metadata: {
+            ...s.metadata,
+            uid: s.metadata?.uid ?? `uid-${name}`,
+            resourceVersion: s.metadata?.resourceVersion ?? '1',
+          },
+        },
+      ]
+    })
   )
   return {
     listResource: vi.fn(async () => recipes.map(name => ({ metadata: { name } }))),
     listSecrets: vi.fn(async () => [...secrets.values()]),
     getSecret: vi.fn(async (name: string) => secrets.get(name) ?? null),
-    createSecret: vi.fn(async (body: { name: string; labels?: Record<string, string> }) => {
+    createSecret: vi.fn(async (body: MockWrite) => {
       secrets.set(body.name, { metadata: { name: body.name, labels: body.labels ?? {} } })
-      return body
+      return writeSummary(body)
     }),
-    updateSecret: vi.fn(async (body: { name: string; labels?: Record<string, string> }) => {
+    updateSecret: vi.fn(async (body: MockWrite) => {
       const existing = secrets.get(body.name)
       secrets.set(body.name, {
         ...(existing ?? {}),
         metadata: { name: body.name, labels: body.labels ?? existing?.metadata?.labels ?? {} },
       })
-      return body
+      return writeSummary(body)
     }),
-    deleteSecret: vi.fn(async (name: string) => {
+    deleteSecret: vi.fn(async (name: string, namespace?: string) => {
       secrets.delete(name)
-      return { deleted: true }
+      return { name, namespace: namespace || 'default', deleted: true as const }
     }),
   }
 }
