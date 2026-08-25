@@ -856,8 +856,17 @@ function createMcpTokenProviderFactory(): McpTokenProviderFactory {
 export function brokerTokenProviderDeps(): BrokerTokenProviderDeps {
   return {
     gatewayUrl: () => config.mcpHostGatewayUrl,
-    controlToken: () =>
-      loadPersistedWorkflowControlToken(workflowControlTokenFromConfig() ?? '') || undefined,
+    controlToken: () => {
+      // No seed at all => fail closed. Calling loadPersistedWorkflowControlToken
+      // with '' reaches its "no fallback binding to compare against" branch,
+      // where ANY persisted token with well-formed binding claims is accepted
+      // without being cross-checked against the pod's mounted identity. The seed
+      // is what makes that cross-check possible, so without it there is nothing
+      // to validate the state file against and the broker must send nothing.
+      const seed = workflowControlTokenFromConfig()?.trim()
+      if (!seed) return undefined
+      return loadPersistedWorkflowControlToken(seed) || undefined
+    },
     // Reactive recovery on a control-api 401, same as every sibling consumer
     // (setupUsageReporting wires `refreshOnUnauthorized: () => refreshWithRecovery(auth)`
     // into UsageReporter / GovernedRunReporter / ApprovalPromptHistoryClient).

@@ -18,6 +18,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { config } from '../../config'
 import { brokerTokenProviderDeps } from '../../main'
 import { persistRuntimeAuthTokens } from '../../workflow/mcpHostJwtState'
 import { createBrokerTokenProvider } from '../brokerTokenProvider'
@@ -32,15 +33,29 @@ const boot = vi.hoisted(() => {
     recipeNamespace: 'mcp-host',
     recipeName: 'standalone',
   }
-  const jwt = (iat: number, exp: number, label: string): string =>
+  const jwtFor = (
+    bindingClaims: Record<string, unknown>,
+    iat: number,
+    exp: number,
+    label: string
+  ): string =>
     `${base64url({ alg: 'none', typ: 'JWT' })}.${base64url({
-      ...binding,
+      ...bindingClaims,
       iat,
       exp,
       label,
       typ: 'service',
       scopes: ['oauth:user-token'],
     })}.sig`
+  const jwt = (iat: number, exp: number, label: string): string => jwtFor(binding, iat, exp, label)
+  // Same well-formed shape, bound to a DIFFERENT host: what an attacker-planted
+  // or cross-tenant state file would carry.
+  const foreignToken = jwtFor(
+    { hostRefs: ['host-other'], recipeNamespace: 'mcp-host', recipeName: 'standalone' },
+    nowSecs - 60,
+    nowSecs + 540,
+    'foreign'
+  )
 
   // The seed the pod booted with: already past its ~10 min TTL.
   const bootToken = jwt(nowSecs - 1200, nowSecs - 600, 'boot-seed')
@@ -53,7 +68,7 @@ const boot = vi.hoisted(() => {
   process.env.MCP_HOST_GATEWAY_URL = 'http://gateway.test:8092'
   process.env.MCP_HOST_WORKFLOW_CONTROL_TOKEN = bootToken
   delete process.env.MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE
-  return { jwt, nowSecs, bootToken, rotatedToken, staleRotatedToken }
+  return { jwt, nowSecs, bootToken, rotatedToken, staleRotatedToken, foreignToken }
 })
 
 const tempDirs: string[] = []
@@ -243,5 +258,61 @@ describe('mcp-oauth broker control token recovery on 401', () => {
     // wiring itself, which is all main.ts can expose without a live runtimeAuth
     // (it is module-private and only assigned by the startup paths).
     expect(typeof brokerTokenProviderDeps().refreshControlToken).toBe('function')
+  })
+})
+
+describe('mcp-oauth broker control token — no seed means fail closed', () => {
+  // The seed (mounted Secret / env) is the pod's mounted identity: it is what
+  // loadPersistedWorkflowControlToken cross-checks the state file against. These
+  // tests drive the real config object main.ts reads, not a copy.
+  let savedSeed: string | undefined
+  let savedSeedFile: string | undefined
+
+  beforeEach(() => {
+    savedSeed = config.mcpHostWorkflowControlToken
+    savedSeedFile = config.mcpHostWorkflowControlTokenFile
+    config.mcpHostWorkflowControlToken = ''
+    config.mcpHostWorkflowControlTokenFile = ''
+  })
+
+  afterEach(() => {
+    config.mcpHostWorkflowControlToken = savedSeed
+    config.mcpHostWorkflowControlTokenFile = savedSeedFile
+  })
+
+  it('never sends a persisted token that could not be cross-checked against the mounted identity', async () => {
+    useStateDir()
+    // Real producer writes a state file whose control token is well-formed but
+    // bound to another host. With no seed there is nothing to compare it to.
+    await persistRuntimeAuthTokens({
+      accessToken: 'foreign-access',
+      refreshToken: 'foreign-refresh',
+      mcpHostControlToken: boot.foreignToken,
+    })
+
+    const fetchImpl = capturingFetch()
+    const provider = createBrokerTokenProvider(
+      { name: 'mcp-clickup' },
+      { userId: 'alice' },
+      { ...brokerTokenProviderDeps(), fetchImpl: fetchImpl as unknown as typeof fetch }
+    )
+
+    await expect(provider.resolve()).resolves.toBeUndefined()
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('resolves undefined without calling the broker when there is no seed and no state file', async () => {
+    const dir = useStateDir()
+    fs.rmSync(dir, { recursive: true, force: true })
+
+    const fetchImpl = capturingFetch()
+    const provider = createBrokerTokenProvider(
+      { name: 'mcp-clickup' },
+      { userId: 'alice' },
+      { ...brokerTokenProviderDeps(), fetchImpl: fetchImpl as unknown as typeof fetch }
+    )
+
+    await expect(provider.resolve()).resolves.toBeUndefined()
+    expect(fetchImpl).not.toHaveBeenCalled()
   })
 })
