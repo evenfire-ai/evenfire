@@ -961,7 +961,7 @@ t2_lock_process_matches() {
 }
 
 t2_lock_acquire() {
-  local process_start
+  local process_start reclaim_dir=""
   t2_lock_profile_id_check || return 1
   mkdir -p "$T2_LOCK_ROOT"
   T2_LOCK_DIR="$T2_LOCK_ROOT/$T2_PROFILE.lock"
@@ -987,13 +987,14 @@ t2_lock_acquire() {
       return 1
     fi
 
-    # Reclaim ownership is itself acquired atomically inside the stale lock.
-    # With two concurrent reclaimers, exactly one can create this directory;
-    # every loser fails closed before it can remove either the stale lock or a
-    # replacement lock created by the winner. If a reclaimer is killed while
-    # holding this claim, the marker deliberately remains and requires the
-    # documented orphan-lock recovery rather than permitting an unsafe retry.
-    reclaim_dir="$T2_LOCK_DIR/.reclaim"
+    # Reclaim ownership is itself acquired atomically beside the stale lock.
+    # The claim must not live inside T2_LOCK_DIR: the winner removes that
+    # directory before creating the replacement lock, and a losing reclaimer
+    # could otherwise recreate `.reclaim` inside the winner's live lock.
+    # If a reclaimer is killed while holding this sibling claim, the marker
+    # deliberately remains and requires the documented orphan-lock recovery
+    # rather than permitting an unsafe retry.
+    reclaim_dir="$T2_LOCK_ROOT/$T2_PROFILE.reclaim"
     if ! mkdir "$reclaim_dir" 2>/dev/null; then
       T2_NEXT_COMMAND='wait for the stale-lock reclaimer to finish; if it died, follow the orphaned-lock recovery steps in docs/testing/minikube-t2-runbook.md'
       t2_fail PROFILE_BUSY "profile $T2_PROFILE stale lock is already being reclaimed"
@@ -1040,6 +1041,9 @@ PID=$$
 PROCESS_START=$process_start
 STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
+  if [ -n "$reclaim_dir" ]; then
+    rmdir "$reclaim_dir" 2>/dev/null || true
+  fi
   T2_LOCK_HELD=true
   T2_LOCK_RELEASED=false
 }
