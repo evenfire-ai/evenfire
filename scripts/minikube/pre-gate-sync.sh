@@ -238,12 +238,15 @@ restore_pre_gate_writers() {
 }
 
 finalize_pre_gate_sync() {
-  local status=$? restore_status=0
+  local status="${1:-$?}" restore_status=0
 
   # An EXIT trap's return value does not replace the script's exit status. Exit
   # explicitly so a failed writer restore cannot turn a successful sync into a
   # green exact-head attestation. Disable the trap first to avoid recursion.
   trap - EXIT
+  # A second signal must not interrupt writer restoration, Docker environment
+  # cleanup, or release of the profile mutation lease.
+  trap '' INT TERM
   if ! restore_pre_gate_writers; then
     restore_status=1
   fi
@@ -258,6 +261,16 @@ finalize_pre_gate_sync() {
   # cleanup failure.
   t2_lock_release 0 || status=1
   exit "${status}"
+}
+
+handle_pre_gate_sync_signal() {
+  local signal="$1" status
+  case "$signal" in
+    INT) status=130 ;;
+    TERM) status=143 ;;
+    *) status=1 ;;
+  esac
+  finalize_pre_gate_sync "$status"
 }
 
 commit_cluster_sync_state() {
@@ -278,6 +291,8 @@ fi
 export T2_PROJECT_DIR T2_PROFILE T2_CONTEXT T2_PROFILE_ROOT T2_PROFILE_ENV T2_PORTS_ENV \
   T2_SKIP_LOCK T2_LOCK_TOKEN
 trap finalize_pre_gate_sync EXIT
+trap 'handle_pre_gate_sync_signal INT' INT
+trap 'handle_pre_gate_sync_signal TERM' TERM
 
 fingerprint_dir() {
   pre_gate_marker_fingerprint_dir "${PROJECT_DIR}" "$1"

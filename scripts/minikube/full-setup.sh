@@ -2462,3 +2462,8 @@ else
 fi
 echo -e "    ${GREEN}✓${NC} Registry catalog seeded (MCP servers + recipes)"
 echo ""
+
+if [ "$all_ready" != true ]; then
+  err "Minikube setup failed: one or more core services are not ready"
+  exit 1
+fi

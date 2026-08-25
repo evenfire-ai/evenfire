@@ -457,6 +457,21 @@ assert_setup_runtime_operations_are_bounded() {
   fi
 }
 
+assert_partial_core_readiness_is_fail_loud() {
+  local setup="scripts/minikube/full-setup.sh" partial_line failure_line failure_block
+  partial_line="$(grep -nF 'Setup partially complete. Some services need attention.' "$setup" | tail -1 | cut -d: -f1)"
+  failure_line="$(grep -nF 'Minikube setup failed: one or more core services are not ready' "$setup" | tail -1 | cut -d: -f1)"
+  failure_block="$(sed -n '/^if \[ "$all_ready" != true \]; then$/,/^fi$/p' "$setup")"
+  if [ -n "$partial_line" ] && [ -n "$failure_line" ] && \
+     [ "$failure_line" -gt "$partial_line" ] && \
+     [ "$(grep -Fc 'if [ "$all_ready" != true ]; then' "$setup")" -eq 1 ] && \
+     grep -Fq 'exit 1' <<<"$failure_block"; then
+    pass "full-setup reports partial readiness and returns a failing status"
+  else
+    fail "full-setup can still return success after a core deployment is unready"
+  fi
+}
+
 # full-setup.sh is a 1284-line orchestrator that needs a real cluster to run,
 # so these cases read its resolved configuration rather than executing it: they
 # source the top of the script with a guard variable set, which stops it before
@@ -1542,6 +1557,7 @@ assert_reset_db_flag_backcompat
 assert_skip_build_staleness_find_is_sigpipe_guarded
 assert_pipefail_head_guard_prevents_abort
 assert_setup_runtime_operations_are_bounded
+assert_partial_core_readiness_is_fail_loud
 assert_t2_handoff_rejects_skip_build
 assert_ghcr_is_the_default_image_source
 assert_image_source_local_is_honoured

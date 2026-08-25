@@ -28,9 +28,10 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
-def strip_comments(source: str) -> str:
-    """Blank comments without changing line/column offsets used in findings."""
-    result: list[str] = []
+def split_comments(source: str) -> tuple[str, str]:
+    """Return code-only and comment-only views while preserving source offsets."""
+    code: list[str] = []
+    comments: list[str] = []
     index = 0
     state = "code"
     while index < len(source):
@@ -38,53 +39,63 @@ def strip_comments(source: str) -> str:
         next_char = source[index + 1] if index + 1 < len(source) else ""
         if state == "code":
             if char == "/" and next_char == "/":
-                result.extend((" ", " "))
+                code.extend((" ", " "))
+                comments.extend(("/", "/"))
                 index += 2
                 state = "line-comment"
                 continue
             if char == "/" and next_char == "*":
-                result.extend((" ", " "))
+                code.extend((" ", " "))
+                comments.extend(("/", "*"))
                 index += 2
                 state = "block-comment"
                 continue
             if char == "'" or char == '"' or char == chr(96):
                 state = char
-            result.append(char)
+            code.append(char)
+            comments.append("\n" if char == "\n" else " ")
             index += 1
             continue
         if state == "line-comment":
             if char == "\n":
-                result.append(char)
+                code.append(char)
+                comments.append(char)
                 state = "code"
             else:
-                result.append(" ")
+                code.append(" ")
+                comments.append(char)
             index += 1
             continue
         if state == "block-comment":
             if char == "*" and next_char == "/":
-                result.extend((" ", " "))
+                code.extend((" ", " "))
+                comments.extend(("*", "/"))
                 index += 2
                 state = "code"
             else:
-                result.append("\n" if char == "\n" else " ")
+                code.append("\n" if char == "\n" else " ")
+                comments.append(char)
                 index += 1
             continue
         # String/template literal. Keep its contents so URLs and text values
         # remain available to the source audit, but do not interpret comments.
-        result.append(char)
+        code.append(char)
+        comments.append("\n" if char == "\n" else " ")
         if char == "\\" and index + 1 < len(source):
-            result.append(source[index + 1])
+            escaped = source[index + 1]
+            code.append(escaped)
+            comments.append("\n" if escaped == "\n" else " ")
             index += 2
             continue
         if char == state:
             state = "code"
         index += 1
-    return "".join(result)
+    return "".join(code), "".join(comments)
 
 
 def audit_file(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
-    audit_text = strip_comments(text)
+    audit_text, comment_text = split_comments(text)
     findings: list[str] = []
     for label, pattern in RULES:
         for match in pattern.finditer(audit_text):
@@ -96,11 +107,18 @@ def audit_file(path: Path) -> list[str]:
     # opt in with an explicit, explanatory marker rather than adding a fake
     # network wait that can hide a broken user transition.
     has_browser_wait = "waitForResponse" in audit_text or "waitForRequest" in audit_text
-    is_browser_spec = bool(
+    is_browser_spec = any("playwright" in part.lower() for part in path.parts) or bool(
         re.search(
             r"['\"](?:@playwright/test|playwright(?:-core)?)['\"]"
-            r"|\bpage\.(?:goto|getByRole|getByLabel|getByText|getByTestId|locator|waitFor\w+)\s*\(",
+            r"|\b[A-Za-z_$][\w$]*\."
+            r"(?:goto|getByRole|getByLabel|getByText|getByTestId|locator|waitFor\w+)\s*\(",
             audit_text,
+        )
+    )
+    has_ipc_flow_marker = is_browser_spec and bool(
+        re.search(
+            r"(?m)^\s*(?://|/\*|\*)\s*E2E_GUARDIAN_IPC_FLOW\b",
+            comment_text,
         )
     )
     has_http_integration = not is_browser_spec and any(
@@ -115,7 +133,7 @@ def audit_file(path: Path) -> list[str]:
             r"\bexecFileSync\(\s*['\"]kubectl['\"]",
         )
     )
-    if not has_browser_wait and not has_http_integration and "E2E_GUARDIAN_IPC_FLOW" not in audit_text:
+    if not has_browser_wait and not has_http_integration and not has_ipc_flow_marker:
         findings.append(f"{path}: missing critical network-response/request wait")
 
     # Direct navigation is allowed only in an explicitly negative terminal

@@ -17,9 +17,10 @@ SPEC.loader.exec_module(AUDIT)
 
 
 class E2EStaticAuditTests(unittest.TestCase):
-    def audit(self, source: str) -> list[str]:
+    def audit(self, source: str, relative_path: str = "fixture.test.ts") -> list[str]:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "fixture.test.ts"
+            path = Path(directory) / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(source, encoding="utf-8")
             return AUDIT.audit_file(path)
 
@@ -53,6 +54,48 @@ class E2EStaticAuditTests(unittest.TestCase):
             "test('health contract', async () => { await fetch('/health') })\n"
         )
         self.assertFalse(any("missing critical network-response/request wait" in finding for finding in findings))
+
+    def test_fetch_does_not_exempt_a_custom_playwright_page_fixture(self) -> None:
+        findings = self.audit(
+            "test('journey', async ({ authedPage }) => {\n"
+            "  await fetch('/health')\n"
+            "  await authedPage.getByRole('button', { name: 'Save' }).click()\n"
+            "})\n"
+        )
+        self.assertTrue(any("missing critical network-response/request wait" in finding for finding in findings))
+
+    def test_e2e_playwright_path_classifies_a_custom_keyboard_fixture(self) -> None:
+        findings = self.audit(
+            "test('journey', async ({ desktopWindow }) => {\n"
+            "  await fetch('/health')\n"
+            "  await desktopWindow.keyboard.press('Enter')\n"
+            "})\n",
+            "desktop-app/test/e2e-playwright/keyboard.test.ts",
+        )
+        self.assertTrue(any("missing critical network-response/request wait" in finding for finding in findings))
+
+    def test_documented_ipc_flow_comment_exempts_browser_network_wait(self) -> None:
+        findings = self.audit(
+            "/*\n"
+            " * E2E_GUARDIAN_IPC_FLOW: discovery uses a visible main-process IPC bridge.\n"
+            " */\n"
+            "await page.getByRole('button', { name: 'Files' }).click()\n"
+        )
+        self.assertFalse(any("missing critical network-response/request wait" in finding for finding in findings))
+
+    def test_ipc_flow_marker_in_a_string_does_not_exempt_browser_wait(self) -> None:
+        findings = self.audit(
+            "const marker = 'E2E_GUARDIAN_IPC_FLOW'\n"
+            "await page.getByRole('button', { name: 'Files' }).click()\n"
+        )
+        self.assertTrue(any("missing critical network-response/request wait" in finding for finding in findings))
+
+    def test_ipc_flow_marker_does_not_exempt_a_non_browser_spec(self) -> None:
+        findings = self.audit(
+            "// E2E_GUARDIAN_IPC_FLOW: not a browser journey.\n"
+            "const value = 1\n"
+        )
+        self.assertTrue(any("missing critical network-response/request wait" in finding for finding in findings))
 
     def test_comments_do_not_trigger_rules_or_network_wait_detection(self) -> None:
         findings = self.audit(

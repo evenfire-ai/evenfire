@@ -44,6 +44,7 @@ const SANDBOX_NS = 'sandbox-recipes'
 let controlApiUp = false
 let adminToken = ''
 let workflowRunId = ''
+let workflowExecutionName = ''
 
 skipEachIfClusterDown(() => controlApiUp)
 
@@ -117,6 +118,21 @@ async function waitForPod(
   return false
 }
 
+/** Wait until every Pod matching labelSelector has been removed. */
+async function waitForPodsAbsent(
+  namespace: string,
+  labelSelector: string,
+  timeoutMs = 60_000
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const out = kubectl(`get pods -n ${namespace} -l ${labelSelector} --no-headers`)
+    if (out !== null && out.trim().length === 0) return true
+    await new Promise(r => setTimeout(r, 1_000))
+  }
+  return false
+}
+
 async function waitForKubectlArgs(args: string[], timeoutMs = 15_000): Promise<string> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -153,6 +169,15 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!adminToken) return
+  if (workflowExecutionName) {
+    await deleteJson(
+      `${CONTROL_API_URL}/api/v1/admin/recipes/${workflowExecutionName}`,
+      adminSessionHeader(adminToken)
+    )
+    kubectl(
+      `delete pods -n ${SANDBOX_NS} -l clerum.io/recipe=${workflowExecutionName} --ignore-not-found=true`
+    )
+  }
   await deleteJson(
     `${CONTROL_API_URL}/api/v1/admin/recipes/${SMOKE_RECIPE}`,
     adminSessionHeader(adminToken)
@@ -233,10 +258,31 @@ describe('WorkflowRecipe lifecycle — coordinator + mcp_host two-Pod model', ()
     workflowRunId = data.id as string
   }, 15_000)
 
+  it('WRC creates a run-scoped execution recipe with the persisted run identity', async () => {
+    expect(workflowRunId).toMatch(/^[0-9a-f-]{36}$/i)
+    const executionName = await waitForKubectlArgs(
+      [
+        'get',
+        'workflowrecipes.clerum.io',
+        '-n',
+        SANDBOX_NS,
+        '-l',
+        `clerum.io/workflow-run-id=${workflowRunId}`,
+        '-o',
+        'jsonpath={.items[0].metadata.name}',
+      ],
+      60_000
+    )
+    workflowExecutionName = executionName.trim()
+    expect(workflowExecutionName).toBeTruthy()
+    expect(workflowExecutionName).not.toBe(SMOKE_RECIPE)
+  }, 70_000)
+
   it('WRC creates coordinator Pod in sandbox-recipes within 60s', async () => {
+    expect(workflowExecutionName).toBeTruthy()
     const found = await waitForPod(
       SANDBOX_NS,
-      `clerum.io/recipe=${SMOKE_RECIPE},clerum.io/component=workflow-coordinator`,
+      `clerum.io/recipe=${workflowExecutionName},clerum.io/component=workflow-coordinator`,
       60_000
     )
 
@@ -244,9 +290,10 @@ describe('WorkflowRecipe lifecycle — coordinator + mcp_host two-Pod model', ()
   }, 70_000)
 
   it('WRC creates mcp_host Pod in sandbox-recipes within 60s', async () => {
+    expect(workflowExecutionName).toBeTruthy()
     const found = await waitForPod(
       SANDBOX_NS,
-      `clerum.io/recipe=${SMOKE_RECIPE},clerum.io/component=workflow-mcp-host`,
+      `clerum.io/recipe=${workflowExecutionName},clerum.io/component=workflow-mcp-host`,
       60_000
     )
 
@@ -254,13 +301,14 @@ describe('WorkflowRecipe lifecycle — coordinator + mcp_host two-Pod model', ()
   }, 70_000)
 
   it('mcp_host Pod env has CLERUM_WORKFLOW_ENABLED=true', async () => {
+    expect(workflowExecutionName).toBeTruthy()
     const out = await waitForKubectlArgs([
       'get',
       'pods',
       '-n',
       SANDBOX_NS,
       '-l',
-      `clerum.io/recipe=${SMOKE_RECIPE},clerum.io/component=workflow-mcp-host`,
+      `clerum.io/recipe=${workflowExecutionName},clerum.io/component=workflow-mcp-host`,
       '-o',
       'jsonpath={.items[0].spec.containers[0].env[?(@.name=="CLERUM_WORKFLOW_ENABLED")].value}',
     ])
@@ -273,27 +321,36 @@ describe('WorkflowRecipe lifecycle — coordinator + mcp_host two-Pod model', ()
       expect(workflowRunId).toMatch(/^[0-9a-f-]{36}$/i)
       const finalPhase = await waitForTriggeredRunPhase(
         workflowRunId,
-        ['completed', 'failed', 'timed_out'],
+        ['Succeeded', 'Failed', 'Canceled'],
         WORKFLOW_TIMEOUT_MS
       )
 
-      expect(finalPhase).toBe('completed')
+      expect(finalPhase).toBe('Succeeded')
       console.log(`[workflow-lifecycle] Final phase: ${finalPhase}`)
     },
     WORKFLOW_TIMEOUT_MS + 30_000
   )
 
-  it('coordinator Pod reached terminal state (Succeeded or Failed)', async () => {
-    const out = kubectl(
-      `get pods -n ${SANDBOX_NS} -l clerum.io/recipe=${SMOKE_RECIPE},clerum.io/component=workflow-coordinator --no-headers`
-    )
-    expect(out).toBeTruthy()
-    expect(out).toContain('Completed')
-  }, 15_000)
+  it('terminal run tears down coordinator and mcp_host compute Pods', async () => {
+    expect(workflowExecutionName).toBeTruthy()
+    const [coordinatorGone, mcpHostGone] = await Promise.all([
+      waitForPodsAbsent(
+        SANDBOX_NS,
+        `clerum.io/recipe=${workflowExecutionName},clerum.io/component=workflow-coordinator`
+      ),
+      waitForPodsAbsent(
+        SANDBOX_NS,
+        `clerum.io/recipe=${workflowExecutionName},clerum.io/component=workflow-mcp-host`
+      ),
+    ])
+    expect(coordinatorGone).toBe(true)
+    expect(mcpHostGone).toBe(true)
+  }, 70_000)
 
   it('WorkflowRecipe CRD has workflowExecution.phase after workflow runs', async () => {
+    expect(workflowExecutionName).toBeTruthy()
     const { status, data } = await fetchJson<Record<string, unknown>>(
-      `${CONTROL_API_URL}/api/v1/admin/recipes/${SMOKE_RECIPE}/status`,
+      `${CONTROL_API_URL}/api/v1/admin/recipes/${workflowExecutionName}/status`,
       { headers: adminSessionHeader(adminToken) }
     )
 

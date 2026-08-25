@@ -29,7 +29,7 @@ while IFS= read -r path; do
   esac
 
   case "$path" in
-    tests/e2e/*)
+    tests/e2e/*|desktop-app/test/e2e-playwright/*)
       case "$path" in
         *.test.ts|*.spec.ts)
           if [ -f "$absolute_path" ]; then
@@ -107,8 +107,8 @@ if [ "${#package_dirs[@]}" -gt 0 ]; then
           "$package" "${#e2e_typecheck_files[@]}"
         (
           cd "$PROJECT_DIR/$package" &&
-          ./node_modules/.bin/tsc --noEmit --target ES2022 --module ESNext \
-            --moduleResolution Bundler --esModuleInterop --skipLibCheck \
+          ./node_modules/.bin/tsc --noEmit --target ES2022 --module Node16 \
+            --moduleResolution Node16 --strict --esModuleInterop --skipLibCheck \
             --types node,vitest/globals "${e2e_typecheck_files[@]}"
         )
       fi

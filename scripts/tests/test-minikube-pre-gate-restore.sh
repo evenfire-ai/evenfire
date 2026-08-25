@@ -94,6 +94,36 @@ exit_status=$?
 set -e
 [ "$exit_status" -eq 23 ] || fail "EXIT cleanup replaced original failure status 23 with ${exit_status}"
 
+# Bash may enter an EXIT trap with the status of the interrupted command rather
+# than the canonical signal status. Exercise the explicit handlers directly so
+# they must preserve 130/143 and finish every safety cleanup exactly once.
+for signal_case in INT:130 TERM:143; do
+  signal="${signal_case%%:*}"
+  expected_status="${signal_case##*:}"
+  signal_events="$tmp/signal-${signal}.events"
+  set +e
+  PRE_GATE_SYNC_CONFIG_ONLY=true MINIKUBE_PROFILE=restore-contract IMAGE_SOURCE=local \
+    SIGNAL_EVENTS="$signal_events" bash -c '
+      script="$1"
+      signal="$2"
+      set --
+      source "$script" >/dev/null
+      restore_pre_gate_writers() { printf "restore\n" >>"$SIGNAL_EVENTS"; }
+      incremental_docker_cleanup() { printf "docker-cleanup\n" >>"$SIGNAL_EVENTS"; }
+      t2_lock_release() { printf "lock-release:%s\n" "$1" >>"$SIGNAL_EVENTS"; return "$1"; }
+      kill "-${signal}" "$$"
+      printf "signal handler returned unexpectedly\n" >>"$SIGNAL_EVENTS"
+    ' bash "$ROOT/scripts/minikube/pre-gate-sync.sh" "$signal" >/dev/null 2>&1
+  signal_status=$?
+  set -e
+  [ "$signal_status" -eq "$expected_status" ] || \
+    fail "$signal cleanup returned ${signal_status}, expected ${expected_status}"
+  expected_events=$'restore\ndocker-cleanup\nlock-release:0'
+  actual_events="$(cat "$signal_events")"
+  [ "$actual_events" = "$expected_events" ] || \
+    fail "$signal cleanup did not restore writers, clean Docker state, and release the lease exactly once: ${actual_events}"
+done
+
 # Exact-head state is committed only after both fenced writers are restored.
 events=""
 restore_pre_gate_writers() { events+="restore "; return 1; }

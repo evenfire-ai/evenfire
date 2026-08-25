@@ -87,6 +87,9 @@ finally:
 PY
 grep -Fq 't0.sh' "$T2"
 grep -Fq 'T0_SHELLCHECK=PASS' "$T0"
+grep -Fq 'tests/e2e/*|desktop-app/test/e2e-playwright/*)' "$T0"
+grep -Fq -- '--module Node16' "$T0"
+grep -Fq -- '--moduleResolution Node16 --strict' "$T0"
 grep -Fq 'npm run build' "$T0"
 grep -Fq 'npm test' "$T0"
 grep -Fq 'if [ "${#package_dirs[@]}" -gt 0 ]' "$T0"

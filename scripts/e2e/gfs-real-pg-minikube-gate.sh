@@ -332,7 +332,7 @@ cleanup_gfs_docker_env() {
   return 1
 }
 cleanup() {
-  local status=$?
+  local status="${1:-$?}"
   trap - EXIT
   trap '' INT TERM
   if ! stop_profile_postgres_forward; then status=1; fi
@@ -340,10 +340,21 @@ cleanup() {
   if ! cleanup_gfs_docker_env; then status=1; fi
   if [ "${GFS_RESTORE_REQUIRED}" = true ] && ! restore_gfs_runtime_credentials; then status=1; fi
   if ! rm -rf "${TMP_DIR}"; then status=1; fi
-  if ! t2_lock_release "${status}"; then status=1; fi
+  t2_lock_release 0 || status=1
   exit "${status}"
 }
+handle_gfs_gate_signal() {
+  local signal="$1" status
+  case "$signal" in
+    INT) status=130 ;;
+    TERM) status=143 ;;
+    *) status=1 ;;
+  esac
+  cleanup "$status"
+}
 trap cleanup EXIT
+trap 'handle_gfs_gate_signal INT' INT
+trap 'handle_gfs_gate_signal TERM' TERM
 
 choose_local_port() {
   python3 - <<'PY'
