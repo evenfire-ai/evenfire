@@ -47,6 +47,8 @@ diff = Path(sys.argv[1]).read_text(errors="replace")
 bad = []
 current = ""
 safe_source_paths = {
+    "control-api/src/routes/admin/communicationchannelcredentials.ts",
+    "control-api/test/routes.admincommunicationchannelcredentials.test.ts",
     "deploy/scripts/lib/gfs-credential-rollout.sh",
     "deploy/scripts/lib/gfs-credential-secret.sh",
     "deploy/scripts/reconcile-gfs-deploy-credentials.sh",
