@@ -45,7 +45,7 @@ function resolveGfsUploadProxyTimeoutMs(): number {
 // default. Set CONTROL_UI_PROXY_MAX_BODY_BYTES on the deployment to change it.
 const DEFAULT_MAX_BODY_BYTES = 24 * 1024 * 1024
 const MAX_BODY_BYTES_CEILING = 512 * 1024 * 1024
-const GFS_UPLOAD_MAX_PART_BYTES = 16 * 1024 * 1024
+export const GFS_UPLOAD_MAX_PART_BYTES = 16 * 1024 * 1024
 function resolveMaxBodyBytes(): number {
   const raw = process.env.CONTROL_UI_PROXY_MAX_BODY_BYTES
   const parsed = raw ? Number(raw) : Number.NaN
