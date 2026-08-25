@@ -49,6 +49,12 @@ current = ""
 safe_source_paths = {
     "control-api/src/routes/admin/communicationchannelcredentials.ts",
     "control-api/test/routes.admincommunicationchannelcredentials.test.ts",
+    # Public Control UI source and documentation may use the domain term
+    # "credential" without containing materialized secret data.
+    "control-ui/components/llmcredentialfields/index.tsx",
+    "control-ui/components/llmcredentialfields/types.ts",
+    "control-ui/components/__tests__/llmcredentialfields.test.tsx",
+    "docs/agent-models-credentials-ux.md",
     "deploy/scripts/lib/gfs-credential-rollout.sh",
     "deploy/scripts/lib/gfs-credential-secret.sh",
     "deploy/scripts/reconcile-gfs-deploy-credentials.sh",
