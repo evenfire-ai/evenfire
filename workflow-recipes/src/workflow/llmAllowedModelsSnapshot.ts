@@ -119,10 +119,9 @@ export function parseAllowedModelsSnapshot(
     } catch {
       return snapshotFromConfigMapError('malformed')
     }
-  } else if (connectionKey !== 'deployment-default') {
-    connectionStatus = 'disconnected'
-    dropCodexModels(enabledModels, staleModels)
   }
+  // No connections map: keep the flat catalog (legacy single-grant). Do not
+  // invent deployment-default; a multi-grant map already fail-closed above.
   return {
     flagEnabled: annotations[CODEX_ENABLED_ANNOTATION] === 'true',
     connectionStatus,

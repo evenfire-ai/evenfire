@@ -934,7 +934,7 @@ function parseOptionalIntegerAnnotation(
 
 function parseCodexPolicyBinding(
   annotations: Record<string, string> | undefined,
-  connectionKey = CODEX_UNASSIGNED_CONNECTION_KEY
+  connectionKey: string = CODEX_UNASSIGNED_CONNECTION_KEY
 ): CodexPolicyBinding | null {
   if (!annotations || connectionKey === CODEX_UNASSIGNED_CONNECTION_KEY) return null
   let catalogRevision = parseOptionalIntegerAnnotation(annotations, CATALOG_REVISION_ANNOTATION)
