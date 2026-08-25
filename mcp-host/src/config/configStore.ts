@@ -631,12 +631,15 @@ export class ConfigStore {
         entries.push(entry)
       }
       if (provider === 'codex-subscription') {
-        if (Array.isArray(binding?.models)) {
+        if (!binding) {
+          entries = []
+        } else if (Array.isArray(binding.models)) {
           const allowed = new Set(binding.models)
           entries = entries.filter(entry => allowed.has(entry.model))
-        } else {
-          entries = []
         }
+        // Legacy ConfigMap with no connections map returns a binding without
+        // models[]. Keep the flat catalog. A map entry that omits models[]
+        // is parsed as [] and fail-closes here.
       }
       next.set(provider, entries)
     }
@@ -961,7 +964,7 @@ function parseCodexPolicyBinding(
           catalogRevision,
           credentialRevision,
           connectionKey,
-          models: Array.isArray(assigned.models) ? assigned.models.filter(Boolean) : undefined,
+          models: Array.isArray(assigned.models) ? assigned.models.filter(Boolean) : [],
         }
       }
       return null
