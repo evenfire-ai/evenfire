@@ -184,3 +184,11 @@ observe a newer same-binding access token but must never refresh/reissue or
 consume the Host refresh-token lineage.
 Do not widen the command, switch clusters, reset PVCs, or delete locks with a
 live owner. Code-by-code guidance is in `reference.md`.
+
+The active profile lock is `$T2_LOCK_ROOT/<profile>.lock`; stale reclaim uses
+the sibling `$T2_LOCK_ROOT/<profile>.reclaim`. A killed reclaimer can leave the
+sibling claim. After verifying that the owner PID, reclaimer process, and all
+other profile-mutating sessions are gone, recover only the exact paths: use
+`rmdir -- "$T2_LOCK_ROOT/<profile>.reclaim"` for an empty claim and
+`rm -rf -- "$T2_LOCK_ROOT/<profile>.lock"` for the lock. If only one exists,
+operate only on that one. Never remove a live owner/reclaimer or the lock root.

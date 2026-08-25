@@ -93,12 +93,13 @@ profile_owner_validate_branch() {
 }
 
 profile_owner_validate_profile_name() {
-  local profile="${1:-}"
+  local profile="${1:-}" normalized_profile
   if [[ ${#profile} -gt 63 || ! "${profile}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
     profile_owner_error PROFILE_METADATA_INVALID 'profile name is not a safe local Minikube identifier'
     return 1
   fi
-  case "${profile}" in
+  normalized_profile="$(printf '%s' "${profile}" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  case "${normalized_profile}" in
     *gke*|*prod*|*staging*|clerum-test|default|minikube)
       profile_owner_error PROFILE_METADATA_INVALID "profile is shared or protected: ${profile}"
       return 1 ;;

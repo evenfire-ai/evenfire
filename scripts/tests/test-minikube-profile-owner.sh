@@ -188,6 +188,26 @@ ports_only_legacy="$("${OWNER_SCRIPT}" resolve --repo-dir "${repo_a}" --branch "
   --profile-root "${v1_root}" --ports-env "${legacy_dir}/ports.env")"
 [[ "$(value_from "${ports_only_legacy}" PROFILE)" == "${legacy_profile}" ]] || fail 'explicit ports.env did not bind to its sibling profile metadata'
 
+valid_profile='clerum-feature-local'
+valid_dir="${TMP_ROOT}/${valid_profile}"
+mkdir -p "${valid_dir}"
+write_v2_profile "${valid_dir}/profile.env" "${valid_profile}" "${repo_a}" "${branch}" "${head_a}"
+write_ports "${valid_dir}/ports.env" 26500
+"${OWNER_SCRIPT}" validate --repo-dir "${repo_a}" --branch "${branch}" \
+  --profile "${valid_profile}" --profile-env "${valid_dir}/profile.env" \
+  --ports-env "${valid_dir}/ports.env" >/dev/null || fail 'valid safe profile was rejected'
+
+for protected_profile in Prod PROD-local GKE-local Staging CLERUM-TEST Default MINIKUBE; do
+  protected_dir="${TMP_ROOT}/protected-${protected_profile}"
+  mkdir -p "${protected_dir}"
+  write_v2_profile "${protected_dir}/profile.env" "${protected_profile}" "${repo_a}" "${branch}" "${head_a}"
+  write_ports "${protected_dir}/ports.env" 26600
+  expect_failure PROFILE_METADATA_INVALID "case-insensitive protected profile ${protected_profile}" \
+    "${OWNER_SCRIPT}" validate --repo-dir "${repo_a}" --branch "${branch}" \
+      --profile "${protected_profile}" --profile-env "${protected_dir}/profile.env" \
+      --ports-env "${protected_dir}/ports.env"
+done
+
 missing_ports_root="${TMP_ROOT}/missing-ports"
 missing_ports_dir="${missing_ports_root}/${legacy_profile}"
 mkdir -p "${missing_ports_dir}"

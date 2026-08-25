@@ -142,6 +142,17 @@ T2 with `make minikube-t2-runtime` (`T2_RUN_T0=false T2_RUN_T1=false`). That
 path is valid only when the pre-gate marker already matches HEAD
 (`already-synced`). Do not set those flags to skip an uncertified lane.
 
+The active profile mutation lock is `$T2_LOCK_ROOT/<profile>.lock`; stale-lock
+reclaim coordination uses the sibling directory
+`$T2_LOCK_ROOT/<profile>.reclaim`. A killed reclaimer may leave that sibling
+claim behind. Before manual recovery, verify that the recorded owner PID, any
+reclaimer process, and every other profile-mutating session are gone. Operate
+only on those two exact paths: use `rmdir -- "$T2_LOCK_ROOT/<profile>.reclaim"`
+for an empty claim and
+`rm -rf -- "$T2_LOCK_ROOT/<profile>.lock"` for the stale lock. If only one
+path exists, remove only that path; never remove either path while its owner or
+reclaimer is live, and never remove the lock root.
+
 A fresh or uninitialized profile must complete the supported bootstrap. The
 standalone preflight refuses to call `pre-gate-sync` on an incomplete profile;
 `make minikube-t2` runs the supported setup when its planner selects

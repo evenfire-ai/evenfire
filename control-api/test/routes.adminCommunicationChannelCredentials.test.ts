@@ -231,12 +231,12 @@ describe('admin communicationchannels — credentials cascade', () => {
     gatewayMock.mergeSecret.mockResolvedValue({
       name: 'cc-foo-credentials',
       namespace: 'channels',
-      keys: ['telegram-bot-token'],
+      keys: ['slack-bot-token', 'telegram-bot-token'],
     })
 
     const res = await request(makeApp())
       .put('/admin/communication-channels/foo/credentials')
-      .send({ 'telegram-bot-token': 'new-token' })
+      .send({ 'telegram-bot-token': 'new-token', 'slack-bot-token': 'slack-token' })
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
@@ -244,13 +244,13 @@ describe('admin communicationchannels — credentials cascade', () => {
       secretName: 'cc-foo-credentials',
       namespace: 'channels',
       rotated: true,
-      rotatedKeys: ['telegram-bot-token'],
+      rotatedKeys: ['slack-bot-token', 'telegram-bot-token'],
     })
     expect(gatewayMock.mergeSecret).toHaveBeenCalledWith(
       expect.objectContaining({
         name: 'cc-foo-credentials',
         namespace: 'channels',
-        stringData: { 'telegram-bot-token': 'new-token' },
+        stringData: { 'telegram-bot-token': 'new-token', 'slack-bot-token': 'slack-token' },
       })
     )
     // Existing-ref branch must NOT recreate the Secret or rewrite the CC.
@@ -293,9 +293,10 @@ describe('admin communicationchannels — credentials cascade', () => {
       },
     })
 
-    const res = await request(makeApp())
-      .put('/admin/communication-channels/foo/credentials')
-      .send({ 'telegram-bot-token': NEW_TOKEN_PLAIN })
+    const res = await request(makeApp()).put('/admin/communication-channels/foo/credentials').send({
+      'telegram-bot-token': NEW_TOKEN_PLAIN,
+      'slack-bot-token': SLACK_TOKEN_PLAIN,
+    })
 
     expect(res.status).toBe(200)
     // Names-only contract: metadata + the rotated key NAMES the caller sent.
@@ -304,7 +305,7 @@ describe('admin communicationchannels — credentials cascade', () => {
       secretName: 'cc-foo-credentials',
       namespace: 'channels',
       rotated: true,
-      rotatedKeys: ['telegram-bot-token'],
+      rotatedKeys: ['slack-bot-token', 'telegram-bot-token'],
     })
     expect(res.body).not.toHaveProperty('result')
     // Belt-and-suspenders: no secret value (base64 or plaintext) at ANY depth,
@@ -335,7 +336,7 @@ describe('admin communicationchannels — credentials cascade', () => {
 
     const res = await request(makeApp())
       .put('/admin/communication-channels/foo/credentials')
-      .send({ 'telegram-bot-token': 'tok' })
+      .send({ 'telegram-bot-token': 'tok', 'slack-bot-token': 'slack-tok' })
 
     expect(res.status).toBe(200)
     // Names-only for the rotated:false branch too: return the written key NAMES,
@@ -345,14 +346,14 @@ describe('admin communicationchannels — credentials cascade', () => {
       secretName: 'cc-foo-credentials',
       namespace: 'channels',
       rotated: false,
-      rotatedKeys: ['telegram-bot-token'],
+      rotatedKeys: ['slack-bot-token', 'telegram-bot-token'],
     })
     expect(res.body).not.toHaveProperty('result')
     expect(gatewayMock.createSecret).toHaveBeenCalledWith(
       expect.objectContaining({
         name: 'cc-foo-credentials',
         namespace: 'channels',
-        stringData: { 'telegram-bot-token': 'tok' },
+        stringData: { 'telegram-bot-token': 'tok', 'slack-bot-token': 'slack-tok' },
       })
     )
     expect(gatewayMock.updateResource).toHaveBeenCalledWith(

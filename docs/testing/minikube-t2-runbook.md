@@ -97,12 +97,14 @@ after the reconcile.
 
 The lock is keyed by repository, branch, `HEAD`, and profile, while the
 profile-level lock prevents two processes from mutating one profile at the
-same time. The lock record contains only local metadata and is removed by
-success, failure, timeout, and interrupt traps. A live owner produces
-`PROFILE_BUSY`; stale metadata may be reclaimed only after its recorded PID is
-no longer running. Reclaimers serialize through an atomic `.reclaim` directory
-inside that exact profile lock. A concurrent loser fails closed and never
-removes either the stale directory or the winner's replacement lock.
+same time. The active lock is `$T2_LOCK_ROOT/<profile>.lock`; its record
+contains only local metadata and is removed by success, failure, timeout, and
+interrupt traps. A live owner produces `PROFILE_BUSY`; stale metadata may be
+reclaimed only after its recorded PID is no longer running. Reclaimers
+serialize through the atomic sibling directory
+`$T2_LOCK_ROOT/<profile>.reclaim`, never a child of the active lock. A
+concurrent loser fails closed and never removes either the stale directory or
+the winner's replacement lock.
 
 The pre-gate marker must contain the current worktree identifier, exact `HEAD`,
 cluster fingerprint, image coordinate, and the exact `imagesGeneratedAt` value
@@ -125,17 +127,22 @@ retries to 1-10, and retry delay to 0-300 seconds; empty successful
 ### Orphaned lock recovery
 
 If `PROFILE_BUSY` reports that the lock has no valid owner PID, or that a stale
-reclaim is already in progress, first verify that neither the recorded owner
-nor a reclaimer process owns the profile. A `.reclaim` directory can remain
-after a reclaimer is killed and is intentionally not auto-reclaimed. After
-those checks, remove only the exact profile lock directory and retry the same
-command:
+reclaim is already in progress, first verify that the recorded owner PID is not
+alive, that no reclaimer process is alive, and that no other session is
+mutating the profile. A `$T2_LOCK_ROOT/<profile>.reclaim` sibling directory can
+remain after a reclaimer is killed and is intentionally not auto-reclaimed.
+After those checks, operate only on the two exact profile paths:
 
 ```bash
+rmdir -- "$T2_LOCK_ROOT/<profile>.reclaim"
 rm -rf -- "$T2_LOCK_ROOT/<profile>.lock"
 ```
 
-Never remove a lock with a live owner, and never remove the whole lock root.
+Use only the command for a path that exists: if only the claim exists, run
+`rmdir`; if only the lock exists, run `rm -rf`; if both exist, remove the empty
+claim first and then the stale lock. `rmdir` is preferred for the claim because
+it must be empty. Never remove either path with a live owner/reclaimer, and
+never remove the whole lock root.
 
 ## Preconditions and secrets
 

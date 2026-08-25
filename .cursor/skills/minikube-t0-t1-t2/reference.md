@@ -91,6 +91,31 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
 | `NP08_HCC_AUTHORIZATION_FAILED` | The deployed Host-to-HCC authorization journey or cleanup failed after T0/T1 passed. | Repair the first NP08 failure, then use `minikube-t2-runtime` on the exact same profile/HEAD; never refresh/reissue in the test. |
 | `PLAYWRIGHT_FAILED` | The opt-in user-visible journey failed after runtime and lane evidence passed. | Repair the journey and retry with `minikube-t2-runtime` on the same exact tuple. |
 
+## Stale-lock reclaim layout
+
+The active profile lock is `$T2_LOCK_ROOT/<profile>.lock`. The atomic stale
+reclaim claim is its sibling `$T2_LOCK_ROOT/<profile>.reclaim`, never a child of
+the active lock. A reclaimer terminated abruptly may leave that sibling
+directory, so it is intentionally fail-closed rather than silently adopted.
+
+Before manual recovery, verify all of the following:
+
+- the recorded lock owner PID is not alive;
+- no stale-lock reclaimer process is alive;
+- no other session is mutating the profile.
+
+After those checks, operate only on the two exact paths. Prefer `rmdir` for the
+empty claim:
+
+```bash
+rmdir -- "$T2_LOCK_ROOT/<profile>.reclaim"
+rm -rf -- "$T2_LOCK_ROOT/<profile>.lock"
+```
+
+If only the claim exists, run only the `rmdir`; if only the lock exists, run
+only the `rm -rf`. Never remove either path with a live owner/reclaimer and
+never remove all of `T2_LOCK_ROOT`.
+
 ## GFS restore pointers (high level, no secrets)
 
 GFS T1 real-Postgres coverage has its own gate

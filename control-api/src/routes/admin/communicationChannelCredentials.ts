@@ -121,7 +121,7 @@ export function registerCommunicationChannelCredentialsRoutes(
           secretName: existingSecretName,
           namespace: ns,
           rotated: true,
-          rotatedKeys: Object.keys(data),
+          rotatedKeys: Object.keys(data).sort((a, b) => a.localeCompare(b)),
         })
         return
       }
@@ -146,7 +146,7 @@ export function registerCommunicationChannelCredentialsRoutes(
         secretName,
         namespace: ns,
         rotated: false,
-        rotatedKeys: Object.keys(data),
+        rotatedKeys: Object.keys(data).sort((a, b) => a.localeCompare(b)),
       })
     })
   )

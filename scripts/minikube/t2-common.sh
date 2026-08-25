@@ -972,7 +972,7 @@ t2_lock_acquire() {
       t2_fail PROFILE_BUSY "profile lock path is not a directory: $T2_LOCK_DIR"
       return 1
     fi
-    local existing_pid existing_token existing_start reclaim_dir
+    local existing_pid existing_token existing_start
     existing_pid="$(t2_lock_owner_value PID || true)"
     existing_token="$(t2_lock_owner_value TOKEN || true)"
     existing_start="$(t2_lock_owner_value PROCESS_START || true)"
