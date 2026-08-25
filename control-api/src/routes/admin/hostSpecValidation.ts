@@ -9,6 +9,7 @@ import type { DbClient } from '../../db.js'
 import { rootLogger } from '../../observability/logger.js'
 import { isCodexAssignmentAllowed } from '../../services/codexSubscriptionCatalog.js'
 import {
+  CODEX_UNASSIGNED_CONNECTION_KEY,
   isCodexUnassignedConnectionKey,
   readHostCodexConnectionRef,
 } from '../../services/codexSubscriptionConnection.js'
@@ -184,7 +185,7 @@ export function createHostValidationDeps(db: DbClient): HostSpecValidationDeps {
   return {
     isModelAllowed: (provider, model, connectionRef) =>
       provider === 'codex-subscription'
-        ? isCodexAssignmentAllowed(db, connectionRef ?? 'deployment-default', model)
+        ? isCodexAssignmentAllowed(db, readHostCodexConnectionRef(connectionRef), model)
         : isModelAllowedDefault(provider, model, db),
     getModelAllowlistState: (provider, model) => getModelAllowlistStateDefault(provider, model, db),
   }
@@ -361,6 +362,10 @@ export async function validateHostSpec(
     }
     const connectionRef =
       provider === 'codex-subscription' ? resolvedCodexConnectionRef(model) : undefined
+    if (provider === 'codex-subscription' && isCodexUnassignedConnectionKey(connectionRef)) {
+      // Persist the sentinel so empty and unassigned are not two Host states.
+      model.connectionRef = CODEX_UNASSIGNED_CONNECTION_KEY
+    }
     const skipCodexAllowlist =
       provider === 'codex-subscription' && isCodexUnassignedConnectionKey(connectionRef)
     const allowed = skipCodexAllowlist
@@ -568,7 +573,7 @@ async function maybeWarnStale(
  * the gate skips its rejection.
  */
 function resolvedCodexConnectionRef(model: unknown): string {
-  if (!isPlainObject(model)) return 'deployment-default'
+  if (!isPlainObject(model)) return CODEX_UNASSIGNED_CONNECTION_KEY
   return readHostCodexConnectionRef(
     typeof model.connectionRef === 'string' ? model.connectionRef : null
   )

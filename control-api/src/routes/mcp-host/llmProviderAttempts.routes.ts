@@ -6,7 +6,7 @@ import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
 import { rootLogger } from '../../observability/logger.js'
 import {
   CODEX_SUBSCRIPTION_CONNECTION_KEY,
-  normalizeCodexConnectionKey,
+  readHostCodexConnectionRef,
 } from '../../services/codexSubscriptionConnection.js'
 import {
   LlmProviderAttemptAuthorizeError,
@@ -53,7 +53,7 @@ export async function resolveHostAssignedConnectionKey(
     const host = (await gateway.getResource('hosts', hostRef, config.hostsNamespace)) as {
       spec?: { model?: { connectionRef?: string } }
     }
-    return normalizeCodexConnectionKey(host?.spec?.model?.connectionRef)
+    return readHostCodexConnectionRef(host?.spec?.model?.connectionRef)
   } catch {
     throw new LlmProviderAttemptAuthorizeError(
       'host_binding_mismatch',

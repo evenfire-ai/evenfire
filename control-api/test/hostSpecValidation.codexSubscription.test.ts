@@ -97,18 +97,14 @@ describe('codex-subscription Host admission', () => {
     expect(isModelAllowed).not.toHaveBeenCalled()
   })
 
-  it('defaults a missing connectionRef to deployment-default and checks that grant', async () => {
+  it('materializes a missing connectionRef as unassigned and does not check a grant', async () => {
     process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED = 'true'
     const isModelAllowed = vi.fn().mockResolvedValue(true)
     const spec = { model: { provider: 'codex-subscription', name: 'gpt-5.1' } }
     const res = await validateHostSpec(spec, { isModelAllowed })
     expect(res).toBeNull()
-    expect(isModelAllowed).toHaveBeenCalledWith(
-      'codex-subscription',
-      'gpt-5.1',
-      'deployment-default'
-    )
-    expect((spec.model as { connectionRef?: string }).connectionRef).toBeUndefined()
+    expect(isModelAllowed).not.toHaveBeenCalled()
+    expect((spec.model as { connectionRef?: string }).connectionRef).toBe('unassigned')
   })
 
   it('evaluates allowedModels and fallbacks against the Host connectionRef', async () => {

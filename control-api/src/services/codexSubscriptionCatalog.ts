@@ -8,7 +8,9 @@ import {
   type CodexSubscriptionConnectionStatus,
   type CodexSubscriptionSafeConnection,
   getSafeCodexSubscriptionConnection,
+  isCodexUnassignedConnectionKey,
   normalizeCodexConnectionKey,
+  readHostCodexConnectionRef,
   recordCodexCatalogOutcome,
 } from './codexSubscriptionConnection.js'
 
@@ -159,10 +161,9 @@ export async function isCodexAssignmentAllowed(
   connectionRef: string,
   model: string
 ): Promise<boolean> {
-  const connection = await getSafeCodexSubscriptionConnection(
-    db,
-    normalizeCodexConnectionKey(connectionRef)
-  )
+  const key = readHostCodexConnectionRef(connectionRef)
+  if (isCodexUnassignedConnectionKey(key)) return false
+  const connection = await getSafeCodexSubscriptionConnection(db, key)
   if (
     !connection ||
     connection.status !== 'connected' ||

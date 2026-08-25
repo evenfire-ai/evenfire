@@ -3,8 +3,10 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   CODEX_EXECUTE_SCOPE,
+  CODEX_UNASSIGNED_CONNECTION_KEY,
   type CodexCatalogSnapshot,
   type CodexHostSpec,
+  assignedHostCodexConnectionRef,
   projectCodexExecution,
 } from './codexExecutionProjection'
 
@@ -99,6 +101,12 @@ describe('projectCodexExecution', () => {
     })
     expect(first.driftHashInput).toBe(second.driftHashInput)
     expect(first.catalogContentHash).not.toBe(second.catalogContentHash)
+  })
+
+  it('treats a missing Host connectionRef as unassigned, not the reserved grant', () => {
+    expect(assignedHostCodexConnectionRef(undefined)).toBe(CODEX_UNASSIGNED_CONNECTION_KEY)
+    expect(assignedHostCodexConnectionRef('')).toBe(CODEX_UNASSIGNED_CONNECTION_KEY)
+    expect(assignedHostCodexConnectionRef('deployment-default')).toBe('deployment-default')
   })
 
   it('anti-false-positive: uncertain never defaults to eligible', () => {

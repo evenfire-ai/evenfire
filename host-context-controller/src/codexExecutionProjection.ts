@@ -1,5 +1,16 @@
 export const CODEX_EXECUTE_SCOPE = 'llm:codex:execute'
 export const CODEX_PROVIDER = 'codex-subscription'
+/** Fail-closed Host sentinel. Empty/missing is not the reserved grant. */
+export const CODEX_UNASSIGNED_CONNECTION_KEY = 'unassigned' as const
+
+export function assignedHostCodexConnectionRef(value?: string | null): string {
+  const trimmed = typeof value === 'string' ? value.trim() : ''
+  return trimmed || CODEX_UNASSIGNED_CONNECTION_KEY
+}
+
+export function isCodexUnassignedConnectionRef(value?: string | null): boolean {
+  return assignedHostCodexConnectionRef(value) === CODEX_UNASSIGNED_CONNECTION_KEY
+}
 
 export type CodexTargetSource = 'primary' | 'allowed' | 'fallback'
 

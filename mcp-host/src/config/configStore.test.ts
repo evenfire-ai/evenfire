@@ -562,6 +562,7 @@ describe('ConfigStore — allowlist tier (R3)', () => {
   it('exposes Codex catalog/credential revisions from allowlist annotations', async () => {
     const built = build({
       provider: 'openai',
+      connectionRef: 'deployment-default',
       secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
       allowlistConfigMapName: ALLOWLIST_CM,
       configMaps: {
@@ -845,6 +846,36 @@ describe('ConfigStore — allowlist tier (R3)', () => {
           'clerum.io/connection-revision': '2',
           'clerum.io/codex-connections': JSON.stringify({
             'personal-pro': {
+              catalogRevision: 4,
+              connectionRevision: 2,
+              models: ['gpt-5.3-codex'],
+            },
+          }),
+        },
+      },
+    })
+    store = built.store
+    await store.start()
+    expect(store.codexPolicyBinding()).toBeNull()
+    expect(store.allowedModels().get('codex-subscription')).toEqual([])
+  })
+
+  it('does not inherit deployment-default when the Host has no connectionRef', async () => {
+    const built = build({
+      provider: 'codex-subscription',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {
+        [ALLOWLIST_CM]: {
+          'codex-subscription': JSON.stringify([{ model: 'gpt-5.3-codex' }]),
+        },
+      },
+      configMapAnnotations: {
+        [ALLOWLIST_CM]: {
+          'clerum.io/catalog-revision': '4',
+          'clerum.io/connection-revision': '2',
+          'clerum.io/codex-connections': JSON.stringify({
+            'deployment-default': {
               catalogRevision: 4,
               connectionRevision: 2,
               models: ['gpt-5.3-codex'],

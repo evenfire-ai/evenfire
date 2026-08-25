@@ -174,8 +174,10 @@ describe('codex subscription connection repository', () => {
       CodexSubscriptionInvalidConnectionKeyError
     )
     expect(readHostCodexConnectionRef('unassigned')).toBe('unassigned')
-    expect(readHostCodexConnectionRef('')).toBe('deployment-default')
+    expect(readHostCodexConnectionRef('')).toBe('unassigned')
+    expect(readHostCodexConnectionRef(undefined)).toBe('unassigned')
     expect(readHostCodexConnectionRef('codex-aaa')).toBe('codex-aaa')
+    expect(readHostCodexConnectionRef('deployment-default')).toBe('deployment-default')
     expect(normalizeCodexConnectionKey('unassigned')).toBe('unassigned')
     expect(normalizeCodexConnectionKey('')).toBe('deployment-default')
   })

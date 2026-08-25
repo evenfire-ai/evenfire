@@ -23,7 +23,7 @@ describe('hostPrimaryLlmBindingChanged', () => {
     expect(change.connectionRefChanged).toBe(true)
   })
 
-  it('does not treat a Phase 1 missing ref as a change from deployment-default', () => {
+  it('treats a missing ref as unassigned, not as the reserved grant', () => {
     const change = hostPrimaryLlmBindingChanged(
       {
         provider: 'codex-subscription',
@@ -36,7 +36,9 @@ describe('hostPrimaryLlmBindingChanged', () => {
         connectionRef: 'deployment-default',
       }
     )
-    expect(change.connectionRefChanged).toBe(false)
-    expect(assignedConnectionRef(undefined)).toBe('deployment-default')
+    expect(change.connectionRefChanged).toBe(true)
+    expect(assignedConnectionRef(undefined)).toBe('unassigned')
+    expect(assignedConnectionRef('')).toBe('unassigned')
+    expect(assignedConnectionRef('deployment-default')).toBe('deployment-default')
   })
 })

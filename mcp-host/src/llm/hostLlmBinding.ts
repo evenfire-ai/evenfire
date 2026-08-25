@@ -5,8 +5,12 @@ export type HostPrimaryLlmBinding = {
   secretRef?: string | null
 }
 
+/** Fail-closed Host sentinel. Empty/missing is not the reserved grant. */
+export const CODEX_UNASSIGNED_CONNECTION_KEY = 'unassigned' as const
+
 export function assignedConnectionRef(connectionRef?: string | null): string {
-  return connectionRef?.trim() || 'deployment-default'
+  const trimmed = typeof connectionRef === 'string' ? connectionRef.trim() : ''
+  return trimmed || CODEX_UNASSIGNED_CONNECTION_KEY
 }
 
 export function hostPrimaryLlmBindingChanged(

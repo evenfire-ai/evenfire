@@ -13,14 +13,16 @@ export function isCodexUnassignedConnectionKey(value?: string | null): boolean {
 }
 
 /**
- * Host spec reader: empty/missing becomes deployment-default; `unassigned` stays.
+ * Host spec reader. Empty/missing is `unassigned`, never the reserved grant.
+ * Only an explicit connectionRef may spend a ChatGPT subscription.
  */
 export function readHostCodexConnectionRef(value?: string | null): string {
   const trimmed = typeof value === 'string' ? value.trim() : ''
-  if (!trimmed) return CODEX_SUBSCRIPTION_CONNECTION_KEY
+  if (!trimmed) return CODEX_UNASSIGNED_CONNECTION_KEY
   return trimmed
 }
 
+/** Grant-row key. Empty aliases the reserved OAuth/DB row, not a Host spec field. */
 export function normalizeCodexConnectionKey(value?: string | null): string {
   const trimmed = typeof value === 'string' ? value.trim() : ''
   if (isCodexUnassignedConnectionKey(trimmed)) return CODEX_UNASSIGNED_CONNECTION_KEY

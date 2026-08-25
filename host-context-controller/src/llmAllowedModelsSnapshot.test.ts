@@ -55,10 +55,15 @@ describe('parseAllowedModelsSnapshot per assigned connection', () => {
     expect(projectCodexExecution(spec, live).eligibility).toBe('eligible')
   })
 
-  it('defaults a Phase 1 Host without connectionRef to deployment-default', () => {
-    const snapshot = parseAllowedModelsSnapshot(multiGrantConfigMap())
+  it('parses the reserved grant when that key is requested, not when a Host omits connectionRef', () => {
+    const snapshot = parseAllowedModelsSnapshot(multiGrantConfigMap(), 'deployment-default')
     expect(snapshot.connectionStatus).toBe('connected')
     expect(snapshot.catalogRevision).toBe(1)
+    const unassigned = parseAllowedModelsSnapshot(multiGrantConfigMap(), 'unassigned')
+    expect(unassigned.connectionStatus).toBe('disconnected')
+    expect(Array.from(unassigned.enabledModels ?? [])).not.toContain(
+      'codex-subscription:gpt-5.3-codex'
+    )
   })
 
   it('does not rematch a missing deployment-default onto another grant in the map', () => {

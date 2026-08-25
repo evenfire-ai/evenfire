@@ -145,7 +145,7 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
 })
 
 describe('resolveHostAssignedConnectionKey', () => {
-  it('reads the Host connectionRef and defaults a Phase 1 Host', async () => {
+  it('reads the Host connectionRef and treats a missing field as unassigned', async () => {
     const gateway = {
       getResource: vi.fn().mockResolvedValue({
         spec: { model: { provider: 'codex-subscription', connectionRef: 'team-plus' } },
@@ -156,14 +156,19 @@ describe('resolveHostAssignedConnectionKey', () => {
     gateway.getResource.mockResolvedValueOnce({
       spec: { model: { provider: 'codex-subscription' } },
     })
-    await expect(resolveHostAssignedConnectionKey(gateway, 'agent-b')).resolves.toBe(
-      'deployment-default'
-    )
+    await expect(resolveHostAssignedConnectionKey(gateway, 'agent-b')).resolves.toBe('unassigned')
 
     gateway.getResource.mockResolvedValueOnce({
       spec: { model: { provider: 'codex-subscription', connectionRef: 'unassigned' } },
     })
     await expect(resolveHostAssignedConnectionKey(gateway, 'agent-c')).resolves.toBe('unassigned')
+
+    gateway.getResource.mockResolvedValueOnce({
+      spec: { model: { provider: 'codex-subscription', connectionRef: 'deployment-default' } },
+    })
+    await expect(resolveHostAssignedConnectionKey(gateway, 'agent-d')).resolves.toBe(
+      'deployment-default'
+    )
   })
 
   it('aliases a recipe caller to deployment-default without a Host GET', async () => {

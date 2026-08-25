@@ -7,6 +7,8 @@ import type { AdministrativeOutcomeReporter } from './administrativeOutcomeRepor
 import {
   type CodexCatalogSnapshot,
   type CodexExecutionProjection,
+  assignedHostCodexConnectionRef,
+  isCodexUnassignedConnectionRef,
   projectCodexExecution,
 } from './codexExecutionProjection'
 import { config } from './config'
@@ -1377,7 +1379,17 @@ export class HostReconciler {
   }
 
   private projectCodexForHost(host: HostCRD): CodexExecutionProjection {
-    const connectionKey = host.spec.model?.connectionRef?.trim() || 'deployment-default'
+    const connectionKey = assignedHostCodexConnectionRef(host.spec.model?.connectionRef)
+    if (isCodexUnassignedConnectionRef(connectionKey)) {
+      // Missing/empty is not the reserved grant. Do not project execute scope
+      // or proxy egress from deployment-default just because the field was omitted.
+      return projectCodexExecution(host.spec, {
+        flagEnabled: this.codexSnapshot.flagEnabled,
+        connectionStatus: 'disconnected',
+        enabledModels: [],
+        staleModels: [],
+      })
+    }
     const snapshot = this.lastCodexConfigMap
       ? parseAllowedModelsSnapshot(this.lastCodexConfigMap, connectionKey)
       : this.codexSnapshot

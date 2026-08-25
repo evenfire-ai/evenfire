@@ -30,6 +30,7 @@
  * backoff; on "too old" the watch falls back to a fresh list and resumes.
  */
 import * as k8s from '@kubernetes/client-node'
+import { assignedConnectionRef } from '../llm/hostLlmBinding'
 import {
   ALL_PROVIDERS,
   ALL_PROVIDER_SLOT_ENV_NAMES,
@@ -135,7 +136,7 @@ export interface ConfigStoreOptions {
   llmSecretRef: string | null
   /** Configured LLM provider — selects which key inside the LLM Secret is exposed. */
   provider: LlmProvider | null
-  /** Assigned Codex grant; defaults to deployment-default. */
+  /** Assigned Codex grant. Empty/missing is unassigned and must not spend. */
   connectionRef?: string | null
   /**
    * Name of the operator-managed LLM allowlist ConfigMap to watch (R3). When
@@ -561,7 +562,7 @@ export class ConfigStore {
   }): boolean {
     const nextBinding = parseCodexPolicyBinding(
       cm.metadata?.annotations,
-      this.opts.connectionRef?.trim() || 'deployment-default'
+      assignedConnectionRef(this.opts.connectionRef)
     )
     const modelsChanged = this.applyAllowlistData(cm.data ?? {}, nextBinding)
     const bindingChanged = !codexBindingsEqual(this.codexBinding, nextBinding)

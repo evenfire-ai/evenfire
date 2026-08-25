@@ -129,7 +129,11 @@ function makeCodexHost(overrides?: Partial<HostCRD['spec']>): HostCRD {
       host: 'codex-host',
       contextRef: 'context-a',
       channels: ['channel-a'],
-      model: { provider: 'codex-subscription', name: 'gpt-5.3-codex' },
+      model: {
+        provider: 'codex-subscription',
+        name: 'gpt-5.3-codex',
+        connectionRef: 'deployment-default',
+      },
       ...overrides,
     },
   }
@@ -300,6 +304,21 @@ describe('HostReconciler Codex scope provenance', () => {
       })
     )
     expect(issuedScopes()).not.toContain('llm:codex:execute')
+  })
+
+  it('does not mint Codex scope or egress when connectionRef is missing', async () => {
+    const { reconciler, coreApi, networkingApi } = createReconciler()
+    wireAllowlist(coreApi, eligibleCodexConfigMap())
+
+    await reconciler.reconcile(
+      makeCodexHost({
+        model: { provider: 'codex-subscription', name: 'gpt-5.3-codex' },
+      })
+    )
+
+    expect(issueMcpHostRuntimeTokens).toHaveBeenCalled()
+    expect(issuedScopes()).not.toContain('llm:codex:execute')
+    expect(proxyPolicyBodies(networkingApi)).toEqual([])
   })
 
   it('does not mint Codex scope or egress when the allowlist ConfigMap times out', async () => {
