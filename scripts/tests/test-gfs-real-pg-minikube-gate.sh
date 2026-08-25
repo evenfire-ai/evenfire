@@ -14,7 +14,11 @@ grep -Fq 't2_marker_check' "${SCRIPT}"
 grep -Fq 't2_mutation_lock' "${SCRIPT}"
 grep -Fq 'rollout status deployment/control-postgres' "${SCRIPT}"
 grep -Fq 'get secret control-postgres' "${SCRIPT}"
-grep -Fq 'PROFILE_PG_FORWARD_PID' "${SCRIPT}"
+grep -Fq 'PROFILE_PG_FORWARD_RECORD' "${SCRIPT}"
+grep -Fq 'pf_owner_record_process "${PROFILE_PG_FORWARD_RECORD}"' "${SCRIPT}"
+grep -Fq 'pf_owner_cleanup_record "${PROFILE_PG_FORWARD_RECORD}"' "${SCRIPT}"
+grep -Fq 'docker_cli_env_prepare false' "${SCRIPT}"
+grep -Fq 'docker_cli_run_public gfs-t1-postgres-run' "${SCRIPT}"
 grep -Fq 'docker run -d --rm' "${SCRIPT}"
 grep -Fq 'ISOLATED_PG_IMAGE' "${SCRIPT}"
 grep -Fq 'pending_files' "${SCRIPT}"
@@ -27,6 +31,17 @@ grep -Fq 'required gfs-controller-db Secret is missing or unreadable' "${SCRIPT}
 grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true' "${SCRIPT}"
 grep -Fq 'failed to restore branch-profile GFS credentials' "${SCRIPT}"
 grep -Fq 'docker rm -f' "${SCRIPT}"
+awk '
+  /^[[:space:]]*docker (run|exec|rm) / {
+    if (previous !~ /docker_cli_run_public/ && before_previous !~ /docker_cli_run_public/) {
+      exit 1
+    }
+  }
+  { before_previous = previous; previous = $0 }
+' "${SCRIPT}" || {
+  echo 'FAIL: standalone GFS lane still runs ambient or unbounded Docker commands' >&2
+  exit 1
+}
 if grep -Fq 'docker rm -f "${ISOLATED_CONTAINER}" >/dev/null 2>&1 || true' "${SCRIPT}"; then
   echo 'FAIL: standalone GFS cleanup suppresses Docker removal failure' >&2
   exit 1

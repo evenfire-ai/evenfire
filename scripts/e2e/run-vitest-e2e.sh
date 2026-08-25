@@ -11,6 +11,9 @@ PF_LOG="${E2E_PF_LOG:-/tmp/clerum-test-e2e-port-forwards.log}"
 PF_PID=""
 WAIT_FULL_STACK="${E2E_WAIT_FULL_STACK:-}"
 DEFAULT_VITEST_SUITES=(
+  gfsUploadProductMutation.test.ts
+  gfsUploadV2Runtime.test.ts
+  gfsUploadV2Runtime.read.test.ts
   external-rest-api/security.e2e.test.ts
   rpc-proxy/security.e2e.test.ts
   integration/channel-reader-via-api.test.ts

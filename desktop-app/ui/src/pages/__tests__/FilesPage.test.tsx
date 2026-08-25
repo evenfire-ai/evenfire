@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GFS_FILE_UPLOAD_MAX_BYTES } from '@constants/gfsFileUpload'
+import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
 import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
 import { type GfsCrumb, isGfsSessionAuthorityFailure } from '@hooks/domain/useGfsBrowserController'
@@ -743,7 +743,7 @@ describe('FilesPage', () => {
       createFile,
     })
     const oversized = new File(['small fixture'], 'oversized.md', { type: 'text/markdown' })
-    Object.defineProperty(oversized, 'size', { value: GFS_FILE_UPLOAD_MAX_BYTES + 1 })
+    Object.defineProperty(oversized, 'size', { value: GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES + 1 })
     const arrayBuffer = vi.spyOn(oversized, 'arrayBuffer')
 
     renderFilesPage(pushToast)
@@ -752,7 +752,10 @@ describe('FilesPage', () => {
     })
 
     await waitFor(() =>
-      expect(pushToast).toHaveBeenCalledWith('GFS uploads are limited to 200 MB per file.', 'error')
+      expect(pushToast).toHaveBeenCalledWith(
+        'GFS uploads cannot exceed the 1 GiB Upload v2 protocol maximum.',
+        'error'
+      )
     )
     expect(arrayBuffer).not.toHaveBeenCalled()
     expect(createFile).not.toHaveBeenCalled()

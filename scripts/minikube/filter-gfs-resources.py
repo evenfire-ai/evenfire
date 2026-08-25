@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Remove GFS-owned Kubernetes documents from an intentionally non-GFS apply.
 
-This is used only by non-T2 pre-gate deployment syncs. The filter is explicit
-about the small set of cluster-scoped and control-plane GFS boundary objects;
-unknown documents are retained rather than guessed away.
+This is used by non-GFS deployment syncs and by the T2 full-setup recovery path
+when an existing GFS writer must remain untouched until control-api/runtime
+roles converge. The filter is explicit about the small set of cluster-scoped
+and control-plane GFS boundary objects; unknown documents are retained rather
+than guessed away.
 
 The input is preserved byte-for-byte apart from removed documents. A small
 structural scanner is used instead of a regular expression so document

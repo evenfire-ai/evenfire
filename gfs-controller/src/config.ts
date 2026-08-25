@@ -20,7 +20,7 @@ import {
   GFS_UPLOAD_V2_FINALIZE_TIMEOUT_MS,
   GFS_UPLOAD_V2_STALE_PART_LEASE_MS,
   GFS_UPLOAD_V2_PREFERRED_PART_BYTES,
-  GFS_UPLOAD_V2_PRODUCT_MAX_BYTES,
+  GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES,
   GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES,
   GFS_UPLOAD_V2_SESSION_TTL_SECONDS,
 } from './upload/protocol'
@@ -167,6 +167,13 @@ function uploadInteger(name: string, defaultValue: number, min: number, max: num
   return value
 }
 
+function requireCanonicalUploadInteger(name: string): void {
+  const raw = process.env[name]
+  if (raw !== undefined && !/^(?:0|[1-9][0-9]*)$/.test(raw)) {
+    throw new Error(`[gfsc] ${name} must use canonical unsigned decimal integer syntax`)
+  }
+}
+
 function uploadDurationMs(name: string, defaultValue: number, max: number): number {
   const raw = process.env[name]
   if (raw === undefined) return defaultValue
@@ -235,15 +242,18 @@ function uploadConfig(): GfsUploadConfig {
   const protocolMaxFileBytes = uploadInteger(
     'GFS_UPLOAD_PROTOCOL_MAX_FILE_BYTES',
     GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES,
-    GFS_UPLOAD_V2_PRODUCT_MAX_BYTES,
+    GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES,
     GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES
   )
+  requireCanonicalUploadInteger('GFS_UPLOAD_PROTOCOL_MAX_FILE_BYTES')
+  requireCanonicalUploadInteger('GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES')
+  requireCanonicalUploadInteger('GFS_UPLOAD_MAX_FILE_BYTES')
   const productMaxFileBytes = uploadIntegerWithAlias(
     'GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES',
     'GFS_UPLOAD_MAX_FILE_BYTES',
-    GFS_UPLOAD_V2_PRODUCT_MAX_BYTES,
-    GFS_UPLOAD_V2_PRODUCT_MAX_BYTES,
-    GFS_UPLOAD_V2_PRODUCT_MAX_BYTES
+    GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES,
+    1,
+    protocolMaxFileBytes
   )
   const preferredPartBytes = uploadIntegerWithAlias(
     'GFS_UPLOAD_PREFERRED_CHUNK_BYTES',

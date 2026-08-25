@@ -2,13 +2,20 @@
 # Enforces the "sync to minikube before every gate" rule from the platform E2E plan.
 
 set -euo pipefail
-set +u
-PRE_GATE_SYNC_CONFIG_ONLY="$PRE_GATE_SYNC_CONFIG_ONLY"
-set -u
+PRE_GATE_SYNC_CONFIG_ONLY="${PRE_GATE_SYNC_CONFIG_ONLY:-}"
+T2_SETUP_HANDOFF_EXPECTED="${T2_SETUP_HANDOFF_EXPECTED:-}"
+T2_SETUP_HANDOFF_TRANSITION="${T2_SETUP_HANDOFF_TRANSITION:-}"
+T2_SETUP_HANDOFF_ROOT="${T2_SETUP_HANDOFF_ROOT:-}"
+T2_SETUP_HANDOFF_TTL_SECONDS="${T2_SETUP_HANDOFF_TTL_SECONDS:-}"
 if [ -z "$PRE_GATE_SYNC_CONFIG_ONLY" ]; then PRE_GATE_SYNC_CONFIG_ONLY=false; fi
+if [ -z "$T2_SETUP_HANDOFF_EXPECTED" ]; then T2_SETUP_HANDOFF_EXPECTED=false; fi
+if [ -z "$T2_SETUP_HANDOFF_TTL_SECONDS" ]; then T2_SETUP_HANDOFF_TTL_SECONDS=300; fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+if [ -z "$T2_SETUP_HANDOFF_ROOT" ]; then
+  T2_SETUP_HANDOFF_ROOT="${PROJECT_DIR}/.local-notes/infra/t2-setup-handoffs"
+fi
 PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 KC="kubectl --context=${PROFILE}"
 # shellcheck source=t2-worktree-id.sh
@@ -109,6 +116,13 @@ fi
 source "${SCRIPT_DIR}/pre-gate-runtime.sh"
 # shellcheck source=scripts/minikube/pre-gate-incremental.sh
 source "${SCRIPT_DIR}/pre-gate-incremental.sh"
+# shellcheck source=scripts/minikube/t2-setup-handoff.sh
+source "${SCRIPT_DIR}/t2-setup-handoff.sh"
+
+case "${T2_SETUP_HANDOFF_EXPECTED}" in
+  true|false) ;;
+  *) log "ERROR: T2_SETUP_HANDOFF_EXPECTED must be true or false"; exit 1 ;;
+esac
 
 # A database/schema migration must not race the eager workflow reconciler. Keep
 # the existing replica count so a failed gate restores the branch-owned
@@ -645,6 +659,32 @@ if [[ "${FORCE_RESTART}" == "true" ]] || has_changed infra "${infra_fingerprint}
   infra_changed=true
 fi
 
+setup_handoff_result=not-expected
+if [[ "${T2_SETUP_HANDOFF_EXPECTED}" == "true" ]]; then
+  if [[ "${GATE_NAME}" != "minikube-t2" || "${T2_SKIP_LOCK}" != "true" ||
+        "${IMAGE_SOURCE}" != "local" ]]; then
+    log "ERROR: setup-complete handoff requires the inherited minikube-t2 lease and local image mode"
+    exit 1
+  fi
+  if T2_PROJECT_DIR="${T2_PROJECT_DIR}" T2_WORKTREE_ID="${T2_WORKTREE_ID}" \
+    T2_RUN_ID="${T2_RUN_ID}" T2_PROFILE="${T2_PROFILE}" T2_CONTEXT="${T2_CONTEXT}" \
+    T2_BRANCH="${T2_BRANCH}" T2_HEAD="${T2_HEAD}" T2_SKIP_LOCK="${T2_SKIP_LOCK}" \
+    T2_LOCK_KEY="${T2_LOCK_KEY}" T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" \
+    T2_IMAGE_MANIFEST="${T2_IMAGE_MANIFEST}" \
+    T2_SETUP_HANDOFF_ROOT="${T2_SETUP_HANDOFF_ROOT}" \
+    T2_SETUP_HANDOFF_TTL_SECONDS="${T2_SETUP_HANDOFF_TTL_SECONDS}" \
+    T2_SETUP_HANDOFF_TRANSITION="${T2_SETUP_HANDOFF_TRANSITION}" \
+      bash "${SCRIPT_DIR}/t2-setup-handoff.sh" consume -- \
+        make --no-print-directory minikube-verify-images; then
+    setup_handoff_result=consumed
+    log "Consumed the verified one-shot setup-complete handoff"
+  else
+    setup_handoff_result=rejected
+    cluster_changed=true
+    log "Setup-complete handoff was not accepted; forcing the safe full reconcile"
+  fi
+fi
+
 run_if_changed packages/workflow-runtime-core "npm test && npm run build"
 ensure_artifact packages/workflow-runtime-core dist/index.js "npm run build"
 # @clerum/network-policy-core is a file: dependency of workflow-recipes and
@@ -663,6 +703,15 @@ run_if_changed desktop-app "npm test"
 
 if [[ "${cluster_changed}" == "true" ]]; then
   incremental_plan
+  if [[ "${T2_SETUP_HANDOFF_EXPECTED}" == "true" ]]; then
+    if ! t2_setup_handoff_apply_plan_result "${setup_handoff_result}"; then
+      log "ERROR: setup-complete handoff reached an ambiguous plan state"
+      exit 1
+    fi
+    if [[ "${setup_handoff_result}" == consumed ]]; then
+      log "Reusing the attested images/deployment from the completed full setup"
+    fi
+  fi
   log "Cluster sync plan before ${GATE_NAME}: images=$(incremental_target_summary), full-image-build=${INCREMENTAL_FULL_IMAGE_BUILD}, full-deployment=${INCREMENTAL_FULL_DEPLOYMENT}"
 
   if [[ "${INCREMENTAL_FULL_IMAGE_BUILD}" == "true" ||
