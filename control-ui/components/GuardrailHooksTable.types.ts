@@ -29,6 +29,7 @@ export type LlmHookRef = { name: string }
 
 export type GuardrailHooksTableProps = {
   items: LlmHookResource[]
+  onInstall?: () => void
   onUninstall?: (hook: LlmHookRef) => Promise<void>
   uninstallingKey?: string | null
   onRefresh?: () => void
