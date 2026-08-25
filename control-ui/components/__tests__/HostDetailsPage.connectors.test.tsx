@@ -1,6 +1,13 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
+import {
+  cleanup,
+  fireEvent,
+  render as rtlRender,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import HostDetailsPage from '../../app/hosts/[name]/page'
 import * as api from '../../lib/api'
 import { ToastProvider } from '../Toast'
@@ -112,10 +119,12 @@ describe('HostDetailsPage connectors', () => {
     expect(await screen.findByText('mcp-existing')).toBeInTheDocument()
     expect(screen.queryByText(contextName)).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add connector', exact: true }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add connector' }))
     await waitFor(() => expect(api.getMcpServers).toHaveBeenCalledTimes(1))
     fireEvent.click(await screen.findByRole('option', { name: 'mcp-new' }))
-    fireEvent.click(screen.getByRole('dialog').getByRole('button', { name: 'Add connector' }))
+    fireEvent.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Add connector' })
+    )
 
     await waitFor(() => expect(api.updateContext).toHaveBeenCalledTimes(1))
     expect(api.updateContext).toHaveBeenCalledWith(
@@ -138,8 +147,8 @@ describe('HostDetailsPage connectors', () => {
       name: 'Actions for connector mcp-existing',
     })
     fireEvent.click(actionsButton)
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove connector', exact: true }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Remove connector', exact: true }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove connector' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove connector' }))
 
     await waitFor(() => expect(api.updateContext).toHaveBeenCalledTimes(1))
     expect(api.updateContext).toHaveBeenCalledWith(

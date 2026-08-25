@@ -87,7 +87,7 @@ function setupApiMocks(bundleHost: TestHost, refetchHost: TestHost = bundleHost)
   ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
     host: bundleHost,
     contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
-    secrets: [{ name: 'openai-secret' }],
+    secrets: [{ name: 'openai-secret', keys: ['openai-api-key'] }],
     users: [],
     teams: [],
     agentUsers: [],
@@ -111,7 +111,7 @@ function navigateToTab(view: ReturnType<typeof rtlRender>, tab: 'overview' | 'mo
 }
 
 async function openOverviewEdit() {
-  const [overviewEditButton] = await screen.findAllByRole('button', { name: 'Edit' })
+  const overviewEditButton = await screen.findByRole('button', { name: 'Edit agent name' })
   await waitFor(() => expect(overviewEditButton).toBeEnabled())
   fireEvent.click(overviewEditButton)
 }
@@ -148,7 +148,7 @@ describe('HostDetailsPage AP-6 save conflict handling', () => {
     render(<HostDetailsPage />)
     await openOverviewEdit()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save agent name' }))
     await waitFor(() =>
       expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
     )
@@ -161,7 +161,7 @@ describe('HostDetailsPage AP-6 save conflict handling', () => {
     render(<HostDetailsPage />)
     await openOverviewEdit()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save agent name' }))
     await waitFor(() =>
       expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
     )
@@ -174,7 +174,7 @@ describe('HostDetailsPage AP-6 save conflict handling', () => {
     render(<HostDetailsPage />)
     await openOverviewEdit()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save agent name' }))
 
     // The resourceVersion precondition is whole-object, so a 409 cannot tell a
     // human edit apart from the agent's own lifecycle tick. The banner must
@@ -189,7 +189,7 @@ describe('HostDetailsPage AP-6 save conflict handling', () => {
     // No silent success…
     expect(screen.queryByText('Agent configuration saved.')).not.toBeInTheDocument()
     // …and the edit form stays open so the operator's draft is preserved.
-    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save agent name' })).toBeInTheDocument()
   })
 
   it('recovers after a 409: reloading then re-applying the same save succeeds and clears the banner', async () => {
@@ -201,17 +201,17 @@ describe('HostDetailsPage AP-6 save conflict handling', () => {
     render(<HostDetailsPage />)
     await openOverviewEdit()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save agent name' }))
     expect(
       await screen.findByText(
         "This agent changed since you opened the form (another edit, or the agent's own lifecycle state updated). Reload to see the latest, then re-apply your change."
       )
     ).toBeInTheDocument()
     // Draft survives: the form is still in edit mode after the conflict.
-    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save agent name' })).toBeInTheDocument()
 
     // Re-apply the change (the reload+re-apply recovery the banner instructs).
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save agent name' }))
 
     // The retry succeeds: success toast shows and the conflict banner is gone.
     expect(await screen.findByText('Agent configuration saved.')).toBeInTheDocument()
@@ -227,63 +227,58 @@ describe('HostDetailsPage AP-6 save conflict handling', () => {
     render(<HostDetailsPage />)
     await openOverviewEdit()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save agent name' }))
 
     expect(await screen.findByText('boom')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save agent name' })).toBeInTheDocument()
   })
 })
 
-describe('HostDetailsPage cross-tab draft preservation', () => {
+describe('HostDetailsPage current model and credential flow', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockParams = { name: 'foo' }
     setupApiMocks(formLoadHost, refetchedHost)
   })
 
-  it('preserves an open Overview draft when Model & credentials is saved', async () => {
+  it('opens the linked LLM Secret editor without navigating or saving the Host', async () => {
     const view = render(<HostDetailsPage />)
-    await openOverviewEdit()
-    fireEvent.change(screen.getByLabelText('Display name'), {
-      target: { value: 'unsaved-overview-name' },
-    })
-
     navigateToTab(view, 'model')
-    expect(
-      await screen.findByText(
-        'Provider, allowed models, fallback policy, and credentials for this agent.'
-      )
-    ).toBeInTheDocument()
+    expect(await screen.findByText('Current model')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
-    fireEvent.change(screen.getByLabelText('Secret reference'), { target: { value: '' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
-    expect(await screen.findByText('Model & credentials saved.')).toBeInTheDocument()
 
-    navigateToTab(view, 'overview')
-    expect(await screen.findByDisplayValue('unsaved-overview-name')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByText('Update LLM secret openai-secret')).toBeInTheDocument()
+    expect(pushMock).not.toHaveBeenCalled()
+    expect(
+      (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.some(
+        args => args[0] === 'PUT' && args[1] === '/api/v1/admin/hosts/foo'
+      )
+    ).toBe(false)
   })
 
-  it('preserves an open Model & credentials draft when Overview is saved', async () => {
+  it('updates the linked Secret without writing Host model configuration', async () => {
     const view = render(<HostDetailsPage />)
     navigateToTab(view, 'model')
-    expect(
-      await screen.findByText(
-        'Provider, allowed models, fallback policy, and credentials for this agent.'
-      )
-    ).toBeInTheDocument()
+    await screen.findByText('Current model')
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
-    fireEvent.change(screen.getByLabelText('Secret reference'), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Replace OpenAI API key' }))
+    fireEvent.change(screen.getByLabelText(/^OpenAI API key/i), {
+      target: { value: 'sk-live' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Update secret' }))
 
-    navigateToTab(view, 'overview')
-    await openOverviewEdit()
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
-    expect(await screen.findByText('Agent configuration saved.')).toBeInTheDocument()
-
-    navigateToTab(view, 'model')
     await waitFor(() =>
-      expect((screen.getByLabelText('Secret reference') as HTMLSelectElement).value).toBe('')
+      expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/secrets', {
+        name: 'openai-secret',
+        merge: true,
+        stringData: { 'openai-api-key': 'sk-live' },
+      })
     )
-    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
+    expect(
+      (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.some(
+        args => args[0] === 'PUT' && args[1] === '/api/v1/admin/hosts/foo'
+      )
+    ).toBe(false)
   })
 })

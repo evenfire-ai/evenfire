@@ -18,9 +18,14 @@ export type HostOverviewTabProps = {
   contextMcpTotal: number
   modelPrimary: string
   modelProviderLine: string
+  stateless: boolean
+  lifecycleState: string
+  lifecycleReason: string
+  statelessRejectionMessage: string
   accessSummary: HostOverviewAccessSummary
   onNavigate: (tab: HostTabKey) => void
   onSaveDisplayName: (displayName: string) => Promise<boolean>
+  onSaveLifecycle: (stateless: boolean) => Promise<boolean>
   createdAt: string
   lastUpdated: string
 }

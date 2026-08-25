@@ -132,7 +132,7 @@ describe('HostDetailsPage identity integration', () => {
     )
   })
 
-  it('puts Allowed models in place of Model name and uses LLM Secret language', async () => {
+  it('shows the current model and opens the linked LLM Secret modal inline', async () => {
     mockParams = { name: 'foo', tab: 'model' }
     const { container } = render(<HostDetailsPage />)
 
@@ -143,36 +143,36 @@ describe('HostDetailsPage identity integration', () => {
       Array.from(container.querySelectorAll('.cu-form-stack > .cu-field label')).map(label =>
         label.textContent?.trim()
       )
-    ).toEqual(['LLM Secret', 'Model provider', 'Allowed models', 'Fallback policy'])
+    ).toEqual([
+      'LLM Secret',
+      'Current model',
+      'Model provider',
+      'Allowed models',
+      'Fallback policy',
+    ])
     expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
     expect(container.querySelector('.cu-agent-detail-heading')).not.toBeNull()
     expect(container.querySelector('.cu-agent-detail-toolbar')).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
 
-    expect(
-      screen.getByLabelText('Allowed models · OpenAI', { selector: '#llm-allowed-openai' })
-    ).toBeInTheDocument()
-    expect(screen.queryByLabelText('Model', { selector: '#llm-primary-model' })).toBeNull()
-    expect(screen.getByLabelText('LLM Secret')).toBeInTheDocument()
-    expect(
-      screen.getByRole('button', { name: 'Save' }).closest('.cu-create-actions')
-    ).not.toBeNull()
-    expect(container.querySelector('.cu-agent-detail-card .cu-agent-detail-scroll')).not.toBeNull()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByText('Update LLM secret openai-secret')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Replace OpenAI API key' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Update secret' })).toBeInTheDocument()
+    expect(pushMock).not.toHaveBeenCalled()
+    expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
   })
 
-  it('frames one linked LLM Secret and exposes additive provider credentials', async () => {
+  it('uses the shared LLM Secret editor for additional provider credentials', async () => {
     mockParams = { name: 'foo', tab: 'model' }
     render(<HostDetailsPage />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
 
-    expect(screen.getByRole('link', { name: 'Manage LLM Secrets' })).toHaveAttribute(
-      'href',
-      '/secrets/llm'
-    )
-    expect(screen.getByText('OpenAI · configured')).toBeInTheDocument()
-    expect(screen.getByText('Additional providers')).toBeInTheDocument()
+    expect(screen.getByText('Update LLM secret openai-secret')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Manage LLM Secrets' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Replace OpenAI API key' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByLabelText('Add provider'))
     fireEvent.click(screen.getByRole('option', { name: 'Anthropic' }))

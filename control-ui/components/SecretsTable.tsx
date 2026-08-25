@@ -11,23 +11,18 @@ import {
   getRecipeSecrets,
   getRecipes,
 } from '../lib/api'
-import {
-  createEmptyLlmKeyDraft,
-  getProviderLabel,
-  getProvidersWithCompleteCredentials,
-  validateLlmSecretData,
-} from '../lib/llm'
+import { getProviderLabel, getProvidersWithCompleteCredentials } from '../lib/llm'
 import { collectWorkflowRecipeSecretRefs } from '../lib/workflowRecipeSecretRefs'
 import { useConfirmDialog } from './ConfirmDialog'
-import { LlmCredentialFields } from './LlmCredentialFields'
 import { LlmProviderIcon } from './LlmProviderIcon'
+import { LlmSecretUpdateModal } from './LlmSecretUpdateModal'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconKey } from './Sidebar/icons'
 import { TabBar } from './TabBar'
 import { TablePanelHeader } from './TablePanelHeader'
 import { useToast } from './Toast'
-import { IconRefresh, IconX } from './icons'
+import { IconRefresh } from './icons'
 
 type SecretItem = {
   name?: string
@@ -99,14 +94,6 @@ export function SecretsTable({
 
   // LLM secrets state
   const [editingName, setEditingName] = useState('')
-  const [editingKeys, setEditingKeys] = useState<string[]>([])
-  const [isLlmModalOpen, setIsLlmModalOpen] = useState(false)
-  const [keyDraft, setKeyDraft] = useState<Record<string, string>>(createEmptyLlmKeyDraft)
-  // Stored data keys the editor queued for retirement (removed or renamed-away
-  // extra slots). Sent as `removeKeys` on save — the draft is write-only and a
-  // blank value is explicitly NOT a deletion server-side.
-  const [removedKeys, setRemovedKeys] = useState<string[]>([])
-  const [saving, setSaving] = useState(false)
   const [deletingName, setDeletingName] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [llmSearchQuery, setLlmSearchQuery] = useState('')
@@ -175,100 +162,8 @@ export function SecretsTable({
     )
   }, [recipeRows, normalizedRecipeSearch])
 
-  function closeLlmModal() {
-    setIsLlmModalOpen(false)
-    setEditingName('')
-    setEditingKeys([])
-    setKeyDraft(createEmptyLlmKeyDraft())
-    setRemovedKeys([])
-    setError('')
-  }
-
   function openUpdate(name: string) {
     setEditingName(name)
-    setEditingKeys(keysByName.get(name) ?? [])
-    setKeyDraft(createEmptyLlmKeyDraft())
-    setRemovedKeys([])
-    setError('')
-    setIsLlmModalOpen(true)
-  }
-
-  async function saveSecret() {
-    const secretName = editingName.trim()
-    if (!secretName) {
-      setError('Secret name is required.')
-      return
-    }
-
-    const stringData = Object.fromEntries(
-      Object.entries(keyDraft)
-        .map(([key, value]) => [key, value.trim()])
-        .filter(([, value]) => value.length > 0)
-    )
-    // Defense in depth: the editor owns this invariant (it never reports a key
-    // the draft is writing), and the server resolves "in data AND in
-    // removeKeys" as retirement-wins, which would drop the value just typed.
-    // The filter stays as a backstop for any future parent wiring the channel.
-    const removeKeys = removedKeys.filter(key => !(key in stringData))
-    // A retire-only edit is a real edit: `merge: true` accepts `removeKeys`
-    // with no data at all, so only an empty-and-nothing-retired save is a
-    // no-op worth blocking.
-    if (Object.keys(stringData).length === 0 && removeKeys.length === 0) {
-      setError('Provide at least one API key.')
-      return
-    }
-    // Retiring every stored key without writing one 400s server-side with
-    // "secret must retain at least one key" — a cryptic answer to a question
-    // the client can answer itself from the keys it already knows.
-    const survivingKeys = new Set([
-      ...editingKeys.filter(key => !removeKeys.includes(key)),
-      ...Object.keys(stringData),
-    ])
-    if (survivingKeys.size === 0) {
-      setError('Removing every key would leave the secret empty — delete the secret instead.')
-      return
-    }
-    // Slot-aware validation (spec R4.5.3), mirrored server-side in control-api.
-    const slotErrors = validateLlmSecretData(stringData)
-    if (slotErrors.length > 0) {
-      setError(slotErrors[0])
-      return
-    }
-    // Retirement is irreversible — the values are write-only, so a key deleted
-    // by mistake cannot be restored from anything the UI holds. Confirm before
-    // the write, naming exactly what goes.
-    if (removeKeys.length > 0) {
-      const confirmed = await confirm({
-        title: 'Remove stored keys',
-        message: `Permanently remove ${removeKeys.join(', ')} from secret ${secretName}? Their values cannot be recovered.`,
-        confirmLabel: 'Remove and save',
-        tone: 'danger',
-      })
-      if (!confirmed) return
-    }
-
-    setSaving(true)
-    setError('')
-    try {
-      // merge:true → server-side read-then-replace that preserves the keys of
-      // other providers stored in this shared LLM secret (spec R4 FIX 2b).
-      // `removeKeys` (merge-only) is the deletion half of the same write: keys
-      // the editor retired are dropped from the merged data. Omitted entirely
-      // when nothing is retired so a plain update stays a pure overlay.
-      await apiSend('PUT', '/api/v1/admin/secrets', {
-        name: secretName,
-        merge: true,
-        stringData,
-        ...(removeKeys.length > 0 ? { removeKeys } : {}),
-      })
-      showToast(`Secret ${secretName} updated.`, { tone: 'success' })
-      await onChanged()
-      closeLlmModal()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to save secret')
-    } finally {
-      setSaving(false)
-    }
   }
 
   async function loadMcpSecretReferences() {
@@ -971,87 +866,15 @@ export function SecretsTable({
         ) : null}
       </div>
 
-      {isLlmModalOpen && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'var(--cu-overlay)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !saving) closeLlmModal()
-          }}
-        >
-          <div
-            className="cu-modal-panel"
-            role="dialog"
-            aria-labelledby="llm-secret-title"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <strong id="llm-secret-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Update LLM secret {editingName}
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={closeLlmModal}
-                disabled={saving}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
-            </div>
-
-            <div className="cu-form-stack" style={{ maxWidth: '100%' }}>
-              <p className="cu-field__hint">
-                Updates the listed keys and deletes the ones you remove here; every other key
-                already stored in this secret is preserved.
-              </p>
-              <LlmCredentialFields
-                draft={keyDraft}
-                onChange={(dataKey, value) => setKeyDraft(prev => ({ ...prev, [dataKey]: value }))}
-                existingKeys={editingKeys}
-                // Identity-stable update: the editor re-reports on every change,
-                // and a fresh array each time would re-render the modal for no
-                // reason (and on mount, for an empty set).
-                onRemovedKeysChange={next =>
-                  setRemovedKeys(prev => (prev.join('\n') === next.join('\n') ? prev : next))
-                }
-                disabled={saving}
-                pickerInline
-              />
-            </div>
-
-            {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
-
-            <div className="cu-modal-panel__foot">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={closeLlmModal}
-                disabled={saving}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={() => void saveSecret()}
-                disabled={saving}
-              >
-                {saving ? 'Saving…' : 'Update secret'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {editingName ? (
+        <LlmSecretUpdateModal
+          key={editingName}
+          secretName={editingName}
+          existingKeys={keysByName.get(editingName) ?? []}
+          onClose={() => setEditingName('')}
+          onChanged={onChanged}
+        />
+      ) : null}
       {confirmDialog}
     </>
   )
