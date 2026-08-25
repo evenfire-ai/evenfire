@@ -611,9 +611,9 @@ describe('GfsUploadSessionService', () => {
     ['100 MiB', 100 * 1024 * 1024],
     ['250 MiB', 250 * 1024 * 1024],
     ['300 MiB', 300 * 1024 * 1024],
-    ['the protocol maximum', 1024 * 1024 * 1024],
+    ['the maximum supported product policy', 1024 * 1024 * 1024],
   ] as const)(
-    'advertises and enforces the configured %s product limit before allocation',
+    'advertises and enforces the configured %s before allocation',
     async (_label, productMaxFileBytes) => {
       tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-runtime-boundary-'))
       const config = { ...CONFIG, productMaxFileBytes }
