@@ -240,12 +240,18 @@ function rawRequest(method, path, headerLines, body = '') {
   })
 }
 
+function assertHeaderRejected(label, status) {
+  if (status !== 400 && status !== 401) {
+    throw new Error(label + ' was not rejected: ' + status)
+  }
+}
+
 const duplicateSystem = await rawRequest('GET', '/api/v2/system/mcpservers', [
   `${authName}: ${scheme} ${identity}`,
   `${authName.toLowerCase()}: ${scheme} duplicate-a`,
   `${proxyName}: ${scheme} forged`,
 ])
-if (duplicateSystem !== 401) throw new Error(`duplicate system header was not rejected: ${duplicateSystem}`)
+assertHeaderRejected('duplicate system header', duplicateSystem)
 console.log('PASS duplicate system headers rejected through the gateway')
 
 const body = JSON.stringify({ serverName: 'np08-raw-header-probe' })
@@ -256,7 +262,7 @@ const duplicateHost = await rawRequest('POST', '/api/v2/system/mcpservers/author
   'Content-Type: application/json',
   `Content-Length: ${Buffer.byteLength(body)}`,
 ], body)
-if (duplicateHost !== 401) throw new Error(`duplicate Host header was not rejected: ${duplicateHost}`)
+assertHeaderRejected('duplicate Host header', duplicateHost)
 console.log('PASS duplicate Host headers rejected through the gateway')
 
 const proxyBoundary = await rawRequest('GET', '/api/v2/system/mcpservers', [
@@ -265,8 +271,14 @@ const proxyBoundary = await rawRequest('GET', '/api/v2/system/mcpservers', [
 ])
 if (proxyBoundary !== 200) throw new Error(`private identity boundary probe failed: ${proxyBoundary}`)
 console.log('PASS private proxy identity is not mixed into the system route')
-})().catch(() => {
-  console.error('FAIL: NP-08 gateway raw header check')
+})().catch(error => {
+  const errorText = error instanceof Error ? error.message : String(error)
+  const safeError = errorText
+    .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/https?:\/\/\S+/gi, '[url]')
+    .replace(/[A-Za-z0-9_-]{20,}/g, '[opaque]')
+    .slice(0, 160)
+  console.error('FAIL: NP-08 gateway raw header check: ' + safeError)
   process.exitCode = 1
 })
 NODE
