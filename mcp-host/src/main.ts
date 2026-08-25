@@ -1782,6 +1782,17 @@ async function handleTaskResult(
           requestId: result.approval.requestId,
           userId: result.approval.userId,
           notification: result.approval.notification,
+          // U5 — surface the connect_required discriminator on the REST poll so a
+          // reconnecting desktop rebuilds a "Connect <server>" suspension, not a
+          // generic approval. Omitted for generic approvals (back-compat).
+          ...(result.approval.reason ? { reason: result.approval.reason } : {}),
+          // mcpServerName/provider ride ONLY connect_required, matching the SSE producer.
+          ...(result.approval.reason === 'connect_required' && result.approval.mcpServerName
+            ? { mcpServerName: result.approval.mcpServerName }
+            : {}),
+          ...(result.approval.reason === 'connect_required' && result.approval.provider
+            ? { provider: result.approval.provider }
+            : {}),
         },
         model: result.model,
       }

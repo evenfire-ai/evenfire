@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'events'
+import { buildConnectRequiredApproval } from '../core/extensions/mcpApprovalGateController'
 import { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import { IncomingMessageHandler, PendingTaskEntry } from '../messageHandler'
 import { progressReporterRegistry } from '../progress/sseProgressReporter'
@@ -124,6 +125,66 @@ describe('IncomingMessageHandler', () => {
     expect(result.approval?.notification).toBe('Approve shell_exec?')
   })
 
+  // U5 — a connect_required suspension must reach the polling wire with its
+  // discriminator so the desktop renders "Connect <server>", matching the SSE
+  // path. Event connect fields are taken from the REAL producer (T1).
+  it('resolves waiting_approval carrying the connect_required discriminator (sync path)', async () => {
+    const deps = createMockDeps()
+    const handler = new IncomingMessageHandler(createTestMessage(), deps)
+
+    const resultPromise = handler.execute()
+    await new Promise(r => setTimeout(r, 10))
+    const task = deps.messageQueue.dequeue()!
+
+    const approval = buildConnectRequiredApproval(
+      { id: 'tc_1', name: 'monday__list_boards', arguments: { limit: 5 } },
+      { mcpServerName: 'monday', provider: 'monday' }
+    )
+    deps.agent.emit('tool:approval_needed', {
+      data: {
+        taskId: task.id,
+        requestId: approval.request_id,
+        userId: 'user-1',
+        notification: 'Connect monday to continue',
+        reason: approval.reason,
+        mcpServerName: approval.mcpServerName,
+        provider: approval.provider,
+      },
+    })
+
+    const result = await resultPromise
+    expect(result.status).toBe('waiting_approval')
+    expect(result.approval).toMatchObject({
+      reason: 'connect_required',
+      mcpServerName: 'monday',
+      provider: 'monday',
+    })
+  })
+
+  it('resolves a generic waiting_approval without connect fields (back-compat, sync path)', async () => {
+    const deps = createMockDeps()
+    const handler = new IncomingMessageHandler(createTestMessage(), deps)
+
+    const resultPromise = handler.execute()
+    await new Promise(r => setTimeout(r, 10))
+    const task = deps.messageQueue.dequeue()!
+
+    deps.agent.emit('tool:approval_needed', {
+      data: {
+        taskId: task.id,
+        requestId: 'req-generic',
+        userId: 'user-1',
+        notification: 'Approve shell_exec?',
+      },
+    })
+
+    const result = await resultPromise
+    expect(result.approval).toBeDefined()
+    expect(result.approval).not.toHaveProperty('reason')
+    expect(result.approval).not.toHaveProperty('mcpServerName')
+    expect(result.approval).not.toHaveProperty('provider')
+  })
+
   it('should store subsequent responses in pendingTaskResults', async () => {
     const deps = createMockDeps()
     const handler = new IncomingMessageHandler(createTestMessage(), deps)
@@ -222,6 +283,71 @@ describe('IncomingMessageHandler', () => {
       expect(stored!.status).toBe('waiting_approval')
       expect(stored!.approval?.requestId).toBe('req-async-1')
       expect(stored!.approval?.notification).toBe('Approve async tool?')
+    })
+
+    // U5 — the stored async approval entry (polled via GET /tasks/:id/result →
+    // handleTaskResult) must carry the connect_required discriminator so a
+    // reconnecting desktop rebuilds the connect suspension. Event connect fields
+    // taken from the REAL producer (T1).
+    it('stores the connect_required discriminator in pendingTaskResults (async path)', async () => {
+      const deps = createMockDeps()
+      const handler = new IncomingMessageHandler(createTestMessage(), deps)
+
+      const result = handler.executeAsync()
+      const taskId = result.taskId!
+      const task = deps.messageQueue.dequeue()!
+
+      const approval = buildConnectRequiredApproval(
+        { id: 'tc_1', name: 'monday__list_boards', arguments: { limit: 5 } },
+        { mcpServerName: 'monday', provider: 'monday' }
+      )
+      deps.agent.emit('tool:approval_needed', {
+        data: {
+          taskId: task.id,
+          requestId: approval.request_id,
+          userId: 'user-1',
+          notification: 'Connect monday to continue',
+          reason: approval.reason,
+          mcpServerName: approval.mcpServerName,
+          provider: approval.provider,
+        },
+      })
+
+      await new Promise(r => setTimeout(r, 10))
+
+      const stored = deps.pendingTaskResults.get(taskId)
+      expect(stored).toBeDefined()
+      expect(stored!.approval).toMatchObject({
+        reason: 'connect_required',
+        mcpServerName: 'monday',
+        provider: 'monday',
+      })
+    })
+
+    it('stores a generic async approval without connect fields (back-compat)', async () => {
+      const deps = createMockDeps()
+      const handler = new IncomingMessageHandler(createTestMessage(), deps)
+
+      const result = handler.executeAsync()
+      const taskId = result.taskId!
+      const task = deps.messageQueue.dequeue()!
+
+      deps.agent.emit('tool:approval_needed', {
+        data: {
+          taskId: task.id,
+          requestId: 'req-async-generic',
+          userId: 'user-1',
+          notification: 'Approve async tool?',
+        },
+      })
+
+      await new Promise(r => setTimeout(r, 10))
+
+      const stored = deps.pendingTaskResults.get(taskId)
+      expect(stored!.approval).toBeDefined()
+      expect(stored!.approval).not.toHaveProperty('reason')
+      expect(stored!.approval).not.toHaveProperty('mcpServerName')
+      expect(stored!.approval).not.toHaveProperty('provider')
     })
   })
 

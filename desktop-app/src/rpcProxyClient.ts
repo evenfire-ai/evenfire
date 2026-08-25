@@ -80,9 +80,21 @@ function parseSessionState(value: unknown, label: string): SessionLifecycleState
 function parsePendingApproval(value: unknown, label: string): PendingApprovalLite | undefined {
   if (value === undefined || value === null) return undefined
   const record = wireObject(value, label)
+  // U5 (mcp-oauth reactive consent): `reason`/`mcpServerName`/`provider` are
+  // additive. They ride the same REST wire as the generic approval descriptor
+  // and MUST be surfaced so the renderer can branch a `connect_required`
+  // suspension into an OAuth "Connect <provider>" affordance instead of a
+  // generic tool approval. An absent `reason` (or any value other than
+  // `connect_required`) keeps the byte-identical generic-approval flow.
+  const reason = optionalWireString(record.reason, `${label}.reason`)
+  const mcpServerName = optionalWireString(record.mcpServerName, `${label}.mcpServerName`)
+  const provider = optionalWireString(record.provider, `${label}.provider`)
   return {
     requestId: wireString(record.requestId, `${label}.requestId`),
     displayName: wireString(record.displayName, `${label}.displayName`),
+    ...(reason !== undefined ? { reason } : {}),
+    ...(mcpServerName !== undefined ? { mcpServerName } : {}),
+    ...(provider !== undefined ? { provider } : {}),
   }
 }
 
