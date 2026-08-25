@@ -3,6 +3,7 @@ import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { createHash } from 'node:crypto'
 import { rateLimitMiddleware } from '../../../middleware/rateLimitMiddleware.js'
 import { verifyAdminToken } from '../../../utils/auth/adminAuthToken.js'
+import { verifyExternalSessionToken } from '../../../utils/auth/externalSessionAuthToken.js'
 import { CONTROL_UI_ADMIN_SESSION_COOKIE, readCookie } from '../../../utils/auth/sessionCookies.js'
 import { extractBearerToken } from '../../../utils/extractBearerToken.js'
 
@@ -149,20 +150,51 @@ export function adminWorkflowTriggerRateLimit() {
   })
 }
 
+function hashedWorkflowTriggerBucket(credential: string): string {
+  const hash = createHash('sha256').update(credential).digest('hex').slice(0, 32)
+  return `workflow_trigger:${hash}`
+}
+
+function workflowTriggerRateLimitFor(getCredential: (req: Request) => string | null) {
+  return rateLimitMiddleware({
+    bucketType: 'workflow_trigger',
+    maxPerMinute: WORKFLOW_TRIGGER_PER_MINUTE,
+    getBucketKey: (req: Request) => {
+      const credential = getCredential(req)
+      if (!credential) return null
+      return hashedWorkflowTriggerBucket(credential)
+    },
+  })
+}
+
+function unverifiedTriggerIpCredential(req: Request): string {
+  return `ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
+}
+
+/** Stable per-account key. Raw tokens rotate and must not mint new buckets. */
+function verifiedUserSessionRateLimitSubject(token: string): string | null {
+  const userId = verifyExternalSessionToken(token)?.userId
+  return userId ? `user:${userId}` : null
+}
+
 /**
- * Prefer the end-user session when external-rest-api forwards both a service
- * bearer and x-user-session-token. Otherwise every Profile user shares one
- * 10/min bucket keyed to the service identity.
+ * External trigger lane: prefer the verified Profile userId when
+ * external-rest-api forwards both a service bearer and x-user-session-token.
+ * An unverified session header falls back to IP so rotation cannot evade the cap.
  */
 export function workflowTriggerRateLimitCredential(req: Request): string | null {
   const userSessionToken = String(req.header('x-user-session-token') || '').trim()
-  if (userSessionToken) return userSessionToken
+  if (userSessionToken) {
+    return (
+      verifiedUserSessionRateLimitSubject(userSessionToken) || unverifiedTriggerIpCredential(req)
+    )
+  }
 
   const cookie = readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)
   const cookieSubject = verifiedAdminRateLimitSubject(cookie)
   if (cookieSubject) return cookieSubject
   if (cookie) {
-    return `ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
+    return unverifiedTriggerIpCredential(req)
   }
 
   const bearer = extractBearerToken(req)
@@ -172,17 +204,17 @@ export function workflowTriggerRateLimitCredential(req: Request): string | null 
   return null
 }
 
+/** mcp-host trigger lane: the authenticated principal is the bearer only. */
+export function mcpHostWorkflowTriggerRateLimitCredential(req: Request): string | null {
+  return extractBearerToken(req)
+}
+
 export function workflowTriggerRateLimit() {
-  return rateLimitMiddleware({
-    bucketType: 'workflow_trigger',
-    maxPerMinute: WORKFLOW_TRIGGER_PER_MINUTE,
-    getBucketKey: (req: Request) => {
-      const credential = workflowTriggerRateLimitCredential(req)
-      if (!credential) return null
-      const hash = createHash('sha256').update(credential).digest('hex').slice(0, 32)
-      return `workflow_trigger:${hash}`
-    },
-  })
+  return workflowTriggerRateLimitFor(workflowTriggerRateLimitCredential)
+}
+
+export function mcpHostWorkflowTriggerRateLimit() {
+  return workflowTriggerRateLimitFor(mcpHostWorkflowTriggerRateLimitCredential)
 }
 
 function workflowAdminReadRateLimit() {
