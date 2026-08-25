@@ -51,14 +51,15 @@ describe('ChatViewWorkspace', () => {
     const { container } = renderWorkspace('active chat', <div role="search">Current chat find</div>)
     const surface = screen.getByRole('region', { name: 'Current chat' })
     const active = screen.getByRole('button', { name: 'First chat' })
-    const list = container.querySelector('.chat-view-tabs__list') as HTMLElement
+    const scroller = container.querySelector('.chat-view-tabs__scroller') as HTMLElement
 
     expect(active.getAttribute('aria-controls')).toBe(surface.id)
     expect(surface.getAttribute('data-selected-surface')).toBe('chat')
     expect(surface.contains(screen.getByRole('search'))).toBe(true)
     expect(surface.contains(screen.getByTestId('chat-state'))).toBe(true)
-    expect(getComputedStyle(list).overflowX).toBe('auto')
+    expect(getComputedStyle(scroller).overflowX).toBe('auto')
     expect(getComputedStyle(surface).borderTopStyle).toBe('solid')
+    expect(getComputedStyle(surface).borderTopWidth).toBe('0px')
     expect(getComputedStyle(surface).borderLeftStyle).toBe('solid')
     expect(getComputedStyle(surface).borderRightStyle).toBe('solid')
     expect(getComputedStyle(surface).borderBottomStyle).toBe('solid')
@@ -78,12 +79,12 @@ describe('ChatViewWorkspace', () => {
   it('keeps tab overflow separate from a full-width surface at narrow widths', () => {
     const { container } = renderWorkspace('narrow chat')
     const workspace = container.querySelector('.chat-view-workspace') as HTMLElement
-    const list = container.querySelector('.chat-view-tabs__list') as HTMLElement
+    const scroller = container.querySelector('.chat-view-tabs__scroller') as HTMLElement
     const surface = screen.getByRole('region', { name: 'Current chat' })
     workspace.style.width = '320px'
 
     expect(getComputedStyle(workspace).display).toBe('flex')
-    expect(getComputedStyle(list).overflowX).toBe('auto')
+    expect(getComputedStyle(scroller).overflowX).toBe('auto')
     expect(getComputedStyle(surface).width).toBe('100%')
     expect(screen.getByText(/A second conversation/)).toBeTruthy()
     expect(screen.getByRole('button', { name: /Close A second conversation/ })).toBeTruthy()
