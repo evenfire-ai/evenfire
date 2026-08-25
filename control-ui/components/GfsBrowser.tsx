@@ -391,7 +391,7 @@ export function GfsBrowser(): React.JSX.Element {
       await refreshCurrent()
       return 'completed'
     } catch (error) {
-      if (!(error instanceof GfsUploadCapabilityError)) throw error
+      if (!(error instanceof GfsUploadCapabilityError) || !error.allowLegacyFallback) throw error
       if (input.resumeUploadId) {
         throw new GfsUploadCapabilityError(
           'The persisted resumable session cannot be resumed while GFS Upload v2 is unavailable.',
@@ -495,7 +495,7 @@ export function GfsBrowser(): React.JSX.Element {
       await refreshCurrent()
     } catch (err) {
       if (uploadJobRef.current?.snapshot().state === 'aborted') return
-      if (err instanceof GfsUploadCapabilityError) {
+      if (err instanceof GfsUploadCapabilityError && err.allowLegacyFallback) {
         if (resumeUploadId) {
           showToast(
             'The persisted resumable session cannot be resumed while GFS Upload v2 is unavailable.',
@@ -1145,7 +1145,7 @@ export function GfsBrowser(): React.JSX.Element {
           fileSummary={
             uploadCandidate ? `${formatBytes(uploadCandidate.size)} selected` : undefined
           }
-          guidance="GFS uploads are limited to 200 MiB per file; each request is streamed in 8 MiB parts (16 MiB hard maximum)."
+          guidance="The writer advertises the Upload v2 file limit (up to the 1 GiB protocol maximum); each request is streamed in 8 MiB parts (16 MiB hard maximum)."
           progress={
             uploadSnapshot
               ? {

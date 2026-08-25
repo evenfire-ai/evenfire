@@ -4,10 +4,11 @@ import { mkdtemp, rm, truncate, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-export const GFS_UPLOAD_V2_MAX_BYTES = 209_715_200
+export const GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES = 209_715_200
+export const GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES = 1_073_741_824
 export const GFS_UPLOAD_V2_BOUNDARIES = [
-  GFS_UPLOAD_V2_MAX_BYTES - 1,
-  GFS_UPLOAD_V2_MAX_BYTES,
+  GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES - 1,
+  GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES,
 ] as const
 
 export interface DiskUploadFixture {
@@ -27,7 +28,11 @@ export async function createDiskUploadFixture(
   extension = '.parquet',
   label = 'gfs-v2'
 ): Promise<DiskUploadFixture> {
-  if (!Number.isSafeInteger(byteLength) || byteLength < 0 || byteLength > GFS_UPLOAD_V2_MAX_BYTES) {
+  if (
+    !Number.isSafeInteger(byteLength) ||
+    byteLength < 0 ||
+    byteLength > GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES
+  ) {
     throw new Error(`invalid GFS v2 fixture size: ${byteLength}`)
   }
   const directory = await mkdtemp(path.join(os.tmpdir(), 'evenfire-gfs-upload-v2-'))
@@ -45,15 +50,22 @@ export async function createDiskUploadFixture(
 }
 
 /**
- * Creates the single-byte-over-limit fixture used by the opt-in negative
- * browser journey. Keep the normal fixture helper fail-closed at the product
- * ceiling so a positive test can never accidentally become an oversize test.
+ * Creates a single-byte-over-product-limit fixture for opt-in negative
+ * journeys. Both helpers remain fail-closed at the protocol ceiling.
  */
 export async function createOversizedDiskUploadFixture(
   extension = '.parquet',
-  label = 'gfs-v2-oversize'
+  label = 'gfs-v2-oversize',
+  productMaxBytes = GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES
 ): Promise<DiskUploadFixture> {
-  const byteLength = GFS_UPLOAD_V2_MAX_BYTES + 1
+  if (
+    !Number.isSafeInteger(productMaxBytes) ||
+    productMaxBytes < 1 ||
+    productMaxBytes >= GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES
+  ) {
+    throw new Error(`invalid GFS v2 product maximum: ${productMaxBytes}`)
+  }
+  const byteLength = productMaxBytes + 1
   const directory = await mkdtemp(path.join(os.tmpdir(), 'evenfire-gfs-upload-v2-'))
   const fileName = `${label}-${byteLength}${extension}`
   const filePath = path.join(directory, fileName)
