@@ -858,6 +858,18 @@ export function brokerTokenProviderDeps(): BrokerTokenProviderDeps {
     gatewayUrl: () => config.mcpHostGatewayUrl,
     controlToken: () =>
       loadPersistedWorkflowControlToken(workflowControlTokenFromConfig() ?? '') || undefined,
+    // Reactive recovery on a control-api 401, same as every sibling consumer
+    // (setupUsageReporting wires `refreshOnUnauthorized: () => refreshWithRecovery(auth)`
+    // into UsageReporter / GovernedRunReporter / ApprovalPromptHistoryClient).
+    // Reading `runtimeAuth` at call time — not capturing it — matters: the broker
+    // factory is built during MCP init, which can run before setupUsageReporting
+    // assigns it. Without the shared auth there is nothing to refresh, and the
+    // broker keeps its previous behaviour of throwing on 401.
+    refreshControlToken: async () => {
+      const auth = runtimeAuth
+      if (!auth) return
+      await refreshWithRecovery(auth)
+    },
   }
 }
 

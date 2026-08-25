@@ -46,11 +46,14 @@ const boot = vi.hoisted(() => {
   const bootToken = jwt(nowSecs - 1200, nowSecs - 600, 'boot-seed')
   // What the in-pod self-refresh minted afterwards.
   const rotatedToken = jwt(nowSecs - 60, nowSecs + 540, 'rotated')
+  // A control JWT that already rotated once and then expired again — the state
+  // an idle pod reaches between proactive refreshes (~50 min apart).
+  const staleRotatedToken = jwt(nowSecs - 900, nowSecs - 300, 'rotated-then-expired')
 
   process.env.MCP_HOST_GATEWAY_URL = 'http://gateway.test:8092'
   process.env.MCP_HOST_WORKFLOW_CONTROL_TOKEN = bootToken
   delete process.env.MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE
-  return { bootToken, rotatedToken }
+  return { jwt, nowSecs, bootToken, rotatedToken, staleRotatedToken }
 })
 
 const tempDirs: string[] = []
@@ -76,9 +79,21 @@ function capturingFetch() {
   )
 }
 
-function bearerOf(fetchImpl: ReturnType<typeof capturingFetch>): string | undefined {
-  const init = fetchImpl.mock.calls[0][1] as RequestInit
+function bearerOf(fetchImpl: ReturnType<typeof capturingFetch>, call = 0): string | undefined {
+  const init = fetchImpl.mock.calls[call][1] as RequestInit
   return (init.headers as Record<string, string>).Authorization
+}
+
+/** A fetch stub that answers 401 until `unlock()` flips it to 200. */
+function unauthorizedThenOk() {
+  let authorized = false
+  const impl = vi.fn(
+    async (_url: string, _init: RequestInit) =>
+      (authorized
+        ? { status: 200, json: async () => ({ token: 'downstream-oauth-token', expiresAt: null }) }
+        : { status: 401, json: async () => ({ error: 'unauthorized' }) }) as unknown as Response
+  )
+  return { impl, unlock: () => (authorized = true) }
 }
 
 beforeEach(() => {
@@ -131,5 +146,102 @@ describe('mcp-oauth broker control token source', () => {
 
     await expect(provider.resolve()).resolves.toBe('downstream-oauth-token')
     expect(bearerOf(fetchImpl)).toBe(`Bearer ${boot.bootToken}`)
+  })
+})
+
+describe('mcp-oauth broker control token recovery on 401', () => {
+  it('refreshes the control JWT and retries once when control-api answers 401', async () => {
+    useStateDir()
+    // Pod state after an earlier rotation that has since expired: BOTH the
+    // persisted control token and the boot seed are past their TTL, so
+    // loadPersistedWorkflowControlToken can only return the expired seed.
+    await persistRuntimeAuthTokens({
+      accessToken: 'rotated-access',
+      refreshToken: 'rotated-refresh',
+      mcpHostControlToken: boot.staleRotatedToken,
+    })
+
+    const freshToken = boot.jwt(boot.nowSecs - 5, boot.nowSecs + 595, 'refreshed')
+    const { impl, unlock } = unauthorizedThenOk()
+
+    const provider = createBrokerTokenProvider(
+      { name: 'mcp-clickup' },
+      { userId: 'alice' },
+      {
+        ...brokerTokenProviderDeps(),
+        fetchImpl: impl as unknown as typeof fetch,
+        // Stand in for refreshWithRecovery(runtimeAuth): control-api mints a new
+        // control JWT and userApprovalRequester persists it through
+        // persistRotatedTokens -> persistRuntimeAuthTokens (the real producer).
+        refreshControlToken: async () => {
+          await persistRuntimeAuthTokens({
+            accessToken: 'refreshed-access',
+            refreshToken: 'refreshed-refresh',
+            mcpHostControlToken: freshToken,
+          })
+          unlock()
+        },
+      }
+    )
+
+    const settled = await provider.resolve().catch((err: unknown) => err)
+
+    expect(impl).toHaveBeenCalledTimes(2)
+    expect(bearerOf(impl, 0)).toBe(`Bearer ${boot.bootToken}`)
+    expect(bearerOf(impl, 1)).toBe(`Bearer ${freshToken}`)
+    expect(settled).toBe('downstream-oauth-token')
+  })
+
+  it('does not retry when the refresh produced no new control token (no loop)', async () => {
+    useStateDir()
+    const { impl } = unauthorizedThenOk()
+    const refreshControlToken = vi.fn(async () => {
+      /* control-api answered without an mcpHostControlToken — nothing rotated */
+    })
+
+    const provider = createBrokerTokenProvider(
+      { name: 'mcp-clickup' },
+      { userId: 'alice' },
+      {
+        ...brokerTokenProviderDeps(),
+        fetchImpl: impl as unknown as typeof fetch,
+        refreshControlToken,
+      }
+    )
+
+    await expect(provider.resolve()).rejects.toThrow(
+      'mcp-oauth broker returned 401 for mcp-clickup'
+    )
+    expect(refreshControlToken).toHaveBeenCalledTimes(1)
+    expect(impl).toHaveBeenCalledTimes(1)
+  })
+
+  it('surfaces the broker 401 (not the refresh error) when the refresh itself fails', async () => {
+    useStateDir()
+    const { impl } = unauthorizedThenOk()
+
+    const provider = createBrokerTokenProvider(
+      { name: 'mcp-clickup' },
+      { userId: 'alice' },
+      {
+        ...brokerTokenProviderDeps(),
+        fetchImpl: impl as unknown as typeof fetch,
+        refreshControlToken: async () => {
+          throw new Error('refresh recovery failed')
+        },
+      }
+    )
+
+    await expect(provider.resolve()).rejects.toThrow(
+      'mcp-oauth broker returned 401 for mcp-clickup'
+    )
+    expect(impl).toHaveBeenCalledTimes(1)
+  })
+
+  it('wires refreshControlToken into the production broker deps', () => {
+    // The behaviour above is proven against the real provider; this pins the
+    // wiring itself, which is all main.ts can expose without a live runtimeAuth
+    // (it is module-private and only assigned by the startup paths).
+    expect(typeof brokerTokenProviderDeps().refreshControlToken).toBe('function')
   })
 })
