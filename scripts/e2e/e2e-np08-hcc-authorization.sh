@@ -234,15 +234,24 @@ function rawRequest(method, path, headerLines, body = '') {
     socket.on('data', chunk => { response += chunk })
     socket.on('end', () => {
       const match = /^HTTP\/1\.1 (\d{3})\b/m.exec(response)
-      resolve(Number(match?.[1] ?? 0))
+      resolve({
+        status: Number(match?.[1] ?? 0),
+        hasHttpResponse: Boolean(match),
+        responseBytes: Buffer.byteLength(response),
+      })
     })
     socket.on('error', reject)
   })
 }
 
-function assertHeaderRejected(label, status) {
-  if (status !== 400 && status !== 401) {
-    throw new Error(label + ' was not rejected: ' + status)
+function assertHeaderRejected(label, result) {
+  // Nginx can reject duplicate fields during request parsing by cleanly
+  // closing the connection before producing an HTTP response. That is an
+  // edge rejection with zero response bytes, not a transport-success path.
+  const closedBeforeHttpResponse = result.status === 0 &&
+    !result.hasHttpResponse && result.responseBytes === 0
+  if (!closedBeforeHttpResponse && result.status !== 400 && result.status !== 401) {
+    throw new Error(label + ' was not rejected: ' + result.status)
   }
 }
 
@@ -269,7 +278,7 @@ const proxyBoundary = await rawRequest('GET', '/api/v2/system/mcpservers', [
   `${authName}: ${scheme} ${identity}`,
   `${proxyName}: ${scheme} forged`,
 ])
-if (proxyBoundary !== 200) throw new Error(`private identity boundary probe failed: ${proxyBoundary}`)
+if (proxyBoundary.status !== 200) throw new Error(`private identity boundary probe failed: ${proxyBoundary.status}`)
 console.log('PASS private proxy identity is not mixed into the system route')
 })().catch(error => {
   const errorText = error instanceof Error ? error.message : String(error)
