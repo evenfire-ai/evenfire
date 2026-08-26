@@ -297,16 +297,17 @@ describe('ArtifactsBadge — download', () => {
     // Mock the anchor element creation without infinite recursion
     const origCreateElement = document.createElement.bind(document)
     const clickSpy = vi.fn()
-    vi.spyOn(document, 'createElement').mockImplementation(
-      (tag: string, options?: ElementCreationOptions) => {
-        if (tag === 'a') {
-          const el = origCreateElement('a', options)
-          el.click = clickSpy
-          return el
-        }
-        return origCreateElement(tag, options)
+    vi.spyOn(document, 'createElement').mockImplementation(((
+      tag: string,
+      options?: ElementCreationOptions
+    ): HTMLElement => {
+      if (tag === 'a') {
+        const el = origCreateElement('a', options)
+        el.click = clickSpy
+        return el
       }
-    )
+      return origCreateElement(tag, options)
+    }) as typeof document.createElement)
 
     render(<ArtifactsBadge hostRef="chatllm" />)
 
