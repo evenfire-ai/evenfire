@@ -28,6 +28,16 @@ export type FormSectionProps = {
   children: ReactNode
   description?: ReactNode
   title: ReactNode
+  // Renders the section behind a disclosure toggle, for settings that most
+  // installs leave alone. Collapsed shows the title only, so the section costs
+  // one line until someone opens it.
+  collapsible?: boolean
+  // Optional controlled state. Left out, the section owns its own and starts
+  // closed. Passed, the owner holds it — which is what a section needs when it
+  // lives inside a subtree that unmounts (a wizard step), or when what should
+  // be open depends on data that has not arrived at first render.
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
 }
 
 export type TextInputProps = InputHTMLAttributes<HTMLInputElement> & {
