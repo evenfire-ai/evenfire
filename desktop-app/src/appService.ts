@@ -1173,7 +1173,7 @@ export class AppService {
   /**
    * Monotonic per sandbox-ui mount. Carried into the SDK surface pin so a
    * request from a superseded embed can be told apart from the live one
-   * (spec §8.1), mirroring the driver's own `mountGeneration` guard.
+   *, mirroring the driver's own `mountGeneration` guard.
    */
   private sandboxUiGeneration = 0
 
@@ -1761,7 +1761,7 @@ export class AppService {
   }
 
   /**
-   * Onboarding's path-D hint (spec §5.6): is a local Evenfire answering?
+   * Onboarding's local-cluster hint: is a local Evenfire answering?
    *
    * Takes **no argument** on purpose. The renderer cannot name a URL for the
    * main process to fetch — it can only ask about the built-in Localhost
@@ -1778,8 +1778,8 @@ export class AppService {
   }
 
   /**
-   * Open the deployment documentation for onboarding's self-hosted path
-   * (spec §5.4). The URL is a build-time constant, not a renderer argument.
+   * Open the deployment documentation for onboarding's self-hosted answer
+   *. The URL is a build-time constant, not a renderer argument.
    */
   async openDeploymentDocs(): Promise<{ opened: true }> {
     const { shell } = await import('electron')
@@ -1788,7 +1788,7 @@ export class AppService {
   }
 
   /**
-   * Open the hosted Evenfire site for onboarding's hosted path (spec §5.3).
+   * Open the hosted Evenfire site for onboarding's hosted answer.
    * Also a build-time constant. No credentials, no tenant name and no nonce
    * cross this boundary — the app only opens a page.
    */
@@ -3039,7 +3039,7 @@ export class AppService {
       this.stopAllStreams()
       // Grants are keyed by userId, not by team, so they carry over — but every
       // cached org/agents/contexts answer is now about the wrong team. Drop the
-      // cache and tell mounted plugins to refetch (spec §6.2).
+      // cache and tell mounted plugins to refetch.
       tryGetPluginSdkRuntime()?.notifySessionChanged(true)
       return { authenticated: true, me: this.me }
     } finally {
@@ -3090,7 +3090,7 @@ export class AppService {
     // boundary for the desktop catalog: the `|| name` guard lives here only
     // (mirroring control-api's accessReconciliation `configuredDisplayName ||
     // name`), so renderer consumers read `agentDisplayByName[name]` directly
-    // without sprinkling `|| name` (spec Decision #6). Filled total over
+    // without sprinkling `|| name`. Filled total over
     // `agentNames` below so a lookup is never undefined.
     const agentDisplayByName: Record<string, string> = {}
     const upsertScopedServers = (
@@ -4605,7 +4605,7 @@ export class AppService {
       return
     }
     // Pin the surface so the SDK broker can derive this plugin's identity from
-    // `webContents.id` — the plugin never asserts who it is (spec §8.1).
+    // `webContents.id` — the plugin never asserts who it is.
     tryGetPluginSdkRuntime()?.pinSandboxUiSurface({
       pluginId: activeView.appRef,
       pluginTitle: String(args.title || '').trim() || recipeName,

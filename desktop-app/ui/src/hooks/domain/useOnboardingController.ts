@@ -7,7 +7,7 @@ import type {
 } from '@pages/OnboardingPage/types'
 
 /**
- * Whether the hosted path (spec §5.3) is offered in Q2.
+ * Whether the hosted path is offered in Q2.
  *
  * True: hosting is the first thing someone just getting started should see,
  * and the hosted step has somewhere real to send them — the Evenfire site.
@@ -26,7 +26,7 @@ interface OnboardingState {
 const INITIAL_STATE: OnboardingState = { step: 'origin', history: [] }
 
 /**
- * Onboarding wizard state (spec §5.1, §5.2).
+ * Onboarding wizard state.
  *
  * Memory-only by design. A cold install closed mid-questionnaire comes back to
  * Q1: nothing was accomplished worth restoring, and persisting a half-answered

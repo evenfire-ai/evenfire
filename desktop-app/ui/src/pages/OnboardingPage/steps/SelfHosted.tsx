@@ -6,11 +6,11 @@ interface SelfHostedProps {
 }
 
 /**
- * Path B — self-hosted (spec §5.4).
+ * Self-hosted.
  *
  * Documentation-first: deployment shapes differ too much for a wizard to guide
  * any of them honestly, so this step names the option, links out, and hands to
- * path D. It deliberately shows no prerequisites, no install command and no
+ * the manual environment step. It deliberately shows no prerequisites, no install command and no
  * default address — all three would assume a deployment shape, and
  * self-hosting means any cluster the user controls, remote or local.
  */

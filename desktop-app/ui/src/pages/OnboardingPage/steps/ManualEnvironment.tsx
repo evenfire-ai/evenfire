@@ -8,9 +8,9 @@ import {
 import { useLocalhostReachable } from '@hooks/useLocalhostReachable'
 
 /**
- * Path D — manual environment (spec §5.6).
+ * Manual environment: connect to a server by address.
  *
- * The terminal step for paths B and D alike, so it carries the local-cluster
+ * The terminal step for the self-hosted and have-an-address answers alike, so it carries the local-cluster
  * hint for both. It shares `handleSaveRuntimeConfig` with AuthPage's inline
  * environment form: one submit path, one validation rule.
  */
@@ -25,7 +25,7 @@ export function ManualEnvironment() {
     handleSelectRuntimeConfig,
   } = useAuthContext()
 
-  // One bounded probe on entry (spec §9.4). A negative or failed result
+  // One bounded probe on entry. A negative or failed result
   // renders nothing, so a user with no local cluster sees no trace of it. The
   // probe never fills the form or saves on its own.
   const localhostReachable = useLocalhostReachable()

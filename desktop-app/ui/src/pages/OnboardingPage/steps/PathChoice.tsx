@@ -8,7 +8,7 @@ interface PathChoiceProps {
 }
 
 /**
- * The questionnaire itself — Q1, and Q2 once the hosted path ships (spec §3).
+ * The questionnaire itself — Q1, and Q2 once the hosted path ships.
  *
  * Q1's "I have a server address" doubles as the wizard's one-click skip, which
  * is why the first step needs no separate skip control.

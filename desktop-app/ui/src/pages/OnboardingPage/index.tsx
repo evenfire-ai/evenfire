@@ -13,10 +13,10 @@ interface OnboardingPageProps {
 }
 
 /**
- * First-run onboarding (spec §5.2).
+ * First-run onboarding.
  *
  * Rendered instead of AuthPage when the app has no environment at all, so it
- * also carries the environment dock: the Localhost escape hatch (path E) lives
+ * also carries the environment dock: the Localhost escape hatch lives
  * there, and a cold install would otherwise have no way to reach it.
  */
 export function OnboardingPage({ onboarding }: OnboardingPageProps) {

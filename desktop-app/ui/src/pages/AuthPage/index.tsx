@@ -9,8 +9,8 @@ import { RuntimeConfigDock } from '@components/RuntimeConfigDock'
  * Sign-in for a configured environment.
  *
  * A cold install never reaches this page — the unauthenticated branch renders
- * onboarding instead (spec §4.1), so the invitation email form that used to
- * live here now belongs to the wizard's invited step (spec §5.5). AuthPage has
+ * onboarding instead, so the invitation email form that used to
+ * live here now belongs to the wizard's invited step. AuthPage has
  * exactly one mode again: sign in, plus the environment dock and its inline
  * add-environment form.
  */

@@ -49,14 +49,14 @@ const DEFAULT_APP_NAME = 'Evenfire'
 const LOCALHOST_OPTION_ID = '__localhost__'
 const LOCALHOST_EXTERNAL_REST_API_BASE_URL = 'http://127.0.0.1:8091'
 const LOCALHOST_RPC_PROXY_BASE_URL = 'http://127.0.0.1:8094'
-// Where onboarding's self-hosted path sends the user (spec §5.4). Self-hosting
+// Where onboarding's self-hosted path sends the user. Self-hosting
 // means any cluster the user controls — remote or local — so this must land on
 // documentation that covers both shapes, never on the minikube quickstart
 // alone. A build-time constant, overridable only where the dev env config gate
 // already allows overrides, so a packaged build cannot be pointed elsewhere.
 const DEFAULT_DEPLOYMENT_DOCS_URL =
   'https://github.com/evenfire-ai/evenfire#deploying-to-a-remote-cluster'
-// Where onboarding's hosted path sends the user (spec §5.3). Today this is the
+// Where onboarding's hosted path sends the user. Today this is the
 // marketing site, not a signup endpoint: there is no tenant provisioning and no
 // evenfire://desktop-environment handoff yet, so the hosted step links out and
 // offers the manual-address fallback for when the user returns with a server.
@@ -64,7 +64,7 @@ const DEFAULT_DEPLOYMENT_DOCS_URL =
 const DEFAULT_HOSTED_SIGNUP_URL = 'https://evenfire.ai'
 const RUNTIME_CONFIG_DIR_NAME = 'runtime-configs'
 /**
- * Dev switch for previewing the first-run onboarding flow (spec §5.1) on a
+ * Dev switch for previewing the first-run onboarding flow on a
  * machine that already has environments configured. Defaults to false; only
  * the exact string "true" enables it.
  *
@@ -791,7 +791,7 @@ export async function saveDesktopRuntimeConfig(next: DesktopRuntimeConfig): Prom
 
 /**
  * Derive the environment namespacing key from a runtime config's external-rest-api
- * and rpc-proxy base origins (spec §5.1, D1). Same REST origin + different RPC
+ * and rpc-proxy base origins. Same REST origin + different RPC
  * origin is a different runtime boundary because desktop session tokens are
  * accepted by the RPC proxy, not by external-rest-api alone.
  *

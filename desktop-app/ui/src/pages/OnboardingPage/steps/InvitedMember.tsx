@@ -3,7 +3,7 @@ import { useAuthContext } from '@contexts/AuthContext'
 import { Button, Field, TextInput } from '@components/Common'
 
 /**
- * Path C — invited member (spec §5.5).
+ * Invited member: finish setup for an address a team already invited.
  *
  * Behaviour is unchanged from the form this replaces on AuthPage: the same
  * `handleStartDesktopSetup` handler, the same single email field, the same

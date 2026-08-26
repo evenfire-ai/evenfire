@@ -7,7 +7,7 @@ interface UnauthenticatedViewInput {
 }
 
 /**
- * Which screen the unauthenticated branch renders (spec §4.1).
+ * Which screen the unauthenticated branch renders.
  *
  * Order matters: an outage wins over everything, because neither signing in
  * nor onboarding can succeed while a dependency is down. Onboarding comes

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 
 /**
- * Whether a local Evenfire is answering on this machine (spec §5.6).
+ * Whether a local Evenfire is answering on this machine.
  *
  * One bounded probe per mount. The main process takes no URL — it only ever
  * checks the built-in Localhost option — so the renderer cannot use this to

@@ -13,7 +13,7 @@ interface RuntimeConfigDockProps {
   /**
    * Where "Add environment" goes. AuthPage opens its inline environment form;
    * onboarding moves to its manual step. The dock itself stays identical, so
-   * the Localhost escape hatch (spec §3, path E) is reachable from both — a
+   * the Localhost escape hatch is reachable from both — a
    * cold install renders onboarding, not AuthPage, and would otherwise have no
    * way to reach it.
    */

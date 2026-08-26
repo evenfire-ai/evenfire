@@ -1,5 +1,5 @@
 /**
- * First-run onboarding types (spec §5.2).
+ * First-run onboarding types.
  *
  * The wizard is one page with a step model and an explicit history stack, not
  * a set of routes. Answers live in the controller; only a path's terminal

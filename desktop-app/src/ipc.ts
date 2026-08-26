@@ -1792,7 +1792,7 @@ export function registerIpcHandlers(service: AppService): void {
   // The consent resolve channel IS trusted-sender guarded. That is what stops
   // an embed from answering its own permission prompt, and it pairs with the
   // main-generated `promptId` nonce: a resolve for an unknown or already-
-  // answered prompt is dropped inside the gate (spec §9.4).
+  // answered prompt is dropped inside the gate.
 
   ipcMain.handle(
     PLUGIN_SDK_CONSENT_RESOLVE_CHANNEL,

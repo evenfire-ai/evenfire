@@ -6,7 +6,7 @@ interface HostedProps {
 }
 
 /**
- * Path A — Evenfire-hosted (spec §5.3), in its link-out form.
+ * Evenfire-hosted, in its link-out form.
  *
  * The hosted signup project does not exist yet: there is no tenant
  * provisioning and no `evenfire://desktop-environment` handoff back into the

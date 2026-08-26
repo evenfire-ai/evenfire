@@ -216,7 +216,7 @@ describe('OnboardingPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'See hosted Evenfire' }))
     expect(openHostedSignup).toHaveBeenCalledTimes(1)
-    // No argument: the renderer never names a URL for the main process (spec §6.8).
+    // No argument: the renderer never names a URL for the main process.
     expect(openHostedSignup).toHaveBeenCalledWith()
     expect(handleSaveRuntimeConfig).not.toHaveBeenCalled()
 
@@ -233,7 +233,7 @@ describe('OnboardingPage', () => {
 
     const step = screen.getByText('Run Evenfire yourself').closest('section')
     const copy = step?.textContent || ''
-    // Self-hosting means any cluster the user controls (spec §5.4). No install
+    // Self-hosting means any cluster the user controls. No install
     // command, no RAM figure, no loopback default, no single deployment shape.
     expect(copy).not.toMatch(/minikube|docker|127\.0\.0\.1|localhost|GB|RAM|your machine/i)
   })
@@ -248,7 +248,7 @@ describe('OnboardingPage', () => {
     await user.click(screen.getByRole('button', { name: 'Open the deployment guide' }))
 
     expect(openDeploymentDocs).toHaveBeenCalledTimes(1)
-    // No argument: the renderer never names a URL for the main process (spec §6.8).
+    // No argument: the renderer never names a URL for the main process.
     expect(openDeploymentDocs).toHaveBeenCalledWith()
     expect(handleSaveRuntimeConfig).not.toHaveBeenCalled()
   })
@@ -296,7 +296,7 @@ describe('OnboardingPage', () => {
     // Presented as a plain option carrying its address, not a callout banner.
     const option = await screen.findByRole('button', { name: /Localhost/ })
     expect(option.textContent).toContain('http://127.0.0.1:8091')
-    // The probe takes no URL argument (spec §5.6).
+    // The probe takes no URL argument.
     expect(probeLocalhostReachable).toHaveBeenCalledWith()
 
     await user.click(option)

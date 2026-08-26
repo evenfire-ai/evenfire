@@ -172,7 +172,7 @@ export function useAppController() {
   // ─── First-run onboarding ───
   const onboarding = useOnboardingController()
   // Onboarding owns the unauthenticated screen only while the app has no
-  // environment at all (spec §5.1). Saving one — or selecting Localhost —
+  // environment at all. Saving one — or selecting Localhost —
   // flips `configured`, which retires the wizard; deleting the last one brings
   // it back rather than leaving a sign-in form with nothing to sign in to.
   const unauthenticatedView = selectUnauthenticatedView({
@@ -552,7 +552,7 @@ export function useAppController() {
         if (!sessionState.authenticated || !sessionState.me) {
           throw new Error('Team switch ended without an authenticated session')
         }
-        // GAP-N4 (spec §4.5-3): the renderer half of a team switch. `clearActiveChat`
+        // GAP-N4: the renderer half of a team switch. `clearActiveChat`
         // only deselects — the previous team's tracker entries and FSM projection
         // survive, so a late terminal from an old-team task could run side effects
         // and stale badges leak across teams. Tear down the renderer chat state
@@ -746,7 +746,7 @@ export function useAppController() {
       teamsData.reset()
       resetWorkflowsData()
       queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
-      // Drop ALL cached queries on logout (spec §5.2 P1): the singleton
+      // Drop ALL cached queries on logout: the singleton
       // desktopQueryClient uses staleTime:Infinity, so any env-scoped data left
       // in cache would otherwise bleed into the next login (possibly a different
       // environment, since the env is chosen pre-login).

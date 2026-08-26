@@ -100,7 +100,7 @@ describe('onboarding main-process surface', () => {
       await service.probeLocalhostReachable()
 
       // The renderer cannot name a URL for the main process to fetch, so the
-      // remote environment must never be contacted by this call (spec §6.8).
+      // remote environment must never be contacted by this call.
       expect(service.authClient.healthAt).toHaveBeenCalledTimes(1)
       expect(service.authClient.healthAt.mock.calls[0]?.[0]).toBe(LOCALHOST_EXTERNAL)
     })
@@ -116,7 +116,7 @@ describe('onboarding main-process surface', () => {
       const opened = String(openExternal.mock.calls[0]?.[0] || '')
       expect(opened).toMatch(/^https:\/\//)
       // Self-hosting covers any cluster the user controls, so the link must not
-      // land on the local-cluster quickstart (spec §5.4).
+      // land on the local-cluster quickstart.
       expect(opened).not.toMatch(/minikube|quickstart/i)
     })
   })

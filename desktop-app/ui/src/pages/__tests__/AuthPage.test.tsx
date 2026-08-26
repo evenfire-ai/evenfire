@@ -87,7 +87,7 @@ function renderAuthPage(auth?: Partial<AuthContextValue>) {
 }
 
 describe('AuthPage', () => {
-  // The invitation email form moved to onboarding's invited step (spec §5.5).
+  // The invitation email form moved to onboarding's invited step.
   // AuthPage has one mode again, and must keep it even if it is somehow
   // rendered without an environment — the unauthenticated branch routes that
   // case to OnboardingPage instead.
