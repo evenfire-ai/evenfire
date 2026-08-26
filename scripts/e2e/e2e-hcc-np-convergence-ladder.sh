@@ -17,6 +17,10 @@
 # Anti-vacuity: observe either the unsynced log or the swallowed{unsynced}
 # metric increment, AND the retry-schedule log. If the window never appears,
 # retry the restart once. Still unseen → exit 3 (HCC_NP_LADDER_VACUOUS).
+# After /ready 200 on that same pod, scrape HTTP /metrics and require
+# deferred-unsynced, swallowed{unsynced}, retries, certified, and last-success
+# to agree on the Prometheus text. That does NOT attribute certification to
+# the 5s timer (watch-recovery may certify first on minikube).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CALLER_E2E_KUBECONTEXT="${E2E_KUBECONTEXT:-}"
@@ -32,6 +36,9 @@ fi
 source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-lock.sh"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/_lib/hcc-ready-series.sh"
+# e2e-lib log() writes stdout. This probe captures helper output as pod names,
+# so progress lines must not leak into those substitutions.
+log() { echo -e "${CYAN}[E2E]${NC} $*" >&2; }
 
 OWNED_MINIKUBE_PROFILE="clerum-fix-447-hcc-certification-watchdog-45626152"
 VACUOUS_EXIT=3
@@ -90,6 +97,7 @@ VACUOUS=0
 ROLLOUT_TRIGGERED=0
 OBSERVED_AT=""
 OBSERVED_POD=""
+OBSERVED_POD_UID=""
 SWALLOW_SOURCE=""
 READY_AT=""
 ATTEMPT=0
@@ -120,17 +128,77 @@ hcc_pod_metrics() {
     wget -T 10 -t 1 -qO- http://127.0.0.1:8081/metrics 2>/dev/null || true
 }
 
-swallowed_unsynced_count() {
-  local metrics=$1
-  awk '
-    $1 ~ /^clerum_hcc_initial_convergence_swallowed_total\{/ &&
-    $1 ~ /lane="NetworkPolicy"/ &&
-    $1 ~ /sink="unsynced"/ {
-      print int($2 + 0)
-      found = 1
+# Label order is not part of the Prometheus contract.
+prom_labeled_value() {
+  local metrics=$1 name=$2
+  shift 2
+  local label_spec="" pair
+  for pair in "$@"; do
+    label_spec="${label_spec}${pair}|"
+  done
+  awk -v metric_name="$name" -v label_spec="$label_spec" '
+    BEGIN {
+      n = split(label_spec, required, "|")
+      while (n > 0 && required[n] == "") n--
+    }
+    index($1, metric_name "{") == 1 {
+      ok = 1
+      for (j = 1; j <= n; j++) {
+        if (required[j] == "") continue
+        split(required[j], kv, "=")
+        needle = kv[1] "=\"" kv[2] "\""
+        if (index($1, needle) == 0) ok = 0
+      }
+      if (ok) {
+        print int($NF + 0)
+        found = 1
+        exit
+      }
     }
     END { if (!found) print 0 }
   ' <<<"$metrics"
+}
+
+swallowed_unsynced_count() {
+  prom_labeled_value "$1" 'clerum_hcc_initial_convergence_swallowed_total' \
+    'lane=NetworkPolicy' 'sink=unsynced'
+}
+
+assert_convergence_metrics_closure() {
+  local pod=$1
+  local uid_now metrics deferred swallowed retries certified ts
+  require_hcc_pod_name "$pod"
+  uid_now="$(hcc_pod_uid "$pod")"
+  [ -n "$OBSERVED_POD_UID" ] && [ "$uid_now" = "$OBSERVED_POD_UID" ] ||
+    die "HCC pod uid changed before /metrics closure (${OBSERVED_POD_UID:-none} -> ${uid_now:-none})"
+  metrics="$(hcc_pod_metrics "$pod")"
+  [ -n "$metrics" ] || die "HCC /metrics scrape was empty on ${pod}"
+  deferred="$(prom_labeled_value "$metrics" 'clerum_hcc_initial_convergence_pass_results_total' \
+    'lane=NetworkPolicy' 'result=deferred-unsynced')"
+  swallowed="$(prom_labeled_value "$metrics" 'clerum_hcc_initial_convergence_swallowed_total' \
+    'lane=NetworkPolicy' 'sink=unsynced')"
+  retries="$(prom_labeled_value "$metrics" 'clerum_hcc_initial_convergence_retries_total' \
+    'lane=NetworkPolicy')"
+  certified="$(prom_labeled_value "$metrics" 'clerum_hcc_initial_convergence_pass_results_total' \
+    'lane=NetworkPolicy' 'result=certified')"
+  ts="$(prom_labeled_value "$metrics" 'clerum_hcc_initial_convergence_last_success_timestamp_seconds' \
+    'lane=NetworkPolicy')"
+  if [ "${deferred:-0}" -lt 1 ]; then
+    fail "INCONCLUSIVE: no deferred-unsynced pass on ${pod} — /metrics closure is vacuous for #447"
+    return 1
+  fi
+  [ "${swallowed:-0}" = "$deferred" ] &&
+    ok "wire /metrics: swallowed{unsynced}=${swallowed} == deferred-unsynced=${deferred}" ||
+    fail "wire /metrics: swallowed{unsynced}=${swallowed} != deferred-unsynced=${deferred}"
+  [ "${retries:-0}" -ge 1 ] &&
+    ok "wire /metrics: retries_total=${retries} (armed; not attributed to the 5s timer alone)" ||
+    fail "wire /metrics: retries_total=${retries} after a deferred-unsynced pass"
+  [ "${certified:-0}" -ge 1 ] &&
+    ok "wire /metrics: certified=${certified} on the same pod that deferred" ||
+    fail "wire /metrics: certified=${certified} after /ready 200 on a deferred pod"
+  [ "$(printf '%s' "$ts" | awk '{ print ($1 > 0) }')" = 1 ] &&
+    ok "wire /metrics: last_success_timestamp_seconds>0" ||
+    fail "wire /metrics: last_success_timestamp_seconds=${ts} was not set by a certified pass"
 }
 
 logs_show_unsynced() {
@@ -147,7 +215,7 @@ write_evidence_artifact() {
   {
     echo "=== HCC NP convergence ladder ==="
     echo "context=${E2E_KUBECONTEXT} attempt=${ATTEMPT} vacuous=${VACUOUS}"
-    echo "observed_at=${OBSERVED_AT:-none} swallow_source=${SWALLOW_SOURCE:-none} ready_at=${READY_AT:-none}"
+    echo "observed_at=${OBSERVED_AT:-none} observed_pod=${OBSERVED_POD:-none} observed_uid=${OBSERVED_POD_UID:-none} swallow_source=${SWALLOW_SOURCE:-none} ready_at=${READY_AT:-none}"
     echo "=== deployment ==="
     kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o wide || true
     echo "=== pods ==="
@@ -211,6 +279,7 @@ observe_unsynced_swallow() {
     fi
     if [ "$seen_swallow" = 1 ] && [ "$seen_retry" = 1 ]; then
       OBSERVED_AT="$(date +%s)"
+      OBSERVED_POD_UID="$(hcc_pod_uid "$pod")"
       return 0
     fi
     now="$(date +%s)"
@@ -218,6 +287,12 @@ observe_unsynced_swallow() {
     sleep 1
   done
   return 1
+}
+
+require_hcc_pod_name() {
+  local pod=$1
+  [[ "$pod" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] ||
+    die "refusing to use a malformed HCC pod name: ${pod}"
 }
 
 restart_hcc_and_wait() {
@@ -229,13 +304,13 @@ restart_hcc_and_wait() {
   kctl rollout status "deployment/${HCC_DEPLOY}" -n "$HCC_NS" --timeout="${ROLLOUT_TIMEOUT_SEC}s" >/dev/null ||
     die "HCC rollout did not become Ready within ${ROLLOUT_TIMEOUT_SEC}s"
   new_pod="$(running_hcc_pod)" || true
-  [ -n "$new_pod" ] || die "no Running HCC pod after rollout"
+  require_hcc_pod_name "${new_pod:-}"
   new_uid="$(hcc_pod_uid "$new_pod")"
   [ -n "$new_uid" ] || die "could not read replacement pod uid"
   if [ "$new_pod" = "$old_pod" ] && [ "$new_uid" = "$old_uid" ]; then
     die "HCC pod did not change after rollout restart (${old_pod}/${old_uid})"
   fi
-  printf '%s\n' "$new_pod"
+  NEW_POD="$new_pod"
 }
 
 wait_ready_after_observation() {
@@ -278,9 +353,13 @@ old_uid="$(hcc_pod_uid "$old_pod")"
 
 swallow_seen=0
 new_pod=""
+NEW_POD=""
+require_hcc_pod_name "$old_pod"
 while [ "$ATTEMPT" -lt "$RESTART_ATTEMPTS" ]; do
   ATTEMPT=$((ATTEMPT + 1))
-  new_pod="$(restart_hcc_and_wait "$old_pod" "$old_uid")"
+  restart_hcc_and_wait "$old_pod" "$old_uid"
+  new_pod="$NEW_POD"
+  require_hcc_pod_name "$new_pod"
   if observe_unsynced_swallow "$new_pod"; then
     swallow_seen=1
     ok "observed unsynced swallow (${SWALLOW_SOURCE}) and retry log on ${new_pod}"
@@ -299,6 +378,7 @@ fi
 
 if wait_ready_after_observation "$new_pod"; then
   ok "/ready 200 ${READY_AT}s epoch, $((READY_AT - OBSERVED_AT))s after the observed swallow (budget ${READY_BUDGET_SEC}s)"
+  assert_convergence_metrics_closure "$new_pod"
 else
   fail "/ready did not become 200 within ${READY_BUDGET_SEC}s after the observed swallow on ${new_pod} (see ${LOG_ARTIFACT})"
 fi
