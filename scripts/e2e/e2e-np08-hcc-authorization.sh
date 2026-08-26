@@ -225,6 +225,7 @@ function rawRequest(method, path, headerLines, body = '') {
         `${method} ${path} HTTP/1.1`,
         'Host: hcc-gateway',
         ...headerLines,
+        'Connection: close',
         '',
         body,
       ].join('\r\n'))
