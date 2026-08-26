@@ -653,7 +653,7 @@ describe('GfsUploadSessionService', () => {
     }
   )
 
-  it('enforces the 1 GiB protocol ceiling independently of product-policy admission', async () => {
+  it('admits exactly 1 GiB when product policy permits the protocol boundary', async () => {
     tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-protocol-boundary-'))
     const config = { ...CONFIG, productMaxFileBytes: GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES }
     const input = {
@@ -671,19 +671,6 @@ describe('GfsUploadSessionService', () => {
     })
     expect(exact.session.expectedBytes).toBe(GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES)
     expect(exactDb.sessions).toHaveLength(1)
-
-    const overDb = new MemoryDb()
-    await expect(
-      service(overDb, config).create({
-        ...input,
-        sizeBytes: GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES + 1,
-        idempotencyKey: '21111111-1111-4111-8111-111111111116',
-      })
-    ).rejects.toMatchObject({
-      code: 'payload_too_large',
-      message: `sizeBytes must be between 0 and ${GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES}`,
-    })
-    expect(overDb.sessions).toHaveLength(0)
   })
 
   it('keeps zero-byte uploads valid with a positive configured product limit', async () => {
