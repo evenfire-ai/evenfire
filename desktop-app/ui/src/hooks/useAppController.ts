@@ -180,6 +180,14 @@ export function useAppController() {
     runtimeConfigMissing: auth.runtimeConfigMissing,
     isAuthenticated: auth.isAuthenticated,
   })
+  // The controller is app-level, so wizard state outlives the wizard itself.
+  // Once an environment exists the run is finished: rewind to Q1, so deleting
+  // that environment later reopens onboarding at the first question instead of
+  // the step of a path the user already left.
+  const resetOnboarding = onboarding.reset
+  useEffect(() => {
+    if (!auth.runtimeConfigMissing) resetOnboarding()
+  }, [auth.runtimeConfigMissing, resetOnboarding])
 
   // ─── First-screen data contexts ───
   const agentsData = useAgentsDataController()

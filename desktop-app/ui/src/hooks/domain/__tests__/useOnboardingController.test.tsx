@@ -36,8 +36,6 @@ describe('useOnboardingController', () => {
   it('sends "just getting started" to Q2, where hosting is offered', () => {
     const { result } = renderHook(() => useOnboardingController())
 
-    expect(result.current.hostedAvailable).toBe(true)
-
     act(() => result.current.answerOrigin('gettingStarted'))
 
     expect(result.current.step).toBe('runStyle')

@@ -30,8 +30,6 @@ export interface OnboardingViewModel {
   step: OnboardingStep
   /** False on the first step, which uses Q1's "I have a server address" as its skip. */
   canGoBack: boolean
-  /** Whether Q2 is part of the flow. False until the hosted project exists. */
-  hostedAvailable: boolean
   answerOrigin: (answer: OnboardingOriginAnswer) => void
   answerRunStyle: (answer: OnboardingRunStyleAnswer) => void
   goToManual: () => void

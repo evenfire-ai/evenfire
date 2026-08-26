@@ -76,7 +76,6 @@ export function useOnboardingController(): OnboardingViewModel {
     () => ({
       step: state.step,
       canGoBack: state.history.length > 0,
-      hostedAvailable: HOSTED_SIGNUP_AVAILABLE,
       answerOrigin,
       answerRunStyle,
       goToManual,
