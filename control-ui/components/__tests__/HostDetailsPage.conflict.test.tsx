@@ -563,9 +563,8 @@ describe('HostDetailsPage current model and credential flow', () => {
     navigateToTab(view, 'model')
     await screen.findByText('Current model')
 
-    fireEvent.change(screen.getByRole('combobox', { name: 'LLM Secret' }), {
-      target: { value: 'anthropic-secret' },
-    })
+    fireEvent.click(screen.getByRole('button', { name: 'LLM Secret' }))
+    fireEvent.click(screen.getByRole('option', { name: /anthropic-secret/ }))
 
     await waitFor(() =>
       expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))

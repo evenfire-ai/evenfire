@@ -15,11 +15,11 @@ import { HostIdentityTab } from '../../../components/HostIdentityTab'
 import { HostOverviewTab } from '../../../components/HostOverviewTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { LlmProviderSummary } from '../../../components/LlmProviderSummary'
+import { LlmSecretSelect } from '../../../components/LlmSecretSelect'
 import { LlmSecretUpdateModal } from '../../../components/LlmSecretUpdateModal'
 import { RowActionsMenu } from '../../../components/RowActionsMenu'
 import { IconRobot } from '../../../components/Sidebar/icons'
 import { IconCheck, IconMoreHorizontal, IconPencil, IconX } from '../../../components/icons'
-import { SelectInput } from '../../../components/ui'
 import {
   apiSend,
   getHost,
@@ -39,6 +39,7 @@ import {
   buildAllowedModelsSpec,
   getModelOptions,
   getProviderLabel,
+  getProvidersWithCompleteCredentials,
   isProviderUsable,
   normalizeAllowedModels,
   normalizeLlmPolicy,
@@ -552,12 +553,27 @@ export default function HostDetailsPage() {
   )
 
   const llmSecretOptions = useMemo(() => {
-    const options = availableLlmSecrets.map(secret => ({
-      name: secret.name,
-      keys: Array.isArray(secret.keys) ? secret.keys : [],
-    }))
-    if (secretRefDraft.trim() && !options.some(secret => secret.name === secretRefDraft.trim())) {
-      options.unshift({ name: secretRefDraft.trim(), keys: currentSecretKeys })
+    const toOption = (name: string, keys: string[]) => {
+      const providers = getProvidersWithCompleteCredentials(keys)
+      return {
+        value: name,
+        label: name,
+        meta:
+          providers.length > 0
+            ? `Providers: ${providers.map(getProviderLabel).join(', ')}`
+            : 'No recognized provider credentials',
+        providers:
+          providers.length > 0
+            ? providers.map(id => ({ id, label: getProviderLabel(id) }))
+            : undefined,
+      }
+    }
+
+    const options = availableLlmSecrets.map(secret =>
+      toOption(secret.name, Array.isArray(secret.keys) ? secret.keys : [])
+    )
+    if (secretRefDraft.trim() && !options.some(secret => secret.value === secretRefDraft.trim())) {
+      options.unshift(toOption(secretRefDraft.trim(), currentSecretKeys))
     }
     return options
   }, [availableLlmSecrets, currentSecretKeys, secretRefDraft])
@@ -957,25 +973,19 @@ export default function HostDetailsPage() {
               <div className="cu-field">
                 <label htmlFor="model-secret">LLM Secret</label>
                 <div className="cu-llm-secret-control">
-                  <SelectInput
+                  <LlmSecretSelect
                     id="model-secret"
                     value={secretRefDraft}
-                    onChange={event => void handleSecretRefChange(event.target.value)}
+                    ariaLabel="LLM Secret"
+                    onChange={value => void handleSecretRefChange(value)}
+                    options={llmSecretOptions}
+                    placeholder={
+                      llmSecretOptions.length === 0
+                        ? 'No LLM Secret available'
+                        : 'Select an LLM Secret...'
+                    }
                     disabled={busy || llmSecretOptions.length === 0}
-                  >
-                    {llmSecretOptions.length === 0 ? (
-                      <option value="">No LLM Secret available</option>
-                    ) : (
-                      <>
-                        <option value="">Select an LLM Secret…</option>
-                        {llmSecretOptions.map(secret => (
-                          <option key={secret.name} value={secret.name}>
-                            {secret.name}
-                          </option>
-                        ))}
-                      </>
-                    )}
-                  </SelectInput>
+                  />
                   <button
                     type="button"
                     className="cu-btn cu-btn--icon cu-btn--toolbar"

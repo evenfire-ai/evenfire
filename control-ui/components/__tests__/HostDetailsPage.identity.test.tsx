@@ -159,6 +159,37 @@ describe('HostDetailsPage identity integration', () => {
     expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
   })
 
+  it('uses a custom LLM Secret picker with the enabled provider icons', async () => {
+    mockParams = { name: 'foo', tab: 'model' }
+    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      host,
+      contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
+      secrets: [
+        { name: 'openai-secret', keys: ['openai-api-key', 'claude-api-key'] },
+        { name: 'zai-secret', keys: ['zai-api-key'] },
+      ],
+      users: [],
+      teams: [],
+      agentUsers: [],
+      agentTeams: [],
+    })
+
+    render(<HostDetailsPage />)
+
+    const picker = await screen.findByRole('button', { name: 'LLM Secret' })
+    expect(picker).toHaveTextContent('openai-secret')
+    expect(picker.querySelectorAll('img')).toHaveLength(2)
+    expect(picker.querySelector('img')).toHaveAttribute('src', '/provider-icons/openai.svg')
+    expect(picker.querySelectorAll('img')[1]).toHaveAttribute('src', '/provider-icons/claude.svg')
+    expect(screen.queryByRole('combobox')).toBeNull()
+
+    fireEvent.click(picker)
+
+    const zaiOption = screen.getByRole('option', { name: /zai-secret/ })
+    expect(zaiOption).toHaveTextContent('Providers: Z.AI')
+    expect(zaiOption.querySelector('img')).toHaveAttribute('src', '/provider-icons/zai.svg')
+  })
+
   it('uses the shared LLM Secret editor for additional provider credentials', async () => {
     mockParams = { name: 'foo', tab: 'model' }
     render(<HostDetailsPage />)

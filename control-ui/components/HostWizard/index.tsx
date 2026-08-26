@@ -1,10 +1,10 @@
 'use client'
 
-import React, { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
 import { LlmProviderConfig } from '@/components/LlmProviderConfig'
-import { LlmProviderIcon } from '@/components/LlmProviderIcon'
+import { LlmSecretSelect } from '@/components/LlmSecretSelect'
 import { SelectionDropdown } from '@/components/SelectionDropdown'
 import { useToast } from '@/components/Toast'
 import { IconAlertTriangle, IconCheck, IconX } from '@/components/icons'
@@ -43,12 +43,7 @@ import {
   STEPS,
   STEP_DETAILS,
 } from './constants'
-import type {
-  CreatedResource,
-  HostWizardProps,
-  HostWizardValidationState,
-  WizardSelectProps,
-} from './types'
+import type { CreatedResource, HostWizardProps, HostWizardValidationState } from './types'
 
 // Stateless lifecycle support remains intact in the API and existing-agent UI;
 // only creation through this wizard is temporarily unavailable.
@@ -59,101 +54,6 @@ const SHOW_STATELESS_AGENT_SELECTOR = false
 // are optional and only warn, so they never enter this gate.
 function primaryCredentialUsable(provider: LlmProvider, draft: Record<string, string>): boolean {
   return isProviderUsable(provider, key => (draft[key] ?? '').trim().length > 0)
-}
-
-function WizardSelect({
-  className,
-  disabled,
-  onChange,
-  options,
-  placeholder,
-  value,
-}: WizardSelectProps) {
-  const [open, setOpen] = useState(false)
-  const selectedOption = options.find(option => option.value === value)
-
-  return (
-    <div
-      className={cn('cu-agent-select', className)}
-      onBlur={event => {
-        if (!event.currentTarget.contains(event.relatedTarget)) {
-          setOpen(false)
-        }
-      }}
-    >
-      <button
-        type="button"
-        className="cu-agent-select__button"
-        aria-expanded={open}
-        aria-haspopup="listbox"
-        disabled={disabled}
-        onClick={() => setOpen(prev => !prev)}
-      >
-        <span className="cu-agent-select__button-copy">
-          <span>{selectedOption?.label || placeholder}</span>
-          {selectedOption?.providers && selectedOption.providers.length > 0 ? (
-            <span className="cu-agent-select__providers">
-              <span className="cu-agent-select__providers-label">Providers: </span>
-              {selectedOption.providers.map((provider, index) => (
-                <Fragment key={provider.id}>
-                  {index > 0 ? ', ' : null}
-                  <span className="cu-agent-select__provider">
-                    <LlmProviderIcon provider={provider.id} label={provider.label} />
-                    <span>{provider.label}</span>
-                  </span>
-                </Fragment>
-              ))}
-            </span>
-          ) : selectedOption?.meta ? (
-            <span className="cu-agent-select__button-meta">{selectedOption.meta}</span>
-          ) : null}
-        </span>
-        <span className="cu-agent-select__chevron" aria-hidden="true" />
-      </button>
-      {open ? (
-        <div className="cu-agent-select__menu" role="listbox">
-          {options.length === 0 ? (
-            <span className="cu-agent-select__empty">No options available.</span>
-          ) : (
-            options.map(option => (
-              <button
-                key={option.value}
-                type="button"
-                className="cu-agent-select__option"
-                data-active={value === option.value ? 'true' : 'false'}
-                role="option"
-                aria-selected={value === option.value}
-                onClick={() => {
-                  onChange(option.value)
-                  setOpen(false)
-                }}
-              >
-                <span className="cu-agent-select__option-copy">
-                  <span className="cu-agent-select__option-name">{option.label}</span>
-                  {option.providers && option.providers.length > 0 ? (
-                    <span className="cu-agent-select__providers">
-                      <span className="cu-agent-select__providers-label">Providers: </span>
-                      {option.providers.map((provider, index) => (
-                        <Fragment key={provider.id}>
-                          {index > 0 ? ', ' : null}
-                          <span className="cu-agent-select__provider">
-                            <LlmProviderIcon provider={provider.id} label={provider.label} />
-                            <span>{provider.label}</span>
-                          </span>
-                        </Fragment>
-                      ))}
-                    </span>
-                  ) : option.meta ? (
-                    <span className="cu-agent-select__option-meta">{option.meta}</span>
-                  ) : null}
-                </span>
-              </button>
-            ))
-          )}
-        </div>
-      ) : null}
-    </div>
-  )
 }
 
 // The DELETE path for one tracked sibling. The server fixes each resource's
@@ -908,7 +808,7 @@ export function HostWizard({
               {secretMode === 'existing' ? (
                 <div className="cu-agent-access-section">
                   <strong>LLM Secret</strong>
-                  <WizardSelect
+                  <LlmSecretSelect
                     value={existingSecret}
                     placeholder="Select LLM Secret..."
                     options={secretOptions}

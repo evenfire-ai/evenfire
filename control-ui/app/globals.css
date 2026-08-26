@@ -8681,6 +8681,12 @@ textarea.cu-input {
   gap: var(--cu-space-2);
 }
 
+.cu-llm-secret-control > .cu-agent-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+}
+
 .cu-llm-secret-control > .cu-input {
   min-width: 0;
   flex: 1;

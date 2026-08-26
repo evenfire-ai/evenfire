@@ -38,22 +38,6 @@ export type HostWizardProps = {
   pageHeader?: ReactNode
 }
 
-export type WizardSelectOption = {
-  label: ReactNode
-  meta?: ReactNode
-  providers?: { id: string; label: string }[]
-  value: string
-}
-
-export type WizardSelectProps = {
-  className?: string
-  disabled?: boolean
-  onChange: (value: string) => void
-  options: WizardSelectOption[]
-  placeholder: string
-  value: string
-}
-
 export type HostWizardValidationState = {
   hostName: string
   secretMode: 'existing' | 'new'
