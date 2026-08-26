@@ -138,6 +138,22 @@ function Probe() {
         onClick={() =>
           ctrl.current
             ? void ctrl
+                .replaceFileFromPath(
+                  ctrl.current.resourceId,
+                  '/tmp/replacement.bin',
+                  ctrl.current.version
+                )
+                .catch(() => {})
+            : undefined
+        }
+      >
+        replace current from path
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          ctrl.current
+            ? void ctrl
                 .moveResource(ctrl.current.resourceId, 'destination-1', ctrl.current.version)
                 .catch(() => {})
             : undefined
@@ -915,6 +931,10 @@ describe('useGfsBrowserController', () => {
     expect(
       client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'folder-x', 'main'))
     ).toBeTruthy()
+    // The authority window compares cache timestamps against the controller
+    // mount clock; sleep past millisecond granularity so the seeded data is
+    // strictly older than the mount (a same-ms seed would read as fresh).
+    await new Promise(resolve => setTimeout(resolve, 5))
 
     // Deferred discovery: authority is being rechecked but the server has
     // not answered yet.
@@ -1034,6 +1054,124 @@ describe('useGfsBrowserController', () => {
     await waitFor(() => expect(renameResource).toHaveBeenCalled())
     await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('revoked'))
     expect(screen.getByTestId('crumbs').textContent).toBe('')
+  })
+
+  // Completes the R3-M1 defect class: the path-based replace — the one
+  // mutation that had escaped the shared onError boundary — must fail the
+  // session closed under the REAL production cache policy, purge every
+  // session-scoped GFS cache, and drop navigation/resource state.
+  it('fails closed when replaceFileFromPath is rejected with 401 under production query defaults', async () => {
+    const scope = ':user-a:team-a'
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const emptyPage = {
+      pages: [{ items: [], nextCursor: null }],
+      pageParams: [undefined],
+    }
+    client.setQueryData(desktopQueryKeys.gfsAccessible(scope, 'main'), {
+      pages: [
+        {
+          items: [
+            {
+              resourceId: 'file-9',
+              rid: 'file9',
+              gfsUri: 'gfs://main/file9',
+              drive: 'main',
+              parentResourceId: null,
+              name: 'report.md',
+              kind: 'file',
+              path: '/report.md',
+              version: 4,
+              bytes: 12,
+              sources: ['grant'],
+              permissions: ['read', 'write'],
+              coversDescendants: false,
+            },
+          ],
+          nextCursor: null,
+        },
+      ],
+      pageParams: [undefined],
+    })
+    client.setQueryData(desktopQueryKeys.gfsChildren(scope, 'root', 'main'), emptyPage)
+    client.setQueryData(desktopQueryKeys.gfsGrants(scope, 'root', 'main'), [
+      {
+        id: 'grant-1',
+        drive: 'main',
+        resourceId: 'root',
+        subject: { type: 'user', id: 'u' },
+        permissions: ['read'],
+        inherit: false,
+      },
+    ])
+    client.setQueryData(desktopQueryKeys.gfsShares(scope, 'root', 'main'), [
+      {
+        id: 'share-1',
+        drive: 'main',
+        resourceId: 'root',
+        subject: { type: 'user', id: 'u' },
+        permissions: ['read'],
+        includeDescendants: false,
+      },
+    ])
+
+    const replaceFileFromPath = vi.fn(async () => {
+      throw new Error('401 Unauthorized: session rejected')
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+            version: 1,
+          })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'write'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+          replaceFileFromPath,
+        },
+      },
+    })
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <AuthContext.Provider value={authValue(userA)}>
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      </AuthContext.Provider>
+    )
+    render(<Probe />, { wrapper })
+
+    // Navigate in; the session is active and caches hold real data.
+    await act(async () => {
+      screen.getByRole('button', { name: 'open' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('active'))
+    expect(client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'root', 'main'))).toBeTruthy()
+
+    // The path-based replace is rejected with a bare 401.
+    await act(async () => {
+      screen.getByRole('button', { name: 'replace current from path' }).click()
+    })
+    await waitFor(() =>
+      expect(replaceFileFromPath).toHaveBeenCalledWith('root', '/tmp/replacement.bin', 'main', 1)
+    )
+
+    // Authority revoked, caches purged, navigation gone — nothing stale kept.
+    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('revoked'))
+    expect(screen.getByTestId('current').textContent).toBe('none')
+    expect(screen.getByTestId('crumbs').textContent).toBe('')
+    expect(client.getQueryData(desktopQueryKeys.gfsAccessible(scope, 'main'))).toBeUndefined()
+    expect(client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'root', 'main'))).toBeUndefined()
+    expect(client.getQueryData(desktopQueryKeys.gfsGrants(scope, 'root', 'main'))).toBeUndefined()
+    expect(client.getQueryData(desktopQueryKeys.gfsShares(scope, 'root', 'main'))).toBeUndefined()
   })
 })
 

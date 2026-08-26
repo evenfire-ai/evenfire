@@ -445,6 +445,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       }
       await refreshGfs()
     },
+    onError: failClosedOnMutationError,
   })
   const renameResourceMutation = useMutation({
     mutationFn: (input: { resourceId: string; name: string; ifMatch?: number }) =>
