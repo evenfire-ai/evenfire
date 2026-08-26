@@ -2,6 +2,7 @@
 set -euo pipefail
 
 BASE_REF="${REPO_INTAKE_BASE_REF:-origin/dev}"
+SCRIPT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 BLOCKERS=()
 WARNINGS=()
 TOUCHED_AREAS=()
@@ -27,13 +28,6 @@ resolve_ref() {
 
 short_ref() { git rev-parse --short=8 "$1" 2>/dev/null || printf 'unknown'; }
 ahead_behind() { git rev-list --left-right --count "$1...$2" 2>/dev/null || printf 'n/a n/a\n'; }
-
-slugify() {
-  printf '%s' "$1" |
-    tr '[:upper:]' '[:lower:]' |
-    sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g' |
-    cut -c1-47
-}
 
 area_for_path() {
   case "$1" in
@@ -143,8 +137,8 @@ resolve_primary_checkout() {
   fi
 }
 
-profile_value() {
-  awk -F= -v wanted="$2" '$1 == wanted { sub(/^[^=]*=/, ""); print; exit }' "$1" 2>/dev/null || true
+record_value() {
+  awk -F= -v wanted="$2" '$1 == wanted { sub(/^[^=]*=/, ""); print; exit }' <<<"$1"
 }
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
@@ -163,9 +157,6 @@ fi
 HEAD_FULL="$(git rev-parse --verify HEAD 2>/dev/null || true)"
 [[ -n "${HEAD_FULL}" ]] || die "unable to resolve HEAD"
 HEAD_SHORT="$(short_ref HEAD)"
-BRANCH_SLUG="$(slugify "${PROFILE_BRANCH}")"
-[[ -n "${BRANCH_SLUG}" ]] || BRANCH_SLUG="detached-${HEAD_SHORT}"
-EXPECTED_PROFILE="clerum-${BRANCH_SLUG}-${HEAD_SHORT}"
 
 UPSTREAM="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
 [[ -n "${UPSTREAM}" ]] || UPSTREAM="none"
@@ -217,6 +208,8 @@ LOCAL_HELPER_EXISTS="no"
 PRIMARY_HELPER_EXISTS="no"
 PROFILE_HELPER_EXISTS="no"
 PROFILE_HELPER_COMMAND="unavailable"
+PROFILE_OWNER_SCRIPT="${SCRIPT_ROOT}/scripts/minikube/profile-owner.sh"
+PROFILE_OWNER_AVAILABLE="no"
 
 [[ -f "${LOCAL_PROFILE_HELPER}" ]] && LOCAL_HELPER_EXISTS="yes"
 if [[ -f "${PRIMARY_PROFILE_HELPER}" ]]; then
@@ -230,34 +223,108 @@ else
   BLOCKERS+=("missing_branch_profile_helper")
 fi
 
-PROFILE_ENV="${HOME}/.cache/clerum/minikube-profiles/${EXPECTED_PROFILE}/profile.env"
+if [[ -x "${PROFILE_OWNER_SCRIPT}" ]]; then
+  PROFILE_OWNER_AVAILABLE="yes"
+else
+  BLOCKERS+=("missing_profile_owner_resolver")
+fi
+
+PROFILE_ROOT="${REPO_INTAKE_PROFILE_ROOT:-${CLERUM_PROFILE_CACHE_ROOT:-${HOME}/.cache/clerum/minikube-profiles}}"
+EXPLICIT_PROFILE="${REPO_INTAKE_PROFILE:-${MINIKUBE_PROFILE:-}}"
+EXPLICIT_PROFILE_ENV="${REPO_INTAKE_PROFILE_ENV:-${T2_PROFILE_ENV:-}}"
+EXPLICIT_PORTS_ENV="${REPO_INTAKE_PORTS_ENV:-${CLERUM_PROFILE_PORTS_ENV:-${T2_PORTS_ENV:-}}}"
+PROFILE_SELECTION_EXPLICIT="no"
+if [[ -n "${EXPLICIT_PROFILE}" || -n "${EXPLICIT_PROFILE_ENV}" || -n "${EXPLICIT_PORTS_ENV}" ]]; then
+  PROFILE_SELECTION_EXPLICIT="yes"
+fi
+
+EXPECTED_PROFILE="unavailable"
+NEW_PROFILE_CANDIDATE="unavailable"
+PROFILE_OWNER_ID="unavailable"
+PROFILE_WORKTREE_ID="unavailable"
+PROFILE_IDENTITY_OUTPUT=""
+if [[ "${PROFILE_OWNER_AVAILABLE}" == "yes" ]]; then
+  identity_status=0
+  PROFILE_IDENTITY_OUTPUT="$("${PROFILE_OWNER_SCRIPT}" identity \
+    --repo-dir "${REPO_ROOT}" --branch "${PROFILE_BRANCH}" \
+    --created-head "${HEAD_FULL}" 2>&1)" || identity_status=$?
+  if (( identity_status == 0 )); then
+    EXPECTED_PROFILE="$(record_value "${PROFILE_IDENTITY_OUTPUT}" PROFILE)"
+    NEW_PROFILE_CANDIDATE="${EXPECTED_PROFILE}"
+    PROFILE_OWNER_ID="$(record_value "${PROFILE_IDENTITY_OUTPUT}" OWNER_ID)"
+    PROFILE_WORKTREE_ID="$(record_value "${PROFILE_IDENTITY_OUTPUT}" WORKTREE_ID)"
+  else
+    BLOCKERS+=("profile_identity_resolution_failed")
+  fi
+fi
+
 PROFILE_CACHE_STATE="absent"
 PROFILE_CACHE_REPO_MATCH="n/a"
-PROFILE_CACHE_SHA_MATCH="n/a"
-if [[ -f "${PROFILE_ENV}" ]]; then
-  PROFILE_CACHE_STATE="present"
-  PROFILE_CACHE_REPO="$(profile_value "${PROFILE_ENV}" REPO_DIR)"
-  PROFILE_CACHE_SHA="$(profile_value "${PROFILE_ENV}" SHA_SHORT)"
+PROFILE_CACHE_BRANCH_MATCH="n/a"
+PROFILE_CACHE_OWNER_MATCH="n/a"
+PROFILE_CACHE_SHA_MATCH="not_applicable"
+PROFILE_CACHE_SCHEMA="n/a"
+PROFILE_CACHE_CREATION_HEAD="n/a"
+RESOLVED_PROFILE="none"
+RESOLVED_PROFILE_ENV="none"
+RESOLVED_PORTS_ENV="none"
+PROFILE_RESOLUTION_CODE="not_attempted"
 
-  if [[ -n "${PROFILE_CACHE_REPO}" ]]; then
-    if [[ "${PROFILE_CACHE_REPO}" == "${REPO_ROOT}" ]]; then
-      PROFILE_CACHE_REPO_MATCH="yes"
-    else
-      PROFILE_CACHE_REPO_MATCH="no"
-      BLOCKERS+=("profile_cache_belongs_to_other_worktree")
-    fi
+if [[ "${PROFILE_OWNER_AVAILABLE}" == "yes" ]]; then
+  resolve_args=(resolve --repo-dir "${REPO_ROOT}" --branch "${PROFILE_BRANCH}" --profile-root "${PROFILE_ROOT}")
+  [[ -z "${EXPLICIT_PROFILE}" ]] || resolve_args+=(--profile "${EXPLICIT_PROFILE}")
+  [[ -z "${EXPLICIT_PROFILE_ENV}" ]] || resolve_args+=(--profile-env "${EXPLICIT_PROFILE_ENV}")
+  [[ -z "${EXPLICIT_PORTS_ENV}" ]] || resolve_args+=(--ports-env "${EXPLICIT_PORTS_ENV}")
+  resolution_status=0
+  PROFILE_RESOLUTION_OUTPUT="$("${PROFILE_OWNER_SCRIPT}" "${resolve_args[@]}" 2>&1)" || resolution_status=$?
+  if (( resolution_status == 0 )); then
+    PROFILE_RESOLUTION_CODE="resolved"
+    PROFILE_CACHE_STATE="present"
+    PROFILE_CACHE_REPO_MATCH="yes"
+    PROFILE_CACHE_BRANCH_MATCH="yes"
+    PROFILE_CACHE_OWNER_MATCH="yes"
+    PROFILE_CACHE_SCHEMA="$(record_value "${PROFILE_RESOLUTION_OUTPUT}" PROFILE_SCHEMA_VERSION)"
+    PROFILE_CACHE_CREATION_HEAD="$(record_value "${PROFILE_RESOLUTION_OUTPUT}" CREATED_HEAD)"
+    RESOLVED_PROFILE="$(record_value "${PROFILE_RESOLUTION_OUTPUT}" PROFILE)"
+    EXPECTED_PROFILE="${RESOLVED_PROFILE}"
+    RESOLVED_PROFILE_ENV="$(record_value "${PROFILE_RESOLUTION_OUTPUT}" PROFILE_ENV)"
+    RESOLVED_PORTS_ENV="$(record_value "${PROFILE_RESOLUTION_OUTPUT}" PORTS_ENV)"
+  else
+    PROFILE_RESOLUTION_CODE="${PROFILE_RESOLUTION_OUTPUT%%:*}"
+    case "${PROFILE_RESOLUTION_CODE}" in
+      PROFILE_NOT_FOUND)
+        if [[ "${PROFILE_SELECTION_EXPLICIT}" == "yes" ]]; then
+          PROFILE_CACHE_STATE="invalid"
+          BLOCKERS+=("selected_profile_not_found")
+        else
+          WARNINGS+=("profile_cache_not_initialized")
+        fi ;;
+      PROFILE_SELECTION_AMBIGUOUS)
+        PROFILE_CACHE_STATE="ambiguous"
+        BLOCKERS+=("profile_selection_ambiguous") ;;
+      PROFILE_PORTS_MISSING)
+        PROFILE_CACHE_STATE="invalid"
+        BLOCKERS+=("profile_ports_missing") ;;
+      PROFILE_PORTS_INVALID)
+        PROFILE_CACHE_STATE="invalid"
+        BLOCKERS+=("profile_ports_invalid") ;;
+      PROFILE_METADATA_MISSING)
+        PROFILE_CACHE_STATE="invalid"
+        BLOCKERS+=("profile_metadata_missing") ;;
+      PROFILE_METADATA_INVALID)
+        PROFILE_CACHE_STATE="invalid"
+        BLOCKERS+=("profile_metadata_invalid") ;;
+      PROFILE_OWNERSHIP_MISMATCH)
+        PROFILE_CACHE_STATE="invalid"
+        PROFILE_CACHE_REPO_MATCH="no"
+        PROFILE_CACHE_BRANCH_MATCH="no"
+        PROFILE_CACHE_OWNER_MATCH="no"
+        BLOCKERS+=("profile_cache_ownership_mismatch") ;;
+      *)
+        PROFILE_CACHE_STATE="invalid"
+        BLOCKERS+=("profile_metadata_invalid") ;;
+    esac
   fi
-
-  if [[ -n "${PROFILE_CACHE_SHA}" ]]; then
-    if [[ "${PROFILE_CACHE_SHA}" == "${HEAD_SHORT}" ]]; then
-      PROFILE_CACHE_SHA_MATCH="yes"
-    else
-      PROFILE_CACHE_SHA_MATCH="no"
-      BLOCKERS+=("profile_cache_sha_mismatch")
-    fi
-  fi
-else
-  WARNINGS+=("profile_cache_not_initialized")
 fi
 
 [[ "${DETACHED}" == "yes" ]] && WARNINGS+=("detached_worktree_confirm_scope")
@@ -301,10 +368,23 @@ for row in \
   "profile_helper_primary|${PRIMARY_HELPER_EXISTS}" \
   "profile_helper_exists|${PROFILE_HELPER_EXISTS}" \
   "profile_helper_command|${PROFILE_HELPER_COMMAND}" \
+  "profile_owner_resolver|${PROFILE_OWNER_AVAILABLE}" \
+  "profile_selection_explicit|${PROFILE_SELECTION_EXPLICIT}" \
   "expected_profile|${EXPECTED_PROFILE}" \
+  "new_profile_candidate|${NEW_PROFILE_CANDIDATE}" \
+  "resolved_profile|${RESOLVED_PROFILE}" \
   "profile_cache_state|${PROFILE_CACHE_STATE}" \
+  "profile_cache_schema|${PROFILE_CACHE_SCHEMA}" \
+  "profile_cache_creation_head|${PROFILE_CACHE_CREATION_HEAD}" \
   "profile_cache_repo_match|${PROFILE_CACHE_REPO_MATCH}" \
-  "profile_cache_sha_match|${PROFILE_CACHE_SHA_MATCH}"; do
+  "profile_cache_branch_match|${PROFILE_CACHE_BRANCH_MATCH}" \
+  "profile_cache_owner_match|${PROFILE_CACHE_OWNER_MATCH}" \
+  "profile_cache_sha_match|${PROFILE_CACHE_SHA_MATCH}" \
+  "profile_owner_id|${PROFILE_OWNER_ID}" \
+  "profile_worktree_id|${PROFILE_WORKTREE_ID}" \
+  "profile_env|${RESOLVED_PROFILE_ENV}" \
+  "ports_env|${RESOLVED_PORTS_ENV}" \
+  "profile_resolution|${PROFILE_RESOLUTION_CODE}"; do
   kv "${row%%|*}" "${row#*|}"
 done
 

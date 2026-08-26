@@ -412,6 +412,9 @@ jobs:
       - name: Test WRC-to-HCC contracts
         run: bash scripts/tests/test-wrc-hcc-contracts-gate.sh
 
+      - name: Test inter-service token HCC restart skip
+        run: bash scripts/tests/test-inter-service-tokens.sh
+
       - name: Test WRC internal dependency NetworkPolicy contracts
         run: bash scripts/tests/test-wrc-internal-dependency-networkpolicy-gate.sh
 
@@ -483,6 +486,12 @@ jobs:
 
       - name: Test minikube Makefile targets
         run: bash scripts/tests/test-minikube-makefile.sh
+
+      - name: Test local Minikube T0/T1/T2 contract
+        run: bash scripts/tests/test-minikube-t2-contract.sh
+
+      - name: Test local Minikube T2 setup handoff
+        run: bash scripts/tests/test-minikube-t2-setup-handoff.sh
 
       - name: Test minikube GFS Upload v2 profile contract
         run: bash scripts/tests/test-minikube-gfs-upload-v2-profile.sh
