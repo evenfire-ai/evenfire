@@ -267,6 +267,53 @@ describe('McpToolRegistryAdapter', () => {
     })
   })
 
+  // `sourceRef` is the tool-lane guardrail's `server` identity, so a `server=` deny
+  // rule matches on it. Slicing it off the display name at the first `__` truncates
+  // any server whose own name contains one — the rule then fails to match, and a
+  // deny that does not match lets the call through.
+  it('takes the MCP server identity from the registry, not the __-sliced name', () => {
+    const mockManager = {
+      getAllTools: () => [
+        {
+          name: 'acme__tools__run_query',
+          description: 'run a query',
+          inputSchema: { type: 'object' },
+          serverName: 'acme__tools',
+        },
+      ],
+      callTool: vi.fn(),
+    } as any
+
+    const registry = new McpToolRegistryAdapter(mockManager)
+    const tool = registry.get('acme__tools__run_query')
+
+    expect(tool!.traceDescriptor?.({}, undefined)).toEqual({
+      kind: 'mcp_server_tool',
+      sourceRef: 'acme__tools', // not 'acme'
+    })
+  })
+
+  it('falls back to the name prefix when the registry omits serverName', () => {
+    const mockManager = {
+      getAllTools: () => [
+        {
+          name: 'github__create_issue',
+          description: 'create an issue',
+          inputSchema: { type: 'object' },
+        },
+      ],
+      callTool: vi.fn(),
+    } as any
+
+    const registry = new McpToolRegistryAdapter(mockManager)
+    const tool = registry.get('github__create_issue')
+
+    expect(tool!.traceDescriptor?.({}, undefined)).toEqual({
+      kind: 'mcp_server_tool',
+      sourceRef: 'github',
+    })
+  })
+
   it('uses a text summary when MCP content contains only images', async () => {
     const mockManager = {
       getAllTools: () => [

@@ -148,9 +148,26 @@ describe('HostDetailsPage identity integration', () => {
     expect(container.querySelector('.cu-agent-detail-card .cu-agent-detail-scroll')).not.toBeNull()
   })
 
+  it('opens Advanced on the Hooks sub-tab', async () => {
+    mockParams = { name: 'foo', tab: 'advanced' }
+    render(<HostDetailsPage />)
+
+    const hooksTab = await screen.findByRole('tab', { name: 'Hooks' })
+    expect(hooksTab).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: 'Per-tool approval' })).toHaveAttribute(
+      'aria-selected',
+      'false'
+    )
+    expect(await screen.findByText('No guardrail hooks on this agent yet.')).toBeInTheDocument()
+    // The approval editor stays unmounted until its sub-tab is selected.
+    expect(screen.queryByLabelText('http_request')).toBeNull()
+  })
+
   it('keeps Per-tool approval actions in the top toolbar without a duplicate title', async () => {
     mockParams = { name: 'foo', tab: 'advanced' }
     const { container } = render(<HostDetailsPage />)
+
+    fireEvent.click(await screen.findByRole('tab', { name: 'Per-tool approval' }))
 
     expect(await screen.findByLabelText('http_request')).toBeInTheDocument()
     expect(

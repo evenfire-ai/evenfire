@@ -7,6 +7,10 @@ name: CodeQL
 #
 # build-mode: none — CodeQL analyses JS/TS from source and does not need the ~33
 # workspaces built, which keeps this a single job rather than a matrix.
+#
+# False-positive dispositions for js/missing-rate-limiting (custom PG limiter) are
+# recorded in docs/how-to/codeql-js-missing-rate-limiting.md with Security-tab
+# dismissals; do not globally exclude that query in config.
 
 on:
   push:

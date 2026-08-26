@@ -1,8 +1,9 @@
 'use client'
 
-import React, { Fragment, useCallback, useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import React, { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { IconChevronRight } from '@components/icons'
+import { MARKETPLACE_ENTRY_TYPE_LABELS } from '@constants/marketplaceEntryTypes'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type OwnedRegistryEntry,
@@ -76,9 +77,16 @@ function groupByName(
 // (mcp-servers always have a serverMode; recipes don't). Prefer an explicit
 // entry_type if the registry ever starts sending it, else infer from serverMode.
 // "Connector" / "Plugin" mirror the labels in PublishToRegistryForm.
+function ownedEntryKind(e: OwnedRegistryEntry): string {
+  // Wire field is `entryType` (camelCase); `entry_type` kept as a fallback.
+  return e.entryType ?? e.entry_type ?? (e.serverMode != null ? 'mcp-server' : 'recipe')
+}
+
 function entryTypeLabel(e: OwnedRegistryEntry): string {
-  const kind = e.entry_type ?? (e.serverMode != null ? 'mcp-server' : 'recipe')
-  return kind === 'mcp-server' ? 'Connector' : 'Plugin'
+  const kind = ownedEntryKind(e)
+  if (kind === 'mcp-server') return 'Connector'
+  if (kind === 'llm-hook') return 'Guardrail hook'
+  return 'Plugin'
 }
 
 /**
@@ -101,6 +109,7 @@ export function OwnedEntries({
   sharingUnavailable?: boolean
 }) {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [entries, setEntries] = useState<OwnedRegistryEntry[]>([])
@@ -114,6 +123,7 @@ export function OwnedEntries({
   const [installedCatalogKeys, setInstalledCatalogKeys] = useState<Set<string>>(new Set())
   const [installedServerNames, setInstalledServerNames] = useState<Set<string>>(new Set())
   const [installedRecipeKeys, setInstalledRecipeKeys] = useState<Set<string>>(new Set())
+  const [installedHookKeys, setInstalledHookKeys] = useState<Set<string>>(new Set())
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -128,6 +138,7 @@ export function OwnedEntries({
         setInstalledCatalogKeys(new Set(catalog.installed.catalogKeys))
         setInstalledServerNames(new Set(catalog.installed.serverNames))
         setInstalledRecipeKeys(new Set(catalog.installed.recipeKeys))
+        setInstalledHookKeys(new Set(catalog.installed.hookKeys ?? []))
       }
     } catch {
       setError(true)
@@ -170,11 +181,12 @@ export function OwnedEntries({
   }, [])
 
   function isInstalled(e: OwnedRegistryEntry): boolean {
-    const kind = e.entry_type ?? (e.serverMode != null ? 'mcp-server' : 'recipe')
+    const kind = ownedEntryKind(e)
     const key = `${e.name}@${e.version}`
     if (kind === 'mcp-server') {
       return installedCatalogKeys.has(key) || installedServerNames.has(e.name)
     }
+    if (kind === 'llm-hook') return installedHookKeys.has(key)
     return installedRecipeKeys.has(key)
   }
 
@@ -197,10 +209,24 @@ export function OwnedEntries({
     )
   }
 
+  // `?type=` narrows the list to a single entry kind — this is how "Add hook"
+  // on an agent lands here showing only guardrail hooks. An unrecognised value
+  // filters nothing, so a stale or hand-edited link degrades to the full list
+  // instead of an empty one.
+  const typeFilter = searchParams?.get('type') ?? null
+  const activeTypeLabel = typeFilter ? MARKETPLACE_ENTRY_TYPE_LABELS[typeFilter] : undefined
+  const visibleEntries = useMemo(
+    () => (activeTypeLabel ? entries.filter(e => ownedEntryKind(e) === typeFilter) : entries),
+    [entries, typeFilter, activeTypeLabel]
+  )
+
+  // Deliberately org-wide, not `visibleEntries`: the notice describes what
+  // cross-org sharing does to this org's private entries, so a `?type=` filter
+  // that happens to hide them all must not make it disappear.
   const hasPrivateEntries = entries.some(e => e.visibility === 'private')
   // Collapse same-named entries into one row (latest leads); expanding a row
   // reveals the previous versions, each individually installable.
-  const grouped = groupByName(entries)
+  const grouped = groupByName(visibleEntries)
 
   return (
     <section>
@@ -221,10 +247,25 @@ export function OwnedEntries({
               onRetry={() => void load()}
             />
           ) : null}
+          {!loading && !error && activeTypeLabel ? (
+            <p className="cu-banner cu-banner--info">
+              Showing {activeTypeLabel.toLowerCase()} only.{' '}
+              <button
+                type="button"
+                className="cu-link"
+                onClick={() => router.replace(CONTROL_ROUTES.marketplace.orgEntries)}
+              >
+                Show all entries
+              </button>
+            </p>
+          ) : null}
           {!loading && !error && entries.length === 0 ? (
             <p>You haven’t published any registry entries yet.</p>
           ) : null}
-          {!loading && !error && entries.length > 0 ? (
+          {!loading && !error && entries.length > 0 && visibleEntries.length === 0 ? (
+            <p>No {activeTypeLabel?.toLowerCase() ?? 'entries'} published yet.</p>
+          ) : null}
+          {!loading && !error && visibleEntries.length > 0 ? (
             <>
               <div className="cu-table-wrap">
                 <table className="cu-table">

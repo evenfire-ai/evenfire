@@ -273,7 +273,7 @@ function cidrOverlaps(left: string, right: string): boolean {
   return a.start <= b.end && b.start <= a.end
 }
 
-function isAllowedExternalEgressCidr(cidr: string): boolean {
+export function isAllowedExternalEgressCidr(cidr: string): boolean {
   if (!cidrRange(cidr)) return false
   return !PUBLIC_EGRESS_EXCEPT_CIDRS.some(blocked => cidrOverlaps(cidr, blocked))
 }
@@ -318,7 +318,7 @@ export function egressSignature(policy: k8s.V1NetworkPolicy): string {
   )
 }
 
-function isPublicDnsHostname(host: string): boolean {
+export function isPublicDnsHostname(host: string): boolean {
   if (host !== host.trim()) return false
   if (host !== host.toLowerCase()) return false
   if (host.includes('*') || host.includes('/') || host.includes(':')) return false

@@ -106,6 +106,7 @@ function makeHost(overrides?: Partial<HostCRD>): HostCRD {
   return {
     name: 'alpha-host',
     namespace: 'mcp-host',
+    uid: 'host-uid-1',
     spec: {
       host: 'alpha-host',
       contextRef: 'context-a',
@@ -318,6 +319,7 @@ describe('HostReconciler', () => {
     expect(reconciler.getStatus('alpha-host')).toMatchObject({ deployed: true, ready: true })
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalledWith(
       'alpha-host',
+      'host-uid-1',
       DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES
     )
   })
@@ -432,6 +434,7 @@ describe('HostReconciler', () => {
 
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalledWith(
       'alpha-host',
+      'host-uid-1',
       DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES
     )
   })
@@ -1950,7 +1953,7 @@ describe('HostReconciler oauth:user-token runtime scope provisioning', () => {
   function lastIssuedScopes(): string[] {
     const calls = vi.mocked(issueMcpHostRuntimeTokens).mock.calls
     const last = calls[calls.length - 1]
-    return [...(last?.[1] ?? [])].sort()
+    return [...(last?.[2] ?? [])].sort()
   }
 
   // Access the private static scope-hash used for drift detection.

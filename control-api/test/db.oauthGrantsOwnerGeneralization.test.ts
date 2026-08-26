@@ -9,7 +9,7 @@ const mockPoolCtor = vi.fn(function MockPool() {
 
 vi.mock('pg', () => ({ Pool: mockPoolCtor }))
 
-describe('0091 oauth_grants owner generalization migration', () => {
+describe('0101 oauth_grants owner generalization migration', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.clearAllMocks()
@@ -17,11 +17,26 @@ describe('0091 oauth_grants owner generalization migration', () => {
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
   })
 
-  it('is registered last in the migration array, after 0099', async () => {
+  it('is registered last in the migration array, after 0100_seed_minimax', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const versions = CONTROL_API_MIGRATIONS.map(m => m.version)
-    expect(versions.at(-1)).toBe('0100_oauth_grants_owner_generalization')
+    expect(versions.at(-1)).toBe('0101_oauth_grants_owner_generalization')
     expect(versions).toContain('0099_gfs_upload_finalizing_recovery')
+    expect(versions).toContain('0100_seed_minimax_allowed_model')
+  })
+
+  it('carries its prior names as legacyVersions so a deploy that already ran it is not re-executed', async () => {
+    // Renamed 0091 -> 0100 -> 0101 across dev syncs. Environments that recorded an
+    // earlier name (the dev cluster) must mark 0101 applied from that row instead
+    // of re-running the DDL. See applyPendingMigrations' legacyVersions branch.
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(
+      m => m.version === '0101_oauth_grants_owner_generalization'
+    )
+    expect(migration?.legacyVersions).toEqual([
+      '0100_oauth_grants_owner_generalization',
+      '0091_oauth_grants_owner_generalization',
+    ])
   })
 
   it('adds owner_kind/context_id/bootstrapped_by, replaces the kind CHECK to admit shared, and rebuilds uniqueness', async () => {
@@ -31,7 +46,7 @@ describe('0091 oauth_grants owner generalization migration', () => {
     const migration = sqls.find(
       sql => sql.includes('ADD COLUMN IF NOT EXISTS owner_kind') && sql.includes('oauth_grants')
     )
-    expect(migration, 'the 0091 DDL was applied').toBeDefined()
+    expect(migration, 'the oauth_grants generalization DDL was applied').toBeDefined()
     const ddl = migration as string
 
     // New columns (idempotent).

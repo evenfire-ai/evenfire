@@ -17,6 +17,15 @@ import {
 } from './client'
 import { ServerStatusTracker } from './serverStatus'
 
+export interface McpStatusRefreshSummary {
+  serverCount: number
+  succeeded: number
+  failed: number
+  toolCount: number
+  outputSchemaCount: number
+  aborted: boolean
+}
+
 export type McpAdmissionOutcome = 'applied' | 'stale'
 export interface McpAdmissionControl {
   isCurrent?: () => boolean
@@ -151,7 +160,7 @@ export class McpManager {
     principal: McpPrincipal,
     eagerToken: string | undefined
   ): McpTokenProvider | undefined {
-    if (serverConfig.auth?.type === 'oauth') {
+    if (serverConfig.authKind === 'oauth-user' || serverConfig.authKind === 'oauth-context') {
       // oauth: JIT resolution via the injected factory (broker per-user /
       // per-context, or token-less representative). No factory (dev/tests) →
       // token-less, which fails closed on a server that requires auth.
@@ -750,8 +759,9 @@ export class McpManager {
 
     const [serverName, toolName] = parts
     const info = this.serverInfos.get(serverName)
-    const isOauthUser =
-      info?.auth?.type === 'oauth' && (info.oauth?.grantScope ?? 'user') === 'user'
+    // Only the per-user oauth sabor gets per-user partitions. oauth-context and
+    // static both resolve on the SHARED representative (the else branch below).
+    const isOauthUser = info?.authKind === 'oauth-user'
 
     let key: string
     if (isOauthUser) {
@@ -865,25 +875,82 @@ export class McpManager {
    * classify refresh failures (spec §4.5 — stay connected, attach reason).
    * Probes the representative connection per serverName.
    *
-   * Returns the number of servers probed.
+   * Probes a stable client snapshot. State is written only after every probe
+   * settles; an aborted round never mutates the last known server status.
    */
-  async refreshAllServerStatus(): Promise<number> {
+  async refreshAllServerStatus(options: McpToolCallOptions = {}): Promise<McpStatusRefreshSummary> {
+    // One representative client per server. The ClientKey index partitions an
+    // oauth grantScope='user' server into per-user clients, but a status round
+    // probes each server once via its representative; iterating raw clients would
+    // double-count those partitions in the summary tally.
     const entries = [...this.byServer.keys()]
       .map(name => [name, this.representativeClient(name)] as const)
       .filter((entry): entry is readonly [string, McpClient] => entry[1] !== undefined)
-    await Promise.all(
+    if (options.signal?.aborted) {
+      return {
+        serverCount: entries.length,
+        succeeded: 0,
+        failed: 0,
+        toolCount: 0,
+        outputSchemaCount: 0,
+        aborted: true,
+      }
+    }
+
+    const results = await Promise.all(
       entries.map(async ([name, client]) => {
-        const result = await client.probeTools()
-        if (this.representativeClient(name) !== client) return
-        if (!result.ok && result.stale) return
-        if (result.ok) {
-          this.statusTracker.updateToolCount(name, result.toolCount)
-        } else {
-          this.statusTracker.updateToolCount(name, 0, { refreshError: result.error })
+        try {
+          return {
+            name,
+            client,
+            // Probes share the round's abort signal directly: the heartbeat owns
+            // round-level cancellation and no per-probe cancellation capability
+            // exists, so wrapping the signal would only fake a seam.
+            result: await client.probeTools({
+              timeoutMs: options.timeoutMs,
+              signal: options.signal,
+            }),
+          }
+        } catch (error) {
+          return { name, client, result: { ok: false as const, error, stale: false } }
         }
       })
     )
-    return entries.length
+    // A probe only counts toward the round's tally when its result is
+    // authoritative for the currently-installed client: never a client swapped
+    // out mid-round, never a stale-error probe that raced a reconnect. This is
+    // the same predicate the status commit below uses, so summary.succeeded /
+    // summary.failed match what was written — a benign mid-round swap can't
+    // inflate `failed` and flip the run's outcome on the series #148 watches.
+    const committed = results.filter(
+      ({ name, client, result }) =>
+        this.representativeClient(name) === client && !(!result.ok && result.stale)
+    )
+    const succeeded = committed.filter(({ result }) => result.ok).length
+    const summary: McpStatusRefreshSummary = {
+      serverCount: entries.length,
+      succeeded,
+      failed: committed.length - succeeded,
+      toolCount: committed.reduce(
+        (total, { result }) => total + (result.ok ? result.toolCount : 0),
+        0
+      ),
+      outputSchemaCount: committed.reduce(
+        (total, { result }) => total + (result.ok ? result.outputSchemaCount : 0),
+        0
+      ),
+      aborted: options.signal?.aborted === true,
+    }
+    if (summary.aborted) return summary
+
+    for (const { name, result } of committed) {
+      if (result.ok) {
+        this.statusTracker.updateToolCount(name, result.toolCount)
+      } else {
+        this.statusTracker.updateToolCount(name, 0, { refreshError: result.error })
+      }
+    }
+    return summary
   }
 
   /**

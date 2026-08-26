@@ -101,6 +101,7 @@ function makeHost(overrides?: Partial<HostCRD>): HostCRD {
   return {
     name: 'alpha-host',
     namespace: 'mcp-host',
+    uid: 'alpha-host-uid',
     spec: {
       host: 'alpha-host',
       contextRef: 'context-a',
@@ -117,6 +118,7 @@ function makeStatelessHost(
   return {
     name,
     namespace: 'mcp-host',
+    uid: `${name}-uid`,
     spec: {
       host: name,
       contextRef: 'context-a',
@@ -145,6 +147,7 @@ function hostApiObject(host: HostCRD) {
     metadata: {
       name: host.name,
       namespace: host.namespace,
+      uid: host.uid,
       resourceVersion: host.resourceVersion ?? '42',
       annotations: host.annotations,
     },
@@ -630,7 +633,7 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
 
     const stateless = makeStatelessHost({ name: 'transition-host' })
     customApi.getNamespacedCustomObject.mockResolvedValue({
-      metadata: { name: stateless.name, namespace: stateless.namespace },
+      metadata: { name: stateless.name, namespace: stateless.namespace, uid: stateless.uid },
       spec: stateless.spec,
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
     })
@@ -664,7 +667,7 @@ describe('HostReconciler stateless lifecycle — env injection', () => {
     const { reconciler, appsApi, customApi } = createReconciler()
     const stateless = makeStatelessHost({ name: 'new-stateless-host' })
     customApi.getNamespacedCustomObject.mockResolvedValue({
-      metadata: { name: stateless.name, namespace: stateless.namespace },
+      metadata: { name: stateless.name, namespace: stateless.namespace, uid: stateless.uid },
       spec: stateless.spec,
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
     })
@@ -827,6 +830,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(mintGfs).toHaveBeenCalledWith({ name: host.name, namespace: host.namespace })
     expect(issueTokens).toHaveBeenCalledWith(
       host.name,
+      host.uid,
       expect.arrayContaining([
         'workflow:list',
         'workflow:read',
@@ -852,8 +856,8 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     const issueTokens = vi.mocked(issueMcpHostRuntimeTokens)
     const defaultIssueTokens = issueTokens.getMockImplementation()
     issueTokens.mockClear()
-    issueTokens.mockImplementationOnce(async (hostName, scopes) => {
-      const tokens = await defaultIssueTokens!(hostName, scopes)
+    issueTokens.mockImplementationOnce(async (hostName, hostUid, scopes) => {
+      const tokens = await defaultIssueTokens!(hostName, hostUid, scopes)
       channelCount = 1
       return tokens
     })
@@ -861,8 +865,9 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     await reconciler.reconcile(host)
 
     expect(issueTokens).toHaveBeenCalledTimes(2)
-    expect(issueTokens.mock.calls[0][1]).not.toContain('workflow:trigger')
-    expect(issueTokens.mock.calls[1][1]).toContain('workflow:trigger')
+    expect(issueTokens.mock.calls[0][1]).toBe(host.uid)
+    expect(issueTokens.mock.calls[0][2]).not.toContain('workflow:trigger')
+    expect(issueTokens.mock.calls[1][2]).toContain('workflow:trigger')
     const deployment = hostDeploymentBody(appsApi, host.name)
     expect(deployment.spec?.replicas).toBe(1)
     expect(containerEnv(deployment).map(entry => entry.name)).not.toContain(
@@ -887,8 +892,8 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     const issueTokens = vi.mocked(issueMcpHostRuntimeTokens)
     const defaultIssueTokens = issueTokens.getMockImplementation()
     issueTokens.mockClear()
-    issueTokens.mockImplementationOnce(async (hostName, scopes) => {
-      const tokens = await defaultIssueTokens!(hostName, scopes)
+    issueTokens.mockImplementationOnce(async (hostName, hostUid, scopes) => {
+      const tokens = await defaultIssueTokens!(hostName, hostUid, scopes)
       channelCount = 1
       return tokens
     })
@@ -896,8 +901,9 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     await reconciler.reconcile(host)
 
     expect(issueTokens).toHaveBeenCalledTimes(2)
-    expect(issueTokens.mock.calls[0][1]).not.toContain('workflow:trigger')
-    expect(issueTokens.mock.calls[1][1]).toContain('workflow:trigger')
+    expect(issueTokens.mock.calls[0][1]).toBe(host.uid)
+    expect(issueTokens.mock.calls[0][2]).not.toContain('workflow:trigger')
+    expect(issueTokens.mock.calls[1][2]).toContain('workflow:trigger')
     expect(
       containerEnv(hostDeploymentBody(appsApi, host.name)).map(entry => entry.name)
     ).not.toContain('CLERUM_STATELESS_LIFECYCLE')
@@ -979,8 +985,9 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     await reconciler.reconcile(host)
 
     expect(issueTokens).toHaveBeenCalledTimes(2)
-    expect(issueTokens.mock.calls[0][1]).not.toContain('workflow:trigger')
-    expect(issueTokens.mock.calls[1][1]).toContain('workflow:trigger')
+    expect(issueTokens.mock.calls[0][1]).toBe(host.uid)
+    expect(issueTokens.mock.calls[0][2]).not.toContain('workflow:trigger')
+    expect(issueTokens.mock.calls[1][2]).toContain('workflow:trigger')
     const hostReplace = appsApi.replaceNamespacedDeployment.mock.calls.find(
       ([request]) => request.name === host.name
     )?.[0].body as k8s.V1Deployment | undefined
@@ -1329,7 +1336,12 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
     })
     customApi.getNamespacedCustomObject.mockResolvedValue({
-      metadata: { name: host.name, namespace: host.namespace },
+      metadata: {
+        name: host.name,
+        namespace: host.namespace,
+        uid: host.uid,
+        resourceVersion: '42',
+      },
       spec: host.spec,
       status: host.status,
     })
@@ -1415,7 +1427,18 @@ describe('HostReconciler stateless lifecycle — kill-switches', () => {
 
   it('kill-switch: removing spec.lifecycle returns a suspended host to active', async () => {
     const { reconciler, appsApi, customApi } = createReconciler()
-    await reconciler.reconcile(makeHost({ name: 'stateless-host', status: suspendedStatus(2) }))
+    const host = makeHost({ name: 'stateless-host', status: suspendedStatus(2) })
+    customApi.getNamespacedCustomObject.mockResolvedValue({
+      metadata: {
+        name: host.name,
+        namespace: host.namespace,
+        uid: host.uid,
+        resourceVersion: '42',
+      },
+      spec: host.spec,
+      status: host.status,
+    })
+    await reconciler.reconcile(host)
 
     expect(hostDeploymentBody(appsApi, 'stateless-host').spec?.replicas).toBe(1)
     const writes = lifecycleStatusWrites(customApi)
@@ -1468,7 +1491,7 @@ describe('HostReconciler stateless lifecycle — status write idempotence', () =
     // FIX 1 replicas guard: state the server-side truth explicitly — the
     // fresh read must agree with the observed (converged) active status.
     customApi.getNamespacedCustomObject.mockResolvedValue({
-      metadata: { name: 'stateless-host', namespace: 'mcp-host' },
+      metadata: { name: 'stateless-host', namespace: 'mcp-host', uid: 'stateless-host-uid' },
       spec: {
         host: 'stateless-host',
         contextRef: 'context-a',
@@ -1514,7 +1537,12 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
     reason?: string
   }) {
     return {
-      metadata: { name: 'stateless-host', namespace: 'mcp-host', resourceVersion: '42' },
+      metadata: {
+        name: 'stateless-host',
+        namespace: 'mcp-host',
+        uid: 'stateless-host-uid',
+        resourceVersion: '42',
+      },
       spec: {
         host: 'stateless-host',
         contextRef: 'context-a',

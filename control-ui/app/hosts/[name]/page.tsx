@@ -9,6 +9,7 @@ import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { HostAccessTab } from '../../../components/HostAccessTab'
 import { HostAdvancedTab } from '../../../components/HostAdvancedTab'
+import type { HostGuardrails } from '../../../components/HostGuardrailsSection/types'
 import { HostIdentityTab } from '../../../components/HostIdentityTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { IconRobot } from '../../../components/Sidebar/icons'
@@ -142,6 +143,7 @@ export default function HostDetailsPage() {
   const [approvalToolsData, setApprovalToolsData] = useState<Record<string, boolean> | undefined>(
     undefined
   )
+  const [guardrailsData, setGuardrailsData] = useState<HostGuardrails | undefined>(undefined)
   const [statelessDraft, setStatelessDraft] = useState(false)
   const [savedStateless, setSavedStateless] = useState(false)
   const [lifecycleState, setLifecycleState] = useState('')
@@ -267,6 +269,10 @@ export default function HostDetailsPage() {
       }
       const rawTools = (spec.approval as { tools?: Record<string, boolean> } | undefined)?.tools
       setApprovalToolsData(rawTools && typeof rawTools === 'object' ? rawTools : undefined)
+      const rawGuardrails = spec.guardrails as HostGuardrails | undefined
+      setGuardrailsData(
+        rawGuardrails && typeof rawGuardrails === 'object' ? rawGuardrails : undefined
+      )
       const specStateless = spec.lifecycle?.stateless === true
       setSavedStateless(specStateless)
       setLifecycleState(String(host.status?.lifecycle?.state ?? ''))
@@ -592,6 +598,53 @@ export default function HostDetailsPage() {
         setError(e instanceof Error ? e.message : 'Failed to save approval tools')
         // Re-throw so HostApprovalSection.handleSave does NOT exit edit mode
         // and the operator's draft is preserved alongside the error banner.
+        throw e
+      } finally {
+        setBusy(false)
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [routeName]
+  )
+
+  // Persist Host.spec.guardrails (hook references + built-ins). Owns only the
+  // guardrails object — every other spec field is preserved via the
+  // `...currentHost.spec` spread (full-replace semantics). Carries the
+  // form-load resourceVersion so a concurrent change 409s instead of being
+  // overwritten (AP-6), surfacing the same reload guidance as the other saves.
+  const persistGuardrails = useCallback(
+    async (next: HostGuardrails) => {
+      setBusy(true)
+      setError('')
+      try {
+        const currentHost = await getHost(routeName)
+        const nextSpec = {
+          ...currentHost.spec,
+          guardrails: next,
+        }
+        const formResourceVersion = formResourceVersionRef.current
+        await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
+          ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
+          spec: nextSpec,
+        })
+        // Reload guardrails/server state while preserving any drafts left open
+        // in the Overview or Model tabs.
+        await loadData('none')
+        // No toast here on purpose: HostGuardrailsSection names the hook it
+        // just changed once this resolves, and a generic 'saved' alongside it
+        // would stack two success toasts on a single remove.
+      } catch (e) {
+        const status = (e as { status?: number } | null)?.status
+        const code = (e as { code?: string } | null)?.code
+        if (status === 409 && code === 'conflict') {
+          setError(
+            "This agent changed since you opened the form (another edit, or the agent's own lifecycle state updated). Reload to see the latest, then re-apply your change."
+          )
+        } else {
+          setError(e instanceof Error ? e.message : 'Failed to save guardrails')
+        }
+        // Re-throw so HostGuardrailsSection knows the save failed and skips
+        // its success toast, leaving the error/conflict banner to explain.
         throw e
       } finally {
         setBusy(false)
@@ -968,9 +1021,11 @@ export default function HostDetailsPage() {
           <HostAdvancedTab
             busy={busy}
             hostName={routeName}
+            initialGuardrails={guardrailsData}
             initialLoading={initialLoading}
             initialTools={approvalToolsData}
             onSaveApprovalTools={persistApprovalTools}
+            onSaveGuardrails={persistGuardrails}
           />
         )}
 

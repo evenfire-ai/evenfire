@@ -26,6 +26,8 @@ export function kindFromPlural(plural: ClerumResourceType): string {
       return 'CommunicationChannel'
     case 'mcpservers':
       return 'McpServer'
+    case 'llmhooks':
+      return 'LlmHook'
     case 'workflowrecipes':
       return 'WorkflowRecipe'
     case 'workflowrecipepolicies':

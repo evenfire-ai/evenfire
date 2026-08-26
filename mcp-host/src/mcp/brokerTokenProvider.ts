@@ -17,6 +17,8 @@
  *                                      forwarded (surfaces as the auth failure
  *                                      U5 later turns into connect_required).
  *   - missing gateway / control token → undefined (fail closed).
+ *   - 401                            → the mcp-host control JWT expired; refresh
+ *                                      it ONCE and retry, then throw.
  *   - any other non-200 / malformed 200 body → throw (never forward a stale or
  *     empty token).
  */
@@ -37,6 +39,17 @@ export interface BrokerTokenProviderDeps {
   gatewayUrl: () => string | undefined
   /** The mcp-host control JWT (scope 'oauth:user-token'). */
   controlToken: () => string | undefined
+  /**
+   * Mint a fresh mcp-host control JWT after control-api rejects the current one
+   * with 401, so `controlToken()` returns a live value on the retry. This is the
+   * same reactive recovery every sibling control-api consumer already gets
+   * (`refreshOnUnauthorized: () => refreshWithRecovery(auth)` in main.ts).
+   *
+   * NOTE: this is the CONTROL JWT (mcp-host → control-api), not the downstream
+   * OAuth token that `McpTokenProvider.refresh()` re-exchanges after an
+   * mcp-server 401. Omitted → no recovery, a 401 throws as before.
+   */
+  refreshControlToken?: () => Promise<void>
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch
   /** Bounded per-request timeout; defaults to DEFAULT_BROKER_FETCH_TIMEOUT_MS. */
@@ -71,17 +84,46 @@ export function createBrokerTokenProvider(
     }
     if (subject.userId) body.userId = subject.userId
     if (subject.contextId) body.contextId = subject.contextId
+    const payload = JSON.stringify(body)
 
-    const res = await fetchImpl(`${gatewayUrl}/api/v1/mcp-oauth/user-token`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${controlToken}`,
-      },
-      body: JSON.stringify(body),
-      // A hung broker must not stall the lazy per-user connect.
-      signal: AbortSignal.timeout(timeoutMs),
-    })
+    const post = async (bearer: string): Promise<Response> =>
+      fetchImpl(`${gatewayUrl}/api/v1/mcp-oauth/user-token`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${bearer}`,
+        },
+        body: payload,
+        // A hung broker must not stall the lazy per-user connect.
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+
+    let res = await post(controlToken)
+
+    // The control JWT has a ~10 min TTL and only rotates when the runtime-auth
+    // chain refreshes. An idle pod therefore reaches control-api with an expired
+    // bearer and gets 401 on every exchange, with nothing in this path to heal
+    // it. Refresh ONCE and retry; the `refreshed` latch plus the "token actually
+    // changed" check bound this to a single extra request per fetchToken() call,
+    // so a refresh that fails (or that control-api answers without a new control
+    // token) cannot loop.
+    if (res.status === 401 && deps.refreshControlToken) {
+      let rotated: string | undefined
+      try {
+        await deps.refreshControlToken()
+        rotated = deps.controlToken()
+      } catch (err) {
+        // Keep the stable broker error below as the surfaced failure; the cause
+        // is logged rather than swallowed.
+        console.warn(
+          `[BrokerTokenProvider] control token refresh failed after 401 for ${server.name}:`,
+          err instanceof Error ? err.message : String(err)
+        )
+      }
+      if (rotated && rotated !== controlToken) {
+        res = await post(rotated)
+      }
+    }
 
     if (res.status === 200) {
       const data = (await res.json()) as { token?: unknown; expiresAt?: unknown }

@@ -3,6 +3,7 @@ import path from 'node:path'
 import { AppService } from './appService.js'
 import { routeClerumOauthCompleted } from './clerumDeepLink.js'
 import { config } from './config.js'
+import { installDesktopTextContextMenus } from './desktopTextContextMenu.js'
 import { createEvenfireDeepLinkRouter } from './evenfireDeepLinkRouter.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
@@ -18,6 +19,7 @@ import {
   parseSandboxUiDeepLink,
 } from './sandboxUiDeepLinks.js'
 import { shouldAcceptSandboxUiProtocolLink } from './sandboxUiProtocolWindowPolicy.js'
+import { wireHostDesktopShortcutRouting } from './shortcutRouter.js'
 import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
 
 const EVENFIRE_APP_NAME = 'Evenfire'
@@ -328,6 +330,7 @@ async function createWindow(): Promise<void> {
     },
   })
   mainWindow = window
+  wireHostDesktopShortcutRouting(window)
   mainWindowRendererReady = false
   window.on('closed', () => {
     if (mainWindow === window) {
@@ -385,6 +388,7 @@ if (gotSingleInstanceLock) {
   app
     .whenReady()
     .then(async () => {
+      installDesktopTextContextMenus()
       wireAdaptiveSystemIcon()
       // Must precede registerIpcHandlers: the SDK IPC handlers resolve the
       // runtime eagerly on first call, and a plugin can be mounted the moment

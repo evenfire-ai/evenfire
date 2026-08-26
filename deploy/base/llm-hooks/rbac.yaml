@@ -1,0 +1,127 @@
+# --- Role: host-context-controller (llm-hooks namespace) ---
+# Namespace-scoped grant for the HCC ServiceAccount to reconcile LlmHook CRDs
+# into shared Deployment+Service+NetworkPolicy workloads (guardrails phase-4).
+# Modeled on deploy/base/mcp-server/rbac.yaml, plus `pods` get/list which the
+# McpServer Role does NOT grant — HCC needs it to read the LIVE pod's container
+# image for status.observedDigest (mirrors the workflow-recipes Role).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: host-context-controller
+  namespace: llm-hooks
+rules:
+  # Watch LlmHook CRDs
+  - apiGroups: ["clerum.io"]
+    resources: ["llmhooks"]
+    verbs: ["get", "list", "watch", "patch"]
+  # Read + write LlmHook status conditions / observedDigest / readyReplicas
+  - apiGroups: ["clerum.io"]
+    resources: ["llmhooks/status"]
+    verbs: ["get", "patch"]
+  # Manage the shared hook Deployments (digest-dedup: one Deployment per pod key)
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # Manage the shared hook Services
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # ConfigMaps (forward-compat for hook config materialization)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # Read hook envSecret content for the credentials-revision digest
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  # Manage the per-pod-key NetworkPolicies (reverse-index ingress + egress)
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # Read the LIVE hook pod's container status for status.observedDigest
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: host-context-controller
+  namespace: llm-hooks
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: host-context-controller
+subjects:
+  - kind: ServiceAccount
+    name: host-context-controller
+    namespace: control-plane
+---
+# --- Role: control-api (llm-hooks namespace) ---
+# The install-hook saga (control-api) mints the hook's credential Secret in
+# llm-hooks and deletes it on rollback/uninstall. LlmHook CR create/delete is
+# granted cluster-wide (deploy/base/cluster-wide/clusterroles.yaml); Secret
+# access is namespace-scoped here, mirroring control-api's mcp-host/control-plane
+# secret Roles.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: control-api-secrets
+  namespace: llm-hooks
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: control-api-secrets
+  namespace: llm-hooks
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: control-api-secrets
+subjects:
+  - kind: ServiceAccount
+    name: control-api
+    namespace: control-plane
+---
+# --- Role: mcp-host hook reader (llm-hooks namespace) ---
+# mcp-host is a READ-ONLY consumer of LlmHook CRs (spec §8.2): at boot each
+# host pod resolves its `Host.spec.guardrails.hooks` references into runtime
+# hook descriptors (endpoint/capabilities/failMode). Host SAs are per-host
+# (`host-<name>-sa` in the mcp-host namespace), so the binding targets the whole
+# mcp-host ServiceAccount group rather than enumerating each host.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mcp-host-hook-reader
+  namespace: llm-hooks
+rules:
+  # get/list/watch — mcp-host resolves referenced hooks and re-resolves live on
+  # LlmHook changes (§8.2). This namespace is tenant-scoped (multi-tenant uses a
+  # per-tenant `<tenant>-llm-hooks` namespace via the namespace prefix), so
+  # list/watch here exposes only THIS tenant's own hooks — no cross-tenant
+  # enumeration. The runtime remains read-only (no write verbs): it can never
+  # mutate hook specs or status (N10).
+  - apiGroups: ["clerum.io"]
+    resources: ["llmhooks"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["clerum.io"]
+    resources: ["llmhooks/status"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mcp-host-hook-reader
+  namespace: llm-hooks
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mcp-host-hook-reader
+subjects:
+  - kind: Group
+    name: system:serviceaccounts:mcp-host
+    apiGroup: rbac.authorization.k8s.io

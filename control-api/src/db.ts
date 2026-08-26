@@ -5915,7 +5915,36 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyGfsUploadFinalizingSchema,
   },
   {
-    version: '0100_oauth_grants_owner_generalization',
+    version: '0100_seed_minimax_allowed_model',
+    apply: async db => {
+      // Seed one sensible default model for the newly added `minimax` provider
+      // (packages/llm-providers). Same shape as 0056/0057/0058: enabled=true (a
+      // provider without credentials is unusable regardless), a `vendor` label
+      // for UI grouping, and ON CONFLICT DO NOTHING so the migration stays
+      // idempotent and never clobbers an admin-edited row. `MiniMax-M2` mirrors
+      // registryCore's minimax defaultModel. Operators curate the rest via
+      // /llm-models.
+      await db.query(`
+        INSERT INTO llm_allowed_models (provider, model, vendor)
+        VALUES
+          ('minimax', 'MiniMax-M2', 'MiniMax')
+        ON CONFLICT DO NOTHING;
+      `)
+    },
+  },
+  {
+    version: '0101_oauth_grants_owner_generalization',
+    // Renamed twice while rebasing onto dev: 0091 -> 0100 -> 0101 (each dev sync
+    // collided with a migration dev landed at the same number). Environments where
+    // the feature branch already deployed recorded it under an earlier name (the
+    // dev cluster most likely as 0100_...). legacyVersions lets the runner mark
+    // 0101 applied from that prior row instead of re-running the DDL and leaving an
+    // orphan schema_migrations entry. Both names are unique to this migration
+    // (dev's 0100 is 0100_seed_minimax_allowed_model), so there is no false-skip.
+    legacyVersions: [
+      '0100_oauth_grants_owner_generalization',
+      '0091_oauth_grants_owner_generalization',
+    ],
     apply: applyOAuthGrantsOwnerGeneralization,
   },
 ]
