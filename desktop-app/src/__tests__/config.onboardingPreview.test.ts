@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
+
+const testUserDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evenfire-test-userdata-'))
 
 vi.mock('electron', () => ({
   app: {
-    getPath: vi.fn(() => '/tmp/evenfire-test-userdata'),
+    getPath: vi.fn(() => testUserDataDir),
     isPackaged: false,
     isReady: vi.fn(() => true),
     setName: vi.fn(),
@@ -130,7 +133,7 @@ describe('EVENFIRE_ONBOARDING_PREVIEW', () => {
     // came up configured and went to sign-in. The switch showed onboarding
     // once and then quietly stopped working.
     const previewDir = path.join(
-      '/tmp/evenfire-test-userdata',
+      testUserDataDir,
       'runtime-configs-onboarding-preview'
     )
     fs.mkdirSync(previewDir, { recursive: true })
