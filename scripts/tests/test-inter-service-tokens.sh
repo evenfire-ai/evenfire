@@ -172,6 +172,23 @@ fi
 assert_other_consumers_restarted "$unchanged_rollout"
 assert_no_secret_material
 
+# Dominant CI redeploy path: no INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET override.
+# Both resolve_token and HCC_HMAC_BEFORE read KUBE_SECRET_HCC.
+preserve_rollout="$TMP/rollout-preserve-or-generate.log"
+KUBE_SECRET_HCC="$HCC_OLD" KUBE_SECRET_WRC="$WRC_OLD" \
+  run_hcc_apply "$preserve_rollout" env \
+  -u INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET \
+  -u INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET \
+  CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=test-member-registration-hmac
+grep -q 'Skipping rollout of control-plane/host-context-controller: hcc-hmac unchanged' "$TMP/stderr"
+if grep -q 'host-context-controller' "$preserve_rollout"; then
+  echo "preserve-or-generate HCC HMAC must not restart host-context-controller" >&2
+  cat "$preserve_rollout" >&2
+  exit 1
+fi
+assert_other_consumers_restarted "$preserve_rollout"
+assert_no_secret_material
+
 changed_rollout="$TMP/rollout-changed.log"
 KUBE_SECRET_HCC="$HCC_OLD" KUBE_SECRET_WRC="$WRC_OLD" \
   run_hcc_apply "$changed_rollout" env \

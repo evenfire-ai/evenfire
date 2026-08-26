@@ -141,7 +141,7 @@ export class ContextMapperServer {
     try {
       return this.hostAuthoritativeFn()
     } catch (err) {
-      console.error('[Server] Host authority check failed:', err)
+      readinessLog.error('host authority check failed', { err })
       return false
     }
   }

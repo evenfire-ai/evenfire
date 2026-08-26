@@ -311,7 +311,11 @@ kctl -n channels patch secret workflow-approval-request-reader-credentials --typ
 # Roll the consumers so they pick up the fresh tokens on first deploy. Safe
 # no-ops if the Deployments do not yet exist. HCC is Recreate + replicas:1
 # and reloads HMAC only at process start, so skip that extra rollout when the
-# in-memory HCC key is unchanged (image/spec applies still roll HCC themselves).
+# HCC key this run writes equals the key already in the Secret (image/spec
+# applies still roll HCC themselves). This is not "the running pod env matches
+# the Secret": an out-of-band kubectl patch of the HCC key, then a re-run that
+# preserve-or-generates from the Secret, will skip. Heal that with
+# FORCE_CONSUMER_RESTART=true.
 for pair in "control-plane:control-api" \
             "control-plane:workflow-recipes" \
             "control-plane:host-context-controller" \

@@ -655,6 +655,48 @@ describe('ContextMapperServer desktop status authority', () => {
       message: 'Host inventory is not authoritative',
     })
   })
+
+  it('fails desktop closed when the Host authority check throws', async () => {
+    const authorityError = new Error('host authority unavailable')
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    server = new ContextMapperServer(
+      new FakeProvider(),
+      0,
+      runningReconciler,
+      hasDesktopFn,
+      () => true,
+      () => {
+        throw authorityError
+      }
+    )
+    server.setReady(true)
+
+    const desktop = await invoke(server, '/api/v1/desktop/host-a')
+    expect(desktop.statusCode).toBe(503)
+    expect(JSON.parse(desktop.body)).toEqual({
+      error: 'Service Unavailable',
+      message: 'Host inventory is not authoritative',
+    })
+    const hostErrors = errorLog.mock.calls
+      .map(args => {
+        try {
+          return JSON.parse(String(args[0])) as {
+            msg?: string
+            err?: { name?: string; message?: string }
+          }
+        } catch {
+          return null
+        }
+      })
+      .filter((entry): entry is { msg: string; err?: { name?: string; message?: string } } =>
+        Boolean(entry && entry.msg === 'host authority check failed')
+      )
+    expect(hostErrors).toHaveLength(1)
+    expect(hostErrors[0].err).toEqual({
+      name: authorityError.name,
+      message: authorityError.message,
+    })
+  })
 })
 
 describe('ContextMapperServer /ready reasons', () => {
@@ -772,7 +814,7 @@ describe('ContextMapperServer /ready reasons', () => {
     })
   })
 
-  it('emits closed reasons through the same resolvers main.ts uses', async () => {
+  it('emits closed reasons through the main.ts resolve*Fn wiring', async () => {
     let detail = authoritativeDetail()
     const watcher = {
       isReadinessInventoryAuthoritative: () =>

@@ -62,6 +62,7 @@ import {
   initialConvergenceRetriesTotal,
 } from './metrics'
 import { NetworkPolicyReconciler, sameContextDesiredRevision } from './networkPolicyReconciler'
+import type { ReadinessInventoryDetail } from './readinessGate'
 import { McpServerReconciler } from './reconciler'
 import { SharedFileSystemReconciler } from './sharedFileSystemReconciler'
 import {
@@ -1013,15 +1014,7 @@ export class McpServerWatcher implements McpServerProvider {
    * by preserving replicas and disabling stateless suspension until recovery.
    * SFS/GFS retain their established eventual-resync contract.
    */
-  getReadinessInventoryDetail(): {
-    stopped: boolean
-    mcpServerCacheSynced: boolean
-    contextCacheSynced: boolean
-    hostCacheSynced: boolean
-    safetyInventoryCertified: boolean
-    contextRevisionAligned: boolean
-    serverRevisionAligned: boolean
-  } {
+  getReadinessInventoryDetail(): ReadinessInventoryDetail {
     return {
       stopped: this.stopped,
       mcpServerCacheSynced: this.mcpServerCacheSynced,
