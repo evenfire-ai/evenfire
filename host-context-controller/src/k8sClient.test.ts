@@ -14,6 +14,7 @@ import {
   listAllSharedFileSystems,
 } from './k8sClient'
 import { registry } from './metrics'
+import { DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE } from './networkPolicyReconciler'
 import { ContextMapperServer } from './server'
 import type { HostCRD, McpServerCRD } from './types'
 
@@ -49,7 +50,27 @@ async function readInitialConvergenceMetric(
   return snapshot.values.find(entry => entry.labels.lane === lane)?.value ?? 0
 }
 
-async function requestReadyOverHttp(server: ContextMapperServer): Promise<{
+async function readLabeledConvergenceMetric(
+  name:
+    | 'clerum_hcc_initial_convergence_swallowed_total'
+    | 'clerum_hcc_initial_convergence_effects_dropped_total'
+    | 'clerum_hcc_initial_convergence_pass_results_total',
+  labels: Record<string, string>
+): Promise<number> {
+  const metric = registry.getSingleMetric(name)
+  if (!metric) throw new Error(`${name} is not registered`)
+  const snapshot = await metric.get()
+  return (
+    snapshot.values.find(entry =>
+      Object.entries(labels).every(([key, value]) => entry.labels[key] === value)
+    )?.value ?? 0
+  )
+}
+
+async function requestHccHttpPath(
+  server: ContextMapperServer,
+  path: '/ready' | '/metrics'
+): Promise<{
   statusCode: number | undefined
   body: string
 }> {
@@ -60,20 +81,81 @@ async function requestReadyOverHttp(server: ContextMapperServer): Promise<{
   }
 
   return new Promise((resolve, reject) => {
-    const request = http.get(
-      { host: '127.0.0.1', port: address.port, path: '/ready' },
-      response => {
-        let body = ''
-        response.setEncoding('utf8')
-        response.on('data', chunk => {
-          body += chunk
-        })
-        response.on('end', () => resolve({ statusCode: response.statusCode, body }))
-      }
-    )
+    const request = http.get({ host: '127.0.0.1', port: address.port, path }, response => {
+      let body = ''
+      response.setEncoding('utf8')
+      response.on('data', chunk => {
+        body += chunk
+      })
+      response.on('end', () => resolve({ statusCode: response.statusCode, body }))
+    })
     request.once('error', reject)
   })
 }
+
+async function requestReadyOverHttp(server: ContextMapperServer): Promise<{
+  statusCode: number | undefined
+  body: string
+}> {
+  return requestHccHttpPath(server, '/ready')
+}
+
+async function requestMetricsOverHttp(server: ContextMapperServer): Promise<{
+  statusCode: number | undefined
+  body: string
+}> {
+  return requestHccHttpPath(server, '/metrics')
+}
+
+// Label order is not part of the Prometheus contract. Match each label
+// independently so a scrape-path pin cannot pass on registry.get() and fail
+// on the text GKE actually keys. Require the pair to end at ',' or '}' so a
+// value cannot match as a prefix of a longer sibling (result="certified"
+// must not hit result="certified-extra").
+function promLabelPairPresent(labelPart: string, key: string, value: string): boolean {
+  const needle = `${key}="${value}"`
+  let from = 0
+  while (from < labelPart.length) {
+    const at = labelPart.indexOf(needle, from)
+    if (at < 0) return false
+    const after = labelPart[at + needle.length]
+    if (after === ',' || after === '}' || after === undefined) return true
+    from = at + 1
+  }
+  return false
+}
+
+function readPromTextMetric(text: string, name: string, labels: Record<string, string>): number {
+  for (const line of text.split('\n')) {
+    if (!line.startsWith(`${name}{`)) continue
+    const close = line.indexOf('}')
+    if (close < 0) continue
+    const labelPart = line.slice(name.length, close + 1)
+    if (
+      !Object.entries(labels).every(([key, value]) => promLabelPairPresent(labelPart, key, value))
+    ) {
+      continue
+    }
+    const value = Number(line.slice(close + 1).trim())
+    return Number.isFinite(value) ? value : 0
+  }
+  return 0
+}
+
+describe('readPromTextMetric', () => {
+  it('does not treat a label value as a prefix of another', () => {
+    const text = [
+      'clerum_hcc_initial_convergence_pass_results_total{lane="NetworkPolicy",result="certified-extra"} 9',
+      'clerum_hcc_initial_convergence_pass_results_total{lane="NetworkPolicy",result="certified"} 3',
+    ].join('\n')
+    expect(
+      readPromTextMetric(text, 'clerum_hcc_initial_convergence_pass_results_total', {
+        lane: 'NetworkPolicy',
+        result: 'certified',
+      })
+    ).toBe(3)
+  })
+})
 
 function stubAuthoritativeInventoryWatch(
   watcher: McpServerWatcher,
@@ -327,6 +409,8 @@ vi.mock('./networkPolicyReconciler', async () => {
   )
   return {
     sameContextDesiredRevision: actual.sameContextDesiredRevision,
+    DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE:
+      actual.DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE,
     NetworkPolicyReconciler: class {
       ensureDefaultPolicies = mocks.ensureDefaultPolicies
       fullReconcile = mocks.netPolFullReconcile
@@ -3908,6 +3992,23 @@ describe('McpServerWatcher startup', () => {
         transport: { type: 'streamableHttp' as const, port: 3000 },
       },
     })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const successTimestampBefore = await readInitialConvergenceMetric(
+      'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+      'NetworkPolicy'
+    )
+    const swallowedBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_initial_convergence_swallowed_total',
+      { lane: 'NetworkPolicy', sink: 'authority-lost' }
+    )
+    const abortedBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_initial_convergence_pass_results_total',
+      { lane: 'NetworkPolicy', result: 'aborted-authority' }
+    )
+    const droppedBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_initial_convergence_effects_dropped_total',
+      { lane: 'NetworkPolicy', kind: 'context' }
+    )
     mocks.netPolFullReconcile.mockImplementation(async (contexts, servers, options) => {
       pass += 1
       if (pass === 1) {
@@ -3942,7 +4043,68 @@ describe('McpServerWatcher startup', () => {
 
     expect(appliedContexts).toEqual([])
     expect(appliedServers).toEqual([])
-    expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(4)
+    expect(
+      warnSpy.mock.calls.some(call =>
+        String(call[0]).includes('pass ended without certifying: inventory authority lost')
+      )
+    ).toBe(true)
+    expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(5)
+    expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(true)
+    expect(
+      await readInitialConvergenceMetric(
+        'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+        'NetworkPolicy'
+      )
+    ).toBe(successTimestampBefore)
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_swallowed_total', {
+        lane: 'NetworkPolicy',
+        sink: 'authority-lost',
+      })
+    ).toBe(swallowedBefore + 1)
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_pass_results_total', {
+        lane: 'NetworkPolicy',
+        result: 'aborted-authority',
+      })
+    ).toBe(abortedBefore + 1)
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_effects_dropped_total', {
+        lane: 'NetworkPolicy',
+        kind: 'context',
+      })
+    ).toBe(droppedBefore + 1)
+    const authorityServer = new ContextMapperServer(watcher, 0, undefined, undefined, () =>
+      watcher.isReadinessInventoryAuthoritative()
+    )
+    await authorityServer.start()
+    authorityServer.setReady(true)
+    try {
+      const scraped = await requestMetricsOverHttp(authorityServer)
+      expect(scraped.statusCode).toBe(200)
+      expect(
+        readPromTextMetric(scraped.body, 'clerum_hcc_initial_convergence_swallowed_total', {
+          lane: 'NetworkPolicy',
+          sink: 'authority-lost',
+        })
+      ).toBe(swallowedBefore + 1)
+      expect(
+        readPromTextMetric(scraped.body, 'clerum_hcc_initial_convergence_pass_results_total', {
+          lane: 'NetworkPolicy',
+          result: 'aborted-authority',
+        })
+      ).toBe(abortedBefore + 1)
+      expect(
+        readPromTextMetric(
+          scraped.body,
+          'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+          { lane: 'NetworkPolicy' }
+        )
+      ).toBe(successTimestampBefore)
+      expect((await requestReadyOverHttp(authorityServer)).statusCode).toBe(503)
+    } finally {
+      await authorityServer.stop()
+    }
     ;(watcher as any).contexts.clear()
     ;(watcher as any).servers.clear()
     ;(watcher as any).contexts.set('current-context', {
@@ -3966,6 +4128,13 @@ describe('McpServerWatcher startup', () => {
     expect(appliedContexts).toEqual(['current-context'])
     expect(appliedServers).toEqual(['current-server'])
     expect((watcher as any).initialConvergenceRetryAttempts.has('NetworkPolicy')).toBe(false)
+    expect(
+      await readInitialConvergenceMetric(
+        'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+        'NetworkPolicy'
+      )
+    ).toBeGreaterThan(successTimestampBefore)
+    warnSpy.mockRestore()
     await watcher.stop()
   })
 
@@ -4298,15 +4467,48 @@ describe('McpServerWatcher startup', () => {
   })
 
   it('defers NetworkPolicy full convergence until both inventories are authoritative', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const watcher = new McpServerWatcher()
     ;(watcher as any).contextCacheSynced = true
     ;(watcher as any).mcpServerCacheSynced = false
     ;(watcher as any).initialConvergenceRetryAttempts.set('NetworkPolicy', 2)
+    const successTimestampBefore = await readInitialConvergenceMetric(
+      'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+      'NetworkPolicy'
+    )
+    const swallowedBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_initial_convergence_swallowed_total',
+      { lane: 'NetworkPolicy', sink: 'unsynced' }
+    )
+    const deferredBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_initial_convergence_pass_results_total',
+      { lane: 'NetworkPolicy', result: 'deferred-unsynced' }
+    )
 
     await (watcher as any).runInitialNetworkPolicyConvergence()
 
     expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
-    expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(2)
+    expect(warnSpy.mock.calls.some(call => String(call[0]).includes('caches unsynced'))).toBe(true)
+    expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(3)
+    expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(true)
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_swallowed_total', {
+        lane: 'NetworkPolicy',
+        sink: 'unsynced',
+      })
+    ).toBe(swallowedBefore + 1)
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_pass_results_total', {
+        lane: 'NetworkPolicy',
+        result: 'deferred-unsynced',
+      })
+    ).toBe(deferredBefore + 1)
+    expect(
+      await readInitialConvergenceMetric(
+        'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+        'NetworkPolicy'
+      )
+    ).toBe(successTimestampBefore)
     ;(watcher as any).mcpServerCacheSynced = true
     await (watcher as any).runInitialNetworkPolicyConvergence()
 
@@ -4322,6 +4524,291 @@ describe('McpServerWatcher startup', () => {
       })
     )
     expect((watcher as any).initialConvergenceRetryAttempts.has('NetworkPolicy')).toBe(false)
+    expect(
+      await readInitialConvergenceMetric(
+        'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+        'NetworkPolicy'
+      )
+    ).toBeGreaterThan(successTimestampBefore)
+    warnSpy.mockRestore()
+    await watcher.stop()
+  })
+
+  it('re-runs NetworkPolicy convergence from the retry ladder after a silent-sink miss without later watch events', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = false
+    const successTimestampBefore = await readInitialConvergenceMetric(
+      'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+      'NetworkPolicy'
+    )
+    const certifiedBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_initial_convergence_pass_results_total',
+      { lane: 'NetworkPolicy', result: 'certified' }
+    )
+
+    await (watcher as any).runInitialNetworkPolicyConvergence()
+
+    expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
+    expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(1)
+    expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(true)
+    expect(
+      await readInitialConvergenceMetric(
+        'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+        'NetworkPolicy'
+      )
+    ).toBe(successTimestampBefore)
+    ;(watcher as any).mcpServerCacheSynced = true
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce()
+    expect((watcher as any).initialConvergenceRetryAttempts.has('NetworkPolicy')).toBe(false)
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_pass_results_total', {
+        lane: 'NetworkPolicy',
+        result: 'certified',
+      })
+    ).toBe(certifiedBefore + 1)
+    expect(
+      await readInitialConvergenceMetric(
+        'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+        'NetworkPolicy'
+      )
+    ).toBeGreaterThan(successTimestampBefore)
+
+    mocks.netPolFullReconcile.mockClear()
+    ;(watcher as any).mcpServerCacheSynced = false
+    await (watcher as any).runInitialNetworkPolicyConvergence()
+    expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
+    expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(1)
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushMicrotasks()
+    expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
+    expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(2)
+    expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(true)
+    await vi.advanceTimersByTimeAsync(14_999)
+    await flushMicrotasks()
+    expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
+    ;(watcher as any).mcpServerCacheSynced = true
+    await vi.advanceTimersByTimeAsync(1)
+    await flushMicrotasks()
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce()
+    expect((watcher as any).initialConvergenceRetryAttempts.has('NetworkPolicy')).toBe(false)
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_pass_results_total', {
+        lane: 'NetworkPolicy',
+        result: 'certified',
+      })
+    ).toBe(certifiedBefore + 2)
+    warnSpy.mockRestore()
+    await watcher.stop()
+  })
+
+  it('recovers HTTP /ready after a NetworkPolicy unsynced swallow without later watch events', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    mocks.hasCertifiedSafetyInventory.mockReturnValue(false)
+    mocks.netPolFullReconcile.mockImplementation(async (...args: unknown[]) => {
+      const options = args[2] as { onAuthoritativeRevocationComplete?: () => void } | undefined
+      options?.onAuthoritativeRevocationComplete?.()
+      mocks.hasCertifiedSafetyInventory.mockReturnValue(true)
+    })
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = false
+    ;(watcher as any).hostCacheSynced = true
+    const certifiedBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_initial_convergence_pass_results_total',
+      { lane: 'NetworkPolicy', result: 'certified' }
+    )
+    const deferredBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_initial_convergence_pass_results_total',
+      { lane: 'NetworkPolicy', result: 'deferred-unsynced' }
+    )
+    const swallowedBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_initial_convergence_swallowed_total',
+      { lane: 'NetworkPolicy', sink: 'unsynced' }
+    )
+    const retriesBefore = await readInitialConvergenceMetric(
+      'clerum_hcc_initial_convergence_retries_total',
+      'NetworkPolicy'
+    )
+    const successTimestampBefore = await readInitialConvergenceMetric(
+      'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+      'NetworkPolicy'
+    )
+    // Prior tests in this file leave a process-global last-success sample that
+    // can sit ahead of a freshly installed fake clock. Pin time past that
+    // sample so "timestamp moved" cannot pass by comparing against a rewind.
+    vi.setSystemTime(Math.max(Date.now(), Math.round(successTimestampBefore * 1000) + 1000))
+    const server = new ContextMapperServer(watcher, 0, undefined, undefined, () =>
+      watcher.isReadinessInventoryAuthoritative()
+    )
+    await server.start()
+    server.setReady(true)
+
+    try {
+      await (watcher as any).runInitialNetworkPolicyConvergence()
+      expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(503)
+      const deferredScrape = await requestMetricsOverHttp(server)
+      expect(deferredScrape.statusCode).toBe(200)
+      expect(
+        readPromTextMetric(deferredScrape.body, 'clerum_hcc_initial_convergence_swallowed_total', {
+          lane: 'NetworkPolicy',
+          sink: 'unsynced',
+        })
+      ).toBe(swallowedBefore + 1)
+      expect(
+        readPromTextMetric(
+          deferredScrape.body,
+          'clerum_hcc_initial_convergence_pass_results_total',
+          {
+            lane: 'NetworkPolicy',
+            result: 'deferred-unsynced',
+          }
+        )
+      ).toBe(deferredBefore + 1)
+      expect(
+        readPromTextMetric(deferredScrape.body, 'clerum_hcc_initial_convergence_retries_total', {
+          lane: 'NetworkPolicy',
+        })
+      ).toBe(retriesBefore + 1)
+      expect(
+        readPromTextMetric(
+          deferredScrape.body,
+          'clerum_hcc_initial_convergence_pass_results_total',
+          {
+            lane: 'NetworkPolicy',
+            result: 'certified',
+          }
+        )
+      ).toBe(certifiedBefore)
+      ;(watcher as any).mcpServerCacheSynced = true
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(503)
+      await vi.advanceTimersByTimeAsync(5000)
+      await flushMicrotasks()
+
+      expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce()
+      expect(
+        await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_pass_results_total', {
+          lane: 'NetworkPolicy',
+          result: 'certified',
+        })
+      ).toBe(certifiedBefore + 1)
+      expect(
+        await readInitialConvergenceMetric(
+          'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+          'NetworkPolicy'
+        )
+      ).toBeGreaterThan(successTimestampBefore)
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(200)
+      const certifiedScrape = await requestMetricsOverHttp(server)
+      expect(certifiedScrape.statusCode).toBe(200)
+      expect(
+        readPromTextMetric(certifiedScrape.body, 'clerum_hcc_initial_convergence_swallowed_total', {
+          lane: 'NetworkPolicy',
+          sink: 'unsynced',
+        })
+      ).toBe(swallowedBefore + 1)
+      expect(
+        readPromTextMetric(
+          certifiedScrape.body,
+          'clerum_hcc_initial_convergence_pass_results_total',
+          {
+            lane: 'NetworkPolicy',
+            result: 'deferred-unsynced',
+          }
+        )
+      ).toBe(deferredBefore + 1)
+      expect(
+        readPromTextMetric(
+          certifiedScrape.body,
+          'clerum_hcc_initial_convergence_pass_results_total',
+          {
+            lane: 'NetworkPolicy',
+            result: 'certified',
+          }
+        )
+      ).toBe(certifiedBefore + 1)
+      expect(
+        readPromTextMetric(
+          certifiedScrape.body,
+          'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+          { lane: 'NetworkPolicy' }
+        )
+      ).toBeGreaterThan(successTimestampBefore)
+    } finally {
+      mocks.hasCertifiedSafetyInventory.mockReturnValue(true)
+      mocks.netPolFullReconcile.mockImplementation(async (...args: unknown[]) => {
+        const options = args[2] as { onAuthoritativeRevocationComplete?: () => void } | undefined
+        options?.onAuthoritativeRevocationComplete?.()
+      })
+      warnSpy.mockRestore()
+      await server.stop()
+      await watcher.stop()
+    }
+  })
+
+  it('names a generic NetworkPolicy catch failure failed instead of aborted-bump', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    mocks.netPolFullReconcile.mockRejectedValueOnce(new Error('apiserver 5xx'))
+    const failedBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_initial_convergence_pass_results_total',
+      { lane: 'NetworkPolicy', result: 'failed' }
+    )
+    const bumpBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_initial_convergence_pass_results_total',
+      { lane: 'NetworkPolicy', result: 'aborted-bump' }
+    )
+
+    await (watcher as any).runInitialNetworkPolicyConvergence()
+
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_pass_results_total', {
+        lane: 'NetworkPolicy',
+        result: 'failed',
+      })
+    ).toBe(failedBefore + 1)
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_pass_results_total', {
+        lane: 'NetworkPolicy',
+        result: 'aborted-bump',
+      })
+    ).toBe(bumpBefore)
+    expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(1)
+    errorSpy.mockRestore()
+    await watcher.stop()
+  })
+
+  it('names the inventory-changed throw aborted-bump', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    mocks.netPolFullReconcile.mockRejectedValueOnce(
+      new Error(DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE)
+    )
+    const bumpBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_initial_convergence_pass_results_total',
+      { lane: 'NetworkPolicy', result: 'aborted-bump' }
+    )
+
+    await (watcher as any).runInitialNetworkPolicyConvergence()
+
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_pass_results_total', {
+        lane: 'NetworkPolicy',
+        result: 'aborted-bump',
+      })
+    ).toBe(bumpBefore + 1)
+    expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(1)
+    errorSpy.mockRestore()
     await watcher.stop()
   })
 
