@@ -157,6 +157,53 @@ describe('OnboardingPage', () => {
     expect(hosted.textContent).not.toMatch(/free|trial|week|\d+\s*day/i)
   })
 
+  it('offers an undecided answer that compares the two run styles', async () => {
+    const user = userEvent.setup()
+
+    renderOnboarding()
+    await user.click(screen.getByRole('button', { name: /No, I’m just getting started/ }))
+    await user.click(screen.getByRole('button', { name: /I have no idea/ }))
+
+    expect(screen.getByText('Which one is right for you?')).toBeTruthy()
+
+    // Both options are described, each with an upside and a downside — a
+    // comparison that only lists benefits is an advert, not a comparison.
+    const compare = screen.getByText('Which one is right for you?').closest('section')
+    const copy = compare?.textContent || ''
+    expect(copy).toContain('Evenfire hosts it')
+    expect(copy).toContain('You run it yourself')
+    expect(screen.getAllByText('+').length).toBeGreaterThanOrEqual(2)
+    expect(screen.getAllByText('−').length).toBe(2)
+  })
+
+  it('makes no cost claims while hosted signup does not exist', async () => {
+    const user = userEvent.setup()
+
+    renderOnboarding()
+    await user.click(screen.getByRole('button', { name: /No, I’m just getting started/ }))
+    await user.click(screen.getByRole('button', { name: /I have no idea/ }))
+
+    const copy = screen.getByText('Which one is right for you?').closest('section')?.textContent
+    expect(copy).not.toMatch(/free|trial|price|pricing|\$|per seat|subscription/i)
+  })
+
+  it('lets the undecided user commit to either run style', async () => {
+    const user = userEvent.setup()
+
+    renderOnboarding()
+    await user.click(screen.getByRole('button', { name: /No, I’m just getting started/ }))
+    await user.click(screen.getByRole('button', { name: /I have no idea/ }))
+    await user.click(screen.getByRole('button', { name: 'I’ll run it myself' }))
+    expect(screen.getByText('Run Evenfire yourself')).toBeTruthy()
+
+    // Back returns to the comparison, not past it to Q2.
+    await user.click(screen.getByRole('button', { name: 'Back' }))
+    expect(screen.getByText('Which one is right for you?')).toBeTruthy()
+
+    await user.click(screen.getByRole('button', { name: 'Evenfire hosts it' }))
+    expect(screen.getByText('Evenfire hosts it for you')).toBeTruthy()
+  })
+
   it('routes the hosted answer to a link-out step with a manual fallback', async () => {
     const user = userEvent.setup()
     const handleSaveRuntimeConfig = vi.fn()

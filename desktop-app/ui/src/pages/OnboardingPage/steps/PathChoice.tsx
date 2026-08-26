@@ -39,6 +39,16 @@ export function PathChoice({ step, onAnswerOrigin, onAnswerRunStyle }: PathChoic
               Deploy Evenfire to a cluster you control.
             </span>
           </SelectableOption>
+          <SelectableOption
+            className="onboarding-option"
+            size="lg"
+            onClick={() => onAnswerRunStyle('compare')}
+          >
+            <span className="onboarding-option__title">I have no idea</span>
+            <span className="onboarding-option__hint">
+              Tell me more about the other two options.
+            </span>
+          </SelectableOption>
         </div>
       </>
     )

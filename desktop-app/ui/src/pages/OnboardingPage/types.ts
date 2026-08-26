@@ -6,13 +6,25 @@
  * action touches disk.
  */
 
-export type OnboardingStep = 'origin' | 'runStyle' | 'invited' | 'hosted' | 'selfHosted' | 'manual'
+export type OnboardingStep =
+  | 'origin'
+  | 'runStyle'
+  | 'compare'
+  | 'invited'
+  | 'hosted'
+  | 'selfHosted'
+  | 'manual'
 
 /** Q1 — "Do you already have an Evenfire server?" */
 export type OnboardingOriginAnswer = 'invited' | 'haveAddress' | 'gettingStarted'
 
-/** Q2 — "How do you want to run Evenfire?" */
-export type OnboardingRunStyleAnswer = 'hosted' | 'selfHosted'
+/**
+ * Q2 — "How do you want to run Evenfire?"
+ *
+ * `compare` is the undecided answer: it leads to a side-by-side of the other
+ * two rather than committing the user to either.
+ */
+export type OnboardingRunStyleAnswer = 'hosted' | 'selfHosted' | 'compare'
 
 export interface OnboardingViewModel {
   step: OnboardingStep

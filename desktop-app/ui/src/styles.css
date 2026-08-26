@@ -10263,6 +10263,9 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
    for a card that holds still. Capped against the viewport so a short window
    scrolls the body instead of overflowing. */
 .auth-card--flow {
+  /* 20% wider than the base auth card (420px): the wizard carries option rows
+     and the run-style comparison, which read cramped at sign-in's width. */
+  width: min(504px, 94vw);
   height: min(540px, 86vh);
   /* header, divider, body, footer — the body takes the slack. */
   grid-template-rows: auto auto 1fr auto;
@@ -10316,6 +10319,60 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   font-weight: var(--font-weight-regular);
   line-height: 1.4;
   color: var(--text-muted);
+}
+
+/* Q2's "I have no idea" branch: the two run styles compared. Stacked rather
+   than side-by-side columns, which would be unreadable at the card's width. */
+.onboarding-compare {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.onboarding-compare__group {
+  display: grid;
+  gap: var(--space-1-5);
+}
+
+.onboarding-compare__title {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  color: var(--text);
+}
+
+.onboarding-compare__lead {
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.onboarding-compare__list {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.onboarding-compare__item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1-5);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.onboarding-compare__mark {
+  font-weight: var(--font-weight-semibold);
+}
+
+.onboarding-compare__mark--pro {
+  color: var(--success);
+}
+
+.onboarding-compare__mark--con {
+  color: var(--warning);
 }
 
 .auth-button-loading {

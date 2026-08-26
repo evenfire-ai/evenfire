@@ -54,6 +54,7 @@ export function useOnboardingController(): OnboardingViewModel {
 
   const answerRunStyle = useCallback(
     (answer: OnboardingRunStyleAnswer) => {
+      if (answer === 'compare') return goTo('compare')
       goTo(answer === 'hosted' ? 'hosted' : 'selfHosted')
     },
     [goTo]

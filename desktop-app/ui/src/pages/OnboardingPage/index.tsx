@@ -1,5 +1,6 @@
 import { AuthBrand } from '@components/AuthBrand'
 import { RuntimeConfigDock } from '@components/RuntimeConfigDock'
+import { CompareRunStyles } from './steps/CompareRunStyles'
 import { Hosted } from './steps/Hosted'
 import { InvitedMember } from './steps/InvitedMember'
 import { ManualEnvironment } from './steps/ManualEnvironment'
@@ -37,6 +38,12 @@ export function OnboardingPage({ onboarding }: OnboardingPageProps) {
               step={step}
               onAnswerOrigin={answerOrigin}
               onAnswerRunStyle={answerRunStyle}
+            />
+          ) : null}
+          {step === 'compare' ? (
+            <CompareRunStyles
+              onChooseHosted={() => answerRunStyle('hosted')}
+              onChooseSelfHosted={() => answerRunStyle('selfHosted')}
             />
           ) : null}
           {step === 'invited' ? <InvitedMember /> : null}
