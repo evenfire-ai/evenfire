@@ -5,11 +5,12 @@ with [`frontend-style-rules.md`](./frontend-style-rules.md) and
 [`../../desktop-app/ui/docs/STYLE_STANDARDIZATION.md`](../../desktop-app/ui/docs/STYLE_STANDARDIZATION.md).
 
 They do not apply to `desktop-app/**` outside `ui/**`. Electron main-process,
-preload, IPC, and shared scripts follow the repository-wide TypeScript/Node and
-Desktop security guidance, not renderer styling or page-layout rules.
+preload, IPC, and shared scripts follow the repository-wide guidance and their
+existing local contracts, not renderer styling or page-layout rules.
 
 ## Navigation
 
+- Reusable configuration constants live under `src/constants/`.
 - Import top-level and nested in-memory destinations from
   `src/constants/navigation.ts`.
 - Never inline Desktop route IDs in navigation handlers, comparisons, sidebar

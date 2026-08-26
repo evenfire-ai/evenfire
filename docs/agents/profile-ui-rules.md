@@ -13,6 +13,7 @@ These provider-neutral rules apply only to `profile-ui/**`. Combine them with
 - Components and primitives remain colocated under `app/components/` in
   folders with `index.tsx` and colocated support such as `types.ts`. Do not
   migrate Profile UI to Control UI's `components/ui/` structure.
+- Reusable configuration constants live under `app/constants/`.
 - Reuse Profile UI's existing primitives, including `Button`, `TextInput`,
   `SelectControl`, `FormField`, and `EditableList`.
 
@@ -30,8 +31,10 @@ These provider-neutral rules apply only to `profile-ui/**`. Combine them with
 
 ## Page patterns
 
-- Use Profile UI's existing `AuthGate`, `CreatePageHeader`, create-panel,
-  form-grid, and action-footer patterns for authenticated create/install flows.
+- Use Profile UI's existing `AuthGate`, `CreateFlowPanel`, `CreatePageHeader`,
+  `CreateStepFlow`, `cu-agent-form-stack`, and `cu-create-actions` patterns for
+  authenticated create/install flows. Put Cancel or Back in a ghost button and
+  the primary continuation or submit action in the default primary button.
 - Full-screen create/install headings use `<h2>`. Modal panel headings use
   `<h3>`; table or panel labels are not headings.
 - Reserve `cu-modal-panel` for overlay/dialog contexts rather than full-screen

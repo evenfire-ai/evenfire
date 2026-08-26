@@ -40,6 +40,7 @@ being changed:
 - Prefer existing tokens for spacing, radii, font sizes, shadows, and motion.
   Add a scoped token only when no existing token fits; promote it to the
   application's token file only when it is shared.
+- Use the application's spacing scale instead of introducing raw `rem` values.
 - Put token declarations and shared CSS classes/layout in the files below.
   Token files declare values; shared-style files own reusable selectors.
 
@@ -53,6 +54,8 @@ being changed:
 - Prefer a named CSS class over inline style. Inline style is reserved for
   values that are genuinely computed at runtime; an application's narrower
   guidance may restrict this further.
+- Use CSS classes for table and column width or alignment when responsive
+  styles need to override those values.
 
 ## Components and controls
 
@@ -61,6 +64,9 @@ being changed:
   variant-driven buttons from the target application's established primitives.
 - Keep primitive APIs narrow and behavior-oriented. Consolidate cosmetic-only
   variants rather than building an oversized component.
+- Express behaviorally distinct button styles through the application's
+  established variants, such as `primary`, `secondary`, `ghost`, or `danger`,
+  rather than duplicating button markup.
 - Reusable components and route-section components should use the target
   application's established folder convention. Keep related `types.ts`,
   `constants.ts`, and other support files beside the component.
@@ -82,10 +88,11 @@ being changed:
   warnings, errors, or information that must remain visible while the user
   acts.
 - Use stable React keys for lists that can reorder or remove items. Never use
-  an array index for those lists.
+  an array index for those lists; use a UUID assigned at creation or a natural
+  unique identifier from the data.
 - Give every non-input interactive element a token-based `:focus-visible`
-  treatment. Use `:focus-visible`, not `:focus`, so mouse clicks do not show a
-  keyboard focus ring.
+  treatment with an appropriate offset. Use `:focus-visible`, not `:focus`, so
+  mouse clicks do not show a keyboard focus ring.
 - Maintain a meaningful heading hierarchy and avoid multiple `<h1>` elements
   on one page. Follow the application's canonical page and modal heading
   levels.

@@ -148,7 +148,8 @@ Never hardcode `700`, `0.06em`, `11px`, or `var(--font-size-xs)` / `var(--text-d
 
 ## 4. Common Controls — Use Them
 
-Imports come from `@components/Common`. The exported set is fixed:
+Imports come from `@components/Common`. The established form and status
+primitives include:
 
 | Primitive      | Key API                                                          |
 | -------------- | ---------------------------------------------------------------- |
@@ -227,6 +228,8 @@ What it catches today (errors block the commit):
 - `da-no-hex-in-css` — hex literal in any CSS file outside `tokens.css` and the 3 legacy files.
 - `da-no-raw-font-size` — `font-size: 13px` / `1rem` outside `tokens.css`. Use one of `var(--font-size-{2xs|xs|sm|md|lg|xl|2xl|3xl|4xl})`.
 - `da-no-new-component-css` — new `.css` files under `src/` other than the 5 allowlisted ones.
+- `da-no-hover-motion` — non-`none` `transform` or `filter` declarations in
+  Desktop `:hover` blocks. Use background, border, text color, or shadow.
 
 Plus two warn-level checks (listed but don't block):
 
@@ -263,6 +266,9 @@ To extend rules or add coverage to control-ui / profile-ui, edit
 `scripts/style-rules/rules.mjs`. The checker has no external dependencies
 and the full rule set is ~200 lines of readable JS — see
 `scripts/style-rules/README.md`.
+
+Keep this document synchronized with the checker. Do not add an enforcement
+rule without documenting its behavior and scope here.
 
 ## 8. Anti-patterns to avoid
 

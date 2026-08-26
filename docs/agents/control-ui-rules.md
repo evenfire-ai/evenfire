@@ -12,6 +12,7 @@ These provider-neutral rules apply only to `control-ui/**`. Combine them with
 - Use the `cu-` prefix for shared utility classes.
 - Reusable components live under `components/` in folders with `index.tsx` and
   colocated support such as `types.ts`.
+- Reusable configuration constants live under `app/constants/`.
 - Reuse the primitives exported by `components/ui/index.tsx`: `Button`,
   `Field`, `TextInput`, `SelectInput`, `TextAreaInput`, `CheckboxField`, and
   `FormSection`.
@@ -36,8 +37,9 @@ These provider-neutral rules apply only to `control-ui/**`. Combine them with
   Disable header CTAs during initial loading, and let only the content pane
   scroll when rows overflow.
 - Use `CreatePageHeader` plus `cu-create-panel`, `cu-create-content`, and
-  `cu-create-actions` for full-screen create/install pages. Use `<h2>` for the
-  create-page heading.
+  `cu-form-grid` for full-screen create/install pages. Put Cancel in a ghost
+  button and Submit in a primary button inside `cu-create-actions`. Use `<h2>`
+  for the create-page heading.
 - Wrap auth-gated pages in `<AuthGate>`.
 - Reserve `cu-modal-panel` for overlay/dialog contexts. Modal panel headings use
   `<h3>`; table panel labels are not headings.
