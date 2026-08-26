@@ -494,7 +494,10 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
 
     dialog = await openResourceManage(page, shareFolder)
     await selectOrdinarySubject(page, operatorJourney.ordinaryEmail)
-    await dialog.getByRole('button', { name: 'Create share', exact: true }).click()
+    await dialog
+      .getByRole('button', { name: `Options for ${shareFolder.name}`, exact: true })
+      .click()
+    await dialog.getByRole('menuitem', { name: 'Create share', exact: true }).click()
     await expectToast(page, '1 share created')
     await expect
       .poll(() => operatorJourney.findShare(shareFolder.resourceId), {
