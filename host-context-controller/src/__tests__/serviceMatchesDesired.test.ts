@@ -46,7 +46,7 @@ describe('serviceMatchesDesired', () => {
       metadata: {
         resourceVersion: '1776125',
         uid: '11111111-2222-3333-4444-555555555555',
-        creationTimestamp: '2026-04-01T00:00:00.000Z',
+        creationTimestamp: new Date('2026-04-01T00:00:00.000Z'),
         generation: 1,
         managedFields: [{ manager: 'kube-apiserver', operation: 'Update' }],
         selfLink: '/api/v1/namespaces/ns/services/svc',

@@ -55,7 +55,7 @@ function asApiserverService(desired: k8s.V1Service, drift?: { port?: number }): 
     metadata: {
       resourceVersion: '4',
       uid: '44444444-5555-6666-7777-888888888888',
-      creationTimestamp: '2026-04-01T00:00:00.000Z',
+      creationTimestamp: new Date('2026-04-01T00:00:00.000Z'),
       generation: 1,
       managedFields: [{ manager: 'kube-apiserver', operation: 'Update' }],
       name: desired.metadata?.name,
@@ -68,8 +68,8 @@ function asApiserverService(desired: k8s.V1Service, drift?: { port?: number }): 
 
 function updatedServiceLogs(log: ReturnType<typeof vi.spyOn>, needle: string): string[] {
   return log.mock.calls
-    .map(call => String(call[0]))
-    .filter(line => line.includes('Updated') && line.includes(needle))
+    .map((call: unknown[]) => String(call[0]))
+    .filter((line: string) => line.includes('Updated') && line.includes(needle))
 }
 
 describe('LlmHook ensureService no-op gate', () => {
