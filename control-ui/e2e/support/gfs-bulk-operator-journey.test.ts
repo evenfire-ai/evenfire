@@ -86,7 +86,9 @@ export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> 
       const panel = grantPanel()
       await expect(panel).toBeVisible()
       await expect(panel.getByLabel('Subject ID')).toHaveCount(0)
-      await expect(panel.getByRole('checkbox', { name: 'Include descendants' })).toBeChecked()
+      await expect(
+        panel.getByRole('checkbox', { name: 'Include contents of this folder' })
+      ).toBeChecked()
 
       await chooseGrantSubject(panel, E2E_TEST_EMAIL, E2E_TEST_NAME)
       await chooseGrantSubject(panel, targetTeam.name, targetTeam.name)
@@ -194,7 +196,7 @@ export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> 
       await page.getByRole('menuitem', { name: 'Manage access' }).click()
       const reopenedPanel = grantPanel()
       await expect(reopenedPanel).toBeVisible()
-      const existingAccess = reopenedPanel.getByRole('region', { name: 'Existing access' })
+      const existingAccess = reopenedPanel.getByRole('region', { name: 'Who has access' })
       await expect(existingAccess.getByText(E2E_TEST_NAME, { exact: true })).toBeVisible()
       await expect(existingAccess.getByText(targetTeam.name, { exact: true })).toBeVisible()
       await expect(existingAccess.getByText('chatllm (Stateful)', { exact: true })).toBeVisible()
@@ -202,9 +204,7 @@ export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> 
         existingAccess.getByText('chatllm-stateless (Stateless)', { exact: true })
       ).toBeVisible()
       await expect(existingAccess.getByText(workflowRecipe.name, { exact: true })).toBeVisible()
-      await expect(
-        existingAccess.getByText('Grant · read, write · resource and descendants')
-      ).toHaveCount(5)
+      await expect(existingAccess.getByText('Direct grant · host')).toHaveCount(5)
 
       const revokeResponsePromise = page.waitForResponse(
         response =>

@@ -839,13 +839,21 @@ export class McpManager {
         // U5 reactive-consent marker: a live 401 on an oauth server (surfaced
         // only AFTER the client's single forced-refresh retry, so already
         // terminal-after-retry — no loop) means the user must (re)connect. Gate
-        // strictly on `auth.type==='oauth'` (covers BOTH per-user and shared
-        // grantScope='context' — the shared flavor bootstraps on its first user)
-        // AND `status===401`. A 403 (insufficient scope) is TERMINAL: no marker,
-        // no connect flow. static (secretRef) has no consent flow → excluded by
-        // the oauth type check. The marker is attached as a typed field so the
-        // caller sees it (NOT flattened into the opaque error).
-        if (info?.auth?.type === 'oauth' && error.status === 401) {
+        // strictly on `authKind ∈ {oauth-user, oauth-context}` (covers BOTH
+        // per-user and shared grantScope='context' — the shared flavor bootstraps
+        // on its first user) AND `status===401`. A 403 (insufficient scope) is
+        // TERMINAL: no marker, no connect flow. static (secretRef) has no consent
+        // flow → excluded by the authKind check. The marker is attached as a typed
+        // field so the caller sees it (NOT flattened into the opaque error).
+        //
+        // NOTE: this gate reads `authKind` (the HCC v2 inventory field), NOT the
+        // pre-mini-spec-10 `auth.type` — `decodeMcpServer` populates `authKind`
+        // and never `auth`, so `info.auth?.type` is always undefined here and the
+        // old check silently disabled reactive consent for every oauth server.
+        if (
+          (info?.authKind === 'oauth-user' || info?.authKind === 'oauth-context') &&
+          error.status === 401
+        ) {
           return {
             toolName: fullToolName,
             result: { error: error.message },

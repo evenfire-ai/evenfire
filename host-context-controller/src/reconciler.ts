@@ -34,6 +34,7 @@ import {
   preserveObjectAnnotations,
   preserveServiceAssignedFields,
   replaceWithConflictRetry,
+  serviceMatchesDesired,
 } from './utils'
 
 /**
@@ -1547,6 +1548,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           logPrefix: '[Reconciler]',
           body: service,
           mergeExisting: preserveServiceAssignedFields,
+          isUpToDate: serviceMatchesDesired,
           read: () =>
             this.coreApi.readNamespacedService({
               name: server.name,

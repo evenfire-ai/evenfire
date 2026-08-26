@@ -598,6 +598,22 @@ export function registerIpcHandlers(service: AppService): void {
     }
   )
   ipcMain.handle(
+    'gfs:moveResource',
+    async (
+      event,
+      payload: { resourceId: string; destinationId: string; drive?: string; ifMatch?: number }
+    ) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      return service.moveGfsResource(
+        sanitizeString(payload?.resourceId),
+        sanitizeString(payload?.destinationId),
+        drive,
+        sanitizeOptionalInteger(payload?.ifMatch)
+      )
+    }
+  )
+  ipcMain.handle(
     'gfs:deleteResource',
     async (event, payload: { resourceId: string; drive?: string; ifMatch?: number }) => {
       assertTrustedSender(event)
