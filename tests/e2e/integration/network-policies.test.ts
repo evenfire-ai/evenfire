@@ -13,6 +13,61 @@ import { execFileSync } from 'child_process'
 
 // Short timeout for negative tests — we expect these to time out
 const NP_TIMEOUT = 3
+const KUBECTL_TIMEOUT_MS = 15_000
+
+function requireSafeLabelValue(envName: string, value: string): string {
+  if (value.length > 63 || !/^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?$/.test(value)) {
+    throw new Error(
+      `Unsafe ${envName}=${JSON.stringify(value)}: expected a non-empty Kubernetes label value ` +
+        'containing at most 63 characters from [A-Za-z0-9_.-].'
+    )
+  }
+  return value
+}
+
+/**
+ * Every cluster operation is pinned to the caller-provided context. This suite
+ * must never inherit kubectl's ambient current-context: branch-owned Minikube
+ * profiles can coexist, and probing the wrong one would produce invalid E2E
+ * evidence.
+ */
+function kubectl(args: string[], timeoutMs = KUBECTL_TIMEOUT_MS): string {
+  const context = process.env.KUBECTL_CONTEXT
+  if (!context) {
+    throw new Error('KUBECTL_CONTEXT is required for the NetworkPolicy E2E suite')
+  }
+
+  return execFileSync('kubectl', ['--context', context, ...args], {
+    encoding: 'utf-8',
+    timeout: timeoutMs,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+}
+
+/** Prefer child stderr over Error.message, which embeds the full command argv. */
+function commandFailureOutput(err: unknown): string {
+  if (typeof err === 'object' && err !== null && 'stderr' in err) {
+    const stderr = (err as { stderr?: unknown }).stderr
+    const text =
+      typeof stderr === 'string' ? stderr : Buffer.isBuffer(stderr) ? stderr.toString('utf-8') : ''
+    if (text.trim()) return text
+  }
+  return err instanceof Error ? err.message : String(err)
+}
+
+function probeProcessWasTerminated(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false
+  const failure = err as { code?: unknown; signal?: unknown; status?: unknown }
+  return failure.code === 'ETIMEDOUT' || failure.status === null || failure.signal != null
+}
+
+const configuredProbeRecipe = process.env.E2E_NETWORK_POLICY_PROBE_RECIPE
+const sandboxDbSelector = configuredProbeRecipe
+  ? `clerum.io/recipe=${requireSafeLabelValue(
+      'E2E_NETWORK_POLICY_PROBE_RECIPE',
+      configuredProbeRecipe
+    )},clerum.io/workload=db`
+  : 'clerum.io/workload=db'
 
 // ─── Cluster reachability gate ───────────────────────────────────────────────
 // This suite drives kubectl against a live minikube cluster (Calico CNI + all
@@ -41,11 +96,7 @@ let clusterReachable = false
  */
 function probeClusterReachable(): boolean {
   try {
-    execFileSync('kubectl', ['get', 'ns', 'default', '-o', 'name'], {
-      encoding: 'utf-8',
-      timeout: 15_000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
+    kubectl(['get', 'ns', 'default', '-o', 'name'])
     return true
   } catch {
     return false
@@ -59,21 +110,19 @@ interface ConnectResult {
 }
 
 let cachedMcpHostRuntimeName: string | null = null
-let cachedChannelReaderPodName: string | null | undefined
+let cachedChannelReaderExecTarget: string | null | undefined
 
 function getMcpHostRuntimeName(): string {
   if (cachedMcpHostRuntimeName) return cachedMcpHostRuntimeName
 
   for (const candidate of ['chatllm', 'mcp-host']) {
     try {
-      execFileSync('kubectl', ['get', 'svc', candidate, '-n', 'mcp-host'], {
-        encoding: 'utf-8',
-        timeout: 10_000,
-      })
+      kubectl(['get', 'svc', candidate, '-n', 'mcp-host'], 10_000)
       cachedMcpHostRuntimeName = candidate
       return candidate
-    } catch {
-      // Try the next known runtime name.
+    } catch (err: unknown) {
+      if (!/\bNotFound\b|not found/i.test(commandFailureOutput(err))) throw err
+      // A missing candidate is expected while supporting both known runtime names.
     }
   }
 
@@ -85,36 +134,31 @@ function getMcpHostRuntimeUrl(path = '/v1/runtime/health'): string {
   return `http://${runtimeName}.mcp-host.svc.cluster.local:8080${path}`
 }
 
-function getChannelReaderPodName(): string | null {
-  if (cachedChannelReaderPodName !== undefined) return cachedChannelReaderPodName
+function getChannelReaderExecTarget(): string | null {
+  if (cachedChannelReaderExecTarget !== undefined) return cachedChannelReaderExecTarget
 
   for (const selector of ['app=channel-reader', 'app.kubernetes.io/name=channel-reader']) {
-    try {
-      const podName = execFileSync(
-        'kubectl',
-        [
-          'get',
-          'pods',
-          '-n',
-          'channels',
-          '-l',
-          selector,
-          '--field-selector=status.phase=Running',
-          '-o',
-          'jsonpath={.items[0].metadata.name}',
-        ],
-        { encoding: 'utf-8', timeout: 10_000 }
-      ).trim()
-      if (podName) {
-        cachedChannelReaderPodName = podName
-        return podName
-      }
-    } catch {
-      // Try the next known label.
+    const podName = kubectl(
+      [
+        'get',
+        'pods',
+        '-n',
+        'channels',
+        '-l',
+        selector,
+        '--field-selector=status.phase=Running',
+        '-o',
+        'jsonpath={.items[0].metadata.name}',
+      ],
+      10_000
+    ).trim()
+    if (podName) {
+      cachedChannelReaderExecTarget = `pod/${podName}`
+      return cachedChannelReaderExecTarget
     }
   }
 
-  cachedChannelReaderPodName = null
+  cachedChannelReaderExecTarget = null
   return null
 }
 
@@ -130,12 +174,11 @@ function testConnectivity(
   fromTarget: string,
   targetUrl: string
 ): ConnectResult {
-  // Support both deployment names (prefixed with deployment/) and bare pod names
+  // Bare names identify deployments; explicit resource refs (for example pod/name) stay exact.
   const execTarget = fromTarget.includes('/') ? fromTarget : `deployment/${fromTarget}`
   try {
     // TM-3: use execFileSync to avoid shell interpolation
-    execFileSync(
-      'kubectl',
+    kubectl(
       [
         'exec',
         '-n',
@@ -147,23 +190,25 @@ function testConnectivity(
         `--timeout=${NP_TIMEOUT}`,
         targetUrl,
       ],
-      { encoding: 'utf-8', timeout: (NP_TIMEOUT + 5) * 1000 }
+      (NP_TIMEOUT + 5) * 1000
     )
     // wget succeeded — HTTP response received
     return { reachable: true, statusCode: 200 }
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err)
+    if (probeProcessWasTerminated(err)) {
+      throw new Error(
+        'kubectl connectivity probe did not complete; NetworkPolicy result is indeterminate'
+      )
+    }
+    const msg = commandFailureOutput(err)
     // wget returns exit code 8 for server error (4xx/5xx) — still reachable
     if (msg.includes('server returned error')) {
       const match = msg.match(/HTTP\/\d\.?\d?\s+(\d+)/)
       return { reachable: true, statusCode: match ? parseInt(match[1]) : 0 }
     }
-    // wget returns "download timed out" when NP blocks traffic
-    if (
-      msg.includes('timed out') ||
-      msg.includes('ETIMEDOUT') ||
-      msg.includes('Network is unreachable')
-    ) {
+    // BusyBox wget reaches its own deadline when the NetworkPolicy drops packets.
+    // Do not accept Node's ETIMEDOUT watchdog or a broken CNI route as policy evidence.
+    if (/wget:.*(?:download|connection).*timed out/i.test(msg)) {
       return { reachable: false, error: 'timeout (blocked by NetworkPolicy)' }
     }
     // Connection refused = port not open, but network IS reachable
@@ -205,11 +250,15 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
   // ─── Prerequisite Check ──────────────────────────────────────────────
   it('Calico CNI is active', ctx => {
     if (!clusterReachable) ctx.skip()
-    const pods = execFileSync(
-      'kubectl',
-      ['get', 'pods', '-n', 'kube-system', '-l', 'k8s-app=calico-node', '--no-headers'],
-      { encoding: 'utf-8' }
-    )
+    const pods = kubectl([
+      'get',
+      'pods',
+      '-n',
+      'kube-system',
+      '-l',
+      'k8s-app=calico-node',
+      '--no-headers',
+    ])
     expect(pods).toContain('Running')
   })
 
@@ -219,27 +268,21 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
     for (const ns of namespaces) {
       let nps: string
       try {
-        nps = execFileSync(
-          'kubectl',
-          [
-            'get',
-            'networkpolicy',
-            '-n',
-            ns,
-            '-l',
-            'clerum.io/policy-type=default-deny',
-            '--no-headers',
-          ],
-          { encoding: 'utf-8' }
-        )
+        nps = kubectl([
+          'get',
+          'networkpolicy',
+          '-n',
+          ns,
+          '-l',
+          'clerum.io/policy-type=default-deny',
+          '--no-headers',
+        ])
       } catch {
         nps = 'NONE'
       }
       // Check for deny-all by name if label selector didn't work
-      if (nps.includes('NONE')) {
-        const allNps = execFileSync('kubectl', ['get', 'networkpolicy', '-n', ns, '--no-headers'], {
-          encoding: 'utf-8',
-        })
+      if (!nps.trim() || nps.includes('NONE')) {
+        const allNps = kubectl(['get', 'networkpolicy', '-n', ns, '--no-headers'])
         expect(allNps).toContain('deny-all')
       }
     }
@@ -306,7 +349,7 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
         'http://rpc-proxy.rpc-proxy.svc.cluster.local:8094/health'
       )
       expect(result.reachable).toBe(false)
-      expect(result.error).toContain('timeout')
+      expect(result.error).toBe('timeout (blocked by NetworkPolicy)')
     })
 
     it('mcp-host → control-api:8090 (no direct access to control-plane)', ctx => {
@@ -317,13 +360,18 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
         'http://control-api.control-plane.svc.cluster.local:8090/health'
       )
       expect(result.reachable).toBe(false)
-      expect(result.error).toContain('timeout')
+      expect(result.error).toBe('timeout (blocked by NetworkPolicy)')
     })
 
     it('channel-reader → workflow approval gateway:8092 (must go through mcp-host)', ctx => {
       if (!clusterReachable) ctx.skip()
-      const podName = getChannelReaderPodName()
-      if (!podName) {
+      const podTarget = getChannelReaderExecTarget()
+      if (!podTarget) {
+        if (REQUIRE_CLUSTER) {
+          throw new Error(
+            'No running channel-reader pod exists in channels; refusing to skip a required cluster gate.'
+          )
+        }
         console.warn('SKIPPED: no running channel-reader pod in channels')
         ctx.skip()
         return
@@ -331,11 +379,11 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
 
       const result = testConnectivity(
         'channels',
-        podName,
+        podTarget,
         'http://nginx-workflow-approval-gateway.control-plane.svc.cluster.local:8092/health'
       )
       expect(result.reachable).toBe(false)
-      expect(result.error).toContain('timeout')
+      expect(result.error).toBe('timeout (blocked by NetworkPolicy)')
     })
 
     it('mcp-host → registry-api:8085 (no direct registry access)', ctx => {
@@ -346,7 +394,7 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
         'http://registry-api.registry.svc.cluster.local:8085/health'
       )
       expect(result.reachable).toBe(false)
-      expect(result.error).toContain('timeout')
+      expect(result.error).toBe('timeout (blocked by NetworkPolicy)')
     })
 
     it('control-api → rpc-proxy:8094 (no direct control-plane hop)', ctx => {
@@ -357,7 +405,7 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
         'http://rpc-proxy.rpc-proxy.svc.cluster.local:8094/health'
       )
       expect(result.reachable).toBe(false)
-      expect(result.error).toContain('timeout')
+      expect(result.error).toBe('timeout (blocked by NetworkPolicy)')
     })
 
     it('external-rest-api → rpc-proxy:8094 (desktop app reaches rpc-proxy directly, not via backend)', ctx => {
@@ -368,21 +416,21 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
         'http://rpc-proxy.rpc-proxy.svc.cluster.local:8094/health'
       )
       expect(result.reachable).toBe(false)
-      expect(result.error).toContain('timeout')
+      expect(result.error).toBe('timeout (blocked by NetworkPolicy)')
     })
 
     it('control-api → mcp-host:8080 directly (must go through rpc-proxy)', ctx => {
       if (!clusterReachable) ctx.skip()
       const result = testConnectivity('control-plane', 'control-api', getMcpHostRuntimeUrl())
       expect(result.reachable).toBe(false)
-      expect(result.error).toContain('timeout')
+      expect(result.error).toBe('timeout (blocked by NetworkPolicy)')
     })
 
     it('external-rest-api → mcp-host:8080 directly (must go through rpc-proxy)', ctx => {
       if (!clusterReachable) ctx.skip()
       const result = testConnectivity('profiles', 'external-rest-api', getMcpHostRuntimeUrl())
       expect(result.reachable).toBe(false)
-      expect(result.error).toContain('timeout')
+      expect(result.error).toBe('timeout (blocked by NetworkPolicy)')
     })
 
     it('mcp-proxy → external-rest-api:3000 (no reverse path)', ctx => {
@@ -393,7 +441,7 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
         'http://external-rest-api.profiles.svc.cluster.local:3000/health'
       )
       expect(result.reachable).toBe(false)
-      expect(result.error).toContain('timeout')
+      expect(result.error).toBe('timeout (blocked by NetworkPolicy)')
     })
   })
 
@@ -401,64 +449,70 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
   describe('Namespace isolation (cross-namespace blocked unless explicitly allowed)', () => {
     /**
      * Helper: checks if a usable pod exists in the namespace before attempting NP validation.
-     * Returns the pod name if found, or null if no pods are available.
+     * Returns an explicit pod resource ref if found, or null if no pods are available.
      */
-    function findExecPod(namespace: string, labelSelector: string): string | null {
-      try {
-        const output = execFileSync(
-          'kubectl',
-          [
-            'get',
-            'pods',
-            '-n',
-            namespace,
-            '-l',
-            labelSelector,
-            '--field-selector=status.phase=Running',
-            '-o',
-            'jsonpath={.items[0].metadata.name}',
-          ],
-          { encoding: 'utf-8', timeout: 10_000 }
-        ).trim()
-        return output || null
-      } catch {
-        return null
+    function findExecPodTarget(namespace: string, labelSelector: string): string | null {
+      const output = kubectl(
+        [
+          'get',
+          'pods',
+          '-n',
+          namespace,
+          '-l',
+          labelSelector,
+          '--field-selector=status.phase=Running',
+          '-o',
+          'jsonpath={.items[0].metadata.name}',
+        ],
+        10_000
+      ).trim()
+      return output ? `pod/${output}` : null
+    }
+
+    function findSandboxDbExecTarget(): string | null {
+      const podTarget = findExecPodTarget('sandbox-recipes', sandboxDbSelector)
+      if (!podTarget && (configuredProbeRecipe || REQUIRE_CLUSTER)) {
+        throw new Error(
+          `NetworkPolicy probe recipe ${configuredProbeRecipe ?? '(not configured)'} has no running db pod ` +
+            `matching ${sandboxDbSelector}; refusing to report a fixture-backed gate with skips.`
+        )
       }
+      return podTarget
     }
 
     it('sandbox-recipes → control-api:8090 (isolated sandbox)', ctx => {
       if (!clusterReachable) ctx.skip()
-      const podName = findExecPod('sandbox-recipes', 'app=db')
-      if (!podName) {
-        console.warn('SKIPPED: no running db pod in sandbox-recipes')
+      const podTarget = findSandboxDbExecTarget()
+      if (!podTarget) {
+        console.warn(`SKIPPED: no running WRC db pod matching ${sandboxDbSelector}`)
         ctx.skip()
         return
       }
       // sandbox-recipes has deny-all; only DNS + HCC API egress allowed
       const result = testConnectivity(
         'sandbox-recipes',
-        podName,
+        podTarget,
         'http://control-api.control-plane.svc.cluster.local:8090/health'
       )
       expect(result.reachable).toBe(false)
-      expect(result.error).toContain('timeout')
+      expect(result.error).toBe('timeout (blocked by NetworkPolicy)')
     })
 
     it('sandbox-recipes → rpc-proxy:8094 (isolated sandbox)', ctx => {
       if (!clusterReachable) ctx.skip()
-      const podName = findExecPod('sandbox-recipes', 'app=db')
-      if (!podName) {
-        console.warn('SKIPPED: no running db pod in sandbox-recipes')
+      const podTarget = findSandboxDbExecTarget()
+      if (!podTarget) {
+        console.warn(`SKIPPED: no running WRC db pod matching ${sandboxDbSelector}`)
         ctx.skip()
         return
       }
       const result = testConnectivity(
         'sandbox-recipes',
-        podName,
+        podTarget,
         'http://rpc-proxy.rpc-proxy.svc.cluster.local:8094/health'
       )
       expect(result.reachable).toBe(false)
-      expect(result.error).toContain('timeout')
+      expect(result.error).toBe('timeout (blocked by NetworkPolicy)')
     })
   })
 })
