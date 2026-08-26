@@ -106,13 +106,29 @@ describe('SidebarNav logo', () => {
     expect(container.querySelector('.sidebar-logo-copy')).toBeNull()
   })
 
-  it('labels the Files destination as Global File System in Resources', () => {
+  it('renders Files as a top-level nav item labelled Files (not under Resources)', () => {
     render(<SidebarNav {...baseProps()} />)
 
-    fireEvent.click(screen.getByTestId('nav-settings-menu'))
+    // Files is always visible as a primary nav destination — no menu opening needed.
+    const filesItem = screen.getByTestId('nav-files')
+    expect(filesItem.textContent).toContain('Files')
+    expect(filesItem.textContent).not.toContain('Global File System')
 
-    expect(screen.getByTestId('nav-files').textContent).toContain('Global File System')
-    expect(screen.queryByRole('menuitem', { name: 'Files' })).toBeNull()
+    // Files is no longer nested under the Settings → Resources submenu.
+    fireEvent.click(screen.getByTestId('nav-settings-menu'))
+    expect(screen.getByTestId('nav-data-menu').textContent).not.toContain('Global File System')
+  })
+
+  it('mounts the GFS solid-folder SVG inside the Files nav item so the icon is visible', () => {
+    const { container } = render(<SidebarNav {...baseProps()} />)
+    const filesLink = container.querySelector('[data-testid="nav-files"]')
+    const icon = filesLink?.querySelector('.ui-nav-item__icon svg')
+    expect(icon).toBeTruthy()
+    expect(icon?.getAttribute('viewBox')).toBe('0 0 512 512')
+    // Solid Font Awesome fa-folder path data.
+    expect(icon?.querySelector('path')?.getAttribute('d')).toContain(
+      'M464 128H272l-64-64H48C21.49 64 0 85.49 0 112v288'
+    )
   })
 
   it('routes a controlled palette request through desktop collapse behavior', () => {

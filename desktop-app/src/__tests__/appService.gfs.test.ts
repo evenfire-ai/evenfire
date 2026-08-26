@@ -23,6 +23,7 @@ function gfsService() {
       createShare: ReturnType<typeof vi.fn>
       listShares: ReturnType<typeof vi.fn>
       revokeShare: ReturnType<typeof vi.fn>
+      moveResource: ReturnType<typeof vi.fn>
     }
     grantGfs: (
       resourceId: string,
@@ -34,6 +35,12 @@ function gfsService() {
     createGfsShare: (resourceId: string, subjectKeys: string[], drive?: string) => Promise<void>
     listGfsShares: (resourceId: string, drive?: string) => Promise<unknown[]>
     revokeGfsShare: (shareId: string) => Promise<void>
+    moveGfsResource: (
+      resourceId: string,
+      destinationId: string,
+      drive?: string,
+      ifMatch?: number
+    ) => Promise<{ resourceId: string; version: number }>
   }
   service.sessionToken = 'session-token'
   service.gfsClient = {
@@ -41,11 +48,25 @@ function gfsService() {
     createShare: vi.fn().mockResolvedValue(undefined),
     listShares: vi.fn().mockResolvedValue([]),
     revokeShare: vi.fn().mockResolvedValue(undefined),
+    moveResource: vi.fn().mockResolvedValue({ resourceId: RESOURCE_ID, version: 9 }),
   }
   return service
 }
 
 describe('AppService GFS delegation subject boundary', () => {
+  it('moves a resource into a destination folder through the user-plane GFS client', async () => {
+    const service = gfsService()
+    const destinationId = '33333333-3333-4333-8333-333333333333'
+
+    await service.moveGfsResource(RESOURCE_ID, destinationId, 'main', 8)
+
+    expect(service.gfsClient.moveResource).toHaveBeenCalledTimes(1)
+    expect(service.gfsClient.moveResource).toHaveBeenCalledWith(
+      { resourceId: RESOURCE_ID, drive: 'main', destinationId, ifMatch: 8 },
+      'session-token'
+    )
+  })
+
   it('forwards share list and revoke through the in-memory session token only', async () => {
     const service = gfsService()
     const shareId = '22222222-2222-4222-8222-222222222222'
