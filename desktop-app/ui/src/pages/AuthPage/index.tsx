@@ -1,9 +1,9 @@
 import type { FormEvent } from 'react'
 import { useState } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
+import { AuthBrand } from '@components/AuthBrand'
 import { Button, Field, StatusBanner, TextInput } from '@components/Common'
 import { RuntimeConfigDock } from '@components/RuntimeConfigDock'
-import { formatDesktopAppVersionTooltip, useDesktopAppInfo } from '@hooks/useDesktopAppInfo'
 
 /**
  * Sign-in for a configured environment.
@@ -39,8 +39,6 @@ export function AuthPage() {
     Boolean(runtimeConfigSetupName.trim()) &&
     Boolean(runtimeConfigSetupExternalRestApiBaseUrl.trim())
   const [forgotPasswordBusy, setForgotPasswordBusy] = useState(false)
-  const desktopAppInfo = useDesktopAppInfo()
-  const desktopVersionTooltip = formatDesktopAppVersionTooltip(desktopAppInfo)
 
   const handlePasswordSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -79,15 +77,12 @@ export function AuthPage() {
     <main className="auth-page">
       <section className="auth-card glass-card">
         <header className="auth-card__header">
-          <div className="auth-brand" title={desktopVersionTooltip}>
-            <img className="auth-brand-mark" src="./logo.svg" alt="" aria-hidden="true" />
-            <span className="auth-brand-copy">
-              <span className="auth-brand-title">Evenfire</span>
-              <span className="auth-brand-subtitle">Desktop App</span>
-            </span>
-          </div>
+          <AuthBrand />
         </header>
 
+        {/* Sign-in stays content-sized. The fixed height belongs to the
+            onboarding wizard, which needs it because its steps differ wildly
+            in length; sign-in has one short form and reads better snug. */}
         {runtimeSetupVisible ? (
           <form className="auth-form-stack" onSubmit={handleRuntimeSetupSubmit}>
             <Field

@@ -1,5 +1,5 @@
+import { AuthBrand } from '@components/AuthBrand'
 import { RuntimeConfigDock } from '@components/RuntimeConfigDock'
-import { formatDesktopAppVersionTooltip, useDesktopAppInfo } from '@hooks/useDesktopAppInfo'
 import { Hosted } from './steps/Hosted'
 import { InvitedMember } from './steps/InvitedMember'
 import { ManualEnvironment } from './steps/ManualEnvironment'
@@ -20,35 +20,38 @@ interface OnboardingPageProps {
  */
 export function OnboardingPage({ onboarding }: OnboardingPageProps) {
   const { step, canGoBack, answerOrigin, answerRunStyle, goToManual, back } = onboarding
-  const desktopAppInfo = useDesktopAppInfo()
-  const desktopVersionTooltip = formatDesktopAppVersionTooltip(desktopAppInfo)
 
   return (
     <main className="auth-page">
-      <section className="auth-card glass-card onboarding-card">
+      <section className="auth-card glass-card auth-card--flow">
         <header className="auth-card__header">
-          <div className="auth-brand" title={desktopVersionTooltip}>
-            <img className="auth-brand-mark" src="./logo.svg" alt="" aria-hidden="true" />
-            <span className="auth-brand-copy">
-              <span className="auth-brand-title">Evenfire</span>
-              <span className="auth-brand-subtitle">Desktop App</span>
-            </span>
-          </div>
+          <AuthBrand />
         </header>
+        <div className="auth-card__divider" role="presentation" />
 
-        {step === 'origin' || step === 'runStyle' ? (
-          <PathChoice step={step} onAnswerOrigin={answerOrigin} onAnswerRunStyle={answerRunStyle} />
-        ) : null}
-        {step === 'invited' ? <InvitedMember /> : null}
-        {step === 'hosted' ? <Hosted onContinue={goToManual} /> : null}
-        {step === 'selfHosted' ? <SelfHosted onContinue={goToManual} /> : null}
-        {step === 'manual' ? <ManualEnvironment /> : null}
+        {/* One wrapper for every step so the card can hold a constant height
+            and scroll internally, instead of resizing as steps change. */}
+        <div className="auth-card__body">
+          {step === 'origin' || step === 'runStyle' ? (
+            <PathChoice
+              step={step}
+              onAnswerOrigin={answerOrigin}
+              onAnswerRunStyle={answerRunStyle}
+            />
+          ) : null}
+          {step === 'invited' ? <InvitedMember /> : null}
+          {step === 'hosted' ? <Hosted onContinue={goToManual} /> : null}
+          {step === 'selfHosted' ? <SelfHosted onContinue={goToManual} /> : null}
+          {step === 'manual' ? <ManualEnvironment /> : null}
+        </div>
 
-        {canGoBack ? (
-          <button type="button" className="auth-inline-link" onClick={back}>
-            Back
-          </button>
-        ) : null}
+        <div className="auth-card__footer">
+          {canGoBack ? (
+            <button type="button" className="auth-inline-link" onClick={back}>
+              Back
+            </button>
+          ) : null}
+        </div>
       </section>
       <RuntimeConfigDock onAddEnvironment={goToManual} />
     </main>
