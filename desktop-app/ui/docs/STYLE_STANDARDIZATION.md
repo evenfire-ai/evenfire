@@ -1,6 +1,6 @@
 # Style Standardization — desktop-app/ui
 
-This document is the authoritative reference for **how a page is built in desktop-app/ui** after the layout/token consolidation refactor. It complements the cross-app rules in [`../../../docs/agents/frontend-style-rules.md`](../../../docs/agents/frontend-style-rules.md) — read that first; this doc adds desktop-app-specific patterns.
+This document is the authoritative reference for **how a page is built in desktop-app/ui** after the layout/token consolidation refactor. It complements the cross-app rules in [`../../../docs/agents/frontend-style-rules.md`](../../../docs/agents/frontend-style-rules.md) and the renderer application rules in [`../../../docs/agents/desktop-ui-rules.md`](../../../docs/agents/desktop-ui-rules.md). Read the shared rules first; this document owns Desktop-specific visual and layout patterns.
 
 When in doubt, mimic an existing post-refactor page (`ContextsPage`, `WorkflowsPage`, `TeamsPage`, `McpServersPage`) before inventing.
 
@@ -92,7 +92,7 @@ Available modifiers:
 - Rows — `--compact` (denser row height), `--clickable` (cursor + hover state, required when the row is a `<button>`), `--selected` (highlighted state).
 - Column headers and cells — `--center`, `--right` (alignment).
 
-Column widths are set via the CSS variable `--da-grid-cols` inline. **This is the only acceptable inline-style use in pages.** Two rules apply:
+Column widths are set via the CSS variable `--da-grid-cols` inline. **This is the only acceptable static inline-style use in pages.** Genuinely runtime-computed values follow the documented checker escape-hatch process in §7. Two rules apply:
 
 1. If the column template is shared across two or more pages, define it as a named constant in `src/lib/gridTemplates.ts` and import it. Existing constants: `SCOPED_RESOURCE_4COL`, `MEMBERS_3COL`.
 2. If the template is unique to one page, leave it as a literal inline next to the JSX it describes — colocation beats premature extraction.
@@ -162,11 +162,11 @@ Imports come from `@components/Common`. The exported set is fixed:
 | `DetailRow`    | `label`, `value`                                                 |
 | `ToastStack`   | `items: ToastMessage[]`                                          |
 
+Button-, menu-, navigation-, and option-like UI must also reuse `IconButton`,
+`TabButton`, `MenuItem`, `NavItem`, `Pill`, and `SelectableOption` from this
+same export boundary rather than recreating them in a page.
+
 Do not recreate equivalents inline. If a real new common control is needed, add it under `src/components/Common/<Component>/index.tsx` with colocated `types.ts`, then re-export it from `src/components/Common/index.ts` — not as a one-off in a page file.
-
-### Feedback Placement
-
-Use the app toast stack for success feedback after a completed user action, such as saving settings, triggering workflows, or approving requests. Do not render inline green success banners inside page cards or forms for transient confirmations. Inline `StatusBanner` is reserved for persistent page state, warnings, errors, and informational messages that must remain visible while the user decides what to do next.
 
 ## 5. Where pages live
 
@@ -178,9 +178,37 @@ When adding a new page, prefer flat `<Name>Page.tsx` unless the page already nee
 
 ## 6. CSS — what to extend, what to leave alone
 
+- Shared primitive-style classes use the `da-` prefix. The page shell and tabs
+  intentionally use the unprefixed semantic names `page`, `page-card`, and
+  `page-tabs`; do not rename them to add a prefix.
 - All shared layout/component classes live in `src/styles.css`. Add new shared rules at the end of the relevant section.
 - Tokens live in `src/styles/tokens.css`. Reach for an existing token first; promote a new value only when it is used in three or more places.
+- Do not hardcode colors or tokenized spacing, radii, shadows, motion,
+  typography, z-index, or table/grid surface values. Consume the variables from
+  `src/styles/tokens.css`.
 - Three legacy component-level stylesheets exist and **must not be extended**: `src/components/ChatListPanel.css`, `src/components/ProgressStepper.css`, `src/components/ArtifactsBadge.css`. They predate the refactor. When a feature touches one of these surfaces, migrate the rules into `styles.css` (boy-scout) — don't add new rules to the legacy file.
+
+### Typography scale
+
+`src/styles/tokens.css` is authoritative for these values:
+
+| Token             | Value  | Use                            |
+| ----------------- | ------ | ------------------------------ |
+| `--font-size-2xs` | `10px` | timestamps and micro labels    |
+| `--font-size-xs`  | `11px` | column headers and metadata    |
+| `--font-size-sm`  | `12px` | secondary body and hints       |
+| `--font-size-md`  | `13px` | default body and table cells   |
+| `--font-size-lg`  | `15px` | emphasized body and row titles |
+| `--font-size-xl`  | `18px` | card and section titles        |
+| `--font-size-2xl` | `22px` | page subheads                  |
+| `--font-size-3xl` | `28px` | page heroes                    |
+| `--font-size-4xl` | `36px` | auth hero only                 |
+
+Font weights are `--font-weight-regular`, `--font-weight-medium`,
+`--font-weight-semibold`, and `--font-weight-bold`. Line heights are
+`--line-height-tight` for headings and `--line-height-normal` for body and
+hints. Do not add another font-size token without an explicit design decision;
+use the existing t-shirt scale directly.
 
 ## 7. Enforcement
 
@@ -243,5 +271,7 @@ and the full rule set is ~200 lines of readable JS — see
 - Adding a new tab class family per domain. Use `.page-tabs` / `.page-tab.active`.
 - Adding a parallel grid/table class family. Extend `.da-grid` modifiers.
 - Hex colors literal in TS/TSX. The one acceptable case is user-controlled dynamic state (e.g. annotation color picker initial value).
-- Inline styles other than `--da-grid-cols`. If you find yourself reaching for one, the right move is usually a class on the global stylesheet or a new token.
+- Static inline styles other than `--da-grid-cols`. Genuinely runtime-computed
+  values must use the documented §7 escape-hatch process; other styling belongs
+  in `src/styles.css` or `src/styles/tokens.css`.
 - **Removing a table's own frame via contextual overrides.** Never write `.some-context .da-grid { border: none; background: transparent }` — every table always owns its own frame regardless of what surrounds it. See §3 "Table frame ownership".
