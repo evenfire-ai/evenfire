@@ -1,4 +1,4 @@
-import type { KeyboardEvent } from 'react'
+import type { KeyboardEvent, MouseEvent as ReactMouseEvent } from 'react'
 
 export type ClickableRowProps = {
   role: 'button'
@@ -51,4 +51,21 @@ export function clickableRowProps(
     ...(ariaLabel ? { 'aria-label': ariaLabel } : {}),
     ...(selected ? { 'aria-pressed': true as const } : {}),
   }
+}
+
+/**
+ * True when a click/keydown inside a clickable row originated from a nested
+ * interactive element (button, link, menu item…). Rows that contain their own
+ * controls use this to activate only on clicks in the row surface itself, so a
+ * nested control never triggers the row action as well.
+ */
+export function isEventFromNestedInteractive(
+  event: KeyboardEvent<HTMLElement> | ReactMouseEvent<HTMLElement>
+): boolean {
+  const target = event.target
+  if (!(target instanceof Element)) return false
+  return (
+    target.closest('button, a, input, select, textarea, [role="button"], [role="menuitem"]') !==
+    null
+  )
 }

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SelectionDropdownOption } from '@components/SelectionDropdown/types'
+import { IconRobot, IconShield, IconUsers, IconWorkflow } from '@components/Sidebar/icons'
 import { IconX } from '@components/icons'
 import { Button, TextInput } from '@components/ui'
 import type { GfsSubjectPickerProps } from './types'
@@ -14,6 +15,25 @@ function optionMatches(option: SelectionDropdownOption, query: string): boolean 
   return [option.label, option.description, option.badge]
     .filter(Boolean)
     .some(value => String(value).toLowerCase().includes(normalized))
+}
+
+function subjectAvatarClass(option: SelectionDropdownOption): string {
+  return `cu-gfs-subject-picker__avatar cu-gfs-subject-picker__avatar--${option.badge?.toLowerCase() || 'user'}`
+}
+
+function subjectAvatarContent(option: SelectionDropdownOption): React.ReactNode {
+  switch (option.badge?.toLowerCase()) {
+    case 'agent':
+      return <IconRobot />
+    case 'operator':
+      return <IconShield />
+    case 'team':
+      return <IconUsers />
+    case 'workflow':
+      return <IconWorkflow />
+    default:
+      return option.label.charAt(0).toUpperCase()
+  }
 }
 
 export function GfsSubjectPicker({
@@ -83,11 +103,8 @@ export function GfsSubjectPicker({
         {selected.map(subject =>
           subject ? (
             <span className="cu-gfs-subject-picker__chip" key={subject.value}>
-              <span
-                className={`cu-gfs-subject-picker__avatar cu-gfs-subject-picker__avatar--${subject.badge?.toLowerCase()}`}
-                aria-hidden="true"
-              >
-                {subject.label.charAt(0).toUpperCase()}
+              <span className={subjectAvatarClass(subject)} aria-hidden="true">
+                {subjectAvatarContent(subject)}
               </span>
               <span className="cu-gfs-subject-picker__chip-label">{subject.label}</span>
               <Button
@@ -116,6 +133,15 @@ export function GfsSubjectPicker({
             setOpen(true)
           }}
           onFocus={() => setOpen(true)}
+          onKeyDown={event => {
+            if (event.key === 'Escape') {
+              setOpen(false)
+              return
+            }
+            if (event.key === 'Backspace' && !query && value.length > 0) {
+              clearSubject(value[value.length - 1] ?? '')
+            }
+          }}
           placeholder={selected.length > 0 ? '' : SUBJECT_PICKER_LABEL}
           role="combobox"
           value={query}
@@ -149,11 +175,8 @@ export function GfsSubjectPicker({
                 role="option"
                 variant="ghost"
               >
-                <span
-                  className={`cu-gfs-subject-picker__avatar cu-gfs-subject-picker__avatar--${option.badge?.toLowerCase()}`}
-                  aria-hidden="true"
-                >
-                  {option.label.charAt(0).toUpperCase()}
+                <span className={subjectAvatarClass(option)} aria-hidden="true">
+                  {subjectAvatarContent(option)}
                 </span>
                 <span className="cu-gfs-subject-picker__option-copy">
                   <span>{option.label}</span>

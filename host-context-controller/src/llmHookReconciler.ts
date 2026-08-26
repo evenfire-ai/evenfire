@@ -43,6 +43,7 @@ import {
   preserveObjectAnnotations,
   preserveServiceAssignedFields,
   replaceWithConflictRetry,
+  serviceMatchesDesired,
 } from './utils'
 
 const GROUP = 'clerum.io'
@@ -795,6 +796,7 @@ export class LlmHookReconciler {
       logPrefix: LOG,
       body: service,
       mergeExisting: preserveServiceAssignedFields,
+      isUpToDate: serviceMatchesDesired,
       read: () => this.coreApi.readNamespacedService({ name, namespace: config.llmHooksNamespace }),
       replace: body =>
         this.coreApi.replaceNamespacedService({ name, namespace: config.llmHooksNamespace, body }),

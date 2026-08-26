@@ -3,11 +3,11 @@ import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
 import { parseInlineMarkdown, parseVanillaMarkdown } from '@lib/vanillaMarkdown'
 
 describe('vanilla Markdown preview', () => {
-  it.each(['README.md', 'guide.MARKDOWN'])('recognizes %s', fileName => {
+  it.each(['README.md', 'guide.MARKDOWN', 'notes.txt'])('recognizes %s', fileName => {
     expect(isGfsMarkdownPreviewFile(fileName)).toBe(true)
   })
 
-  it.each(['README', 'notes.txt', 'archive.md.zip'])('rejects %s', fileName => {
+  it.each(['README', 'archive.md.zip'])('rejects %s', fileName => {
     expect(isGfsMarkdownPreviewFile(fileName)).toBe(false)
   })
 
