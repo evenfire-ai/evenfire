@@ -8,7 +8,6 @@ import {
   disposeFixtureLeaseForTest,
   hasFixtureLeaseForTest,
   registerFixtureLeaseForTest,
-  setFixtureHandleForTest,
 } from './gfsUploadV2FixtureLease.js'
 
 export { setFixtureHandleForTest } from './gfsUploadV2FixtureLease.js'
