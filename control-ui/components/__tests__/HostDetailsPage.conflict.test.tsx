@@ -1,9 +1,17 @@
 import React from 'react'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
+import {
+  cleanup,
+  fireEvent,
+  render as rtlRender,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import HostDetailsPage from '../../app/hosts/[name]/page'
 import * as api from '../../lib/api'
+import { materializeHostResource } from '../../test/fixtures/contextResource'
 import { ToastProvider } from '../Toast'
 
 const replaceMock = vi.fn()
@@ -83,18 +91,72 @@ const refetchedHost: TestHost = {
   spec: { ...baseSpec },
 }
 
-function setupApiMocks(bundleHost: TestHost, refetchHost: TestHost = bundleHost) {
-  ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+const modelCatalogRows = [
+  {
+    id: 'openai-gpt-5-4-mini',
+    provider: 'openai',
+    model: 'gpt-5.4-mini',
+    vendor: 'OpenAI',
+    display_name: null,
+    context_window_tokens: 400000,
+    enabled: true,
+    source: 'manual' as const,
+    stale: false,
+    created_at: '',
+    updated_at: '',
+  },
+  {
+    id: 'openai-gpt-5-4',
+    provider: 'openai',
+    model: 'gpt-5.4',
+    vendor: 'OpenAI',
+    display_name: null,
+    context_window_tokens: 400000,
+    enabled: true,
+    source: 'manual' as const,
+    stale: false,
+    created_at: '',
+    updated_at: '',
+  },
+  {
+    id: 'openai-gpt-4-1',
+    provider: 'openai',
+    model: 'gpt-4.1',
+    vendor: 'OpenAI',
+    display_name: null,
+    context_window_tokens: 1047576,
+    enabled: true,
+    source: 'manual' as const,
+    stale: false,
+    created_at: '',
+    updated_at: '',
+  },
+]
+
+const defaultSecretResources = [
+  { name: 'openai-secret', keys: ['openai-api-key'] },
+  { name: 'anthropic-secret', keys: ['claude-api-key'] },
+]
+
+function detailBundle(bundleHost: TestHost, secrets = defaultSecretResources) {
+  return {
     host: bundleHost,
-    contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
-    secrets: [
-      { name: 'openai-secret', keys: ['openai-api-key'] },
-      { name: 'anthropic-secret', keys: ['claude-api-key'] },
-    ],
+    contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx', mcpServers: [] } }],
+    secrets,
     users: [],
     teams: [],
     agentUsers: [],
     agentTeams: [],
+  }
+}
+
+function setupApiMocks(
+  bundleHost: TestHost,
+  refetchHost: TestHost = bundleHost,
+  secrets = defaultSecretResources
+) {
+  ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+    ...detailBundle(bundleHost, secrets),
   })
   ;(api.getHost as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(refetchHost)
   ;(api.apiSend as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({})
@@ -125,6 +187,10 @@ function findHostPutPayload(): Record<string, unknown> {
   )
   expect(call).toBeDefined()
   return call![2] as Record<string, unknown>
+}
+
+function configureModelCatalog() {
+  vi.mocked(api.getLlmModels).mockResolvedValue({ rows: modelCatalogRows })
 }
 
 // Shape produced by lib/api formatApiError for the facade's AP-6 response
@@ -241,6 +307,7 @@ describe('HostDetailsPage current model and credential flow', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockParams = { name: 'foo' }
+    vi.mocked(api.getLlmModels).mockResolvedValue({ rows: [] })
     setupApiMocks(formLoadHost, refetchedHost)
   })
 
@@ -280,6 +347,215 @@ describe('HostDetailsPage current model and credential flow', () => {
     expect(payload.spec.model).toEqual(baseSpec.model)
     expect(payload.spec.secretRef).toBe('openai-secret')
     expect(await screen.findByText('Model configuration saved.')).toBeInTheDocument()
+  })
+
+  it('cancels model changes, reloads the Host, and restores authoritative server state', async () => {
+    configureModelCatalog()
+    const authoritativeHost: TestHost = {
+      metadata: { name: 'foo', resourceVersion: 'rv-authoritative-cancel' },
+      spec: {
+        ...baseSpec,
+        model: { name: 'gpt-4.1', provider: 'openai' },
+      },
+    }
+    vi.mocked(api.getHostDetailBundle)
+      .mockResolvedValueOnce(detailBundle(formLoadHost))
+      .mockResolvedValue(detailBundle(authoritativeHost))
+
+    const view = render(<HostDetailsPage />)
+    navigateToTab(view, 'model')
+    await screen.findByText('Current model')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    fireEvent.click(screen.getByLabelText('Current model', { selector: '#llm-primary-model' }))
+    fireEvent.click(await screen.findByRole('option', { name: 'gpt-5.4' }))
+    expect(
+      screen.getByLabelText('Current model', { selector: '#llm-primary-model' })
+    ).toHaveTextContent('gpt-5.4')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel model changes' }))
+
+    expect(await screen.findByText('gpt-4.1')).toBeInTheDocument()
+    await waitFor(() => expect(api.getHostDetailBundle).toHaveBeenCalledTimes(2))
+    expect(
+      screen.queryByRole('button', { name: 'Save model configuration' })
+    ).not.toBeInTheDocument()
+    expect(
+      (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.some(
+        args => args[0] === 'PUT' && args[1] === '/api/v1/admin/hosts/foo'
+      )
+    ).toBe(false)
+  })
+
+  it('keeps the model draft and displays the error when the Host save fails', async () => {
+    configureModelCatalog()
+    const formSpec = {
+      ...baseSpec,
+      description: 'Preserve this unrelated field',
+      channels: ['slack'],
+      approval: { tools: { shell_exec: true, web_search: false } },
+      workflowControl: { scopes: ['chat'] },
+      customField: { keep: true },
+    }
+    const formHost: TestHost = {
+      metadata: { name: 'foo', resourceVersion: 'rv-model-form' },
+      spec: formSpec,
+    }
+    setupApiMocks(formHost, formHost)
+    ;(api.apiSend as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('model save failed')
+    )
+
+    const view = render(<HostDetailsPage />)
+    navigateToTab(view, 'model')
+    await screen.findByText('Current model')
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    fireEvent.click(screen.getByLabelText('Current model', { selector: '#llm-primary-model' }))
+    fireEvent.click(await screen.findByRole('option', { name: 'gpt-5.4' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save model configuration' }))
+
+    expect(await screen.findByText('model save failed')).toBeInTheDocument()
+    expect(
+      screen.getByLabelText('Current model', { selector: '#llm-primary-model' })
+    ).toHaveTextContent('gpt-5.4')
+    expect(screen.getByRole('button', { name: 'Save model configuration' })).toBeInTheDocument()
+    expect(screen.queryByText('Model configuration saved.')).not.toBeInTheDocument()
+
+    const payload = findHostPutPayload() as {
+      metadata?: { resourceVersion?: string }
+      spec: Record<string, unknown>
+    }
+    expect(payload.metadata?.resourceVersion).toBe('rv-model-form')
+    expect(payload.spec).toMatchObject({
+      description: 'Preserve this unrelated field',
+      channels: ['slack'],
+      approval: { tools: { shell_exec: true, web_search: false } },
+      workflowControl: { scopes: ['chat'] },
+      customField: { keep: true },
+      model: { provider: 'openai', name: 'gpt-5.4' },
+      secretRef: 'openai-secret',
+    })
+  })
+
+  it('renders the authoritative Host state after a successful model save', async () => {
+    configureModelCatalog()
+    const formSpec = {
+      ...baseSpec,
+      description: 'Keep this description',
+      channels: ['telegram'],
+      approval: { tools: { shell_exec: true } },
+      lifecycle: { stateless: false },
+      customField: 'keep-me',
+    }
+    const formHost: TestHost = {
+      metadata: { name: 'foo', resourceVersion: 'rv-model-form' },
+      spec: formSpec,
+    }
+    const preSaveHost: TestHost = {
+      metadata: { name: 'foo', resourceVersion: 'rv-model-refetch' },
+      spec: formSpec,
+    }
+    const authoritativeHost: TestHost = {
+      metadata: { name: 'foo', resourceVersion: 'rv-model-after-save' },
+      spec: {
+        ...formSpec,
+        // The refresh is authoritative even if the server normalizes the
+        // selected model or another writer changes it during the save.
+        model: { provider: 'openai', name: 'gpt-4.1' },
+      },
+    }
+    setupApiMocks(formHost, preSaveHost)
+    vi.mocked(api.getHostDetailBundle)
+      .mockResolvedValueOnce(detailBundle(formHost))
+      .mockResolvedValue(detailBundle(authoritativeHost))
+
+    const view = render(<HostDetailsPage />)
+    navigateToTab(view, 'model')
+    await screen.findByText('Current model')
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    fireEvent.click(screen.getByLabelText('Current model', { selector: '#llm-primary-model' }))
+    fireEvent.click(await screen.findByRole('option', { name: 'gpt-5.4' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save model configuration' }))
+
+    expect(await screen.findByText('Model configuration saved.')).toBeInTheDocument()
+    expect(await screen.findByText('gpt-4.1')).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Save model configuration' })
+    ).not.toBeInTheDocument()
+
+    const payload = findHostPutPayload() as {
+      metadata?: { resourceVersion?: string }
+      spec: Record<string, unknown>
+    }
+    expect(payload.metadata?.resourceVersion).toBe('rv-model-form')
+    expect(payload.spec).toMatchObject({
+      description: 'Keep this description',
+      channels: ['telegram'],
+      approval: { tools: { shell_exec: true } },
+      lifecycle: { stateless: false },
+      customField: 'keep-me',
+      model: { provider: 'openai', name: 'gpt-5.4' },
+      secretRef: 'openai-secret',
+    })
+    expect(api.getHost).toHaveBeenCalledWith('foo')
+    expect(api.getHostDetailBundle).toHaveBeenCalledTimes(2)
+  })
+
+  it('blocks removing a stored fallback credential slot still referenced by the Host policy', async () => {
+    // Producer-valid Host data: the custom Secret key is referenced by an
+    // active fallback, not merely shown as an arbitrary extra Secret key.
+    const fallbackSlot = 'claude-api-key-fb1'
+    const hostWithFallback = materializeHostResource(
+      {
+        metadata: { name: 'foo' },
+        spec: {
+          ...baseSpec,
+          llmPolicy: {
+            fallbacks: [
+              {
+                provider: 'claude',
+                model: 'claude-sonnet-4-6',
+                credentialSlot: fallbackSlot,
+              },
+            ],
+          },
+        },
+      },
+      { metadata: { resourceVersion: 'rv-fallback-policy' } }
+    )
+    setupApiMocks(hostWithFallback, hostWithFallback, [
+      { name: 'openai-secret', keys: ['openai-api-key', fallbackSlot] },
+      { name: 'anthropic-secret', keys: ['claude-api-key'] },
+    ])
+
+    const view = render(<HostDetailsPage />)
+    navigateToTab(view, 'model')
+    await screen.findByText('Current model')
+    fireEvent.click(screen.getByRole('button', { name: 'Edit LLM Secret credentials' }))
+
+    const anthropicGroup = screen
+      .getByText('Anthropic', { selector: '.cu-llm-cred-group__title' })
+      .closest('section')
+    expect(anthropicGroup).not.toBeNull()
+    fireEvent.click(
+      within(anthropicGroup as HTMLElement).getByRole('button', {
+        name: 'Remove extra credential slot',
+      })
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Update secret' }))
+
+    expect(
+      await screen.findByText(
+        new RegExp(`Cannot remove "${fallbackSlot}".*active fallback.*credential slot`)
+      )
+    ).toBeInTheDocument()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(
+      (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.some(
+        args => args[0] === 'PUT' && args[1] === '/api/v1/admin/secrets'
+      )
+    ).toBe(false)
   })
 
   it('changes the linked LLM Secret from the inline credentials dropdown', async () => {

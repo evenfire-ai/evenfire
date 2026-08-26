@@ -29,6 +29,36 @@ export type ProducerContextCreatePayload = {
   }
 }
 
+/** The create payload emitted by HostWizard before Kubernetes adds metadata/status. */
+export type ProducerHostCreatePayload = {
+  metadata: { name: string }
+  spec: {
+    host: string
+    contextRef: string
+    secretRef: string
+    channels: string[]
+    model: { provider: string; name: string }
+    [key: string]: unknown
+  }
+}
+
+/** The Host shape returned by the producer after Kubernetes materializes it. */
+export type ProducerHostResource = {
+  metadata: {
+    name: string
+    namespace: string
+    resourceVersion: string
+  }
+  spec: {
+    host: string
+    contextRef: string
+    secretRef: string
+    channels: string[]
+    model: { provider: string; name: string }
+    [key: string]: unknown
+  }
+}
+
 export type ContextResourceOverrides = {
   metadata?: Partial<ProducerContextResource['metadata']>
   spec?: Partial<ProducerContextResource['spec']>
@@ -89,16 +119,51 @@ export function materializeContextResource(
   })
 }
 
+/**
+ * Materialize the persisted Host shape from the exact HostWizard POST body.
+ * The defaults model the producer/Kubernetes response fields that are
+ * relevant to a Host consuming a Context; the payload's remaining spec fields
+ * are retained so tests cannot accidentally discard unrelated Host settings.
+ */
+export function materializeHostResource(
+  payload: ProducerHostCreatePayload,
+  overrides: {
+    metadata?: Partial<ProducerHostResource['metadata']>
+    spec?: Partial<ProducerHostResource['spec']>
+  } = {}
+): ProducerHostResource {
+  return {
+    metadata: {
+      name: payload.metadata.name,
+      namespace: 'mcp-host',
+      resourceVersion: 'rv-host-read',
+      ...overrides.metadata,
+    },
+    spec: {
+      ...payload.spec,
+      channels: [...payload.spec.channels],
+      model: { ...payload.spec.model },
+      ...overrides.spec,
+    },
+  }
+}
+
 export function buildHostReferencesForContext(
   contextName: string,
   hostNames: readonly string[] = ['foo', 'bar']
-) {
+): Record<string, ProducerHostResource> {
   return Object.fromEntries(
     hostNames.map(name => [
       name,
       {
         metadata: { name, namespace: 'mcp-host', resourceVersion: `rv-host-${name}` },
-        spec: { host: name, contextRef: contextName },
+        spec: {
+          host: name,
+          contextRef: contextName,
+          secretRef: 'shared-llm-secret',
+          channels: [],
+          model: { provider: 'openai', name: 'gpt-5.4-mini' },
+        },
       },
     ])
   )
@@ -118,18 +183,22 @@ export function buildSharedContextScenario(
   } = {}
 ) {
   const contextName = input.contextName ?? 'shared-connectors'
-  const context = buildContextResource({
-    metadata: {
-      name: contextName,
-      namespace: 'mcp-server',
-      resourceVersion: 'rv-context-shared-1',
+  const context = materializeContextResource(
+    {
+      metadata: { name: contextName },
+      spec: {
+        contextId: contextName,
+        description: input.description ?? 'Shared connector context',
+        mcpServers: [...(input.mcpServers ?? [])],
+      },
     },
-    spec: {
-      contextId: contextName,
-      description: input.description ?? 'Shared connector context',
-      mcpServers: [...(input.mcpServers ?? [])],
-    },
-  })
+    {
+      metadata: {
+        namespace: 'mcp-server',
+        resourceVersion: 'rv-context-shared-1',
+      },
+    }
+  )
   const hostNames = input.hostNames ?? ['foo', 'bar']
   const hosts = buildHostReferencesForContext(contextName, hostNames)
 

@@ -5,6 +5,7 @@ import * as api from '../../lib/api'
 import {
   buildHostReferencesForContext,
   materializeContextResource,
+  materializeHostResource,
 } from '../../test/fixtures/contextResource'
 import { buildSecretSummary } from '../../test/fixtures/secretSummary'
 import { HostWizard } from '../HostWizard'
@@ -450,17 +451,19 @@ describe('HostWizard — connector selection and automatic context creation', ()
     const context = materializeContextResource(
       contextCall![2] as Parameters<typeof materializeContextResource>[0]
     )
-    const contextRef = (hostCall![2] as { spec: { contextRef: string } }).spec.contextRef
-    const twoHosts = buildHostReferencesForContext(contextRef, [
-      'shared-context-agent',
-      'second-agent',
-    ])
+    const createdHost = materializeHostResource(
+      hostCall![2] as Parameters<typeof materializeHostResource>[0],
+      { metadata: { resourceVersion: 'rv-host-created' } }
+    )
+    const secondHost = buildHostReferencesForContext(createdHost.spec.contextRef, ['second-agent'])[
+      'second-agent'
+    ]
+    const twoHosts = [createdHost, secondHost]
 
     expect(context.spec.mcpServers).toEqual(['mcp-a'])
-    expect(context.metadata.name).toBe(contextRef)
-    expect(new Set(Object.values(twoHosts).map(host => host.spec.contextRef))).toEqual(
-      new Set([contextRef])
-    )
+    expect(createdHost.spec.contextRef).toBe(context.metadata.name)
+    expect(twoHosts).toHaveLength(2)
+    expect(twoHosts.every(host => host.spec.contextRef === context.metadata.name)).toBe(true)
   })
 })
 

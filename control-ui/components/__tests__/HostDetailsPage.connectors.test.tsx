@@ -13,6 +13,7 @@ import * as api from '../../lib/api'
 import {
   buildContextResource,
   buildSharedContextScenario,
+  materializeContextResource,
 } from '../../test/fixtures/contextResource'
 import { ToastProvider } from '../Toast'
 
@@ -180,22 +181,30 @@ describe('HostDetailsPage connectors', () => {
     })
     let persistedContext = scenario.context
 
-    // Previous-head reproduction (43e0d17cc): the old test mounted only one
-    // Host and supplied a partial hand-built Context. That fixture could pass
-    // even if the page accidentally treated connector membership as Host-local.
-    // Both producer-shaped Hosts below point at the same persisted Context, so
-    // the second mount must observe the first Host's Context update.
-    expect(scenario.hosts.foo.spec.contextRef).toBe(scenario.hosts.bar.spec.contextRef)
+    // Previous-head reproduction (8c9e129a7ad4e7252bf8dae5a3820c08cb32ed5b):
+    // the reviewed coverage mounted one Host with a partial hand-built Context.
+    // That setup could pass without proving that two producer Hosts consume the
+    // same persisted Context. Each response below is a fresh producer-shaped
+    // Host + Context read, so a Host-local connector list cannot satisfy the
+    // observable assertions.
     ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockImplementation(
-      async (name: string) => ({
-        host: scenario.hosts[name as 'foo' | 'bar'],
-        contexts: [persistedContext],
-        secrets: [],
-        users: [],
-        teams: [],
-        agentUsers: [],
-        agentTeams: [],
-      })
+      async (name: string) => {
+        const host = scenario.hosts[name as 'foo' | 'bar']
+        // Model the producer's detail response: Contexts are resolved from the
+        // Host's persisted reference, rather than injected into every Host
+        // response regardless of its binding.
+        const contexts =
+          persistedContext.metadata.name === host.spec.contextRef ? [persistedContext] : []
+        return {
+          host,
+          contexts,
+          secrets: [],
+          users: [],
+          teams: [],
+          agentUsers: [],
+          agentTeams: [],
+        }
+      }
     )
     ;(api.getHost as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       async (name: string) => ({ ...scenario.hosts[name as 'foo' | 'bar'] })
@@ -205,28 +214,44 @@ describe('HostDetailsPage connectors', () => {
         _name: string,
         payload: { metadata: { resourceVersion: string }; spec: Record<string, unknown> }
       ) => {
-        persistedContext = buildContextResource({
-          metadata: {
-            ...persistedContext.metadata,
-            resourceVersion: 'rv-context-shared-2',
+        persistedContext = materializeContextResource(
+          {
+            metadata: { name: 'shared-connectors' },
+            spec: {
+              contextId: String(payload.spec.contextId || 'shared-connectors'),
+              description: String(payload.spec.description || ''),
+              mcpServers: Array.isArray(payload.spec.mcpServers)
+                ? payload.spec.mcpServers.map(String)
+                : [],
+            },
           },
-          spec: {
-            ...persistedContext.spec,
-            ...payload.spec,
-            contextId: persistedContext.spec.contextId,
-            mcpServers: Array.isArray(payload.spec.mcpServers)
-              ? payload.spec.mcpServers.map(String)
-              : [],
-          },
-        })
+          {
+            metadata: {
+              ...persistedContext.metadata,
+              resourceVersion: 'rv-context-shared-2',
+            },
+            spec: payload.spec,
+          }
+        )
         return persistedContext
       }
     )
 
+    // Both Hosts render the same producer Context before any mutation. This
+    // is deliberately checked through the UI, not by inspecting contextRef.
     activeHostName = 'foo'
     renderPage()
     expect(await screen.findByText('mcp-existing')).toBeInTheDocument()
 
+    cleanup()
+    activeHostName = 'bar'
+    renderPage()
+    expect(await screen.findByText('mcp-existing')).toBeInTheDocument()
+
+    cleanup()
+    activeHostName = 'foo'
+    renderPage()
+    expect(await screen.findByText('mcp-existing')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Add connector' }))
     await waitFor(() => expect(api.getMcpServers).toHaveBeenCalledTimes(1))
     fireEvent.click(await screen.findByRole('option', { name: 'mcp-new' }))

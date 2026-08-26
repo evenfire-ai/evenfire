@@ -11,6 +11,8 @@ import { IconX } from './icons'
 export type LlmSecretUpdateModalProps = {
   secretName: string
   existingKeys: string[]
+  /** Credential slots still referenced by persisted Host fallback policies. */
+  protectedCredentialSlots?: string[]
   onClose: () => void
   onChanged: () => Promise<void>
 }
@@ -26,6 +28,7 @@ export type LlmSecretUpdateModalProps = {
 export function LlmSecretUpdateModal({
   secretName,
   existingKeys,
+  protectedCredentialSlots = [],
   onClose,
   onChanged,
 }: LlmSecretUpdateModalProps) {
@@ -58,6 +61,21 @@ export function LlmSecretUpdateModal({
 
     if (Object.keys(stringData).length === 0 && removeKeys.length === 0) {
       setError('Provide at least one API key.')
+      return
+    }
+
+    // A fallback credentialSlot is a live reference into this Secret. Refuse
+    // the retirement before the empty-secret check and confirmation dialog so
+    // the operator gets the actionable reason even when this is the Secret's
+    // last stored key. Re-adding the key above intentionally removes it from
+    // removeKeys, so replacing a protected slot remains allowed.
+    const protectedSlotSet = new Set(protectedCredentialSlots)
+    const blockedRemovals = removeKeys.filter(key => protectedSlotSet.has(key))
+    if (blockedRemovals.length > 0) {
+      const quotedSlots = blockedRemovals.map(key => `"${key}"`).join(', ')
+      setError(
+        `Cannot remove ${quotedSlots}: an active fallback still references ${blockedRemovals.length === 1 ? 'this credential slot' : 'these credential slots'}. Update the fallback configuration first.`
+      )
       return
     }
 

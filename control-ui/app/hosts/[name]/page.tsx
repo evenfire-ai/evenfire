@@ -205,6 +205,10 @@ export default function HostDetailsPage() {
   const [availableLlmSecrets, setAvailableLlmSecrets] = useState<HostSecretResource[]>([])
   // Fallback policy (spec §3-R5). `undefined` = the Host has no llmPolicy.
   const [llmPolicyDraft, setLlmPolicyDraft] = useState<LlmPolicy | undefined>(undefined)
+  // Keep the last server-backed policy separate from the editable draft. A
+  // model edit may contain an unsaved fallback slot, but Secret retirement
+  // must be guarded by the policy that is actually active on the Host.
+  const [persistedLlmPolicy, setPersistedLlmPolicy] = useState<LlmPolicy | undefined>(undefined)
   // Per-host model allowlist subset (spec.allowedModels, Topic 3a). Empty = the
   // host offers the full global allowlist per provider (back-compat default).
   const [allowedModelsDraft, setAllowedModelsDraft] = useState<HostAllowedModel[]>([])
@@ -262,6 +266,17 @@ export default function HostDetailsPage() {
       allowedCatalog
     )
   }, [allowedModelsDraft, allowedCatalog, providerDraft, llmPolicyDraft])
+  const protectedCredentialSlots = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (persistedLlmPolicy?.fallbacks ?? [])
+            .map(fallback => String(fallback.credentialSlot || '').trim())
+            .filter(Boolean)
+        )
+      ),
+    [persistedLlmPolicy]
+  )
   // Mount race: if the host loaded before the allowlist and it had NO saved
   // model, loadData resolved the draft to '' — seed the default once the
   // catalog arrives. Never overrides a non-empty draft (a saved model that
@@ -302,6 +317,8 @@ export default function HostDetailsPage() {
       const { host, contexts: contextsList, secrets: secretsList, agentUsers, agentTeams } = detail
       if (!mountedRef.current) return
       const spec = host.spec || {}
+      const nextPersistedLlmPolicy = normalizeLlmPolicy(spec.llmPolicy)
+      setPersistedLlmPolicy(nextPersistedLlmPolicy)
       // AP-6: remember the version of THIS read — the edit drafts below are
       // built from it, so it is the correct precondition for the eventual save.
       formResourceVersionRef.current = String(host.metadata?.resourceVersion || '')
@@ -385,7 +402,7 @@ export default function HostDetailsPage() {
             resolveDefaultModel(nextProvider, getModelOptions(allowedCatalog, nextProvider))
         )
         setSecretRefDraft(String(spec.secretRef || ''))
-        setLlmPolicyDraft(normalizeLlmPolicy(spec.llmPolicy))
+        setLlmPolicyDraft(nextPersistedLlmPolicy)
         // Hydrate the per-host model subset from the saved spec (Topic 3a); absent
         // → [] = unrestricted (offers the full global allowlist per provider).
         setAllowedModelsDraft(normalizeAllowedModels(spec.allowedModels))
@@ -1036,6 +1053,7 @@ export default function HostDetailsPage() {
                 key={secretRefDraft}
                 secretName={secretRefDraft}
                 existingKeys={currentSecretKeys}
+                protectedCredentialSlots={protectedCredentialSlots}
                 onClose={() => setLlmSecretModalOpen(false)}
                 onChanged={async () => {
                   await loadData('none')

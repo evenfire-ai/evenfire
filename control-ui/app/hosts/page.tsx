@@ -27,11 +27,23 @@ export default function HostsPage() {
     setLoading(true)
     setError('')
     try {
-      // Fetch hosts and contexts in parallel. The context payload powers the
-      // hover card on the Context column (shows the same MCP-server list the
-      // create wizard shows), so any failure to load it surfaces here too.
-      const [hostsResponse, contextsResponse] = await Promise.all([getHosts(), getContexts()])
+      // Hosts are the primary resource for this page. Contexts only enrich the
+      // connector hover card, so an optional enrichment failure must not hide
+      // the table or its primary actions.
+      const hostsResponse = await getHosts()
       setHosts(hostsResponse.items || [])
+      // Clear stale enrichment before refreshing it. If the optional request
+      // fails, rows still render with their raw context reference and a
+      // degraded connector count/hover card.
+      setContextsByRef({})
+
+      let contextsResponse
+      try {
+        contextsResponse = await getContexts()
+      } catch {
+        return
+      }
+
       const map: Record<string, string[]> = {}
       for (const ctx of contextsResponse.items || []) {
         const ref = String(ctx.spec?.contextId || ctx.metadata?.name || '').trim()
