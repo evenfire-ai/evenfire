@@ -33,13 +33,20 @@ const STEP_DETAILS = [
 ] as const
 
 // A Host's guardrails.capabilityCeiling bounds which capabilities a hook may be
-// granted. spec is typed AnyRecord in lib/api, so read it defensively and keep
-// only the four known capability values.
+// granted. An absent ceiling is the empty set, not "unbounded": the install
+// route reads it as `capabilityCeiling ?? []` and rejects anything requested
+// against it, so granting must narrow to nothing here for the same Host.
+//
+// `null` means "no agent resolved yet" and is the one case that must not
+// narrow, so the author's seed survives the load rather than being cleared
+// before the selected Host has arrived. spec is typed AnyRecord in lib/api, so
+// read it defensively and keep only the four known capability values.
 function hostCapabilityCeiling(host: HostResource | undefined): HookCapability[] | null {
-  const guardrails = (host?.spec as { guardrails?: { capabilityCeiling?: unknown } } | undefined)
+  if (!host) return null
+  const guardrails = (host.spec as { guardrails?: { capabilityCeiling?: unknown } } | undefined)
     ?.guardrails
   const ceiling = guardrails?.capabilityCeiling
-  if (!Array.isArray(ceiling)) return null
+  if (!Array.isArray(ceiling)) return []
   return ceiling.filter((c): c is HookCapability =>
     ALL_HOOK_CAPABILITIES.includes(c as HookCapability)
   )
@@ -145,8 +152,8 @@ export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFor
   )
   const ceiling = useMemo(() => hostCapabilityCeiling(selectedHost), [selectedHost])
 
-  // When the target agent declares a ceiling, drop any selected capability that
-  // is no longer allowed for the newly selected host.
+  // Drop any selected capability the newly selected agent does not allow. A
+  // null ceiling is the not-yet-resolved agent, which narrows nothing.
   useEffect(() => {
     if (!ceiling) return
     setCapabilities(prev => {
@@ -154,6 +161,23 @@ export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFor
       return next.size === prev.size ? prev : next
     })
   }, [ceiling])
+
+  // What is ticked, then what the agent permits — the second sentence applies
+  // whether or not the author declared anything, so it is appended rather than
+  // chosen between. An agent with no ceiling can grant nothing, so say that
+  // plainly instead of pointing at a ceiling it does not have.
+  const capabilitiesDescription = [
+    declaredCapabilities.length > 0
+      ? "Pre-selected from what the hook's author says it needs. Removing one does not stop the install — the hook runs without that power."
+      : 'Grant only the capabilities this hook needs.',
+    ceiling === null
+      ? ''
+      : ceiling.length === 0
+        ? 'This agent has no capability ceiling, so no capability can be granted until one is set on the agent.'
+        : "Only the capabilities within this agent's capability ceiling can be granted.",
+  ]
+    .filter(Boolean)
+    .join(' ')
 
   // Declared capabilities the hook will not get — either the operator unticked
   // them or the agent's ceiling forbids them. Either way the hook is installed
@@ -390,13 +414,7 @@ export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFor
                     single decision, and fail mode below is constrained by it. */}
                 <fieldset className="cu-form-section__group">
                   <legend className="cu-form-section__subheading">Capabilities</legend>
-                  <p className="cu-form-section__description">
-                    {declaredCapabilities.length > 0
-                      ? "Pre-selected from what the hook's author says it needs. Removing one does not stop the install — the hook runs without that power."
-                      : ceiling
-                        ? "Only the capabilities within this agent's capability ceiling can be granted."
-                        : 'Grant only the capabilities this hook needs.'}
-                  </p>
+                  <p className="cu-form-section__description">{capabilitiesDescription}</p>
                   {HOOK_CAPABILITY_OPTIONS.map(option => {
                     const outsideCeiling = !!ceiling && !ceiling.includes(option.value)
                     const declared = declaredCapabilities.includes(option.value)

@@ -25,10 +25,17 @@ function entryWith(hookMeta: Record<string, unknown>): RegistryEntry {
   } as unknown as RegistryEntry
 }
 
-/** A Host whose guardrails ceiling allows `ceiling`, or none when null. */
+/**
+ * A Host whose guardrails ceiling allows `ceiling`. `null` writes no ceiling at
+ * all, which the install route reads as the empty set — an agent that permits
+ * nothing, not one that permits everything.
+ */
 function host(name: string, ceiling: string[] | null) {
   return { metadata: { name }, spec: ceiling ? { guardrails: { capabilityCeiling: ceiling } } : {} }
 }
+
+/** A ceiling that permits every capability, so a test can isolate the seeding. */
+const ALL_CAPABILITIES = ['may_deny', 'may_rewrite', 'may_substitute_result', 'may_add_context']
 
 function render(ui: React.ReactNode) {
   return rtlRender(<ToastProvider>{ui}</ToastProvider>)
@@ -57,7 +64,9 @@ afterEach(cleanup)
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(api.getRegistryCredentialSchema).mockResolvedValue({ keys: [] } as never)
-  vi.mocked(api.getHosts).mockResolvedValue({ items: [host('agent-a', null)] } as never)
+  vi.mocked(api.getHosts).mockResolvedValue({
+    items: [host('agent-a', ALL_CAPABILITIES)],
+  } as never)
 })
 
 const noop = () => undefined
@@ -177,6 +186,25 @@ describe('HookInstallForm — declaration never escapes the ceiling', () => {
       screen.getByText(/required by this hook, but outside the agent's ceiling/i)
     ).toBeInTheDocument()
     expect(screen.getByText(/needs may_deny to function/i)).toBeInTheDocument()
+  })
+
+  it('grants nothing on an agent with no ceiling, matching the install route', async () => {
+    // control-api reads a missing capabilityCeiling as [] and 403s anything
+    // requested against it, so a seeded tick here would submit a request the
+    // server is certain to reject.
+    vi.mocked(api.getHosts).mockResolvedValue({ items: [host('agent-a', null)] } as never)
+    render(
+      <HookInstallForm
+        entry={entryWith({ requiredCapabilities: ['may_rewrite'] })}
+        onCancel={noop}
+        onInstalled={noop}
+      />
+    )
+    await openAdvanced()
+    await waitFor(() => expect(capabilityBox('May rewrite')).toBeDisabled())
+    expect(capabilityBox('May rewrite').checked).toBe(false)
+    expect(screen.getByText(/no capability can be granted/i)).toBeInTheDocument()
+    expect(screen.getByText(/needs may_rewrite to function/i)).toBeInTheDocument()
   })
 
   it('a declared may_deny still forces fail closed, as a manual tick does', async () => {
