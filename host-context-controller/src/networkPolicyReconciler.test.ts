@@ -4,6 +4,7 @@ import type { RecordWithTtl } from 'node:dns'
 import * as dns from 'node:dns/promises'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { asApiserverNetworkPolicy } from './__tests__/asApiserverNetworkPolicy'
 import { confirmAuthoritativeMcpServerAbsence } from './mcpServerSafety'
 import {
   networkPolicySafetyPassDurationSeconds,
@@ -5617,6 +5618,27 @@ describe('NetworkPolicyReconciler', () => {
         }
       ).reconcileExternalEgressSafety(server, [stalePredecessor], () => true)
     }
+
+    it('BYPASS-NP-1: equivalent HCC-owned recorded policy skips replace', async () => {
+      const binding = server.spec.egressBindings![0]
+      const desired = (
+        reconciler as unknown as {
+          buildExactHostEgressPolicy: (
+            server: McpServerCRD,
+            name: string,
+            binding: { cidr?: string; port?: number; protocol?: string },
+            cidrs: string[]
+          ) => k8s.V1NetworkPolicy
+        }
+      ).buildExactHostEgressPolicy(server, desiredName, binding, ['104.18.0.0/16'])
+      mockApi.createNamespacedNetworkPolicy.mockRejectedValueOnce(
+        Object.assign(new Error('already exists'), { code: 409 })
+      )
+      mockApi.readNamespacedNetworkPolicy.mockResolvedValueOnce(asApiserverNetworkPolicy(desired))
+
+      expect(await reconcileExternalEgressSafety()).toBe(true)
+      expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
 
     it('converges an HCC-owned same-name policy instead of aborting the pass', async () => {
       mockApi.createNamespacedNetworkPolicy.mockRejectedValueOnce(

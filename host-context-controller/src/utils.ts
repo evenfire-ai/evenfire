@@ -235,6 +235,58 @@ function isServiceObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * True when the desired NetworkPolicy is equivalent to the live object, so a
+ * replace would be a no-op. Canonicalize first: the apiserver default-fills
+ * policyTypes and ports[].protocol=TCP, and key order is not stable (#307).
+ * Arrays stay in author order (#214). Doubt or a malformed object returns
+ * false (fail-open-to-write).
+ */
+export function networkPolicyMatchesDesired(
+  desired: k8s.V1NetworkPolicy | undefined,
+  existing: k8s.V1NetworkPolicy | undefined
+): boolean {
+  try {
+    if (!desired?.spec || !existing?.spec) return false
+    return (
+      JSON.stringify(normalizeNetworkPolicyForComparison(desired)) ===
+      JSON.stringify(normalizeNetworkPolicyForComparison(existing))
+    )
+  } catch {
+    return false
+  }
+}
+
+function normalizeNetworkPolicyForComparison(policy: k8s.V1NetworkPolicy): unknown {
+  const normalized = structuredClone(policy) as k8s.V1NetworkPolicy & { status?: unknown }
+  delete normalized.status
+  delete normalized.metadata?.resourceVersion
+  delete normalized.metadata?.uid
+  delete normalized.metadata?.generation
+  delete normalized.metadata?.creationTimestamp
+  delete normalized.metadata?.managedFields
+  delete normalized.metadata?.selfLink
+
+  const spec = normalized.spec
+  if (spec) {
+    if (!spec.policyTypes) {
+      spec.policyTypes = (spec.egress?.length ?? 0) > 0 ? ['Ingress', 'Egress'] : ['Ingress']
+    }
+    for (const rule of spec.ingress ?? []) {
+      for (const port of rule.ports ?? []) {
+        if (port.protocol === 'TCP') delete port.protocol
+      }
+    }
+    for (const rule of spec.egress ?? []) {
+      for (const port of rule.ports ?? []) {
+        if (port.protocol === 'TCP') delete port.protocol
+      }
+    }
+  }
+
+  return normalizeServiceValue(normalized)
+}
+
 /** Create-or-replace a NetworkPolicy (409 catch → conflict-retry replace). */
 export async function applyNetworkPolicy(
   api: k8s.NetworkingV1Api,
@@ -263,6 +315,7 @@ export async function applyNetworkPolicy(
     replace: body => api.replaceNamespacedNetworkPolicy({ name, namespace, body }),
     mutationAllowed,
     validateExisting,
+    isUpToDate: networkPolicyMatchesDesired,
   })
 }
 
