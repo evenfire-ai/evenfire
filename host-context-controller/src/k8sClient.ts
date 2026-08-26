@@ -3156,7 +3156,7 @@ export class McpServerWatcher implements McpServerProvider {
         },
       })
       if (!contextInventoryAuthoritative() || !serverInventoryAuthoritative()) {
-        console.error('[K8s] pass ended without certifying: inventory authority lost')
+        console.warn('[K8s] pass ended without certifying: inventory authority lost')
         initialConvergenceSwallowedTotal.inc({ lane: 'NetworkPolicy', sink: 'authority-lost' })
         observeInitialNetworkPolicyPass(startedAtMs, 'aborted-authority')
         this.scheduleInitialConvergenceRetry('NetworkPolicy')
