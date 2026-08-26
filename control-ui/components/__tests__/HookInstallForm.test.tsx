@@ -226,3 +226,41 @@ describe('HookInstallForm — declaration never escapes the ceiling', () => {
     expect(select).toBeDisabled()
   })
 })
+
+describe('HookInstallForm — ungranted-capability warning', () => {
+  // `enforceCapabilities` neutralizes deny/rewrite/substitute and nothing else,
+  // so the "actions are discarded" warning must not be shown for a capability
+  // the runtime never withholds.
+  it('does not claim discarded actions for an unenforced capability', async () => {
+    vi.mocked(api.getHosts).mockResolvedValue({ items: [host('agent-a', null)] } as never)
+    render(
+      <HookInstallForm
+        entry={entryWith({ requiredCapabilities: ['may_add_context'] })}
+        onCancel={noop}
+        onInstalled={noop}
+      />
+    )
+    await openAdvanced()
+    await waitFor(() =>
+      expect(screen.getByText(/the author lists may_add_context/i)).toBeInTheDocument()
+    )
+    expect(screen.getByText(/does not enforce today/i)).toBeInTheDocument()
+    expect(screen.queryByText(/the actions it takes are discarded/i)).toBeNull()
+  })
+
+  it('warns about the enforced capability and notes the unenforced one apart', async () => {
+    vi.mocked(api.getHosts).mockResolvedValue({ items: [host('agent-a', null)] } as never)
+    render(
+      <HookInstallForm
+        entry={entryWith({ requiredCapabilities: ['may_deny', 'may_add_context'] })}
+        onCancel={noop}
+        onInstalled={noop}
+      />
+    )
+    await openAdvanced()
+    // The strong warning names only the capability the runtime withholds.
+    await waitFor(() => expect(screen.getByText(/needs may_deny to function/i)).toBeInTheDocument())
+    expect(screen.queryByText(/needs may_deny, may_add_context to function/i)).toBeNull()
+    expect(screen.getByText(/the author also lists may_add_context/i)).toBeInTheDocument()
+  })
+})

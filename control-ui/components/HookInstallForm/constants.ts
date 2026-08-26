@@ -31,6 +31,20 @@ export const HOOK_CAPABILITY_OPTIONS: Array<{
 
 export const ALL_HOOK_CAPABILITIES: HookCapability[] = HOOK_CAPABILITY_OPTIONS.map(o => o.value)
 
+// The capabilities mcp-host neutralizes when they are not granted, per
+// `enforceCapabilities` (core/guardrails/capabilities.ts): an ungranted `deny`
+// downgrades to `no_decision`, an ungranted `rewrite`/`substitute` is dropped.
+//
+// `may_add_context` has no such branch — a hook adds context whether or not it
+// was granted — so telling an operator its actions are discarded would be
+// untrue for that one, and would spend the warning's credibility on a case
+// where nothing is wrong.
+export const ENFORCED_HOOK_CAPABILITIES: HookCapability[] = [
+  'may_deny',
+  'may_rewrite',
+  'may_substitute_result',
+]
+
 // Default installation order applied by the backend when none is supplied.
 export const DEFAULT_HOOK_ORDER = 100
 

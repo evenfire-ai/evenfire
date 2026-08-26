@@ -11,6 +11,7 @@ import { getEmbeddedHookCredentialSchema } from '../registryInstallHelpers'
 import {
   ALL_HOOK_CAPABILITIES,
   DEFAULT_HOOK_ORDER,
+  ENFORCED_HOOK_CAPABILITIES,
   HOOK_CAPABILITY_OPTIONS,
   HOOK_INSTALL_ERROR_LABELS,
   ORDER_HINT_LABELS,
@@ -186,6 +187,12 @@ export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFor
     () => declaredCapabilities.filter(c => !capabilities.has(c)),
     [declaredCapabilities, capabilities]
   )
+
+  // Split by whether mcp-host actually withholds the action. The two cases
+  // deserve different words: one silently breaks the hook, the other changes
+  // nothing about how it runs today.
+  const missingEnforced = missingDeclared.filter(c => ENFORCED_HOOK_CAPABILITIES.includes(c))
+  const missingUnenforced = missingDeclared.filter(c => !ENFORCED_HOOK_CAPABILITIES.includes(c))
 
   // may_deny ⇒ fail-closed, matching the backend deny_requires_fail_closed rule.
   const mustFailClosed = capabilities.has('may_deny')
@@ -436,11 +443,19 @@ export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFor
                       />
                     )
                   })}
-                  {missingDeclared.length > 0 ? (
+                  {missingEnforced.length > 0 ? (
                     <div className="cu-banner cu-banner--warning" role="status">
-                      This hook needs {missingDeclared.join(', ')} to function. Without{' '}
-                      {missingDeclared.length > 1 ? 'them' : 'it'}, it installs and reports Ready,
+                      This hook needs {missingEnforced.join(', ')} to function. Without{' '}
+                      {missingEnforced.length > 1 ? 'them' : 'it'}, it installs and reports Ready,
                       but the actions it takes are discarded.
+                    </div>
+                  ) : null}
+                  {missingUnenforced.length > 0 ? (
+                    <div className="cu-banner cu-banner--info">
+                      {missingEnforced.length > 0 ? 'The author also lists' : 'The author lists'}{' '}
+                      {missingUnenforced.join(', ')}, which the runtime does not enforce today: the
+                      hook behaves the same whether or not{' '}
+                      {missingUnenforced.length > 1 ? 'they are' : 'it is'} granted.
                     </div>
                   ) : null}
                 </fieldset>
