@@ -5,7 +5,9 @@ import { HostFleetReconcileError } from './hostReconciler'
 import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
 import {
   McpServerWatcher,
+  createMcpAuthorizationStore,
   getContext,
+  isMcpAuthorizationNotFound,
   listAllCommunicationChannels,
   listAllGlobalFileSystems,
   listAllHosts,
@@ -117,6 +119,7 @@ const mocks = vi.hoisted(() => {
   const getNamespacedCustomObject = vi
     .fn()
     .mockRejectedValue(Object.assign(new Error('not found'), { code: 404 }))
+  const readNamespacedSecret = vi.fn()
   const ensureDefaultPolicies = vi.fn().mockResolvedValue(undefined)
   const hasCertifiedSafetyInventory = vi.fn().mockReturnValue(true)
   const netPolFullReconcile = vi.fn().mockImplementation(async (...args: unknown[]) => {
@@ -135,6 +138,7 @@ const mocks = vi.hoisted(() => {
     hasCertifiedSafetyInventory,
     listNamespacedCustomObject,
     getNamespacedCustomObject,
+    readNamespacedSecret,
     ensureDefaultPolicies,
     netPolFullReconcile,
     serverFullReconcile,
@@ -190,6 +194,7 @@ vi.mock('@kubernetes/client-node', () => {
     makeApiClient(api: unknown): unknown {
       if (api === CustomObjectsApi) {
         return {
+          getNamespacedCustomObject: mocks.getNamespacedCustomObject,
           listNamespacedCustomObject: async (request: { plural?: string }, options?: unknown) => {
             if (request.plural === 'hosts') mocks.hostListCallOptions(options)
             if (request.plural === 'sharedfilesystems')
@@ -217,8 +222,10 @@ vi.mock('@kubernetes/client-node', () => {
             }
             return response
           },
-          getNamespacedCustomObject: mocks.getNamespacedCustomObject,
         }
+      }
+      if (api === CoreV1Api) {
+        return { readNamespacedSecret: mocks.readNamespacedSecret }
       }
       return {}
     }
@@ -354,6 +361,142 @@ vi.mock('./sharedFileSystemReconciler', () => ({
 beforeEach(() => {
   mocks.hostFullReconcile.mockReset().mockResolvedValue(undefined)
   mocks.hostReconcileHosts.mockReset().mockResolvedValue(undefined)
+})
+
+describe('MCP authorization store Kubernetes 404 normalization', () => {
+  const provider = {
+    getAllServerInfos: () => [],
+  } as unknown as Parameters<typeof createMcpAuthorizationStore>[0]
+
+  const restoreDefaultReadMocks = () => {
+    mocks.getNamespacedCustomObject
+      .mockReset()
+      .mockRejectedValue(Object.assign(new Error('not found'), { code: 404 }))
+    mocks.readNamespacedSecret.mockReset()
+  }
+
+  beforeEach(() => {
+    restoreDefaultReadMocks()
+  })
+
+  afterEach(() => {
+    // These tests intentionally reset the shared Kubernetes read mocks. Restore
+    // the normal 404 default so later watcher tests still model an absent
+    // object instead of an accidentally resolved undefined response.
+    restoreDefaultReadMocks()
+  })
+
+  it('treats ApiException.code=404 as absent for every CR authority read', async () => {
+    mocks.getNamespacedCustomObject.mockRejectedValue({ code: 404 })
+    const store = createMcpAuthorizationStore(provider)
+
+    await expect(store.readHost('host-a')).resolves.toBeNull()
+    await expect(store.readContext('context-a')).resolves.toBeNull()
+    await expect(store.readMcpServer('server-a')).resolves.toBeNull()
+  })
+
+  it('treats ApiException.code=404 as absent for metadata and full Secret reads', async () => {
+    mocks.readNamespacedSecret.mockRejectedValue({ code: 404 })
+    const store = createMcpAuthorizationStore(provider)
+
+    await expect(store.readSecretMetadata('server-token')).resolves.toBeNull()
+    await expect(store.readSecret('server-token')).resolves.toBeNull()
+  })
+
+  it('projects only Secret identity metadata for inventory even when Kubernetes returns data', async () => {
+    mocks.readNamespacedSecret.mockResolvedValue({
+      metadata: {
+        name: 'server-token',
+        namespace: 'mcp-server',
+        uid: 'secret-uid',
+        resourceVersion: '42',
+      },
+      data: { token: 'credential-bytes-must-not-cross-this-boundary' },
+    })
+    const store = createMcpAuthorizationStore(provider)
+
+    const metadata = await store.readSecretMetadata('server-token')
+    expect(metadata).toEqual({
+      name: 'server-token',
+      namespace: 'mcp-server',
+      metadata: { uid: 'secret-uid', resourceVersion: '42' },
+    })
+    expect(metadata).not.toHaveProperty('data')
+    expect(JSON.stringify(metadata)).not.toContain('credential-bytes-must-not-cross-this-boundary')
+  })
+
+  it('projects successful Host, Context, and McpServer authority reads from live Kubernetes objects', async () => {
+    const provider = {
+      getAllServerInfos: () => [
+        {
+          name: 'server-a',
+          status: { deployed: true, ready: true, authoritative: true },
+        },
+      ],
+    } as unknown as Parameters<typeof createMcpAuthorizationStore>[0]
+    const objects: Record<string, unknown> = {
+      'hosts/host-a': {
+        metadata: {
+          name: 'host-a',
+          namespace: 'mcp-host',
+          uid: 'host-uid-a',
+          resourceVersion: '11',
+        },
+        spec: { contextRef: 'context-a' },
+      },
+      'contexts/context-a': {
+        metadata: {
+          name: 'context-a',
+          namespace: 'mcp-server',
+          uid: 'context-uid-a',
+          resourceVersion: '12',
+        },
+        spec: { mcpServers: ['server-a'] },
+      },
+      'mcpservers/server-a': {
+        metadata: {
+          name: 'server-a',
+          namespace: 'mcp-server',
+          uid: 'server-uid-a',
+          resourceVersion: '13',
+        },
+        spec: {
+          description: 'Server A',
+          transport: { type: 'streamableHttp', url: 'http://server-a/mcp', port: 8080 },
+          auth: { type: 'bearer', secretRef: 'server-a-auth', secretKey: 'token' },
+          enabled: true,
+        },
+      },
+    }
+    mocks.getNamespacedCustomObject.mockImplementation(
+      async ({ plural, name }: { plural: string; name: string }) => objects[`${plural}/${name}`]
+    )
+
+    const store = createMcpAuthorizationStore(provider)
+
+    await expect(store.readHost('host-a')).resolves.toEqual({
+      name: 'host-a',
+      namespace: 'mcp-host',
+      metadata: { uid: 'host-uid-a', resourceVersion: '11' },
+      contextRef: 'context-a',
+    })
+    await expect(store.readContext('context-a')).resolves.toEqual({
+      name: 'context-a',
+      namespace: 'mcp-server',
+      metadata: { uid: 'context-uid-a', resourceVersion: '12' },
+      mcpServers: ['server-a'],
+    })
+    await expect(store.readMcpServer('server-a')).resolves.toEqual({
+      name: 'server-a',
+      namespace: 'mcp-server',
+      metadata: { uid: 'server-uid-a', resourceVersion: '13' },
+      description: 'Server A',
+      transport: { type: 'streamableHttp', url: 'http://server-a/mcp', port: 8080 },
+      auth: { type: 'bearer', secretRef: 'server-a-auth', secretKey: 'token' },
+      enabled: true,
+      status: { deployed: true, ready: true, authoritative: true },
+    })
+  })
 })
 
 describe('McpServerWatcher startup', () => {
@@ -4654,6 +4797,20 @@ describe('getContext error semantics', () => {
     mocks.getNamespacedCustomObject.mockRejectedValueOnce(unavailable)
 
     await expect(getContext('production-context')).rejects.toBe(unavailable)
+  })
+})
+
+describe('MCP authorization Kubernetes not-found classification', () => {
+  it.each([{ code: 404 }, { response: { statusCode: 404 } }])(
+    'recognizes Kubernetes 404 shape %#',
+    error => {
+      expect(isMcpAuthorizationNotFound(error)).toBe(true)
+    }
+  )
+
+  it('does not classify authority failures as not-found', () => {
+    expect(isMcpAuthorizationNotFound({ code: 403 })).toBe(false)
+    expect(isMcpAuthorizationNotFound({ response: { statusCode: 503 } })).toBe(false)
   })
 })
 

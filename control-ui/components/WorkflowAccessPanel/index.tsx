@@ -10,6 +10,7 @@ import {
   allowWorkflowApprovalTeam,
   getAdminTeams,
   getAdminUsers,
+  isSilentApiError,
   listWorkflowApprovalAllowedTeams,
   listWorkflowGrants,
   listWorkflowTeamGrants,
@@ -44,6 +45,21 @@ const INITIAL_SECTION_STATE: SectionState = {
 
 function uniqueIds(ids: string[]): string[] {
   return [...new Set(ids.map(id => id.trim()).filter(Boolean))]
+}
+
+function apiErrorStatus(error: unknown): number | null {
+  if (!error || typeof error !== 'object') return null
+  const status = (error as { status?: unknown }).status
+  return typeof status === 'number' ? status : null
+}
+
+function apiErrorRetryAfterSeconds(error: unknown): number | null {
+  if (apiErrorStatus(error) !== 429 || !error || typeof error !== 'object') return null
+  const body = (error as { body?: unknown }).body
+  if (!body || typeof body !== 'object') return null
+  const raw = (body as Record<string, unknown>).retryAfterSeconds
+  const seconds = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN
+  return Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : null
 }
 
 function removeId(ids: string[], id: string): string[] {
@@ -296,12 +312,56 @@ export function WorkflowAccessPanel(props: WorkflowAccessPanelProps): React.JSX.
     const added = nextTeamIds.filter(id => !current.includes(id))
     const removed = current.filter(id => !nextTeamIds.includes(id))
     setSectionPatch('approval-target-teams', { mutating: true, mutateError: null })
+    const errors: string[] = []
+    let rateLimited = false
+    let retryAfterSeconds: number | null = null
+    let appliedMutations = 0
+    const recordMutationError = (error: unknown): boolean => {
+      if (isSilentApiError(error)) throw error
+      if (apiErrorStatus(error) === 429) {
+        rateLimited = true
+        const retry = apiErrorRetryAfterSeconds(error)
+        retryAfterSeconds = Math.max(retryAfterSeconds ?? 0, retry ?? 0) || null
+        return true
+      }
+      errors.push(error instanceof Error ? error.message : String(error))
+      return false
+    }
+    let stopMutations = false
     try {
-      await Promise.all([
-        ...added.map(teamId => allowWorkflowApprovalTeam(namespace, recipeName, teamId)),
-        ...removed.map(teamId => revokeWorkflowApprovalTeam(namespace, recipeName, teamId)),
-      ])
+      // Serialize allow/revoke so a shared 20/min grant-write bucket cannot
+      // leave a partial write behind a Promise.all rejection.
+      for (const teamId of added) {
+        try {
+          await allowWorkflowApprovalTeam(namespace, recipeName, teamId)
+          appliedMutations += 1
+        } catch (error) {
+          stopMutations = recordMutationError(error)
+          if (stopMutations) break
+        }
+      }
+      for (const teamId of stopMutations ? [] : removed) {
+        try {
+          await revokeWorkflowApprovalTeam(namespace, recipeName, teamId)
+          appliedMutations += 1
+        } catch (error) {
+          stopMutations = recordMutationError(error)
+          if (stopMutations) break
+        }
+      }
       await loadApprovalTeams()
+      if (rateLimited || errors.length > 0) {
+        const messages = [...errors]
+        if (rateLimited) {
+          const partialPrefix = appliedMutations > 0 ? 'Some changes were saved. ' : ''
+          messages.unshift(
+            retryAfterSeconds === null
+              ? `${partialPrefix}Too many approval target team changes. Try again shortly.`
+              : `${partialPrefix}Too many approval target team changes. Try again in about ${retryAfterSeconds} seconds.`
+          )
+        }
+        throw new Error(messages.join('; '))
+      }
       if (added.length > 0) {
         showToast('Approval target team allowed.', { tone: 'success' })
       } else if (removed.length > 0) {
@@ -310,7 +370,7 @@ export function WorkflowAccessPanel(props: WorkflowAccessPanelProps): React.JSX.
         showToast('Approval target teams updated.', { tone: 'success' })
       }
     } catch (error) {
-      if (!mountedRef.current) return
+      if (!mountedRef.current || isSilentApiError(error)) return
       setSectionPatch('approval-target-teams', {
         mutateError:
           error instanceof Error ? error.message : 'Failed to save approval target teams',

@@ -9,6 +9,7 @@ import type { SessionTokenUsage } from '../conversation/conversationStore'
 import { LlmError } from '../errors'
 import { LlmPort } from '../interfaces'
 import type { SystemPromptParts } from '../reasoning/systemPrompt'
+import { redactDiagnosticField } from '../redactDiagnostics.js'
 import type { TokenCounter } from '../tokenizer/tokenCounter'
 import {
   ChatMessage,
@@ -45,16 +46,6 @@ function errorField(value: unknown, field: string): string | null {
   if (typeof fieldValue !== 'string') return null
   const trimmed = fieldValue.trim()
   return trimmed ? redactDiagnosticField(trimmed).slice(0, 120) : null
-}
-
-function redactDiagnosticField(value: string): string {
-  return value
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
-    .replace(/\bsk-[A-Za-z0-9_-]{6,}/gi, 'sk-[redacted]')
-    .replace(
-      /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|secret)=([^\s,;]+)/gi,
-      '$1=[redacted]'
-    )
 }
 
 function providerErrorDiagnostics(err: unknown): string {

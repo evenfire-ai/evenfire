@@ -2,6 +2,7 @@
  * Shared types for the MCP Host.
  */
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
+import type { GuardrailsConfig } from './core/guardrails/config'
 import type { LlmProvider } from './llm/registryCore'
 
 /**
@@ -72,6 +73,13 @@ export interface HostSpec {
    * CR like `spec.model`; hot-reloads with the rest of the spec.
    */
   allowedModels?: HostAllowedModel[]
+  /**
+   * Guardrails — the admin-authored `Host.spec.guardrails` block (spec §5).
+   * mcp-host CONSUMES it; the CRD schema is owned by the CRD chart. Absent/empty
+   * = no guardrails = byte-identical to today (no-config compatibility, spec §5).
+   * Phase 1: only `rules` + `limits` are interpreted.
+   */
+  guardrails?: GuardrailsConfig
 }
 
 /**
@@ -131,6 +139,7 @@ export type ApiKeys = Partial<Record<LlmProvider, ProviderCredentials>>
 export interface McpServerTransport {
   type: 'sse' | 'streamableHttp' | 'stdio'
   url?: string
+  port?: number
 }
 
 /**
@@ -183,14 +192,36 @@ export interface McpServerStatus {
 export interface McpServerInfo {
   name: string
   description?: string
-  contextRef: string
+  /**
+   * Present only for development/legacy in-process configuration. The HCC v2
+   * Host inventory deliberately omits Context identity: HCC derives it from
+   * the authenticated Host JWT and never returns it to the caller.
+   */
+  contextRef?: string
   transport: McpServerTransport
+  /** Legacy development shape. HCC v2 returns only authRequired. */
   auth?: McpServerAuth
   /**
    * OAuth broker config; present iff auth.type === 'oauth'. Carries `grantScope`
    * so the manager can dispatch the per-connection partition (user vs shared).
    */
   oauth?: McpServerOAuth
+  /** Whether the scoped HCC credential route must return a bearer. */
+  authRequired?: boolean
+  /**
+   * Opaque HCC authority revision. It changes when the authorized server,
+   * auth selector, or referenced Secret identity/resourceVersion changes.
+   */
+  credentialRevision?: string
+  /**
+   * Non-secret credential-mode policy emitted by the HCC v2 inventory. Drives the
+   * token-provider dispatch in the mcp-host seam (mini-spec §3.2): `static` uses
+   * the revision-locked getAuthToken route; `oauth-user`/`oauth-context` build a
+   * broker provider. Absent → treated as `static` (fail-closed). It carries NO
+   * authority (never contextRef/secretRef/token) — that is the invariant (I1)
+   * keeping it on the policy side of the decoder's forbidden-metadata guard.
+   */
+  authKind?: 'static' | 'oauth-user' | 'oauth-context'
   enabled: boolean
   status: McpServerStatus
 }

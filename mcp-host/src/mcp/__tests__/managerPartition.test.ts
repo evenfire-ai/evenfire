@@ -81,8 +81,8 @@ function oauthUserServer(name = 'gh'): McpServerInfo {
     name,
     contextRef: 'ctx-1',
     transport: { type: 'streamableHttp', url: `http://${name}/mcp` },
-    auth: { type: 'oauth' },
-    oauth: { grantScope: 'user' },
+    // HCC v2 inventory shape: the seam dispatches on authKind, not auth/oauth.
+    authKind: 'oauth-user',
     enabled: true,
     status: { deployed: true, ready: true },
   }

@@ -94,8 +94,10 @@ retain the fail-closed replica state; no reset path patches the key ad hoc.
 The Minikube T2 profile separately enables Upload v2 through the committed HCC
 patch `deploy/overlays/minikube/patches/gfs-upload-v2.yaml`. The
 `GlobalFileSystem` instance remains declarative storage/layout input; HCC env is
-the sole owner of feature activation and the exact 200 MiB/part/concurrency
-contract passed into generated GFSC workloads. Public-base and production
+the sole owner of feature activation, the product upload policy, and the exact
+part/concurrency contract passed into generated GFSC workloads. The product
+policy defaults to 200 MiB and may be configured from one byte through the
+compiled 1 GiB Upload v2 protocol maximum. Public-base and production
 activation remain disabled and separate from this local profile contract.
 Any later convergence failure reasserts the Control API fence together with the
 other database-dependent controllers and waits for the Control API Pods to

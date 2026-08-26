@@ -2224,7 +2224,12 @@ export class AppService {
       // A legacy fallback is valid only for a fresh upload. An explicit resume
       // must remain a v2 operation so a missing capability cannot silently turn
       // a persisted session into a second non-resumable resource.
-      if (!(error instanceof DesktopUploadCapabilityError) || resumeUploadId) throw error
+      if (
+        !(error instanceof DesktopUploadCapabilityError) ||
+        !error.allowLegacyFallback ||
+        resumeUploadId
+      )
+        throw error
       const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
         const encodedData = await legacyEncodedFile(filePath)
         this.assertCurrentDesktopGfsUploadScope(scope)
@@ -2258,7 +2263,12 @@ export class AppService {
         resumeUploadId,
       })
     } catch (error) {
-      if (!(error instanceof DesktopUploadCapabilityError) || resumeUploadId) throw error
+      if (
+        !(error instanceof DesktopUploadCapabilityError) ||
+        !error.allowLegacyFallback ||
+        resumeUploadId
+      )
+        throw error
       const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
         const encodedData = await legacyEncodedFile(filePath)
         this.assertCurrentDesktopGfsUploadScope(scope)
@@ -2422,7 +2432,8 @@ export class AppService {
       }
       return await entry.promise
     } catch (error) {
-      if (!(error instanceof DesktopUploadCapabilityError)) throw error
+      if (!(error instanceof DesktopUploadCapabilityError) || !error.allowLegacyFallback)
+        throw error
       const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
         const encodedData = await legacyEncodedFile(filePath)
         this.assertCurrentDesktopGfsUploadScope(scope)
@@ -2467,7 +2478,8 @@ export class AppService {
       }
       return await entry.promise
     } catch (error) {
-      if (!(error instanceof DesktopUploadCapabilityError)) throw error
+      if (!(error instanceof DesktopUploadCapabilityError) || !error.allowLegacyFallback)
+        throw error
       const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
         const encodedData = await legacyEncodedFile(filePath)
         this.assertCurrentDesktopGfsUploadScope(scope)
@@ -4623,6 +4635,26 @@ export class AppService {
   async captureSandboxUiPreview(): Promise<string | null> {
     const { captureSandboxUiPreview } = await import('./sandboxUiDriver.js')
     return captureSandboxUiPreview()
+  }
+
+  async findInActiveSandboxUi(
+    query: string,
+    operation: import('./sandboxUiDriver.js').SandboxUiFindOperation,
+    clientRequestId: number,
+    onResult: (result: import('./sandboxUiDriver.js').SandboxUiFindResult) => void
+  ): Promise<import('./sandboxUiDriver.js').SandboxUiFindStartResult> {
+    const { findInActiveSandboxUi } = await import('./sandboxUiDriver.js')
+    return findInActiveSandboxUi(query, operation, clientRequestId, onResult)
+  }
+
+  async stopActiveSandboxUiFind(): Promise<void> {
+    const { stopActiveSandboxUiFind } = await import('./sandboxUiDriver.js')
+    stopActiveSandboxUiFind()
+  }
+
+  async focusActiveSandboxUi(): Promise<boolean> {
+    const { focusActiveSandboxUi } = await import('./sandboxUiDriver.js')
+    return focusActiveSandboxUi()
   }
 
   /**

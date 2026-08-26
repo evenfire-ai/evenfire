@@ -64,7 +64,7 @@ export function classifyConnectError(error: unknown): {
   }
 
   const code = extractErrorCode(error)
-  if (code === 'ETIMEDOUT' || /timed? ?out/i.test(msg)) {
+  if (code === 'ETIMEDOUT' || code === -32001 || /timed? ?out/i.test(msg)) {
     return { reason: 'timeout', message: truncate(msg || 'request timed out') }
   }
   if (
@@ -77,8 +77,11 @@ export function classifyConnectError(error: unknown): {
   }
 
   // MCP SDK surfaces protocol errors with numeric JSON-RPC codes in msg.
-  if (/jsonrpc|protocol|invalid params|invalid request/i.test(msg)) {
-    return { reason: 'handshake', message: truncate(msg) }
+  if (/jsonrpc|protocol|invalid params|invalid request/i.test(msg) || isZodValidationError(error)) {
+    return {
+      reason: 'handshake',
+      message: isZodValidationError(error) ? 'invalid MCP response schema' : truncate(msg),
+    }
   }
 
   return { reason: 'unknown', message: truncate(msg || 'unknown error') }
@@ -147,12 +150,20 @@ export function isAuthError(error: unknown): boolean {
   return status === 401 || status === 403
 }
 
-function extractErrorCode(error: unknown): string | null {
+function extractErrorCode(error: unknown): string | number | null {
   if (error && typeof error === 'object') {
     const code = (error as Record<string, unknown>).code
     if (typeof code === 'string') return code
+    if (typeof code === 'number') return code
   }
   return null
+}
+
+function isZodValidationError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const candidate = error as Record<string, unknown>
+  const hasIssues = Array.isArray(candidate.issues)
+  return hasIssues && (candidate.name === 'ZodError' || candidate.name === '$ZodError')
 }
 
 function truncate(s: string, max = 240): string {

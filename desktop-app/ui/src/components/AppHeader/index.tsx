@@ -83,6 +83,8 @@ function notificationPillLabel(kind: AppNotificationKind): string {
 }
 
 export const AppHeader = React.memo(function AppHeader({
+  searchFocusRequestId = 0,
+  notificationOpenRequestId = 0,
   notificationTrayMode = 'overlay',
   notificationTrayReady = true,
   onNotificationTrayOpenChange,
@@ -129,6 +131,7 @@ export const AppHeader = React.memo(function AppHeader({
     () => window.innerWidth <= COMPACT_SEARCH_BREAKPOINT
   )
   const searchRef = useRef<HTMLDivElement | null>(null)
+  const searchInputRef = useRef<HTMLInputElement | null>(null)
   const notificationsRef = useRef<HTMLDivElement | null>(null)
   const searchDirectoryInFlightRef = useRef(false)
   const searchDirectoryRefreshQueryRef = useRef('')
@@ -151,6 +154,19 @@ export const AppHeader = React.memo(function AppHeader({
 
   useClickOutside(searchRef, searchOpen, () => setSearchOpen(false))
   useClickOutside(notificationsRef, notificationsOpen, () => setNotificationsOpen(false))
+
+  useEffect(() => {
+    if (searchFocusRequestId <= 0) return
+    setNotificationsOpen(false)
+    setSearchOpen(true)
+    searchInputRef.current?.focus()
+  }, [searchFocusRequestId])
+
+  useEffect(() => {
+    if (notificationOpenRequestId <= 0) return
+    setSearchOpen(false)
+    setNotificationsOpen(true)
+  }, [notificationOpenRequestId])
 
   React.useLayoutEffect(() => {
     onShellOverlayOpenChange?.(searchOpen || (notificationsOpen && !notificationTrayUsesDrawer))
@@ -552,6 +568,7 @@ export const AppHeader = React.memo(function AppHeader({
       <div className="header-left">
         <div className="global-search" ref={searchRef}>
           <TextInput
+            ref={searchInputRef}
             type="text"
             placeholder={compactSearch ? COMPACT_SEARCH_PLACEHOLDER : FULL_SEARCH_PLACEHOLDER}
             className="search-input"

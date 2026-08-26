@@ -23,12 +23,14 @@ spec:
   # single-writer assumption through the rollout too.
   strategy:
     type: Recreate
+  # CONTRACT: hcc-rollout-recovery=external-detection-only; owner=evenfire-infra
   # Recreate + replicas:1 means a botched rollout (new pod never Ready) leaves
-  # the control plane down until a manual `kubectl rollout undo` — the single-
-  # writer invariant forbids any overlap-based auto-recovery. This deadline is
-  # DETECTION ONLY: it flips Progressing=False (ProgressDeadlineExceeded) and
-  # fails `kubectl rollout status` for callers without their own --timeout; it
-  # does not roll back.
+  # /ready 503. Kubernetes will not self-heal that; the evenfire-infra deploy
+  # workflows own automatic `rollout undo --to-revision` for this Deployment
+  # only (evenfire#391). The deploy job still fails after a successful undo.
+  # This deadline is DETECTION ONLY: it flips Progressing=False
+  # (ProgressDeadlineExceeded) and fails `kubectl rollout status` for callers
+  # without their own --timeout; it does not roll back.
   #
   # Value (origin/dev, 2026-08-05): HCC's /ready stays 503 until its initial fleet
   # reconciliation finishes, so time-to-Ready scales with the McpServer/Context
@@ -130,6 +132,25 @@ spec:
           value: CLERUM_AUTH_JWT_PUBLIC_KEY
         - name: HCC_TARGET_NAMESPACE
           value: mcp-host
+        # Existing Control API RS256 public key used to verify the first-party
+        # mcp-host access-token family on HCC v2 Host routes. The audience is a
+        # fixed HCC code contract; the issuer is read from the same ConfigMap
+        # key consumed by Control API so signer and verifier cannot drift.
+        - name: HCC_MCP_HOST_JWT_PUBLIC_KEY
+          valueFrom:
+            configMapKeyRef:
+              name: control-api-public-key
+              key: CONTROL_API_PUBLIC_KEY_PEM
+        - name: HCC_MCP_HOST_JWT_ISSUER
+          valueFrom:
+            configMapKeyRef:
+              name: control-api-config
+              key: CONTROL_API_ADMIN_JWT_ISSUER
+        - name: HCC_MCP_HOST_JWT_MAX_TTL_SECONDS
+          valueFrom:
+            configMapKeyRef:
+              name: control-api-config
+              key: WORKFLOW_APPROVAL_ACCESS_TTL_SEC
         - name: CONTROL_API_BASE_URL
           value: http://control-api.control-plane.svc.cluster.local:8090
         # URL of the nginx gateway that mediates mcp-host → control-api

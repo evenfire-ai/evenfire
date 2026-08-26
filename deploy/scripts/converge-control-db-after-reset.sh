@@ -35,6 +35,25 @@ done
 [ -n "$OVERLAY" ] \
   || { printf '[converge-control-db-after-reset] ERROR: --overlay is required\n' >&2; exit 2; }
 
+# Reset convergence writes cluster state, scales multiple workloads, and
+# restores GFS credentials. It is a private child of the owning T2/full-setup
+# transition and must prove that lease before the first Kubernetes read/write.
+# The validator also binds the effective profile and context, so CONTEXT alone
+# cannot redirect this recovery path.
+T2_EFFECTIVE_PROFILE="${T2_PROFILE:-${MINIKUBE_PROFILE:-${CONTEXT}}}"
+T2_EFFECTIVE_CONTEXT="${T2_CONTEXT:-${CONTROL_API_REAL_PG_CONTEXT:-${CONTEXT}}}"
+if [[ "${T2_EFFECTIVE_PROFILE}" != "${T2_EFFECTIVE_CONTEXT}" ||
+      "${T2_EFFECTIVE_CONTEXT}" != "${CONTEXT}" ]]; then
+  printf '[converge-control-db-after-reset] ERROR: mutation profile/context does not match CONTEXT\n' >&2
+  exit 1
+fi
+T2_PROJECT_DIR="${T2_PROJECT_DIR:-${ROOT}}" \
+T2_PROFILE="${T2_EFFECTIVE_PROFILE}" \
+T2_CONTEXT="${T2_EFFECTIVE_CONTEXT}" \
+T2_LOCK_TOKEN="${T2_LOCK_TOKEN:-}" \
+T2_LOCK_ROOT="${T2_LOCK_ROOT:-${HOME}/.cache/evenfire/minikube-t2-locks}" \
+bash "$ROOT/scripts/minikube/require-t2-mutation-lock.sh"
+
 kc() { kubectl --context="$CONTEXT" "$@"; }
 fail() { printf '[converge-control-db-after-reset] ERROR: %s\n' "$*" >&2; exit 1; }
 

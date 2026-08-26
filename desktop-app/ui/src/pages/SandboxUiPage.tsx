@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button, StatusBanner } from '@components/Common'
+import SandboxCurrentContentSearch from '../components/SandboxCurrentContentSearch'
+import type { AppFindState } from '../components/SandboxCurrentContentSearch/types'
 import {
   IconChat,
   IconClose,
@@ -144,8 +146,10 @@ function useEmbedBounds(
 
 const APP_PAGE_SIZE = 6
 let pendingSandboxUiUnmountCleanup: number | null = null
+let nextSandboxFindClientRequestId = 0
 
 export function SandboxUiPage({
+  actionRequest = null,
   boundsRefreshKey = 0,
   conversationOrigin = null,
   currentTeamId = '',
@@ -154,8 +158,10 @@ export function SandboxUiPage({
   toastShellOverlayOpen = false,
   shortcutApp = null,
   shortcutOpenRequestId = 0,
+  localSearchRequestId = 0,
   onBackToConversation,
   onEmbeddedAppOpening,
+  onEmbeddedAppMounted,
   onEmbeddedAppBack,
   onEmbeddedAppRemoved,
   onEmbedBoundsApplied,
@@ -168,8 +174,16 @@ export function SandboxUiPage({
   const [refreshError, setRefreshError] = useState<{ appRef: string; message: string } | null>(null)
   const [appsPage, setAppsPage] = useState(0)
   const [embedPreviewDataUrl, setEmbedPreviewDataUrl] = useState<string | null>(null)
+  const [localSearchOpen, setLocalSearchOpen] = useState(false)
+  const [localSearchQuery, setLocalSearchQuery] = useState('')
+  const [localSearchState, setLocalSearchState] = useState<AppFindState>({ status: 'idle' })
   const embedSlotRef = useRef<HTMLDivElement>(null)
+  const activeFindClientRequestIdRef = useRef<number | null>(null)
+  const localSearchStateRef = useRef<AppFindState>({ status: 'idle' })
+  const lastLocalSearchRequestIdRef = useRef(shortcutApp ? localSearchRequestId : 0)
+  const localSearchPreviousFocusRef = useRef<HTMLElement | null>(null)
   const lastShortcutOpenRequestIdRef = useRef(0)
+  const lastActionRequestIdRef = useRef(0)
   const shellOverlayOpen =
     headerShellOverlayOpen || sidebarShellOverlayOpen || toastShellOverlayOpen
 
@@ -212,6 +226,101 @@ export function SandboxUiPage({
   useEffect(() => {
     return window.clerum.sandboxUi.onRefreshError(args => setRefreshError(args))
   }, [])
+
+  useEffect(() => {
+    return window.clerum.sandboxUi.onFindResult(result => {
+      if (result.clientRequestId !== activeFindClientRequestIdRef.current) return
+      if (!result.finalUpdate) return
+      const next: AppFindState =
+        result.matches > 0
+          ? { status: 'results', current: result.activeMatchOrdinal, total: result.matches }
+          : { status: 'empty' }
+      localSearchStateRef.current = next
+      setLocalSearchState(next)
+    })
+  }, [])
+
+  const stopLocalSearch = useCallback(() => {
+    const previous = localSearchPreviousFocusRef.current
+    activeFindClientRequestIdRef.current = null
+    setLocalSearchOpen(false)
+    setLocalSearchQuery('')
+    localSearchStateRef.current = { status: 'idle' }
+    setLocalSearchState({ status: 'idle' })
+    void window.clerum.sandboxUi
+      .stopFindInPage()
+      .then(() => window.clerum.sandboxUi.focusActive())
+      .then(focused => {
+        if (!focused) {
+          requestAnimationFrame(() => {
+            if (previous?.isConnected) previous.focus()
+          })
+        }
+      })
+      .catch(() => undefined)
+  }, [])
+
+  const runLocalSearch = useCallback(
+    async (query: string, operation: 'start' | 'next' | 'previous') => {
+      if (!query.trim()) {
+        activeFindClientRequestIdRef.current = null
+        localSearchStateRef.current = { status: 'idle' }
+        setLocalSearchState({ status: 'idle' })
+        await window.clerum.sandboxUi.stopFindInPage()
+        return
+      }
+      if (operation !== 'start' && localSearchStateRef.current.status !== 'results') return
+      const clientRequestId =
+        operation === 'start'
+          ? ++nextSandboxFindClientRequestId
+          : activeFindClientRequestIdRef.current
+      if (clientRequestId === null) return
+      activeFindClientRequestIdRef.current = clientRequestId
+      localSearchStateRef.current = { status: 'pending' }
+      setLocalSearchState({ status: 'pending' })
+      try {
+        const response = await window.clerum.sandboxUi.findInPage(query, {
+          operation,
+          clientRequestId,
+        })
+        if (clientRequestId !== activeFindClientRequestIdRef.current) return
+        if (response.status === 'unavailable') {
+          const next: AppFindState = {
+            status: 'unavailable',
+            reason:
+              response.reason === 'document-loading'
+                ? 'App is still loading'
+                : 'Search is not available',
+          }
+          localSearchStateRef.current = next
+          setLocalSearchState(next)
+        }
+      } catch (error) {
+        if (clientRequestId !== activeFindClientRequestIdRef.current) return
+        const next: AppFindState = {
+          status: 'error',
+          message: error instanceof Error ? error.message : 'Search failed',
+        }
+        localSearchStateRef.current = next
+        setLocalSearchState(next)
+      }
+    },
+    []
+  )
+
+  useEffect(() => {
+    if (localSearchRequestId <= lastLocalSearchRequestIdRef.current || launch.kind !== 'mounted') {
+      return
+    }
+    lastLocalSearchRequestIdRef.current = localSearchRequestId
+    localSearchPreviousFocusRef.current = document.activeElement as HTMLElement | null
+    setLocalSearchOpen(true)
+  }, [launch.kind, localSearchRequestId])
+
+  useEffect(() => {
+    if (launch.kind === 'mounted' || !localSearchOpen) return
+    stopLocalSearch()
+  }, [launch.kind, localSearchOpen, stopLocalSearch])
 
   // Tear down the embed when this page unmounts (user navigates away).
   useLayoutEffect(() => {
@@ -267,6 +376,7 @@ export function SandboxUiPage({
           bounds,
         })
         setLaunch({ kind: 'mounted', appRef: app.appRef })
+        onEmbeddedAppMounted?.()
         return { status: 'mounted' }
       } catch (err) {
         const { status, message } = statusFromError(err)
@@ -283,7 +393,7 @@ export function SandboxUiPage({
         return { status: 'failed', message: userFacing }
       }
     },
-    [onEmbeddedAppOpening, onEmbeddedAppRemoved]
+    [onEmbeddedAppMounted, onEmbeddedAppOpening, onEmbeddedAppRemoved]
   )
 
   const onOpen = useCallback(
@@ -332,6 +442,19 @@ export function SandboxUiPage({
   const onRefresh = useCallback(() => {
     void window.clerum.sandboxUi.reload()
   }, [])
+
+  useEffect(() => {
+    if (!actionRequest || actionRequest.id <= lastActionRequestIdRef.current) return
+    lastActionRequestIdRef.current = actionRequest.id
+    if (launch.kind !== 'mounted') return
+    if (actionRequest.action === 'refresh') {
+      onRefresh()
+    } else if (actionRequest.action === 'back-to-apps') {
+      void onBackToApps()
+    } else {
+      void handleBackToConversation()
+    }
+  }, [actionRequest, handleBackToConversation, launch.kind, onBackToApps, onRefresh])
 
   const onCopyDeepLink = useCallback(async () => {
     try {
@@ -486,6 +609,19 @@ export function SandboxUiPage({
             text={`Session refresh failed: ${refreshError.message}. Close and re-open the app to continue.`}
           />
         )}
+        {localSearchOpen ? (
+          <SandboxCurrentContentSearch
+            focusRequestId={localSearchRequestId}
+            onClose={stopLocalSearch}
+            onMove={operation => void runLocalSearch(localSearchQuery, operation)}
+            onQueryChange={query => {
+              setLocalSearchQuery(query)
+              void runLocalSearch(query, 'start')
+            }}
+            query={localSearchQuery}
+            state={localSearchState}
+          />
+        ) : null}
         {/* The slot div is the rectangle the WebContentsView floats above
             after the selected app completes its initial load. */}
         <div ref={embedSlotRef} className="sandbox-ui-embed-slot">

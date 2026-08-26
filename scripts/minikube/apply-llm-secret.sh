@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ======================================================================
-# Apply the chatllm-api-keys LLM Secret (all 21 providers)
+# Apply the chatllm-api-keys LLM Secret (all 22 providers)
 # ======================================================================
 #
 # Builds the `chatllm-api-keys` Secret (namespace: mcp-host) from whatever
@@ -14,7 +14,7 @@
 # Backward compatible: the four original providers (openai/claude/zai/
 # bailian) keep their test-placeholder fallbacks so an empty .env (CI, first
 # boot) still stands up the default `zai` agent. Real values override the
-# placeholders; the other 17 providers appear only when their key is set.
+# placeholders; the other 18 providers appear only when their key is set.
 #
 # The Secret stores keys in the registry `dataKey` form (lowercase-hyphen,
 # e.g. `openai-api-key`), which is what mcp-host's LLM-secret watch expects.
@@ -86,6 +86,7 @@ SLOTS=(
   "moonshot-api-key|MOONSHOT_API_KEY|"
   "nebius-api-key|NEBIUS_API_KEY|"
   "novita-api-key|NOVITA_API_KEY|"
+  "minimax-api-key|MINIMAX_API_KEY|"
   "azure-openai-api-key|AZURE_OPENAI_API_KEY|"
 )
 
