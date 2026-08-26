@@ -109,14 +109,31 @@ async function requestMetricsOverHttp(server: ContextMapperServer): Promise<{
 
 // Label order is not part of the Prometheus contract. Match each label
 // independently so a scrape-path pin cannot pass on registry.get() and fail
-// on the text GKE actually keys.
+// on the text GKE actually keys. Require the pair to end at ',' or '}' so a
+// value cannot match as a prefix of a longer sibling (result="certified"
+// must not hit result="certified-extra").
+function promLabelPairPresent(labelPart: string, key: string, value: string): boolean {
+  const needle = `${key}="${value}"`
+  let from = 0
+  while (from < labelPart.length) {
+    const at = labelPart.indexOf(needle, from)
+    if (at < 0) return false
+    const after = labelPart[at + needle.length]
+    if (after === ',' || after === '}' || after === undefined) return true
+    from = at + 1
+  }
+  return false
+}
+
 function readPromTextMetric(text: string, name: string, labels: Record<string, string>): number {
   for (const line of text.split('\n')) {
     if (!line.startsWith(`${name}{`)) continue
     const close = line.indexOf('}')
     if (close < 0) continue
     const labelPart = line.slice(name.length, close + 1)
-    if (!Object.entries(labels).every(([key, value]) => labelPart.includes(`${key}="${value}"`))) {
+    if (
+      !Object.entries(labels).every(([key, value]) => promLabelPairPresent(labelPart, key, value))
+    ) {
       continue
     }
     const value = Number(line.slice(close + 1).trim())
@@ -124,6 +141,21 @@ function readPromTextMetric(text: string, name: string, labels: Record<string, s
   }
   return 0
 }
+
+describe('readPromTextMetric', () => {
+  it('does not treat a label value as a prefix of another', () => {
+    const text = [
+      'clerum_hcc_initial_convergence_pass_results_total{lane="NetworkPolicy",result="certified-extra"} 9',
+      'clerum_hcc_initial_convergence_pass_results_total{lane="NetworkPolicy",result="certified"} 3',
+    ].join('\n')
+    expect(
+      readPromTextMetric(text, 'clerum_hcc_initial_convergence_pass_results_total', {
+        lane: 'NetworkPolicy',
+        result: 'certified',
+      })
+    ).toBe(3)
+  })
+})
 
 function stubAuthoritativeInventoryWatch(
   watcher: McpServerWatcher,
