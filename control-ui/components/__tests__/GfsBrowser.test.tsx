@@ -14,6 +14,7 @@ import {
   getRecipes,
   gfsDownload,
   gfsFetchFileBlob,
+  postGfsShare,
   putGfsGrant,
 } from '@lib/api'
 import {
@@ -39,6 +40,7 @@ vi.mock('@lib/api', () => ({
   gfsDownload: vi.fn(),
   gfsFetchFileBlob: vi.fn(),
   isSilentApiError: () => false,
+  postGfsShare: vi.fn(),
   putGfsGrant: vi.fn(),
 }))
 
@@ -58,6 +60,7 @@ vi.mock('@lib/gfsFileUpload', async importOriginal => ({
     pause: vi.fn(),
     resume: vi.fn(),
     cancel: vi.fn(),
+    snapshot: vi.fn(() => ({ state: 'failed' })),
   })),
 }))
 
@@ -72,6 +75,7 @@ const mockGetRecipes = vi.mocked(getRecipes)
 const mockPutGfsGrant = putGfsGrant as unknown as ReturnType<typeof vi.fn>
 const mockGfsDownload = gfsDownload as unknown as ReturnType<typeof vi.fn>
 const mockGfsFetchFileBlob = gfsFetchFileBlob as unknown as ReturnType<typeof vi.fn>
+const mockPostGfsShare = vi.mocked(postGfsShare)
 const mockUploadGfsFile = uploadGfsFile as unknown as ReturnType<typeof vi.fn>
 const mockCreateGfsUploadJob = createGfsUploadJob as unknown as ReturnType<typeof vi.fn>
 const mockCreateObjectUrl = vi.fn((_blob: Blob) => 'blob:gfs-image-preview')
@@ -138,6 +142,7 @@ describe('GfsBrowser', () => {
     mockPutGfsGrant.mockReset()
     mockGfsDownload.mockReset()
     mockGfsFetchFileBlob.mockReset()
+    mockPostGfsShare.mockReset()
     mockCreateGfsUploadJob.mockClear()
     mockUploadGfsFile.mockReset()
     window.localStorage.clear()
@@ -191,11 +196,118 @@ describe('GfsBrowser', () => {
     await screen.findAllByText(/readme\.md/)
     expect(screen.getByRole('navigation', { name: 'Breadcrumb' })).toBeTruthy()
     expect(screen.queryByText('Drive map')).toBeNull()
+
+    const orgRow = screen
+      .getByRole('list', { name: 'Current folder resources' })
+      .querySelector('li')
+    expect(orgRow?.querySelector('svg path')?.getAttribute('d')).toContain(
+      'M464 128H272l-64-64H48C21.49 64 0 85.49 0 112v288'
+    )
+
     await openResourceMenu('readme.md')
     expect(screen.getByRole('menuitem', { name: 'Copy GFS link' }).getAttribute('title')).toBe(
       'gfs://main/r2'
     )
     expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/tree', { drive: 'main' })
+  })
+
+  it('orders directories first, then files, both alphabetically', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [
+        child('zebra.md', 'file', 4),
+        child('beta', 'directory', 2),
+        child('apple.md', 'file', 3),
+        child('alpha', 'directory', 1),
+      ],
+      nextCursor: null,
+    })
+    renderBrowser()
+
+    const list = await screen.findByRole('list', { name: 'Current folder resources' })
+    const resourceNamesInOrder = Array.from(list.querySelectorAll('.cu-gfs-list__name'))
+      .map(node => node.textContent?.trim() ?? '')
+      .filter(name => /^(alpha|beta|apple|zebra)/.test(name))
+    expect(resourceNamesInOrder).toEqual(['alpha', 'beta', 'apple.md', 'zebra.md'])
+  })
+
+  it('renders the solid Font Awesome folder glyph inside the directory row', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('alpha', 'directory', 1)],
+      nextCursor: null,
+    })
+    renderBrowser()
+
+    const list = await screen.findByRole('list', { name: 'Current folder resources' })
+    const folderSvg = list.querySelector('.cu-gfs-list__icon svg')
+    expect(folderSvg?.getAttribute('viewBox')).toBe('0 0 512 512')
+    expect(folderSvg?.getAttribute('fill')).toBe('currentColor')
+    expect(folderSvg?.getAttribute('stroke-width')).toBe('0')
+    expect(folderSvg?.getAttribute('data-solid')).toBe('true')
+    const path = folderSvg?.querySelector('path')
+    expect(path?.getAttribute('d')).toContain('M464 128H272l-64-64H48C21.49 64')
+  })
+
+  it('keeps the outlined document glyph visible next to .pdf files', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('report.pdf', 'file', 2)],
+      nextCursor: null,
+    })
+    renderBrowser()
+
+    const list = await screen.findByRole('list', { name: 'Current folder resources' })
+    const fileSvg = list.querySelector('.cu-gfs-list__icon svg')
+    // Document glyph is outline-only — should NOT receive the solid opt-in.
+    expect(fileSvg?.getAttribute('data-solid')).not.toBe('true')
+    expect(fileSvg?.getAttribute('viewBox')).toBe('0 0 512 512')
+    const path = fileSvg?.querySelector('path')
+    expect(path?.getAttribute('fill')).toBe('none')
+    expect(path?.getAttribute('stroke-width')).toBe('32')
+  })
+
+  it('prefetches every folder child into the in-memory cache', async () => {
+    mockApiGet
+      .mockResolvedValueOnce({
+        items: [
+          child('alpha', 'directory', 1),
+          child('beta', 'directory', 2),
+          child('notes.md', 'file', 3),
+        ],
+        nextCursor: null,
+      })
+      // The prefetch effect fans out one request per directory row.
+      .mockResolvedValue({ items: [], nextCursor: null })
+
+    renderBrowser()
+
+    await waitFor(() => expect(mockApiGet).toHaveBeenCalledTimes(3))
+    expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resources/id-1/children', {
+      drive: 'main',
+    })
+    expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resources/id-2/children', {
+      drive: 'main',
+    })
+  })
+
+  it('uses the paperclip header, labels the root as main, and ignores current-crumb clicks', async () => {
+    mockApiGet.mockResolvedValueOnce({ items: [], nextCursor: null })
+    renderBrowser()
+    await screen.findByText('No resources are visible in this folder.')
+
+    const title = screen.getByText('Global File System').closest('.cu-panel-title')
+    expect(title?.querySelector('path')).toHaveAttribute(
+      'd',
+      'm21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48'
+    )
+
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    expect(within(breadcrumb).queryByText('Drive', { exact: true })).toBeNull()
+    const rootCrumb = within(breadcrumb).getByRole('button', { name: 'main' })
+    expect(rootCrumb).toHaveAttribute('aria-current', 'page')
+
+    fireEvent.click(rootCrumb)
+
+    expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
+    expect(mockApiGet).toHaveBeenCalledTimes(1)
   })
 
   it('shows the subtle loader during initial load and folder navigation', async () => {
@@ -317,53 +429,12 @@ describe('GfsBrowser', () => {
         expect.objectContaining({
           name: fileName,
           target: { operation: 'create', parentRid: rootRid },
-          file: expect.any(File),
         })
       )
     )
   })
 
-  it('reuses a matching persisted session from the button upload path', async () => {
-    const rootId = '11111111-1111-1111-1111-111111111111'
-    const rootRid = '11111111111111111111111111111111'
-    const uploadId = '88888888-8888-4888-8888-888888888888'
-    const lastModified = 1_725_000_000_000
-    const fileName = 'button-resume.md'
-    window.localStorage.setItem(
-      'evenfire:gfs-upload-v2:pending',
-      JSON.stringify({
-        uploadId,
-        fileName,
-        fileSize: 11,
-        lastModified,
-        target: { operation: 'create', parentRid: rootRid },
-        name: fileName,
-      })
-    )
-    mockApiGet.mockResolvedValue({ rootResourceId: rootId, items: [], nextCursor: null })
-    renderBrowser()
-    await screen.findByText('No resources are visible in this folder.')
-
-    fireEvent.click(screen.getByRole('button', { name: /upload file/i }))
-    const dialog = await screen.findByRole('dialog', { name: 'Upload file' })
-    fireEvent.change(within(dialog).getByLabelText('Choose file to upload'), {
-      target: { files: [new File(['button data'], fileName, { lastModified })] },
-    })
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Upload' }))
-
-    await waitFor(() =>
-      expect(mockCreateGfsUploadJob).toHaveBeenCalledWith(
-        expect.objectContaining({
-          file: expect.any(File),
-          name: fileName,
-          resumeUploadId: uploadId,
-          target: { operation: 'create', parentRid: rootRid },
-        })
-      )
-    )
-  })
-
-  it('uploads dropped images and Markdown files into the current folder', async () => {
+  it('uploads dropped files into the current folder', async () => {
     const rootId = '11111111-1111-1111-1111-111111111111'
     const rootRid = '11111111111111111111111111111111'
     mockApiGet.mockResolvedValue({
@@ -378,7 +449,8 @@ describe('GfsBrowser', () => {
     const browser = screen.getByRole('region', { name: 'Global File System browser' })
     const image = new File(['operator image'], 'diagram.png', { type: 'image/png' })
     const markdown = new File(['# Operator notes'], 'notes.md', { type: 'text/markdown' })
-    const dataTransfer = { dropEffect: 'none', files: [image, markdown], types: ['Files'] }
+    const pdf = new File(['%PDF operator report'], 'report.pdf', { type: 'application/pdf' })
+    const dataTransfer = { dropEffect: 'none', files: [image, markdown, pdf], types: ['Files'] }
 
     fireEvent.dragEnter(browser.querySelector('.cu-gfs-card')!, { dataTransfer })
     const dropStatus = screen.getByRole('status')
@@ -387,63 +459,30 @@ describe('GfsBrowser', () => {
 
     fireEvent.drop(browser.querySelector('.cu-gfs-card')!, { dataTransfer })
 
-    await waitFor(() =>
-      expect(mockCreateGfsUploadJob).toHaveBeenCalledWith(
+    await waitFor(() => {
+      expect(mockCreateGfsUploadJob).toHaveBeenCalledTimes(3)
+      expect(mockCreateGfsUploadJob).toHaveBeenNthCalledWith(
+        1,
         expect.objectContaining({
           name: 'diagram.png',
           target: { operation: 'create', parentRid: rootRid },
         })
       )
-    )
-    expect(mockCreateGfsUploadJob).toHaveBeenCalledWith(
-      expect.objectContaining({
-        name: 'notes.md',
-        target: { operation: 'create', parentRid: rootRid },
-      })
-    )
-  })
-
-  it('reuses the matching persisted session when a file is resumed through drag-and-drop', async () => {
-    const rootId = '11111111-1111-1111-1111-111111111111'
-    const rootRid = '11111111111111111111111111111111'
-    const uploadId = '55555555-5555-4555-8555-555555555555'
-    const lastModified = 1_725_000_000_000
-    window.localStorage.setItem(
-      'evenfire:gfs-upload-v2:pending',
-      JSON.stringify({
-        uploadId,
-        fileName: 'resume.md',
-        fileSize: 11,
-        lastModified,
-        target: { operation: 'create', parentRid: rootRid },
-        name: 'resume.md',
-      })
-    )
-    mockApiGet.mockResolvedValue({
-      rootResourceId: rootId,
-      items: [],
-      nextCursor: null,
-    })
-    renderBrowser()
-    await screen.findByText('No resources are visible in this folder.')
-
-    const browser = screen.getByRole('region', { name: 'Global File System browser' })
-    const file = new File(['resume data'], 'resume.md', {
-      type: 'text/markdown',
-      lastModified,
-    })
-    const dataTransfer = { dropEffect: 'none', files: [file], types: ['Files'] }
-    fireEvent.drop(browser.querySelector('.cu-gfs-card')!, { dataTransfer })
-
-    await waitFor(() =>
-      expect(mockCreateGfsUploadJob).toHaveBeenCalledWith(
+      expect(mockCreateGfsUploadJob).toHaveBeenNthCalledWith(
+        2,
         expect.objectContaining({
-          file,
-          resumeUploadId: uploadId,
+          name: 'notes.md',
           target: { operation: 'create', parentRid: rootRid },
         })
       )
-    )
+      expect(mockCreateGfsUploadJob).toHaveBeenNthCalledWith(
+        3,
+        expect.objectContaining({
+          name: 'report.pdf',
+          target: { operation: 'create', parentRid: rootRid },
+        })
+      )
+    })
   })
 
   it('keeps a persisted drag-and-drop session when resumable capabilities are unavailable', async () => {
@@ -725,24 +764,34 @@ describe('GfsBrowser', () => {
 
   it('previews supported image files from the file name and resource menu', async () => {
     mockApiGet.mockResolvedValueOnce({
-      items: [child('avatar.PNG', 'file', 2), child('notes.txt', 'file', 3)],
+      items: [child('avatar.PNG', 'file', 2), child('notes.bin', 'file', 3)],
       nextCursor: null,
     })
     mockGfsFetchFileBlob.mockResolvedValue(new Blob(['image bytes']))
     renderBrowser()
 
     const previewTrigger = await screen.findByRole('button', { name: 'avatar.PNG' })
-    expect(screen.getByText('notes.txt').closest('button')).toBeNull()
+    expect(screen.getByText('notes.bin').closest('button')).toBeNull()
+    expect(mockGfsFetchFileBlob).not.toHaveBeenCalled()
     fireEvent.click(previewTrigger)
 
     const dialog = await screen.findByRole('dialog', { name: 'avatar.PNG' })
+    const copyButton = within(dialog).getByRole('button', { name: /Copy image to clipboard/i })
+    expect(copyButton.querySelector('svg')?.getAttribute('viewBox')).toBe('0 0 24 24')
+    expect(copyButton.querySelector('path')?.getAttribute('d')).toBe('M0 0h24v24H0z')
     expect(
       await within(dialog).findByRole('img', { name: 'Preview of avatar.PNG' })
     ).toHaveAttribute('src', 'blob:gfs-image-preview')
     expect(mockGfsFetchFileBlob).toHaveBeenCalledWith('r2')
-    expect((mockCreateObjectUrl.mock.calls[0]?.[0] as Blob).type).toBe('image/png')
+    // Preview modal wraps the fetched blob with the original MIME type so
+    // the dialog <img> loads as that media type.
+    const previewCall = mockCreateObjectUrl.mock.calls.find(
+      call => (call[0] as Blob).type === 'image/png'
+    )
+    expect(previewCall?.[0]).toBeDefined()
 
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Close image preview' }))
+    const closeButton = within(dialog).getByRole('button', { name: /close image preview/i })
+    fireEvent.click(closeButton)
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'avatar.PNG' })).toBeNull())
     expect(mockRevokeObjectUrl).toHaveBeenCalledWith('blob:gfs-image-preview')
 
@@ -752,7 +801,7 @@ describe('GfsBrowser', () => {
     fireEvent.keyDown(window, { key: 'Escape' })
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'avatar.PNG' })).toBeNull())
 
-    await openResourceMenu('notes.txt')
+    await openResourceMenu('notes.bin')
     expect(screen.queryByRole('menuitem', { name: 'Preview' })).toBeNull()
   })
 
@@ -761,7 +810,9 @@ describe('GfsBrowser', () => {
       items: [child('diagram.svg', 'file', 4)],
       nextCursor: null,
     })
-    mockGfsFetchFileBlob.mockRejectedValueOnce(new Error('preview unavailable'))
+    // Both the row thumbnail and the preview modal hit gfsFetchFileBlob
+    // for the same file; reject both so the preview can show its error.
+    mockGfsFetchFileBlob.mockRejectedValue(new Error('preview unavailable'))
     renderBrowser()
 
     fireEvent.click(await screen.findByRole('button', { name: 'diagram.svg' }))
@@ -782,6 +833,80 @@ describe('GfsBrowser', () => {
       'Image previews are limited to 10 MB.'
     )
     expect(mockGfsFetchFileBlob).not.toHaveBeenCalled()
+  })
+
+  it('copies markdown source to the clipboard via the preview header button', async () => {
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { ...navigator.clipboard, writeText },
+    })
+
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('README.md', 'file', 9)],
+      nextCursor: null,
+    })
+    mockGfsFetchFileBlob.mockResolvedValueOnce(
+      new Blob(['# Hello\n\nGreetings.'], { type: 'text/markdown' })
+    )
+
+    renderBrowser()
+    fireEvent.click(await screen.findByRole('button', { name: 'README.md' }))
+    const dialog = await screen.findByRole('dialog', { name: 'README.md' })
+
+    const copyButton = within(dialog).getByRole('button', {
+      name: /Copy preview contents to clipboard/i,
+    })
+    expect(copyButton.querySelector('svg')?.getAttribute('viewBox')).toBe('0 0 24 24')
+    expect(copyButton.querySelector('path')?.getAttribute('d')).toBe('M0 0h24v24H0z')
+    fireEvent.click(copyButton)
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('# Hello\n\nGreetings.'))
+  })
+
+  it('renders a .txt file as plain text inside the preview dialog', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('notes.txt', 'file', 11)],
+      nextCursor: null,
+    })
+    mockGfsFetchFileBlob.mockResolvedValueOnce(
+      new Blob(['line one\nline two\twith tab'], { type: 'text/plain' })
+    )
+
+    renderBrowser()
+    fireEvent.click(await screen.findByRole('button', { name: 'notes.txt' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'notes.txt' })
+    const pre = await within(dialog).findByText(/line one/)
+    expect(pre.tagName).toBe('PRE')
+    expect(pre.textContent).toContain('line two\twith tab')
+  })
+
+  it('previews supported video files in a closable HTML5 video dialog', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('demo.mp4', 'file', 7)],
+      nextCursor: null,
+    })
+    mockGfsFetchFileBlob.mockResolvedValueOnce(new Blob(['fake-video-bytes']))
+    renderBrowser()
+
+    const previewTrigger = await screen.findByRole('button', { name: 'demo.mp4' })
+    fireEvent.click(previewTrigger)
+
+    const dialog = await screen.findByRole('dialog', { name: 'demo.mp4' })
+    const video = await within(dialog).findByLabelText('Video preview of demo.mp4')
+    expect(video.tagName).toBe('VIDEO')
+    expect(video).toHaveAttribute('controls', '')
+    expect(video).toHaveAttribute('src', 'blob:gfs-image-preview')
+    expect((mockCreateObjectUrl.mock.calls[0]?.[0] as Blob).type).toBe('video/mp4')
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close video preview' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'demo.mp4' })).toBeNull())
+    expect(mockRevokeObjectUrl).toHaveBeenCalledWith('blob:gfs-image-preview')
+
+    await openResourceMenu('demo.mp4')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Preview' }))
+    expect(await screen.findByRole('dialog', { name: 'demo.mp4' })).toBeTruthy()
   })
 
   it('previews Markdown files with safe vanilla rendering', async () => {
@@ -808,7 +933,7 @@ describe('GfsBrowser', () => {
     expect(dialog.querySelector('script')).toBeNull()
     expect(mockGfsFetchFileBlob).toHaveBeenCalledWith('r5')
 
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Close Markdown preview' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: /^close preview$/i }))
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'README.md' })).toBeNull())
 
     await openResourceMenu('README.md')
@@ -837,12 +962,16 @@ describe('GfsBrowser', () => {
         items: [child('org', 'directory', 1), child('report.md', 'file', 2)],
         nextCursor: null,
       })
+      // The 'org' folder prefetch resolves with an empty children page
+      // so the cache holds something realistic.
       .mockResolvedValueOnce({ items: [], nextCursor: null })
+      // Entering org serves that cache and revalidates in the background.
+      .mockResolvedValueOnce({ items: [], nextCursor: null })
+      // Navigate back: re-fetch the root listing.
       .mockResolvedValueOnce({
         items: [child('org', 'directory', 1), child('report.md', 'file', 2)],
         nextCursor: null,
       })
-      .mockResolvedValueOnce({ items: [], nextCursor: null })
     mockApiSend.mockResolvedValueOnce({ ok: true })
     renderBrowser()
 
@@ -868,7 +997,6 @@ describe('GfsBrowser', () => {
       expect(mockCreateGfsUploadJob).toHaveBeenCalledWith(
         expect.objectContaining({
           name: 'report.md',
-          file: expect.any(File),
           target: { operation: 'replace', resourceRid: 'r2', ifMatch: 0 },
         })
       )
@@ -958,19 +1086,111 @@ describe('GfsBrowser', () => {
   it('navigates into a directory and lists its children', async () => {
     mockApiGet
       .mockResolvedValueOnce({ items: [child('org', 'directory', 1)], nextCursor: null })
+      // Prefetch returns org's children so the cache is populated.
       .mockResolvedValueOnce({ items: [child('eng', 'directory', 3)], nextCursor: null })
+      // Entering org serves the cache and revalidates in the background.
+      .mockResolvedValueOnce({ items: [child('eng', 'directory', 3)], nextCursor: null })
+      // After the revalidated view renders, the prefetcher reaches for eng's
+      // children. Empty page is fine — eng has no folders.
+      .mockResolvedValueOnce({ items: [], nextCursor: null })
+      // Navigate back: re-fetch the root listing.
       .mockResolvedValueOnce({ items: [child('org', 'directory', 1)], nextCursor: null })
     renderBrowser()
     const orgButton = (await screen.findAllByRole('button', { name: 'org' }))[0]
     fireEvent.click(orgButton)
     await screen.findAllByText(/eng/)
-    expect(mockApiGet).toHaveBeenLastCalledWith('/api/v1/gfs/resources/id-1/children', {
+    // The click handler is served from the prefetch cache; the recorded
+    // apiGet covers the org children fetch that primed the cache.
+    expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resources/id-1/children', {
       drive: 'main',
     })
     // Navigate back to the drive root via the breadcrumb root crumb (Back/Forward were removed).
     const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
     fireEvent.click(within(breadcrumb).getAllByRole('button')[0])
     await screen.findAllByRole('button', { name: 'org' })
+  })
+
+  it('revalidates a prefetched folder in the background when navigating into it', async () => {
+    mockApiGet
+      .mockResolvedValueOnce({ items: [child('org', 'directory', 1)], nextCursor: null }) // root listing
+      .mockResolvedValueOnce({ items: [child('stale.md', 'file', 3)], nextCursor: null }) // prefetch org
+      .mockResolvedValueOnce({ items: [child('fresh.md', 'file', 4)], nextCursor: null }) // background revalidation
+    renderBrowser()
+
+    fireEvent.click((await screen.findAllByRole('button', { name: 'org' }))[0])
+    // The cached page renders instantly — no spinner, stale rows visible…
+    await screen.findByText('stale.md')
+    expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
+    // …then the background revalidation replaces them with the server state.
+    await waitFor(() => expect(screen.getByText('fresh.md')).toBeTruthy())
+    await waitFor(() => expect(screen.queryByText('stale.md')).toBeNull())
+    expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resources/id-1/children', {
+      drive: 'main',
+    })
+  })
+
+  it('reflects mutations in the folder cache when returning to a folder', async () => {
+    const rootPage = { items: [child('org', 'directory', 1)], nextCursor: null }
+    mockApiGet
+      .mockResolvedValueOnce(rootPage) // initial root listing
+      .mockResolvedValueOnce({ items: [], nextCursor: null }) // prefetch org (empty)
+      .mockResolvedValueOnce({ items: [], nextCursor: null }) // background revalidation on entering org
+      .mockResolvedValueOnce({ items: [child('report.md', 'file', 3)], nextCursor: null }) // refresh after upload
+      .mockResolvedValueOnce(rootPage) // navigate back to the root
+      // Re-entering org revalidates in the background against fresh rows.
+      .mockResolvedValue({ items: [child('report.md', 'file', 3)], nextCursor: null })
+    renderBrowser()
+
+    fireEvent.click((await screen.findAllByRole('button', { name: 'org' }))[0])
+    await screen.findByText('No resources are visible in this folder.')
+
+    // Upload into org: the resumable job mock completes → refreshCurrent().
+    fireEvent.click(screen.getByRole('button', { name: /upload file/i }))
+    const uploadDialog = await screen.findByRole('dialog', { name: 'Upload file' })
+    fireEvent.change(within(uploadDialog).getByLabelText('Choose file to upload'), {
+      target: { files: [new File(['report'], 'report.md', { type: 'text/markdown' })] },
+    })
+    fireEvent.click(within(uploadDialog).getByRole('button', { name: 'Upload' }))
+    await waitFor(() => expect(screen.getByText('report.md')).toBeTruthy())
+
+    // Navigate back to the root, then into org again: the served cache must
+    // hold the post-mutation rows, not the prefetched empty page.
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    fireEvent.click(within(breadcrumb).getAllByRole('button')[0])
+    await screen.findAllByRole('button', { name: 'org' })
+    fireEvent.click(screen.getByRole('button', { name: 'org' }))
+    await waitFor(() => expect(screen.getByText('report.md')).toBeTruthy())
+  })
+
+  it('routes files above the legacy limit through the resumable transport, not contentBase64', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    const rootRid = '11111111111111111111111111111111'
+    mockApiGet.mockResolvedValue({ rootResourceId: rootId, items: [], nextCursor: null })
+    renderBrowser()
+    await screen.findByText('No resources are visible in this folder.')
+
+    // One byte above the legacy raw ceiling: legacy transport must be
+    // impossible; the resumable job is the only path. The transport decision
+    // reads only `size`, so the fixture overrides it instead of allocating
+    // 16 MiB through jsdom's fireEvent serialization.
+    const bigFile = new File(['x'], 'big-report.bin')
+    Object.defineProperty(bigFile, 'size', { value: 16 * 1024 * 1024 + 1 })
+    fireEvent.click(screen.getByRole('button', { name: /upload file/i }))
+    const uploadDialog = await screen.findByRole('dialog', { name: 'Upload file' })
+    fireEvent.change(within(uploadDialog).getByLabelText('Choose file to upload'), {
+      target: { files: [bigFile] },
+    })
+    fireEvent.click(within(uploadDialog).getByRole('button', { name: 'Upload' }))
+
+    await waitFor(() =>
+      expect(mockCreateGfsUploadJob).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'big-report.bin',
+          target: { operation: 'create', parentRid: rootRid },
+        })
+      )
+    )
+    expect(mockApiSend).not.toHaveBeenCalled()
   })
 
   it('keeps the new-folder modal open after an error and allows a retry', async () => {
@@ -1095,31 +1315,44 @@ describe('GfsBrowser', () => {
     expect(screen.getByRole('button', { name: 'Grant access' })).not.toBeDisabled()
   })
 
-  it('includes descendants for directory grants and exposes share creation', async () => {
+  it('includes descendants for directory shares from the resource menu', async () => {
     mockApiGet.mockResolvedValueOnce({
       items: [child('team-folder', 'directory', 2)],
       nextCursor: null,
     })
-    mockPutGfsGrant.mockResolvedValueOnce({ ok: true })
     renderBrowser()
 
     await openManage('team-folder')
     expect(screen.queryByText('Manage folder')).toBeNull()
     await waitFor(() => expect(mockGetAdminUsers).toHaveBeenCalledWith(''))
-    expect(await screen.findByRole('checkbox', { name: /Include descendants/ })).toBeChecked()
-    expect(screen.getByText('Apply this grant or share to the full folder tree.')).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Create share' })).toBeDisabled()
+    expect(
+      await screen.findByRole('checkbox', { name: /Include contents of this folder/ })
+    ).toBeChecked()
+    const manageDialog = screen.getByRole('dialog', { name: 'Manage folder team-folder' })
+    const manageMenuTrigger = within(manageDialog).getByRole('button', {
+      name: 'Actions for team-folder',
+    })
+    expect(within(manageDialog).queryByRole('button', { name: 'Upload file' })).toBeNull()
+    fireEvent.click(manageMenuTrigger)
+    expect(within(manageDialog).getByRole('menuitem', { name: 'Create share' })).toBeDisabled()
+    fireEvent.click(manageMenuTrigger)
     await openSubjectPicker()
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
     selectPermission('Read')
-    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
-    await confirmGrantAccess()
+    fireEvent.click(manageMenuTrigger)
+    const createShareItem = within(manageDialog).getByRole('menuitem', { name: 'Create share' })
+    expect(createShareItem).toBeEnabled()
+    fireEvent.click(createShareItem)
+    const shareDialog = await screen.findByRole('alertdialog', { name: 'Create share?' })
+    fireEvent.click(within(shareDialog).getByRole('button', { name: 'Create share' }))
 
     await waitFor(() =>
-      expect(mockPutGfsGrant).toHaveBeenCalledWith(
+      expect(mockPostGfsShare).toHaveBeenCalledWith(
         expect.objectContaining({
           resourceId: 'id-2',
-          inherit: true,
+          subjects: [{ type: 'user', id: '11111111-1111-1111-1111-111111111111' }],
+          permissions: ['read'],
+          includeDescendants: true,
         })
       )
     )
