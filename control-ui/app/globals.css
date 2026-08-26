@@ -623,6 +623,63 @@ body.cu-body {
   line-height: 1.5;
 }
 
+/* Disclosure variant: the title becomes the toggle, so a collapsed section
+   costs a single line. The chevron points right when closed and rotates down
+   when open, matching the other disclosures in the app. */
+.cu-form-section__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-1);
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cu-form-section__toggle:focus-visible {
+  outline: 2px solid rgba(var(--cu-focus-rgb), 0.8);
+  outline-offset: 3px;
+  border-radius: calc(var(--cu-radius-sm) / 2);
+}
+
+.cu-form-section__toggle svg {
+  flex: none;
+  color: var(--cu-text-muted);
+  transition: transform var(--cu-control-transition) ease;
+}
+
+.cu-form-section__toggle svg.is-expanded {
+  transform: rotate(90deg);
+}
+
+.cu-form-section__content {
+  display: grid;
+  gap: var(--cu-space-3);
+}
+
+/* A labelled group of related controls inside one section — a fieldset so the
+   legend names the group for assistive tech, with the browser's default
+   fieldset chrome removed. */
+.cu-form-section__group {
+  display: grid;
+  gap: var(--cu-space-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.cu-form-section__subheading {
+  padding: 0;
+  color: var(--cu-text);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
 .cu-checkbox-field {
   display: flex;
   gap: var(--cu-space-2);
