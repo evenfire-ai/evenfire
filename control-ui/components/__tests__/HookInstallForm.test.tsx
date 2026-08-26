@@ -71,6 +71,18 @@ beforeEach(() => {
 
 const noop = () => undefined
 
+/** Walks the wizard to step 1 and installs, returning the submitted payload. */
+async function installAndCapturePayload() {
+  vi.mocked(api.installHookFromRegistry).mockResolvedValue({
+    hookName: 'token-compactor',
+    trustLevel: 'verified',
+  } as never)
+  fireEvent.click(await screen.findByRole('button', { name: /continue/i }))
+  fireEvent.click(await screen.findByRole('button', { name: /^install$/i }))
+  await waitFor(() => expect(api.installHookFromRegistry).toHaveBeenCalledTimes(1))
+  return vi.mocked(api.installHookFromRegistry).mock.calls[0][0]
+}
+
 describe('HookInstallForm — author declarations', () => {
   it('pre-ticks the capabilities the author declares', async () => {
     render(
@@ -364,5 +376,69 @@ describe('HookInstallForm — ungranted-capability warning', () => {
     await waitFor(() => expect(screen.getByText(/needs may_deny to function/i)).toBeInTheDocument())
     expect(screen.queryByText(/needs may_deny, may_add_context to function/i)).toBeNull()
     expect(screen.getByText(/the author also lists may_add_context/i)).toBeInTheDocument()
+  })
+})
+
+describe('HookInstallForm — what actually reaches the install route', () => {
+  it('requests no capability from an agent with no ceiling', async () => {
+    // The claim this form makes is about the request it sends, so assert the
+    // request. control-api reads a missing capabilityCeiling as [] and 403s
+    // anything against it, so a seeded may_rewrite here would be rejected.
+    vi.mocked(api.getHosts).mockResolvedValue({ items: [host('agent-a', null)] } as never)
+    render(
+      <HookInstallForm
+        entry={entryWith({ requiredCapabilities: ['may_rewrite'] })}
+        onCancel={noop}
+        onInstalled={noop}
+      />
+    )
+    const payload = await installAndCapturePayload()
+    expect(payload.capabilities).toBeUndefined()
+    expect(payload).toMatchObject({
+      hostRef: 'agent-a',
+      registryEntryName: '@acme1/token-compactor',
+      registryEntryVersion: '0.2.3',
+      order: 100,
+      failMode: 'open',
+    })
+  })
+
+  it('sends the declared capabilities the agent permits, fail mode included', async () => {
+    render(
+      <HookInstallForm
+        entry={entryWith({
+          requiredCapabilities: ['may_deny'],
+          // The author asks for fail open; a granted may_deny overrides it, and
+          // the override has to reach the payload, not just the select.
+          authorDefaults: { failMode: 'open' },
+        })}
+        onCancel={noop}
+        onInstalled={noop}
+      />
+    )
+    await openAdvanced()
+    await waitFor(() => expect(capabilityBox('May deny').checked).toBe(true))
+    const payload = await installAndCapturePayload()
+    expect(payload.capabilities).toEqual(['may_deny'])
+    expect(payload.failMode).toBe('closed')
+  })
+
+  it('drops a declared capability the agent forbids before sending', async () => {
+    vi.mocked(api.getHosts).mockResolvedValue({
+      items: [host('agent-a', ['may_add_context'])],
+    } as never)
+    render(
+      <HookInstallForm
+        entry={entryWith({ requiredCapabilities: ['may_deny', 'may_add_context'] })}
+        onCancel={noop}
+        onInstalled={noop}
+      />
+    )
+    await openAdvanced()
+    await waitFor(() => expect(capabilityBox('May add context').checked).toBe(true))
+    const payload = await installAndCapturePayload()
+    expect(payload.capabilities).toEqual(['may_add_context'])
+    // Nothing outside the ceiling escapes, so fail mode is not forced either.
+    expect(payload.failMode).toBe('open')
   })
 })
