@@ -64,7 +64,7 @@ export async function disposeFixtureLeaseForTest(fixture: FixtureLeaseTarget): P
   try {
     await operation
   } finally {
-    if (lease.disposeInFlight === operation) lease.disposeInFlight = undefined
+    lease.disposeInFlight = undefined
   }
 }
 
