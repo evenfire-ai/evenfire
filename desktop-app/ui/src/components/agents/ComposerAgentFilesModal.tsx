@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button, EmptyState, IconButton } from '@components/Common'
+import { GfsFileIcon } from '@components/GfsFileIcon'
 import { IconAttachFile, IconClose, IconContexts } from '@components/SidebarNav/icons'
 import { formatSharedFileSize, getSharedFileParentPath, joinSharedFilePath } from '@lib/sharedFiles'
 import type { ComposerAgentFileReference } from '../../uiTypes'
@@ -286,7 +287,7 @@ export function ComposerAgentFilesModal({
                           onChange={() => toggleAgentFileReference(fullPath, 'file')}
                         />
                         <span className="composer-reference-icon composer-reference-icon--agent-file">
-                          <IconAttachFile />
+                          <GfsFileIcon name={entry.name} />
                         </span>
                         <span className="composer-agent-file-details">
                           <strong>{entry.name}</strong>

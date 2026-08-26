@@ -337,6 +337,12 @@ declare global {
           drive?: string,
           ifMatch?: number
         ) => Promise<{ resourceId: string; version: number }>
+        moveResource: (
+          resourceId: string,
+          destinationId: string,
+          drive?: string,
+          ifMatch?: number
+        ) => Promise<{ resourceId: string; version: number }>
         deleteResource: (
           resourceId: string,
           drive?: string,

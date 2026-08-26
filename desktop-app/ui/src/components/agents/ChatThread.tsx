@@ -15,14 +15,10 @@ import { useNavigationContext } from '@contexts/NavigationContext'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
 import { Button, IconButton, MenuItem } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
+import { GfsFileIcon } from '@components/GfsFileIcon'
 import { MessageArtifactActions } from '@components/MessageArtifactActions'
 import { SecureHtmlPreview } from '@components/SecureHtmlPreview'
-import {
-  IconAttachFile,
-  IconConnectors,
-  IconContexts,
-  IconWorkflows,
-} from '@components/SidebarNav/icons'
+import { IconConnectors, IconContexts, IconWorkflows } from '@components/SidebarNav/icons'
 import { WorkflowRunArtifactActions } from '@components/WorkflowRunArtifactActions'
 import {
   AGENT_ERROR_CODE_LABELS,
@@ -134,12 +130,11 @@ function extractWorkflowArtifactScopeFromProgress(
   }
 }
 
-function getChatMessageAttachmentIcon(type: ChatMessageAttachment['type']) {
-  if (type === 'plugin') return <IconWorkflows />
-  if (type === 'connector') return <IconConnectors />
-  if (type === 'agent_file') return <IconContexts />
-  if (type === 'global_file') return <IconAttachFile />
-  return <IconAttachFile />
+function getChatMessageAttachmentIcon(attachment: ChatMessageAttachment) {
+  if (attachment.type === 'plugin') return <IconWorkflows />
+  if (attachment.type === 'connector') return <IconConnectors />
+  if (attachment.type === 'agent_file') return <IconContexts />
+  return <GfsFileIcon name={attachment.filename || attachment.label} />
 }
 
 function canDownloadResponseFileAttachment(attachment: ChatMessageAttachment): boolean {
@@ -191,7 +186,7 @@ function MessageAttachmentList({ attachments }: { attachments: ChatMessageAttach
               className={`composer-reference-icon message-attachment-icon composer-reference-icon--${iconTypeClass}`}
               aria-hidden="true"
             >
-              {getChatMessageAttachmentIcon(attachment.type)}
+              {getChatMessageAttachmentIcon(attachment)}
             </span>
             {isResponseFile ? (
               <span className="message-attachment-type-label">Generated file</span>

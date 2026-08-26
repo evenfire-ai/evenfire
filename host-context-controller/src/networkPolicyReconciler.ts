@@ -68,6 +68,9 @@ type NetworkPolicyMutationOptions = {
   honorsLostFence?: boolean
 }
 
+export const DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE =
+  'Desired NetworkPolicy inventory changed during authoritative revocation'
+
 export function sameContextDesiredRevision(expected: ContextCRD, current: ContextCRD): boolean {
   return (
     expected.name === current.name &&
@@ -1576,7 +1579,7 @@ export class NetworkPolicyReconciler {
       contextCleanupAuthoritative() &&
       serverCleanupAuthoritative()
     ) {
-      throw new Error('Desired NetworkPolicy inventory changed during authoritative revocation')
+      throw new Error(DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE)
     }
 
     if (
