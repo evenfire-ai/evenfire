@@ -14,6 +14,7 @@ import {
   listAllSharedFileSystems,
 } from './k8sClient'
 import { registry } from './metrics'
+import { DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE } from './networkPolicyReconciler'
 import { ContextMapperServer } from './server'
 import type { HostCRD, McpServerCRD } from './types'
 
@@ -344,6 +345,8 @@ vi.mock('./networkPolicyReconciler', async () => {
   )
   return {
     sameContextDesiredRevision: actual.sameContextDesiredRevision,
+    DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE:
+      actual.DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE,
     NetworkPolicyReconciler: class {
       ensureDefaultPolicies = mocks.ensureDefaultPolicies
       fullReconcile = mocks.netPolFullReconcile
@@ -4018,6 +4021,12 @@ describe('McpServerWatcher startup', () => {
     expect(appliedContexts).toEqual(['current-context'])
     expect(appliedServers).toEqual(['current-server'])
     expect((watcher as any).initialConvergenceRetryAttempts.has('NetworkPolicy')).toBe(false)
+    expect(
+      await readInitialConvergenceMetric(
+        'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+        'NetworkPolicy'
+      )
+    ).toBeGreaterThan(successTimestampBefore)
     errorSpy.mockRestore()
     await watcher.stop()
   })
@@ -4356,6 +4365,10 @@ describe('McpServerWatcher startup', () => {
     ;(watcher as any).contextCacheSynced = true
     ;(watcher as any).mcpServerCacheSynced = false
     ;(watcher as any).initialConvergenceRetryAttempts.set('NetworkPolicy', 2)
+    const successTimestampBefore = await readInitialConvergenceMetric(
+      'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+      'NetworkPolicy'
+    )
 
     await (watcher as any).runInitialNetworkPolicyConvergence()
 
@@ -4375,6 +4388,12 @@ describe('McpServerWatcher startup', () => {
         result: 'deferred-unsynced',
       })
     ).toBeGreaterThan(0)
+    expect(
+      await readInitialConvergenceMetric(
+        'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+        'NetworkPolicy'
+      )
+    ).toBe(successTimestampBefore)
     ;(watcher as any).mcpServerCacheSynced = true
     await (watcher as any).runInitialNetworkPolicyConvergence()
 
@@ -4390,6 +4409,12 @@ describe('McpServerWatcher startup', () => {
       })
     )
     expect((watcher as any).initialConvergenceRetryAttempts.has('NetworkPolicy')).toBe(false)
+    expect(
+      await readInitialConvergenceMetric(
+        'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+        'NetworkPolicy'
+      )
+    ).toBeGreaterThan(successTimestampBefore)
     warnSpy.mockRestore()
     await watcher.stop()
   })
@@ -4400,12 +4425,22 @@ describe('McpServerWatcher startup', () => {
     const watcher = new McpServerWatcher()
     ;(watcher as any).contextCacheSynced = true
     ;(watcher as any).mcpServerCacheSynced = false
+    const successTimestampBefore = await readInitialConvergenceMetric(
+      'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+      'NetworkPolicy'
+    )
 
     await (watcher as any).runInitialNetworkPolicyConvergence()
 
     expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
     expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(1)
     expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(true)
+    expect(
+      await readInitialConvergenceMetric(
+        'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+        'NetworkPolicy'
+      )
+    ).toBe(successTimestampBefore)
     ;(watcher as any).mcpServerCacheSynced = true
     await vi.advanceTimersByTimeAsync(5000)
 
@@ -4417,6 +4452,12 @@ describe('McpServerWatcher startup', () => {
         result: 'certified',
       })
     ).toBeGreaterThan(0)
+    expect(
+      await readInitialConvergenceMetric(
+        'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+        'NetworkPolicy'
+      )
+    ).toBeGreaterThan(successTimestampBefore)
     warnSpy.mockRestore()
     await watcher.stop()
   })
@@ -4461,7 +4502,7 @@ describe('McpServerWatcher startup', () => {
     ;(watcher as any).contextCacheSynced = true
     ;(watcher as any).mcpServerCacheSynced = true
     mocks.netPolFullReconcile.mockRejectedValueOnce(
-      new Error('Desired NetworkPolicy inventory changed during authoritative revocation')
+      new Error(DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE)
     )
     const bumpBefore = await readLabeledConvergenceMetric(
       'clerum_hcc_initial_convergence_pass_results_total',

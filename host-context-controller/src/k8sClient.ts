@@ -65,7 +65,11 @@ import {
   initialConvergenceRetriesTotal,
   initialConvergenceSwallowedTotal,
 } from './metrics'
-import { NetworkPolicyReconciler, sameContextDesiredRevision } from './networkPolicyReconciler'
+import {
+  DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE,
+  NetworkPolicyReconciler,
+  sameContextDesiredRevision,
+} from './networkPolicyReconciler'
 import type { ReadinessInventoryDetail } from './readinessGate'
 import { McpServerReconciler } from './reconciler'
 import { SharedFileSystemReconciler } from './sharedFileSystemReconciler'
@@ -228,9 +232,6 @@ type InitialConvergencePassResult =
   | 'deferred-unsynced'
   | 'aborted-bump'
   | 'failed'
-
-const DESIRED_INVENTORY_CHANGED_MESSAGE =
-  'Desired NetworkPolicy inventory changed during authoritative revocation'
 
 function observeInitialNetworkPolicyPass(
   startedAtMs: number,
@@ -3175,7 +3176,7 @@ export class McpServerWatcher implements McpServerProvider {
         error
       )
       const abortedBump =
-        error instanceof Error && error.message === DESIRED_INVENTORY_CHANGED_MESSAGE
+        error instanceof Error && error.message === DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE
       observeInitialNetworkPolicyPass(startedAtMs, abortedBump ? 'aborted-bump' : 'failed')
       this.scheduleInitialConvergenceRetry('NetworkPolicy')
     }
