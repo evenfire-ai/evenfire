@@ -118,6 +118,46 @@ when 'missing-egress-policy-type'
   end
   abort('fixture source is missing mcp-host NetworkPolicy') unless policy
   policy['spec']['policyTypes'] = ['Ingress']
+when 'proxy-id-projection'
+  deployment = documents.find do |document|
+    document['kind'] == 'Deployment' &&
+      document.dig('metadata', 'namespace') == 'mcp-server' &&
+      document.dig('metadata', 'name') == 'mcp-proxy'
+  end
+  abort('fixture source is missing mcp-proxy Deployment') unless deployment
+  deployment.dig('spec', 'template', 'spec')['volumes'] = []
+when 'proxy-ingress-selector'
+  policy = documents.find do |document|
+    document['kind'] == 'NetworkPolicy' &&
+      document.dig('metadata', 'namespace') == 'mcp-server' &&
+      document.dig('metadata', 'name') == 'mcp-proxy-ingress'
+  end
+  abort('fixture source is missing mcp-proxy ingress policy') unless policy
+  policy.dig('spec', 'ingress').first['from'].first.delete('podSelector')
+when 'proxy-backend-selector'
+  policy = documents.find do |document|
+    document['kind'] == 'NetworkPolicy' &&
+      document.dig('metadata', 'namespace') == 'mcp-server' &&
+      document.dig('metadata', 'name') == 'mcp-proxy-egress'
+  end
+  abort('fixture source is missing mcp-proxy egress policy') unless policy
+  policy.fetch('spec').fetch('egress') << {
+    'to' => [{
+      'podSelector' => {
+        'matchLabels' => { 'clerum.io/managed-by' => 'host-context-controller' },
+        'matchExpressions' => [{ 'key' => 'clerum.io/mcpserver', 'operator' => 'Exists' }],
+      },
+    }],
+    'ports' => [{ 'port' => 3000, 'protocol' => 'TCP' }],
+  }
+when 'proxy-host-egress-selector'
+  policy = documents.find do |document|
+    document['kind'] == 'NetworkPolicy' &&
+      document.dig('metadata', 'namespace') == 'mcp-host' &&
+      document.dig('metadata', 'name') == 'mcp-host-proxy-egress'
+  end
+  abort('fixture source is missing mcp-host proxy egress policy') unless policy
+  policy.dig('spec', 'podSelector')['matchExpressions'] = []
 when 'host-secret-grant'
   documents << {
     'apiVersion' => 'rbac.authorization.k8s.io/v1',
@@ -259,6 +299,34 @@ assert_rejected \
   "${missing_egress_policy_type}" \
   'mcp-host allow policy must select HCC-managed Host pods and enforce Egress' \
   'mcp-host policy without Egress type'
+
+proxy_id_projection="${tmpdir}/proxy-id-projection.yaml"
+mutate_render proxy-id-projection "${proxy_id_projection}"
+assert_rejected \
+  "${proxy_id_projection}" \
+  'mcp-proxy identity projection is not exact' \
+  'mcp-proxy projected identity'
+
+proxy_ingress_selector="${tmpdir}/proxy-ingress-selector.yaml"
+mutate_render proxy-ingress-selector "${proxy_ingress_selector}"
+assert_rejected \
+  "${proxy_ingress_selector}" \
+  'mcp-proxy ingress must select only HCC-managed Host pods' \
+  'mcp-proxy ingress selector'
+
+proxy_backend_selector="${tmpdir}/proxy-backend-selector.yaml"
+mutate_render proxy-backend-selector "${proxy_backend_selector}"
+assert_rejected \
+  "${proxy_backend_selector}" \
+  'mcp-proxy backend egress must be generated per live McpServer' \
+  'mcp-proxy backend selector'
+
+proxy_host_egress_selector="${tmpdir}/proxy-host-egress-selector.yaml"
+mutate_render proxy-host-egress-selector "${proxy_host_egress_selector}"
+assert_rejected \
+  "${proxy_host_egress_selector}" \
+  'mcp-host proxy egress selector is not exact' \
+  'mcp-host proxy egress selector'
 
 host_secret_grant="${tmpdir}/host-secret-grant.yaml"
 mutate_render host-secret-grant "${host_secret_grant}"

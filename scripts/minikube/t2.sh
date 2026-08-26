@@ -338,7 +338,7 @@ run_np08_hcc_authorization() {
     cat "$log_file"
     T2_NP08_HCC_AUTHORIZATION_STATUS=PASS
     t2_evidence_write NP08_HCC_AUTHORIZATION PASS \
-      "deployed same-Context, cross-Context, caller-token, and credential-disclosure checks passed; duration=$((SECONDS - phase_started_seconds))s"
+      "deployed HCC same-Context, cross-Context, tombstone, and real mcp-host McpManager/SDK protocol checks passed; duration=$((SECONDS - phase_started_seconds))s"
     return 0
   fi
 

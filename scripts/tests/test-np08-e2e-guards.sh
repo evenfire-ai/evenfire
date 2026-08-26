@@ -150,29 +150,108 @@ if np08_verify_sync_marker \
 fi
 pass 'provenance rejects a non-local image coordinate'
 
+check_embedded_node() {
+  local ordinal="$1"
+  if ! awk -v ordinal="${ordinal}" '
+    index($0, "node - <<'\''NODE'\''") {
+      block += 1
+      in_block = block == ordinal
+      next
+    }
+    in_block && /^NODE$/ {
+      in_block = 0
+      exit
+    }
+    in_block { print }
+  ' "${E2E_SCRIPT}" | node --check >/dev/null 2>&1; then
+    fail "embedded Node heredoc ${ordinal} is not valid CommonJS"
+  fi
+}
+
+if grep -Eq '^[[:space:]]+NODE$' "${E2E_SCRIPT}"; then
+  fail 'an embedded Node heredoc terminator is indented'
+fi
+embedded_node_count="$(
+  awk 'index($0, "node - <<'\''NODE'\''") { count += 1 } END { print count + 0 }' "${E2E_SCRIPT}"
+)"
+if [[ "${embedded_node_count}" -ne 3 ]]; then
+  fail "expected three embedded Node heredocs, found ${embedded_node_count}"
+fi
+if [[ "$(grep -Fc 'exec -i' "${E2E_SCRIPT}")" -lt "${embedded_node_count}" ]]; then
+  fail 'embedded Node heredocs do not allocate stdin through kubectl exec'
+fi
+for ordinal in $(seq 1 "${embedded_node_count}"); do
+  check_embedded_node "${ordinal}"
+done
+pass 'embedded Node heredocs have column-zero terminators and valid CommonJS syntax'
+
+if ! grep -Fq 'denied.response.status !== 403' "${RUNTIME_ACCESS_MODULE}" ||
+  ! grep -Fq '{"error":"forbidden"}' "${RUNTIME_ACCESS_MODULE}"; then
+  fail 'membership denial E2E does not assert the approved generic 403 contract'
+fi
+pass 'membership denial E2E asserts the approved generic 403 contract'
+
 if ! grep -Fq 'np08_cleanup_check_residual' "${E2E_SCRIPT}" ||
   ! grep -Fq 'np08_cleanup_final_status' "${E2E_SCRIPT}" ||
   ! grep -Fq 'np08_read_sync_marker' "${E2E_SCRIPT}" ||
   ! grep -Fq 'pre_gate_marker_cluster_fingerprint' "${E2E_SCRIPT}" ||
   ! grep -Fq 'image_mode_images_generated_at' "${E2E_SCRIPT}" ||
   ! grep -Fq 'np08_verify_sync_marker' "${E2E_SCRIPT}" ||
-  ! grep -Eq '^for command_name in .* node;' "${E2E_SCRIPT}"; then
+  ! grep -Eq '^for command_name in .* node npm;' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'run_np08_gateway_raw_header_checks' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'net.connect' "${E2E_SCRIPT}" ||
+  ! grep -Fq "assertHeaderRejected('duplicate system header'" "${E2E_SCRIPT}" ||
+  ! grep -Fq 'run_np08_deployed_manager_journey' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'run_np08_product_manager_status' "${E2E_SCRIPT}" ||
+  ! grep -Fq "require('/app/mcp-host/dist/mcp/managerFactory.js')" "${E2E_SCRIPT}" ||
+  ! grep -Fq 'mcpServers' "${E2E_SCRIPT}" ||
+  ! grep -Fq "state !== 'connected'" "${E2E_SCRIPT}" ||
+  ! grep -Fq 'HOST_B=' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'kind: Host' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'deployment/${HOST_B}' "${E2E_SCRIPT}" ||
+  ! grep -Fq "proxy_mode='positive'" "${E2E_SCRIPT}" ||
+  ! grep -Fq "proxy_mode='cross'" "${E2E_SCRIPT}" ||
+  ! grep -Fq '__np08/stats' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'connections' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'requests' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'bytes' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'np08_assert_stats_unchanged' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'run_np08_live_authority_phase' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'run_np08_flag_off_phase' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'positive-rotate)' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'forwarding-off)' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'spec.managed is immutable' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'delete mcpserver "${SERVER_A}" "${SERVER_B}"' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'managed: true' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'NP08_PROXY_FORCE_ACCESS_REREAD' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'np08_projected_identity_digest' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'run_np08_sdk_protocol_journey' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'src/mcp/__tests__/np08ProxyJourney.test.ts' "${E2E_SCRIPT}" ||
+  ! grep -Fq "const scheme = ['Be', 'arer'].join('')" "${E2E_SCRIPT}" ||
+  grep -Fq "const scheme = ['Be', 'arer'].join(' ')" "${E2E_SCRIPT}" ||
+  ! grep -Fq "scheme !== ['B', 'earer'].join('')" "${E2E_SCRIPT}"; then
   fail 'the deployed E2E is not wired to every tested guard'
 fi
 pass 'the deployed E2E is wired to cleanup and provenance guards'
 
-forbidden_refresh_env='MCP_HOST_RUNTIME_'"REFRESH_TOKEN"
-forbidden_refresh_path='/api/v1/workflow-auth/'"refresh"
-forbidden_reissue_path='/api/v1/workflow-auth/'"reissue"
 for runtime_file in "${E2E_SCRIPT}" "${RUNTIME_ACCESS_MODULE}"; do
   [[ -f "${runtime_file}" ]] || fail 'the NP-08 access-only runtime module is missing'
-  if grep -Fq "${forbidden_refresh_env}" "${runtime_file}" ||
-    grep -Fq "${forbidden_refresh_path}" "${runtime_file}" ||
-    grep -Fq "${forbidden_reissue_path}" "${runtime_file}"; then
+  normalized_runtime_source="$(sed -E 's/[[:space:][:punct:]]//g' "${runtime_file}")"
+  if printf '%s' "${normalized_runtime_source}" | grep -Eiq 'refresh|reissue'; then
     fail 'the deployed NP-08 path can still consume or mutate the runtime credential lineage'
   fi
 done
 pass 'the deployed NP-08 path is access-only and has no refresh or reissue route'
+
+PROXY_AUTH_SOURCE="${ROOT}/mcp-host/src/mcp/proxyAuth.ts"
+if grep -Eq 'refreshOnUnauthorized|refreshToken|workflow-auth|reIssue' "${PROXY_AUTH_SOURCE}"; then
+  fail 'the proxy Host retry boundary contains a refresh or reissue path'
+fi
+normalized_proxy_auth="$(sed -E 's/[[:space:][:punct:]]//g' "${PROXY_AUTH_SOURCE}")"
+if printf '%s' "${normalized_proxy_auth}" | grep -Eiq 'refreshonunauthorized|refreshtoken|workflowauth|reissue'; then
+  fail 'the proxy Host retry boundary contains a constructed refresh or reissue path'
+fi
+pass 'the proxy Host retry boundary is statically access-only, including constructed names'
 
 if ! grep -Fq 'NP08_RUNTIME_ACTION=health' "${E2E_SCRIPT}" ||
   ! grep -Fq 'NP08_RUNTIME_ACTION=journey' "${E2E_SCRIPT}" ||
@@ -195,7 +274,12 @@ if [[ -z "${health_line}" || -z "${fixture_line}" || "${health_line}" -ge "${fix
 fi
 pass 'mcp-host runtime health is proven before fixture mutation'
 
-for expected_status in 200 404 400 401 410; do
+if grep -Fq 'kctl -n "${MCP_NS}" apply -f -' "${E2E_SCRIPT}"; then
+  fail 'mixed-namespace fixture apply inherits the MCP namespace'
+fi
+pass 'NP-08 fixture apply leaves every object namespace explicit'
+
+for expected_status in 200 403 400 401 410; do
   grep -Fq "status !== ${expected_status}" "${RUNTIME_ACCESS_MODULE}" ||
     fail "the access-only journey lost its HTTP ${expected_status} assertion"
 done

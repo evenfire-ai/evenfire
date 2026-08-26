@@ -1,4 +1,5 @@
 import {
+  type AuthTokenResponse,
   type ContextMapperClient,
   isContextMapperAuthorityRevocation,
 } from '../contextMapperClient'
@@ -154,7 +155,8 @@ export class AuthoritativeMcpFleetCoordinator {
     this.snapshotToken = capturedSnapshotToken
     const nextDesired = new Map<string, McpAuthorityEntry>()
     for (const server of servers) {
-      const fingerprint = canonicalJson(server)
+      const { credentialRevision: _legacyCredentialRevision, ...snapshot } = server
+      const fingerprint = canonicalJson(snapshot)
       const previous = this.desired.get(server.name)
       nextDesired.set(server.name, {
         fingerprint,
@@ -461,13 +463,10 @@ async function runMcpFleetEffects<T>(
   await Promise.all(workers)
 }
 
-async function resolveRequiredMcpAuthToken(
+async function resolveRequiredMcpGrant(
   server: McpServerInfo,
-  getAuthToken: (
-    serverName: string,
-    expectedCredentialRevision?: string
-  ) => Promise<string | undefined>
-): Promise<string | undefined> {
+  getAuthToken: (serverName: string) => Promise<AuthTokenResponse>
+): Promise<AuthTokenResponse | undefined> {
   if (
     !server.enabled ||
     !server.status?.ready ||
@@ -477,11 +476,11 @@ async function resolveRequiredMcpAuthToken(
     return undefined
   }
 
-  const authToken = await getAuthToken(server.name, server.credentialRevision)
-  if (!authToken) {
+  const grant = await getAuthToken(server.name)
+  if (!grant.credentialRevision || !grant.token) {
     throw new Error('Required MCP credential is unavailable')
   }
-  return authToken
+  return grant
 }
 
 /**
@@ -498,11 +497,12 @@ export async function replaceAuthoritativeMcpFleet<
   servers: McpServerInfo[]
   previousManager: { disconnectAll(): Promise<void> } | null
   createManager: () => TManager
-  getAuthToken: (
-    serverName: string,
-    expectedCredentialRevision?: string
-  ) => Promise<string | undefined>
-  installFleet: (manager: TManager, serverState: Map<string, string>) => void
+  getAuthToken: (serverName: string) => Promise<AuthTokenResponse>
+  installFleet: (
+    manager: TManager,
+    serverState: Map<string, string>,
+    grantState: Map<string, string>
+  ) => void
   maxConcurrency?: number
   coordinator?: AuthoritativeMcpFleetCoordinator
   onColdStartPublished?: () => void
@@ -523,6 +523,7 @@ export async function replaceAuthoritativeMcpFleet<
       : undefined
   const lease = coordinator.publishSnapshot(nextManager, options.servers)
   const nextServerState = new Map<string, string>()
+  const nextGrantState = new Map<string, string>()
   const admissionFailures: unknown[] = []
   const coldStart = options.previousManager === null
 
@@ -536,15 +537,15 @@ export async function replaceAuthoritativeMcpFleet<
       if (options.isFleetLifecycleCurrent?.() === false) {
         throw new Error('MCP fleet initialization was superseded before publish')
       }
-      options.installFleet(nextManager, nextServerState)
+      options.installFleet(nextManager, nextServerState, nextGrantState)
       options.onColdStartPublished?.()
     }
 
     const admitServer = async (server: McpServerInfo, isCurrent: () => boolean): Promise<void> => {
       if (!isCurrent()) return
-      let authToken: string | undefined
+      let grant: AuthTokenResponse | undefined
       try {
-        authToken = await resolveRequiredMcpAuthToken(server, options.getAuthToken)
+        grant = await resolveRequiredMcpGrant(server, options.getAuthToken)
       } catch (error) {
         if (!isCurrent()) return
         // Auth discovery fails before addServer can own the status transition.
@@ -559,11 +560,16 @@ export async function replaceAuthoritativeMcpFleet<
       }
 
       try {
-        await nextManager.addServer(server, authToken, {
+        await nextManager.addServer(server, grant?.token ?? undefined, {
           isCurrent,
           onCommit: () => {
             if (isCurrent()) {
               nextServerState.set(server.name, JSON.stringify(server))
+              if (grant) {
+                nextGrantState.set(server.name, grant.credentialRevision)
+              } else {
+                nextGrantState.delete(server.name)
+              }
             }
           },
           scheduleCleanup: cleanup => coordinator.scheduleCleanup(cleanup),
@@ -611,7 +617,7 @@ export async function replaceAuthoritativeMcpFleet<
     }
 
     if (!coldStart) {
-      options.installFleet(nextManager, nextServerState)
+      options.installFleet(nextManager, nextServerState, nextGrantState)
       options.coordinator?.publishSnapshot(nextManager, options.servers)
     }
   } catch (error) {
@@ -670,7 +676,11 @@ function canonicalJson(value: unknown): string {
 }
 
 function mcpServerDesiredRevision(server: McpServerInfo): string {
-  const { status: _observedStatus, ...desired } = server
+  const {
+    status: _observedStatus,
+    credentialRevision: _legacyCredentialRevision,
+    ...desired
+  } = server
   return canonicalJson(desired)
 }
 
@@ -682,16 +692,18 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
   servers: McpServerInfo[]
   manager: AuthoritativeMcpSnapshotManager
   serverState: Map<string, string>
-  getAuthToken: (
-    serverName: string,
-    expectedCredentialRevision?: string
-  ) => Promise<string | undefined>
+  /** The runtime always supplies this; isolated legacy unit callers may omit it. */
+  grantState?: Map<string, string>
+  getAuthToken: (serverName: string) => Promise<AuthTokenResponse>
   maxConcurrency?: number
   coordinator?: AuthoritativeMcpFleetCoordinator
+  /** Await background effects when the caller uses completion as authority evidence. */
+  awaitCompletion?: boolean
 }): Promise<void> {
   const maxConcurrency = resolveMcpFleetConcurrency(options.maxConcurrency)
   const coordinator =
     options.coordinator ?? new AuthoritativeMcpFleetCoordinator(maxConcurrency, maxConcurrency)
+  const grantState = options.grantState ?? new Map<string, string>()
   // Snapshot publication is synchronous and precedes every manager read or
   // network effect. It invalidates stale initial/poll candidates immediately.
   const lease = coordinator.publishSnapshot(options.manager, options.servers)
@@ -715,6 +727,7 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
       if (!currentNames.has(name) && lease.isAbsentCurrent(name)) {
         coordinator.scheduleCleanup(options.manager.detachServer(name))
         options.serverState.delete(name)
+        grantState.delete(name)
       }
     }
     for (const server of options.servers) {
@@ -723,32 +736,27 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
         previousState !== undefined &&
         mcpServerDesiredRevision(JSON.parse(previousState) as McpServerInfo) !==
           mcpServerDesiredRevision(server)
-      const previousCredentialRevision =
-        previousState !== undefined
-          ? (JSON.parse(previousState) as McpServerInfo).credentialRevision
-          : undefined
-      const credentialAuthorityChanged =
-        previousState !== undefined &&
-        previousCredentialRevision !== server.credentialRevision &&
-        (previousCredentialRevision !== undefined || server.credentialRevision !== undefined)
+      // Credential rotation is authorized by HCC's live pre/post Secret fence
+      // on the scoped credential POST. The metadata-only inventory is never a
+      // client-side credential authority barrier.
       const revokesLiveConnection =
         connectedNames.has(server.name) &&
         (!server.enabled ||
-          credentialAuthorityChanged ||
           (server.status?.authoritative !== false && server.status?.ready === false) ||
           (server.status?.authoritative === false && desiredChanged))
       if (revokesLiveConnection && lease.isCurrent(server.name)) {
         coordinator.scheduleCleanup(options.manager.detachServer(server.name))
+        grantState.delete(server.name)
       }
     }
   }
 
-  const resolveAuthToken = async (
+  const resolveGrant = async (
     server: McpServerInfo,
     isCurrent: () => boolean
-  ): Promise<string | undefined> => {
+  ): Promise<AuthTokenResponse | undefined> => {
     try {
-      return await resolveRequiredMcpAuthToken(server, options.getAuthToken)
+      return await resolveRequiredMcpGrant(server, options.getAuthToken)
     } catch (error) {
       if (isCurrent() && isContextMapperAuthorityRevocation(error)) {
         if (options.manager.detachServer) {
@@ -757,6 +765,7 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
           await options.manager.removeServer(server.name)
         }
         options.serverState.delete(server.name)
+        grantState.delete(server.name)
       }
       // Auth discovery fails before manager admission. Preserve a live
       // connection's status during replacement; otherwise publish the
@@ -775,19 +784,26 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
     if (!isCurrent()) return
     const previousState = options.serverState.get(server.name)
     const currentState = JSON.stringify(server)
+    let grantRevisionToCommit: string | undefined
     const control: Required<McpAdmissionControl> = {
       isCurrent,
       onCommit: () => {
         if (isCurrent()) {
           options.serverState.set(server.name, currentState)
+          if (grantRevisionToCommit) {
+            grantState.set(server.name, grantRevisionToCommit)
+          } else {
+            grantState.delete(server.name)
+          }
         }
       },
       scheduleCleanup: cleanup => coordinator.scheduleCleanup(cleanup),
     }
 
     if (!previousState) {
-      const authToken = await resolveAuthToken(server, isCurrent)
-      await options.manager.addServer(server, authToken, control)
+      const grant = await resolveGrant(server, isCurrent)
+      grantRevisionToCommit = grant?.credentialRevision
+      await options.manager.addServer(server, grant?.token ?? undefined, control)
       return
     }
 
@@ -813,8 +829,9 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
       // A ready authoritative desired revision is connected before commit.
       // Failure leaves the previous connection and recorded revision intact,
       // so an identical later snapshot retries it.
-      const authToken = await resolveAuthToken(server, isCurrent)
-      await options.manager.replaceServer(server, authToken, control)
+      const grant = await resolveGrant(server, isCurrent)
+      grantRevisionToCommit = grant?.credentialRevision
+      await options.manager.replaceServer(server, grant?.token ?? undefined, control)
       return
     }
 
@@ -843,8 +860,38 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
     // A previously not-ready server was intentionally recorded without a
     // connection. Admit it once the authoritative snapshot reports it ready.
     if (!connectedNames.has(server.name) && server.enabled) {
-      const authToken = await resolveAuthToken(server, isCurrent)
-      await options.manager.addServer(server, authToken, control)
+      const grant = await resolveGrant(server, isCurrent)
+      grantRevisionToCommit = grant?.credentialRevision
+      await options.manager.addServer(server, grant?.token ?? undefined, control)
+      return
+    }
+
+    if (connectedNames.has(server.name) && server.enabled) {
+      // The directory is topology-only. Re-read the scoped HCC grant on every
+      // healthy poll so Secret/server rotation is detected without accepting a
+      // revision supplied by, or obtained from, the inventory caller.
+      const grant = await resolveGrant(server, isCurrent)
+      if (!grant) {
+        if (isCurrent()) options.serverState.set(server.name, currentState)
+        return
+      }
+      const previousGrantRevision = grantState.get(server.name)
+      if (previousGrantRevision === grant.credentialRevision) {
+        if (isCurrent()) options.serverState.set(server.name, currentState)
+        return
+      }
+      if (!isCurrent()) return
+
+      // detachServer revokes the bearer synchronously and only schedules the
+      // physical close; the replacement cannot admit with the old bearer.
+      if (options.manager.detachServer) {
+        coordinator.scheduleCleanup(options.manager.detachServer(server.name))
+      } else {
+        await options.manager.removeServer(server.name)
+      }
+      if (!isCurrent()) return
+      grantRevisionToCommit = grant.credentialRevision
+      await options.manager.replaceServer(server, grant.token ?? undefined, control)
       return
     }
 
@@ -856,6 +903,7 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
   }
 
   const effects: Array<() => Promise<void>> = []
+  let firstReconciliationFailure: unknown = null
   // Authoritative absence is a revocation signal. Queue deletions before
   // admissions so a full budget of slow new peers cannot delay retiring
   // servers that are no longer desired.
@@ -868,6 +916,7 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
           await options.manager.removeServer(name)
           if (lease.isAbsentCurrent(name)) {
             options.serverState.delete(name)
+            grantState.delete(name)
           }
         } catch (error) {
           console.error(`[Main] MCP server deletion failed; will retry: ${name}`, error)
@@ -882,6 +931,7 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
           reconcileServer(server, isCurrent)
         )
       } catch (error) {
+        firstReconciliationFailure ??= error
         console.error(`[Main] MCP server reconciliation failed; will retry: ${server.name}`, error)
       }
     })
@@ -892,6 +942,11 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
   // deletion keys, so effects can progress independently under one bounded
   // fleet-wide budget without weakening same-server ordering.
   const reconciliation = runMcpFleetEffects(effects, maxConcurrency, effect => effect())
+  if (options.awaitCompletion) {
+    await reconciliation
+    if (firstReconciliationFailure !== null) throw firstReconciliationFailure
+    return
+  }
   if (coordinator.reconcilesInBackground) {
     void reconciliation.catch(error => {
       console.error('[Main] MCP background snapshot reconciliation failed:', error)

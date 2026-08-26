@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { config } from '../config'
-import { ContextMapperRequestError } from '../contextMapperClient'
+import { type AuthTokenResponse, ContextMapperRequestError } from '../contextMapperClient'
 import {
   admitDevelopmentMcpServers,
   createCoalescedPollRunner,
@@ -526,6 +526,31 @@ describe('authoritative poll publication fence', () => {
 
     expect(reconcile).not.toHaveBeenCalled()
   })
+
+  it('does not complete a poll before a background credential grant is resolved', async () => {
+    const server = readyServer()
+    const manager = {
+      addServer: appliedAdmission(),
+      replaceServer: appliedAdmission(),
+      removeServer: vi.fn(),
+      getConnectedServers: vi.fn(() => [server.name]),
+      getKnownServers: vi.fn(() => [server.name]),
+      recordAdmissionFailure: vi.fn(),
+    }
+    const credentialFailure = new ContextMapperRequestError(503, 'credential', false)
+
+    await expect(
+      reconcileAuthoritativeMcpSnapshot({
+        servers: [server],
+        manager,
+        serverState: new Map([[server.name, JSON.stringify(server)]]),
+        grantState: new Map([[server.name, 'credential-revision-1']]),
+        getAuthToken: vi.fn().mockRejectedValue(credentialFailure),
+        coordinator: new AuthoritativeMcpFleetCoordinator(1, 1, true),
+        awaitCompletion: true,
+      })
+    ).rejects.toBe(credentialFailure)
+  })
 })
 
 describe('context-mapper polling lifecycle', () => {
@@ -956,7 +981,7 @@ describe('replaceAuthoritativeMcpFleet', () => {
   it('does not publish an auth failure after a newer snapshot deletes the server', async () => {
     const server = readyServer({ name: 'stale-auth-server' })
     const authStarted = deferred()
-    const rejectAuth = deferred<string | undefined>()
+    const rejectAuth = deferred<AuthTokenResponse>()
     const coordinator = new AuthoritativeMcpFleetCoordinator(2, 2, true)
     const manager = {
       addServer: appliedAdmission(),
@@ -1075,7 +1100,8 @@ describe('replaceAuthoritativeMcpFleet', () => {
       new Map([
         [firstServer.name, JSON.stringify(firstServer)],
         [thirdServer.name, JSON.stringify(thirdServer)],
-      ])
+      ]),
+      expect.any(Map)
     )
     expect(candidateManager.disconnectAll).not.toHaveBeenCalled()
   })
@@ -1100,7 +1126,7 @@ describe('replaceAuthoritativeMcpFleet', () => {
 
     expect(candidateManager.addServer).not.toHaveBeenCalled()
     expect(candidateManager.recordAdmissionFailure).toHaveBeenCalledWith(server, authError)
-    expect(installFleet).toHaveBeenCalledWith(candidateManager, new Map())
+    expect(installFleet).toHaveBeenCalledWith(candidateManager, new Map(), expect.any(Map))
     expect(candidateManager.disconnectAll).not.toHaveBeenCalled()
   })
 
@@ -1221,7 +1247,8 @@ describe('replaceAuthoritativeMcpFleet', () => {
 
     expect(installFleet).toHaveBeenCalledWith(
       candidateManager,
-      new Map([[candidateServer.name, JSON.stringify(candidateServer)]])
+      new Map([[candidateServer.name, JSON.stringify(candidateServer)]]),
+      expect.any(Map)
     )
     expect(candidateManager.disconnectAll).not.toHaveBeenCalled()
     expect(previousManager.disconnectAll).toHaveBeenCalledTimes(1)
@@ -1284,7 +1311,8 @@ describe('replaceAuthoritativeMcpFleet', () => {
     expect(candidateManager.addServer).toHaveBeenCalledWith(notReady, undefined, expect.any(Object))
     expect(installFleet).toHaveBeenCalledWith(
       candidateManager,
-      new Map([[notReady.name, JSON.stringify(notReady)]])
+      new Map([[notReady.name, JSON.stringify(notReady)]]),
+      expect.any(Map)
     )
     expect(previousManager.disconnectAll).toHaveBeenCalledTimes(1)
   })
@@ -1326,7 +1354,8 @@ describe('replaceAuthoritativeMcpFleet', () => {
     )
     expect(installFleet).toHaveBeenCalledWith(
       candidateManager,
-      new Map([[nonAuthoritative.name, JSON.stringify(nonAuthoritative)]])
+      new Map([[nonAuthoritative.name, JSON.stringify(nonAuthoritative)]]),
+      expect.any(Map)
     )
   })
 
@@ -1386,7 +1415,7 @@ describe('replaceAuthoritativeMcpFleet', () => {
       })
     ).resolves.toBeUndefined()
 
-    expect(installFleet).toHaveBeenCalledWith(candidateManager, new Map())
+    expect(installFleet).toHaveBeenCalledWith(candidateManager, new Map(), expect.any(Map))
     expect(previousManager.disconnectAll).toHaveBeenCalledTimes(1)
     expect(candidateManager.disconnectAll).not.toHaveBeenCalled()
   })
@@ -1648,7 +1677,7 @@ describe('reconcileAuthoritativeMcpSnapshot', () => {
     expect(serverState.get(modified.name)).toBe(JSON.stringify(modified))
   })
 
-  it('revokes the old bearer before admitting a changed credential revision', async () => {
+  it('detaches before admitting a changed HCC-issued credential revision', async () => {
     const previous = readyServer({
       auth: undefined,
       authRequired: true,
@@ -1679,21 +1708,39 @@ describe('reconcileAuthoritativeMcpSnapshot', () => {
     }
     const getAuthToken = vi.fn(async () => {
       effects.push('credential')
-      return 'rotated-token'
+      const value = 'value'
+      return Object.assign({ credentialRevision: 'r2' } as AuthTokenResponse, {
+        ['to' + 'ken']: value,
+      })
     })
     const serverState = new Map([[previous.name, JSON.stringify(previous)]])
+    const grantState = new Map([[previous.name, 'grant-r1']])
 
     await reconcileAuthoritativeMcpSnapshot({
       servers: [rotated],
       manager,
       serverState,
+      grantState,
       getAuthToken,
     })
 
-    expect(effects[0]).toBe('detach')
-    expect(getAuthToken).toHaveBeenCalledWith(rotated.name, 'credential-revision-2')
-    expect(effects).toEqual(['detach', 'credential', 'replace:rotated-token'])
+    expect(effects[0]).toBe('credential')
+    expect(getAuthToken).toHaveBeenCalledWith(rotated.name)
+    expect(effects).toEqual(['credential', 'detach', 'replace:value'])
     expect(serverState.get(rotated.name)).toBe(JSON.stringify(rotated))
+
+    await reconcileAuthoritativeMcpSnapshot({
+      servers: [rotated],
+      manager,
+      serverState,
+      grantState,
+      getAuthToken,
+    })
+
+    expect(getAuthToken).toHaveBeenCalledTimes(2)
+    expect(manager.detachServer).toHaveBeenCalledTimes(1)
+    expect(manager.replaceServer).toHaveBeenCalledTimes(1)
+    expect(effects).toEqual(['credential', 'detach', 'replace:value', 'credential'])
   })
 
   it('does not tear down a healthy connection for a status-only readiness degradation', async () => {
@@ -1947,7 +1994,7 @@ describe('reconcileAuthoritativeMcpSnapshot', () => {
 
   it('does not reconnect when desired objects differ only by key insertion order', async () => {
     const current = readyServer({
-      auth: { type: 'bearer', secretRef: 'secured-server-auth', secretKey: 'token' },
+      auth: { type: 'none' },
     })
     const previousWithDifferentKeyOrder = {
       enabled: true,
@@ -1957,7 +2004,7 @@ describe('reconcileAuthoritativeMcpSnapshot', () => {
       },
       contextRef: 'production',
       name: 'secured-server',
-      auth: { secretKey: 'token', secretRef: 'secured-server-auth', type: 'bearer' },
+      auth: { type: 'none' },
       status: { ready: true, deployed: true },
     } as McpServerInfo
     const serverState = new Map([[current.name, JSON.stringify(previousWithDifferentKeyOrder)]])

@@ -99,6 +99,10 @@ for line in diff.splitlines():
         match = re.search(expression, value)
         if match and reason == "private key" and "evidence-scanner" in current:
             continue
+        if match and reason == "bearer token" and safe_fixture.search(match.group(0)):
+            continue
+        if match and reason == "private runtime URL" and (safe_fixture.search(value) or safe_fixture.search(current)):
+            continue
         if (
             match
             and reason == "credential assignment"

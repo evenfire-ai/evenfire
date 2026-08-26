@@ -60,8 +60,15 @@ fi
 
 if [ "${#package_dirs[@]}" -gt 0 ]; then
   for package in "${package_dirs[@]}"; do
-    printf '[minikube-t0] affected package: %s test\n' "$package"
-    (cd "$PROJECT_DIR/$package" && npm test)
+    if (
+      cd "$PROJECT_DIR/$package" &&
+      node -e "const scripts = require('./package.json').scripts ?? {}; process.exit(typeof scripts.test === 'string' && scripts.test.trim() ? 0 : 1)"
+    ); then
+      printf '[minikube-t0] affected package: %s test\n' "$package"
+      (cd "$PROJECT_DIR/$package" && npm test)
+    else
+      printf '[minikube-t0] affected package: %s test NOT_APPLICABLE (no scripts.test)\n' "$package"
+    fi
     printf '[minikube-t0] affected package: %s build/typecheck\n' "$package"
     (cd "$PROJECT_DIR/$package" && npm run build)
   done

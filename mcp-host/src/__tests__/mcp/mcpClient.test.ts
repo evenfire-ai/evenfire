@@ -98,17 +98,22 @@ describe('McpClient — connect', () => {
     expect(client.isConnected).toBe(true)
   })
 
-  it('uses StreamableHTTP + proxy URL routing when proxyUrl is provided', async () => {
+  it('preserves direct SSE transport when proxyUrl is provided', async () => {
+    const hostAuthorization = {
+      getAccessToken: () => 'host-token',
+      rereadAccessToken: vi.fn().mockResolvedValue(false),
+    }
     const client = new McpClient(
       makeServerInfo({ transport: { type: 'sse', url: 'http://server/mcp' } }),
       undefined,
-      'http://mcp-proxy:8083'
+      'http://mcp-proxy:8083',
+      hostAuthorization
     )
     await client.connect()
-    // StreamableHTTP used even for SSE type when proxy is set
-    expect(lastStreamableArgs.length).toBeGreaterThan(0)
-    const urlArg = lastStreamableArgs[0] as URL
-    expect(urlArg.href).toContain('/servers/test-server/mcp')
+    expect(lastStreamableArgs.length).toBe(0)
+    expect(lastSSEArgs.length).toBeGreaterThan(0)
+    const urlArg = lastSSEArgs[0] as URL
+    expect(urlArg.href).toBe('http://server/mcp')
   })
 
   it('injects Authorization header when authToken is provided', async () => {

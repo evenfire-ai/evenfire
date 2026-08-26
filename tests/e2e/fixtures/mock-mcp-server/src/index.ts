@@ -38,6 +38,7 @@ const FETCH_ALLOWED_HOSTS = new Set(
     .filter(Boolean)
 )
 const records = new Map<string, string>()
+const np08Stats = { connections: 0, requests: 0, bytes: 0 }
 
 // ─── Issue #223: opt-in credential-rotation test gate ───────────────────────
 // Must match ROTATION_CREDENTIAL_ENV_VAR / ROTATION_INVALID_SENTINEL in
@@ -249,6 +250,10 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse) {
 
 const mcpHttpServer = createServer(async (req, res) => {
   if (req.url === '/mcp') {
+    np08Stats.requests += 1
+    req.on('data', chunk => {
+      np08Stats.bytes += Buffer.byteLength(chunk)
+    })
     try {
       await handleMcp(req, res)
     } catch (e) {
@@ -262,6 +267,10 @@ const mcpHttpServer = createServer(async (req, res) => {
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'Not found' }))
   }
+})
+
+mcpHttpServer.on('connection', () => {
+  np08Stats.connections += 1
 })
 
 mcpHttpServer.listen(MCP_PORT, '0.0.0.0', () => {
@@ -282,6 +291,21 @@ const healthServer = createServer((req, res) => {
   if (url === '/echo-headers') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ headers: req.headers }))
+    return
+  }
+
+  if (url === '/__np08/stats') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+    res.end(JSON.stringify(np08Stats))
+    return
+  }
+
+  if (url === '/__np08/stats/reset' && req.method === 'POST') {
+    np08Stats.connections = 0
+    np08Stats.requests = 0
+    np08Stats.bytes = 0
+    res.writeHead(204)
+    res.end()
     return
   }
 

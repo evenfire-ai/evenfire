@@ -50,7 +50,10 @@ const server: AuthorityMcpServer = {
   name: 'server-a',
   namespace: 'mcp-server',
   metadata: meta('server-uid-a', '30'),
-  transport: { type: 'streamableHttp', url: 'http://server-a/mcp' },
+  transport: {
+    type: 'streamableHttp',
+    url: 'http://server-a.mcp-server.svc.cluster.local:3000/mcp',
+  },
   auth: { type: 'bearer', secretRef: 'server-a-auth', secretKey: 'token' },
   enabled: true,
   status: { deployed: true, ready: true, authoritative: false },
@@ -59,7 +62,10 @@ const serverB: AuthorityMcpServer = {
   ...server,
   name: 'server-b',
   metadata: meta('server-uid-b', '31'),
-  transport: { type: 'streamableHttp', url: 'http://server-b/mcp' },
+  transport: {
+    type: 'streamableHttp',
+    url: 'http://server-b.mcp-server.svc.cluster.local:3000/mcp',
+  },
   auth: { type: 'bearer', secretRef: 'server-b-auth', secretKey: 'token' },
 }
 const secret: AuthoritySecret = {
@@ -88,6 +94,10 @@ class FakeStore implements McpAuthorizationStore {
   hostObject: AuthorityHost | null = host
   contextObject: AuthorityContext | null = context
   serverObject: AuthorityMcpServer | null = server
+
+  async listMcpServers(): Promise<AuthorityMcpServer[]> {
+    return this.serverObject ? [this.serverObject] : []
+  }
 
   async readHost(name: string) {
     this.hostReads += 1
@@ -142,6 +152,41 @@ async function expectCredentialFailure(
 }
 
 describe('McpAuthorizationService', () => {
+  it('keeps descriptions out of the global system inventory DTO', async () => {
+    const store = new FakeStore()
+    const describedServer = {
+      ...server,
+      contextRef: 'context-a',
+      description: ['fixture', 'description'].join(' '),
+    }
+    store.listMcpServers = async () => [describedServer]
+    const service = new McpAuthorizationService(store)
+
+    const inventory = await service.listSystemServers()
+
+    expect(inventory[0]).not.toHaveProperty('description')
+    expect(Object.keys(inventory[0]).sort()).toEqual([
+      'contextRef',
+      'destinationRevision',
+      'enabled',
+      'name',
+      'status',
+      'transport',
+    ])
+  })
+
+  it('omits McpServers that are not attached to any Context from the system inventory', async () => {
+    const store = new FakeStore()
+    const orphan = { ...server, name: 'orphan-server', contextRef: undefined }
+    const attached = { ...server, contextRef: 'context-a' }
+    store.listMcpServers = async () => [orphan, attached]
+    const service = new McpAuthorizationService(store)
+
+    await expect(service.listSystemServers()).resolves.toEqual([
+      expect.objectContaining({ name: 'server-a', contextRef: 'context-a' }),
+    ])
+  })
+
   it('keeps two Host/Context grant sets disjoint in both directions', async () => {
     const hostB: AuthorityHost = {
       name: 'host-b',
@@ -213,7 +258,7 @@ describe('McpAuthorizationService', () => {
     }
   })
 
-  it('returns only the current Context inventory and an opaque Secret-aware revision', async () => {
+  it('returns only the current Context inventory without Secret metadata or credential revisions', async () => {
     const store = new FakeStore()
     const service = new McpAuthorizationService(store)
     const inventory = await service.listServers(principal)
@@ -221,25 +266,26 @@ describe('McpAuthorizationService', () => {
       expect.objectContaining({
         name: 'server-a',
         authRequired: true,
-        credentialRevision: expect.any(String),
         status: { deployed: true, ready: true, authoritative: false },
       }),
     ])
-    expect(inventory[0]).not.toHaveProperty('contextRef')
+    expect(inventory[0]).toHaveProperty('contextRef', 'context-a')
     expect(inventory[0]).not.toHaveProperty('auth')
+    expect(inventory[0]).not.toHaveProperty('credentialRevision')
     expect(JSON.stringify(inventory)).not.toContain('credential-value')
-    expect(store.secretMetadataReads).toBe(1)
+    expect(store.secretMetadataReads).toBe(0)
     expect(store.secretValueReads).toBe(0)
   })
 
-  it('authorizes before Secret read and returns the same revision for a stable credential', async () => {
+  it('authorizes before Secret read and returns the revision only from the credential route', async () => {
     const store = new FakeStore()
     const service = new McpAuthorizationService(store)
     const inventory = await service.listServers(principal)
+    expect(store.secretMetadataReads).toBe(0)
     const credential = await service.getCredential(principal, 'server-a')
     expect(credential).toEqual({
       token: 'credential-value',
-      credentialRevision: inventory[0].credentialRevision,
+      credentialRevision: expect.any(String),
     })
   })
 
@@ -438,7 +484,7 @@ describe('McpAuthorizationService', () => {
     await expect(service.listServers(principal)).rejects.toMatchObject({
       code: 'authorization_unavailable',
     })
-    expect(store.secretMetadataReads).toBe(1)
+    expect(store.secretMetadataReads).toBe(0)
     expect(store.secretValueReads).toBe(0)
   })
 
@@ -453,7 +499,7 @@ describe('McpAuthorizationService', () => {
     await expect(service.listServers(principal)).rejects.toMatchObject({
       code: 'authorization_unavailable',
     })
-    expect(store.secretMetadataReads).toBe(1)
+    expect(store.secretMetadataReads).toBe(0)
     expect(store.secretValueReads).toBe(0)
   })
 

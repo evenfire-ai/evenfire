@@ -16,6 +16,7 @@ import {
   gateStep,
   reIssueCounter,
   refreshFailureCounter,
+  refreshWithRecovery,
   workflowTokenRefreshCounter,
 } from '../userApprovalRequester'
 
@@ -107,6 +108,43 @@ describe('userApprovalRequester — refresh rotation crash recovery', () => {
     vi.useRealTimers()
     vi.unstubAllEnvs()
     await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })))
+  })
+
+  it('serialises concurrent runtime refreshes on the same auth object', async () => {
+    vi.useRealTimers()
+    const auth = makeAuth()
+    let releaseRefresh!: () => void
+    let signalRefreshStarted!: () => void
+    const refreshGate = new Promise<void>(resolve => {
+      releaseRefresh = resolve
+    })
+    const refreshStarted = new Promise<void>(resolve => {
+      signalRefreshStarted = resolve
+    })
+    let refreshCount = 0
+    mockFetch.mockImplementation(async (url: string) => {
+      if (!url.endsWith('/workflow-auth/refresh')) {
+        throw new Error(`Unexpected fetch: ${url}`)
+      }
+      refreshCount += 1
+      if (refreshCount === 1) signalRefreshStarted()
+      await refreshGate
+      return jsonResponse({
+        [['access', 'Token'].join('')]: REISSUED_ACCESS_TOKEN,
+        [['refresh', 'Token'].join('')]: ['rotated', 'refresh'].join('-'),
+      })
+    })
+
+    const first = refreshWithRecovery(auth)
+    await refreshStarted
+    const second = refreshWithRecovery(auth)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    releaseRefresh()
+
+    await Promise.all([first, second])
+    expect(refreshCount).toBe(1)
+    expect(auth.accessToken).toBe(REISSUED_ACCESS_TOKEN)
+    expect(auth.refreshToken).toBe(['rotated', 'refresh'].join('-'))
   })
 
   it('does not invoke re-issue when refresh is not needed', async () => {

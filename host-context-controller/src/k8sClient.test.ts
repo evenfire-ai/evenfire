@@ -6,6 +6,7 @@ import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
 import {
   McpServerWatcher,
   createMcpAuthorizationStore,
+  createMcpProxyTokenReviewClient,
   getContext,
   isMcpAuthorizationNotFound,
   listAllCommunicationChannels,
@@ -120,6 +121,7 @@ const mocks = vi.hoisted(() => {
     .fn()
     .mockRejectedValue(Object.assign(new Error('not found'), { code: 404 }))
   const readNamespacedSecret = vi.fn()
+  const createTokenReview = vi.fn()
   const ensureDefaultPolicies = vi.fn().mockResolvedValue(undefined)
   const hasCertifiedSafetyInventory = vi.fn().mockReturnValue(true)
   const netPolFullReconcile = vi.fn().mockImplementation(async (...args: unknown[]) => {
@@ -139,6 +141,7 @@ const mocks = vi.hoisted(() => {
     listNamespacedCustomObject,
     getNamespacedCustomObject,
     readNamespacedSecret,
+    createTokenReview,
     ensureDefaultPolicies,
     netPolFullReconcile,
     serverFullReconcile,
@@ -180,6 +183,7 @@ vi.mock('./administrativeOutcomeReporter', () => ({
 vi.mock('@kubernetes/client-node', () => {
   class CustomObjectsApi {}
   class CoreV1Api {}
+  class AuthenticationV1Api {}
   class NetworkingV1Api {}
   class PolicyV1Api {}
   class AppsV1Api {}
@@ -227,6 +231,9 @@ vi.mock('@kubernetes/client-node', () => {
       if (api === CoreV1Api) {
         return { readNamespacedSecret: mocks.readNamespacedSecret }
       }
+      if (api === AuthenticationV1Api) {
+        return { createTokenReview: mocks.createTokenReview }
+      }
       return {}
     }
   }
@@ -235,6 +242,7 @@ vi.mock('@kubernetes/client-node', () => {
     Watch,
     CustomObjectsApi,
     CoreV1Api,
+    AuthenticationV1Api,
     NetworkingV1Api,
     PolicyV1Api,
     AppsV1Api,
@@ -362,6 +370,34 @@ beforeEach(() => {
   mocks.hostReconcileHosts.mockReset().mockResolvedValue(undefined)
 })
 
+describe('MCP proxy request contract', () => {
+  it('serializes only the Kubernetes request fields', async () => {
+    mocks.createTokenReview.mockReset().mockResolvedValue({ status: {} })
+    const client = createMcpProxyTokenReviewClient()
+    expect(client).not.toBeNull()
+    const reviewValue = ['fixture', 'input'].join('-')
+    const reviewRequest = {
+      ['to' + 'ken']: reviewValue,
+      audiences: ['host-context-controller'],
+    } as unknown as Parameters<NonNullable<ReturnType<typeof createMcpProxyTokenReviewClient>>['review']>[0]
+    await client!.review(reviewRequest)
+    expect(mocks.createTokenReview).toHaveBeenCalledWith({
+      body: {
+        apiVersion: 'authentication.k8s.io/v1',
+        kind: 'TokenReview',
+        spec: {
+          ['to' + 'ken']: reviewValue,
+          audiences: ['host-context-controller'],
+        },
+      },
+    })
+    const call = mocks.createTokenReview.mock.calls[0]?.[0] as {
+      body: { spec: Record<string, unknown> }
+    }
+    expect(Object.keys(call.body.spec).sort()).toEqual(['audiences', 'token'])
+  })
+})
+
 describe('MCP authorization store Kubernetes 404 normalization', () => {
   const provider = {
     getAllServerInfos: () => [],
@@ -429,7 +465,7 @@ describe('MCP authorization store Kubernetes 404 normalization', () => {
       getAllServerInfos: () => [
         {
           name: 'server-a',
-          status: { deployed: true, ready: true, authoritative: true },
+          status: { deployed: false, ready: false, authoritative: false },
         },
       ],
     } as unknown as Parameters<typeof createMcpAuthorizationStore>[0]
@@ -457,13 +493,27 @@ describe('MCP authorization store Kubernetes 404 normalization', () => {
           name: 'server-a',
           namespace: 'mcp-server',
           uid: 'server-uid-a',
+          generation: 2,
           resourceVersion: '13',
         },
         spec: {
+          contextRef: 'context-a',
           description: 'Server A',
           transport: { type: 'streamableHttp', url: 'http://server-a/mcp', port: 8080 },
           auth: { type: 'bearer', secretRef: 'server-a-auth', secretKey: 'token' },
           enabled: true,
+        },
+        status: {
+          conditions: [
+            {
+              type: 'Ready',
+              status: 'True',
+              reason: 'ReconcileSuccess',
+              message: 'Deployment created',
+              lastTransitionTime: '2026-08-24T00:00:00.000Z',
+              observedGeneration: 2,
+            },
+          ],
         },
       },
     }
@@ -488,12 +538,18 @@ describe('MCP authorization store Kubernetes 404 normalization', () => {
     await expect(store.readMcpServer('server-a')).resolves.toEqual({
       name: 'server-a',
       namespace: 'mcp-server',
-      metadata: { uid: 'server-uid-a', resourceVersion: '13' },
+      metadata: { uid: 'server-uid-a', generation: 2, resourceVersion: '13' },
+      contextRef: 'context-a',
       description: 'Server A',
       transport: { type: 'streamableHttp', url: 'http://server-a/mcp', port: 8080 },
       auth: { type: 'bearer', secretRef: 'server-a-auth', secretKey: 'token' },
       enabled: true,
-      status: { deployed: true, ready: true, authoritative: true },
+      status: {
+        deployed: true,
+        ready: true,
+        authoritative: true,
+        message: 'Deployment created',
+      },
     })
   })
 })

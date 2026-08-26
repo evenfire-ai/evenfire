@@ -8,6 +8,10 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js'
 import { McpServerInfo, McpTool } from '../types'
 import {
+  createMcpProxyFetch,
+  type McpProxyHostAuthorization,
+} from './proxyAuth'
+import {
   type McpToolCallOptions,
   ensureNotAborted,
   remainingBudgetMs,
@@ -15,6 +19,7 @@ import {
   resolveMcpRequestTimeoutMs,
   withRequestTimeout,
 } from './requestOptions'
+import { mcpHostLogger } from '../logger'
 
 export type { McpToolCallOptions } from './requestOptions'
 
@@ -28,12 +33,17 @@ interface McpCallRecovery {
   promise: Promise<void>
 }
 
+function errorName(error: unknown): string {
+  return error instanceof Error ? error.name : 'unknown'
+}
+
 export class McpClient {
   private client: Client | null = null
   private transport: SupportedMcpTransport | null = null
   private serverConfig: McpServerInfo
   private authToken?: string
   private proxyUrl?: string
+  private proxyHostAuthorization?: McpProxyHostAuthorization
   private tools: McpTool[] = []
   private connected: boolean = false
   private reconnectPromise: Promise<void> | null = null
@@ -43,10 +53,16 @@ export class McpClient {
   private readonly retirementController = new AbortController()
   private readonly transportCleanups = new WeakMap<SupportedMcpTransport, Promise<void>>()
 
-  constructor(serverConfig: McpServerInfo, authToken?: string, proxyUrl?: string) {
+  constructor(
+    serverConfig: McpServerInfo,
+    authToken?: string,
+    proxyUrl?: string,
+    proxyHostAuthorization?: McpProxyHostAuthorization
+  ) {
     this.serverConfig = serverConfig
     this.authToken = authToken
     this.proxyUrl = proxyUrl
+    this.proxyHostAuthorization = proxyHostAuthorization
   }
 
   get name(): string {
@@ -130,9 +146,9 @@ export class McpClient {
    */
   private resolveUrl(): string {
     const { transport } = this.serverConfig
-    if (this.proxyUrl) {
+    if (this.proxyUrl && transport.type !== 'sse') {
       const url = `${this.proxyUrl}/servers/${this.serverConfig.name}/mcp`
-      console.log(`[MCP:${this.name}] Using proxy URL: ${url}`)
+      mcpHostLogger.info('proxy_target_selected', { server: this.name })
       return url
     }
     return transport.url || `http://${this.serverConfig.name}.mcp-server.svc.cluster.local:3000/mcp`
@@ -141,28 +157,45 @@ export class McpClient {
   private createTransport(): SupportedMcpTransport {
     const { transport } = this.serverConfig
     const headers: Record<string, string> = {}
+    const proxyForTransport = Boolean(this.proxyUrl && transport.type !== 'sse')
 
     if (this.authToken) {
       headers['Authorization'] = `Bearer ${this.authToken}`
     }
 
     const targetUrl = this.resolveUrl()
+    if (proxyForTransport && !this.proxyHostAuthorization) {
+      throw new Error('MCP proxy Host authorization is unavailable')
+    }
+    if (this.proxyUrl && transport.type === 'sse') {
+      mcpHostLogger.info('proxy_transport_bypassed', {
+        server: this.name,
+        reason: 'legacy_sse_direct_path',
+      })
+    }
+    const proxyFetch = proxyForTransport && this.proxyHostAuthorization
+      ? createMcpProxyFetch(this.proxyHostAuthorization)
+      : undefined
+    const requestInit = { headers }
 
-    if (this.proxyUrl || transport.type === 'streamableHttp') {
-      console.log(`[MCP:${this.name}] Using Streamable HTTP transport`)
+    if (proxyForTransport || transport.type === 'streamableHttp') {
+      mcpHostLogger.info('transport_selected', { server: this.name, transport: 'streamable_http' })
       return new StreamableHTTPClientTransport(new URL(targetUrl), {
-        requestInit: {
-          headers,
-        },
+        requestInit,
+        ...(proxyFetch ? { fetch: proxyFetch } : {}),
       })
     }
 
     // Default to SSE (legacy) transport
-    console.log(`[MCP:${this.name}] Using SSE transport`)
+    mcpHostLogger.info('transport_selected', { server: this.name, transport: 'sse' })
     return new SSEClientTransport(new URL(targetUrl), {
-      requestInit: {
-        headers,
-      },
+      requestInit,
+      ...(proxyFetch
+        ? {
+            fetch: proxyFetch,
+            eventSourceInit: { fetch: proxyFetch },
+          }
+        : {}),
     })
   }
 
@@ -172,7 +205,7 @@ export class McpClient {
   async connect(options: McpToolCallOptions = {}): Promise<void> {
     const { transport } = this.serverConfig
 
-    console.log(`[MCP:${this.name}] Connecting to ${transport.url} (${transport.type})...`)
+    mcpHostLogger.info('mcp_connect_started', { server: this.name, transport: transport.type })
 
     this.ensureNotRetired()
     const connectionEpoch = ++this.connectionEpoch
@@ -205,7 +238,7 @@ export class McpClient {
       }
       this.connected = true
 
-      console.log(`[MCP:${this.name}] Connected successfully`)
+      mcpHostLogger.info('mcp_connected', { server: this.name })
 
       // Fetch available tools
       await this.refreshTools(options)
@@ -213,7 +246,7 @@ export class McpClient {
         throw this.lifecycleError(this.retired ? 'closed' : 'superseded')
       }
     } catch (error) {
-      console.error(`[MCP:${this.name}] Failed to connect:`, error)
+      mcpHostLogger.error('mcp_connect_failed', { server: this.name, error: errorName(error) })
       if (this.client === nextClient && this.transport === nextTransport) {
         this.connectionEpoch += 1
         this.client = null
@@ -238,7 +271,7 @@ export class McpClient {
     // synchronously inside close(), and their onclose hook clears Client state.
     const cleanup = this.detachConnection()
     await cleanup()
-    console.log(`[MCP:${this.name}] Disconnected`)
+    mcpHostLogger.info('mcp_disconnected', { server: this.name })
   }
 
   /**
@@ -264,7 +297,7 @@ export class McpClient {
    */
   async refreshTools(options: McpToolCallOptions = {}): Promise<void> {
     if (!this.client || !this.connected) {
-      console.warn(`[MCP:${this.name}] Not connected, cannot refresh tools`)
+      mcpHostLogger.warn('mcp_tools_refresh_skipped', { server: this.name, reason: 'not_connected' })
       return
     }
 
@@ -276,7 +309,7 @@ export class McpClient {
       response = await refreshClient.listTools(undefined, sdkRequestOptions)
     } catch (error) {
       this.ensureCallCurrent(refreshEpoch, refreshClient)
-      console.error(`[MCP:${this.name}] Failed to list tools:`, error)
+      mcpHostLogger.error('mcp_tools_list_failed', { server: this.name, error: errorName(error) })
       this.tools = []
       throw error
     }
@@ -289,10 +322,7 @@ export class McpClient {
       serverName: this.name,
     }))
 
-    console.log(`[MCP:${this.name}] Found ${this.tools.length} tool(s):`)
-    for (const tool of this.tools) {
-      console.log(`[MCP:${this.name}]   - ${tool.name}: ${tool.description || '(no description)'}`)
-    }
+    mcpHostLogger.info('mcp_tools_listed', { server: this.name, count: this.tools.length })
   }
 
   /**
@@ -395,7 +425,7 @@ export class McpClient {
 
   private async startReconnect(options: McpToolCallOptions): Promise<void> {
     this.reconnectPromise = (async () => {
-      console.log(`[MCP:${this.name}] Reconnecting...`)
+      mcpHostLogger.info('mcp_reconnect_started', { server: this.name })
       await this.disconnect()
       this.ensureNotRetired()
       await this.connect(options)
@@ -509,8 +539,7 @@ export class McpClient {
     const callClient = this.client
     const callEpoch = this.connectionEpoch
 
-    console.log(`[MCP:${this.name}] Calling tool: ${toolName}`)
-    console.log(`[MCP:${this.name}]   Args:`, JSON.stringify(args).substring(0, 200))
+    mcpHostLogger.info('mcp_tool_call_started', { server: this.name, tool: toolName })
     ensureNotAborted(options.signal)
     const deadlineMs =
       options.timeoutMs !== undefined
@@ -530,7 +559,7 @@ export class McpClient {
       )
       this.ensureCallCurrent(callEpoch, callClient)
 
-      console.log(`[MCP:${this.name}] Tool result:`, JSON.stringify(result).substring(0, 200))
+      mcpHostLogger.info('mcp_tool_call_succeeded', { server: this.name, tool: toolName })
       return result
     } catch (error) {
       const sessionError = this.isSessionError(error)
@@ -542,7 +571,7 @@ export class McpClient {
         throw this.lifecycleError('superseded')
       }
       if (sessionError) {
-        console.warn(`[MCP:${this.name}] Session lost, reconnecting and retrying after delay...`)
+        mcpHostLogger.warn('mcp_session_lost', { server: this.name, action: 'reconnect' })
         try {
           // Brief delay before reconnect to avoid hammering the server
           const retryDelayMs = Math.min(1000, remainingBudgetMs(deadlineMs) ?? 1000)
@@ -565,17 +594,25 @@ export class McpClient {
             callRequestOptions()
           )
           this.ensureCallCurrent(retryEpoch, retryClient)
-          console.log(
-            `[MCP:${this.name}] Tool result (after reconnect):`,
-            JSON.stringify(result).substring(0, 200)
-          )
+          mcpHostLogger.info('mcp_tool_call_succeeded_after_reconnect', {
+            server: this.name,
+            tool: toolName,
+          })
           return result
         } catch (retryError) {
-          console.error(`[MCP:${this.name}] Tool call failed after reconnect:`, retryError)
+          mcpHostLogger.error('mcp_tool_call_failed_after_reconnect', {
+            server: this.name,
+            tool: toolName,
+            error: errorName(retryError),
+          })
           throw retryError
         }
       }
-      console.error(`[MCP:${this.name}] Tool call failed:`, error)
+      mcpHostLogger.error('mcp_tool_call_failed', {
+        server: this.name,
+        tool: toolName,
+        error: errorName(error),
+      })
       throw error
     }
   }

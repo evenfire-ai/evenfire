@@ -121,7 +121,7 @@ end
 port_is_numeric = lambda do |port|
   port.is_a?(Hash) &&
     port["port"].is_a?(Integer) &&
-    (port["endPort"].nil? || port["endPort"].is_a?(Integer))
+    port["endPort"].nil?
 end
 
 allows_tcp_port = lambda do |rule, expected_port|
@@ -129,13 +129,16 @@ allows_tcp_port = lambda do |rule, expected_port|
     next false unless port.is_a?(Hash)
     next false unless port.fetch("protocol", "TCP") == "TCP"
 
-    first = port["port"]
-    last = port.fetch("endPort", first)
-    first.is_a?(Integer) && last.is_a?(Integer) && first <= expected_port && expected_port <= last
+    port["port"] == expected_port && port["endPort"].nil?
   end
 end
 
-broad_internal_peer = lambda do |peer, policy|
+allows_only_tcp_port = lambda do |rule, expected_port|
+  ports = Array(rule["ports"])
+  ports.length == 1 && allows_tcp_port.call(rule, expected_port)
+end
+
+broad_internal_peer = lambda do |peer, policy, rule|
   next true unless peer.is_a?(Hash)
   next true if peer.empty?
   next true unless (peer.keys - %w[ipBlock namespaceSelector podSelector]).empty?
@@ -178,6 +181,26 @@ broad_internal_peer = lambda do |peer, policy|
   has_pod_selector = pod_labels.is_a?(Hash) && !pod_labels.empty? ||
     pod_expressions.is_a?(Array) && !pod_expressions.empty?
   if namespace_name == "mcp-server"
+    exact_proxy_peer = pod_selector.is_a?(Hash) &&
+      pod_selector.keys.sort == ["matchLabels"] &&
+      pod_selector["matchLabels"] == { "app" => "mcp-proxy" } &&
+      Array(pod_selector["matchExpressions"]).empty? &&
+      allows_only_tcp_port.call(rule, 8083)
+    static_proxy_source = policy.dig("metadata", "name") == "mcp-host-proxy-egress" &&
+      policy.dig("spec", "podSelector") == {
+        "matchExpressions" => [
+          { "key" => "clerum.io/managed-by", "operator" => "In", "values" => ["host-context-controller"] },
+          { "key" => "clerum.io/host", "operator" => "Exists" },
+          { "key" => "clerum.io/context", "operator" => "Exists" },
+        ],
+      }
+    generated_proxy_source = policy.dig("metadata", "labels", "clerum.io/policy-type") == "context-allow" &&
+      policy.dig("spec", "podSelector", "matchLabels") == {
+        "clerum.io/managed-by" => "host-context-controller",
+        "clerum.io/context" => policy.dig("metadata", "labels", "clerum.io/context"),
+      }
+    next false if exact_proxy_peer && (static_proxy_source || generated_proxy_source)
+
     server_name = pod_selector.dig("matchLabels", "clerum.io/mcpserver") if pod_selector.is_a?(Hash)
     policy_labels = policy.dig("metadata", "labels")
     source_selector = policy.dig("spec", "podSelector")
@@ -235,7 +258,7 @@ egress_contract_ok = policy_rules.all? do |policy, rule|
   peers.is_a?(Array) && !peers.empty? &&
     ports.is_a?(Array) && !ports.empty? &&
     ports.all? { |port| port_is_numeric.call(port) } &&
-    peers.none? { |peer| broad_internal_peer.call(peer, policy) }
+    peers.none? { |peer| broad_internal_peer.call(peer, policy, rule) }
 end
 
 gfs_contract_ok = policy_rules.all? do |_policy, rule|
@@ -265,7 +288,29 @@ hcc_lane = policy_rules.any? do |_policy, rule|
     end
 end
 
-proxy_8083 = policy_rules.any? { |_policy, rule| allows_tcp_port.call(rule, 8083) }
+proxy_8083 = policy_rules.any? do |policy, rule|
+  Array(rule["to"]).any? do |peer|
+    peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") == "mcp-server" &&
+      peer.dig("podSelector", "matchLabels") == { "app" => "mcp-proxy" } &&
+      Array(peer.dig("podSelector", "matchExpressions")).empty? &&
+      allows_only_tcp_port.call(rule, 8083) &&
+      (
+        policy.dig("metadata", "name") == "mcp-host-proxy-egress" &&
+          policy.dig("spec", "podSelector") == {
+            "matchExpressions" => [
+              { "key" => "clerum.io/managed-by", "operator" => "In", "values" => ["host-context-controller"] },
+              { "key" => "clerum.io/host", "operator" => "Exists" },
+              { "key" => "clerum.io/context", "operator" => "Exists" },
+            ],
+          } ||
+        policy.dig("metadata", "labels", "clerum.io/policy-type") == "context-allow" &&
+          policy.dig("spec", "podSelector", "matchLabels") == {
+            "clerum.io/managed-by" => "host-context-controller",
+            "clerum.io/context" => policy.dig("metadata", "labels", "clerum.io/context"),
+          } && Array(policy.dig("spec", "podSelector", "matchExpressions")).empty?
+      )
+  end
+end
 
 puts JSON.generate(
   "egress_contract_ok" => egress_contract_ok,

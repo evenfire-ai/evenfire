@@ -70,6 +70,7 @@ import { clerumPromptCacheInvalidationsTotal } from './llm/promptCacheMetrics'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import './logger'
 import { McpManager } from './mcp'
+import { createMcpManagerForHost } from './mcp/managerFactory'
 import {
   AuthoritativeMcpFleetCoordinator,
   DEFAULT_MCP_FLEET_RECONCILE_MAX_CONCURRENCY,
@@ -87,6 +88,10 @@ import {
 import type { HandleMcpAuthorityPollFailureOptions } from './mcp/authorityLifecycle'
 import { McpStatusHeartbeat } from './mcp/statusHeartbeat'
 import { startMcpInitializationInBackground } from './mcpBackgroundInit'
+import {
+  getSharedMcpProxyHostAuthorization,
+  type McpProxyHostAuthorization,
+} from './mcp/proxyAuth'
 import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
 import {
   configurePluginWorkloadSdkBootstrapIdentity,
@@ -150,6 +155,7 @@ import { confirmProviderWorkflowApprovalTelegramVerification } from './workflow/
 import { resolveProviderWorkflowCallerContext } from './workflow/providerWorkflowCallerContextClient'
 import { wireWorkflowApprovalRuntimeRoutes } from './workflow/runtimeApprovalRouteWiring'
 import { createMcpHostRuntimeAuth } from './workflow/runtimeAuthFactory'
+import { rereadRuntimeAccessTokenFromPersistedState } from './workflow/mcpHostJwtState'
 import {
   startRuntimeAuthProactiveRefresh,
   stopRuntimeAuthProactiveRefresh,
@@ -186,6 +192,7 @@ const GUARDRAIL_RESOLVE_INTERVAL_MS = 300_000
 let contextMapperPollRunner: { trigger(): void; stop(): void } | null = null
 let mcpStatusHeartbeat: McpStatusHeartbeat | null = null
 let lastServerState: Map<string, string> = new Map()
+let lastGrantState: Map<string, string> = new Map()
 let rpcServer: RPCServer | null = null
 let mcpManager: McpManager | null = null
 let contextMapperClient: ContextMapperClient | null = null
@@ -811,6 +818,17 @@ function ensureAuthenticatedContextMapperClient(): ContextMapperClient {
   return contextMapperClient
 }
 
+function getMcpProxyHostAuthorization(): McpProxyHostAuthorization | undefined {
+  if (!config.mcpProxyEnabled) return undefined
+  if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
+  if (!runtimeAuth) return undefined
+  const auth = runtimeAuth
+  return getSharedMcpProxyHostAuthorization(auth, () => ({
+    getAccessToken: () => auth.accessToken,
+    rereadAccessToken: async () => rereadRuntimeAccessTokenFromPersistedState(auth),
+  }))
+}
+
 export { createMcpAuthorityStalenessDeadline, isMcpAuthorityStale }
 
 type McpAuthorityPollFailureCallbacks = Pick<
@@ -878,6 +896,7 @@ function revokeMcpAuthority(reason: string, restartPolling: boolean): void {
     },
     clearServerState: () => {
       lastServerState = new Map()
+      lastGrantState = new Map()
     },
     clearLastSuccess: () => {
       mcpAuthorityLastSuccessAt = 0
@@ -901,13 +920,19 @@ async function initializeMcpServers(): Promise<void> {
     await replaceAuthoritativeMcpFleet({
       servers,
       previousManager,
-      createManager: () => new McpManager(config.mcpProxyEnabled ? config.mcpProxyUrl : undefined),
-      getAuthToken: async (serverName, expectedRevision) => {
-        return ensureAuthenticatedContextMapperClient().getAuthToken(serverName, expectedRevision)
+      createManager: () =>
+        createMcpManagerForHost({
+          proxyEnabled: config.mcpProxyEnabled,
+          proxyUrl: config.mcpProxyUrl,
+          hostAuthorization: getMcpProxyHostAuthorization(),
+        }),
+      getAuthToken: async serverName => {
+        return ensureAuthenticatedContextMapperClient().getAuthToken(serverName)
       },
-      installFleet: (nextManager, nextServerState) => {
+      installFleet: (nextManager, nextServerState, nextGrantState) => {
         mcpManager = nextManager
         lastServerState = nextServerState
+        lastGrantState = nextGrantState
         recordMcpAuthoritySuccess()
         agent?.setMcpManager(nextManager)
       },
@@ -981,9 +1006,10 @@ async function pollContextMapper(): Promise<void> {
           servers,
           manager,
           serverState: lastServerState,
-          getAuthToken: (serverName, expectedRevision) =>
-            contextMapperClient!.getAuthToken(serverName, expectedRevision),
+          grantState: lastGrantState,
+          getAuthToken: serverName => contextMapperClient!.getAuthToken(serverName),
           coordinator: mcpFleetCoordinator,
+          awaitCompletion: true,
         }),
     })
     if (!isShuttingDown && mcpManager === manager) {
@@ -2812,7 +2838,11 @@ async function startDevMode(): Promise<void> {
   await initializeProvider(host, keys)
 
   // Initialize MCP manager
-  mcpManager = new McpManager(config.mcpProxyEnabled ? config.mcpProxyUrl : undefined)
+  mcpManager = createMcpManagerForHost({
+    proxyEnabled: config.mcpProxyEnabled,
+    proxyUrl: config.mcpProxyUrl,
+    hostAuthorization: getMcpProxyHostAuthorization(),
+  })
 
   if (config.devMcpServers && config.devMcpServers.length > 0) {
     console.log(`[Main] Adding ${config.devMcpServers.length} dev MCP server(s)`)

@@ -77,11 +77,11 @@ network_policy_result="$(RUBYOPT=--disable=gems ruby "${BASH_SOURCE[0]%/*}/check
 network_policy_ok="$(ruby -rjson -e 'puts(JSON.parse(STDIN.read)["egress_contract_ok"] ? 1 : 0)' <<<"${network_policy_result}")"
 selector_contract_ok="$(ruby -rjson -e 'puts(JSON.parse(STDIN.read)["selector_contract_ok"] ? 1 : 0)' <<<"${network_policy_result}")"
 hcc_lane_ok="$(ruby -rjson -e 'puts(JSON.parse(STDIN.read)["hcc_lane"] ? 1 : 0)' <<<"${network_policy_result}")"
-host_proxy_8083_ok="$(ruby -rjson -e 'puts(JSON.parse(STDIN.read)["proxy_8083"] ? 0 : 1)' <<<"${network_policy_result}")"
+host_proxy_8083_ok="$(ruby -rjson -e 'puts(JSON.parse(STDIN.read)["proxy_8083"] ? 1 : 0)' <<<"${network_policy_result}")"
 check mcp_host_egress_contract "${network_policy_ok}"
 check mcp_host_selector_contract "${selector_contract_ok}"
 check hcc_gateway_egress_lane "${hcc_lane_ok}"
-check no_host_proxy_8083_egress "${host_proxy_8083_ok}"
+check mcp_host_proxy_8083_egress "${host_proxy_8083_ok}"
 
 gateway_config="$(kubectl --context="${context}" -n control-plane get configmap host-context-controller-api-gateway -o jsonpath='{.data.nginx\.conf}')"
 check v1_context_tombstone "$(rg -q 'location ~ \^/api/v1/mcpservers/context/\[\^/\]\+\$' <<<"${gateway_config}" && rg -q 'return 410' <<<"${gateway_config}" && echo 1 || echo 0)"

@@ -1,158 +1,259 @@
-import http, { IncomingMessage, ServerResponse } from "node:http";
+import http, { ClientRequest, IncomingMessage, ServerResponse } from 'node:http'
+import https from 'node:https'
+import { expectedMcpServiceHostname } from './hccClient'
 
 export interface ForwarderConfig {
-  requestTimeout: number;
-  maxResponseSize: number;
-  maxBufferSize: number; // Pre-commit buffer cap (bytes). Prevents unbounded memory during header-delay phase.
+  requestTimeout: number
+  maxResponseSize: number
+  maxBufferSize: number
+  allowLoopbackTargets?: boolean
+}
+
+export class HttpForwarderError extends Error {
+  constructor(readonly code: 'invalid_target' | 'invalid_headers') {
+    super(code)
+    this.name = 'HttpForwarderError'
+  }
+}
+
+const REQUEST_HEADERS = [
+  'authorization',
+  'accept',
+  'content-type',
+  'mcp-session-id',
+  'mcp-protocol-version',
+  'last-event-id',
+] as const
+
+const RESPONSE_HEADERS = [
+  'content-type',
+  'content-length',
+  'cache-control',
+  'last-event-id',
+  'mcp-session-id',
+  'mcp-protocol-version',
+  'retry',
+] as const
+
+export function normalizedUpstreamStatus(statusCode: number | undefined): number {
+  return statusCode ?? 503
+}
+
+function connectionTokens(headers: IncomingMessage['headers']): Set<string> {
+  const value = headers.connection
+  const values = Array.isArray(value) ? value : value ? [value] : []
+  return new Set(
+    values
+      .flatMap(item => item.split(','))
+      .map(item => item.trim().toLowerCase())
+      .filter(Boolean)
+  )
+}
+
+export function validateInternalTarget(
+  backendUrl: string,
+  allowLoopback = false,
+  expectedServerName?: string
+): URL {
+  let parsed: URL
+  try {
+    parsed = new URL(backendUrl)
+  } catch {
+    throw new HttpForwarderError('invalid_target')
+  }
+  const host = parsed.hostname.toLowerCase()
+  const loopback = host === '127.0.0.1' || host === 'localhost' || host === '::1'
+  const expectedHost = expectedServerName
+    ? expectedMcpServiceHostname(expectedServerName)
+    : undefined
+  const serviceHost = expectedHost
+    ? host === expectedHost
+    : /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.mcp-server\.svc\.cluster\.local$/.test(host)
+  if (
+    (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+    (!serviceHost && !(allowLoopback && loopback)) ||
+    parsed.username ||
+    parsed.password ||
+    parsed.hash ||
+    parsed.search ||
+    !parsed.pathname.startsWith('/') ||
+    (parsed.port && (!/^\d+$/.test(parsed.port) || Number(parsed.port) < 1 || Number(parsed.port) > 65_535))
+  ) {
+    throw new HttpForwarderError('invalid_target')
+  }
+  return parsed
+}
+
+function responseHeaders(source: IncomingMessage['headers']): Record<string, string> {
+  const result: Record<string, string> = {}
+  const blocked = connectionTokens(source)
+  for (const name of RESPONSE_HEADERS) {
+    if (blocked.has(name)) continue
+    const value = source[name]
+    if (typeof value === 'string') result[name] = value
+  }
+  return result
 }
 
 export class HttpForwarder {
-  private config: ForwarderConfig;
-
-  constructor(config: ForwarderConfig) {
-    this.config = config;
-  }
+  constructor(private readonly config: ForwarderConfig) {}
 
   async forward(
     req: IncomingMessage,
     res: ServerResponse,
-    backendUrl: string
+    backendUrl: string,
+    body: Buffer,
+    expectedServerName?: string
   ): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      const parsed = new URL(backendUrl);
+    const parsed = validateInternalTarget(
+      backendUrl,
+      this.config.allowLoopbackTargets,
+      expectedServerName
+    )
+    const headers = this.buildHeaders(req, parsed.host, body)
+    const requestModule = parsed.protocol === 'https:' ? https : http
 
-      const proxyReq = http.request(
+    await new Promise<void>(resolve => {
+      let settled = false
+      let aborted = req.aborted || Boolean(req.socket?.destroyed) || res.destroyed
+      let proxyReq: ClientRequest | undefined
+      let abortHandler: (() => void) | undefined
+      let responseCloseHandler: (() => void) | undefined
+      const finish = () => {
+        if (settled) return
+        settled = true
+        if (abortHandler) req.off('aborted', abortHandler)
+        if (responseCloseHandler) res.off('close', responseCloseHandler)
+        resolve()
+      }
+      const fail = (status: number, error: string) => {
+        if (aborted) {
+          finish()
+          return
+        }
+        if (!res.headersSent) {
+          res.writeHead(status, {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store, private',
+            Pragma: 'no-cache',
+            'X-Content-Type-Options': 'nosniff',
+          })
+          res.end(JSON.stringify({ error }))
+        } else {
+          res.end()
+        }
+        finish()
+      }
+
+      abortHandler = () => {
+        aborted = true
+        proxyReq?.destroy()
+        finish()
+      }
+      responseCloseHandler = () => {
+        if (res.writableEnded) return
+        aborted = true
+        proxyReq?.destroy()
+        finish()
+      }
+      req.once('aborted', abortHandler)
+      res.once('close', responseCloseHandler)
+      if (aborted) {
+        finish()
+        return
+      }
+
+      proxyReq = requestModule.request(
         {
           hostname: parsed.hostname,
-          port: parsed.port || 80,
-          path: parsed.pathname + parsed.search,
+          port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+          path: parsed.pathname,
           method: req.method,
-          headers: this.buildHeaders(req, parsed.hostname),
+          headers,
           timeout: this.config.requestTimeout,
         },
-        (proxyRes) => {
-          const contentLength = parseInt(proxyRes.headers["content-length"] || "0", 10);
-          // Known-length guard: reject immediately before sending any response bytes
-          if (contentLength > this.config.maxResponseSize) {
-            res.writeHead(413, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Response too large" }));
-            proxyReq.destroy();
-            resolve();
-            return;
+        proxyRes => {
+          const contentLength = Number(proxyRes.headers['content-length'] ?? 0)
+          if (Number.isFinite(contentLength) && contentLength > this.config.maxResponseSize) {
+            proxyReq?.destroy()
+            fail(503, 'authorization_unavailable')
+            return
           }
 
-          // For chunked/unknown-length responses, buffer initial chunks before
-          // committing to a status code. This prevents the silent-truncation bug
-          // where headers are sent as 200 and then the stream is destroyed mid-body.
-          let headersSent = false;
-          let totalSize = 0;
-          const buffer: Buffer[] = [];
+          let committed = false
+          let totalSize = 0
+          let bufferedSize = 0
+          const buffer: Buffer[] = []
+          const commit = () => {
+            if (committed) return
+            committed = true
+            res.writeHead(normalizedUpstreamStatus(proxyRes.statusCode), responseHeaders(proxyRes.headers))
+            for (const chunk of buffer) res.write(chunk)
+            buffer.length = 0
+            bufferedSize = 0
+          }
 
-          proxyRes.on("data", (chunk: Buffer) => {
-            totalSize += chunk.length;
+          proxyRes.on('data', chunk => {
+            const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+            totalSize += part.length
             if (totalSize > this.config.maxResponseSize) {
-              proxyRes.destroy();
-              if (!headersSent) {
-                headersSent = true;
-                res.writeHead(413, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ error: "Response too large" }));
-              } else {
-                // Headers already sent — best we can do is terminate the stream.
-                // Client will see an incomplete response (unavoidable).
-                res.end();
+              proxyRes.destroy()
+              if (!committed) fail(503, 'authorization_unavailable')
+              else {
+                res.end()
+                finish()
               }
-              resolve();
-              return;
+              return
             }
-            if (!headersSent) {
-              buffer.push(chunk);
-              // TM-2: Cap pre-commit buffer independently of maxResponseSize
-              const bufferSize = buffer.reduce((sum, b) => sum + b.length, 0);
-              if (bufferSize >= this.config.maxBufferSize) {
-                headersSent = true;
-                res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
-                for (const b of buffer) { res.write(b); }
-                buffer.length = 0;
-              }
+            if (!committed) {
+              buffer.push(part)
+              bufferedSize += part.length
+              if (bufferedSize >= this.config.maxBufferSize) commit()
             } else {
-              res.write(chunk);
+              res.write(part)
             }
-          });
-
-          // After first data event, flush buffer and commit headers on next tick.
-          // This gives us at least one chunk to check size before committing.
-          proxyRes.once("data", () => {
-            if (headersSent) return;
-            process.nextTick(() => {
-              if (headersSent) return;
-              headersSent = true;
-              res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
-              for (const chunk of buffer) {
-                res.write(chunk);
-              }
-              buffer.length = 0;
-            });
-          });
-
-          proxyRes.on("end", () => {
-            if (!headersSent) {
-              // Small response that finished within buffering phase
-              headersSent = true;
-              res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
-              for (const chunk of buffer) {
-                res.write(chunk);
-              }
-            }
-            res.end();
-            resolve();
-          });
-
-          proxyRes.on("error", (err) => {
-            if (!headersSent && !res.headersSent) {
-              res.writeHead(502, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ error: "Backend error", message: err.message }));
-            } else {
-              res.end();
-            }
-            resolve();
-          });
+          })
+          proxyRes.once('data', () => {
+            if (!committed) process.nextTick(commit)
+          })
+          proxyRes.on('end', () => {
+            if (!committed) commit()
+            res.end()
+            finish()
+          })
+          proxyRes.on('error', () => fail(503, 'authorization_unavailable'))
         }
-      );
+      )
 
-      req.on("aborted", () => {
-        if (!proxyReq.destroyed) {
-          proxyReq.destroy();
-        }
-      });
-
-      proxyReq.on("error", (err) => {
-        if (!res.headersSent) {
-          res.writeHead(502, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Proxy error", message: err.message }));
-        }
-        resolve();
-      });
-
-      proxyReq.on("timeout", () => {
-        proxyReq.destroy();
-        if (!res.headersSent) {
-          res.writeHead(504, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Gateway timeout" }));
-        }
-        resolve();
-      });
-
-      req.pipe(proxyReq);
-    });
+      if (aborted) {
+        proxyReq.destroy()
+        finish()
+        return
+      }
+      proxyReq.on('error', () => fail(503, 'authorization_unavailable'))
+      proxyReq.on('timeout', () => {
+        proxyReq.destroy()
+        fail(503, 'authorization_unavailable')
+      })
+      proxyReq.end(body)
+    })
   }
 
   private buildHeaders(
     req: IncomingMessage,
-    backendHost: string
-  ): Record<string, string | string[] | undefined> {
-    const headers = { ...req.headers };
-    headers.host = backendHost;
-    delete headers["connection"];
-    return headers;
+    backendHost: string,
+    body: Buffer
+  ): Record<string, string> {
+    const result: Record<string, string> = {}
+    const blocked = connectionTokens(req.headers)
+    for (const name of REQUEST_HEADERS) {
+      if (blocked.has(name)) continue
+      const value = req.headers[name]
+      if (Array.isArray(value)) throw new HttpForwarderError('invalid_headers')
+      if (typeof value === 'string') result[name] = value
+    }
+    result.host = backendHost
+    result['content-length'] = String(body.length)
+    return result
   }
 }

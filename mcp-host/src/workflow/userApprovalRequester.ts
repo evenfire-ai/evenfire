@@ -177,6 +177,7 @@ function reloadPersistedAuthIfAvailable(auth: McpHostRuntimeAuth): boolean {
 
 /** Mutex (per auth identity) so concurrent callers share one re-issue. */
 const inflightReIssues = new WeakMap<McpHostRuntimeAuth, Promise<void>>()
+const inflightRefreshes = new WeakMap<McpHostRuntimeAuth, Promise<void>>()
 
 function approvalPayloadMetadata(params: ApprovalGateParams): unknown {
   if (!params.runtimeMcpHostRef) return params.payloadMetadata
@@ -381,12 +382,29 @@ async function refreshWithRecoveryInner(auth: McpHostRuntimeAuth): Promise<void>
 
 /** Refresh with retry; escalates to recoverTokenPair on persistent 401s. */
 export async function refreshWithRecovery(auth: McpHostRuntimeAuth): Promise<void> {
+  const inflight = inflightRefreshes.get(auth)
+  if (inflight) {
+    await inflight
+    return
+  }
+
+  const job = (async () => {
+    try {
+      await refreshWithRecoveryInner(auth)
+      recordRuntimeAuthRecoverySuccess()
+    } catch (err) {
+      recordRuntimeAuthRecoveryFailure('refresh_recovery_failed')
+      throw err
+    }
+  })()
+
+  inflightRefreshes.set(auth, job)
   try {
-    await refreshWithRecoveryInner(auth)
-    recordRuntimeAuthRecoverySuccess()
-  } catch (err) {
-    recordRuntimeAuthRecoveryFailure('refresh_recovery_failed')
-    throw err
+    await job
+  } finally {
+    if (inflightRefreshes.get(auth) === job) {
+      inflightRefreshes.delete(auth)
+    }
   }
 }
 

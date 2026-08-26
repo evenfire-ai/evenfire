@@ -7,6 +7,7 @@ import {
   isInternalWorkflowArtifactName,
   loadPersistedRuntimeAuth,
   persistRuntimeAuthTokens,
+  rereadRuntimeAccessTokenFromPersistedState,
   refreshRuntimeAuthFromPersistedState,
 } from './mcpHostJwtState'
 import type { McpHostRuntimeAuth } from './userApprovalRequester'
@@ -341,6 +342,131 @@ describe('mcpHostJwtState', () => {
       accessToken: mountedAccess,
       refreshToken: mountedRefresh,
     })
+  })
+
+  it('adopts only a newer valid same-binding access token without changing the token pair', () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-host-jwt-state-'))
+    tempDirs.push(stateDir)
+
+    const nowSecs = Math.floor(Date.now() / 1000)
+    const binding = {
+      hostRefs: ['mounted-host'],
+      recipeNamespace: 'mcp-host',
+      recipeName: 'standalone',
+    }
+    const mountedAccess = makeJwt(nowSecs + 300, 'mounted-access', {
+      ...binding,
+      iat: nowSecs,
+    })
+    const mountedRefresh = makeJwt(nowSecs + 600, 'mounted-pair', { iat: nowSecs })
+    const persistedAccess = makeJwt(nowSecs + 900, 'persisted-access', {
+      ...binding,
+      iat: nowSecs + 10,
+    })
+    const stateFile = getMcpHostJwtStateFilePath(stateDir)
+    fs.writeFileSync(
+      stateFile,
+      JSON.stringify({ accessToken: persistedAccess, refreshToken: 'fixture-pair-sentinel' }),
+      'utf-8'
+    )
+    const stateBefore = fs.readFileSync(stateFile, 'utf-8')
+    const auth: McpHostRuntimeAuth = {
+      accessToken: mountedAccess,
+      refreshToken: mountedRefresh,
+      baseUrl: 'http://gateway:8092',
+      hostRef: 'mounted-host',
+      recipeNamespace: 'mcp-host',
+      recipeName: 'standalone',
+    }
+
+    expect(rereadRuntimeAccessTokenFromPersistedState(auth, stateDir)).toBe(true)
+    expect(auth.accessToken).toBe(persistedAccess)
+    expect(auth.refreshToken).toBe(mountedRefresh)
+    expect(auth.hostRef).toBe('mounted-host')
+    expect(auth.recipeNamespace).toBe('mcp-host')
+    expect(auth.recipeName).toBe('standalone')
+    expect(fs.readFileSync(stateFile, 'utf-8')).toBe(stateBefore)
+  })
+
+  it.each([
+    ['missing state', undefined],
+    ['malformed state', '{not-json'],
+    ['missing binding', JSON.stringify({ accessToken: 'fixture-access-without-binding' })],
+  ])('fails closed when the access-only state is %s', (_label, content) => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-host-jwt-state-'))
+    tempDirs.push(stateDir)
+
+    const nowSecs = Math.floor(Date.now() / 1000)
+    const binding = {
+      hostRefs: ['mounted-host'],
+      recipeNamespace: 'mcp-host',
+      recipeName: 'standalone',
+    }
+    const mountedAccess = makeJwt(nowSecs + 300, 'mounted-access', { ...binding, iat: nowSecs })
+    const mountedRefresh = makeJwt(nowSecs + 600, 'mounted-pair', { iat: nowSecs })
+    const auth: McpHostRuntimeAuth = {
+      accessToken: mountedAccess,
+      refreshToken: mountedRefresh,
+      baseUrl: 'http://gateway:8092',
+      hostRef: 'mounted-host',
+      recipeNamespace: 'mcp-host',
+      recipeName: 'standalone',
+    }
+    if (content !== undefined) {
+      fs.writeFileSync(getMcpHostJwtStateFilePath(stateDir), content, 'utf-8')
+    }
+
+    expect(rereadRuntimeAccessTokenFromPersistedState(auth, stateDir)).toBe(false)
+    expect(auth.accessToken).toBe(mountedAccess)
+    expect(auth.refreshToken).toBe(mountedRefresh)
+  })
+
+  it.each([
+    ['older access token', 200, -10, 'mounted-host'],
+    ['expired access token', -10, 10, 'mounted-host'],
+    ['different Host binding', 900, 10, 'other-host'],
+    ['additional Host binding', 900, 10, 'mounted-host'],
+  ])('does not adopt a %s', (_label, expOffset, iatOffset, host) => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-host-jwt-state-'))
+    tempDirs.push(stateDir)
+
+    const nowSecs = Math.floor(Date.now() / 1000)
+    const mountedBinding = {
+      hostRefs: ['mounted-host'],
+      recipeNamespace: 'mcp-host',
+      recipeName: 'standalone',
+    }
+    const mountedAccess = makeJwt(nowSecs + 300, 'mounted-access', {
+      ...mountedBinding,
+      iat: nowSecs,
+    })
+    const mountedRefresh = makeJwt(nowSecs + 600, 'mounted-pair', { iat: nowSecs })
+    const persistedAccess = makeJwt(nowSecs + Number(expOffset), 'candidate-access', {
+      hostRefs:
+        _label === 'additional Host binding'
+          ? [String(host), 'secondary-host']
+          : [String(host)],
+      recipeNamespace: 'mcp-host',
+      recipeName: 'standalone',
+      iat: nowSecs + Number(iatOffset),
+    })
+    fs.writeFileSync(
+      getMcpHostJwtStateFilePath(stateDir),
+      JSON.stringify({ accessToken: persistedAccess, refreshToken: 'fixture-pair-sentinel' }),
+      'utf-8'
+    )
+    const auth: McpHostRuntimeAuth = {
+      accessToken: mountedAccess,
+      refreshToken: mountedRefresh,
+      baseUrl: 'http://gateway:8092',
+      hostRef: 'mounted-host',
+      recipeNamespace: 'mcp-host',
+      recipeName: 'standalone',
+    }
+
+    expect(rereadRuntimeAccessTokenFromPersistedState(auth, stateDir)).toBe(false)
+    expect(auth.accessToken).toBe(mountedAccess)
+    expect(auth.refreshToken).toBe(mountedRefresh)
   })
 
   it('marks the internal workflow state directory as non-artifact', () => {

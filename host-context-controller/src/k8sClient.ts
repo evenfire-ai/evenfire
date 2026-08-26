@@ -49,6 +49,7 @@ import type {
   AuthoritySecretMetadata,
   McpAuthorizationStore,
 } from './mcpAuthorization'
+import type { TokenReviewClient, TokenReviewRequest } from './mcpProxyAuthentication'
 import {
   confirmAuthoritativeMcpServerAbsence,
   isMcpServerStatusOnlyUpdate,
@@ -78,6 +79,7 @@ import {
   McpServerCRD,
   McpServerInfo,
   McpServerSpec,
+  McpServerStatus,
   SharedFileSystemCRD,
   SharedFileSystemSpec,
 } from './types'
@@ -87,6 +89,7 @@ import { getErrorCode } from './utils'
 let customObjectsApi: k8s.CustomObjectsApi | null = null
 let hostCustomObjectsApi: k8s.CustomObjectsApi | null = null
 let coreApi: k8s.CoreV1Api | null = null
+let authenticationApi: k8s.AuthenticationV1Api | null = null
 let kc: k8s.KubeConfig | null = null
 
 if (!config.devMode) {
@@ -99,6 +102,7 @@ if (!config.devMode) {
     config.hostK8sRequestTimeoutMs
   )
   coreApi = kc.makeApiClient(k8s.CoreV1Api)
+  authenticationApi = kc.makeApiClient(k8s.AuthenticationV1Api)
 }
 
 /**
@@ -107,6 +111,50 @@ if (!config.devMode) {
  */
 export function getKubeConfig(): k8s.KubeConfig | null {
   return kc
+}
+
+export function createMcpProxyTokenReviewClient(): TokenReviewClient | null {
+  if (!authenticationApi) return null
+  return {
+    async review(request: TokenReviewRequest) {
+      const response = await authenticationApi!.createTokenReview({
+        body: {
+          apiVersion: 'authentication.k8s.io/v1',
+          kind: 'TokenReview',
+          spec: {
+            token: request.token,
+            audiences: [...request.audiences],
+          },
+        },
+      })
+      return {
+        status: {
+          authenticated: response.status?.authenticated,
+          user: {
+            username: response.status?.user?.username,
+            uid: response.status?.user?.uid,
+          },
+          audiences: response.status?.audiences,
+        },
+      }
+    },
+  }
+}
+
+export function createMcpProxyServiceAccountUidReader(): (() => Promise<string | null>) | null {
+  if (!coreApi) return null
+  return async () => {
+    try {
+      const response = await coreApi!.readNamespacedServiceAccount({
+        name: 'mcp-proxy',
+        namespace: config.namespace,
+      })
+      return response.metadata?.uid ?? null
+    } catch (error) {
+      if (isMcpAuthorizationNotFound(error)) return null
+      throw error
+    }
+  }
 }
 
 const GROUP = 'clerum.io'
@@ -4651,14 +4699,49 @@ export function createMcpServerProvider(): McpServerProvider {
 function authorizationMetadata(metadata: {
   uid?: string
   resourceVersion?: string
+  generation?: number
   deletionTimestamp?: string | Date
-}): { uid: string; resourceVersion: string; deletionTimestamp?: string } {
+}): { uid: string; resourceVersion: string; generation?: number; deletionTimestamp?: string } {
   return {
     uid: metadata.uid ?? '',
     resourceVersion: metadata.resourceVersion ?? '',
+    ...(typeof metadata.generation === 'number' ? { generation: metadata.generation } : {}),
     ...(metadata.deletionTimestamp
       ? { deletionTimestamp: new Date(metadata.deletionTimestamp).toISOString() }
       : {}),
+  }
+}
+
+/**
+ * Project only the persisted readiness condition for a live McpServer read.
+ * A provider cache is intentionally not an authorization source: the CRD
+ * generation and observedGeneration must match before readiness is usable.
+ */
+export function liveMcpServerStatus(
+  metadata: { generation?: number },
+  status?: McpServerCRD['status']
+): McpServerStatus {
+  const readyConditions = status?.conditions?.filter(condition => condition.type === 'Ready') ?? []
+  const ready =
+    metadata.generation !== undefined &&
+    readyConditions.length === 1 &&
+    readyConditions[0].observedGeneration === metadata.generation
+      ? readyConditions[0]
+      : undefined
+  if (!ready) {
+    return {
+      deployed: false,
+      ready: false,
+      authoritative: false,
+      message: 'McpServer readiness is not current',
+    }
+  }
+  const isReady = ready.status === 'True'
+  return {
+    deployed: isReady,
+    ready: isReady,
+    authoritative: true,
+    message: ready.message,
   }
 }
 
@@ -4688,6 +4771,9 @@ export function createMcpAuthorizationStore(provider: McpServerProvider): McpAut
       },
       async readSecret() {
         return null
+      },
+      async listMcpServers() {
+        return []
       },
     }
   }
@@ -4767,18 +4853,16 @@ export function createMcpAuthorizationStore(provider: McpServerProvider): McpAut
             deletionTimestamp?: string
           }
         }
-        const status = provider.getAllServerInfos().find(server => server.name === name)
-          ?.status ?? {
-          deployed: false,
-          ready: false,
-        }
+        const status = liveMcpServerStatus(object.metadata, object.status)
         return {
           name: object.metadata.name,
           namespace: object.metadata.namespace ?? config.namespace,
           metadata: authorizationMetadata(object.metadata),
+          contextRef: object.spec.contextRef,
           description: object.spec.description,
           transport: { ...object.spec.transport },
           auth: object.spec.auth ? { ...object.spec.auth } : undefined,
+          ...(typeof object.spec.managed === 'boolean' ? { managed: object.spec.managed } : {}),
           enabled: object.spec.enabled !== false,
           status,
         }
@@ -4786,6 +4870,60 @@ export function createMcpAuthorizationStore(provider: McpServerProvider): McpAut
         if (isMcpAuthorizationNotFound(error)) return null
         throw error
       }
+    },
+
+    async listMcpServers(): Promise<AuthorityMcpServer[]> {
+      const response = (await customObjectsApi!.listNamespacedCustomObject({
+        group: GROUP,
+        version: VERSION,
+        namespace: config.namespace,
+        plural: PLURAL_MCPSERVERS,
+      })) as {
+        items?: Array<
+          McpServerWatchObject & {
+            metadata: McpServerWatchObject['metadata'] & {
+              resourceVersion?: string
+              deletionTimestamp?: string
+            }
+          }
+        >
+      }
+      const contextsResponse = (await customObjectsApi!.listNamespacedCustomObject({
+        group: GROUP,
+        version: VERSION,
+        namespace: config.namespace,
+        plural: PLURAL_CONTEXTS,
+      })) as {
+        items?: Array<{
+          metadata?: { name?: string }
+          spec?: { mcpServers?: string[] }
+        }>
+      }
+      const contextByServer = new Map<string, string[]>()
+      for (const item of contextsResponse.items ?? []) {
+        const contextName = item.metadata?.name
+        if (!contextName) continue
+        for (const serverName of item.spec?.mcpServers ?? []) {
+          const refs = contextByServer.get(serverName) ?? []
+          refs.push(contextName)
+          contextByServer.set(serverName, refs)
+        }
+      }
+      return (response.items ?? []).map(object => {
+        const status = liveMcpServerStatus(object.metadata, object.status)
+        return {
+          name: object.metadata.name,
+          namespace: object.metadata.namespace ?? config.namespace,
+          metadata: authorizationMetadata(object.metadata),
+          contextRef: contextByServer.get(object.metadata.name)?.[0] ?? '',
+          description: object.spec.description,
+          transport: { ...object.spec.transport },
+          auth: object.spec.auth ? { ...object.spec.auth } : undefined,
+          ...(typeof object.spec.managed === 'boolean' ? { managed: object.spec.managed } : {}),
+          enabled: object.spec.enabled !== false,
+          status,
+        }
+      })
     },
 
     async readSecretMetadata(name: string): Promise<AuthoritySecretMetadata | null> {

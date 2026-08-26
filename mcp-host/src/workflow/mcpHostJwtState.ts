@@ -5,12 +5,14 @@ import {
   getJwtExpiry,
   getJwtIssuedAt,
   getJwtRuntimeBinding,
+  getStrictJwtRuntimeBinding,
 } from './mcpHostRuntimeJwt'
 import type { McpHostRuntimeAuth } from './userApprovalRequester'
 
 export const INTERNAL_WORKFLOW_STATE_DIR = '.clerum-state'
 const MCP_HOST_JWT_STATE_FILE = 'approval-auth.json'
 const DEFAULT_WORKFLOW_AUTH_STATE_DIR = '/var/run/clerum/workflow-auth'
+const MAX_ACCESS_ONLY_STATE_BYTES = 128 * 1024
 
 type PersistedMcpHostJwtState = {
   accessToken: string
@@ -220,6 +222,67 @@ export function refreshRuntimeAuthFromPersistedState(
   if (next.mcpHostControlToken) {
     auth.mcpHostControlToken = next.mcpHostControlToken
   }
+  return true
+}
+
+/**
+ * Adopt a strictly newer access token from the already-persisted runtime
+ * state without consuming or replacing the refresh lineage. This is the only
+ * reread boundary used by the MCP proxy Host challenge retry.
+ *
+ * The persisted state is an observation source, not an authorization source:
+ * the candidate must be a valid, unexpired JWT with the exact same Host and
+ * workflow binding as the current access token. The file is never rewritten
+ * and no other token field is read or mutated.
+ */
+export function rereadRuntimeAccessTokenFromPersistedState(
+  auth: McpHostRuntimeAuth,
+  stateDir = getMcpHostJwtStateDir()
+): boolean {
+  const currentBinding = getStrictJwtRuntimeBinding(auth.accessToken)
+  if (!currentBinding) return false
+
+  const currentExpiry = getJwtExpiry(auth.accessToken)
+  const currentIssuedAt = getJwtIssuedAt(auth.accessToken)
+  const filePath = getMcpHostJwtStateFilePath(stateDir)
+
+  let candidate: string
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8')
+    if (raw.length > MAX_ACCESS_ONLY_STATE_BYTES) return false
+    const parsed = JSON.parse(raw) as { accessToken?: unknown }
+    if (typeof parsed.accessToken !== 'string') return false
+    candidate = parsed.accessToken.trim()
+  } catch {
+    return false
+  }
+  if (!candidate || candidate === auth.accessToken) return false
+
+  const candidateBinding = getStrictJwtRuntimeBinding(candidate)
+  if (!candidateBinding || !sameRuntimeBinding(currentBinding, candidateBinding)) {
+    return false
+  }
+
+  const nowSecs = Math.floor(Date.now() / 1000)
+  const candidateExpiry = getJwtExpiry(candidate)
+  const candidateIssuedAt = getJwtIssuedAt(candidate)
+  if (candidateExpiry === null || candidateExpiry <= nowSecs) return false
+  if (currentExpiry !== null && candidateExpiry < currentExpiry) return false
+  if (
+    currentIssuedAt !== null &&
+    (candidateIssuedAt === null || candidateIssuedAt < currentIssuedAt)
+  ) {
+    return false
+  }
+
+  const strictlyNewer =
+    (currentExpiry !== null && candidateExpiry > currentExpiry) ||
+    (currentIssuedAt !== null &&
+      candidateIssuedAt !== null &&
+      candidateIssuedAt > currentIssuedAt)
+  if (!strictlyNewer) return false
+
+  auth.accessToken = candidate
   return true
 }
 

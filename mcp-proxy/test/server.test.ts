@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import http from "node:http";
 import { Router } from "../src/router";
 import { HttpForwarder } from "../src/httpForwarder";
@@ -20,6 +20,10 @@ function makeConfig(port: number): ProxyConfig {
     devMode: true,
     devServers: [],
     logLevel: "info",
+    forwardingEnabled: false,
+    systemTokenFile: "/tmp/fixture-system-token",
+    requestBodyLimit: 1048576,
+    allowLoopbackTargets: true,
   };
 }
 
@@ -50,7 +54,12 @@ describe("ProxyServer", () => {
     const config = makeConfig(0);
     router = new Router();
     hccClient = new HccClient(config);
-    const forwarder = new HttpForwarder({ requestTimeout: 5000, maxResponseSize: 10485760, maxBufferSize: 65536 });
+    const forwarder = new HttpForwarder({
+      requestTimeout: 5000,
+      maxResponseSize: 10485760,
+      maxBufferSize: 65536,
+      allowLoopbackTargets: true,
+    });
     const metrics = new Metrics();
     const health = new Health(router, hccClient);
     server = new ProxyServer(router, forwarder, metrics, health, config);
@@ -87,20 +96,89 @@ describe("ProxyServer", () => {
     expect(res.body).toContain("mcp_proxy");
   });
 
-  it("should respond 404 for unknown paths", async () => {
+  it("should respond 400 for malformed paths", async () => {
     const res = await httpRequest(actualPort, "/unknown");
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(400);
   });
 
-  it("should respond 404 for unknown server in route dispatch", async () => {
+  it("should not enumerate a server when forwarding is disabled", async () => {
     const res = await httpRequest(actualPort, "/servers/nonexistent/mcp", "POST");
-    expect(res.status).toBe(404);
-    expect(JSON.parse(res.body).error).toContain("nonexistent");
+    expect(res.status).toBe(503);
+    expect(res.body).not.toContain("nonexistent");
   });
 
   it("should respond 503 for unready server", async () => {
     router.update([makeRoute("server-a", false)]);
     const res = await httpRequest(actualPort, "/servers/server-a/mcp", "POST");
     expect(res.status).toBe(503);
+  });
+
+  it("should normalize unexpected forwarding failures to 503", async () => {
+    await server.stop();
+    const config = makeConfig(0);
+    config.forwardingEnabled = true;
+    const throwingForwarder = {
+      forward: vi.fn().mockRejectedValue(new Error("unexpected_forwarder_failure")),
+    } as unknown as HttpForwarder;
+    const authorizedHcc = {
+      authorizeForward: vi.fn().mockResolvedValue({
+        serverName: "server-a",
+        contextRef: "ctx1",
+        targetUrl: "http://127.0.0.1:3000/mcp/fixture",
+        destinationRevision: "revision-a",
+      }),
+    } as unknown as HccClient;
+    const metrics = new Metrics();
+    const health = new Health(router, authorizedHcc);
+    server = new ProxyServer(
+      router,
+      throwingForwarder,
+      metrics,
+      health,
+      config,
+      authorizedHcc
+    );
+    await server.start();
+    actualPort = server.getPort();
+
+    const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = http.request(
+        {
+          hostname: "127.0.0.1",
+          port: actualPort,
+          path: "/servers/server-a/mcp",
+          method: "GET",
+          headers: { "proxy-authorization": "Bearer host-token" },
+        },
+        response => {
+          let body = "";
+          response.on("data", (chunk: Buffer) => (body += chunk.toString()));
+          response.on("end", () => resolve({ status: response.statusCode || 0, body }));
+        }
+      );
+      req.on("error", reject);
+      req.end();
+    });
+
+    expect(res.status).toBe(503);
+    expect(JSON.parse(res.body)).toEqual({ error: "authorization_unavailable" });
+    expect(res.body).not.toContain("unexpected_forwarder_failure");
+    expect(throwingForwarder.forward).toHaveBeenCalledTimes(1);
+  });
+
+  it("should normalize an unexpected data-plane handler failure to 503", async () => {
+    const handleRequest = vi
+      .spyOn(server as any, "handleRequest")
+      .mockRejectedValue(new Error("unexpected_handler_failure"));
+
+    try {
+      const res = await httpRequest(actualPort, "/servers/server-a/mcp", "GET");
+
+      expect(res.status).toBe(503);
+      expect(JSON.parse(res.body)).toEqual({ error: "authorization_unavailable" });
+      expect(res.body).not.toContain("unexpected_handler_failure");
+    } finally {
+      handleRequest.mockRestore();
+    }
   });
 });

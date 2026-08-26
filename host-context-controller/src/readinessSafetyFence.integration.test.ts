@@ -57,6 +57,7 @@ vi.mock('./config', () => ({
 vi.mock('@kubernetes/client-node', () => {
   class CustomObjectsApi {}
   class CoreV1Api {}
+  class AuthenticationV1Api {}
   class NetworkingV1Api {}
   class PolicyV1Api {}
   class AppsV1Api {}
@@ -87,12 +88,16 @@ vi.mock('@kubernetes/client-node', () => {
           patchNamespacedCustomObjectStatus: mocks.patchNamespacedCustomObjectStatus,
         }
       }
+      if (api === AuthenticationV1Api) {
+        return {}
+      }
       return new Proxy({}, { get: () => vi.fn().mockResolvedValue({ items: [] }) })
     }
   }
   return {
     CustomObjectsApi,
     CoreV1Api,
+    AuthenticationV1Api,
     NetworkingV1Api,
     PolicyV1Api,
     AppsV1Api,

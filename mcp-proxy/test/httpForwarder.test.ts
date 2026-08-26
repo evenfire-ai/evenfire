@@ -1,15 +1,25 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import http from "node:http";
-import { HttpForwarder } from "../src/httpForwarder";
+import { HttpForwarder, normalizedUpstreamStatus } from "../src/httpForwarder";
 
 describe("HttpForwarder", () => {
+  it("normalizes an absent upstream status to 503 without rewriting MCP statuses", () => {
+    expect(normalizedUpstreamStatus(undefined)).toBe(503);
+    expect(normalizedUpstreamStatus(400)).toBe(400);
+  });
+
   let backend: http.Server;
   let backendPort: number;
   let forwarder: HttpForwarder;
   let backendHandler: (req: http.IncomingMessage, res: http.ServerResponse) => void;
 
   beforeEach(async () => {
-    forwarder = new HttpForwarder({ requestTimeout: 5000, maxResponseSize: 1048576, maxBufferSize: 65536 });
+    forwarder = new HttpForwarder({
+      requestTimeout: 5000,
+      maxResponseSize: 1048576,
+      maxBufferSize: 65536,
+      allowLoopbackTargets: true,
+    });
 
     await new Promise<void>((resolve) => {
       backend = http.createServer((req, res) => {
@@ -38,7 +48,16 @@ describe("HttpForwarder", () => {
       // Create a temporary proxy server that uses our forwarder
       const proxy = http.createServer(async (req, res) => {
         try {
-          await forwarder.forward(req, res, `http://127.0.0.1:${backendPort}/mcp`);
+          const chunks: Buffer[] = [];
+          for await (const chunk of req) {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          }
+          await forwarder.forward(
+            req,
+            res,
+            `http://127.0.0.1:${backendPort}/mcp`,
+            Buffer.concat(chunks)
+          );
         } catch {
           if (!res.headersSent) {
             res.writeHead(500);
@@ -94,21 +113,59 @@ describe("HttpForwarder", () => {
 
     await forwardViaProxy("POST", {
       authorization: "Bearer test-token",
-      "x-mcp-session": "session-123",
+      "mcp-session-id": "session-123",
+      "proxy-authorization": "Bearer host-token",
+      "x-forwarded-for": "attacker-controlled",
     });
 
     expect(receivedHeaders["authorization"]).toBe("Bearer test-token");
-    expect(receivedHeaders["x-mcp-session"]).toBe("session-123");
+    expect(receivedHeaders["mcp-session-id"]).toBe("session-123");
+    expect(receivedHeaders["proxy-authorization"]).toBeUndefined();
+    expect(receivedHeaders["x-forwarded-for"]).toBeUndefined();
+  });
+
+  it("should strip an allowlisted request header named by Connection", async () => {
+    let receivedHeaders: http.IncomingHttpHeaders = {};
+    backendHandler = (req, res) => {
+      receivedHeaders = req.headers;
+      res.writeHead(200);
+      res.end("ok");
+    };
+
+    await forwardViaProxy("POST", {
+      authorization: "Bearer test-token",
+      connection: "authorization",
+    });
+
+    expect(receivedHeaders["authorization"]).toBeUndefined();
   });
 
   it("should preserve response headers", async () => {
     backendHandler = (_, res) => {
-      res.writeHead(200, { "X-Custom-Header": "custom-value" });
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Content-Length": "2",
+        "Cache-Control": "no-store",
+        "Mcp-Protocol-Version": "2025-06-18",
+        "X-Custom-Header": "custom-value",
+        "Mcp-Session-Id": "session-123",
+        "Last-Event-ID": "event-123",
+        Retry: "2",
+        "Retry-After": "10",
+      });
       res.end("ok");
     };
 
     const res = await forwardViaProxy("POST");
-    expect(res.headers["x-custom-header"]).toBe("custom-value");
+    expect(res.headers["content-type"]).toBe("text/event-stream");
+    expect(res.headers["content-length"]).toBe("2");
+    expect(res.headers["cache-control"]).toBe("no-store");
+    expect(res.headers["mcp-protocol-version"]).toBe("2025-06-18");
+    expect(res.headers["last-event-id"]).toBe("event-123");
+    expect(res.headers.retry).toBe("2");
+    expect(res.headers["retry-after"]).toBeUndefined();
+    expect(res.headers["x-custom-header"]).toBeUndefined();
+    expect(res.headers["mcp-session-id"]).toBe("session-123");
   });
 
   it("should pass through error status codes", async () => {
@@ -122,12 +179,30 @@ describe("HttpForwarder", () => {
     expect(JSON.parse(res.body).error.code).toBe(-32600);
   });
 
-  it("should return 502 when backend is unreachable", async () => {
-    const deadForwarder = new HttpForwarder({ requestTimeout: 1000, maxResponseSize: 1048576, maxBufferSize: 65536 });
+  it("should return generic 503 when backend is unreachable", async () => {
+    const deadForwarder = new HttpForwarder({
+      requestTimeout: 1000,
+      maxResponseSize: 1048576,
+      maxBufferSize: 65536,
+      allowLoopbackTargets: true,
+    });
 
-    const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+    const res = await new Promise<{
+      status: number;
+      body: string;
+      headers: http.IncomingHttpHeaders;
+    }>((resolve, reject) => {
       const proxy = http.createServer(async (req, proxyRes) => {
-        await deadForwarder.forward(req, proxyRes, "http://127.0.0.1:1/mcp");
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        await deadForwarder.forward(
+          req,
+          proxyRes,
+          "http://127.0.0.1:1/mcp",
+          Buffer.concat(chunks)
+        );
       });
 
       proxy.listen(0, () => {
@@ -140,7 +215,7 @@ describe("HttpForwarder", () => {
             r.on("data", (c: Buffer) => (data += c.toString()));
             r.on("end", () => {
               proxy.close();
-              resolve({ status: r.statusCode || 0, body: data });
+              resolve({ status: r.statusCode || 0, body: data, headers: r.headers });
             });
           }
         );
@@ -152,7 +227,49 @@ describe("HttpForwarder", () => {
       });
     });
 
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(503);
+    expect(res.headers["cache-control"]).toBe("no-store, private");
+    expect(res.headers.pragma).toBe("no-cache");
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+  });
+
+  it("should return generic 503 when the upstream response is too large", async () => {
+    forwarder = new HttpForwarder({
+      requestTimeout: 5000,
+      maxResponseSize: 3,
+      maxBufferSize: 65536,
+      allowLoopbackTargets: true,
+    });
+    backendHandler = (_, res) => {
+      res.writeHead(200, { "Content-Length": "4" });
+      res.end("four");
+    };
+
+    const res = await forwardViaProxy("POST");
+
+    expect(res.status).toBe(503);
+    expect(res.headers["cache-control"]).toBe("no-store, private");
+    expect(res.headers.pragma).toBe("no-cache");
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+  });
+
+  it("should return generic 503 when the upstream times out", async () => {
+    forwarder = new HttpForwarder({
+      requestTimeout: 20,
+      maxResponseSize: 1048576,
+      maxBufferSize: 65536,
+      allowLoopbackTargets: true,
+    });
+    backendHandler = (_, res) => {
+      setTimeout(() => res.end("late"), 100);
+    };
+
+    const res = await forwardViaProxy("POST");
+
+    expect(res.status).toBe(503);
+    expect(res.headers["cache-control"]).toBe("no-store, private");
+    expect(res.headers.pragma).toBe("no-cache");
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
   });
 
   it("should stream chunked responses", async () => {

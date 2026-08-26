@@ -2,7 +2,9 @@
  * MCP Manager - manages connections to multiple MCP servers.
  */
 import { McpServerInfo, McpTool, ToolCallResult } from '../types'
+import { mcpHostLogger } from '../logger'
 import { McpClient, type McpToolCallOptions } from './client'
+import type { McpProxyHostAuthorization } from './proxyAuth'
 import { ServerStatusTracker } from './serverStatus'
 
 export interface McpStatusRefreshSummary {
@@ -32,6 +34,10 @@ interface ClientRetirement {
   claimed: boolean
 }
 
+function errorName(error: unknown): string {
+  return error instanceof Error ? error.name : 'unknown'
+}
+
 export class McpManager {
   private clients: Map<string, McpClient> = new Map()
   private serverInfos: Map<string, McpServerInfo> = new Map()
@@ -41,13 +47,19 @@ export class McpManager {
   private lifecycleEpoch = 0
   private closed = false
   private proxyUrl?: string
+  private proxyHostAuthorization?: McpProxyHostAuthorization
   private statusTracker: ServerStatusTracker
 
-  constructor(proxyUrl?: string, statusTracker?: ServerStatusTracker) {
+  constructor(
+    proxyUrl?: string,
+    statusTracker?: ServerStatusTracker,
+    proxyHostAuthorization?: McpProxyHostAuthorization
+  ) {
     this.proxyUrl = proxyUrl
+    this.proxyHostAuthorization = proxyHostAuthorization
     this.statusTracker = statusTracker ?? new ServerStatusTracker()
     if (proxyUrl) {
-      console.log(`[McpManager] Proxy mode enabled: ${proxyUrl}`)
+      mcpHostLogger.info('mcp_proxy_mode_enabled')
     }
   }
 
@@ -141,7 +153,7 @@ export class McpManager {
 
     // Skip disabled servers — operator intent, not infra failure.
     if (!serverConfig.enabled) {
-      console.log(`[McpManager] Skipping disabled server: ${serverConfig.name}`)
+      mcpHostLogger.info('mcp_server_skipped', { server: serverConfig.name, reason: 'disabled' })
       this.serverInfos.set(serverConfig.name, serverConfig)
       this.statusTracker.markDisabled(serverConfig.name)
       control.onCommit?.()
@@ -151,9 +163,10 @@ export class McpManager {
     // Explicitly non-authoritative readiness is a fail-closed admission
     // signal, not permission to open a new connection.
     if (serverConfig.status?.authoritative === false) {
-      console.log(
-        `[McpManager] Skipping server with non-authoritative readiness: ${serverConfig.name}`
-      )
+      mcpHostLogger.info('mcp_server_skipped', {
+        server: serverConfig.name,
+        reason: 'non_authoritative',
+      })
       this.serverInfos.set(serverConfig.name, serverConfig)
       this.statusTracker.markNotReady(serverConfig.name, serverConfig.status?.message)
       control.onCommit?.()
@@ -162,9 +175,7 @@ export class McpManager {
 
     // Skip servers that aren't ready yet — transient infra, surfaced as not_ready.
     if (!serverConfig.status?.ready) {
-      console.log(
-        `[McpManager] Skipping server not ready: ${serverConfig.name} (${serverConfig.status?.message || 'unknown'})`
-      )
+      mcpHostLogger.info('mcp_server_skipped', { server: serverConfig.name, reason: 'not_ready' })
       this.serverInfos.set(serverConfig.name, serverConfig)
       this.statusTracker.markNotReady(serverConfig.name, serverConfig.status?.message)
       control.onCommit?.()
@@ -175,14 +186,19 @@ export class McpManager {
     if (this.clients.has(serverConfig.name)) {
       const installed = this.serverInfos.get(serverConfig.name)
       if (installed && JSON.stringify(installed) === JSON.stringify(serverConfig)) {
-        console.log(`[McpManager] Server already connected: ${serverConfig.name}`)
+        mcpHostLogger.info('mcp_server_already_connected', { server: serverConfig.name })
         control.onCommit?.()
         return 'applied'
       }
       return this.replaceServer(serverConfig, authToken, control)
     }
 
-    const client = new McpClient(serverConfig, authToken, this.proxyUrl)
+    const client = new McpClient(
+      serverConfig,
+      authToken,
+      this.proxyUrl,
+      this.proxyHostAuthorization
+    )
     const attempt = Symbol(serverConfig.name)
     this.pendingAdmissions.set(serverConfig.name, { attempt, client })
     this.statusTracker.markConnecting(serverConfig.name)
@@ -197,7 +213,7 @@ export class McpManager {
       this.pendingAdmissions.delete(serverConfig.name)
       this.installConnectedClient(serverConfig, client)
       control.onCommit?.()
-      console.log(`[McpManager] Added server: ${serverConfig.name}`)
+      mcpHostLogger.info('mcp_server_added', { server: serverConfig.name })
       return 'applied'
     } catch (error) {
       if (!isCurrent() || this.pendingAdmissions.get(serverConfig.name)?.attempt !== attempt) {
@@ -206,7 +222,10 @@ export class McpManager {
         return 'stale'
       }
       this.pendingAdmissions.delete(serverConfig.name)
-      console.error(`[McpManager] Failed to add server ${serverConfig.name}:`, error)
+      mcpHostLogger.error('mcp_server_add_failed', {
+        server: serverConfig.name,
+        error: errorName(error),
+      })
       this.recordAdmissionFailure(serverConfig, error)
       // Surface the failed admission so callers can leave this server's
       // revision retryable while continuing to publish healthy peers.
@@ -235,7 +254,12 @@ export class McpManager {
       return this.addServer(serverConfig, authToken, control)
     }
 
-    const candidate = new McpClient(serverConfig, authToken, this.proxyUrl)
+    const candidate = new McpClient(
+      serverConfig,
+      authToken,
+      this.proxyUrl,
+      this.proxyHostAuthorization
+    )
     const attempt = Symbol(serverConfig.name)
     this.pendingAdmissions.set(serverConfig.name, { attempt, client: candidate })
     try {
@@ -263,7 +287,7 @@ export class McpManager {
     control.onCommit?.()
 
     await this.scheduleClientCleanup(previousClient, control)
-    console.log(`[McpManager] Replaced server: ${serverConfig.name}`)
+    mcpHostLogger.info('mcp_server_replaced', { server: serverConfig.name })
     return 'applied'
   }
 
@@ -293,7 +317,7 @@ export class McpManager {
 
     return async () => {
       await this.runDetachedCleanups(cleanups)
-      console.log(`[McpManager] Removed server: ${serverName}`)
+      mcpHostLogger.info('mcp_server_removed', { server: serverName })
     }
   }
 

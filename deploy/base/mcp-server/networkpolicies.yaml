@@ -131,6 +131,16 @@ spec:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: mcp-host
+      podSelector:
+        matchExpressions:
+        - key: clerum.io/managed-by
+          operator: In
+          values:
+          - host-context-controller
+        - key: clerum.io/host
+          operator: Exists
+        - key: clerum.io/context
+          operator: Exists
     ports:
     - port: 8083
       protocol: TCP
@@ -157,14 +167,9 @@ spec:
       podSelector:
         matchLabels:
           app: host-context-controller-api-gateway
-  - ports:
-    - port: 3000
-      protocol: TCP
-    to:
-    - podSelector:
-        matchExpressions:
-        - key: clerum.io/mcpserver
-          operator: Exists
+  # HCC adds one context/server-scoped egress policy per live McpServer,
+  # including the declared transport port. Keeping no static backend lane
+  # avoids admitting only port 3000 (or widening the singleton to a range).
   - ports:
     - port: 53
       protocol: UDP

@@ -118,3 +118,26 @@ export function getJwtRuntimeBinding(token: string): RuntimeJwtBinding | null {
     recipeName: claims.recipeName,
   }
 }
+
+/**
+ * Decode the binding for the proxy's access-only adoption boundary.
+ *
+ * HCC runtime access tokens are single-Host identities. The ordinary metadata
+ * decoder intentionally preserves hostRefs[0] semantics for existing
+ * workflow/usage callers; the proxy retry must compare the complete claim and
+ * therefore rejects additional Host refs.
+ */
+export function getStrictJwtRuntimeBinding(token: string): RuntimeJwtBinding | null {
+  try {
+    const payload = decodeJwt(token) as RuntimeJwtClaims
+    const hostRefs = payload.hostRefs
+    if (!Array.isArray(hostRefs) || hostRefs.length !== 1) return null
+    const hostRef = nonEmptyString(hostRefs[0])
+    const recipeNamespace = nonEmptyString(payload.recipeNamespace)
+    const recipeName = nonEmptyString(payload.recipeName)
+    if (!hostRef || !recipeNamespace || !recipeName) return null
+    return { hostRef, recipeNamespace, recipeName }
+  } catch {
+    return null
+  }
+}

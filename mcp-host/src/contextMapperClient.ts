@@ -37,16 +37,8 @@ export class ContextMapperRequestError extends Error {
   }
 }
 
-export class ContextMapperCredentialRevisionError extends Error {
-  constructor() {
-    super('HCC credential authority changed during retrieval')
-    this.name = 'ContextMapperCredentialRevisionError'
-  }
-}
-
 export function isContextMapperAuthorityRevocation(error: unknown): boolean {
   return (
-    error instanceof ContextMapperCredentialRevisionError ||
     (error instanceof ContextMapperRequestError &&
       (error.authorizationFailure || (error.kind === 'credential' && error.status === 404)))
   )
@@ -81,7 +73,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function decodeMcpServer(value: unknown): McpServerInfo {
   if (!isRecord(value)) throw new Error('HCC inventory response is malformed')
-  if ('contextRef' in value || 'auth' in value || 'secretRef' in value || 'secretKey' in value) {
+  if ('contextRef' in value &&
+    (typeof value.contextRef !== 'string' ||
+      value.contextRef.length > 253 ||
+      !MCP_SERVER_NAME_PATTERN.test(value.contextRef))) {
+    throw new Error('HCC inventory response contains an invalid Context reference')
+  }
+  if (
+    'auth' in value ||
+    'secretRef' in value ||
+    'secretKey' in value ||
+    'credentialRevision' in value
+  ) {
+    if ('credentialRevision' in value) {
+      throw new Error('HCC inventory response contains forbidden credential revision')
+    }
     throw new Error('HCC inventory response contains forbidden authority metadata')
   }
   if (typeof value.name !== 'string' || !MCP_SERVER_NAME_PATTERN.test(value.name)) {
@@ -112,18 +118,9 @@ function decodeMcpServer(value: unknown): McpServerInfo {
   if (typeof value.status.deployed !== 'boolean' || typeof value.status.ready !== 'boolean') {
     throw new Error('HCC inventory response is malformed')
   }
-  if (
-    value.credentialRevision !== undefined &&
-    (typeof value.credentialRevision !== 'string' || !value.credentialRevision)
-  ) {
-    throw new Error('HCC inventory response contains an invalid credential revision')
-  }
-  if (value.authRequired && typeof value.credentialRevision !== 'string') {
-    throw new Error('HCC authenticated server is missing its credential revision')
-  }
-
   return {
     name: value.name,
+    ...(typeof value.contextRef === 'string' ? { contextRef: value.contextRef } : {}),
     ...(typeof value.description === 'string' ? { description: value.description } : {}),
     transport: {
       type: transportType as McpServerInfo['transport']['type'],
@@ -132,9 +129,6 @@ function decodeMcpServer(value: unknown): McpServerInfo {
     },
     enabled: value.enabled,
     authRequired: value.authRequired,
-    ...(typeof value.credentialRevision === 'string'
-      ? { credentialRevision: value.credentialRevision }
-      : {}),
     status: {
       deployed: value.status.deployed,
       ready: value.status.ready,
@@ -276,13 +270,7 @@ export class ContextMapperClient {
   /**
    * Get auth token for an McpServer.
    */
-  async getAuthToken(
-    serverName: string,
-    expectedCredentialRevision?: string
-  ): Promise<string | undefined> {
-    if (!expectedCredentialRevision) {
-      throw new ContextMapperCredentialRevisionError()
-    }
+  async getAuthToken(serverName: string): Promise<AuthTokenResponse> {
     const response = await this.protectedFetch(
       '/api/v2/hosts/self/mcpservers/credential',
       'credential',
@@ -293,10 +281,7 @@ export class ContextMapperClient {
       }
     )
     const data = decodeCredentialResponse(await response.json())
-    if (data.credentialRevision !== expectedCredentialRevision) {
-      throw new ContextMapperCredentialRevisionError()
-    }
-    return data.token ?? undefined
+    return data
   }
 
   /**

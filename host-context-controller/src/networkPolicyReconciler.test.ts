@@ -936,11 +936,20 @@ describe('NetworkPolicyReconciler', () => {
         },
       })
       mockApi.listNamespacedNetworkPolicy.mockImplementation(
-        async ({ namespace }: { namespace?: string }) => ({
-          items: [...livePolicies.values()].filter(
-            policy => policy.metadata?.namespace === namespace
-          ),
-        })
+        async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => {
+          const items = [...livePolicies.values()].filter(
+            policy =>
+              policy.metadata?.namespace === namespace &&
+              (!labelSelector ||
+                labelSelector
+                  .split(',')
+                  .every(selector => {
+                    const [key, value] = selector.split('=', 2)
+                    return policy.metadata?.labels?.[key] === value
+                  }))
+          )
+          return { items }
+        }
       )
       mockApi.createNamespacedNetworkPolicy.mockImplementation(async ({ namespace, body }) => {
         livePolicies.set(`${namespace}/${body.metadata?.name}`, body)
@@ -1107,7 +1116,7 @@ describe('NetworkPolicyReconciler', () => {
       releaseFirstCreate.resolve(undefined)
       await reconcile
 
-      expect(mockApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(3)
+      expect(mockApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(4)
     })
 
     it('does not adopt an McpServer that appeared after Context selection', async () => {
@@ -1167,8 +1176,9 @@ describe('NetworkPolicyReconciler', () => {
 
       await rec.reconcileContext(context, { isCurrent: () => true })
 
-      // Three calls: L2 ingress (mcp-server), L2 egress (mcp-host), L2 rpc-proxy egress (rpc-proxy)
-      expect(mockApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(3)
+      // Four calls: L2 ingress, mcp-host egress, rpc-proxy egress, and
+      // mcp-proxy egress.
+      expect(mockApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(4)
       const egressCall = mockApi.createNamespacedNetworkPolicy.mock.calls[1][0] as {
         namespace: string
         body: {
@@ -1201,6 +1211,17 @@ describe('NetworkPolicyReconciler', () => {
       )
       expect(egressRule.to[0].podSelector.matchLabels['clerum.io/mcpserver']).toBe('mongo')
       expect(egressRule.ports[0].port).toBe(3000)
+      expect(egressCall.body.spec.egress).toContainEqual({
+        to: [
+          {
+            namespaceSelector: {
+              matchLabels: { 'kubernetes.io/metadata.name': 'mcp-server' },
+            },
+            podSelector: { matchLabels: { app: 'mcp-proxy' } },
+          },
+        ],
+        ports: [{ port: 8083, protocol: 'TCP' }],
+      })
     })
 
     it('scopes L2 mcp-host egress by Context CRD name, not namespace-wide selector', async () => {
@@ -1290,6 +1311,142 @@ describe('NetworkPolicyReconciler', () => {
       )
       expect(egressRule.to[0].podSelector.matchLabels['clerum.io/mcpserver']).toBe('mongo')
       expect(egressRule.ports[0].port).toBe(3000)
+    })
+
+    it('creates mcp-proxy egress for the McpServer transport port', async () => {
+      const cache = new Map<string, McpServerCRD>()
+      cache.set('playwright', {
+        name: 'playwright',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'dev',
+          image: 'playwright:latest',
+          transport: {
+            type: 'streamableHttp',
+            url: 'http://playwright:8931/mcp',
+            port: 8931,
+          },
+        },
+      })
+
+      const rec = makeReconciler(mockApi, cache)
+      const context: ContextCRD = {
+        name: 'dev',
+        namespace: 'mcp-server',
+        spec: { contextId: 'dev', mcpServers: ['playwright'] },
+      }
+
+      await rec.reconcileContext(context, { isCurrent: () => true })
+
+      const proxyEgressCall = mockApi.createNamespacedNetworkPolicy.mock.calls.find(
+        ([call]) =>
+          call.namespace === 'mcp-server' &&
+          call.body.metadata.labels['clerum.io/policy-type'] === 'mcp-proxy-egress'
+      )?.[0] as {
+        namespace: string
+        body: {
+          metadata: { name: string; labels: Record<string, string> }
+          spec: {
+            podSelector: { matchLabels: Record<string, string> }
+            egress: Array<{
+              to: Array<{
+                namespaceSelector: { matchLabels: Record<string, string> }
+                podSelector: { matchLabels: Record<string, string> }
+              }>
+              ports: Array<{ port: number; protocol: string }>
+            }>
+          }
+        }
+      }
+
+      expect(proxyEgressCall).toBeDefined()
+      expect(proxyEgressCall.namespace).toBe('mcp-server')
+      expect(proxyEgressCall.body.metadata.name).toBe('mcp-proxy-egress-dev-playwright')
+      expect(proxyEgressCall.body.metadata.labels['clerum.io/context']).toBe('dev')
+      expect(proxyEgressCall.body.metadata.labels['clerum.io/mcpserver']).toBe('playwright')
+      expect(proxyEgressCall.body.spec.podSelector.matchLabels).toEqual({ app: 'mcp-proxy' })
+      expect(proxyEgressCall.body.spec.egress).toEqual([
+        {
+          to: [
+            {
+              namespaceSelector: {
+                matchLabels: { 'kubernetes.io/metadata.name': 'mcp-server' },
+              },
+              podSelector: {
+                matchLabels: {
+                  'clerum.io/mcpserver': 'playwright',
+                },
+                matchExpressions: [
+                  {
+                    key: 'clerum.io/managed-by',
+                    operator: 'In',
+                    values: ['host-context-controller', 'workflow-recipes'],
+                  },
+                ],
+              },
+            },
+          ],
+          ports: [{ port: 8931, protocol: 'TCP' }],
+        },
+      ])
+    })
+
+    it('admits both HCC-managed and workflow-recipes-managed MCP server pods', async () => {
+      const cache = new Map<string, McpServerCRD>()
+      cache.set('workflow-http', {
+        name: 'workflow-http',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'workflow-context',
+          image: 'workflow-http:latest',
+          managed: false,
+          transport: {
+            type: 'streamableHttp',
+            url: 'http://workflow-http:8080/mcp',
+            port: 8080,
+          },
+        },
+      })
+
+      const rec = makeReconciler(mockApi, cache)
+      await rec.reconcileContext(
+        {
+          name: 'workflow-context',
+          namespace: 'mcp-server',
+          spec: { contextId: 'workflow-context', mcpServers: ['workflow-http'] },
+        },
+        { isCurrent: () => true }
+      )
+
+      const proxyEgressCall = mockApi.createNamespacedNetworkPolicy.mock.calls.find(
+        ([call]) =>
+          call.namespace === 'mcp-server' &&
+          call.body.metadata.labels['clerum.io/policy-type'] === 'mcp-proxy-egress'
+      )?.[0] as {
+        body: {
+          spec: {
+            egress: Array<{
+              to: Array<{
+                podSelector: {
+                  matchLabels: Record<string, string>
+                  matchExpressions: unknown[]
+                }
+              }>
+            }>
+          }
+        }
+      }
+
+      expect(proxyEgressCall.body.spec.egress[0].to[0].podSelector).toEqual({
+        matchLabels: { 'clerum.io/mcpserver': 'workflow-http' },
+        matchExpressions: [
+          {
+            key: 'clerum.io/managed-by',
+            operator: 'In',
+            values: ['host-context-controller', 'workflow-recipes'],
+          },
+        ],
+      })
     })
   })
 
@@ -3716,7 +3873,7 @@ describe('NetworkPolicyReconciler', () => {
       const oldPolicies = mockApi.createNamespacedNetworkPolicy.mock.calls.map(
         call => (call[0] as { body: k8s.V1NetworkPolicy }).body
       )
-      expect(oldPolicies).toHaveLength(3)
+      expect(oldPolicies).toHaveLength(4)
 
       vi.clearAllMocks()
       serverCache.set(currentServer.name, currentServer)
@@ -3727,7 +3884,17 @@ describe('NetworkPolicyReconciler', () => {
         async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => {
           if (labelSelector?.includes('external-egress')) return { items: [] }
           return {
-            items: oldPolicies.filter(policy => policy.metadata?.namespace === namespace),
+            items: oldPolicies.filter(
+              policy =>
+                policy.metadata?.namespace === namespace &&
+                (!labelSelector ||
+                  labelSelector
+                    .split(',')
+                    .every(selector => {
+                      const [key, value] = selector.split('=', 2)
+                      return policy.metadata?.labels?.[key] === value
+                    }))
+            ),
           }
         }
       )
@@ -3753,6 +3920,7 @@ describe('NetworkPolicyReconciler', () => {
         'replace:mcp-server',
         'replace:mcp-host',
         'replace:rpc-proxy',
+        'replace:mcp-server',
         'certify',
       ])
       expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
@@ -4794,10 +4962,14 @@ describe('NetworkPolicyReconciler', () => {
 
       await additiveStarted.promise
       try {
-        expect(mockApi.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(7)
+        expect(mockApi.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(8)
         expect(mockApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
           namespace: 'mcp-server',
           labelSelector: expect.stringContaining('policy-type=context-allow'),
+        })
+        expect(mockApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+          namespace: 'mcp-server',
+          labelSelector: expect.stringContaining('policy-type=mcp-proxy-egress'),
         })
         expect(mockApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
           namespace: 'mcp-host',

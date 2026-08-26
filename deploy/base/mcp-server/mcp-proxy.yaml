@@ -26,6 +26,15 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 60
+      volumes:
+      - name: mcp-proxy-token
+        projected:
+          defaultMode: 0444
+          sources:
+          - serviceAccountToken:
+              audience: host-context-controller
+              expirationSeconds: 600
+              path: token
       containers:
       - name: mcp-proxy
         image: clerum/mcp-proxy:0.9.5
@@ -34,10 +43,18 @@ spec:
         env:
         - name: MCP_PROXY_PORT
           value: "8083"
+        - name: MCP_PROXY_FORWARDING_ENABLED
+          value: "false"
+        - name: MCP_PROXY_IDENTITY_TOKEN_FILE
+          value: /var/run/secrets/clerum/mcp-proxy/token
         - name: HCC_API_URL
           value: http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081
         - name: HCC_POLL_INTERVAL
           value: "30000"
+        volumeMounts:
+        - name: mcp-proxy-token
+          mountPath: /var/run/secrets/clerum/mcp-proxy
+          readOnly: true
         resources:
           limits:
             cpu: 200m
