@@ -173,6 +173,68 @@ export function preserveServiceAssignedFields<
   }
 }
 
+/**
+ * True when the merged desired Service is equivalent to the live object, so a
+ * replace would be a no-op. Canonicalize first: the apiserver default-fills
+ * type/sessionAffinity/internalTrafficPolicy/protocol and omitted targetPort,
+ * and key order is not stable (#307). Arrays stay in author order (#214).
+ * Doubt or a malformed object returns false (fail-open-to-write).
+ */
+export function serviceMatchesDesired(
+  desired: k8s.V1Service | undefined,
+  existing: k8s.V1Service | undefined
+): boolean {
+  try {
+    if (!desired?.spec || !existing?.spec) return false
+    return (
+      JSON.stringify(normalizeServiceForComparison(desired)) ===
+      JSON.stringify(normalizeServiceForComparison(existing))
+    )
+  } catch {
+    return false
+  }
+}
+
+export function normalizeServiceForComparison(service: k8s.V1Service): unknown {
+  const normalized = structuredClone(service)
+  delete normalized.status
+  delete normalized.metadata?.resourceVersion
+  delete normalized.metadata?.uid
+  delete normalized.metadata?.generation
+  delete normalized.metadata?.creationTimestamp
+  delete normalized.metadata?.managedFields
+  delete normalized.metadata?.selfLink
+
+  const spec = normalized.spec
+  if (spec) {
+    if (spec.type === 'ClusterIP') delete spec.type
+    if (spec.sessionAffinity === 'None') delete spec.sessionAffinity
+    if (spec.internalTrafficPolicy === 'Cluster') delete spec.internalTrafficPolicy
+    for (const port of spec.ports ?? []) {
+      if (port.protocol === 'TCP') delete port.protocol
+      if (port.targetPort === undefined) port.targetPort = port.port
+    }
+  }
+
+  return normalizeServiceValue(normalized)
+}
+
+function normalizeServiceValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeServiceValue)
+  if (!isServiceObject(value)) return value
+
+  const normalized: Record<string, unknown> = {}
+  for (const key of Object.keys(value).sort()) {
+    const entry = value[key]
+    if (entry !== undefined) normalized[key] = normalizeServiceValue(entry)
+  }
+  return normalized
+}
+
+function isServiceObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 /** Create-or-replace a NetworkPolicy (409 catch → conflict-retry replace). */
 export async function applyNetworkPolicy(
   api: k8s.NetworkingV1Api,
