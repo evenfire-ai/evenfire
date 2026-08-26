@@ -76,6 +76,10 @@ export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFor
   const [capabilities, setCapabilities] = useState<Set<HookCapability>>(new Set())
   const [order, setOrder] = useState(String(DEFAULT_HOOK_ORDER))
   const [failMode, setFailMode] = useState<'open' | 'closed'>('open')
+  // Owned here rather than inside FormSection: step 0's subtree unmounts on
+  // Continue, so a disclosure holding its own state would forget it and come
+  // back closed on Back, hiding the capabilities the operator just reviewed.
+  const [advancedOpen, setAdvancedOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [installing, setInstalling] = useState(false)
   const [error, setError] = useState('')
@@ -118,6 +122,7 @@ export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFor
     setStep(0)
     setError('')
     setCredValues({})
+    setAdvancedOpen(false)
     // Seed from the author's declaration so the default install is the working
     // one. The ceiling effect below narrows this once an agent is selected, and
     // the operator can still untick anything.
@@ -385,7 +390,12 @@ export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFor
               {/* Everything an install can leave at its default lives behind one
                   disclosure: the entry's own facts, which are applied as-is, the
                   granted capabilities, and the ordering/fail-mode knobs. */}
-              <FormSection title="Advanced details" collapsible>
+              <FormSection
+                title="Advanced details"
+                collapsible
+                open={advancedOpen}
+                onOpenChange={setAdvancedOpen}
+              >
                 <div className="cu-summary-list cu-summary-list--flush">
                   {targetImage ? (
                     <div className="cu-summary-list__row">

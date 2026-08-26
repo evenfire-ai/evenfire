@@ -59,10 +59,18 @@ export function FormSection({
   description,
   title,
   collapsible = false,
-  defaultOpen = false,
+  open: openProp,
+  onOpenChange,
 }: FormSectionProps) {
-  const [open, setOpen] = React.useState(defaultOpen)
+  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false)
+  const open = openProp ?? uncontrolledOpen
   const contentId = React.useId()
+
+  function toggle() {
+    const next = !open
+    if (openProp === undefined) setUncontrolledOpen(next)
+    onOpenChange?.(next)
+  }
 
   if (!collapsible) {
     return (
@@ -86,7 +94,7 @@ export function FormSection({
           className="cu-form-section__toggle"
           aria-expanded={open}
           aria-controls={contentId}
-          onClick={() => setOpen(value => !value)}
+          onClick={toggle}
         >
           <IconChevronRight className={open ? 'is-expanded' : undefined} width={18} height={18} />
           {title}

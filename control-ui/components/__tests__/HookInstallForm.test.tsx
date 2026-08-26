@@ -242,6 +242,30 @@ describe('HookInstallForm — declaration never escapes the ceiling', () => {
   })
 })
 
+describe('HookInstallForm — step navigation', () => {
+  it('keeps Advanced details open across Continue and Back', async () => {
+    // Step 0's subtree unmounts on Continue. When the disclosure held its own
+    // state, Back rebuilt it closed and the capabilities the operator had just
+    // reviewed — and any warning their edit produced — silently disappeared.
+    render(
+      <HookInstallForm
+        entry={entryWith({ requiredCapabilities: ['may_rewrite'] })}
+        onCancel={noop}
+        onInstalled={noop}
+      />
+    )
+    await openAdvanced()
+
+    fireEvent.click(await screen.findByRole('button', { name: /continue/i }))
+    expect(await screen.findByText(/will be installed on agent/i)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /back/i }))
+    const toggle = await screen.findByRole('button', { name: /advanced details/i })
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(capabilityBox('May rewrite').checked).toBe(true)
+  })
+})
+
 describe('HookInstallForm — ungranted-capability warning', () => {
   // `enforceCapabilities` neutralizes deny/rewrite/substitute and nothing else,
   // so the "actions are discarded" warning must not be shown for a capability
