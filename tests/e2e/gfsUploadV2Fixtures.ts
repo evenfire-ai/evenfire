@@ -4,7 +4,9 @@ import { mkdtemp, open } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {
+  closeUnregisteredFixtureHandleForTest,
   disposeFixtureLeaseForTest,
+  hasFixtureLeaseForTest,
   registerFixtureLeaseForTest,
   setFixtureHandleForTest,
 } from './gfsUploadV2FixtureLease.js'
@@ -85,8 +87,9 @@ async function createFixture(
   const fileName = `${label}-${byteLength}${extension}`
   const filePath = path.join(directory, fileName)
   let fixture: DiskUploadFixture | undefined
+  let handle: Awaited<ReturnType<typeof open>> | undefined
   try {
-    const handle = await open(
+    handle = await open(
       filePath,
       constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW,
       0o600
@@ -104,13 +107,22 @@ async function createFixture(
     fixture.sha256 = await sha256File(filePath)
     return fixture
   } catch (error) {
-    if (fixture) {
+    if (fixture && hasFixtureLeaseForTest(fixture)) {
       try {
         await disposeFixtureLeaseForTest(fixture)
       } catch (cleanupError) {
         throw new AggregateError(
           [error, cleanupError],
           'failed to neutralize partial GFS v2 fixture'
+        )
+      }
+    } else if (handle) {
+      try {
+        await closeUnregisteredFixtureHandleForTest(handle)
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          'failed to close unregistered GFS v2 fixture handle'
         )
       }
     }

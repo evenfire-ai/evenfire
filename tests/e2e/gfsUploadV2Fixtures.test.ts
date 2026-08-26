@@ -125,6 +125,99 @@ describe('GFS Upload v2 disk fixtures', () => {
     await removeKnownFixtureDirectory(created[0]!, ['partial-handle-1.bin'])
   })
 
+  it('closes the raw opened handle when wrapper construction fails', async () => {
+    const before = await fixtureDirectories()
+    const wrapperFailure = new Error('synthetic fixture wrapper failure')
+    let rawHandle: FileHandle | undefined
+    setFixtureHandleForTest(handle => {
+      rawHandle = handle
+      throw wrapperFailure
+    })
+
+    await expect(createDiskUploadFixture(1, '.bin', 'partial-wrapper')).rejects.toBe(wrapperFailure)
+
+    expect(rawHandle).toBeDefined()
+    await expect(rawHandle!.stat()).rejects.toThrow()
+    const created = (await fixtureDirectories()).filter(directory => !before.includes(directory))
+    expect(created).toHaveLength(1)
+    const partialFile = path.join(created[0]!, 'partial-wrapper-1.bin')
+    expect((await stat(partialFile)).size).toBe(0)
+    await removeKnownFixtureDirectory(created[0]!, ['partial-wrapper-1.bin'])
+  })
+
+  it('closes the retained handle when the after-handle setup hook fails', async () => {
+    const before = await fixtureDirectories()
+    const setupFailure = new Error('synthetic setup hook failure')
+    let rawHandle: FileHandle | undefined
+    setFixtureHandleForTest(handle => {
+      rawHandle = handle
+      return {
+        async truncate(length: number): Promise<void> {
+          await handle.truncate(length)
+        },
+        async close(): Promise<void> {
+          await handle.close()
+        },
+      }
+    })
+    setAfterFixtureHandleForTest?.(() => {
+      throw setupFailure
+    })
+
+    await expect(createDiskUploadFixture(1, '.bin', 'partial-hook')).rejects.toBe(setupFailure)
+
+    expect(rawHandle).toBeDefined()
+    await expect(rawHandle!.stat()).rejects.toThrow()
+    const created = (await fixtureDirectories()).filter(directory => !before.includes(directory))
+    expect(created).toHaveLength(1)
+    await removeKnownFixtureDirectory(created[0]!, ['partial-hook-1.bin'])
+  })
+
+  it('closes the retained handle when hashing fails after setup', async () => {
+    const before = await fixtureDirectories()
+    let rawHandle: FileHandle | undefined
+    let retainedPath = ''
+    setFixtureHandleForTest(handle => {
+      rawHandle = handle
+      return {
+        async truncate(length: number): Promise<void> {
+          await handle.truncate(length)
+        },
+        async close(): Promise<void> {
+          await handle.close()
+        },
+      }
+    })
+    setAfterFixtureHandleForTest?.(async fixture => {
+      retainedPath = `${fixture.filePath}-retained`
+      await rename(fixture.filePath, retainedPath)
+    })
+
+    await expect(createDiskUploadFixture(1, '.bin', 'partial-hash')).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+
+    expect(rawHandle).toBeDefined()
+    await expect(rawHandle!.stat()).rejects.toThrow()
+    expect((await stat(retainedPath)).size).toBe(0)
+    const created = (await fixtureDirectories()).filter(directory => !before.includes(directory))
+    expect(created).toHaveLength(1)
+    await removeKnownFixtureDirectory(created[0]!, ['partial-hash-1.bin-retained'])
+  })
+
+  it('uses exactly one disposal surface after a successful wrapper transition', async () => {
+    const calls = useScriptedFixtureHandle({})
+    const fixture = await createDiskUploadFixture(1, '.bin', 'cleanup-wrapper-transition')
+
+    try {
+      await removeDiskUploadFixture(fixture)
+      await expect(removeDiskUploadFixture(fixture)).resolves.toBeUndefined()
+      expect(calls).toEqual({ truncate: 2, close: 1 })
+    } finally {
+      await removeKnownFixtureDirectory(fixture.directory, [fixture.fileName])
+    }
+  })
+
   it('rejects a fabricated fixture object with copied pathname data', async () => {
     const fixture = await createDiskUploadFixture(32, '.bin', 'cleanup-fabricated')
     const fabricated = { ...fixture }

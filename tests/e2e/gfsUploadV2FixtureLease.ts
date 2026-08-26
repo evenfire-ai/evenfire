@@ -32,13 +32,23 @@ export function registerFixtureLeaseForTest(
   fixture: FixtureLeaseTarget,
   handle: FileHandle
 ): FixtureHandle {
-  const ownedHandle = fixtureHandleForTest?.(handle, fixture) ?? handle
-  fixtureLeases.set(fixture, {
-    handle: ownedHandle,
+  const lease: FixtureLease = {
+    handle,
     state: 'active',
     neutralized: false,
-  })
+  }
+  fixtureLeases.set(fixture, lease)
+  const ownedHandle = fixtureHandleForTest?.(handle, fixture) ?? handle
+  lease.handle = ownedHandle
   return ownedHandle
+}
+
+export async function closeUnregisteredFixtureHandleForTest(handle: FileHandle): Promise<void> {
+  await handle.close()
+}
+
+export function hasFixtureLeaseForTest(fixture: FixtureLeaseTarget): boolean {
+  return fixtureLeases.has(fixture)
 }
 
 export async function disposeFixtureLeaseForTest(fixture: FixtureLeaseTarget): Promise<void> {
