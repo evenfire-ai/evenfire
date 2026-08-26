@@ -205,6 +205,7 @@ run_np08_gateway_raw_header_checks() {
   kctl -n "${MCP_NS}" exec -i deploy/mcp-proxy -- node - <<'NODE'
 ;(async () => {
 const fs = require('node:fs')
+const http = require('node:http')
 const net = require('node:net')
 const gatewayHost = 'host-context-controller-api-gateway.control-plane.svc.cluster.local'
 const gatewayPort = 8081
@@ -256,6 +257,33 @@ function assertHeaderRejected(label, result) {
   }
 }
 
+function parsedHttpRequest(method, path, headers, body = '') {
+  return new Promise((resolve, reject) => {
+    const request = http.request({
+      hostname: gatewayHost,
+      port: gatewayPort,
+      path,
+      method,
+      headers: {
+        Host: 'hcc-gateway',
+        Connection: 'close',
+        ...headers,
+      },
+    }, response => {
+      let responseBytes = 0
+      response.on('data', chunk => { responseBytes += chunk.length })
+      response.on('end', () => resolve({
+        status: response.statusCode ?? 0,
+        hasHttpResponse: true,
+        responseBytes,
+      }))
+    })
+    request.setTimeout(10_000, () => request.destroy(new Error('parsed gateway timeout')))
+    request.on('error', reject)
+    request.end(body)
+  })
+}
+
 const duplicateSystem = await rawRequest('GET', '/api/v2/system/mcpservers', [
   `${authName}: ${scheme} ${identity}`,
   `${authName.toLowerCase()}: ${scheme} duplicate-a`,
@@ -275,10 +303,10 @@ const duplicateHost = await rawRequest('POST', '/api/v2/system/mcpservers/author
 assertHeaderRejected('duplicate Host header', duplicateHost)
 console.log('PASS duplicate Host headers rejected through the gateway')
 
-const proxyBoundary = await rawRequest('GET', '/api/v2/system/mcpservers', [
-  `${authName}: ${scheme} ${identity}`,
-  `${proxyName}: ${scheme} forged`,
-])
+const proxyBoundary = await parsedHttpRequest('GET', '/api/v2/system/mcpservers', {
+  [authName]: `${scheme} ${identity}`,
+  [proxyName]: `${scheme} forged`,
+})
 if (proxyBoundary.status !== 200) throw new Error(`private identity boundary probe failed: ${proxyBoundary.status}`)
 console.log('PASS private proxy identity is not mixed into the system route')
 })().catch(error => {
