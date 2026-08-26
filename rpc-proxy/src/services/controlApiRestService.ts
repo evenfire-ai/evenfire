@@ -83,6 +83,96 @@ export async function fetchUserAllowedServersFromControlApi(
   }
 }
 
+export type UserConnector = {
+  name: string
+  provider?: string
+  authKind?: 'static' | 'oauth-user' | 'oauth-context'
+  grantScope?: 'user' | 'context'
+  status: 'authorized' | 'requires_setup' | 'no_oauth'
+}
+
+export type UserAgentConnectors = {
+  name: string
+  contextRef: string | null
+  connectors: UserConnector[]
+}
+
+export type UserConnectorsResponse = {
+  userId: string
+  agents: UserAgentConnectors[]
+}
+
+const CONNECTOR_STATUSES = new Set(['authorized', 'requires_setup', 'no_oauth'])
+const CONNECTOR_AUTH_KINDS = new Set(['static', 'oauth-user', 'oauth-context'])
+const CONNECTOR_GRANT_SCOPES = new Set(['user', 'context'])
+
+function sanitizeConnector(raw: unknown): UserConnector | null {
+  if (!raw || typeof raw !== 'object') return null
+  const entry = raw as Record<string, unknown>
+  const name = typeof entry.name === 'string' ? entry.name.trim() : ''
+  const status = entry.status
+  if (!name || typeof status !== 'string' || !CONNECTOR_STATUSES.has(status)) return null
+  const connector: UserConnector = { name, status: status as UserConnector['status'] }
+  if (typeof entry.provider === 'string' && entry.provider.trim()) {
+    connector.provider = entry.provider.trim()
+  }
+  if (typeof entry.authKind === 'string' && CONNECTOR_AUTH_KINDS.has(entry.authKind)) {
+    connector.authKind = entry.authKind as UserConnector['authKind']
+  }
+  if (typeof entry.grantScope === 'string' && CONNECTOR_GRANT_SCOPES.has(entry.grantScope)) {
+    connector.grantScope = entry.grantScope as UserConnector['grantScope']
+  }
+  return connector
+}
+
+function sanitizeAgentConnectors(raw: unknown): UserAgentConnectors | null {
+  if (!raw || typeof raw !== 'object') return null
+  const agent = raw as Record<string, unknown>
+  const name = typeof agent.name === 'string' ? agent.name.trim() : ''
+  if (!name) return null
+  const contextRef =
+    typeof agent.contextRef === 'string' && agent.contextRef.trim() ? agent.contextRef.trim() : null
+  const connectors = Array.isArray(agent.connectors)
+    ? agent.connectors
+        .map(sanitizeConnector)
+        .filter((entry): entry is UserConnector => entry !== null)
+    : []
+  return { name, contextRef, connectors }
+}
+
+/**
+ * Fetch the proactive connectors read-model for a user (spec 11 U1). Projects
+ * the control-api payload down to the declared, NON-SECRET shape and drops any
+ * unexpected field — the inventory never transports `auth`/`secretRef`/tokens.
+ * Deliberately UNCACHED: the tri-state must reflect a just-completed
+ * connect/disconnect, unlike the server catalog (`fetchUserAllowedServers…`).
+ */
+export async function fetchUserConnectorsFromControlApi(
+  userId: string,
+  rpcAccessToken: string
+): Promise<UserConnectorsResponse> {
+  const response = await fetch(
+    `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-connectors`,
+    {
+      method: 'GET',
+      headers: controlApiHeaders(rpcAccessToken),
+    }
+  )
+
+  if (!response.ok) {
+    throw new Error(`Control API MCP connectors lookup failed (${response.status})`)
+  }
+
+  const parsed = (await response.json()) as Partial<UserConnectorsResponse>
+  const agents = Array.isArray(parsed.agents)
+    ? parsed.agents
+        .map(sanitizeAgentConnectors)
+        .filter((agent): agent is UserAgentConnectors => agent !== null)
+    : []
+
+  return { userId, agents }
+}
+
 export async function fetchHostConnectionFromControlApi(
   userId: string,
   hostRef: string,

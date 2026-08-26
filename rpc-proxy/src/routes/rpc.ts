@@ -11,6 +11,7 @@ import {
 import { rpcInvocationContext } from '../rpcAccessContext.js'
 import {
   type HostWakeApiResponse,
+  fetchUserConnectorsFromControlApi,
   requestHostWakeFromControlApi,
 } from '../services/controlApiRestService.js'
 import {
@@ -216,6 +217,27 @@ export function createRpcRouter(): Router {
           contextIds: result.contextIds,
           servers: result.servers,
         })
+      } catch (error) {
+        next(error)
+      }
+    }
+  )
+
+  // Proactive connectors panel read-model (spec 11 U1): per-agent classified
+  // fleet (`authorized`/`requires_setup`/`no_oauth`). Read of the same catalog
+  // rail as `/rpc/servers`, so it REUSES the `mcp:servers:list` scope (no new
+  // scope minted). `userId` is the signed session subject (`auth.sub`), never a
+  // body/query param.
+  router.get(
+    '/rpc/connectors',
+    requireRpcAuth,
+    requireScope('mcp:servers:list'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const auth = req.auth!
+        const rpcAccessToken = extractAuthToken(req)
+        const result = await fetchUserConnectorsFromControlApi(auth.sub, rpcAccessToken)
+        res.status(200).json(result)
       } catch (error) {
         next(error)
       }

@@ -26,12 +26,15 @@
  */
 import type { DbClient } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
-import { resolveServerOAuth } from '../../oauth/mcpServerOAuthSpec.js'
+import { type GrantScope, resolveServerOAuth } from '../../oauth/mcpServerOAuthSpec.js'
 import { oauthGrantExists } from '../../oauth/store.js'
+import { rootLogger } from '../../observability/logger.js'
 import {
   type AgentDirectoryEntry,
   buildAgentDirectoryEntry,
 } from '../directory/accessReconciliation.js'
+
+const connectorsLog = rootLogger.child({ module: 'mcp-connectors' })
 
 export interface InvocableMcpServer {
   name: string
@@ -41,6 +44,38 @@ export interface InvocableMcpServer {
 export interface AgentWithMcpServers extends AgentDirectoryEntry {
   contextRef: string | null
   mcpServers: Array<{ name: string }>
+}
+
+/**
+ * Tri-state authorization status of one connector for the proactive panel
+ * (spec 11 U1). Derived, never invented:
+ *   - `no_oauth`       — the server is not governed by this OAuth rail
+ *                        (`resolveServerOAuth` = null, i.e. static/none/no id).
+ *   - `authorized`     — an OAuth server WITH a valid grant by its flavor.
+ *   - `requires_setup` — an OAuth server WITHOUT a grant (the "needs-connect").
+ * The `authorized`/`requires_setup` split comes SOLELY from `oauthGrantExists`
+ * over `oauth_grants` (the same authoritative source the LLM rail reads for
+ * `no_grant`, D4) — there is no parallel "connected" computation.
+ */
+export type ConnectorStatus = 'authorized' | 'requires_setup' | 'no_oauth'
+
+/**
+ * One connector row: a READ-MODEL projection that classifies instead of
+ * filtering, so a `requires_setup` server NEVER disappears from the list.
+ * Carries only NON-SECRET policy (`authKind`, `provider`, `grantScope`) — never
+ * `auth`/`secretRef`/tokens (spec §1.4).
+ */
+export interface ConnectorEntry {
+  name: string
+  provider?: string
+  authKind?: 'static' | 'oauth-user' | 'oauth-context'
+  grantScope?: GrantScope
+  status: ConnectorStatus
+}
+
+export interface AgentWithConnectors extends AgentDirectoryEntry {
+  contextRef: string | null
+  connectors: ConnectorEntry[]
 }
 
 interface ContextCR {
@@ -59,6 +94,9 @@ interface McpServerCR {
     oauth?: {
       id?: unknown
       grantScope?: unknown
+      // Non-secret provider label (e.g. 'google'). Surfaced verbatim to the
+      // panel; never gates oauth-ness (that is `id` via `resolveServerOAuth`).
+      provider?: unknown
     }
     contextRef?: unknown
   }
@@ -421,5 +459,176 @@ export async function resolveMcpServersForAgents(
       contextRef,
       mcpServers: names.map(name => ({ name })),
     }
+  })
+}
+
+/**
+ * The non-OAuth `authKind` label. Mirrors host-context-controller's
+ * `deriveAuthKind` for the non-oauth branch (mini-spec 10): a static auth type
+ * (`bearer`/`basic`/`apiKey`) maps to `static`; absent/`none` (implicit no-auth)
+ * carries no label. Cosmetic for the panel — all of these classify `no_oauth`.
+ */
+function deriveNonOauthAuthKind(server: McpServerCR): 'static' | undefined {
+  const authType = server.spec?.auth?.type
+  return authType === 'bearer' || authType === 'basic' || authType === 'apiKey'
+    ? 'static'
+    : undefined
+}
+
+/**
+ * Classify ONE server into the tri-state, given the authoritative grant-presence
+ * set (`grantPresent`, computed by `computeGrantPresence` — the SAME flavored
+ * key construction the rpc-proxy gate uses, D4). FAIL-CLOSED: a server that is
+ * not an OAuth connector (not `auth.type==='oauth'`, or no usable oauth id) is
+ * `no_oauth`, never `authorized`; an OAuth server absent from `grantPresent`
+ * (no grant OR a grant-read error, both swallowed fail-closed upstream) is
+ * `requires_setup`, never `authorized`.
+ */
+function classifyConnector(server: McpServerCR, grantPresent: ReadonlySet<string>): ConnectorEntry {
+  const name = String(server.metadata?.name)
+  // Gate on `auth.type==='oauth'` to stay aligned with `computeGrantPresence`,
+  // which only ever considers (and thus admits into `grantPresent`) oauth
+  // servers. A server carrying `spec.oauth` but a non-oauth auth type is NOT an
+  // oauth connector on this rail.
+  const resolved = server.spec?.auth?.type === 'oauth' ? resolveServerOAuth(server) : null
+  if (!resolved) {
+    return { name, status: 'no_oauth', authKind: deriveNonOauthAuthKind(server) }
+  }
+  // Provider is the non-secret panel label. Derive it directly from
+  // `spec.oauth.provider`, consistent with the oauth-ness gate above — NOT via
+  // `resolveServerOAuthSubject`, which additionally requires clientIdRef/
+  // clientSecretRef and would drop the label for an oauth server missing them.
+  const providerRaw = server.spec?.oauth?.provider
+  const provider =
+    typeof providerRaw === 'string' && providerRaw.length > 0 ? providerRaw : undefined
+  return {
+    name,
+    ...(provider ? { provider } : {}),
+    authKind: resolved.grantScope === 'context' ? 'oauth-context' : 'oauth-user',
+    grantScope: resolved.grantScope,
+    status: grantPresent.has(name) ? 'authorized' : 'requires_setup',
+  }
+}
+
+/**
+ * For each agent (Host), return its Host's contextRef and the CLASSIFIED
+ * connector fleet of its Context (spec 11 U1). This is the panel read-model: it
+ * CLASSIFIES the whole allowlist into `{authorized | requires_setup | no_oauth}`
+ * rather than FILTERING the un-granted ones out (which is what the rpc-proxy
+ * rail's `resolveInvocableMcpServersForContexts` does, and precisely what a
+ * panel must NOT do). `filterInvocable` is left untouched.
+ *
+ * Authorization model is identical to `resolveMcpServersForAgents`: agent access
+ * IS the gate. The caller MUST only pass `agentNames` the principal is
+ * authorized to use (e.g. from `getUserAgents`). `userId` is the authenticated
+ * session subject — it flows ONLY into the grant-presence key, never from a body.
+ *
+ * Returns valid, active entries in the same order as `agentNames`.
+ */
+export async function resolveConnectorsForAgents(
+  gateway: K8sGateway,
+  opts: {
+    mcpServersNamespace: string
+    hostsNamespace: string
+    agentNames: readonly string[]
+    userId: string
+  },
+  db: DbClient
+): Promise<AgentWithConnectors[]> {
+  const { mcpServersNamespace, hostsNamespace, agentNames, userId } = opts
+  if (agentNames.length === 0) return []
+
+  const resolvedHosts = await Promise.all(
+    agentNames.map(async requestedName => {
+      try {
+        const host = (await gateway.getResource('hosts', requestedName, hostsNamespace)) as HostCR
+        const directoryEntry = buildAgentDirectoryEntry(host, hostsNamespace)
+        if (!directoryEntry || directoryEntry.name !== requestedName) return null
+        return { host, directoryEntry }
+      } catch (error) {
+        if (isK8sResourceNotFound(error)) return null
+        // A non-404 failure says nothing about whether this already-authorized
+        // Host still exists — propagate rather than silently dropping the agent.
+        throw error
+      }
+    })
+  )
+
+  let serverList: McpServerCR[] = []
+  try {
+    serverList = asArray<McpServerCR>(await gateway.listResource('mcpservers', mcpServersNamespace))
+  } catch (err) {
+    // Degrade loudly: an mcpservers-list outage yields empty connector lists,
+    // distinguishable in logs from "this agent genuinely exposes no tools".
+    connectorsLog.error(
+      { err },
+      'mcpservers list failed; connectors served without catalog classification'
+    )
+  }
+
+  const byName = new Map<string, McpServerCR>()
+  for (const s of serverList) {
+    const n = s.metadata?.name
+    if (n) byName.set(n, s)
+  }
+
+  const visibleHosts = resolvedHosts.filter(
+    (item): item is { host: HostCR; directoryEntry: AgentDirectoryEntry } => item !== null
+  )
+
+  const scopedContextIds = new Set<string>()
+  for (const { host } of visibleHosts) {
+    const contextRef = host.spec?.contextRef
+    if (contextRef) scopedContextIds.add(contextRef)
+  }
+
+  let allowedByContext = new Map<string, Set<string>>()
+  if (scopedContextIds.size > 0) {
+    try {
+      allowedByContext = await loadAllowedNamesByContext(
+        gateway,
+        mcpServersNamespace,
+        scopedContextIds
+      )
+    } catch (err) {
+      // Preserve the authorized directory DTOs with empty connector lists —
+      // loudly, so a Context-read outage is distinguishable from "no tools".
+      connectorsLog.error(
+        { err },
+        'context allowlist load failed; connectors served with empty lists'
+      )
+    }
+  }
+
+  // Union of every allowlisted name across the visible agents' contexts, so the
+  // authoritative grant-presence check runs ONCE per unique oauth server.
+  const union = new Set<string>()
+  for (const names of allowedByContext.values()) {
+    for (const name of names) union.add(name)
+  }
+  const grantPresent = await computeGrantPresence(
+    db,
+    mcpServersNamespace,
+    userId,
+    serverList,
+    union
+  )
+
+  return visibleHosts.map(({ host, directoryEntry }) => {
+    const contextRef = host?.spec?.contextRef ?? null
+    if (!contextRef) {
+      return { ...directoryEntry, contextRef, connectors: [] }
+    }
+    const allowed = allowedByContext.get(contextRef)
+    if (!allowed || allowed.size === 0) {
+      return { ...directoryEntry, contextRef, connectors: [] }
+    }
+    const connectors: ConnectorEntry[] = []
+    for (const name of [...allowed].sort((a, b) => a.localeCompare(b))) {
+      const server = byName.get(name)
+      if (!server) continue // allowlisted name with no live McpServer CR
+      connectors.push(classifyConnector(server, grantPresent))
+    }
+    return { ...directoryEntry, contextRef, connectors }
   })
 }

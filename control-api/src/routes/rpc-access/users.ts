@@ -9,7 +9,10 @@ import {
   requireValidRpcAccessTokenAny,
 } from '../../middleware/rpcAccessAuth.js'
 import type { RpcAccessClaims } from '../../profileTypes.js'
-import { resolveInvocableMcpServersForContexts } from '../../services/access/mcpInvocable.js'
+import {
+  resolveConnectorsForAgents,
+  resolveInvocableMcpServersForContexts,
+} from '../../services/access/mcpInvocable.js'
 import {
   type RpcHostAccessDenialReason,
   type RpcHostAccessDirectory,
@@ -134,6 +137,35 @@ export function createRpcAccessUsersRouter(
           contextIds: userContexts.contextIds,
           servers,
         })
+      } catch (error) {
+        next(error)
+      }
+    }
+  )
+
+  // Proactive connectors panel read-model (spec 11 U1): the CLASSIFIED fleet
+  // per agent — `authorized` / `requires_setup` / `no_oauth`. Same gate as
+  // `/mcp-servers`; `req.params.userId` is authoritative (bound to the RPC
+  // token subject by `requireRpcTokenUserMatch()`) and flows only into the
+  // grant-presence key, never from a body. Agents derive from `getUserAgents`.
+  router.get(
+    '/rpc/access/users/:userId/mcp-connectors',
+    requireValidRpcAccessToken(),
+    requireRpcTokenUserMatch(),
+    async (req, res, next) => {
+      try {
+        const { agentNames } = await getUserAgents(req.params.userId)
+        const agents = await resolveConnectorsForAgents(
+          gateway,
+          {
+            mcpServersNamespace: config.mcpServersNamespace,
+            hostsNamespace: config.hostsNamespace,
+            agentNames,
+            userId: req.params.userId,
+          },
+          { query: (text, values) => pool.query(text, values) }
+        )
+        res.status(200).json({ userId: req.params.userId, agents })
       } catch (error) {
         next(error)
       }
