@@ -7,12 +7,8 @@ These provider-neutral rules apply only to:
 - `desktop-app/ui/**`
 
 They do not apply to `desktop-app/**` outside `ui/**` or to other repository
-services. Combine them with the provider-neutral guidance for the application
-being changed:
-
-- [`control-ui-rules.md`](./control-ui-rules.md)
-- [`profile-ui-rules.md`](./profile-ui-rules.md)
-- [`desktop-ui-rules.md`](./desktop-ui-rules.md)
+services. The applicable provider adapter also selects the provider-neutral
+application guidance that must be combined with this shared document.
 
 ## Preserve behavior
 
