@@ -195,7 +195,7 @@ export function serviceMatchesDesired(
   }
 }
 
-export function normalizeServiceForComparison(service: k8s.V1Service): unknown {
+function normalizeServiceForComparison(service: k8s.V1Service): unknown {
   const normalized = structuredClone(service)
   delete normalized.status
   delete normalized.metadata?.resourceVersion

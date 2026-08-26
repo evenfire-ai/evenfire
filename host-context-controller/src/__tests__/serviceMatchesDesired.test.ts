@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
 import { preserveServiceAssignedFields, serviceMatchesDesired } from '../utils'
+import { asApiserverService } from './asApiserverService'
 
 function desiredService(overrides: Partial<k8s.V1Service> = {}): k8s.V1Service {
   return {
@@ -28,34 +29,8 @@ function merged(desired: k8s.V1Service, existing: k8s.V1Service): k8s.V1Service 
 describe('serviceMatchesDesired', () => {
   it('CMP-1: server defaults and omitted targetPort=port compare equal', () => {
     const desired = desiredService()
-    const existing: k8s.V1Service = {
-      kind: 'Service',
-      apiVersion: 'v1',
-      spec: {
-        type: 'ClusterIP',
-        sessionAffinity: 'None',
-        internalTrafficPolicy: 'Cluster',
-        clusterIP: '10.96.14.7',
-        clusterIPs: ['10.96.14.7'],
-        ipFamilyPolicy: 'SingleStack',
-        ipFamilies: ['IPv4'],
-        selector: { app: 'svc' },
-        ports: [{ protocol: 'TCP', name: 'http', port: 8080, targetPort: 8080 }],
-      },
-      status: { loadBalancer: {} },
-      metadata: {
-        resourceVersion: '1776125',
-        uid: '11111111-2222-3333-4444-555555555555',
-        creationTimestamp: new Date('2026-04-01T00:00:00.000Z'),
-        generation: 1,
-        managedFields: [{ manager: 'kube-apiserver', operation: 'Update' }],
-        selfLink: '/api/v1/namespaces/ns/services/svc',
-        name: 'svc',
-        namespace: 'ns',
-        labels: { app: 'svc' },
-      },
-    }
-
+    const existing = asApiserverService(desired)
+    expect(existing.spec?.ports?.[0]?.targetPort).toBe(8080)
     expect(serviceMatchesDesired(merged(desired, existing), existing)).toBe(true)
   })
 
@@ -119,5 +94,12 @@ describe('serviceMatchesDesired', () => {
     const desired = desiredService()
     expect(serviceMatchesDesired(desired, { metadata: { name: 'svc' } })).toBe(false)
     expect(serviceMatchesDesired(desired, undefined as unknown as k8s.V1Service)).toBe(false)
+  })
+
+  it('CMP-6: a well-formed Service is equal to itself', () => {
+    const desired = desiredService()
+    const existing = asApiserverService(desired)
+    expect(serviceMatchesDesired(desired, desired)).toBe(true)
+    expect(serviceMatchesDesired(existing, existing)).toBe(true)
   })
 })

@@ -15,6 +15,7 @@ import {
 } from '../../test/__fixtures__/testMocks'
 import { HostReconciler } from '../hostReconciler'
 import type { HostCRD } from '../types'
+import { asApiserverService, updatedServiceLogs } from './asApiserverService'
 
 function makeStubKc(): k8s.KubeConfig {
   const stub = new Proxy({}, { get: () => vi.fn() })
@@ -32,49 +33,6 @@ function makeHost(): HostCRD {
       secretRef: 'secret',
     },
   }
-}
-
-function asApiserverService(desired: k8s.V1Service, drift?: { port?: number }): k8s.V1Service {
-  const ports = (desired.spec?.ports ?? []).map(port => ({
-    protocol: 'TCP' as const,
-    name: port.name,
-    port: drift?.port ?? port.port,
-    targetPort: port.targetPort,
-  }))
-  return {
-    spec: {
-      clusterIP: '10.96.20.4',
-      clusterIPs: ['10.96.20.4'],
-      type: 'ClusterIP',
-      sessionAffinity: 'None',
-      internalTrafficPolicy: 'Cluster',
-      ipFamilyPolicy: 'SingleStack',
-      ipFamilies: ['IPv4'],
-      selector: desired.spec?.selector,
-      ports,
-    },
-    status: { loadBalancer: {} },
-    apiVersion: 'v1',
-    kind: 'Service',
-    metadata: {
-      resourceVersion: '1783416',
-      uid: '22222222-3333-4444-5555-666666666666',
-      creationTimestamp: new Date('2026-04-01T00:00:00.000Z'),
-      generation: 1,
-      managedFields: [{ manager: 'kube-apiserver', operation: 'Update' }],
-      selfLink: '/api/v1/namespaces/channels/services/channel-reader-chatllm',
-      name: desired.metadata?.name,
-      namespace: desired.metadata?.namespace,
-      labels: desired.metadata?.labels,
-      annotations: { 'kubectl.kubernetes.io/last-applied-configuration': '{}' },
-    },
-  }
-}
-
-function updatedServiceLogs(log: ReturnType<typeof vi.spyOn>, needle: string): string[] {
-  return log.mock.calls
-    .map((call: unknown[]) => String(call[0]))
-    .filter((line: string) => line.includes('Updated') && line.includes(needle))
 }
 
 describe('channel-reader Service no-op gate', () => {

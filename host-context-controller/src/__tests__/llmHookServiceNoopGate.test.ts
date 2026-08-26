@@ -14,6 +14,7 @@ import {
 import { config } from '../config'
 import { LlmHookReconciler, computePodKey } from '../llmHookReconciler'
 import type { HostCRD, LlmHookCRD } from '../types'
+import { asApiserverService, updatedServiceLogs } from './asApiserverService'
 
 const IMG = 'registry.example.com/hook@sha256:' + 'a'.repeat(64)
 
@@ -28,48 +29,6 @@ function makeHook(): LlmHookCRD {
       lifecyclePoints: ['preCall'],
     },
   }
-}
-
-function asApiserverService(desired: k8s.V1Service, drift?: { port?: number }): k8s.V1Service {
-  const ports = (desired.spec?.ports ?? []).map(port => ({
-    protocol: 'TCP' as const,
-    name: port.name,
-    port: drift?.port ?? port.port,
-    targetPort: port.targetPort,
-  }))
-  return {
-    spec: {
-      clusterIP: '10.96.40.2',
-      clusterIPs: ['10.96.40.2'],
-      type: 'ClusterIP',
-      sessionAffinity: 'None',
-      internalTrafficPolicy: 'Cluster',
-      ipFamilyPolicy: 'SingleStack',
-      ipFamilies: ['IPv4'],
-      selector: desired.spec?.selector,
-      ports,
-    },
-    status: { loadBalancer: {} },
-    apiVersion: 'v1',
-    kind: 'Service',
-    metadata: {
-      resourceVersion: '4',
-      uid: '44444444-5555-6666-7777-888888888888',
-      creationTimestamp: new Date('2026-04-01T00:00:00.000Z'),
-      generation: 1,
-      managedFields: [{ manager: 'kube-apiserver', operation: 'Update' }],
-      name: desired.metadata?.name,
-      namespace: desired.metadata?.namespace,
-      labels: desired.metadata?.labels,
-      annotations: { 'kubectl.kubernetes.io/last-applied-configuration': '{}' },
-    },
-  }
-}
-
-function updatedServiceLogs(log: ReturnType<typeof vi.spyOn>, needle: string): string[] {
-  return log.mock.calls
-    .map((call: unknown[]) => String(call[0]))
-    .filter((line: string) => line.includes('Updated') && line.includes(needle))
 }
 
 describe('LlmHook ensureService no-op gate', () => {
