@@ -266,6 +266,69 @@ describe('HookInstallForm — step navigation', () => {
   })
 })
 
+describe('HookInstallForm — a degraded grant is visible without hunting for it', () => {
+  it('opens Advanced details when the grant falls short of the declaration', async () => {
+    // Whether the grant falls short is only knowable once the agent's ceiling
+    // has loaded, so this cannot be a static default.
+    vi.mocked(api.getHosts).mockResolvedValue({ items: [host('agent-a', null)] } as never)
+    render(
+      <HookInstallForm
+        entry={entryWith({ requiredCapabilities: ['may_deny'] })}
+        onCancel={noop}
+        onInstalled={noop}
+      />
+    )
+    const toggle = await screen.findByRole('button', { name: /advanced details/i })
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-expanded', 'true'))
+    expect(screen.getByText(/needs may_deny to function/i)).toBeInTheDocument()
+  })
+
+  it('stays closed when the install gets everything the author asked for', async () => {
+    render(
+      <HookInstallForm
+        entry={entryWith({ requiredCapabilities: ['may_rewrite'] })}
+        onCancel={noop}
+        onInstalled={noop}
+      />
+    )
+    const toggle = await screen.findByRole('button', { name: /advanced details/i })
+    await waitFor(() => expect(screen.getByRole('button', { name: /continue/i })).toBeEnabled())
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('does not reopen itself after the operator closes it', async () => {
+    vi.mocked(api.getHosts).mockResolvedValue({ items: [host('agent-a', null)] } as never)
+    render(
+      <HookInstallForm
+        entry={entryWith({ requiredCapabilities: ['may_deny'] })}
+        onCancel={noop}
+        onInstalled={noop}
+      />
+    )
+    const toggle = await screen.findByRole('button', { name: /advanced details/i })
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-expanded', 'true'))
+    fireEvent.click(toggle)
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-expanded', 'false'))
+    expect(screen.queryByText(/needs may_deny to function/i)).toBeNull()
+  })
+
+  it('names the dropped capabilities in the review step', async () => {
+    // The review is the last thing before Install; stating only what was
+    // granted let a silently degraded install through unremarked.
+    vi.mocked(api.getHosts).mockResolvedValue({ items: [host('agent-a', null)] } as never)
+    render(
+      <HookInstallForm
+        entry={entryWith({ requiredCapabilities: ['may_deny'] })}
+        onCancel={noop}
+        onInstalled={noop}
+      />
+    )
+    fireEvent.click(await screen.findByRole('button', { name: /continue/i }))
+    expect(await screen.findByText(/will be installed on agent/i)).toBeInTheDocument()
+    expect(screen.getByText(/needs may_deny to function/i)).toBeInTheDocument()
+  })
+})
+
 describe('HookInstallForm — ungranted-capability warning', () => {
   // `enforceCapabilities` neutralizes deny/rewrite/substitute and nothing else,
   // so the "actions are discarded" warning must not be shown for a capability

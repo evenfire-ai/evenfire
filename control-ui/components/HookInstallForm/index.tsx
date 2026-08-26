@@ -66,6 +66,38 @@ function describeHookInstallError(err: unknown): string {
   return reason ? `${message} (${reason})` : message
 }
 
+/**
+ * What the author declared and the install will not get. Rendered at step 0,
+ * where the operator can still act on it, and again in the review, which is the
+ * last thing they see before Install.
+ */
+function DegradedGrantNotices({
+  enforced,
+  unenforced,
+}: {
+  enforced: HookCapability[]
+  unenforced: HookCapability[]
+}) {
+  return (
+    <>
+      {enforced.length > 0 ? (
+        <div className="cu-banner cu-banner--warning">
+          This hook needs {enforced.join(', ')} to function. Without{' '}
+          {enforced.length > 1 ? 'them' : 'it'}, it installs and reports Ready, but the actions it
+          takes are discarded.
+        </div>
+      ) : null}
+      {unenforced.length > 0 ? (
+        <div className="cu-banner cu-banner--info">
+          {enforced.length > 0 ? 'The author also lists' : 'The author lists'}{' '}
+          {unenforced.join(', ')}, which the runtime does not enforce today: the hook behaves the
+          same whether or not {unenforced.length > 1 ? 'they are' : 'it is'} granted.
+        </div>
+      ) : null}
+    </>
+  )
+}
+
 export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFormProps) {
   const { showToast } = useToast()
   const [step, setStep] = useState(0)
@@ -123,6 +155,7 @@ export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFor
     setError('')
     setCredValues({})
     setAdvancedOpen(false)
+    autoOpenedRef.current = false
     // Seed from the author's declaration so the default install is the working
     // one. The ceiling effect below narrows this once an agent is selected, and
     // the operator can still untick anything.
@@ -198,6 +231,21 @@ export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFor
   // nothing about how it runs today.
   const missingEnforced = missingDeclared.filter(c => ENFORCED_HOOK_CAPABILITIES.includes(c))
   const missingUnenforced = missingDeclared.filter(c => !ENFORCED_HOOK_CAPABILITIES.includes(c))
+
+  // The capability grant lives behind a disclosure that ships closed, so an
+  // operator can reach Install having never seen it. Open it the first time the
+  // grant falls short of what the author declared — which is only knowable once
+  // the agent's ceiling has loaded, so it cannot be a static default. Once per
+  // entry: an operator who closes it again has answered the question.
+  //
+  // Not while loading: the seed is applied by an effect, so the first render
+  // sees an empty selection and every declared capability as missing.
+  const autoOpenedRef = useRef(false)
+  useEffect(() => {
+    if (loading || missingDeclared.length === 0 || autoOpenedRef.current) return
+    autoOpenedRef.current = true
+    setAdvancedOpen(true)
+  }, [loading, missingDeclared])
 
   // may_deny ⇒ fail-closed, matching the backend deny_requires_fail_closed rule.
   const mustFailClosed = capabilities.has('may_deny')
@@ -453,21 +501,15 @@ export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFor
                       />
                     )
                   })}
-                  {missingEnforced.length > 0 ? (
-                    <div className="cu-banner cu-banner--warning" role="status">
-                      This hook needs {missingEnforced.join(', ')} to function. Without{' '}
-                      {missingEnforced.length > 1 ? 'them' : 'it'}, it installs and reports Ready,
-                      but the actions it takes are discarded.
-                    </div>
-                  ) : null}
-                  {missingUnenforced.length > 0 ? (
-                    <div className="cu-banner cu-banner--info">
-                      {missingEnforced.length > 0 ? 'The author also lists' : 'The author lists'}{' '}
-                      {missingUnenforced.join(', ')}, which the runtime does not enforce today: the
-                      hook behaves the same whether or not{' '}
-                      {missingUnenforced.length > 1 ? 'they are' : 'it is'} granted.
-                    </div>
-                  ) : null}
+                  {/* Always mounted, so ticking a box announces the change. A
+                      live region added to the DOM already populated announces
+                      nothing. */}
+                  <div role="status">
+                    <DegradedGrantNotices
+                      enforced={missingEnforced}
+                      unenforced={missingUnenforced}
+                    />
+                  </div>
                 </fieldset>
 
                 <Field
@@ -515,15 +557,18 @@ export function HookInstallForm({ entry, onCancel, onInstalled }: HookInstallFor
           ) : null}
 
           {step === 1 ? (
-            <div className="cu-agent-review">
-              Guardrail hook <b>{entry.name}</b> v{entry.version} will be installed on agent{' '}
-              <b>{hostRef || '-'}</b> with{' '}
-              <b>
-                {capabilities.size > 0 ? [...capabilities].join(', ') : 'no extra capabilities'}
-              </b>
-              , order <b>{order.trim() === '' ? DEFAULT_HOOK_ORDER : order}</b>, fail mode{' '}
-              <b>{effectiveFailMode}</b>.
-            </div>
+            <>
+              <div className="cu-agent-review">
+                Guardrail hook <b>{entry.name}</b> v{entry.version} will be installed on agent{' '}
+                <b>{hostRef || '-'}</b> with{' '}
+                <b>
+                  {capabilities.size > 0 ? [...capabilities].join(', ') : 'no extra capabilities'}
+                </b>
+                , order <b>{order.trim() === '' ? DEFAULT_HOOK_ORDER : order}</b>, fail mode{' '}
+                <b>{effectiveFailMode}</b>.
+              </div>
+              <DegradedGrantNotices enforced={missingEnforced} unenforced={missingUnenforced} />
+            </>
           ) : null}
 
           {error ? (
