@@ -1233,6 +1233,7 @@ t2_prior_targeted_health_pending() {
     EXPECTED_GATE_ID="$T2_GATE_ID" python3 - <<'PY'
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 root = Path(os.environ["CERTIFICATION_ROOT"])
@@ -1245,22 +1246,68 @@ expected = {
     "context": os.environ["EXPECTED_CONTEXT"],
     "gateId": os.environ["EXPECTED_GATE_ID"],
 }
-candidates = []
+events = []
+unorderable_open = False
+
+
+def parse_timestamp(value):
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
 for candidate in root.glob("*/evidence.json"):
     try:
         data = json.loads(candidate.read_text())
-        stamp = candidate.stat().st_mtime_ns
     except (OSError, ValueError):
         continue
     if data.get("certificationVersion") != 1 or data.get("evidenceKind") != "certification":
         continue
-    if all(data.get(key, "") == value for key, value in expected.items()):
-        candidates.append((stamp, str(candidate), data))
-if not candidates:
-    print("false")
+    if not all(data.get(key, "") == value for key, value in expected.items()):
+        continue
+
+    phases = data.get("phases", [])
+    if not isinstance(phases, list):
+        phases = []
+    for index, phase in enumerate(phases):
+        if not isinstance(phase, dict):
+            continue
+        stamp = parse_timestamp(phase.get("timestamp"))
+        is_health_pass = phase.get("name") == "Health" and phase.get("status") == "PASS"
+        if not is_health_pass:
+            continue
+        if stamp is None:
+            continue
+        events.append((stamp, 0, str(candidate), index, "close"))
+
+    if data.get("targetedHealthPending") is True:
+        # The top-level bit is the structured fail-closed state snapshot. Its
+        # write happened with the final appended phase, so that phase
+        # timestamps the outstanding obligation without trusting mutable
+        # filesystem mtimes.
+        final_stamp = None
+        if phases and isinstance(phases[-1], dict):
+            final_stamp = parse_timestamp(phases[-1].get("timestamp"))
+        if final_stamp is None:
+            unorderable_open = True
+        else:
+            # At an identical timestamp, the open has higher priority than a
+            # close so an ambiguous ordering remains fail-closed.
+            events.append((final_stamp, 1, str(candidate), len(phases), "open"))
+
+if unorderable_open:
+    print("true")
 else:
-    _, _, latest = max(candidates)
-    print("true" if latest.get("targetedHealthPending") is True else "false")
+    pending = False
+    for _, _, _, _, kind in sorted(events):
+        pending = kind == "open"
+    print("true" if pending else "false")
 PY
   )" || return 1
   printf '%s' "$pending"
