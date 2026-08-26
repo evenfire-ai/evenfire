@@ -8,6 +8,7 @@
  *   - the rpc-proxy grant-presence gate (`services/access/mcpInvocable.ts`).
  * Both read the SAME fields the SAME way, so the rule lives here once.
  */
+import type { GetOAuthGrantInput } from './store.js'
 
 export interface McpServerOAuthDecl {
   id?: unknown
@@ -54,6 +55,55 @@ export function resolveServerOAuth(server: McpServerOAuthSpecInput): ResolvedSer
       ? server.spec.contextRef
       : undefined
   return { oauthClientId: oauth.id, grantScope, contextRef }
+}
+
+/**
+ * Build the `oauth_grants` key for an OAuth mcp-server, BY FLAVOR — the single
+ * construction shared by every seam that touches a server's grant row (D4/F2):
+ *   - the rpc-proxy grant-presence gate (`computeGrantPresence`) — read;
+ *   - the end-user disconnect endpoint (`internal/oauth.ts`) — delete.
+ * Keeping the key derivation here (next to `resolveServerOAuth`) means the two
+ * never drift, and a `grantScope` we don't recognize fails closed in ONE place.
+ *
+ * - `user`    → per-user key `(mcpserver, ns, server, userId, oauthClientId)`.
+ * - `context` → shared key `(mcpserver, ns, server, contextRef, oauthClientId)`,
+ *   `user_id NULL`; the `contextId` is the server's AUTHORITATIVE `spec.contextRef`
+ *   (resolved server-side), NEVER a caller-supplied value.
+ *
+ * Returns null (fail-closed) when the key cannot be built:
+ *   - a `context`-scope server without a `contextRef`, or
+ *   - an unrecognized `grantScope`.
+ * A null return must be treated as "cannot act on this grant" — never as a
+ * broad/blind delete.
+ */
+export function buildMcpServerGrantKey(
+  resolved: Pick<ResolvedServerOAuth, 'grantScope' | 'oauthClientId' | 'contextRef'>,
+  coords: { namespace: string; serverName: string; userId: string }
+): GetOAuthGrantInput | null {
+  if (resolved.grantScope === 'user') {
+    return {
+      grantKind: 'user',
+      ownerKind: 'mcpserver',
+      recipeNamespace: coords.namespace,
+      recipeName: coords.serverName,
+      userId: coords.userId,
+      oauthClientId: resolved.oauthClientId,
+    }
+  }
+  if (resolved.grantScope === 'context') {
+    // fail-closed: a context-identity server MUST carry its authoritative Context.
+    if (!resolved.contextRef) return null
+    return {
+      grantKind: 'shared',
+      ownerKind: 'mcpserver',
+      recipeNamespace: coords.namespace,
+      recipeName: coords.serverName,
+      contextId: resolved.contextRef,
+      oauthClientId: resolved.oauthClientId,
+    }
+  }
+  // Unknown grantScope → fail-closed.
+  return null
 }
 
 /**

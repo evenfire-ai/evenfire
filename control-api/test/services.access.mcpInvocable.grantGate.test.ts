@@ -18,6 +18,17 @@ vi.mock('../src/oauth/store.js', async importActual => {
   }
 })
 
+// The resolver logs the fail-closed exclusion through the pino child logger
+// (`rootLogger.child({ module: 'mcp-connectors' })`), not console.*. Capture the
+// child's `.error` so the fail-closed-logging assertion survives the migration.
+const loggerMock = vi.hoisted(() => {
+  const error = vi.fn()
+  const noop = vi.fn()
+  const child = () => ({ error, info: noop, warn: noop, debug: noop, trace: noop, fatal: noop })
+  return { error, rootLogger: { child, error, info: noop, warn: noop, debug: noop } }
+})
+vi.mock('../src/observability/logger.js', () => ({ rootLogger: loggerMock.rootLogger }))
+
 const { resolveInvocableMcpServersForContexts } =
   await import('../src/services/access/mcpInvocable.js')
 
@@ -248,12 +259,12 @@ describe('resolveInvocableMcpServersForContexts — fail-closed + non-oauth', ()
       if (input.recipeName === 'broken') throw new Error('db down')
       return true // 'good'
     })
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    loggerMock.error.mockClear()
 
     const out = await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB)
     // 'broken' excluded (fail-closed), 'plain' (none) + 'good' survive. Sorted.
     expect(names(out)).toEqual(['good', 'plain'])
-    expect(errSpy).toHaveBeenCalled()
-    errSpy.mockRestore()
+    // Fail-closed exclusion is logged through the pino child logger (not console).
+    expect(loggerMock.error).toHaveBeenCalled()
   })
 })

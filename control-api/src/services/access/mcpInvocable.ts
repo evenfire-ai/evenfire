@@ -26,7 +26,11 @@
  */
 import type { DbClient } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
-import { type GrantScope, resolveServerOAuth } from '../../oauth/mcpServerOAuthSpec.js'
+import {
+  type GrantScope,
+  buildMcpServerGrantKey,
+  resolveServerOAuth,
+} from '../../oauth/mcpServerOAuthSpec.js'
 import { oauthGrantExists } from '../../oauth/store.js'
 import { rootLogger } from '../../observability/logger.js'
 import {
@@ -262,41 +266,29 @@ async function computeGrantPresence(
     const resolved = resolveServerOAuth(s)
     if (!resolved) continue // fail-closed: no usable oauth id
 
+    // Flavored grant key — the SAME construction the disconnect endpoint deletes
+    // by (D4/F2). null ⇒ fail-closed (context server without contextRef, or an
+    // unknown grantScope): the server is simply not added to the present set.
+    // The shared-identity `context` branch is keyed by the server's AUTHORITATIVE
+    // Context (`spec.contextRef`), decoupled from the caller's userId
+    // (mini-spec 04 §2 3b); exercised end-to-end by U6(api).
+    const key = buildMcpServerGrantKey(resolved, {
+      namespace: mcpServersNamespace,
+      serverName: name,
+      userId: callerUserId,
+    })
+    if (!key) continue
+
     try {
-      let exists = false
-      if (resolved.grantScope === 'user') {
-        exists = await oauthGrantExists(db, {
-          grantKind: 'user',
-          ownerKind: 'mcpserver',
-          recipeNamespace: mcpServersNamespace,
-          recipeName: name,
-          userId: callerUserId,
-          oauthClientId: resolved.oauthClientId,
-        })
-      } else if (resolved.grantScope === 'context') {
-        // Shared identity is keyed by the server's AUTHORITATIVE Context
-        // (`spec.contextRef`), DECOUPLED from the caller's userId (mini-spec 04
-        // §2 3b). Exercised end-to-end by U6(api).
-        if (!resolved.contextRef) continue // fail-closed: context server without contextRef
-        exists = await oauthGrantExists(db, {
-          grantKind: 'shared',
-          ownerKind: 'mcpserver',
-          recipeNamespace: mcpServersNamespace,
-          recipeName: name,
-          contextId: resolved.contextRef,
-          oauthClientId: resolved.oauthClientId,
-        })
-      }
-      // Any other grantScope is unknown → fail-closed (exists stays false).
+      const exists = await oauthGrantExists(db, key)
       if (exists) present.add(name)
     } catch (err) {
       // A grant-check DB error excludes THIS server (fail-closed) rather than
       // failing the whole request — loudly, matching the sibling resolver's
       // observable-degradation posture (`resolveMcpServersForAgents`).
-      console.error(
-        '[mcpInvocable] grant-presence check failed; server excluded from rpc-proxy rail:',
-        name,
-        err instanceof Error ? err.message : String(err)
+      connectorsLog.error(
+        { err, server: name },
+        'grant-presence check failed; server excluded from rpc-proxy rail'
       )
     }
   }

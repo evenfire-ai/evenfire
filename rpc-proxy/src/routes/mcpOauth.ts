@@ -116,5 +116,88 @@ export function createMcpOauthRouter(): Router {
     }
   )
 
+  // ── DELETE /api/v1/mcp-oauth/:mcpServerName/grant ─────────────────────────
+  //
+  // Desktop "Disconnect <server>" surface (spec 11 U4). Revokes the caller's
+  // OAuth grant for an mcp-server. Same auth chain as the authorize-URL mint:
+  //   1. `requireRpcAuth` — RPC JWT.
+  //   2. `requireScope('mcp:server:invoke')` — the SAME capability the desktop
+  //      already holds to connect/invoke; revoking is the inverse of connecting,
+  //      so no new scope is issued.
+  //
+  // rpc-proxy forwards IDENTITY only. control-api owns server→context
+  // resolution and the per-flavor authorization (user: own grant; context:
+  // Context membership) — this route never resolves a server's Context. The
+  // `userId` is `req.auth.sub`, never the body. An optional `{ contextId? }` is
+  // forwarded for control-api to cross-check against the server's authoritative
+  // `spec.contextRef`.
+  //
+  // Error propagation mirrors the authorize-URL route exactly:
+  //   - 401 → rpc-proxy↔control-api service-token misconfig → coerce to 502 so
+  //     the user does not read it as their own credential failure;
+  //   - 403 → legitimate `context_membership_denied` → propagate verbatim;
+  //   - 404 (`server_not_found`) / 400 (`not_oauth_server`, `context_mismatch`,
+  //     `server_missing_context`, `invalid_request`) → propagate verbatim;
+  //   - 204 → success (idempotent; empty body).
+  router.delete(
+    '/mcp-oauth/:mcpServerName/grant',
+    requireRpcAuth,
+    requireScope('mcp:server:invoke'),
+    async (req: AuthedRequest, res: Response) => {
+      const { mcpServerName } = req.params
+      if (!isValidK8sName(mcpServerName)) {
+        res.status(400).json({ error: 'invalid_request' })
+        return
+      }
+      const userId = req.auth!.sub
+      const contextId =
+        typeof req.body?.contextId === 'string' && req.body.contextId.trim().length > 0
+          ? String(req.body.contextId).trim()
+          : undefined
+
+      const upstreamUrl = `${config.controlApiBaseUrl.replace(/\/+$/, '')}/internal/mcp-oauth/grant`
+      let upstream: globalThis.Response
+      try {
+        upstream = await fetch(upstreamUrl, {
+          method: 'DELETE',
+          headers: {
+            authorization: `Bearer ${config.controlApiServiceToken}`,
+            'x-service-token': config.controlApiServiceName,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            mcpServerName,
+            userId, // from req.auth.sub — never the body
+            ...(contextId ? { contextId } : {}),
+          }),
+          signal: AbortSignal.timeout(config.upstreamTimeoutMs),
+        })
+      } catch {
+        res.status(502).json({ error: 'control_api_unreachable' })
+        return
+      }
+
+      // 401 = service-token misconfig — do NOT surface as the user's own auth
+      // failure. 403 IS a legitimate membership denial → propagate.
+      if (upstream.status === 401) {
+        res.status(502).json({ error: 'control_api_auth_failed' })
+        return
+      }
+
+      // Success: control-api answers 204 (no body). Forward it verbatim.
+      if (upstream.ok) {
+        res.status(upstream.status).end()
+        return
+      }
+
+      // Forward the upstream JSON error verbatim.
+      const upstreamText = await upstream.text().catch(() => '')
+      res
+        .status(upstream.status)
+        .type(upstream.headers.get('content-type') ?? 'application/json')
+        .send(upstreamText)
+    }
+  )
+
   return router
 }
