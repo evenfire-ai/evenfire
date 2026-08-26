@@ -49,8 +49,16 @@ export function IconTeams(props: IconProps) {
 
 export function IconContexts(props: IconProps) {
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
-      <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
+    <svg
+      stroke="currentColor"
+      fill="currentColor"
+      strokeWidth="0"
+      viewBox="0 0 512 512"
+      aria-hidden="true"
+      data-solid="true"
+      {...props}
+    >
+      <path d="M464 128H272l-64-64H48C21.49 64 0 85.49 0 112v288c0 26.51 21.49 48 48 48h416c26.51 0 48-21.49 48-48V176c0-26.51-21.49-48-48-48z" />
     </svg>
   )
 }
@@ -73,11 +81,21 @@ export function IconAttachFile(props: IconProps) {
   )
 }
 
+// Copy to clipboard — Material content-copy glyph. Used by the GFS image and
+// text/markdown preview modals.
 export function IconCopy(props: IconProps) {
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
-      <rect width="14" height="14" x="8" y="8" rx="2" />
-      <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      stroke="currentColor"
+      strokeWidth="0"
+      aria-hidden="true"
+      data-solid="true"
+      {...props}
+    >
+      <path fill="none" d="M0 0h24v24H0z" />
+      <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2m0 16H8V7h11z" />
     </svg>
   )
 }
@@ -309,6 +327,86 @@ export function IconThemeMoon(props: IconProps) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
       <path d="M12 3a7.5 7.5 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+    </svg>
+  )
+}
+
+export function IconEye(props: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 512 512"
+      aria-hidden="true"
+      fill="currentColor"
+      stroke="currentColor"
+      strokeWidth="0"
+      {...props}
+    >
+      <circle cx="256" cy="256" r="64" />
+      <path d="M394.82 141.18C351.1 111.2 304.31 96 255.76 96c-43.69 0-86.28 13-126.59 38.48C88.52 160.23 48.67 207 16 256c26.42 44 62.56 89.24 100.2 115.18C159.38 400.92 206.33 416 255.76 416c49 0 95.85-15.07 139.3-44.79C433.31 345 469.71 299.82 496 256c-26.38-43.43-62.9-88.56-101.18-114.82M256 352a96 96 0 1 1 96-96 96.11 96.11 0 0 1-96 96" />
+    </svg>
+  )
+}
+
+export function IconImage(props: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      fill="currentColor"
+      stroke="currentColor"
+      strokeWidth="0"
+      data-solid="true"
+      {...props}
+    >
+      <g>
+        <path d="M18.435,3.06H5.565a2.5,2.5,0,0,0-2.5,2.5V18.44a2.507,2.507,0,0,0,2.5,2.5h12.87a2.507,2.507,0,0,0,2.5-2.5V5.56A2.5,2.5,0,0,0,18.435,3.06ZM4.065,5.56a1.5,1.5,0,0,1,1.5-1.5h12.87a1.5,1.5,0,0,1,1.5,1.5v8.66l-3.88-3.88a1.509,1.509,0,0,0-2.12,0l-4.56,4.57a.513.513,0,0,1-.71,0l-.56-.56a1.522,1.522,0,0,0-2.12,0l-1.92,1.92Zm15.87,12.88a1.5,1.5,0,0,1-1.5,1.5H5.565a1.5,1.5,0,0,1-1.5-1.5v-.75L6.7,15.06a.5.5,0,0,1,.35-.14.524.524,0,0,1,.36.14l.55.56a1.509,1.509,0,0,0,2.12,0l4.57-4.57a.5.5,0,0,1,.71,0l4.58,4.58Z" />
+        <path d="M8.062,10.565a2.5,2.5,0,1,1,2.5-2.5A2.5,2.5,0,0,1,8.062,10.565Zm0-4a1.5,1.5,0,1,0,1.5,1.5A1.5,1.5,0,0,0,8.062,6.565Z" />
+      </g>
+    </svg>
+  )
+}
+
+export function IconVideo(props: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      fill="currentColor"
+      stroke="currentColor"
+      strokeWidth="0"
+      data-solid="true"
+      {...props}
+    >
+      <path d="M0 4.75C0 3.784.784 3 1.75 3h20.5c.966 0 1.75.784 1.75 1.75v14.5A1.75 1.75 0 0 1 22.25 21H1.75A1.75 1.75 0 0 1 0 19.25Zm1.75-.25a.25.25 0 0 0-.25.25v14.5c0 .138.112.25.25.25h20.5a.25.25 0 0 0 .25-.25V4.75a.25.25 0 0 0-.25-.25Z" />
+      <path d="M9 15.584V8.416a.5.5 0 0 1 .77-.42l5.576 3.583a.5.5 0 0 1 0 .842L9.77 16.005a.5.5 0 0 1-.77-.42Z" />
+    </svg>
+  )
+}
+
+// Document file glyph for doc/docx/pdf/md/txt resources in GFS listings.
+export function IconDocumentText(props: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 512 512"
+      aria-hidden="true"
+      fill="currentColor"
+      stroke="currentColor"
+      strokeWidth="0"
+      {...props}
+    >
+      <path
+        fill="none"
+        strokeLinejoin="round"
+        strokeWidth="32"
+        d="M416 221.25V416a48 48 0 0 1-48 48H144a48 48 0 0 1-48-48V96a48 48 0 0 1 48-48h98.75a32 32 0 0 1 22.62 9.37l141.26 141.26a32 32 0 0 1 9.37 22.62z"
+      />
+      <path
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="32"
+        d="M256 56v120a32 32 0 0 0 32 32h120m-232 80h160m-160 80h160"
+      />
     </svg>
   )
 }

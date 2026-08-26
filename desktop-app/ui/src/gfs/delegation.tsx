@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button, StatusBanner } from '@components/Common'
 import { describeGfsGrantError } from '@lib/gfsGrantErrors'
 import { GfsPermissionDropdown } from '@/gfs/GfsPermissionDropdown'
@@ -39,6 +39,7 @@ export function GfsDelegationPanel({
   isDirectory,
   onGrant,
   onCreateShare,
+  onCreateShareActionChange,
 }: GfsDelegationPanelProps) {
   const [subjectKeys, setSubjectKeys] = useState<string[]>([])
   const [bits, setBits] = useState<string[]>(() =>
@@ -47,16 +48,7 @@ export function GfsDelegationPanel({
   const [inherit, setInherit] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  // A Leader without manage_acl (canDelegate=false) sees no controls.
-  if (!affordances.canDelegate) {
-    return (
-      <div className="da-gfs-delegation__empty" role="note">
-        <strong>Read-only access</strong>
-        <span>You do not have delegation rights on this folder.</span>
-      </div>
-    )
-  }
+  const createShareActionRef = useRef<() => void>(() => undefined)
 
   const grantableBits = affordances.grantableBits
   const hasHost = subjectKeys.some(key => key.startsWith(HOST_SUBJECT_KEY_PREFIX))
@@ -66,6 +58,11 @@ export function GfsDelegationPanel({
   const visiblePermissionBits = hasHost
     ? HOST_PERMISSION_BITS.filter(bit => grantableBits.includes(bit))
     : grantableBits
+  const canCreateShare =
+    Boolean(onCreateShare && affordances.canCreateShare) &&
+    !busy &&
+    !hasHost &&
+    subjectKeys.length > 0
 
   function changeSubjects(nextKeys: string[]) {
     setSubjectKeys(nextKeys)
@@ -96,6 +93,27 @@ export function GfsDelegationPanel({
     }
   }
 
+  createShareActionRef.current = () => {
+    if (!onCreateShare || !canCreateShare) return
+    void run(() => onCreateShare(subjectKeys))
+  }
+
+  useEffect(() => {
+    if (!onCreateShareActionChange) return
+    onCreateShareActionChange(() => createShareActionRef.current(), !canCreateShare)
+    return () => onCreateShareActionChange(null, true)
+  }, [canCreateShare, onCreateShareActionChange])
+
+  // A Leader without manage_acl (canDelegate=false) sees no controls.
+  if (!affordances.canDelegate) {
+    return (
+      <div className="da-gfs-delegation__empty" role="note">
+        <strong>Read-only access</strong>
+        <span>You do not have delegation rights on this folder.</span>
+      </div>
+    )
+  }
+
   return (
     <div className="da-gfs-delegation">
       <div className="da-gfs-delegation__composer">
@@ -118,37 +136,29 @@ export function GfsDelegationPanel({
           Agent selections are limited to read and write. Incompatible permissions were removed.
         </p>
       ) : null}
-      {isDirectory ? (
-        <label className="da-gfs-delegation__inherit">
-          <input
-            checked={inherit}
-            disabled={busy}
-            onChange={event => setInherit(event.target.checked)}
-            type="checkbox"
-          />
-          <span>Include contents of this folder</span>
-        </label>
-      ) : null}
       {subjectOptionsError ? <StatusBanner tone="error" text={subjectOptionsError} /> : null}
-      <div className="da-gfs-delegation__actions">
-        <Button
-          type="button"
-          loading={busy}
-          disabled={busy || subjectKeys.length === 0 || bits.length === 0}
-          onClick={() => run(() => onGrant(subjectKeys, bits, isDirectory ? inherit : false))}
-        >
-          Grant access
-        </Button>
-        {onCreateShare && affordances.canCreateShare ? (
+      <div className="da-gfs-delegation__scope-actions">
+        {isDirectory ? (
+          <label className="da-gfs-delegation__inherit">
+            <input
+              checked={inherit}
+              disabled={busy}
+              onChange={event => setInherit(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Include contents of this folder</span>
+          </label>
+        ) : null}
+        <div className="da-gfs-delegation__actions">
           <Button
             type="button"
-            variant="outline"
-            disabled={busy || hasHost || subjectKeys.length === 0}
-            onClick={() => run(() => onCreateShare(subjectKeys))}
+            loading={busy}
+            disabled={busy || subjectKeys.length === 0 || bits.length === 0}
+            onClick={() => run(() => onGrant(subjectKeys, bits, isDirectory ? inherit : false))}
           >
-            Create share
+            Grant access
           </Button>
-        ) : null}
+        </div>
       </div>
       {error !== null && <StatusBanner tone="error" text={error} />}
     </div>
@@ -157,6 +167,7 @@ export function GfsDelegationPanel({
 
 export type {
   DelegationAffordances,
+  GfsCreateShareActionChange,
   GfsAgentSubjectOption,
   GfsDelegationPanelProps,
   GfsDelegationSubjectOption,
