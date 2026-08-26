@@ -1439,6 +1439,62 @@ describe('McpServerWatcher startup', () => {
     }
   })
 
+  it('keeps getReadinessInventoryDetail aligned with isReadinessInventoryAuthoritative one gate at a time', () => {
+    const watcher = newContextAuthoritativeWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).hostCacheSynced = true
+    markNetworkPolicyRevocationAuthoritative(watcher)
+
+    const expectAligned = (authoritative: boolean) => {
+      const detail = watcher.getReadinessInventoryDetail()
+      const fromDetail =
+        !detail.stopped &&
+        detail.mcpServerCacheSynced &&
+        detail.contextCacheSynced &&
+        detail.hostCacheSynced &&
+        detail.safetyInventoryCertified &&
+        detail.contextRevisionAligned &&
+        detail.serverRevisionAligned
+      expect(fromDetail).toBe(authoritative)
+      expect(watcher.isReadinessInventoryAuthoritative()).toBe(authoritative)
+    }
+
+    expectAligned(true)
+    ;(watcher as any).stopped = true
+    expectAligned(false)
+    expect(watcher.getReadinessInventoryDetail().stopped).toBe(true)
+    ;(watcher as any).stopped = false
+    expectAligned(true)
+    ;(watcher as any).mcpServerCacheSynced = false
+    expectAligned(false)
+    expect(watcher.getReadinessInventoryDetail().mcpServerCacheSynced).toBe(false)
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextCacheSynced = false
+    expectAligned(false)
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).hostCacheSynced = false
+    expectAligned(false)
+    ;(watcher as any).hostCacheSynced = true
+    try {
+      mocks.hasCertifiedSafetyInventory.mockReturnValue(false)
+      expectAligned(false)
+      expect(watcher.getReadinessInventoryDetail().safetyInventoryCertified).toBe(false)
+    } finally {
+      mocks.hasCertifiedSafetyInventory.mockReturnValue(true)
+    }
+    ;(watcher as any).networkPolicyRevocationContextRevision =
+      (watcher as any).contextDesiredRevision + 1
+    expectAligned(false)
+    expect(watcher.getReadinessInventoryDetail().contextRevisionAligned).toBe(false)
+    markNetworkPolicyRevocationAuthoritative(watcher)
+    ;(watcher as any).networkPolicyRevocationServerRevision =
+      (watcher as any).mcpServerDesiredRevision + 1
+    expectAligned(false)
+    expect(watcher.getReadinessInventoryDetail().serverRevisionAligned).toBe(false)
+    markNetworkPolicyRevocationAuthoritative(watcher)
+    expectAligned(true)
+  })
+
   it('ignores a late McpServer callback from a retired watch generation', async () => {
     const callbacks: Array<(type: string, apiObj: any) => Promise<void>> = []
     mocks.watch.mockImplementation(async (path, _options, callback) => {
