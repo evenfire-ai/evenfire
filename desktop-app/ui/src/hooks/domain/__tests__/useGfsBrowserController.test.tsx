@@ -75,7 +75,9 @@ function Probe() {
       <div data-testid="current-version">{ctrl.current?.version ?? 'none'}</div>
       <div data-testid="crumbs">{ctrl.crumbs.map(crumb => crumb.name).join(' / ')}</div>
       <div data-testid="access-state">{ctrl.accessState}</div>
+      <div data-testid="authority-pending">{ctrl.authorityPending ? 'pending' : 'ready'}</div>
       <div data-testid="accessible-count">{ctrl.accessibleResources.length}</div>
+      <div data-testid="items-count">{ctrl.items.length}</div>
       <div data-testid="accessible-error">{ctrl.accessibleError ?? 'none'}</div>
       <div data-testid="accessible-notice">{ctrl.accessibleNotice ?? 'none'}</div>
       <div data-testid="held-permissions">{ctrl.affordances?.held.join(',') ?? 'none'}</div>
@@ -99,7 +101,9 @@ function Probe() {
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl.createFile(ctrl.current.resourceId, 'notes.md', 'IyBOb3Rlcw==')
+            ? void ctrl
+                .createFile(ctrl.current.resourceId, 'notes.md', 'IyBOb3Rlcw==')
+                .catch(() => {})
             : undefined
         }
       >
@@ -109,11 +113,9 @@ function Probe() {
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl.renameResource(
-                ctrl.current.resourceId,
-                'Renamed report.md',
-                ctrl.current.version
-              )
+            ? void ctrl
+                .renameResource(ctrl.current.resourceId, 'Renamed report.md', ctrl.current.version)
+                .catch(() => {})
             : undefined
         }
       >
@@ -123,7 +125,9 @@ function Probe() {
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl.replaceFile(ctrl.current.resourceId, 'aGVsbG8=', ctrl.current.version)
+            ? void ctrl
+                .replaceFile(ctrl.current.resourceId, 'aGVsbG8=', ctrl.current.version)
+                .catch(() => {})
             : undefined
         }
       >
@@ -133,7 +137,9 @@ function Probe() {
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl.moveResource(ctrl.current.resourceId, 'destination-1', ctrl.current.version)
+            ? void ctrl
+                .moveResource(ctrl.current.resourceId, 'destination-1', ctrl.current.version)
+                .catch(() => {})
             : undefined
         }
       >
@@ -849,6 +855,185 @@ describe('useGfsBrowserController', () => {
 
     render(<Probe />, { wrapper })
     await waitFor(() => expect(listAccessible).toHaveBeenCalledTimes(2))
+  })
+
+  // R4 spec §1 — the authority revocation scenario: caches are fully
+  // populated (roots, children, grants, shares), then the session's authority
+  // is revoked server-side. The remounted browser must not render ANY of it —
+  // not before the (deferred) discovery response lands, and not after it
+  // fails with 401 — and the failure must purge every session-scoped cache.
+  it('withholds cached gfs state while authority revalidates and purges it when discovery fails 401', async () => {
+    const scope = ':user-a:team-a'
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const accessiblePage = {
+      pages: [
+        {
+          items: [
+            {
+              resourceId: 'folder-x',
+              rid: 'folderx',
+              gfsUri: 'gfs://main/folderx',
+              drive: 'main',
+              parentResourceId: null,
+              name: 'Folder X',
+              kind: 'directory',
+              path: '/folder-x',
+              version: 1,
+              bytes: 0,
+              sources: ['grant'],
+              permissions: ['read'],
+              coversDescendants: true,
+            },
+          ],
+          nextCursor: null,
+        },
+      ],
+      pageParams: [undefined],
+    }
+    client.setQueryData(desktopQueryKeys.gfsAccessible(scope, 'main'), accessiblePage)
+    client.setQueryData(desktopQueryKeys.gfsChildren(scope, 'folder-x', 'main'), accessiblePage)
+    client.setQueryData(desktopQueryKeys.gfsGrants(scope, 'folder-x', 'main'), [
+      {
+        id: 'grant-1',
+        drive: 'main',
+        resourceId: 'folder-x',
+        subject: { type: 'user', id: 'u' },
+        permissions: ['read'],
+        inherit: false,
+      },
+    ])
+    client.setQueryData(desktopQueryKeys.gfsShares(scope, 'folder-x', 'main'), [
+      {
+        id: 'share-1',
+        drive: 'main',
+        resourceId: 'folder-x',
+        subject: { type: 'user', id: 'u' },
+        permissions: ['read'],
+        includeDescendants: false,
+      },
+    ])
+    expect(
+      client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'folder-x', 'main'))
+    ).toBeTruthy()
+
+    // Deferred discovery: authority is being rechecked but the server has
+    // not answered yet.
+    let failDiscovery: ((error: Error) => void) | undefined
+    const listAccessible = vi.fn(
+      () =>
+        new Promise<never>((_, reject) => {
+          failDiscovery = reject
+        })
+    )
+    const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const affordances = vi.fn(async () => ({
+      held: ['read'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible,
+          resolve: vi.fn(async () => ({
+            resourceId: 'folder-x',
+            gfsUri: 'gfs://main/folderx',
+            name: 'Folder X',
+            kind: 'directory',
+            version: 1,
+          })),
+          listChildren,
+          affordances,
+        },
+      },
+    })
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <AuthContext.Provider value={authValue(userA)}>
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      </AuthContext.Provider>
+    )
+    render(<Probe />, { wrapper })
+
+    // BEFORE the failure: cached roots/children must be withheld from render.
+    await waitFor(() => expect(listAccessible).toHaveBeenCalledTimes(1))
+    expect(screen.getByTestId('authority-pending').textContent).toBe('pending')
+    expect(screen.getByTestId('accessible-count').textContent).toBe('0')
+
+    // Entering the prefetched child cannot bypass revalidation either: the
+    // children cache is populated, but its rows stay withheld.
+    await act(async () => {
+      screen.getByRole('button', { name: 'open' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-x'))
+    expect(screen.getByTestId('authority-pending').textContent).toBe('pending')
+    expect(screen.getByTestId('items-count').textContent).toBe('0')
+
+    // AFTER the failure: the 401 fails the session closed — every cached
+    // surface is purged and navigation state is gone.
+    await act(async () => {
+      failDiscovery?.(new Error('401 Unauthorized: session rejected'))
+    })
+    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('revoked'))
+    expect(screen.getByTestId('current').textContent).toBe('none')
+    expect(screen.getByTestId('crumbs').textContent).toBe('')
+    expect(client.getQueryData(desktopQueryKeys.gfsAccessible(scope, 'main'))).toBeUndefined()
+    expect(
+      client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'folder-x', 'main'))
+    ).toBeUndefined()
+    expect(
+      client.getQueryData(desktopQueryKeys.gfsGrants(scope, 'folder-x', 'main'))
+    ).toBeUndefined()
+    expect(
+      client.getQueryData(desktopQueryKeys.gfsShares(scope, 'folder-x', 'main'))
+    ).toBeUndefined()
+  })
+
+  it('fails a mutation-carrying session closed when an imperative operation reports 401', async () => {
+    const renameResource = vi.fn(async () => {
+      throw new Error('401 Unauthorized: session rejected')
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+          renameResource,
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('active'))
+
+    // The mutation's rejection propagates to the caller AND the shared
+    // mutation onError boundary fails the session closed.
+    await act(async () => {
+      screen.getByRole('button', { name: 'rename current' }).click()
+    })
+    await waitFor(() => expect(renameResource).toHaveBeenCalled())
+    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('revoked'))
+    expect(screen.getByTestId('crumbs').textContent).toBe('')
   })
 })
 

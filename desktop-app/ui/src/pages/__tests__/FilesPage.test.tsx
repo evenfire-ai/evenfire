@@ -1318,6 +1318,127 @@ describe('FilesPage', () => {
     expect(retryAccess).toHaveBeenCalledTimes(1)
   })
 
+  // R4 spec §1 — on revocation, every local surface that could show or act on
+  // stale GFS data must close. Here: an open image preview (already-fetched
+  // bytes) and an open Move dialog.
+  it('closes an open preview when authority is revoked mid-session', async () => {
+    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
+    const createObjectURL = vi.fn(() => 'blob:gfs-image-preview')
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { download } },
+    })
+    const controllerState = {
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'image-1',
+          rid: 'image-1',
+          gfsUri: 'gfs://main/image-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'secret.PNG',
+          kind: 'file',
+          path: '/secret.PNG',
+          version: 1,
+          bytes: 3,
+          sources: ['grant'],
+          permissions: ['read'],
+          coversDescendants: false,
+        },
+      ],
+    }
+    hookMock.useGfsBrowserController.mockReturnValue(controllerState)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    // A fresh element per render pass: rerendering the identical element
+    // reference would bail out and never observe the mutated mock.
+    const makeElement = () => (
+      <QueryClientProvider client={queryClient}>
+        <FilesPage />
+      </QueryClientProvider>
+    )
+    const { rerender } = render(makeElement())
+
+    fireEvent.click(screen.getByRole('button', { name: 'secret.PNG' }))
+    expect(await screen.findByRole('dialog', { name: 'secret.PNG' })).toBeTruthy()
+
+    controllerState.accessState = 'revoked'
+    rerender(makeElement())
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'secret.PNG' })).toBeNull())
+    expect(await screen.findByText('File access is not authorized')).toBeTruthy()
+  })
+
+  it('closes the move dialog and manage dialog when authority is revoked mid-session', async () => {
+    const moveResource = vi.fn(async () => ({}))
+    const controllerState = {
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+        bytes: 0,
+      },
+      crumbs: [
+        {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          name: 'Product',
+          kind: 'directory',
+          version: 1,
+          bytes: 0,
+        },
+      ],
+      affordances: {
+        held: ['read', 'write', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read'],
+        canCreateShare: true,
+      },
+      moveResource,
+    }
+    hookMock.useGfsBrowserController.mockReturnValue(controllerState)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    // A fresh element per render pass: rerendering the identical element
+    // reference would bail out and never observe the mutated mock.
+    const makeElement = () => (
+      <QueryClientProvider client={queryClient}>
+        <FilesPage />
+      </QueryClientProvider>
+    )
+    const { rerender } = render(makeElement())
+
+    // Open the manage dialog, then the move dialog from its menu.
+    await openManageDialog('Product')
+    await act(async () => {
+      fireEvent.click(
+        within(screen.getByRole('dialog', { name: 'Manage folder Product' })).getByRole('button', {
+          name: 'Options for Product',
+        })
+      )
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
+    })
+    expect(await screen.findByRole('dialog', { name: 'Move folder Product' })).toBeTruthy()
+
+    controllerState.accessState = 'revoked'
+    rerender(makeElement())
+
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Move folder Product' })).toBeNull()
+    )
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Manage folder Product' })).toBeNull()
+    )
+    expect(await screen.findByText('File access is not authorized')).toBeTruthy()
+    expect(moveResource).not.toHaveBeenCalled()
+  })
+
   it('refreshes server affordances whenever the manage dialog opens', async () => {
     const refreshAffordances = vi.fn(async () => undefined)
     hookMock.useGfsBrowserController.mockReturnValue({

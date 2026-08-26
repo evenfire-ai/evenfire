@@ -236,6 +236,32 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     [ctrl.sharesError]
   )
   const accessRevoked = ctrl.accessState === 'revoked'
+  // R4 spec §1: on an authority failure every local surface that could show
+  // or act on stale GFS data must close — preview bytes, Manage, Move, rename,
+  // delete, open-link, and the inline create-folder form.
+  useEffect(() => {
+    if (!accessRevoked) return
+    setFilePreview(null)
+    setManageOpen(false)
+    setMoveTarget(null)
+    setRenameTarget(null)
+    setDeleteTarget(null)
+    setOpenLinkOpen(false)
+    setCreateFolderOpen(false)
+    setRenameOpen(false)
+    setDeleteOpen(false)
+  }, [accessRevoked])
+  /** Central imperative boundary: route any non-query GFS failure through the
+   *  controller's authority classifier before toasting. Returns true when the
+   *  session failed closed (caller should stop; the revoked state takes over). */
+  const failClosedOnAuthorizationError = useCallback(
+    (error: unknown): boolean =>
+      ctrl.handleAuthorityFailure(
+        error instanceof Error ? error.message : String(error),
+        'operation'
+      ),
+    [ctrl]
+  )
   const canWriteCurrent = !accessRevoked && hasBit(affordances, 'write')
   const canDeleteCurrent = !accessRevoked && hasBit(affordances, 'delete')
   const currentIsFolder = current?.kind === 'directory'
@@ -264,6 +290,15 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     if (!manageOpen || !current?.resourceId) return
     void refreshAffordances()
   }, [current?.resourceId, manageOpen, refreshAffordances])
+
+  // Preview byte-fetches are imperative downloads: an authority failure must
+  // reach the central fail-closed boundary, not just the in-dialog error.
+  const handlePreviewDownloadError = useCallback(
+    (error: unknown) => {
+      failClosedOnAuthorizationError(error)
+    },
+    [failClosedOnAuthorizationError]
+  )
 
   const openFilePreview = (
     resource: Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name'>
@@ -321,7 +356,12 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   // agents are capped to read/write inside the panel. Inherit is honored for
   // directories (default ON) and forced false for files.
   const handleGrant = async (subjectKeys: string[], bits: string[], inherit: boolean) => {
-    await ctrl.grant(subjectKeys, bits, inherit)
+    try {
+      await ctrl.grant(subjectKeys, bits, inherit)
+    } catch (grantError) {
+      if (failClosedOnAuthorizationError(grantError)) return
+      throw grantError
+    }
     pushToast?.(
       `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
       'success'
@@ -335,6 +375,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       await ctrl.revokeGrant(grantId)
       pushToast?.(`Access revoked for ${label}`, 'success')
     } catch (revokeError) {
+      if (failClosedOnAuthorizationError(revokeError)) return
       pushToast?.(describeGfsGrantError(revokeError).message, 'error')
     }
   }
@@ -345,13 +386,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     } catch (error) {
       // A session-authority rejection fails the browser closed; anything
       // else re-throws to the delegation panel's own error surface.
-      if (
-        !ctrl.handleAuthorityFailure(
-          error instanceof Error ? error.message : String(error),
-          'operation'
-        )
-      )
-        throw error
+      if (!failClosedOnAuthorizationError(error)) throw error
       return
     }
     pushToast?.(
@@ -367,10 +402,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       await ctrl.revokeShare(shareId)
       pushToast?.(`Shared access revoked for ${label}`, 'success')
     } catch (revokeError) {
-      ctrl.handleAuthorityFailure(
-        revokeError instanceof Error ? revokeError.message : String(revokeError),
-        'operation'
-      )
+      if (failClosedOnAuthorizationError(revokeError)) return
       pushToast?.(describeGfsGrantError(revokeError).message, 'error')
     }
   }
@@ -386,6 +418,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       setTimeout(() => URL.revokeObjectURL(url), 10_000)
       pushToast?.(`Downloaded ${name}`, 'success')
     } catch (downloadError) {
+      if (failClosedOnAuthorizationError(downloadError)) return
       pushToast?.(
         downloadError instanceof Error ? downloadError.message : String(downloadError),
         'error'
@@ -434,6 +467,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       setCreateFolderOpen(false)
       pushToast?.(`Folder ${name} created`, 'success')
     } catch (createError) {
+      if (failClosedOnAuthorizationError(createError)) return
       pushToast?.(createError instanceof Error ? createError.message : String(createError), 'error')
     }
   }
@@ -451,6 +485,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       await ctrl.createFileFromPath(parentResourceId, name, filePath)
       pushToast?.(`Uploaded ${name}`, 'success')
     } catch (uploadError) {
+      if (failClosedOnAuthorizationError(uploadError)) return
       pushToast?.(uploadError instanceof Error ? uploadError.message : String(uploadError), 'error')
     }
   }
@@ -513,6 +548,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       await ctrl.replaceFileFromPath(current.resourceId, filePath, current.version)
       pushToast?.(`Replaced ${current.name}`, 'success')
     } catch (replaceError) {
+      if (failClosedOnAuthorizationError(replaceError)) return
       pushToast?.(
         replaceError instanceof Error ? replaceError.message : String(replaceError),
         'error'
@@ -531,6 +567,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       setRenameOpen(false)
       pushToast?.(`Renamed to ${name}`, 'success')
     } catch (renameError) {
+      if (failClosedOnAuthorizationError(renameError)) return
       pushToast?.(renameError instanceof Error ? renameError.message : String(renameError), 'error')
     }
   }
@@ -543,6 +580,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       setManageOpen(false)
       pushToast?.(`Deleted ${current.name}`, 'success')
     } catch (deleteError) {
+      if (failClosedOnAuthorizationError(deleteError)) return
       pushToast?.(deleteError instanceof Error ? deleteError.message : String(deleteError), 'error')
     }
   }
@@ -552,7 +590,12 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       await ctrl.deleteResource(resource.resourceId, resource.version)
       pushToast?.(`Deleted ${resource.name}`, 'success')
     } catch (deleteError) {
-      pushToast?.(deleteError instanceof Error ? deleteError.message : String(deleteError), 'error')
+      if (!failClosedOnAuthorizationError(deleteError)) {
+        pushToast?.(
+          deleteError instanceof Error ? deleteError.message : String(deleteError),
+          'error'
+        )
+      }
     } finally {
       setDeleteTarget(null)
     }
@@ -586,11 +629,21 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   }
 
   /** Move commits bubble their failure back to the dialog (in-place banner);
-   *  success toasts and closes it. ifMatch pins the resource version. */
+   *  success toasts and closes it. An authority rejection instead fails the
+   *  session closed and closes the dialog — the revoked state takes over.
+   *  ifMatch pins the resource version. */
   const handleMoveTarget = async (destinationId: string, destinationName: string) => {
     if (!moveTarget) return
     const target = moveTarget
-    await ctrl.moveResource(target.resourceId, destinationId, target.version)
+    try {
+      await ctrl.moveResource(target.resourceId, destinationId, target.version)
+    } catch (moveError) {
+      if (failClosedOnAuthorizationError(moveError)) {
+        setMoveTarget(null)
+        return
+      }
+      throw moveError
+    }
     setMoveTarget(null)
     pushToast?.(`Moved ${target.name} to ${destinationName}`, 'success')
   }
@@ -617,6 +670,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       setRenameTarget(null)
       pushToast?.(`Renamed to ${name}`, 'success')
     } catch (renameError) {
+      if (failClosedOnAuthorizationError(renameError)) return
       pushToast?.(renameError instanceof Error ? renameError.message : String(renameError), 'error')
     }
   }
@@ -635,7 +689,11 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       return (left.name || left.drive).localeCompare(right.name || right.drive)
     })
   }, [accessibleResources, currentIsFile, currentIsFolder, items])
-  const visibleLoading = currentIsFolder ? loading : !current ? loadingAccessible : false
+  // authorityPending keeps the loading state up: cached rows must not render
+  // (and must not be mistaken for an empty folder) until discovery re-proves
+  // the session (R4 spec §1).
+  const visibleLoading =
+    ctrl.authorityPending || (currentIsFolder ? loading : !current ? loadingAccessible : false)
   const visibleError = currentIsFolder ? error : !current ? accessibleError : null
   const hasMoreVisible = currentIsFolder ? ctrl.hasMore : !current && ctrl.hasMoreAccessible
   const loadingMoreVisible = currentIsFolder ? ctrl.isFetchingMore : ctrl.isFetchingMoreAccessible
@@ -1241,6 +1299,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           gfsUri={filePreview.gfsUri}
           mimeType={filePreview.mimeType}
           onClose={() => setFilePreview(null)}
+          onDownloadError={handlePreviewDownloadError}
         />
       ) : null}
 
@@ -1250,6 +1309,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           fileName={filePreview.name}
           gfsUri={filePreview.gfsUri}
           onClose={() => setFilePreview(null)}
+          onDownloadError={handlePreviewDownloadError}
         />
       ) : null}
 
@@ -1260,6 +1320,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           gfsUri={filePreview.gfsUri}
           mimeType={filePreview.mimeType}
           onClose={() => setFilePreview(null)}
+          onDownloadError={handlePreviewDownloadError}
         />
       ) : null}
 
@@ -1286,6 +1347,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           }
           onClose={() => setMoveTarget(null)}
           onMove={handleMoveTarget}
+          onAuthorityFailure={message => ctrl.handleAuthorityFailure(message, 'operation')}
           sessionScope={sessionScope}
           target={moveTarget}
         />

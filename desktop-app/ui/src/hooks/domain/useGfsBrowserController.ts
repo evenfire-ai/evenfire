@@ -147,6 +147,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // server-backed request (retryAccess) is the only way back in.
   const [accessState, setAccessState] = useState<'active' | 'revoked'>('active')
   const previousSessionScopeRef = useRef<string | null>(null)
+  // Per controller-mount timestamp: discovery (`refetchOnMount: 'always'`) must
+  // land a response newer than this before cached GFS state may render again.
+  // Between mount and that fresh response the browser withholds cached rows
+  // (authority revalidation window — R4 spec §1).
+  const authorityEpochRef = useRef(Date.now())
 
   const current = crumbs.length ? crumbs[crumbs.length - 1] : null
   const currentIsDirectory = current?.kind === 'directory'
@@ -190,6 +195,20 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
+
+  // Authority revalidation window (R4 spec §1): true from mount/session-return
+  // until discovery lands a response NEWER than this mount. While true, every
+  // cached GFS surface this controller exposes is withheld so prefetched or
+  // 30-minute-cached state cannot render before the session is re-proved. If
+  // discovery fails with an authority error, the query-error boundary revokes
+  // (which clears the same caches); a policy error stays a local banner. When
+  // the runtime has no discovery, there is nothing to revalidate against and
+  // per-resource operations still fail closed through handleAuthorityFailure.
+  const authorityPending =
+    Boolean(sessionScope) &&
+    canListAccessibleResources &&
+    accessState === 'active' &&
+    accessibleQuery.dataUpdatedAt < authorityEpochRef.current
 
   const childrenQuery = useInfiniteQuery({
     queryKey: desktopQueryKeys.gfsChildren(
@@ -273,10 +292,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       queryKey: desktopQueryKeys.gfsShares(sessionScope ?? 'anonymous', resourceId, DRIVE),
     })
   }, [current?.resourceId, queryClient, sessionScope])
-  const revokeShareMutation = useMutation({
-    mutationFn: (shareId: string) => window.clerum.gfs.revokeShare(shareId),
-    onSuccess: refreshShares,
-  })
   const refreshGrants = useCallback(async () => {
     const resourceId = current?.resourceId
     if (!resourceId) return
@@ -285,10 +300,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       queryKey: desktopQueryKeys.gfsGrants(sessionScope ?? 'anonymous', resourceId, DRIVE),
     })
   }, [current?.resourceId, queryClient, sessionScope])
-  const revokeGrantMutation = useMutation({
-    mutationFn: (grantId: string) => window.clerum.gfs.revokeGrant(grantId),
-    onSuccess: refreshGrants,
-  })
   const refreshGfs = useCallback(async () => {
     await queryClient.invalidateQueries({
       queryKey: desktopQueryKeys.gfsRoot,
@@ -342,6 +353,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     affordancesQuery.error
       ? { message: toMessage(affordancesQuery.error), surface: 'operation' as const }
       : null,
+    rowAffordancesQuery.error
+      ? { message: toMessage(rowAffordancesQuery.error), surface: 'operation' as const }
+      : null,
     grantsQuery.error
       ? { message: toMessage(grantsQuery.error), surface: 'operation' as const }
       : null,
@@ -357,17 +371,38 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     if (!queryAuthorizationError || accessState === 'revoked') return
     revokeAccess()
   }, [accessState, queryAuthorizationError, revokeAccess])
+  // All GFS mutations share the central fail-closed boundary: an authority
+  // rejection (401 / typed lifecycle code) revokes the session even when the
+  // caller would only have toasted. Policy verdicts (403/412) stay local.
+  const failClosedOnMutationError = useCallback(
+    (error: unknown) => {
+      handleAuthorityFailure(toMessage(error), 'operation')
+    },
+    [handleAuthorityFailure]
+  )
+  const revokeGrantMutation = useMutation({
+    mutationFn: (grantId: string) => window.clerum.gfs.revokeGrant(grantId),
+    onSuccess: refreshGrants,
+    onError: failClosedOnMutationError,
+  })
+  const revokeShareMutation = useMutation({
+    mutationFn: (shareId: string) => window.clerum.gfs.revokeShare(shareId),
+    onSuccess: refreshShares,
+    onError: failClosedOnMutationError,
+  })
   const createFolderMutation = useMutation({
     mutationFn: async (name: string) => {
       if (!current) throw new Error('No folder selected')
       return window.clerum.gfs.createFolder(current.resourceId, name, DRIVE)
     },
     onSuccess: refreshGfs,
+    onError: failClosedOnMutationError,
   })
   const createFileMutation = useMutation({
     mutationFn: (input: { parentResourceId: string; name: string; encodedData: string }) =>
       window.clerum.gfs.createFile(input.parentResourceId, input.name, input.encodedData, DRIVE),
     onSuccess: refreshGfs,
+    onError: failClosedOnMutationError,
   })
   const createFileFromPathMutation = useMutation({
     mutationFn: (input: { parentResourceId: string; name: string; filePath: string }) =>
@@ -378,6 +413,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         DRIVE
       ),
     onSuccess: refreshGfs,
+    onError: failClosedOnMutationError,
   })
   const replaceFileMutation = useMutation({
     mutationFn: (input: { resourceId: string; encodedData: string; ifMatch?: number }) =>
@@ -392,6 +428,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       )
       await refreshGfs()
     },
+    onError: failClosedOnMutationError,
   })
   const replaceFileFromPathMutation = useMutation({
     mutationFn: (input: { resourceId: string; filePath: string; ifMatch?: number }) =>
@@ -422,6 +459,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       )
       await refreshGfs()
     },
+    onError: failClosedOnMutationError,
   })
   const deleteResourceMutation = useMutation({
     mutationFn: (input: { resourceId: string; ifMatch?: number }) =>
@@ -430,21 +468,34 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       setCrumbs(prev => prev.filter(crumb => crumb.resourceId !== input.resourceId))
       await refreshGfs()
     },
+    onError: failClosedOnMutationError,
   })
 
+  // Cached GFS state is a rendering optimization only (R4 spec §1): while the
+  // authority revalidation window is open, nothing cached may be exposed —
+  // rows, affordances, grants, and shares all stay withheld until discovery
+  // re-proves the session (or an authority failure clears everything).
   const items = useMemo<GfsBrowserChild[]>(
-    () => (childrenQuery.data?.pages ?? []).flatMap(page => page.items),
-    [childrenQuery.data]
+    () => (authorityPending ? [] : (childrenQuery.data?.pages ?? []).flatMap(page => page.items)),
+    [authorityPending, childrenQuery.data]
   )
   const accessibleResources = useMemo<GfsAccessibleResource[]>(
     () =>
-      (accessibleQuery.data?.pages ?? []).flatMap(page =>
-        page.items.map(normalizeAccessibleResource)
-      ),
-    [accessibleQuery.data]
+      authorityPending
+        ? []
+        : (accessibleQuery.data?.pages ?? []).flatMap(page =>
+            page.items.map(normalizeAccessibleResource)
+          ),
+    [accessibleQuery.data, authorityPending]
   )
-  const grants = useMemo<GfsGrantListItem[]>(() => grantsQuery.data ?? [], [grantsQuery.data])
-  const shares = useMemo<GfsShareListItem[]>(() => sharesQuery.data ?? [], [sharesQuery.data])
+  const grants = useMemo<GfsGrantListItem[]>(
+    () => (authorityPending ? [] : (grantsQuery.data ?? [])),
+    [authorityPending, grantsQuery.data]
+  )
+  const shares = useMemo<GfsShareListItem[]>(
+    () => (authorityPending ? [] : (sharesQuery.data ?? [])),
+    [authorityPending, sharesQuery.data]
+  )
   const accessibleErrorMessage = accessibleQuery.error ? toMessage(accessibleQuery.error) : null
   const accessibleNotice =
     sessionScope && !canListAccessibleResources
@@ -535,6 +586,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       await refreshGfs()
       if (movedCrumb) await openUri(movedCrumb.gfsUri)
     },
+    onError: failClosedOnMutationError,
   })
 
   const openChild = useCallback((child: GfsBrowserChild) => {
@@ -605,20 +657,32 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     /** 'revoked' after a session-authority failure — queries are gated off
      *  and cached GFS state is gone until retryAccess re-enters the server. */
     accessState,
+    /** True while discovery re-proves the session after mount/session return;
+     *  cached GFS state is withheld (R4 spec §1). FilesPage renders loading. */
+    authorityPending,
     retryAccess,
     handleAuthorityFailure,
     accessibleResources,
     items,
-    affordances: (affordancesQuery.data as GfsBrowserAffordances | undefined) ?? null,
+    affordances:
+      authorityPending || accessState === 'revoked'
+        ? null
+        : ((affordancesQuery.data as GfsBrowserAffordances | undefined) ?? null),
     affordancesError: affordancesQuery.error ? toMessage(affordancesQuery.error) : null,
     loadingAffordances: affordancesQuery.isFetching,
     rowAffordancesResourceId,
     setRowAffordancesResourceId,
-    rowAffordances: (rowAffordancesQuery.data as GfsBrowserAffordances | undefined) ?? null,
+    rowAffordances:
+      authorityPending || accessState === 'revoked'
+        ? null
+        : ((rowAffordancesQuery.data as GfsBrowserAffordances | undefined) ?? null),
     rowAffordancesError: rowAffordancesQuery.error ? toMessage(rowAffordancesQuery.error) : null,
-    loading: childrenQuery.isFetching && items.length === 0,
+    loading: (authorityPending || childrenQuery.isFetching) && items.length === 0,
     loadingAccessible:
-      canListAccessibleResources && accessibleQuery.isFetching && accessibleResources.length === 0,
+      (authorityPending && canListAccessibleResources) ||
+      (canListAccessibleResources &&
+        accessibleQuery.isFetching &&
+        accessibleResources.length === 0),
     error: childrenQuery.error ? toMessage(childrenQuery.error) : null,
     accessibleError: accessibleNotice ? null : accessibleErrorMessage,
     accessibleNotice,

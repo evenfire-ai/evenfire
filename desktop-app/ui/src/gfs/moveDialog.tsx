@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { Button, IconButton, StatusBanner } from '@components/Common'
 import { IconClose, IconContexts } from '@components/SidebarNav/icons'
@@ -25,6 +25,7 @@ export function GfsMoveDialog({
   onMove,
   onClose,
   busy = false,
+  onAuthorityFailure,
 }: GfsMoveDialogProps) {
   const [crumbs, setCrumbs] = useState<GfsCrumb[]>(initialCrumbs)
   const [error, setError] = useState<string | null>(null)
@@ -48,11 +49,26 @@ export function GfsMoveDialog({
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
+  // Both listings are cursor-paginated; whichever one is active drives the
+  // Load-more control so destinations beyond page one stay reachable (R4
+  // spec §3). Fetching the next page keeps already-rendered rows in place.
+  const activeQuery = current === null ? accessibleQuery : childrenQuery
+  const hasMoreDestinations = Boolean(activeQuery.hasNextPage)
+  const loadingMoreDestinations = activeQuery.isFetchingNextPage
 
   const folders = useMemo(() => {
-    const source: Array<GfsBrowserChild & { kind: 'file' | 'directory' }> =
+    // Accessible-root items normalize their optional wire fields; children
+    // items are already GfsBrowserChild. Both flows converge on the same
+    // destination shape before filtering.
+    const source: GfsBrowserChild[] =
       current === null
-        ? (accessibleQuery.data?.pages ?? []).flatMap(page => page.items)
+        ? (accessibleQuery.data?.pages ?? [])
+            .flatMap(page => page.items)
+            .map(item => ({
+              ...item,
+              drive: item.drive ?? GFS_DRIVE_MAIN,
+              parentResourceId: item.parentResourceId ?? null,
+            }))
         : (childrenQuery.data?.pages ?? []).flatMap(page => page.items)
     return source.filter(item => item.kind === 'directory' && item.resourceId !== target.resourceId)
   }, [accessibleQuery.data, childrenQuery.data, current, target.resourceId])
@@ -64,6 +80,13 @@ export function GfsMoveDialog({
     current === null
       ? (accessibleQuery.error?.message ?? null)
       : (childrenQuery.error?.message ?? null)
+  // Destination listings are session-scoped GFS reads: an authority failure
+  // here must reach the same fail-closed boundary as the page's queries (the
+  // page then closes this dialog via its revocation effect). Policy errors
+  // return false and render as the dialog's in-place banner below.
+  useEffect(() => {
+    if (listError) onAuthorityFailure?.(listError)
+  }, [listError, onAuthorityFailure])
 
   const enterFolder = (folder: GfsBrowserChild) => {
     setError(null)
@@ -148,19 +171,33 @@ export function GfsMoveDialog({
           <div className="da-gfs-move-dialog__list" role="list">
             {loading && folders.length === 0 ? (
               <p className="muted">Loading folders…</p>
-            ) : folders.length === 0 ? (
+            ) : folders.length === 0 && !hasMoreDestinations ? (
               <p className="muted">No folders here.</p>
             ) : (
-              folders.map(folder => (
-                <div className="da-gfs-move-dialog__row" role="listitem" key={folder.resourceId}>
-                  <span className="da-gfs-move-dialog__row-icon" aria-hidden="true">
-                    <IconContexts />
-                  </span>
-                  <Button align="start" block onClick={() => enterFolder(folder)} variant="text">
-                    {folder.name}
-                  </Button>
-                </div>
-              ))
+              <>
+                {folders.map(folder => (
+                  <div className="da-gfs-move-dialog__row" role="listitem" key={folder.resourceId}>
+                    <span className="da-gfs-move-dialog__row-icon" aria-hidden="true">
+                      <IconContexts />
+                    </span>
+                    <Button align="start" block onClick={() => enterFolder(folder)} variant="text">
+                      {folder.name}
+                    </Button>
+                  </div>
+                ))}
+                {hasMoreDestinations ? (
+                  <div className="da-gfs-move-dialog__more">
+                    <Button
+                      loading={loadingMoreDestinations}
+                      onClick={() => void activeQuery.fetchNextPage()}
+                      size="sm"
+                      variant="outline"
+                    >
+                      Load more
+                    </Button>
+                  </div>
+                ) : null}
+              </>
             )}
           </div>
           <div className="da-gfs-move-dialog__actions">
