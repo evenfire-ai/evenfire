@@ -91,6 +91,30 @@ export const initialConvergenceLastSuccessTimestampSeconds = gauge({
   labelNames: ['lane'] as const,
 })
 
+export const initialConvergenceSwallowedTotal = counter({
+  name: 'clerum_hcc_initial_convergence_swallowed_total',
+  help: 'Initial background convergence requests that returned without certifying.',
+  labelNames: ['lane', 'sink'] as const,
+})
+
+export const initialConvergenceEffectsDroppedTotal = counter({
+  name: 'clerum_hcc_initial_convergence_effects_dropped_total',
+  help: 'Positive NetworkPolicy effects dropped because the pass inventory lease was retired.',
+  labelNames: ['lane', 'kind'] as const,
+})
+
+export const initialConvergencePassResultsTotal = counter({
+  name: 'clerum_hcc_initial_convergence_pass_results_total',
+  help: 'Named outcomes of initial background convergence passes.',
+  labelNames: ['lane', 'result'] as const,
+})
+
+export const initialConvergencePassDurationSeconds = histogram({
+  name: 'clerum_hcc_initial_convergence_pass_duration_seconds',
+  help: 'Seconds spent in an initial background convergence pass, labeled by named result.',
+  labelNames: ['lane', 'result'] as const,
+})
+
 export const networkPolicySafetyPassDurationSeconds = histogram({
   name: 'clerum_hcc_networkpolicy_safety_pass_duration_seconds',
   help: 'Seconds until an authoritative NetworkPolicy safety pass has revoked stale allows.',
