@@ -15249,3 +15249,96 @@ pre {
     forced-color-adjust: none;
   }
 }
+
+/* First-run tour. A self-contained centered modal: it anchors to no live DOM
+   geometry, so it survives sidebar refactors and reads the same whether a
+   surface is populated, empty, or still loading. */
+.tour-backdrop {
+  position: fixed;
+  inset: 0;
+  /* Below the confirm-dialog layer (2300): the tour must never paint over a
+     consent prompt or an environment-setup confirmation. */
+  z-index: 2200;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: rgba(var(--overlay-rgb), 0.42);
+}
+
+.tour-card {
+  width: min(460px, 94vw);
+  display: grid;
+  justify-items: center;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-4) var(--space-4);
+  text-align: center;
+}
+
+.tour-illustration {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  padding: var(--space-2) 0;
+  color: var(--accent);
+}
+
+.tour-glyph {
+  width: 96px;
+  height: 60px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tour-title {
+  font-size: var(--font-size-2xl);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  color: var(--text);
+}
+
+.tour-body {
+  max-width: 46ch;
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.tour-position {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.tour-dots {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.tour-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(var(--edge-rgb), 0.5);
+  transition: background var(--motion-fast);
+}
+
+.tour-dot.is-current {
+  background: var(--accent);
+}
+
+.tour-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  justify-content: center;
+  padding-top: var(--space-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tour-dot {
+    transition: none;
+  }
+}

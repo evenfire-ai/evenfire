@@ -206,6 +206,11 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     setRuntimeConfigSetupRpcProxyBaseUrl: noop,
     setPendingDesktopEnvironmentSetup: noop,
     setDesktopEnvironmentSetupComplete: noop,
+    // The first-run tour is off in these fixtures: deep-link orchestration is
+    // what is under test, and a tour painting over it would be noise.
+    tour: { visible: false, dismiss: noop },
+    tourCensus: { agentNames: [], contextIds: [], mcpServersByAgent: {} },
+    tourAgentLabels: [],
     ...overrides,
   } as unknown as AppController
   return controller

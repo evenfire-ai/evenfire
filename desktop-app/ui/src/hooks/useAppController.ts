@@ -43,6 +43,7 @@ import { useNotificationsController } from './domain/useNotificationsController'
 import { useOnboardingController } from './domain/useOnboardingController'
 import { useTeamsDataController } from './domain/useTeamsDataController'
 import { useToastController } from './domain/useToastController'
+import { useTourController } from './domain/useTourController'
 import {
   EMPTY_WORKFLOW_SELECTION,
   type WorkflowSelectionState,
@@ -336,6 +337,38 @@ export function useAppController() {
     isAuthenticated: auth.isAuthenticated,
     agentProviderByName: agentsData.agentProviderByName,
   })
+
+  // ─── First-run tour ───
+  // "Settled" means resolved or errored: the tour waits for an answer, not for
+  // success. An errored catalog yields a thinner deck, which is correct.
+  const tourCatalogSettled = Boolean(agentsData.accessCatalog) || Boolean(agentsData.error)
+  const tour = useTourController({
+    isAuthenticated: auth.isAuthenticated,
+    catalogSettled: tourCatalogSettled,
+    blockedByOtherModal: Boolean(auth.pendingDesktopEnvironmentSetup),
+  })
+  // The census the tour describes. Everything here is already fetched by the
+  // authenticated app; the tour issues no request of its own. Sandbox apps are
+  // owned by App.tsx and merged in there.
+  const tourCensus = useMemo(
+    () => ({
+      agentNames: agentsData.agentNames,
+      contextIds: contextsData.contextIds,
+      mcpServersByAgent: agentsData.mcpServersByAgent,
+    }),
+    [agentsData.agentNames, agentsData.mcpServersByAgent, contextsData.contextIds]
+  )
+  const tourAgentLabels = useMemo(
+    () => agentsData.agentNames.map(name => agentsData.agentDisplayByName[name] || name),
+    [agentsData.agentNames, agentsData.agentDisplayByName]
+  )
+  // The active environment's own name, so the welcome step greets the server
+  // the user actually connected to rather than the product in the abstract.
+  const tourAppName = useMemo(() => {
+    const options = auth.runtimeConfigState?.options ?? []
+    const active = options.find(option => option.id === auth.runtimeConfigState?.activeOptionId)
+    return active?.appName?.trim() || 'Evenfire'
+  }, [auth.runtimeConfigState])
 
   // ─── Host pre-warm (authenticated catalog only — see the hook's anti-flapping doc) ───
   useHostPrewarmController({
@@ -1143,6 +1176,10 @@ export function useAppController() {
     runtimeConfigMissing: auth.runtimeConfigMissing,
     onboarding,
     unauthenticatedView,
+    tour,
+    tourCensus,
+    tourAgentLabels,
+    tourAppName,
     desktopReleaseStatus: auth.desktopReleaseStatus,
     desktopEnvironmentSetupComplete: auth.desktopEnvironmentSetupComplete,
     pendingDesktopEnvironmentSetup: auth.pendingDesktopEnvironmentSetup,
