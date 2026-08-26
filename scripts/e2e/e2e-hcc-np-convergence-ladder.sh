@@ -83,6 +83,8 @@ kctl get nodes -o json | jq -e --arg c "$E2E_KUBECONTEXT" \
 
 HCC_NS="${HCC_NS:-control-plane}"
 HCC_DEPLOY="${HCC_DEPLOY:-host-context-controller}"
+HCC_PROBE_HOST="${HCC_PROBE_HOST:-127.0.0.1}"
+HCC_PROBE_PORT="${HCC_PROBE_PORT:-8081}"
 SWALLOW_OBSERVE_SEC="${SWALLOW_OBSERVE_SEC:-90}"
 READY_BUDGET_SEC="${READY_BUDGET_SEC:-300}"
 ROLLOUT_TIMEOUT_SEC="${ROLLOUT_TIMEOUT_SEC:-180}"
@@ -125,7 +127,7 @@ hcc_pod_logs() {
 hcc_pod_metrics() {
   local pod=$1
   kctl exec "pod/$pod" -n "$HCC_NS" -c host-context-controller -- \
-    wget -T 10 -t 1 -qO- http://127.0.0.1:8081/metrics 2>/dev/null || true
+    wget -T 10 -t 1 -qO- "http://${HCC_PROBE_HOST}:${HCC_PROBE_PORT}/metrics" 2>/dev/null || true
 }
 
 # Label order is not part of the Prometheus contract.
