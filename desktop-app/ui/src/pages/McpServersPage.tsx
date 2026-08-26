@@ -1,173 +1,169 @@
-import { useMemo } from 'react'
-import { DataTable, EmptyState, ReferenceTag } from '@components/Common'
+import { Button, EmptyState, Pill, StatusBanner } from '@components/Common'
 import { formatMcpServerDisplayName } from '@lib/format'
-import type { ScopedMcpServer } from '@/uiTypes'
-import { useNavigationContext } from '../contexts/NavigationContext'
-import { useMcpServersDataController } from '../hooks/domain/useMcpServersDataController'
+import type { RpcConnector } from '../../../src/types'
+import {
+  connectorActionKey,
+  isActionableConnector,
+  isSharedConnector,
+  useConnectorsController,
+} from '../hooks/domain/useConnectorsController'
+
+const CONNECTORS_GRID_COLS =
+  'minmax(10rem, 1.4fr) minmax(8rem, 0.6fr) minmax(12rem, 1.4fr) minmax(7rem, auto)'
+
+type StatusPresentation = {
+  label: string
+  tone: 'success' | 'warning' | 'neutral'
+}
+
+function statusPresentation(status: RpcConnector['status']): StatusPresentation {
+  switch (status) {
+    case 'authorized':
+      return { label: 'Authorized', tone: 'success' }
+    case 'requires_setup':
+      return { label: 'Requires setup', tone: 'warning' }
+    default:
+      return { label: 'No OAuth', tone: 'neutral' }
+  }
+}
+
+/**
+ * The per-connector scope caption (spec §1.3 / D-1). A `oauth-user` grant is
+ * global to `(server, userId)`, so acting under one agent flips the SAME server
+ * across every agent that lists it; a `oauth-context` grant is shared by the
+ * whole Context. Surfaced verbatim so the user understands the blast radius
+ * before the derived state changes several rows at once.
+ */
+function scopeCaption(connector: RpcConnector): string | null {
+  if (connector.status === 'no_oauth') return null
+  if (isSharedConnector(connector)) {
+    return 'Shared by the team — affects everyone in this context.'
+  }
+  if (connector.authKind === 'oauth-user') {
+    return 'Affects all your agents that use this connector.'
+  }
+  return null
+}
 
 export function McpServersPage() {
-  const {
-    agentNames,
-    agentDisplayByName,
-    mcpServersByAgent,
-    agentContextByName,
-    globalMcpServers,
-    mcpServerMappingUnavailableMessage,
-    loading,
-    error,
-  } = useMcpServersDataController()
-  const { handleOpenAgentWorkspace, handleOpenContextDetails } = useNavigationContext()
+  const { loading, error, agents, pendingKey, authorize, disconnect } = useConnectorsController()
 
-  const globalByName = useMemo(() => {
-    const index = new Map<string, ScopedMcpServer>()
-    for (const server of globalMcpServers) {
-      index.set(server.name, server)
-    }
-    return index
-  }, [globalMcpServers])
-
-  const serverRows = useMemo(() => {
-    const rowsByServer = new Map<
-      string,
-      {
-        agents: Set<string>
-        contexts: Set<string>
-        serverName: string
-        url?: string
-      }
-    >()
-
-    for (const agentName of agentNames) {
-      const servers = Array.from(
-        new Set(
-          (mcpServersByAgent[agentName] || [])
-            .map(name => String(name || '').trim())
-            .filter(Boolean)
-        )
-      ).sort((a, b) => a.localeCompare(b))
-      if (!servers.length) continue
-
-      const contextRefRaw = agentContextByName[agentName]
-      const contextId =
-        typeof contextRefRaw === 'string' && contextRefRaw.trim().length > 0
-          ? contextRefRaw.trim()
-          : 'Unassigned context'
-
-      for (const serverName of servers) {
-        const globalServer = globalByName.get(serverName)
-        const existing = rowsByServer.get(serverName)
-        if (existing) {
-          existing.agents.add(agentName)
-          existing.contexts.add(contextId)
-          if (!existing.url && globalServer?.url) existing.url = globalServer.url
-          continue
-        }
-        rowsByServer.set(serverName, {
-          agents: new Set([agentName]),
-          contexts: new Set([contextId]),
-          serverName,
-          ...(globalServer?.url ? { url: globalServer.url } : {}),
-        })
-      }
-    }
-
-    return [...rowsByServer.values()]
-      .map(row => ({
-        agents: [...row.agents].sort((a, b) => a.localeCompare(b)),
-        contexts: [...row.contexts].sort((a, b) => {
-          if (a === 'Unassigned context') return 1
-          if (b === 'Unassigned context') return -1
-          return a.localeCompare(b)
-        }),
-        serverName: row.serverName,
-        url: row.url,
-      }))
-      .sort((a, b) => a.serverName.localeCompare(b.serverName))
-  }, [agentContextByName, agentNames, globalByName, mcpServersByAgent])
+  const hasAgents = agents.length > 0
 
   return (
     <section className="page">
       <div className="page-header">
         <h2>Connectors</h2>
-        <p className="muted">Connectors mapped across available agents and contexts.</p>
+        <p className="muted">
+          Review the connectors available to each agent, authorize the ones that require setup, and
+          disconnect the ones you no longer want to grant.
+        </p>
       </div>
 
       <div className="page-layout">
-        <section className="page-card mcp-servers-board-card">
-          {loading && serverRows.length === 0 ? (
-            <EmptyState title="Loading" body="Fetching connector inventory..." />
-          ) : error && serverRows.length === 0 ? (
-            <div className="composer-error" role="alert">
-              <p className="error-text">{error}</p>
-            </div>
-          ) : serverRows.length === 0 ? (
-            <EmptyState title="No connectors" body={mcpServerMappingUnavailableMessage} />
-          ) : (
-            <DataTable frameless fullBleed className="mcp-servers-data-table">
-              <thead>
-                <tr>
-                  <th className="da-table__col-header" scope="col">
-                    Server
-                  </th>
-                  <th className="da-table__col-header" scope="col">
-                    Contexts
-                  </th>
-                  <th className="da-table__col-header" scope="col">
-                    Agents
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {serverRows.map(row => (
-                  <tr key={row.serverName}>
-                    <td className="da-table__cell">
-                      <span className="mcp-servers-server-cell">
-                        {formatMcpServerDisplayName(row.serverName)}
+        {error ? <StatusBanner tone="error">{error}</StatusBanner> : null}
+
+        {loading && !hasAgents ? (
+          <section className="page-card">
+            <EmptyState title="Loading" body="Fetching your connectors…" />
+          </section>
+        ) : !hasAgents ? (
+          <section className="page-card">
+            <EmptyState
+              title="No connectors"
+              body="No agents with connectors are available for your account yet."
+            />
+          </section>
+        ) : (
+          agents.map(agent => {
+            const contextRef = agent.contextRef
+            return (
+              <section
+                className="page-card"
+                key={agent.name}
+                aria-labelledby={`agent-${agent.name}`}
+              >
+                <div className="page-card__header">
+                  <div>
+                    <h3 id={`agent-${agent.name}`}>{agent.name}</h3>
+                    <p className="muted">
+                      {contextRef ? `Context: ${contextRef}` : 'No context assigned'}
+                    </p>
+                  </div>
+                </div>
+
+                {agent.connectors.length === 0 ? (
+                  <EmptyState
+                    title="No connectors"
+                    body="This agent's context lists no connectors."
+                  />
+                ) : (
+                  <div className="da-grid" style={{ '--da-grid-cols': CONNECTORS_GRID_COLS }}>
+                    <div className="da-grid__head">
+                      <span className="da-grid__col-header">Connector</span>
+                      <span className="da-grid__col-header">Status</span>
+                      <span className="da-grid__col-header">Scope</span>
+                      <span className="da-grid__col-header da-grid__col-header--right">
+                        Actions
                       </span>
-                      {row.url ? <code className="mcp-servers-url-inline">{row.url}</code> : null}
-                    </td>
-                    <td className="da-table__cell">
-                      <span className="reference-tag-list">
-                        {row.contexts.map(contextId => (
-                          <ReferenceTag
-                            key={`${row.serverName}:${contextId}`}
-                            kind="context"
-                            title={contextId}
-                            aria-label={`Open context ${contextId}`}
-                            disabled={contextId === 'Unassigned context'}
-                            onClick={() => {
-                              if (contextId === 'Unassigned context') return
-                              handleOpenContextDetails(contextId)
-                            }}
-                          >
-                            {contextId}
-                          </ReferenceTag>
-                        ))}
-                      </span>
-                    </td>
-                    <td className="da-table__cell">
-                      <span className="reference-tag-list">
-                        {row.agents.map(agentName => (
-                          <ReferenceTag
-                            key={`${row.serverName}:${agentName}`}
-                            kind="agent"
-                            onClick={() => handleOpenAgentWorkspace(agentName)}
-                            title={agentName}
-                            aria-label={`Open agent ${agentName}`}
-                          >
-                            {/* Visible agent name (spec.host) read directly from
-                                the producer-total map — no fallback (Decision #6). */}
-                            {agentDisplayByName[agentName]}
-                          </ReferenceTag>
-                        ))}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </DataTable>
-          )}
-        </section>
+                    </div>
+                    <div className="da-grid__body">
+                      {agent.connectors.map(connector => {
+                        const presentation = statusPresentation(connector.status)
+                        const caption = scopeCaption(connector)
+                        const actionKey = connectorActionKey(agent.name, connector.name)
+                        const busy = pendingKey === actionKey
+                        const actionInput = { agentName: agent.name, contextRef, connector }
+                        return (
+                          <div className="da-grid__row" key={`${agent.name}:${connector.name}`}>
+                            <span className="da-grid__cell">
+                              {formatMcpServerDisplayName(connector.name)}
+                              {connector.provider ? (
+                                <span className="muted"> · {connector.provider}</span>
+                              ) : null}
+                            </span>
+                            <span className="da-grid__cell">
+                              <Pill tone={presentation.tone} size="sm">
+                                {presentation.label}
+                              </Pill>
+                            </span>
+                            <span className="da-grid__cell muted">{caption ?? '—'}</span>
+                            <span className="da-grid__cell da-grid__cell--right">
+                              {!isActionableConnector(connector) ? null : connector.status ===
+                                'authorized' ? (
+                                <Button
+                                  color="danger"
+                                  disabled={busy}
+                                  loading={busy}
+                                  onClick={() => disconnect(actionInput).catch(() => undefined)}
+                                  size="sm"
+                                  variant="ghost"
+                                >
+                                  Disconnect
+                                </Button>
+                              ) : (
+                                <Button
+                                  color="primary"
+                                  disabled={busy}
+                                  loading={busy}
+                                  onClick={() => authorize(actionInput).catch(() => undefined)}
+                                  size="sm"
+                                  variant="soft"
+                                >
+                                  Authorize
+                                </Button>
+                              )}
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+              </section>
+            )
+          })
+        )}
       </div>
     </section>
   )

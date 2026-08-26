@@ -60,6 +60,7 @@ import {
   PrewarmHostResult,
   ProfileSettingsOpenOptions,
   RpcAllowedServersResult,
+  RpcConnectorsResult,
   RpcScope,
   SessionLifecycleState,
   SessionMe,
@@ -4500,13 +4501,22 @@ export class AppService {
   async requestMcpOauthAuthorize(
     mcpServerName: string,
     hostRef: string,
-    contextId?: string
+    contextId?: string,
+    // Proactive panel (spec 11 U3/D-4): when the connector is `oauth-context`
+    // ("shared by the team"), authorizing affects the WHOLE Context, so the
+    // panel asks main to show an explicit confirm dialog first. The reactive
+    // U5 path never sets this, so its behavior is byte-identical.
+    options?: { confirmShared?: boolean }
   ): Promise<void> {
     const server = String(mcpServerName || '').trim()
     const targetHostRef = String(hostRef || '').trim()
     if (!server) throw new Error('mcpServerName is required')
     if (!targetHostRef) throw new Error('hostRef is required')
     const ctx = contextId ? String(contextId).trim() || undefined : undefined
+    if (options?.confirmShared) {
+      const confirmed = await this.confirmSharedConnectorAction('connect', server)
+      if (!confirmed) return
+    }
     let rpc = await this.issueRpcTokenForHostRefs(MCP_SERVER_INVOKE_SCOPES, [targetHostRef])
     let result: { authorizeUrl: string }
     try {
@@ -4527,6 +4537,118 @@ export class AppService {
     }
     const { shell } = await import('electron')
     await shell.openExternal(result.authorizeUrl)
+  }
+
+  /**
+   * Proactive connectors read-model (spec 11 U2). Returns the user's agent fleet
+   * with each connector classified tri-state (`authorized`/`requires_setup`/
+   * `no_oauth`). Host refs come from the access catalog purely to mint the
+   * `mcp:servers:list` RPC token (rpc-proxy derives the userId from `auth.sub`
+   * and enumerates agents server-side). Retry-after-refresh mirrors
+   * {@link listAccessibleMcpServers}.
+   */
+  async getConnectors(): Promise<RpcConnectorsResult> {
+    const token = this.requireSessionToken()
+    const catalog = await this.getAccessCatalog()
+    const hostRefs = AppService.dedupe(
+      (catalog.agentNames || []).map(name => String(name || '').trim()).filter(Boolean)
+    )
+    if (!hostRefs.length) {
+      const me = this.me ?? (await this.authClient.getMe(token))
+      this.me = me
+      return { userId: me.id, agents: [] }
+    }
+    const rpc = await this.issueRpcTokenForHostRefs(MCP_SERVERS_LIST_SCOPES, hostRefs)
+    try {
+      return await this.rpcClient.getConnectors(rpc.token)
+    } catch (error) {
+      if (AppService.shouldRefreshRpcToken(error)) {
+        this.rpcTokenManager.clear()
+        const retried = await this.issueRpcTokenForHostRefs(MCP_SERVERS_LIST_SCOPES, hostRefs)
+        return this.rpcClient.getConnectors(retried.token)
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Disconnect (revoke) an mcp-server's OAuth grant from the proactive panel
+   * (spec 11 U4). Host-bound to the agent whose row triggered it (RPC tokens
+   * require ≥1 hostRef; `mcp:server:invoke`, same as connect). Disconnect is
+   * destructive, so it ALWAYS asks for explicit confirmation via a native
+   * dialog (D-4); for an `oauth-context` connector the copy names the team-wide
+   * blast radius. `userId` is derived by rpc-proxy from `auth.sub`, never sent.
+   * Resolves `{ confirmed:false }` when the user cancels (nothing was revoked).
+   */
+  async disconnectMcpServer(
+    mcpServerName: string,
+    hostRef: string,
+    contextId?: string,
+    options?: { shared?: boolean }
+  ): Promise<{ confirmed: boolean }> {
+    const server = String(mcpServerName || '').trim()
+    const targetHostRef = String(hostRef || '').trim()
+    if (!server) throw new Error('mcpServerName is required')
+    if (!targetHostRef) throw new Error('hostRef is required')
+    const ctx = contextId ? String(contextId).trim() || undefined : undefined
+    const confirmed = await this.confirmSharedConnectorAction(
+      'disconnect',
+      server,
+      Boolean(options?.shared)
+    )
+    if (!confirmed) return { confirmed: false }
+    let rpc = await this.issueRpcTokenForHostRefs(MCP_SERVER_INVOKE_SCOPES, [targetHostRef])
+    try {
+      await this.rpcClient.deleteMcpOauthGrant(rpc.token, server, ctx)
+    } catch (error) {
+      // The DELETE is idempotent and rpc-proxy emits every 401/403-missing-scope
+      // from its auth middleware BEFORE the upstream call, so a retried error is
+      // always a pre-effect rejection — safe to re-mint (same hostRef) and retry.
+      if (AppService.shouldRefreshRpcToken(error)) {
+        this.rpcTokenManager.clear()
+        rpc = await this.issueRpcTokenForHostRefs(MCP_SERVER_INVOKE_SCOPES, [targetHostRef])
+        await this.rpcClient.deleteMcpOauthGrant(rpc.token, server, ctx)
+      } else {
+        throw error
+      }
+    }
+    return { confirmed: true }
+  }
+
+  /**
+   * Native confirmation dialog for a connector action whose effect is either
+   * destructive (any disconnect) or team-wide (`oauth-context`). Mirrors the
+   * background-consent dialog of {@link requestSandboxUiOauthAuthorize}. The
+   * `shared` copy names the Context blast radius; every disconnect carries the
+   * revocation-latency note (D-5 — no immediate push; eviction is by idle
+   * timeout). Returns true iff the user confirmed.
+   */
+  private async confirmSharedConnectorAction(
+    action: 'connect' | 'disconnect',
+    server: string,
+    shared = true
+  ): Promise<boolean> {
+    const { dialog, BrowserWindow } = await import('electron')
+    const win = BrowserWindow.getFocusedWindow() ?? undefined
+    const verb = action === 'connect' ? 'Connect' : 'Disconnect'
+    const latencyNote =
+      action === 'disconnect' ? ' It can take a few minutes to cut active sessions.' : ''
+    const message = shared ? `${verb} "${server}" for the whole team?` : `${verb} "${server}"?`
+    const detail = shared
+      ? action === 'connect'
+        ? `This connector is shared by the team. Authorizing it connects every agent in this context on your behalf.${latencyNote}`
+        : `This connector is shared by the team. Disconnecting removes access for every agent in this context.${latencyNote}`
+      : `This removes your authorization for this connector.${latencyNote}`
+    const opts = {
+      type: (action === 'disconnect' ? 'warning' : 'question') as 'warning' | 'question',
+      buttons: ['Cancel', verb],
+      defaultId: 1,
+      cancelId: 0,
+      message,
+      detail,
+    }
+    const result = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts)
+    return result.response === 1
   }
 
   /**

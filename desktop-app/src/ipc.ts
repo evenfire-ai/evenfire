@@ -1123,13 +1123,41 @@ export function registerIpcHandlers(service: AppService): void {
   // conversation's hostRef) and opens it in the OS browser. The deep-link return
   // (`clerum://oauth-completed?…&source=mcp`) is routed by main.ts back to the
   // renderer to resume the suspended task.
-  ipcMain.handle('rpc:connectMcpServer', async (event, { mcpServerName, hostRef, contextId }) => {
+  ipcMain.handle(
+    'rpc:connectMcpServer',
+    async (event, { mcpServerName, hostRef, contextId, options }) => {
+      assertTrustedSender(event)
+      const server = sanitizeString(mcpServerName)
+      const targetHostRef = sanitizeString(hostRef)
+      const ctx = sanitizeString(contextId) || undefined
+      // `confirmShared` is a UX-only flag (the server-side authz per flavor is
+      // authoritative). The panel sets it for `oauth-context` connectors so main
+      // shows a team-wide confirm dialog; the reactive U5 path omits it.
+      const confirmShared = options && typeof options === 'object' && options.confirmShared === true
+      return service.requestMcpOauthAuthorize(server, targetHostRef, ctx, { confirmShared })
+    }
+  )
+
+  // Proactive connectors panel (spec 11 U2): the classified per-agent fleet.
+  ipcMain.handle('rpc:listConnectors', async event => {
     assertTrustedSender(event)
-    const server = sanitizeString(mcpServerName)
-    const targetHostRef = sanitizeString(hostRef)
-    const ctx = sanitizeString(contextId) || undefined
-    return service.requestMcpOauthAuthorize(server, targetHostRef, ctx)
+    return service.getConnectors()
   })
+
+  // Proactive disconnect (spec 11 U4): revoke an mcp-server's OAuth grant. Main
+  // shows an explicit confirm dialog before the DELETE (destructive; team-wide
+  // for `oauth-context`). `shared` drives only the confirm copy.
+  ipcMain.handle(
+    'rpc:disconnectMcpServer',
+    async (event, { mcpServerName, hostRef, contextId, options }) => {
+      assertTrustedSender(event)
+      const server = sanitizeString(mcpServerName)
+      const targetHostRef = sanitizeString(hostRef)
+      const ctx = sanitizeString(contextId) || undefined
+      const shared = options && typeof options === 'object' && options.shared === true
+      return service.disconnectMcpServer(server, targetHostRef, ctx, { shared })
+    }
+  )
 
   ipcMain.handle('rpc:listServers', async (event, { hostRefs }) => {
     assertTrustedSender(event)

@@ -457,8 +457,23 @@ const clerum = Object.freeze({
     // U5 (mcp-oauth reactive consent): "Connect <server>" — open the provider
     // authorize-URL for a task that suspended with `connect_required`. Host-bound
     // to the suspended conversation's hostRef (RPC tokens require a hostRef).
-    connectMcpServer: (mcpServerName: string, hostRef: string, contextId?: string) =>
-      ipcRenderer.invoke('rpc:connectMcpServer', { mcpServerName, hostRef, contextId }),
+    connectMcpServer: (
+      mcpServerName: string,
+      hostRef: string,
+      contextId?: string,
+      options?: { confirmShared?: boolean }
+    ) => ipcRenderer.invoke('rpc:connectMcpServer', { mcpServerName, hostRef, contextId, options }),
+    // Proactive connectors panel (spec 11 U2): the classified per-agent fleet.
+    listConnectors: () => ipcRenderer.invoke('rpc:listConnectors'),
+    // Proactive disconnect (spec 11 U4): revoke an mcp-server's OAuth grant.
+    // `options.shared` only drives the native confirm-dialog copy.
+    disconnectMcpServer: (
+      mcpServerName: string,
+      hostRef: string,
+      contextId?: string,
+      options?: { shared?: boolean }
+    ) =>
+      ipcRenderer.invoke('rpc:disconnectMcpServer', { mcpServerName, hostRef, contextId, options }),
     // Fired when the OAuth deep-link returns with `source=mcp`. The renderer
     // correlates `mcpServerName` to its suspended entries and resumes the task.
     onMcpOauthCompleted: (

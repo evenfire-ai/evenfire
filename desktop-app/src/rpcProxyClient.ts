@@ -13,6 +13,7 @@ import {
   MessageToolStep,
   PendingApprovalLite,
   RpcAllowedServersResult,
+  RpcConnectorsResult,
   SandboxUiApp,
   SessionLifecycleState,
   SessionMessagesQuery,
@@ -422,6 +423,45 @@ export class RpcProxyClient {
     return requestJson<RpcAllowedServersResult>('GET', url('/api/v1/rpc/servers'), {
       token: rpcAccessToken,
     })
+  }
+
+  /**
+   * Proactive connectors read-model (spec 11 U2/U1) — the per-agent classified
+   * fleet (`authorized`/`requires_setup`/`no_oauth`). Reuses the `mcp:servers:list`
+   * scope (catalog read), like {@link listServers}; rpc-proxy derives the
+   * `userId` from `auth.sub` and enumerates the agents server-side, so the token
+   * only needs a valid host binding for the scope gate. Throws `ApiError` so
+   * `AppService.shouldRefreshRpcToken` can drive the retry-after-refresh.
+   */
+  async getConnectors(rpcAccessToken: string): Promise<RpcConnectorsResult> {
+    return requestJson<RpcConnectorsResult>('GET', url('/api/v1/rpc/connectors'), {
+      token: rpcAccessToken,
+    })
+  }
+
+  /**
+   * Disconnect (revoke) an mcp-server's OAuth grant (spec 11 U4). Mirrors the
+   * authorize-URL mint route but as a `DELETE`; the `userId` is derived by
+   * rpc-proxy from `auth.sub` and is NEVER sent in the body (invariant 3). The
+   * optional `contextId` is only a hint for the `oauth-context` flavor — control
+   * -api resolves the authoritative Context server-side. Idempotent: a missing
+   * grant answers 204. Throws `ApiError` (401/403-missing-scope → refresh retry).
+   */
+  async deleteMcpOauthGrant(
+    rpcAccessToken: string,
+    mcpServerName: string,
+    contextId?: string
+  ): Promise<void> {
+    await requestJson<unknown>(
+      'DELETE',
+      url(`/api/v1/mcp-oauth/${encodeURIComponent(mcpServerName)}/grant`),
+      {
+        token: rpcAccessToken,
+        // Body is optional; only send `contextId` when present. `userId` is NEVER
+        // sent — rpc-proxy derives it from the JWT sub.
+        body: contextId ? { contextId } : {},
+      }
+    )
   }
 
   async invokeHostMessage(

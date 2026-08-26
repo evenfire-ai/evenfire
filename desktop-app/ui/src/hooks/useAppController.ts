@@ -24,7 +24,7 @@ import type {
 import {
   type ApprovalDecisionTarget,
   decideApproval as decideApprovalCore,
-  resolveConnectResumeTargets,
+  handleMcpOauthCompletion,
 } from './domain/approvalDecision'
 import { desktopQueryKeys } from './domain/queryKeys'
 import { useActivityController } from './domain/useActivityController'
@@ -32,6 +32,7 @@ import { useAgentChatController } from './domain/useAgentChatController'
 import { useAgentsDataController } from './domain/useAgentsDataController'
 import { useAuthController } from './domain/useAuthController'
 import { useChannelNotificationPreferencesController } from './domain/useChannelNotificationPreferencesController'
+import { useConnectorsController } from './domain/useConnectorsController'
 import { useContextsDataController } from './domain/useContextsDataController'
 import { useDesktopController } from './domain/useDesktopController'
 import { useHostPrewarmController } from './domain/useHostPrewarmController'
@@ -175,6 +176,10 @@ export function useAppController() {
   const agentsData = useAgentsDataController()
   const contextsData = useContextsDataController()
   const mcpServersData = useMcpServersDataController()
+  // App-coordinated like the other data-controllers: the panel query is
+  // `enabled:false`, so the initial load and the identity teardown are owned
+  // here (see refreshAuthenticatedData / handleLogout / switchTeamForWorkspace).
+  const connectorsData = useConnectorsController()
   const teamsData = useTeamsDataController()
   const currentTeamId = auth.me?.teamId || teamsData.currentTeamId || ''
   const availableTeamIds = useMemo(() => teamsData.teams.map(team => team.id), [teamsData.teams])
@@ -321,15 +326,29 @@ export function useAppController() {
   // ephemeral client_id→server map. Each match resumes through the SAME central
   // decider (`decideApproval` approve → the approval RPC re-executes the tool).
   // Subscribed once; `chat.sessionFsmStore` and `decideApprovalRef` are read live.
+  // U3 (mcp-oauth PROACTIVE consent) adds the missing arm: when the completion
+  // matches no suspended turn (panel "Authorize" with no turn in flight),
+  // `handleMcpOauthCompletion` yields no resume targets and instead refreshes the
+  // connectors panel. When a turn IS suspended it does BOTH — resumes through the
+  // same decider AND refreshes the panel (coexistence must-fix). The panel's
+  // tri-state is always re-read from U1 (D4).
   useEffect(() => {
     const unsub = window.clerum.rpc.onMcpOauthCompleted?.(({ mcpServerName }) => {
-      const targets = resolveConnectResumeTargets(chat.sessionFsmStore.getSnapshot(), mcpServerName)
-      for (const target of targets) {
-        void decideApprovalRef.current(target)
-      }
+      handleMcpOauthCompletion(
+        {
+          getSnapshot: () => chat.sessionFsmStore.getSnapshot(),
+          decide: target => void decideApprovalRef.current(target),
+          // The panel query is `enabled:false`, so an invalidate would only mark
+          // it stale without refetching — drive the imperative refresh instead so
+          // both the PROACTIVE (no suspended turn) and coexistence (turn + panel)
+          // arms of U3 actually re-read the grant store.
+          refreshConnectors: () => void connectorsData.refresh(),
+        },
+        mcpServerName
+      )
     })
     return () => unsub?.()
-  }, [chat.sessionFsmStore])
+  }, [chat.sessionFsmStore, connectorsData.refresh])
 
   // ─── MCP Server ───
   const mcpServer = useMcpServerController({
@@ -428,6 +447,7 @@ export function useAppController() {
                 refreshMcpServersData(),
                 refreshTeams(),
                 refreshWorkflowsData(),
+                connectorsData.refresh(),
                 notif.handleRefreshPendingApprovals({ silent: true }),
               ])
             }
@@ -441,10 +461,12 @@ export function useAppController() {
         refreshMcpServersData(),
         refreshTeams(),
         refreshWorkflowsData(),
+        connectorsData.refresh(),
         notif.handleRefreshPendingApprovals({ silent: true }),
       ])
     },
     [
+      connectorsData.refresh,
       notif.handleRefreshPendingApprovals,
       refreshAgentsData,
       refreshContextsData,
@@ -564,6 +586,11 @@ export function useAppController() {
         // team's tasks stay alive server-side and converge on return via reconcile.
         // Main-process stream teardown is Fase 4.
         chat.resetChat()
+        // The connectors panel key is identity-unscoped, and its payload carries
+        // per-connector OAuth authorization state — drop it here (before the
+        // refresh below repopulates) so the previous team's grants cannot show,
+        // even for the frame between the confirmed switch and the refetch.
+        connectorsData.reset()
         auth.setIsAuthenticated(true)
         auth.setMe(sessionState.me)
         auth.setEmail(sessionState.me.email || '')
@@ -592,6 +619,7 @@ export function useAppController() {
       auth.setIsAuthenticated,
       auth.setMe,
       chat.resetChat,
+      connectorsData.reset,
       fullSetStatus,
       refreshAuthenticatedData,
       setPostPaintDataReady,
@@ -670,6 +698,7 @@ export function useAppController() {
           agentsData.reset()
           contextsData.reset()
           mcpServersData.reset()
+          connectorsData.reset()
           teamsData.reset()
           resetWorkflowsData()
           queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
@@ -711,6 +740,7 @@ export function useAppController() {
     [
       agentsData.reset,
       auth.refreshRuntimeConfigState,
+      connectorsData.reset,
       auth.setBooting,
       auth.setDependencyHealth,
       auth.setDesktopReleaseStatus,
@@ -745,6 +775,7 @@ export function useAppController() {
       agentsData.reset()
       contextsData.reset()
       mcpServersData.reset()
+      connectorsData.reset()
       teamsData.reset()
       resetWorkflowsData()
       queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
@@ -773,6 +804,7 @@ export function useAppController() {
     auth.setBusy,
     chat.resetChat,
     chat.stopAllActivityStreams,
+    connectorsData.reset,
     contextsData.reset,
     fullSetStatus,
     loadSession,

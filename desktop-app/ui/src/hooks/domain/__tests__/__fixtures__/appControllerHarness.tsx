@@ -184,6 +184,11 @@ export function extendMockClerumForAppController(
     prewarmHost: vi.fn(async () => ({ status: 'ok' })),
     approveToolCall: vi.fn(async () => undefined),
     denyToolCall: vi.fn(async () => undefined),
+    // The coordinator now owns the connectors panel's initial load (post-auth
+    // bootstrap) — give the app-level `useConnectorsController` a producer.
+    listConnectors: vi.fn(async () => ({ userId: HARNESS_ME.id, agents: [] })),
+    connectMcpServer: vi.fn(async () => undefined),
+    disconnectMcpServer: vi.fn(async () => ({ confirmed: true })),
   })
 
   Object.assign(bridge, {
