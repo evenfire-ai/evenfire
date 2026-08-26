@@ -233,7 +233,7 @@ function rawRequest(method, path, headerLines, body = '') {
     socket.setEncoding('utf8')
     socket.on('data', chunk => { response += chunk })
     socket.on('end', () => {
-      const match = /^HTTP\/1\.1 (\d{3})\b/m.exec(response)
+      const match = /^HTTP\/\d(?:\.\d)? (\d{3})\b/m.exec(response)
       resolve({
         status: Number(match?.[1] ?? 0),
         hasHttpResponse: Boolean(match),
