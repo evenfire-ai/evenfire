@@ -38,7 +38,8 @@ export const ALL_HOOK_CAPABILITIES: HookCapability[] = HOOK_CAPABILITY_OPTIONS.m
 // `may_add_context` has no such branch — a hook adds context whether or not it
 // was granted — so telling an operator its actions are discarded would be
 // untrue for that one, and would spend the warning's credibility on a case
-// where nothing is wrong.
+// where nothing is wrong. Tracked in evenfire-ai/evenfire#459; this list moves
+// when that lands.
 export const ENFORCED_HOOK_CAPABILITIES: HookCapability[] = [
   'may_deny',
   'may_rewrite',
@@ -48,9 +49,14 @@ export const ENFORCED_HOOK_CAPABILITIES: HookCapability[] = [
 // Default installation order applied by the backend when none is supplied.
 export const DEFAULT_HOOK_ORDER = 100
 
-// `hook_meta.authorDefaults.orderHint` is a word ("early", "late"), while the
-// CRD's `order` is an integer. There is no published mapping between them, so
-// the hint is shown to the operator rather than silently converted to a number.
+// `hook_meta.authorDefaults.orderHint` is one of three words the registry
+// accepts — "early", "normal", "late" — while the CRD's `order` is an integer.
+// There is no published mapping between them, so the hint is shown to the
+// operator rather than silently converted to a number.
+//
+// All three are labelled, "normal" included: an author who publishes it made a
+// choice, and rendering nothing would make that indistinguishable from an
+// author who published no hint at all.
 //
 // Null-prototype on purpose: the key is a publisher-supplied string off the
 // registry entry, so an inherited key (`toString`, `constructor`, …) would
@@ -59,6 +65,7 @@ export const ORDER_HINT_LABELS: Record<string, string> = Object.assign(
   Object.create(null) as Record<string, string>,
   {
     early: 'The author suggests running this hook early.',
+    normal: 'The author has no ordering preference for this hook.',
     late: 'The author suggests running this hook late.',
   }
 )

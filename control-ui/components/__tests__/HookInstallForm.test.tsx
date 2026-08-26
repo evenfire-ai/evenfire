@@ -121,6 +121,21 @@ describe('HookInstallForm — author declarations', () => {
     expect(await screen.findByLabelText(/^order$/i)).toHaveValue(100)
   })
 
+  it('shows a hint for every order hint the registry accepts', async () => {
+    // "normal" is legal alongside "early"/"late". Rendering nothing for it made
+    // an author who chose it look like an author who published no hint.
+    render(
+      <HookInstallForm
+        entry={entryWith({ authorDefaults: { orderHint: 'normal' } })}
+        onCancel={noop}
+        onInstalled={noop}
+      />
+    )
+    await openAdvanced()
+    expect(await screen.findByText(/no ordering preference/i)).toBeInTheDocument()
+    expect(await screen.findByLabelText(/^order$/i)).toHaveValue(100)
+  })
+
   it('ignores an order hint naming an inherited object key', async () => {
     // `orderHint: "toString"` used to resolve to Object.prototype.toString off
     // the label map and render as if it were a real hint.
