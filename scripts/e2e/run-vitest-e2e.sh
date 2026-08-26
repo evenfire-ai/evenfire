@@ -95,7 +95,7 @@ run_vitest_gate() {
   # Capture Vitest's real exit code across the tee (a pipe otherwise reports
   # tee's status). Guards below run regardless, to catch a green-but-empty run.
   set +e
-  npx vitest run "$@" 2>&1 | tee "${log}"
+  npx vitest run --no-color "$@" 2>&1 | tee "${log}"
   status="${PIPESTATUS[0]}"
   set -e
   if grep -qE "No test files found" "${log}"; then

@@ -27,6 +27,8 @@ require_contains "${RUNNER}" "Vitest reported 'No test files found'" \
   "zero-file guard"
 require_contains "${RUNNER}" "Vitest reported no executed tests" \
   "zero-test guard"
+require_contains "${RUNNER}" "npx vitest run --no-color" \
+  "color-free Vitest output for the zero-test guard"
 require_contains "${WORKFLOW}" "E2E Vitest node-unit (tests/e2e)" \
   "public CI job"
 require_contains "${WORKFLOW}" "node-version: '24'" \
