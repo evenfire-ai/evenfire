@@ -11,9 +11,11 @@ export interface FixtureHandle {
 
 interface FixtureLease {
   handle: FixtureHandle
-  state: 'active' | 'disposed' | 'neutralize-failed-closed' | 'close-failed'
+  state: 'active' | 'disposing' | 'disposed' | 'neutralize-failed-closed' | 'close-failed'
   neutralized: boolean
+  disposeInFlight?: Promise<void>
   failure?: unknown
+  neutralizeFailure?: unknown
 }
 
 const fixtureLeases = new WeakMap<FixtureLeaseTarget, FixtureLease>()
@@ -56,6 +58,20 @@ export async function disposeFixtureLeaseForTest(fixture: FixtureLeaseTarget): P
   if (!lease) {
     throw new Error(`refusing to neutralize an unowned GFS v2 fixture: ${fixture.filePath}`)
   }
+  if (lease.disposeInFlight) return lease.disposeInFlight
+  const operation = runFixtureLeaseDisposal(fixture, lease)
+  lease.disposeInFlight = operation
+  try {
+    await operation
+  } finally {
+    if (lease.disposeInFlight === operation) lease.disposeInFlight = undefined
+  }
+}
+
+async function runFixtureLeaseDisposal(
+  fixture: FixtureLeaseTarget,
+  lease: FixtureLease
+): Promise<void> {
   if (lease.state === 'disposed') return
   if (lease.state === 'neutralize-failed-closed') {
     throw (
@@ -67,17 +83,28 @@ export async function disposeFixtureLeaseForTest(fixture: FixtureLeaseTarget): P
     await retryCloseAfterFailure(fixture, lease)
     return
   }
+  if (lease.state === 'disposing') {
+    throw new Error(`GFS v2 fixture disposal is already in progress: ${fixture.filePath}`)
+  }
+  lease.state = 'disposing'
   try {
     await lease.handle.truncate(0)
     lease.neutralized = true
+  } catch (error) {
+    await closeAfterNeutralizeFailure(lease, error)
+  }
+  try {
     await lease.handle.close()
     lease.state = 'disposed'
   } catch (error) {
-    await closeAfterDisposalFailure(lease, error)
+    lease.failure = error
+    lease.state = 'close-failed'
+    throw error
   }
 }
 
-async function closeAfterDisposalFailure(lease: FixtureLease, failure: unknown): Promise<never> {
+async function closeAfterNeutralizeFailure(lease: FixtureLease, failure: unknown): Promise<never> {
+  lease.neutralizeFailure = failure
   try {
     await lease.handle.close()
   } catch (closeError) {
@@ -101,6 +128,7 @@ async function retryCloseAfterFailure(
   const previousFailure =
     lease.failure ??
     new Error(`GFS v2 fixture disposal failed without a recorded cause: ${fixture.filePath}`)
+  const neutralizeFailure = lease.neutralizeFailure ?? previousFailure
   try {
     await lease.handle.close()
   } catch (closeError) {
@@ -112,7 +140,8 @@ async function retryCloseAfterFailure(
     return
   }
   lease.state = 'neutralize-failed-closed'
-  throw previousFailure
+  lease.failure = neutralizeFailure
+  throw neutralizeFailure
 }
 
 function combineFixtureDisposalFailures(

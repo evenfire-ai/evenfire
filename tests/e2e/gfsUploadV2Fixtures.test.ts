@@ -62,6 +62,28 @@ function useScriptedFixtureHandle(script: {
   return calls
 }
 
+function deferred(): {
+  promise: Promise<void>
+  resolve: () => void
+  reject: (error: unknown) => void
+} {
+  let resolve!: () => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+async function settledReasons(promises: Array<Promise<void>>): Promise<unknown[]> {
+  const results = await Promise.allSettled(promises)
+  return results.map(result => {
+    expect(result.status).toBe('rejected')
+    return (result as PromiseRejectedResult).reason
+  })
+}
+
 describe('GFS Upload v2 disk fixtures', () => {
   const fixtures: Array<Awaited<ReturnType<typeof createDiskUploadFixture>>> = []
 
@@ -318,6 +340,165 @@ describe('GFS Upload v2 disk fixtures', () => {
     expect((await stat(fixture.filePath)).size).toBe(0)
   })
 
+  it('single-flights two concurrent successful disposals', async () => {
+    const entered = deferred()
+    const release = deferred()
+    const calls = useScriptedFixtureHandle({
+      truncate: async (_length, call) => {
+        if (call === 2) {
+          entered.resolve()
+          await release.promise
+        }
+      },
+    })
+    const fixture = await createDiskUploadFixture(1, '.bin', 'cleanup-concurrent-success')
+
+    try {
+      const first = removeDiskUploadFixture(fixture)
+      await entered.promise
+      const second = removeDiskUploadFixture(fixture)
+      release.resolve()
+      await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined])
+      expect(calls).toEqual({ truncate: 2, close: 1 })
+      await expect(removeDiskUploadFixture(fixture)).resolves.toBeUndefined()
+      expect(calls).toEqual({ truncate: 2, close: 1 })
+    } finally {
+      await removeKnownFixtureDirectory(fixture.directory, [fixture.fileName])
+    }
+  })
+
+  it('single-flights many concurrent successful disposals', async () => {
+    const entered = deferred()
+    const release = deferred()
+    const calls = useScriptedFixtureHandle({
+      truncate: async (_length, call) => {
+        if (call === 2) {
+          entered.resolve()
+          await release.promise
+        }
+      },
+    })
+    const fixture = await createDiskUploadFixture(1, '.bin', 'cleanup-many-concurrent-success')
+
+    try {
+      const first = removeDiskUploadFixture(fixture)
+      await entered.promise
+      const joined = Array.from({ length: 8 }, () => removeDiskUploadFixture(fixture))
+      release.resolve()
+      await expect(Promise.all([first, ...joined])).resolves.toEqual(
+        Array.from({ length: 9 }, () => undefined)
+      )
+      expect(calls).toEqual({ truncate: 2, close: 1 })
+    } finally {
+      await removeKnownFixtureDirectory(fixture.directory, [fixture.fileName])
+    }
+  })
+
+  it('single-flights concurrent truncate failure and terminal closed recovery', async () => {
+    const entered = deferred()
+    const release = deferred()
+    const truncateFailure = new Error('synthetic concurrent truncate failure')
+    const calls = useScriptedFixtureHandle({
+      truncate: async (_length, call) => {
+        if (call === 2) {
+          entered.resolve()
+          await release.promise
+          throw truncateFailure
+        }
+      },
+    })
+    const fixture = await createDiskUploadFixture(1, '.bin', 'cleanup-concurrent-truncate-failure')
+
+    try {
+      const first = removeDiskUploadFixture(fixture)
+      await entered.promise
+      const second = removeDiskUploadFixture(fixture)
+      release.resolve()
+      const reasons = await settledReasons([first, second])
+      expect(reasons).toEqual([truncateFailure, truncateFailure])
+      expect(calls).toEqual({ truncate: 2, close: 1 })
+
+      await expect(removeDiskUploadFixture(fixture)).rejects.toBe(truncateFailure)
+      expect(calls).toEqual({ truncate: 2, close: 1 })
+    } finally {
+      await removeKnownFixtureDirectory(fixture.directory, [fixture.fileName])
+    }
+  })
+
+  it('single-flights concurrent close failure after successful neutralization', async () => {
+    const entered = deferred()
+    const release = deferred()
+    const closeFailure = new Error('synthetic concurrent close failure')
+    const calls = useScriptedFixtureHandle({
+      close: async (call, handle) => {
+        if (call === 1) {
+          entered.resolve()
+          await release.promise
+          throw closeFailure
+        }
+        await handle.close()
+      },
+    })
+    const fixture = await createDiskUploadFixture(1, '.bin', 'cleanup-concurrent-close-failure')
+
+    try {
+      const first = removeDiskUploadFixture(fixture)
+      await entered.promise
+      const second = removeDiskUploadFixture(fixture)
+      release.resolve()
+      const reasons = await settledReasons([first, second])
+      expect(reasons).toEqual([closeFailure, closeFailure])
+      expect(calls).toEqual({ truncate: 2, close: 1 })
+
+      await expect(removeDiskUploadFixture(fixture)).resolves.toBeUndefined()
+      expect(calls).toEqual({ truncate: 2, close: 2 })
+      await expect(removeDiskUploadFixture(fixture)).resolves.toBeUndefined()
+      expect(calls).toEqual({ truncate: 2, close: 2 })
+    } finally {
+      await removeKnownFixtureDirectory(fixture.directory, [fixture.fileName])
+    }
+  })
+
+  it('single-flights concurrent truncate and recovery-close failure', async () => {
+    const entered = deferred()
+    const release = deferred()
+    const truncateFailure = new Error('synthetic concurrent truncate failure')
+    const closeFailure = new Error('synthetic concurrent close failure')
+    const calls = useScriptedFixtureHandle({
+      truncate: async (_length, call) => {
+        if (call === 2) {
+          entered.resolve()
+          await release.promise
+          throw truncateFailure
+        }
+      },
+      close: async (call, handle) => {
+        if (call === 1) throw closeFailure
+        await handle.close()
+      },
+    })
+    const fixture = await createDiskUploadFixture(1, '.bin', 'cleanup-concurrent-truncate-close')
+
+    try {
+      const first = removeDiskUploadFixture(fixture)
+      await entered.promise
+      const second = removeDiskUploadFixture(fixture)
+      release.resolve()
+      const reasons = await settledReasons([first, second])
+      expect(reasons[0]).toBeInstanceOf(AggregateError)
+      expect(reasons[1]).toBe(reasons[0])
+      expect((reasons[0] as AggregateError).errors).toEqual([truncateFailure, closeFailure])
+      expect(calls).toEqual({ truncate: 2, close: 1 })
+
+      await expect(removeDiskUploadFixture(fixture)).rejects.toBe(truncateFailure)
+      expect(calls).toEqual({ truncate: 2, close: 2 })
+      await expect(removeDiskUploadFixture(fixture)).rejects.toBe(truncateFailure)
+      expect(calls).toEqual({ truncate: 2, close: 2 })
+    } finally {
+      await removeKnownFixtureDirectory(fixture.directory, [fixture.fileName])
+    }
+  })
+
   it('keeps a truncate-failure disposal terminal after recovery close succeeds', async () => {
     const truncateFailure = new Error('synthetic cleanup truncate failure')
     const calls = useScriptedFixtureHandle({
@@ -362,12 +543,10 @@ describe('GFS Upload v2 disk fixtures', () => {
       expect((firstError as AggregateError).errors).toEqual([truncateFailure, closeFailure])
       expect(calls).toEqual({ truncate: 2, close: 1 })
 
-      const secondError = await removeDiskUploadFixture(fixture).catch((error: unknown) => error)
-      expect(secondError).toBe(firstError)
+      await expect(removeDiskUploadFixture(fixture)).rejects.toBe(truncateFailure)
       expect(calls).toEqual({ truncate: 2, close: 2 })
 
-      const thirdError = await removeDiskUploadFixture(fixture).catch((error: unknown) => error)
-      expect(thirdError).toBe(firstError)
+      await expect(removeDiskUploadFixture(fixture)).rejects.toBe(truncateFailure)
       expect(calls).toEqual({ truncate: 2, close: 2 })
     } finally {
       await removeKnownFixtureDirectory(fixture.directory, [fixture.fileName])
@@ -387,7 +566,7 @@ describe('GFS Upload v2 disk fixtures', () => {
     try {
       await expect(removeDiskUploadFixture(fixture)).rejects.toBe(closeFailure)
       expect((await stat(fixture.filePath)).size).toBe(0)
-      expect(calls).toEqual({ truncate: 2, close: 2 })
+      expect(calls).toEqual({ truncate: 2, close: 1 })
 
       await expect(removeDiskUploadFixture(fixture)).resolves.toBeUndefined()
       expect(calls).toEqual({ truncate: 2, close: 2 })
