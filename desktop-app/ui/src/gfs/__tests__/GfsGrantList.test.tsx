@@ -66,6 +66,10 @@ describe('GfsGrantList', () => {
     expect(within(agentRow).getByText('Read')).toBeTruthy()
     expect(within(agentRow).getByText('Write')).toBeTruthy()
     expect(within(agentRow).getByText('Includes contents')).toBeTruthy()
+    expect(within(agentRow).getByText('X')).toBeTruthy()
+    expect(
+      within(agentRow).getByRole('button', { name: 'Revoke access for Chat LLM' }).className
+    ).toContain('da-gfs-grant-list__revoke')
 
     const userRow = screen.getByText('Test Two').closest('li')!
     expect(within(userRow).getByText('Read')).toBeTruthy()
@@ -173,5 +177,56 @@ describe('GfsGrantList', () => {
     render(<GfsGrantList agents={agents} items={[]} onRevoke={vi.fn()} subjects={subjects} />)
 
     expect(screen.getByText('No direct grants or shares yet.')).toBeTruthy()
+  })
+
+  // R4 spec §2 — grants and shares fail independently: a share-list error
+  // must not hide successful grant rows or their revoke actions, and vice
+  // versa. Regression for the early-return that swallowed grants whenever
+  // listShares failed.
+  it('keeps grants visible and revocable when only the share list fails', () => {
+    const onRevoke = vi.fn()
+    const grant = grantItem({ id: 'grant-1' })
+    render(
+      <GfsGrantList
+        agents={agents}
+        error={null}
+        items={[grant]}
+        onRevoke={onRevoke}
+        shareError={{ code: null, message: 'listShares exploded', severity: 'error' }}
+        shares={[]}
+        subjects={subjects}
+      />
+    )
+
+    // The share failure is visible…
+    const banner = screen.getByText('listShares exploded')
+    expect(banner.closest('.status-banner')?.className).toContain('tone-error')
+    // …but the grant row and its revoke action stay available and work.
+    const grantRow = screen.getByTestId('gfs-access-row-grant-grant-1')
+    expect(within(grantRow).getByText('Chat LLM')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke access for Chat LLM' }))
+    expect(onRevoke).toHaveBeenCalledWith(grant, 'Chat LLM')
+  })
+
+  it('keeps shares visible and revocable when only the grants list fails', () => {
+    const onRevokeShare = vi.fn()
+    const share = shareItem({})
+    render(
+      <GfsGrantList
+        agents={agents}
+        error={{ code: null, message: 'listGrants exploded', severity: 'error' }}
+        items={[]}
+        onRevoke={vi.fn()}
+        onRevokeShare={onRevokeShare}
+        shares={[share]}
+        subjects={subjects}
+      />
+    )
+
+    expect(screen.getByText('listGrants exploded')).toBeTruthy()
+    const shareRow = screen.getByTestId('gfs-access-row-share-share-1')
+    expect(within(shareRow).getByText('Core Team')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke shared access for Core Team' }))
+    expect(onRevokeShare).toHaveBeenCalledWith(share, 'Core Team')
   })
 })
