@@ -3102,22 +3102,26 @@ export class McpServerWatcher implements McpServerProvider {
       return
     }
     let authoritativeRevocationCompleted = false
+    let safetyCertificate: NetworkPolicySafetyCertificate | undefined
     try {
       const initialContexts = [...this.contexts.values()]
       const initialServers = [...this.servers.values()]
       const contextInventoryGeneration = this.contextWatchGeneration
       const serverInventoryGeneration = this.mcpWatchGeneration
-      const safetyCertificate: NetworkPolicySafetyCertificate = {
+      const capturedSafetyCertificate: NetworkPolicySafetyCertificate = {
         contextGeneration: contextInventoryGeneration,
         serverGeneration: serverInventoryGeneration,
         contextRevision: this.contextDesiredRevision,
         serverRevision: this.mcpServerDesiredRevision,
       }
+      safetyCertificate = capturedSafetyCertificate
       const serverInventoryComplete = this.mcpServerCacheSynced
       const contextInventoryAuthoritative = () =>
-        this.hasContextInventoryAuthority(contextInventoryGeneration)
+        this.contextCacheSynced &&
+        this.contextDesiredRevision === capturedSafetyCertificate.contextRevision
       const serverInventoryAuthoritative = () =>
-        this.hasMcpServerInventoryAuthority(serverInventoryGeneration)
+        this.mcpServerCacheSynced &&
+        this.mcpServerDesiredRevision === capturedSafetyCertificate.serverRevision
       console.log('[K8s] Running initial NetworkPolicy background reconciliation...')
       await this.netPolReconciler.fullReconcile(initialContexts, initialServers, {
         serverInventoryComplete,
@@ -3165,7 +3169,7 @@ export class McpServerWatcher implements McpServerProvider {
         onExternalEgressRevoked: server =>
           this.externalEgressCoordinator.scheduleRetry('MODIFIED', server),
         onAuthoritativeRevocationComplete: () => {
-          if (!this.recordNetworkPolicySafetyCertificate(safetyCertificate)) return
+          if (!this.recordNetworkPolicySafetyCertificate(capturedSafetyCertificate)) return
           authoritativeRevocationCompleted = true
           // Start runtime convergence at the safety boundary, before this full
           // pass enters additive Context work. Startup egress gates may now
@@ -3175,7 +3179,10 @@ export class McpServerWatcher implements McpServerProvider {
         },
       })
       if (!contextInventoryAuthoritative() || !serverInventoryAuthoritative()) {
-        console.warn('[K8s] pass ended without certifying: inventory authority lost')
+        console.warn(
+          '[K8s] pass ended without certifying: inventory authority lost',
+          this.networkPolicyInventoryMovement(capturedSafetyCertificate)
+        )
         initialConvergenceSwallowedTotal.inc({ lane: 'NetworkPolicy', sink: 'authority-lost' })
         observeInitialNetworkPolicyPass(startedAtMs, 'aborted-authority')
         this.scheduleInitialConvergenceRetry('NetworkPolicy')
@@ -3196,8 +3203,28 @@ export class McpServerWatcher implements McpServerProvider {
       )
       const abortedBump =
         error instanceof Error && error.message === DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE
+      if (abortedBump && safetyCertificate) {
+        console.warn(
+          '[K8s] pass ended without certifying: desired inventory changed',
+          this.networkPolicyInventoryMovement(safetyCertificate)
+        )
+      }
       observeInitialNetworkPolicyPass(startedAtMs, abortedBump ? 'aborted-bump' : 'failed')
       this.scheduleInitialConvergenceRetry('NetworkPolicy')
+    }
+  }
+
+  private networkPolicyInventoryMovement(certificate: NetworkPolicySafetyCertificate): {
+    contextMoved: boolean
+    serverMoved: boolean
+    contextCacheSynced: boolean
+    mcpServerCacheSynced: boolean
+  } {
+    return {
+      contextMoved: this.contextDesiredRevision !== certificate.contextRevision,
+      serverMoved: this.mcpServerDesiredRevision !== certificate.serverRevision,
+      contextCacheSynced: this.contextCacheSynced,
+      mcpServerCacheSynced: this.mcpServerCacheSynced,
     }
   }
 

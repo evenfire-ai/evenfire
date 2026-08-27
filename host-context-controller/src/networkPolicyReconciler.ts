@@ -421,8 +421,10 @@ export interface NetworkPolicyFullReconcileOptions {
   resolveCurrentServer?: (name: string) => McpServerCRD | undefined
   /**
    * Monotonic desired-state revisions fence ordinary watch events that arrive
-   * after an owner has completed its safety turn. Watch generations remain the
-   * separate authority fence for LIST -> WATCH recovery.
+   * after an owner has completed its safety turn. The in-flight NetworkPolicy
+   * pass also uses these revisions (plus cacheSynced) as its authority fence.
+   * Watch generations remain the delete-confirm / watch-effect lease, not the
+   * pass abort predicate.
    */
   contextDesiredRevision?: () => number
   serverDesiredRevision?: () => number
@@ -1451,7 +1453,7 @@ export class NetworkPolicyReconciler {
       allExternalPolicies.length
 
     // Count namespace-wide orphan candidates BEFORE any delete. A blown cache
-    // that lists a mass-delete must refuse the pass rather than sweep.
+    // that lists a mass-delete must refuse the sweep and still certify.
     const isContextLaneOrphan = (policy: k8s.V1NetworkPolicy): boolean => {
       const contextId = policy.metadata?.labels?.[CONTEXT_LABEL]
       return !contextId || !desiredContextIds.has(contextId)
