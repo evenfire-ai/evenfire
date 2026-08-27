@@ -14,6 +14,7 @@ import {
 import {
   type ReadinessInventoryDetail,
   resolveHostAuthoritativeFn,
+  resolveProbeAuthoritativeFn,
   resolveProviderAuthoritativeFn,
   resolveReadinessDetailFn,
 } from './readinessGate'
@@ -814,7 +815,10 @@ describe('ContextMapperServer /ready reasons', () => {
     })
   })
 
-  it('emits closed reasons through the main.ts resolve*Fn wiring', async () => {
+  it('emits closed reasons through the omitted-probe fallback resolve*Fn wiring', async () => {
+    // A1 fallback / T10: the 10th constructor arg is omitted on purpose so
+    // /ready still uses the 6-clause provider gate. Production main.ts now
+    // wires resolveProbeAuthoritativeFn; that split is covered below.
     let detail = authoritativeDetail()
     const watcher = {
       isReadinessInventoryAuthoritative: () =>
@@ -852,5 +856,238 @@ describe('ContextMapperServer /ready reasons', () => {
       ready: false,
       reasons: ['safety_pass_uncertified'],
     })
+  })
+})
+
+describe('ContextMapperServer /ready probe cut (A1)', () => {
+  let server: ContextMapperServer | null = null
+
+  const authoritativeDetail = (
+    overrides: Partial<ReadinessInventoryDetail> = {}
+  ): ReadinessInventoryDetail => ({
+    stopped: false,
+    mcpServerCacheSynced: true,
+    contextCacheSynced: true,
+    hostCacheSynced: true,
+    safetyInventoryCertified: true,
+    contextRevisionAligned: true,
+    serverRevisionAligned: true,
+    ...overrides,
+  })
+
+  function sixClauseAuthoritative(detail: ReadinessInventoryDetail): boolean {
+    return (
+      !detail.stopped &&
+      detail.mcpServerCacheSynced &&
+      detail.contextCacheSynced &&
+      detail.hostCacheSynced &&
+      detail.safetyInventoryCertified &&
+      detail.contextRevisionAligned &&
+      detail.serverRevisionAligned
+    )
+  }
+
+  function mainLikeServer(
+    detailRef: { current: ReadinessInventoryDetail },
+    extras: {
+      authenticator?: McpApiAuthenticator
+      authorization?: McpAuthorizationService
+    } = {}
+  ): ContextMapperServer {
+    const watcher = {
+      isReadinessInventoryAuthoritative: () => sixClauseAuthoritative(detailRef.current),
+      isHostInventoryAuthoritative: () =>
+        !detailRef.current.stopped && detailRef.current.hostCacheSynced,
+      getReadinessInventoryDetail: () => detailRef.current,
+    }
+    return new ContextMapperServer(
+      new FakeProvider(),
+      0,
+      undefined,
+      undefined,
+      resolveProviderAuthoritativeFn(watcher),
+      resolveHostAuthoritativeFn(watcher),
+      extras.authenticator,
+      extras.authorization,
+      resolveReadinessDetailFn(watcher),
+      resolveProbeAuthoritativeFn(watcher)
+    )
+  }
+
+  afterEach(async () => {
+    await server?.stop()
+    server = null
+    vi.restoreAllMocks()
+  })
+
+  it('A1-T05 keeps /ready 200 when only the safety pass is uncertified', async () => {
+    const detailRef = { current: authoritativeDetail({ safetyInventoryCertified: false }) }
+    const authenticator = { authenticate: () => principal } as unknown as McpApiAuthenticator
+    server = mainLikeServer(detailRef, {
+      authenticator,
+      authorization: new McpAuthorizationService(new FakeAuthorityStore()),
+    })
+    server.setReady(true)
+
+    const ready = await invoke(server, '/ready')
+    expect(ready.statusCode).toBe(200)
+    expect(JSON.parse(ready.body)).toEqual({ status: 'ready', ready: true })
+    expect(JSON.parse(ready.body)).not.toHaveProperty('reasons')
+
+    const inventory = await invoke(server, '/api/v1/mcpservers')
+    expect(inventory.statusCode).toBe(503)
+
+    const hostInventory = await invoke(server, '/api/v2/hosts/self/mcpservers')
+    expect(hostInventory.statusCode).toBe(503)
+    expect(JSON.parse(hostInventory.body)).toEqual({ error: 'authorization_unavailable' })
+  })
+
+  it.each([
+    ['serverRevisionAligned', { serverRevisionAligned: false }],
+    ['contextRevisionAligned', { contextRevisionAligned: false }],
+  ] as const)('A1-T06 keeps /ready 200 when only %s is false', async (_name, override) => {
+    const detailRef = { current: authoritativeDetail(override) }
+    const authenticator = { authenticate: () => principal } as unknown as McpApiAuthenticator
+    server = mainLikeServer(detailRef, {
+      authenticator,
+      authorization: new McpAuthorizationService(new FakeAuthorityStore()),
+    })
+    server.setReady(true)
+
+    const ready = await invoke(server, '/ready')
+    expect(ready.statusCode).toBe(200)
+    expect(JSON.parse(ready.body)).toEqual({ status: 'ready', ready: true })
+    expect(JSON.parse(ready.body)).not.toHaveProperty('reasons')
+
+    const inventory = await invoke(server, '/api/v1/mcpservers')
+    expect(inventory.statusCode).toBe(503)
+
+    const hostInventory = await invoke(server, '/api/v2/hosts/self/mcpservers')
+    expect(hostInventory.statusCode).toBe(503)
+    expect(JSON.parse(hostInventory.body)).toEqual({ error: 'authorization_unavailable' })
+  })
+
+  it('A1-T07 reports only the host watch reason on /ready when phase-2 is also down', async () => {
+    const detailRef = {
+      current: authoritativeDetail({
+        hostCacheSynced: false,
+        safetyInventoryCertified: false,
+      }),
+    }
+    server = mainLikeServer(detailRef)
+    server.setReady(true)
+
+    const ready = await invoke(server, '/ready')
+    expect(ready.statusCode).toBe(503)
+    expect(JSON.parse(ready.body)).toEqual({
+      status: 'degraded',
+      ready: false,
+      reasons: ['host_watch_unsynced'],
+    })
+  })
+
+  it('A1-T08 withholds /ready while starting or stopping even if the probe gate is always true', async () => {
+    server = new ContextMapperServer(
+      new FakeProvider(),
+      0,
+      undefined,
+      undefined,
+      () => true,
+      () => true,
+      undefined,
+      undefined,
+      undefined,
+      () => true
+    )
+
+    let ready = await invoke(server, '/ready')
+    expect(ready.statusCode).toBe(503)
+    expect(JSON.parse(ready.body)).toEqual({ status: 'starting', ready: false })
+
+    server.setReady(true)
+    ready = await invoke(server, '/ready')
+    expect(ready.statusCode).toBe(200)
+
+    server.setReady(false)
+    ready = await invoke(server, '/ready')
+    expect(ready.statusCode).toBe(503)
+    expect(JSON.parse(ready.body)).toEqual({ status: 'starting', ready: false })
+
+    server.setReady(true)
+    await server.stop()
+    ready = await invoke(server, '/ready')
+    expect(ready.statusCode).toBe(503)
+    expect(JSON.parse(ready.body)).toEqual({ status: 'starting', ready: false })
+  })
+
+  it('A1-T09 fails /ready closed when the probe gate throws', async () => {
+    server = new ContextMapperServer(
+      new FakeProvider(),
+      0,
+      undefined,
+      undefined,
+      () => true,
+      () => true,
+      undefined,
+      undefined,
+      undefined,
+      () => {
+        throw new Error('probe authority unavailable')
+      }
+    )
+    server.setReady(true)
+
+    const ready = await invoke(server, '/ready')
+    expect(ready.statusCode).toBe(503)
+    expect(JSON.parse(ready.body)).toEqual({ status: 'degraded', ready: false })
+  })
+
+  it('A1-T10 keeps /ready on the 6-clause gate when the 10th argument is omitted', async () => {
+    const detail = authoritativeDetail({ safetyInventoryCertified: false })
+    server = new ContextMapperServer(
+      new FakeProvider(),
+      0,
+      undefined,
+      undefined,
+      () => sixClauseAuthoritative(detail),
+      () => false,
+      undefined,
+      undefined,
+      () => detail
+    )
+    server.setReady(true)
+
+    const ready = await invoke(server, '/ready')
+    expect(ready.statusCode).toBe(503)
+    expect(JSON.parse(ready.body)).toEqual({
+      status: 'degraded',
+      ready: false,
+      reasons: ['safety_pass_uncertified'],
+    })
+  })
+
+  it('A1-T11 503s both lanes when the MCP watch is unsynced and heals both on the same instance', async () => {
+    const detailRef = { current: authoritativeDetail({ mcpServerCacheSynced: false }) }
+    server = mainLikeServer(detailRef)
+    server.setReady(true)
+
+    let ready = await invoke(server, '/ready')
+    expect(ready.statusCode).toBe(503)
+    expect(JSON.parse(ready.body)).toEqual({
+      status: 'degraded',
+      ready: false,
+      reasons: ['mcp_watch_unsynced'],
+    })
+
+    let inventory = await invoke(server, '/api/v1/mcpservers')
+    expect(inventory.statusCode).toBe(503)
+
+    detailRef.current = authoritativeDetail()
+    ready = await invoke(server, '/ready')
+    expect(ready.statusCode).toBe(200)
+    expect(JSON.parse(ready.body)).toEqual({ status: 'ready', ready: true })
+
+    inventory = await invoke(server, '/api/v1/mcpservers')
+    expect(inventory.statusCode).toBe(200)
   })
 })
