@@ -5,7 +5,7 @@
  * degrading into a generic approval. This drives a REAL in-memory SQLite DB
  * through every migration (incl. 013), inserts a connect_required row via the
  * real prepared statement, reads it back via the real select, and reconstructs
- * the PendingApproval — asserting reason/mcpServerName/provider are preserved.
+ * the PendingApproval — asserting reason/mcpServerName are preserved.
  *
  * The row shape is `PendingApprovalRow`, the exact interface `persistSuspend`
  * fills (T1: no ad-hoc fixture standing in for another layer — the DB schema and
@@ -42,12 +42,11 @@ function connectRow(): PendingApprovalRow {
     trace_context: null,
     reason: 'connect_required',
     mcp_server_name: 'monday',
-    provider: 'monday',
   }
 }
 
 describe('U5 — connect_required durable round-trip', () => {
-  it('preserves reason/mcpServerName/provider through insert → select → reconstruct', () => {
+  it('preserves reason/mcpServerName through insert → select → reconstruct', () => {
     const db = freshDb()
     const s = prepareStatements(db)
 
@@ -62,10 +61,9 @@ describe('U5 — connect_required durable round-trip', () => {
     const approval = reconstructPendingApproval(row)
 
     // Observable: the rehydrated suspension is a connect_required, not a generic
-    // approval, and it still names the oauth server + provider.
+    // approval, and it still names the oauth server.
     expect(approval.reason).toBe('connect_required')
     expect(approval.mcpServerName).toBe('monday')
-    expect(approval.provider).toBe('monday')
     expect(approval.tool_name).toBe('monday__list_boards')
     db.close()
   })
@@ -86,7 +84,6 @@ describe('U5 — connect_required durable round-trip', () => {
       task_id: 'task-2',
       reason: null,
       mcp_server_name: null,
-      provider: null,
     }
     s.insertPendingApproval.run(legacy)
 
@@ -95,7 +92,6 @@ describe('U5 — connect_required durable round-trip', () => {
 
     expect(approval.reason).toBeUndefined()
     expect(approval.mcpServerName).toBeUndefined()
-    expect(approval.provider).toBeUndefined()
     db.close()
   })
 })

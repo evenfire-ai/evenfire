@@ -31,7 +31,7 @@ async function suspendConnectRequired(
   await convManager.startTurn(conv, 'list boards', 'task-connect')
   const approval = buildConnectRequiredApproval(
     { id: 'tc_1', name: 'monday__list_boards', arguments: { limit: 5 } },
-    { mcpServerName: 'monday', provider: 'monday' }
+    { mcpServerName: 'monday' }
   )
   await convManager.suspendForApproval(conv, approval)
 }
@@ -53,7 +53,7 @@ async function suspendGenericApproval(
 }
 
 describe('createSessionRouteHandlers — U5 connect_required projection on the rejoin snapshot', () => {
-  it('handleSessionMessages surfaces reason/mcpServerName/provider for a connect_required suspension', async () => {
+  it('handleSessionMessages surfaces reason/mcpServerName for a connect_required suspension', async () => {
     const { convManager, handleSessionMessages } = makeHandlersUnderTest()
     await suspendConnectRequired(convManager, 'user-A:rpc:agent-x:chat-1')
 
@@ -63,8 +63,8 @@ describe('createSessionRouteHandlers — U5 connect_required projection on the r
     expect(page?.pendingApproval).toMatchObject({
       reason: 'connect_required',
       mcpServerName: 'monday',
-      provider: 'monday',
     })
+    expect(page?.pendingApproval).not.toHaveProperty('provider')
   })
 
   it('handleSessionsList surfaces the connect_required discriminator on the summary', async () => {
@@ -76,8 +76,8 @@ describe('createSessionRouteHandlers — U5 connect_required projection on the r
     expect(item?.pendingApproval).toMatchObject({
       reason: 'connect_required',
       mcpServerName: 'monday',
-      provider: 'monday',
     })
+    expect(item?.pendingApproval).not.toHaveProperty('provider')
   })
 
   it('a generic approval projects WITHOUT the connect fields (back-compat)', async () => {

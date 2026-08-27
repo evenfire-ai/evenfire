@@ -85,11 +85,10 @@ export interface MessageResponse {
     notification: string
     // U5 — connect_required discriminator, mirrored from the SSE `suspended`
     // event so a REST poll rebuilds the connect suspension. Absent reason ⇒
-    // generic approval (back-compat). mcpServerName/provider set iff
+    // generic approval (back-compat). mcpServerName set iff
     // reason==='connect_required'.
     reason?: 'approval_required' | 'connect_required'
     mcpServerName?: string
-    provider?: string
   }
 }
 
@@ -120,7 +119,6 @@ export interface StatusResponse {
     // PendingApproval. Absent reason ⇒ generic approval (back-compat).
     reason?: 'approval_required' | 'connect_required'
     mcpServerName?: string
-    provider?: string
   }>
   /**
    * Per-MCP-server health snapshot (spec §4.2). Omitted by older mcp-host
@@ -494,7 +492,6 @@ export interface SessionStateWire {
     // reason ⇒ generic approval (back-compat). Set by `sessionRouteHandlers`.
     reason?: 'approval_required' | 'connect_required'
     mcpServerName?: string
-    provider?: string
   }
   /** Lifetime token totals; omitted when the session has had no LLM call yet. */
   tokens?: SessionTokensWire

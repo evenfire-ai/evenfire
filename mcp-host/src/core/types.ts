@@ -511,8 +511,6 @@ export interface PendingApproval {
   reason?: 'approval_required' | 'connect_required'
   /** U5 — the oauth mcp-server to connect. Set iff reason==='connect_required'. */
   mcpServerName?: string
-  /** U5 — the OAuth provider (enum) for the connect UI. Set iff reason==='connect_required'. */
-  provider?: string
 }
 
 // ─── Loop Types ─────────────────────────────────────────────

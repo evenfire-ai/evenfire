@@ -396,7 +396,6 @@ export class SqliteConversationStore implements ConversationStore {
                 tool_name: cached.pending_approval.tool_name,
                 reason: cached.pending_approval.reason,
                 mcpServerName: cached.pending_approval.mcpServerName,
-                provider: cached.pending_approval.provider,
               }
             : undefined
           : row.pending_approval
@@ -406,7 +405,6 @@ export class SqliteConversationStore implements ConversationStore {
                 // DB-direct (cold) projection: snake→camel + narrow the reason.
                 reason: normalizeConnectReason(row.pending_approval.reason),
                 mcpServerName: row.pending_approval.mcp_server_name ?? undefined,
-                provider: row.pending_approval.provider ?? undefined,
               }
             : undefined,
         turnCount: Math.max(0, Math.floor(row.turn_count ?? 0)),
@@ -447,7 +445,6 @@ export class SqliteConversationStore implements ConversationStore {
               tool_name: cached.pending_approval.tool_name,
               reason: cached.pending_approval.reason,
               mcpServerName: cached.pending_approval.mcpServerName,
-              provider: cached.pending_approval.provider,
             }
           : undefined,
         turns,
@@ -487,7 +484,6 @@ export class SqliteConversationStore implements ConversationStore {
             // DB-direct (cold) projection: snake→camel + narrow the reason.
             reason: normalizeConnectReason(page.pending_approval.reason),
             mcpServerName: page.pending_approval.mcp_server_name ?? undefined,
-            provider: page.pending_approval.provider ?? undefined,
           }
         : undefined,
       turns: groupMessagesIntoTurns(page.messages),
@@ -1020,12 +1016,11 @@ export class SqliteConversationStore implements ConversationStore {
       expires_at:
         (now + (this.opts.pendingApprovalTtlMs ?? DEFAULT_PENDING_APPROVAL_TTL_MS)) / 1000,
       trace_context: approval.traceContext ? JSON.stringify(approval.traceContext) : null,
-      // U5 — durable connect_required discriminator + oauth server/provider, so a
+      // U5 — durable connect_required discriminator + oauth server, so a
       // cold restart rehydrates the reactive-consent suspension (never a generic
       // approval). NULL for the default HITL gate.
       reason: approval.reason ?? null,
       mcp_server_name: approval.mcpServerName ?? null,
-      provider: approval.provider ?? null,
     }
     await this.persistQueue.enqueueSync(
       { kind: 'insert_pending_approval', payload: row },

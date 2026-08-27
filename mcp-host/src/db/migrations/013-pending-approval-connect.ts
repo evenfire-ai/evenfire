@@ -3,7 +3,7 @@
  *
  * A reactive OAuth-consent suspension (`reason='connect_required'`) must survive
  * a cold restart WITHOUT degrading into a generic approval. These nullable
- * columns carry the discriminator + the oauth server/provider so
+ * columns carry the discriminator + the oauth server to connect so
  * `reconstructPendingApproval` rebuilds the right kind of suspension. NULL for
  * every existing/legacy row and for the default HITL gate (absent reason ⇒
  * 'approval_required').
@@ -26,15 +26,9 @@ export function up(db: Database): void {
   if (!hasColumn(db, 'mcp_server_name')) {
     db.exec('ALTER TABLE pending_approvals ADD COLUMN mcp_server_name TEXT;')
   }
-  if (!hasColumn(db, 'provider')) {
-    db.exec('ALTER TABLE pending_approvals ADD COLUMN provider TEXT;')
-  }
 }
 
 export function down(db: Database): void {
-  if (hasColumn(db, 'provider')) {
-    db.exec('ALTER TABLE pending_approvals DROP COLUMN provider;')
-  }
   if (hasColumn(db, 'mcp_server_name')) {
     db.exec('ALTER TABLE pending_approvals DROP COLUMN mcp_server_name;')
   }

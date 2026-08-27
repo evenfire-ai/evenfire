@@ -106,8 +106,6 @@ export interface SuspendedEvent {
   reason: 'approval_required' | 'connect_required'
   /** Set iff reason==='connect_required' — the oauth mcp-server to connect. */
   mcpServerName?: string
-  /** Set iff reason==='connect_required' — the OAuth provider for the connect UI. */
-  provider?: string
 }
 
 /**

@@ -3,13 +3,13 @@
  *
  * Invariants pinned here (spec §U5 must-fix):
  *  - 401 on an oauth server → typed `connectRequired` marker carrying
- *    `mcpServerName`, NOT a flattened opaque error. The marker's `provider` is
- *    always undefined here because HCC v2 never forwards the OAuth provider to
- *    mcp-host: `decodeMcpServer` (the sole producer of `McpServerInfo`) emits
- *    `authKind` and never an `oauth` block, so `info.oauth?.provider` in the
- *    gate resolves to undefined. The connect UI keys the consent flow off
- *    `mcpServerName` and resolves the provider server-side (control-api), so the
- *    absent `provider` is dead-but-harmless. See the `oauthUserServer` fixture.
+ *    `mcpServerName` ONLY, NOT a flattened opaque error. The marker no longer
+ *    declares an OAuth `provider`: HCC v2 never forwards it to mcp-host
+ *    (`decodeMcpServer`, the sole producer of `McpServerInfo`, emits `authKind`
+ *    and never an `oauth` block), and no consumer read it — the connect UI keys
+ *    the consent flow off `mcpServerName` and resolves the provider server-side
+ *    (control-api). The dead field was pruned from the whole U5 chain. See the
+ *    `oauthUserServer` fixture.
  *  - 403 on an oauth server → TERMINAL: plain error, NO connectRequired marker.
  *  - 401 on a static (non-oauth) server → NO connectRequired marker (only oauth
  *    has a consent flow).
@@ -104,7 +104,7 @@ beforeEach(() => {
 })
 
 describe('manager.callTool — U5 reactive consent classification', () => {
-  it('401 on an oauth server → typed connect_required marker (mcpServerName; provider undefined under HCC v2)', async () => {
+  it('401 on an oauth server → typed connect_required marker (mcpServerName only)', async () => {
     const manager = new McpManager(undefined, undefined, tokenFactory())
     await manager.addServer(oauthUserServer('monday'))
 
@@ -113,9 +113,9 @@ describe('manager.callTool — U5 reactive consent classification', () => {
     const result = await manager.callTool('monday__do', {}, { userId: 'alice' })
 
     expect(result.isError).toBe(true)
-    // provider is undefined by design: HCC v2 forwards only authKind, never the
-    // OAuth provider, so the gate's `info.oauth?.provider` resolves to undefined.
-    expect(result.connectRequired).toEqual({ mcpServerName: 'monday', provider: undefined })
+    // The marker carries ONLY the mcpServerName: HCC v2 forwards only authKind,
+    // never the OAuth provider, so the marker no longer declares a provider field.
+    expect(result.connectRequired).toEqual({ mcpServerName: 'monday' })
   })
 
   it('403 on an oauth server → terminal, NO connect_required marker', async () => {

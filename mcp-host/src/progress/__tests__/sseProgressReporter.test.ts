@@ -151,7 +151,7 @@ describe('SseProgressReporter', () => {
     })
   })
 
-  it('U5: emitSuspended with connect_required carries reason + mcpServerName + provider', () => {
+  it('U5: emitSuspended with connect_required carries reason + mcpServerName', () => {
     const reporter = new SseProgressReporter('task-1', undefined, NoopSafety)
     const received: ProgressEvent[] = []
     reporter.subscribe(e => received.push(e))
@@ -159,7 +159,6 @@ describe('SseProgressReporter', () => {
     reporter.emitSuspended('Monday', 'req-connect', {
       reason: 'connect_required',
       mcpServerName: 'monday',
-      provider: 'monday',
     })
 
     expect(received).toHaveLength(1)
@@ -171,7 +170,6 @@ describe('SseProgressReporter', () => {
         displayName: 'Monday',
         reason: 'connect_required',
         mcpServerName: 'monday',
-        provider: 'monday',
       },
     })
   })

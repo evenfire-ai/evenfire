@@ -159,14 +159,13 @@ export class SseProgressReporter implements ProgressReporter {
   // P1-1: takes only the server-derived displayName (not the raw tool_name).
   // U5: `options` is ADDITIVE — absent → the legacy 'approval_required' gate,
   // byte-identical to before. reason==='connect_required' carries the oauth
-  // mcpServerName/provider so the desktop can open the connect flow.
+  // mcpServerName so the desktop can open the connect flow.
   emitSuspended(
     displayName: string,
     requestId: string,
     options?: {
       reason?: 'approval_required' | 'connect_required'
       mcpServerName?: string
-      provider?: string
     }
   ): void {
     if (this.completed) return
@@ -174,7 +173,6 @@ export class SseProgressReporter implements ProgressReporter {
     const data: SuspendedEvent = { taskId: this.taskId, requestId, displayName, reason }
     if (reason === 'connect_required') {
       if (options?.mcpServerName) data.mcpServerName = options.mcpServerName
-      if (options?.provider) data.provider = options.provider
     }
     const event: ProgressEvent = { type: 'suspended', data }
     // P1: store the exact redacted payload we publish live so late/re-connected
