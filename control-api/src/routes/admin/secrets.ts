@@ -74,6 +74,105 @@ function effectiveSecretData(body: unknown): Record<string, string> {
   return out
 }
 
+type FallbackCredentialReference = {
+  hostName: string
+  credentialSlot: string
+}
+
+type SecretSnapshot = {
+  data?: Record<string, string>
+  stringData?: Record<string, string>
+  metadata?: { labels?: Record<string, string> }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return value as Record<string, unknown>
+}
+
+/**
+ * Find credential slots actively consumed by Host fallback policies for one
+ * Secret. This reads the producer-shaped Host CRs, rather than inferring
+ * ownership from Secret labels or names: multiple Hosts may intentionally
+ * share the same LLM Secret.
+ */
+function listFallbackCredentialReferences(
+  hosts: unknown[],
+  secretName: string
+): FallbackCredentialReference[] {
+  const references: FallbackCredentialReference[] = []
+  for (const host of hosts) {
+    const resource = asRecord(host)
+    const metadata = asRecord(resource?.metadata)
+    const spec = asRecord(resource?.spec)
+    if (typeof spec?.secretRef !== 'string' || spec.secretRef.trim() !== secretName) continue
+
+    const policy = asRecord(spec.llmPolicy)
+    if (!Array.isArray(policy?.fallbacks)) continue
+    for (const fallback of policy.fallbacks) {
+      const entry = asRecord(fallback)
+      const credentialSlot =
+        typeof entry?.credentialSlot === 'string' ? entry.credentialSlot.trim() : ''
+      if (!credentialSlot) continue
+      references.push({
+        hostName:
+          typeof metadata?.name === 'string' && metadata.name.trim()
+            ? metadata.name.trim()
+            : '(unnamed Host)',
+        credentialSlot,
+      })
+    }
+  }
+  return references
+}
+
+async function findFallbackCredentialReferences(
+  gateway: K8sGateway,
+  secretName: string
+): Promise<FallbackCredentialReference[]> {
+  // Do not use the gateway's '*' aggregation here: that path intentionally
+  // swallows namespace LIST errors, which would turn an incomplete reference
+  // scan into an unsafe green write. A failed authoritative scan rejects the
+  // mutation through asyncHandler instead.
+  const hosts = await gateway.listResource('hosts', config.hostsNamespace)
+  return listFallbackCredentialReferences(hosts, secretName)
+}
+
+function secretWriteKeys(body: unknown): Set<string> {
+  const keys = new Set<string>()
+  const record = asRecord(body)
+  for (const field of ['data', 'stringData']) {
+    const values = asRecord(record?.[field])
+    if (!values) continue
+    for (const key of Object.keys(values)) keys.add(key)
+  }
+  return keys
+}
+
+function secretStoredKeys(secret: unknown): Set<string> {
+  const keys = new Set<string>()
+  const record = asRecord(secret)
+  for (const field of ['data', 'stringData']) {
+    const values = asRecord(record?.[field])
+    if (!values) continue
+    for (const key of Object.keys(values)) keys.add(key)
+  }
+  return keys
+}
+
+function fallbackCredentialProtectionError(
+  secretName: string,
+  references: FallbackCredentialReference[]
+): string {
+  const details = references
+    .map(reference => `"${reference.credentialSlot}" on Host "${reference.hostName}"`)
+    .join(', ')
+  const slots = Array.from(
+    new Set(references.map(reference => `"${reference.credentialSlot}"`))
+  ).join(', ')
+  return `Cannot remove ${slots} from Secret "${secretName}": an active fallback still references ${details}. Update the fallback configuration first.`
+}
+
 // Slot-aware validation for the LLM credential slots, mirroring the client-side
 // `validateLlmSecretData` in control-ui (spec R4.5.3). Only enforced when the
 // write payload targets an LLM host Secret — everything else passes through the
@@ -174,6 +273,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
           .getSecret(name.trim(), config.secretsNamespace)
           .catch(() => null)) as {
           data?: Record<string, string>
+          stringData?: Record<string, string>
           metadata?: { labels?: Record<string, string> }
         } | null
         if (!existing) {
@@ -208,6 +308,20 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         const removeList = Array.isArray(rawRemove)
           ? rawRemove.filter((k): k is string => typeof k === 'string' && k.length > 0)
           : []
+
+        if (removeList.length > 0) {
+          const references = await findFallbackCredentialReferences(gateway, name.trim())
+          const blocked = references.filter(reference =>
+            removeList.includes(reference.credentialSlot)
+          )
+          if (blocked.length > 0) {
+            res.status(409).json({
+              error: fallbackCredentialProtectionError(name.trim(), blocked),
+            })
+            return
+          }
+        }
+
         for (const k of removeList) {
           delete mergedData[k]
         }
@@ -269,15 +383,36 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
       // is merged (full-replace stays a passthrough). `chatllm-api-keys` is
       // matched by name, so this only affects per-host labeled Secrets.
       const replaceName = (req.body as { name?: unknown }).name
-      const existingReplaceLabels =
-        typeof replaceName === 'string' && replaceName.trim()
-          ? (
-              (await gateway
-                .getSecret(replaceName.trim(), config.secretsNamespace)
-                .catch(() => null)) as { metadata?: { labels?: Record<string, string> } } | null
-            )?.metadata?.labels
-          : undefined
+      let existingReplace: SecretSnapshot | null = null
+      if (typeof replaceName === 'string' && replaceName.trim()) {
+        try {
+          existingReplace = (await gateway.getSecret(
+            replaceName.trim(),
+            config.secretsNamespace
+          )) as SecretSnapshot
+        } catch (err) {
+          if (extractHttpStatus(err) !== 404) throw err
+        }
+      }
+      const existingReplaceLabels = existingReplace?.metadata?.labels
       const bodyLabels = (req.body as { labels?: Record<string, string> }).labels
+
+      if (existingReplace && typeof replaceName === 'string' && replaceName.trim()) {
+        const storedKeys = secretStoredKeys(existingReplace)
+        const incomingKeys = secretWriteKeys(req.body)
+        const references = await findFallbackCredentialReferences(gateway, replaceName.trim())
+        const blocked = references.filter(
+          reference =>
+            storedKeys.has(reference.credentialSlot) && !incomingKeys.has(reference.credentialSlot)
+        )
+        if (blocked.length > 0) {
+          res.status(409).json({
+            error: fallbackCredentialProtectionError(replaceName.trim(), blocked),
+          })
+          return
+        }
+      }
+
       const llmSlotError = validateLlmSecretSlots({
         ...(req.body as Record<string, unknown>),
         labels: bodyLabels || existingReplaceLabels,
@@ -299,7 +434,15 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
     '/admin/secrets/:name',
     enforceNamespace(config.secretsNamespace),
     asyncHandler(async (req, res) => {
-      const deleted = await gateway.deleteSecret(req.params.name, config.secretsNamespace)
+      const name = req.params.name.trim()
+      const references = await findFallbackCredentialReferences(gateway, name)
+      if (references.length > 0) {
+        res.status(409).json({
+          error: fallbackCredentialProtectionError(name, references),
+        })
+        return
+      }
+      const deleted = await gateway.deleteSecret(name, config.secretsNamespace)
       res.status(200).json(toPublicDeleteSecretSummary(deleted))
     })
   )
