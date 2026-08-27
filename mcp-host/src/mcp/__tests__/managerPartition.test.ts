@@ -576,3 +576,38 @@ describe('Reconcile no-change preserves live per-user partitions', () => {
     expect(manager.getConnectedServers()).toEqual(['gh'])
   })
 })
+
+// ─── R4-M3 · detachServer purges the `clients` map for EVERY ClientKey ────────
+//
+// The "detachServer purges every ClientKey" invariant was only pinned via the
+// `byServer` projections (getConnectedServers/getAllTools). Removing
+// `this.clients.delete(key)` from detachServer leaves byServer cleared (so those
+// projections stay green) while stale clients survive in the private `clients`
+// map. The observable of a surviving key: a later admission that SHOULD open a
+// fresh connection instead silently reuses the stale client. Re-admitting the
+// same server + users after a detach must therefore open a FULL set of fresh
+// connections (representative + each per-user partition).
+
+describe('R4-M3 — detachServer purges the clients map for every ClientKey', () => {
+  it('a re-admitted server + users open fresh connections (no stale ClientKey reused)', async () => {
+    const { factory } = recordingFactory()
+    const manager = new McpManager(undefined, undefined, factory)
+    await manager.addServer(oauthUserServer())
+    await manager.callTool('gh__do', {}, { userId: 'alice' })
+    await manager.callTool('gh__do', {}, { userId: 'bob' })
+
+    await manager.detachServer('gh')()
+
+    // Count only connections opened AFTER the detach.
+    sdk.transports = []
+    await manager.addServer(oauthUserServer()) // SHARED representative
+    await manager.callTool('gh__do', {}, { userId: 'alice' }) // per-user partition
+    await manager.callTool('gh__do', {}, { userId: 'bob' }) // per-user partition
+
+    // Exactly 3 fresh connections: representative + alice + bob. If detachServer
+    // left any ClientKey (SHARED or per-user) in `clients`, that partition would
+    // reuse its stale client and open fewer than 3 (removing clients.delete →
+    // representative re-enters via replaceServer + both users reuse stale → 1).
+    expect(sdk.transports.length).toBe(3)
+  })
+})
