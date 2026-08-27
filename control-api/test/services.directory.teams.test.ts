@@ -8,6 +8,7 @@ import {
   getTeamById,
   listAllTeams,
   listMembers,
+  renameTeamForUser,
   softDeleteMember,
   updateMemberRole,
 } from '../src/services/directory/index.js'
@@ -108,6 +109,37 @@ describe('services/directory team management unit tests', () => {
       expect.stringContaining(`VALUES($1, $2, 'admin', 'active')`),
       ['team-1', 'user-1']
     )
+  })
+
+  it('revalidates source authority before final team rename authorization', async () => {
+    dbMocks.txQuery
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'user-1',
+            email: 'admin@example.test',
+            lifecycle_state: 'active',
+            lifecycle_version: 1,
+          },
+        ],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [{ valid_after: null, token_revoked: false }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ role: 'admin' }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ id: 'team-1', name: 'Renamed' }], rowCount: 1 })
+
+    const result = await renameTeamForUser('user-1', 'team-1', 'Renamed', {
+      contract: 'v1',
+      userId: 'user-1',
+      tokenHash: 'legacy-token-hash',
+      issuedAt: Math.floor(Date.now() / 1000),
+      authGeneration: 1,
+    })
+
+    expect(result).toEqual({ team: { id: 'team-1', name: 'Renamed' } })
+    expect(String(dbMocks.txQuery.mock.calls[0]?.[0])).toContain('FROM users')
+    expect(String(dbMocks.txQuery.mock.calls[0]?.[0])).toContain('FOR UPDATE')
+    expect(String(dbMocks.txQuery.mock.calls[2]?.[0])).toContain('FROM team_members')
   })
 
   it('addMemberToTeam upserts and returns membership row', async () => {
