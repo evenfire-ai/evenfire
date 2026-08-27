@@ -621,7 +621,13 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         session: sessionRow,
         messages: messageRows as PersistedSessionMessagePage['messages'],
         pending_approval: pendingRow
-          ? { request_id: pendingRow.request_id, tool_name: pendingRow.tool_name }
+          ? {
+              request_id: pendingRow.request_id,
+              tool_name: pendingRow.tool_name,
+              reason: pendingRow.reason,
+              mcp_server_name: pendingRow.mcp_server_name,
+              provider: pendingRow.provider,
+            }
           : null,
         total_turns: sessionRow.turn_count ?? 0,
         first_turn_number: bounds?.first_turn_number ?? null,
@@ -673,6 +679,9 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           summary_turn_count: number
           pending_request_id: string | null
           pending_tool_name: string | null
+          pending_reason: string | null
+          pending_mcp_server_name: string | null
+          pending_provider: string | null
         }
       >
       return rows.map(row => {
@@ -681,6 +690,9 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           summary_turn_count,
           pending_request_id,
           pending_tool_name,
+          pending_reason,
+          pending_mcp_server_name,
+          pending_provider,
           ...session
         } = row
         return {
@@ -689,7 +701,13 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           turn_count: summary_turn_count,
           pending_approval:
             pending_request_id && pending_tool_name
-              ? { request_id: pending_request_id, tool_name: pending_tool_name }
+              ? {
+                  request_id: pending_request_id,
+                  tool_name: pending_tool_name,
+                  reason: pending_reason,
+                  mcp_server_name: pending_mcp_server_name,
+                  provider: pending_provider,
+                }
               : null,
         } satisfies PersistedSessionSummary
       })

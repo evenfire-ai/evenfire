@@ -211,7 +211,9 @@ describe('MCP authority lifecycle', () => {
         pollerRunning: true,
       })
       expect(harness.state().serverState.size).toBe(0)
-      expect((installedClient as unknown as { currentAuthToken?: string }).currentAuthToken).toBeUndefined()
+      expect(
+        (installedClient as unknown as { currentAuthToken?: string }).currentAuthToken
+      ).toBeUndefined()
       expect(manager.getConnectedServers()).toEqual([])
       expect(manager.getKnownServers()).toEqual([])
       expect(harness.effects).toEqual([
@@ -351,7 +353,9 @@ describe('MCP authority lifecycle', () => {
     await connectStarted.promise
     const candidate = pendingClient(manager)
     expect(candidate).toBeDefined()
-    expect((candidate as unknown as { currentAuthToken?: string }).currentAuthToken).toBe('late-sensitive-bearer')
+    expect((candidate as unknown as { currentAuthToken?: string }).currentAuthToken).toBe(
+      'late-sensitive-bearer'
+    )
 
     harness.revoke('caller_403', true)
 

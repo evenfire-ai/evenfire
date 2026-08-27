@@ -589,6 +589,12 @@ export class TaskTracker implements AgentTaskTracker {
             ? {
                 requestId: sd.requestId,
                 displayName: sd.displayName || 'Unknown Tool',
+                // U5: preserved so downstream (stepper prompt, deep-link
+                // correlation) can distinguish a connect_required suspension and
+                // resume the right task. Undefined for ordinary approvals.
+                reason: sd.reason,
+                mcpServerName: sd.mcpServerName,
+                provider: sd.provider,
               }
             : undefined
         })

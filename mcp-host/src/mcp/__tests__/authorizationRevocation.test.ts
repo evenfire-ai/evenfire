@@ -23,9 +23,7 @@ describe('MCP credential revocation', () => {
 
     const cleanup = client.retire()
 
-    expect(
-      (client as unknown as { currentAuthToken?: string }).currentAuthToken
-    ).toBeUndefined()
+    expect((client as unknown as { currentAuthToken?: string }).currentAuthToken).toBeUndefined()
     await expect(cleanup()).resolves.toBeUndefined()
   })
 })

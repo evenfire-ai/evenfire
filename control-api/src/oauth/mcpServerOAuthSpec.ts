@@ -55,3 +55,69 @@ export function resolveServerOAuth(server: McpServerOAuthSpecInput): ResolvedSer
       : undefined
   return { oauthClientId: oauth.id, grantScope, contextRef }
 }
+
+/**
+ * The `spec.oauth` declaration in the `oauthClients[]`-compatible shape the
+ * consent flow (U5: authorize-URL mint + callback) consumes, plus the grant
+ * routing. Structurally assignable to `OAuthClientDecl` (`oauth/callback.ts`) so
+ * the same broker/refresh machinery stays owner-agnostic.
+ */
+export interface ResolvedServerOAuthSubject {
+  decl: {
+    id: string
+    provider: string
+    clientIdRef: { name: string; key: string }
+    clientSecretRef: { name: string; key: string }
+    scopes?: string[]
+    backgroundAccess?: boolean
+  }
+  grantScope: GrantScope
+  /** Authoritative Context (spec.contextRef); undefined if absent. */
+  contextRef?: string
+}
+
+/**
+ * Resolve a McpServer's full OAuth subject (decl + grant routing) for the U5
+ * consent flow. Returns null when the server carries no usable OAuth
+ * declaration (missing id/provider/clientIdRef/clientSecretRef) so callers fail
+ * closed. Same field-reading rule as {@link resolveServerOAuth} — kept here so
+ * the authorize-URL minter and the callback never drift (D4).
+ */
+export function resolveServerOAuthSubject(
+  server: McpServerOAuthSpecInput
+): ResolvedServerOAuthSubject | null {
+  const oauth = server.spec?.oauth
+  if (!oauth || typeof oauth.id !== 'string' || oauth.id.length === 0) return null
+  if (typeof oauth.provider !== 'string' || oauth.provider.length === 0) return null
+  const clientIdRef = oauth.clientIdRef
+  const clientSecretRef = oauth.clientSecretRef
+  if (
+    !clientIdRef ||
+    typeof clientIdRef.name !== 'string' ||
+    typeof clientIdRef.key !== 'string' ||
+    !clientSecretRef ||
+    typeof clientSecretRef.name !== 'string' ||
+    typeof clientSecretRef.key !== 'string'
+  ) {
+    return null
+  }
+  const grantScope: GrantScope = oauth.grantScope === 'context' ? 'context' : 'user'
+  const contextRef =
+    typeof server.spec?.contextRef === 'string' && server.spec.contextRef.length > 0
+      ? server.spec.contextRef
+      : undefined
+  return {
+    decl: {
+      id: oauth.id,
+      provider: oauth.provider,
+      clientIdRef: { name: clientIdRef.name, key: clientIdRef.key },
+      clientSecretRef: { name: clientSecretRef.name, key: clientSecretRef.key },
+      scopes: Array.isArray(oauth.scopes)
+        ? oauth.scopes.filter((s): s is string => typeof s === 'string')
+        : undefined,
+      backgroundAccess: oauth.backgroundAccess === true,
+    },
+    grantScope,
+    contextRef,
+  }
+}

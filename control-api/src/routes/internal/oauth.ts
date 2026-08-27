@@ -5,6 +5,8 @@ import { K8sGateway } from '../../k8s.js'
 import { requireInternalService } from '../../middleware/internalServiceAuth.js'
 import { buildAuthorizeUrl } from '../../oauth/authorizeUrlHelper.js'
 import {
+  type McpServerOAuthReader,
+  type McpServerOAuthSubject,
   RecipeNotFoundError,
   type RecipeReader,
   type RecipeWithOAuthClients,
@@ -13,9 +15,28 @@ import {
 } from '../../oauth/callback.js'
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { integrationNotConfigured, isSecretNotFound } from '../../oauth/integrationNotConfigured.js'
+import {
+  type McpServerOAuthSpecInput,
+  resolveServerOAuthSubject,
+} from '../../oauth/mcpServerOAuthSpec.js'
 import { deleteOAuthGrant } from '../../oauth/store.js'
 import { getAccessToken } from '../../oauth/tokenHelper.js'
+import { getUserContexts } from '../../services/directory/index.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
+import { buildPublicCallbackUrl } from '../external/oauthCallback.js'
+
+// DNS-1123 subdomain — the shape a k8s resource name takes. Reject anything else
+// up front so a malformed `mcpServerName` becomes a 400 rather than surfacing a
+// non-404 apiserver error as a 500. (Mirrors routes/mcpOauth.ts.)
+const K8S_NAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/
+function isValidK8sName(name: string): boolean {
+  return name.length > 0 && name.length <= 253 && K8S_NAME_RE.test(name)
+}
+
+/** McpServer shape used to read `spec.auth.type` for the OAuth gate. */
+interface McpServerAuthResource extends McpServerOAuthSpecInput {
+  spec?: McpServerOAuthSpecInput['spec'] & { auth?: { type?: unknown } }
+}
 
 /**
  * Internal OAuth helper endpoints. rpc-proxy fronts these from the
@@ -66,12 +87,185 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
     },
   }
 
+  // U5: resolver for OAuth McpServer subjects. Reads the CR from the mcp-servers
+  // namespace (authoritative for oauthClientId / grantScope / contextRef).
+  const mcpServerReader: McpServerOAuthReader = {
+    async read(mcpServerName): Promise<McpServerOAuthSubject | null> {
+      let server: McpServerAuthResource
+      try {
+        server = (await gateway.getResource(
+          'mcpservers',
+          mcpServerName,
+          config.mcpServersNamespace
+        )) as McpServerAuthResource
+      } catch (err) {
+        if (err instanceof K8sNotFoundError) return null
+        throw err
+      }
+      const resolved = resolveServerOAuthSubject(server)
+      if (!resolved) return null
+      return { namespace: config.mcpServersNamespace, ...resolved }
+    },
+  }
+
+  // ── U5: mint a fresh authorize-URL for an OAuth mcp-server, on click ──────
+  //
+  // rpc-proxy fronts this from the desktop "Connect <server>" surface. The
+  // `userId` is derived by rpc-proxy from the session `auth.sub` and forwarded
+  // over this mutually-authenticated seam (requireInternalService('rpc-proxy')),
+  // exactly like the sandbox-ui endpoints above — it is NOT a client-controlled
+  // param on any end-user surface (invariant §1.1.3, U1 must-fix note). Minting
+  // fresh per click keeps the state's 600s TTL counting from the user's click
+  // and binds the state to that initiator.
+  //
+  // `oauthClientId` + `grantScope` + the Context come from the McpServer CR
+  // (authoritative), never the body. A body `contextId` for a context-identity
+  // server is only cross-checked against `spec.contextRef` (defence in depth).
+  router.post(
+    '/internal/mcp-oauth/authorize-url',
+    requireInternalService('rpc-proxy'),
+    async (req, res, next) => {
+      try {
+        const { mcpServerName, userId, contextId } = (req.body ?? {}) as {
+          mcpServerName?: unknown
+          userId?: unknown
+          contextId?: unknown
+        }
+        if (typeof mcpServerName !== 'string' || !isValidK8sName(mcpServerName)) {
+          return res.status(400).json({ error: 'invalid_request' })
+        }
+        if (typeof userId !== 'string' || userId.length === 0) {
+          return res.status(400).json({ error: 'invalid_request' })
+        }
+        if (contextId !== undefined && typeof contextId !== 'string') {
+          return res.status(400).json({ error: 'invalid_request' })
+        }
+
+        // Read the server to derive oauthClientId + grant routing. Never trust
+        // the body for these.
+        let server: McpServerAuthResource
+        try {
+          server = (await gateway.getResource(
+            'mcpservers',
+            mcpServerName,
+            config.mcpServersNamespace
+          )) as McpServerAuthResource
+        } catch (err) {
+          if (err instanceof K8sNotFoundError) {
+            return res.status(404).json({ error: 'server_not_found' })
+          }
+          throw err
+        }
+
+        const authType = server?.spec?.auth?.type
+        const resolved = resolveServerOAuthSubject(server)
+        if (authType !== 'oauth' || !resolved) {
+          return res.status(400).json({ error: 'not_oauth_server' })
+        }
+
+        // Context-identity servers: the AUTHORITATIVE Context is spec.contextRef.
+        // A body contextId, if present, must match it (cross-context guard).
+        if (resolved.grantScope === 'context') {
+          if (!resolved.contextRef) {
+            return res.status(400).json({ error: 'server_missing_context' })
+          }
+          if (typeof contextId === 'string' && contextId !== resolved.contextRef) {
+            return res.status(400).json({ error: 'context_mismatch' })
+          }
+        }
+
+        // DEC-U5-1 (+ security fix): defence in depth — fail EARLY (before
+        // sending the user to the provider) unless the consenting user is a
+        // member of the server's Context. This runs for EVERY grantScope, not
+        // just `context`: even a per-user server lives inside a Context, and
+        // connect shares the `mcp:server:invoke` scope with invoke — which
+        // additionally requires the server to be in the caller's per-context
+        // allowlist. Without a universal gate, any user could start consent for
+        // (and enumerate) another Context's integration on a `user`-scope server.
+        //
+        // `spec.contextRef` is CRD-required + singular, so every server has one;
+        // a server that somehow lacks it cannot be membership-verified → fail
+        // closed. Same rule + primitive as the callback bootstrap
+        // (getUserContexts → user_contexts) so membership lives in ONE place
+        // (D4). Deliberately NOT resolveInvocableMcpServersForContexts: that
+        // applies U3's grant-presence gate, which filters out servers WITHOUT a
+        // grant — exactly the ones connect exists to bootstrap (chicken-and-egg).
+        if (!resolved.contextRef) {
+          return res.status(403).json({ error: 'context_membership_denied' })
+        }
+        const { contextIds } = await getUserContexts(userId)
+        if (!contextIds.includes(resolved.contextRef)) {
+          return res.status(403).json({ error: 'context_membership_denied' })
+        }
+
+        const oauthClientId = resolved.decl.id
+        const redirectUri = buildPublicCallbackUrl(req, oauthClientId, config.oauthCallbackBaseUrl)
+
+        const result = await buildAuthorizeUrl(
+          {
+            subjectKind: 'mcp',
+            mcpServerName,
+            oauthClientId,
+            // Initiator forwarded from the session by rpc-proxy (see note above).
+            userId,
+            // mcp reactive consent mints per-user-shaped states; grant-scope
+            // routing (user vs shared) is resolved authoritatively on the
+            // callback from spec.contextRef.
+            grantKind: 'user',
+            background: false,
+            redirectUri,
+          },
+          {
+            recipeReader,
+            mcpServerReader,
+            secretReader,
+            stateSecret: config.oauthStateHmacSecret,
+          }
+        )
+
+        switch (result.kind) {
+          case 'ok':
+            req.log?.info(
+              {
+                event: 'mcp_oauth_authorize_url_minted',
+                mcpServerName,
+                grantScope: resolved.grantScope,
+                oauthClientId,
+              },
+              'mcp oauth authorize url minted'
+            )
+            return res.status(200).json({ authorizeUrl: result.authorizeUrl })
+          case 'server_not_found':
+          case 'recipe_not_found':
+            return res.status(404).json({ error: 'server_not_found' })
+          case 'unknown_oauth_client':
+          case 'background_access_not_enabled':
+            return res.status(400).json({ error: 'unknown_oauth_client' })
+          case 'unsupported_provider':
+            return res
+              .status(400)
+              .json({ error: 'unsupported_provider', provider: result.provider })
+          case 'secret_missing':
+            return res.status(503).json(integrationNotConfigured(oauthClientId, result.secret))
+          default:
+            // Exhaustiveness guard: a future BuildAuthorizeUrlResult kind must
+            // never leave the request hanging without a response.
+            result satisfies never
+            return res.status(500).json({ error: 'internal_error' })
+        }
+      } catch (err) {
+        next(err)
+      }
+    }
+  )
+
   router.post(
     '/internal/sandbox-ui/oauth/authorize-url',
     requireInternalService('rpc-proxy'),
     async (req, res, next) => {
       try {
-        const { recipeNs, recipeName, oauthClientId, userId, redirectUri, background } = req.body ?? {}
+        const { recipeNs, recipeName, oauthClientId, userId, redirectUri, background } =
+          req.body ?? {}
         if (
           typeof recipeNs !== 'string' ||
           typeof recipeName !== 'string' ||

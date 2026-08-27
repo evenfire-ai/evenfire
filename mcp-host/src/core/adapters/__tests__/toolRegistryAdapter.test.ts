@@ -134,6 +134,62 @@ describe('McpToolRegistryAdapter', () => {
     })
   })
 
+  it('maps the connect_required marker to metadata.connect_required on the success path (U5)', async () => {
+    const mockManager = {
+      getAllTools: () => [
+        {
+          name: 'monday-server__list_boards',
+          description: 'List boards',
+          inputSchema: { type: 'object' },
+          serverName: 'monday-server',
+        },
+      ],
+      // manager.callTool returns the TYPED marker (never a flattened opaque error)
+      // when a live 401 hit an oauth server.
+      callTool: vi.fn(async () => ({
+        toolName: 'monday-server__list_boards',
+        result: { error: 'MCP server monday-server auth failed (401)' },
+        isError: true,
+        connectRequired: { mcpServerName: 'monday-server', provider: 'monday' },
+      })),
+    } as any
+
+    const registry = new McpToolRegistryAdapter(mockManager)
+    const tool = registry.get('monday-server__list_boards')
+    expect(tool).not.toBeNull()
+
+    const output = await tool!.execute({})
+    // The consumer observes the typed metadata marker, not an opaque error.
+    expect(output.metadata).toEqual({
+      connect_required: { mcpServerName: 'monday-server', provider: 'monday' },
+    })
+    expect(output.is_error).toBe(true)
+  })
+
+  it('does not attach connect_required metadata for a plain (non-oauth) error result', async () => {
+    const mockManager = {
+      getAllTools: () => [
+        {
+          name: 'airtable-server__list',
+          description: 'List',
+          inputSchema: { type: 'object' },
+          serverName: 'airtable-server',
+        },
+      ],
+      callTool: vi.fn(async () => ({
+        toolName: 'airtable-server__list',
+        result: { error: 'boom' },
+        isError: true,
+        // no connectRequired marker
+      })),
+    } as any
+
+    const registry = new McpToolRegistryAdapter(mockManager)
+    const tool = registry.get('airtable-server__list')
+    const output = await tool!.execute({})
+    expect(output.metadata).toBeUndefined()
+  })
+
   // ─── Principal binding (PR #319 C2/H1) ──────────────────────────────────────
   //
   // The userId the adapter forwards to `manager.callTool` (which becomes the

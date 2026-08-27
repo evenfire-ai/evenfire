@@ -177,6 +177,12 @@ const HOST_MODEL_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.model
 const HOST_ARTIFACT_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.artifact
 const HOST_APPROVAL_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.approval
 const MCP_SERVERS_LIST_SCOPES: RpcScope[] = ['mcp:servers:list']
+// U5 (mcp-oauth reactive consent): "Connect <server>" reuses the SAME capability
+// the desktop already holds to invoke mcp tools — connecting is a precondition of
+// invoking, so rpc-proxy gates the authorize-url route on this scope (no new
+// scope is minted). The token is host-bound to the suspended conversation's
+// hostRef, which the user demonstrably has access to.
+const MCP_SERVER_INVOKE_SCOPES: RpcScope[] = ['mcp:server:invoke']
 const DESKTOP_VIEW_SCOPES: RpcScope[] = ['desktop:view']
 const SANDBOX_UI_VIEW_SCOPES: RpcScope[] = ['sandbox:ui:view']
 // hostRefs is required by control-api's RPC token issuance (see
@@ -4489,6 +4495,52 @@ export class AppService {
         ? await dialog.showMessageBox(win, opts)
         : await dialog.showMessageBox(opts)
       if (result.response !== 1) return
+    }
+    const { shell } = await import('electron')
+    await shell.openExternal(result.authorizeUrl)
+  }
+
+  /**
+   * U5 (mcp-oauth reactive consent) — the renderer's "Connect <server>" button.
+   * A tool-call against an OAuth mcp-server suspended the task with
+   * `connect_required`; this fetches a fresh provider authorize URL via rpc-proxy
+   * and `shell.openExternal`s it. The rest of the flow runs in the OS browser;
+   * control-api's callback stores the grant and bounces back to
+   * `clerum://oauth-completed?…&source=mcp`, which `main.ts` routes to the
+   * renderer to resume the suspended task (NOT the sandbox-ui embed).
+   *
+   * Analogous to `requestSandboxUiOauthAuthorize`, but keyed by `mcpServerName`
+   * (never a recipe) and host-bound to the suspended conversation's `hostRef`
+   * (RPC tokens require ≥1 hostRef; the user has access to the host they are
+   * chatting in). `userId` is derived by rpc-proxy from `auth.sub`, never sent.
+   */
+  async requestMcpOauthAuthorize(
+    mcpServerName: string,
+    hostRef: string,
+    contextId?: string
+  ): Promise<void> {
+    const server = String(mcpServerName || '').trim()
+    const targetHostRef = String(hostRef || '').trim()
+    if (!server) throw new Error('mcpServerName is required')
+    if (!targetHostRef) throw new Error('hostRef is required')
+    const ctx = contextId ? String(contextId).trim() || undefined : undefined
+    let rpc = await this.issueRpcTokenForHostRefs(MCP_SERVER_INVOKE_SCOPES, [targetHostRef])
+    let result: { authorizeUrl: string }
+    try {
+      result = await this.rpcClient.requestMcpOauthAuthorizeUrl(rpc.token, server, ctx)
+    } catch (error) {
+      // §4.5-7: a 401/expired-scope means the 300s RPC token lapsed; clear the
+      // cache, re-mint (same hostRef) and retry once. Every 401/403-missing-scope
+      // on this route is emitted by rpc-proxy's auth middleware BEFORE any grant
+      // mutation, so a retried error is always a pre-effect rejection — the
+      // authorize-url mint is idempotent regardless.
+      if (AppService.shouldRefreshRpcToken(error)) {
+        this.rpcTokenManager.clear()
+        rpc = await this.issueRpcTokenForHostRefs(MCP_SERVER_INVOKE_SCOPES, [targetHostRef])
+        result = await this.rpcClient.requestMcpOauthAuthorizeUrl(rpc.token, server, ctx)
+      } else {
+        throw error
+      }
     }
     const { shell } = await import('electron')
     await shell.openExternal(result.authorizeUrl)

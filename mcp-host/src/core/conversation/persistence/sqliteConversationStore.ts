@@ -53,6 +53,7 @@ import type { PersistQueue } from './persistQueue'
 import { CacheOverflowError, PinnedLRUMap } from './pinnedLruMap'
 import {
   groupMessagesIntoTurns,
+  normalizeConnectReason,
   reconstructConversation,
   reconstructPendingApproval,
 } from './reconstruct'
@@ -393,12 +394,19 @@ export class SqliteConversationStore implements ConversationStore {
             ? {
                 request_id: cached.pending_approval.request_id,
                 tool_name: cached.pending_approval.tool_name,
+                reason: cached.pending_approval.reason,
+                mcpServerName: cached.pending_approval.mcpServerName,
+                provider: cached.pending_approval.provider,
               }
             : undefined
           : row.pending_approval
             ? {
                 request_id: row.pending_approval.request_id,
                 tool_name: row.pending_approval.tool_name,
+                // DB-direct (cold) projection: snake→camel + narrow the reason.
+                reason: normalizeConnectReason(row.pending_approval.reason),
+                mcpServerName: row.pending_approval.mcp_server_name ?? undefined,
+                provider: row.pending_approval.provider ?? undefined,
               }
             : undefined,
         turnCount: Math.max(0, Math.floor(row.turn_count ?? 0)),
@@ -437,6 +445,9 @@ export class SqliteConversationStore implements ConversationStore {
           ? {
               request_id: cached.pending_approval.request_id,
               tool_name: cached.pending_approval.tool_name,
+              reason: cached.pending_approval.reason,
+              mcpServerName: cached.pending_approval.mcpServerName,
+              provider: cached.pending_approval.provider,
             }
           : undefined,
         turns,
@@ -473,6 +484,10 @@ export class SqliteConversationStore implements ConversationStore {
         ? {
             request_id: page.pending_approval.request_id,
             tool_name: page.pending_approval.tool_name,
+            // DB-direct (cold) projection: snake→camel + narrow the reason.
+            reason: normalizeConnectReason(page.pending_approval.reason),
+            mcpServerName: page.pending_approval.mcp_server_name ?? undefined,
+            provider: page.pending_approval.provider ?? undefined,
           }
         : undefined,
       turns: groupMessagesIntoTurns(page.messages),
@@ -1005,6 +1020,12 @@ export class SqliteConversationStore implements ConversationStore {
       expires_at:
         (now + (this.opts.pendingApprovalTtlMs ?? DEFAULT_PENDING_APPROVAL_TTL_MS)) / 1000,
       trace_context: approval.traceContext ? JSON.stringify(approval.traceContext) : null,
+      // U5 — durable connect_required discriminator + oauth server/provider, so a
+      // cold restart rehydrates the reactive-consent suspension (never a generic
+      // approval). NULL for the default HITL gate.
+      reason: approval.reason ?? null,
+      mcp_server_name: approval.mcpServerName ?? null,
+      provider: approval.provider ?? null,
     }
     await this.persistQueue.enqueueSync(
       { kind: 'insert_pending_approval', payload: row },

@@ -483,6 +483,16 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
               : undefined
           }
           onCancel={canCancel ? () => onCancelTask!(taskId!) : undefined}
+          onConnect={
+            // U5: a connect_required suspension opens the provider OAuth flow,
+            // host-bound to this conversation's agent (hostRef ≡ selectedAgent).
+            // The deep-link completion resumes the task via the same approval RPC.
+            si?.reason === 'connect_required' && si.mcpServerName && selectedAgent
+              ? () => {
+                  void window.clerum.rpc.connectMcpServer(si.mcpServerName!, selectedAgent)
+                }
+              : undefined
+          }
         />
       )
     },

@@ -20,7 +20,16 @@ interface Props {
    * sticky `suspended` (V2) into the tracker. The tracker's own `pendingApproval`
    * (live/replayed suspended) still wins when present.
    */
-  pendingApproval?: { requestId: string; displayName: string }
+  pendingApproval?: {
+    requestId: string
+    displayName: string
+    // U5: carried through the FSM projection so the optimistic-paint fallback can
+    // also drive the "Connect <server>" prompt before the tracker's live
+    // suspended replays.
+    reason?: string
+    mcpServerName?: string
+    provider?: string
+  }
 }
 
 /**
@@ -100,6 +109,15 @@ export function InFlightAssistantPlaceholder({
               : undefined
           }
           onCancel={onCancelTask ? () => onCancelTask(taskId) : undefined}
+          onConnect={
+            // U5: connect_required suspension → open the provider OAuth flow,
+            // host-bound to this conversation's agent (hostRef ≡ agentRef).
+            si?.reason === 'connect_required' && si.mcpServerName
+              ? () => {
+                  void window.clerum.rpc.connectMcpServer(si.mcpServerName!, agentRef)
+                }
+              : undefined
+          }
         />
       </div>
     </section>

@@ -7,7 +7,6 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js'
 import { McpServerInfo, McpTool } from '../types'
-import { extractStructuredHttpStatus, isAuthError } from './serverStatus'
 import {
   type McpToolCallOptions,
   ensureNotAborted,
@@ -16,6 +15,7 @@ import {
   resolveMcpRequestTimeoutMs,
   withRequestTimeout,
 } from './requestOptions'
+import { extractStructuredHttpStatus, isAuthError } from './serverStatus'
 
 export type { McpToolCallOptions } from './requestOptions'
 
@@ -58,7 +58,6 @@ export class McpAuthError extends Error {
     this.status = status
   }
 }
-
 
 interface McpCallRecovery {
   sourceEpoch: number

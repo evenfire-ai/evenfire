@@ -1,11 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { VerifiedMcpHostPrincipal } from './mcpApiAuthentication'
-import type {
-  McpServerAuth,
-  McpServerOAuth,
-  McpServerStatus,
-  McpServerTransport,
-} from './types'
+import type { McpServerAuth, McpServerOAuth, McpServerStatus, McpServerTransport } from './types'
 
 export interface AuthorityMetadata {
   uid: string

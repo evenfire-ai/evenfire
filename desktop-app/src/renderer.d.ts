@@ -569,6 +569,18 @@ declare global {
           hostRefs?: string[]
         ) => Promise<SetHostModelResult>
         getTokenMetadata: () => Promise<TokenMetadata>
+        // U5 (mcp-oauth reactive consent): "Connect <server>" for a task
+        // suspended with `connect_required`. Host-bound to that conversation.
+        connectMcpServer: (
+          mcpServerName: string,
+          hostRef: string,
+          contextId?: string
+        ) => Promise<void>
+        // Push fired when the OAuth deep-link returns with `source=mcp`; the
+        // renderer correlates `mcpServerName` and resumes the suspended task.
+        onMcpOauthCompleted: (
+          callback: (args: { mcpServerName: string; provider: string }) => void
+        ) => () => void
       }
       app: {
         openUrl: (url: string) => Promise<void>

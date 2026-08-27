@@ -456,6 +456,23 @@ const clerum = Object.freeze({
     setHostModel: (hostRef: string, chatId: string, model: string, hostRefs?: string[]) =>
       ipcRenderer.invoke('rpc:setHostModel', { hostRef, chatId, model, hostRefs }),
     getTokenMetadata: () => ipcRenderer.invoke('rpc:getTokenMetadata'),
+    // U5 (mcp-oauth reactive consent): "Connect <server>" — open the provider
+    // authorize-URL for a task that suspended with `connect_required`. Host-bound
+    // to the suspended conversation's hostRef (RPC tokens require a hostRef).
+    connectMcpServer: (mcpServerName: string, hostRef: string, contextId?: string) =>
+      ipcRenderer.invoke('rpc:connectMcpServer', { mcpServerName, hostRef, contextId }),
+    // Fired when the OAuth deep-link returns with `source=mcp`. The renderer
+    // correlates `mcpServerName` to its suspended entries and resumes the task.
+    onMcpOauthCompleted: (
+      callback: (args: { mcpServerName: string; provider: string }) => void
+    ) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        args: { mcpServerName: string; provider: string }
+      ) => callback(args)
+      ipcRenderer.on('rpc:mcpOauthCompleted', listener)
+      return () => ipcRenderer.off('rpc:mcpOauthCompleted', listener)
+    },
   },
   workflows: {
     list: () => ipcRenderer.invoke('workflows:list'),

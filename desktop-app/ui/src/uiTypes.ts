@@ -173,6 +173,12 @@ export interface SuspendedInfo {
   /** Raw tool name (e.g. `clerum__plot_pnl`) — lets the approval label surface
    *  the function when the display name is generic. */
   toolName?: string
+  /** U5 (mcp-oauth reactive consent): `'connect_required'` makes the stepper
+   *  render a "Connect <server>" prompt instead of Approve/Deny. `mcpServerName`
+   *  is the server to connect. Absent on ordinary approval suspensions. */
+  reason?: string
+  mcpServerName?: string
+  provider?: string
 }
 
 export interface TaskProgress {

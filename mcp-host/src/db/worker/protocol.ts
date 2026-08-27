@@ -96,6 +96,14 @@ export interface PendingApprovalRow {
   registered_at: number
   expires_at: number
   trace_context: string | null
+  /** U5 (migration 013) — suspension discriminator. NULL / 'approval_required'
+   *  is the default HITL gate; 'connect_required' is a reactive OAuth-consent
+   *  suspension. Preserved so a cold restart rehydrates the right kind. */
+  reason: string | null
+  /** U5 (migration 013) — oauth mcp-server to connect (reason='connect_required'). */
+  mcp_server_name: string | null
+  /** U5 (migration 013) — OAuth provider for the connect UI (reason='connect_required'). */
+  provider: string | null
 }
 
 export interface SessionCountersUpdate {
@@ -120,13 +128,22 @@ export interface PersistedSessionSummary {
   session: SessionRow
   last_activity_at: number
   turn_count: number
-  pending_approval: Pick<PendingApprovalRow, 'request_id' | 'tool_name'> | null
+  // U5 — carry the connect_required discriminator on the lightweight summary
+  // projection too, so the REST rejoin snapshot never degrades a reactive-consent
+  // suspension into a generic approval.
+  pending_approval: Pick<
+    PendingApprovalRow,
+    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name' | 'provider'
+  > | null
 }
 
 export interface PersistedSessionMessagePage {
   session: SessionRow
   messages: MessageRow[]
-  pending_approval: Pick<PendingApprovalRow, 'request_id' | 'tool_name'> | null
+  pending_approval: Pick<
+    PendingApprovalRow,
+    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name' | 'provider'
+  > | null
   total_turns: number
   first_turn_number: number | null
   last_turn_number: number | null

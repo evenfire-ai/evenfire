@@ -6,9 +6,9 @@ import {
   type AuthorityMcpServer,
   type AuthoritySecret,
   type AuthoritySecretMetadata,
-  deriveAuthKind,
   McpAuthorizationService,
   type McpAuthorizationStore,
+  deriveAuthKind,
   toPublicMcpTransport,
 } from './mcpAuthorization'
 import type { McpServerOAuth } from './types'
@@ -571,9 +571,27 @@ describe('McpAuthorizationService', () => {
 
 describe('deriveAuthKind (mini-spec 10 §3.1)', () => {
   it.each([
-    ['oauth + grantScope=user → oauth-user', { type: 'oauth' as const }, { grantScope: 'user' as const }, true, 'oauth-user'],
-    ['oauth + grantScope=context → oauth-context', { type: 'oauth' as const }, { grantScope: 'context' as const }, true, 'oauth-context'],
-    ['oauth + grantScope absent → oauth-user (CEL default)', { type: 'oauth' as const }, undefined, true, 'oauth-user'],
+    [
+      'oauth + grantScope=user → oauth-user',
+      { type: 'oauth' as const },
+      { grantScope: 'user' as const },
+      true,
+      'oauth-user',
+    ],
+    [
+      'oauth + grantScope=context → oauth-context',
+      { type: 'oauth' as const },
+      { grantScope: 'context' as const },
+      true,
+      'oauth-context',
+    ],
+    [
+      'oauth + grantScope absent → oauth-user (CEL default)',
+      { type: 'oauth' as const },
+      undefined,
+      true,
+      'oauth-user',
+    ],
     ['bearer (authRequired) → static', { type: 'bearer' as const }, undefined, true, 'static'],
     ['apiKey (authRequired) → static', { type: 'apiKey' as const }, undefined, true, 'static'],
     ['none → undefined (omitted)', { type: 'none' as const }, undefined, false, undefined],
@@ -584,11 +602,7 @@ describe('deriveAuthKind (mini-spec 10 §3.1)', () => {
 
   it('never collapses an oauth server to static across every grantScope', () => {
     for (const grantScope of ['user', 'context', undefined] as const) {
-      const kind = deriveAuthKind(
-        { type: 'oauth' },
-        grantScope ? { grantScope } : undefined,
-        true
-      )
+      const kind = deriveAuthKind({ type: 'oauth' }, grantScope ? { grantScope } : undefined, true)
       expect(kind).not.toBe('static')
       expect(kind?.startsWith('oauth-')).toBe(true)
     }
@@ -605,7 +619,12 @@ describe('listServers authKind emission (mini-spec 10 §3.2, T1)', () => {
   it.each([
     ['oauth-user', { type: 'oauth' as const }, fullOAuth('user'), 'oauth-user'],
     ['oauth-context', { type: 'oauth' as const }, fullOAuth('context'), 'oauth-context'],
-    ['static (bearer)', { type: 'bearer' as const, secretRef: 'server-a-auth', secretKey: 'token' }, undefined, 'static'],
+    [
+      'static (bearer)',
+      { type: 'bearer' as const, secretRef: 'server-a-auth', secretKey: 'token' },
+      undefined,
+      'static',
+    ],
   ])('emits authKind=%s derived from the real producer', async (_label, auth, oauth, expected) => {
     const store = new FakeStore()
     store.serverObject = {

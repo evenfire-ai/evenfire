@@ -24,6 +24,7 @@ import type {
 import {
   type ApprovalDecisionTarget,
   decideApproval as decideApprovalCore,
+  resolveConnectResumeTargets,
 } from './domain/approvalDecision'
 import { desktopQueryKeys } from './domain/queryKeys'
 import { useActivityController } from './domain/useActivityController'
@@ -53,6 +54,9 @@ const DENY_REASON_BY_SOURCE: Record<ApprovalDecisionTarget['source'], string> = 
   inapp_bell: 'Denied from notifications panel',
   in_chat: 'User denied',
   placeholder: 'User denied',
+  // U5: connect_completed is only ever an approve/resume — this deny reason is
+  // unreachable, present solely to satisfy the exhaustive source map.
+  connect_completed: 'User denied',
 }
 
 export async function loadWorkflowRunsWithArtifactsForWorkflowTarget(
@@ -306,6 +310,26 @@ export function useAppController() {
     [chat.sessionFsmStore, chat.reconcileChat, notif.resolveApprovalNotification, pushToast]
   )
   decideApprovalRef.current = decideApprovalImpl
+
+  // U5 (mcp-oauth reactive consent) — deep-link correlation + resume.
+  // When the OAuth "Connect <server>" flow completes, control-api bounces to
+  // `clerum://oauth-completed?…&source=mcp&mcpServerName=<X>`; main.ts forwards
+  // `{ mcpServerName }` here. Correlation is by `mcpServerName` against the FSM
+  // snapshot — the single source of truth already used by the resume/reconcile
+  // paths — so it is robust to concurrency (resumes EVERY conversation suspended
+  // on that server, since a per-user grant is global to the user) and needs no
+  // ephemeral client_id→server map. Each match resumes through the SAME central
+  // decider (`decideApproval` approve → the approval RPC re-executes the tool).
+  // Subscribed once; `chat.sessionFsmStore` and `decideApprovalRef` are read live.
+  useEffect(() => {
+    const unsub = window.clerum.rpc.onMcpOauthCompleted?.(({ mcpServerName }) => {
+      const targets = resolveConnectResumeTargets(chat.sessionFsmStore.getSnapshot(), mcpServerName)
+      for (const target of targets) {
+        void decideApprovalRef.current(target)
+      }
+    })
+    return () => unsub?.()
+  }, [chat.sessionFsmStore])
 
   // ─── MCP Server ───
   const mcpServer = useMcpServerController({
