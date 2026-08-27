@@ -111,16 +111,38 @@ describe('createBrokerTokenProvider — fail-closed contract', () => {
     expect(f).toHaveBeenCalledTimes(2)
   })
 
-  it('404 no_grant → resolves undefined (fail-closed, call not forwarded)', async () => {
-    const f = stubFetch(() => jsonResponse(404, { error: 'no_grant' }))
-    const p = createBrokerTokenProvider({ name: 'gh' }, { userId: 'alice' }, deps(f))
-    expect(await p.resolve()).toBeUndefined()
+  it('404 no_grant → resolves undefined (fail-closed, call not forwarded, no warn)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const f = stubFetch(() => jsonResponse(404, { error: 'no_grant' }))
+      const p = createBrokerTokenProvider({ name: 'gh' }, { userId: 'alice' }, deps(f))
+      expect(await p.resolve()).toBeUndefined()
+      // Normal revocation is silent — no observability noise.
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
   })
 
-  it('403 insufficient_scope → resolves undefined (fail-closed)', async () => {
-    const f = stubFetch(() => jsonResponse(403, { error: 'insufficient_scope' }))
-    const p = createBrokerTokenProvider({ name: 'gh' }, { userId: 'alice' }, deps(f))
-    expect(await p.resolve()).toBeUndefined()
+  it('403 → resolves undefined (fail-closed) AND warns with status + serverName (R4-M6)', async () => {
+    // 403 is a platform/permission defect (control-api rejected the principal),
+    // NOT a normal revocation like 404. It must fail closed like 404 but emit a
+    // warn so it is distinguishable in logs — the user sees "Connect" and
+    // reconnecting never fixes it, so a silent 403 leaves no trace.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const f = stubFetch(() => jsonResponse(403, { error: 'insufficient_scope' }))
+      const p = createBrokerTokenProvider({ name: 'gh' }, { userId: 'alice' }, deps(f))
+      expect(await p.resolve()).toBeUndefined()
+      expect(warn).toHaveBeenCalledTimes(1)
+      const msg = warn.mock.calls[0][0] as string
+      expect(msg).toContain('403')
+      expect(msg).toContain('gh')
+      // Never leak the subject or any token material into the log.
+      expect(msg).not.toContain('alice')
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('500 → throws (never forwards a stale/empty token)', async () => {

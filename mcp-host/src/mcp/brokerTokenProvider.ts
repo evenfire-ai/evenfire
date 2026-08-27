@@ -160,8 +160,19 @@ export function createBrokerTokenProvider(
       }
       return data.token
     }
-    // no_grant / insufficient_scope → fail closed as "no token".
-    if (res.status === 404 || res.status === 403) {
+    // 404 no_grant → normal, expected revocation; fail closed silently.
+    if (res.status === 404) {
+      cached = undefined
+      return undefined
+    }
+    // 403 → control-api rejected the principal (a platform/permission defect,
+    // NOT a normal revocation). Fail closed like 404, but WARN so it is
+    // distinguishable in logs: reconnecting will never fix it. server.name is
+    // non-PII; never log the token, userId, or the control token.
+    if (res.status === 403) {
+      console.warn(
+        `[BrokerTokenProvider] broker returned 403 for ${server.name}; failing closed (platform/permission defect, reconnect will not fix)`
+      )
       cached = undefined
       return undefined
     }
