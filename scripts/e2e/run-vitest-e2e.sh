@@ -10,7 +10,11 @@ PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 PF_LOG="${E2E_PF_LOG:-/tmp/clerum-test-e2e-port-forwards.log}"
 PF_PID=""
 WAIT_FULL_STACK="${E2E_WAIT_FULL_STACK:-}"
-DEFAULT_VITEST_SUITES=(
+VITEST_SUITE_GROUP="${E2E_VITEST_SUITE_GROUP:-cluster}"
+DEFAULT_NODE_UNIT_VITEST_SUITES=(
+  gfsUploadV2Fixtures.test.ts
+)
+DEFAULT_CLUSTER_VITEST_SUITES=(
   gfsUploadProductMutation.test.ts
   gfsUploadV2Runtime.test.ts
   gfsUploadV2Runtime.read.test.ts
@@ -44,6 +48,7 @@ DEFAULT_VITEST_SUITES=(
   mcp-host/crd.test.ts
   mcp-host/health.test.ts
 )
+DEFAULT_VITEST_SUITES=("${DEFAULT_CLUSTER_VITEST_SUITES[@]}")
 
 if [[ -z "${WAIT_FULL_STACK}" ]]; then
   if [[ "${GITHUB_ACTIONS:-false}" == "true" ]]; then
@@ -71,6 +76,69 @@ service_url() {
 die() {
   printf '[e2e-vitest] ERROR: %s\n' "$*" >&2
   exit 1
+}
+
+ensure_vitest_dependencies() {
+  if [[ ! -x tests/e2e/node_modules/.bin/vitest ]]; then
+    log "Installing tests/e2e dependencies with npm ci"
+    (cd tests/e2e && npm ci --no-audit --no-fund)
+  fi
+}
+
+# Run Vitest and FAIL if zero tests actually executed, even on a green exit:
+# "nothing failed" is not "everything passed". A renamed/deleted suite or an
+# empty glob must not pass silently.
+run_vitest_gate() {
+  local log
+  log="$(mktemp)"
+  local status=0
+  # Capture Vitest's real exit code across the tee (a pipe otherwise reports
+  # tee's status). Guards below run regardless, to catch a green-but-empty run.
+  set +e
+  npx vitest run --no-color "$@" 2>&1 | tee "${log}"
+  status="${PIPESTATUS[0]}"
+  set -e
+  if grep -qE "No test files found" "${log}"; then
+    rm -f "${log}"
+    die "Vitest reported 'No test files found' — zero tests executed. A gate that ran nothing is not green."
+  fi
+  if ! grep -qE "Tests +[1-9][0-9]* (passed|failed)" "${log}"; then
+    rm -f "${log}"
+    die "Vitest reported no executed tests (no 'Tests N' with N>0). Refusing to treat an empty run as success."
+  fi
+  rm -f "${log}"
+  return "${status}"
+}
+
+run_selected_vitest_suites() {
+  log "Running Vitest E2E (${VITEST_SUITE_GROUP})"
+  cd tests/e2e
+  if [[ "$#" -gt 0 ]]; then
+    run_vitest_gate "$@"
+    return
+  fi
+
+  local default_suites=()
+  case "${VITEST_SUITE_GROUP}" in
+    cluster)
+      default_suites=("${DEFAULT_CLUSTER_VITEST_SUITES[@]}")
+      ;;
+    node-unit)
+      default_suites=("${DEFAULT_NODE_UNIT_VITEST_SUITES[@]}")
+      ;;
+    *)
+      die "unknown E2E_VITEST_SUITE_GROUP '${VITEST_SUITE_GROUP}' (expected cluster or node-unit)"
+      ;;
+  esac
+
+  log "No explicit Vitest specs supplied; running deterministic ${VITEST_SUITE_GROUP} suites"
+  # A suite renamed or deleted out of this explicit list would resolve to zero
+  # files and pass silently while the other suites keep files.length > 0. Fail
+  # loud, by name, before running a single test.
+  for suite in "${default_suites[@]}"; do
+    [[ -f "${suite}" ]] || die "Vitest suite not found: ${suite} (renamed or deleted?). A gate cannot pass over a suite that never ran."
+  done
+  run_vitest_gate "${default_suites[@]}"
 }
 
 cleanup() {
@@ -168,17 +236,23 @@ NODE
 
 cd "${PROJECT_DIR}"
 
+ensure_vitest_dependencies
+
+if [[ "${VITEST_SUITE_GROUP}" == "node-unit" ]]; then
+  run_selected_vitest_suites "$@"
+  exit 0
+fi
+
+if [[ "${VITEST_SUITE_GROUP}" != "cluster" ]]; then
+  die "unknown E2E_VITEST_SUITE_GROUP '${VITEST_SUITE_GROUP}' (expected cluster or node-unit)"
+fi
+
 if ! minikube -p "${PROFILE}" status >/dev/null 2>&1; then
   die "minikube profile '${PROFILE}' is not running. Run: make minikube-setup"
 fi
 
 if ! kubectl --context="${PROFILE}" cluster-info >/dev/null 2>&1; then
   die "kubectl cannot reach context '${PROFILE}'. Run: make minikube-status"
-fi
-
-if [[ ! -x tests/e2e/node_modules/.bin/vitest ]]; then
-  log "Installing tests/e2e dependencies with npm ci"
-  (cd tests/e2e && npm ci --no-audit --no-fund)
 fi
 
 export MINIKUBE_PROFILE="${PROFILE}"
@@ -246,42 +320,4 @@ if [[ -n "${E2E_SKIP_IF_CLUSTER_UNREACHABLE:-}" ]]; then
   die "E2E_SKIP_IF_CLUSTER_UNREACHABLE is set — the gate refuses the skip bypass (a down cluster would report a false green). Unset it; the flag is for local exploration only."
 fi
 
-# Run Vitest and FAIL if zero tests actually executed, even on a green exit:
-# "nothing failed" is not "everything passed". A renamed/deleted suite or an
-# empty glob must not pass silently.
-run_vitest_gate() {
-  local log
-  log="$(mktemp)"
-  local status=0
-  # Capture Vitest's real exit code across the tee (a pipe otherwise reports
-  # tee's status). Guards below run regardless, to catch a green-but-empty run.
-  set +e
-  npx vitest run "$@" 2>&1 | tee "${log}"
-  status="${PIPESTATUS[0]}"
-  set -e
-  if grep -qE "No test files found" "${log}"; then
-    rm -f "${log}"
-    die "Vitest reported 'No test files found' — zero tests executed. A gate that ran nothing is not green."
-  fi
-  if ! grep -qE "Tests +[1-9][0-9]* (passed|failed)" "${log}"; then
-    rm -f "${log}"
-    die "Vitest reported no executed tests (no 'Tests N' with N>0). Refusing to treat an empty run as success."
-  fi
-  rm -f "${log}"
-  return "${status}"
-}
-
-log "Running Vitest E2E"
-cd tests/e2e
-if [[ "$#" -gt 0 ]]; then
-  run_vitest_gate "$@"
-else
-  log "No explicit Vitest specs supplied; running deterministic default suites"
-  # A suite renamed or deleted out of this explicit list would resolve to zero
-  # files and pass silently while the other suites keep files.length > 0. Fail
-  # loud, by name, before running a single test.
-  for suite in "${DEFAULT_VITEST_SUITES[@]}"; do
-    [[ -f "${suite}" ]] || die "Vitest suite not found: ${suite} (renamed or deleted?). A gate cannot pass over a suite that never ran."
-  done
-  run_vitest_gate "${DEFAULT_VITEST_SUITES[@]}"
-fi
+run_selected_vitest_suites "$@"
