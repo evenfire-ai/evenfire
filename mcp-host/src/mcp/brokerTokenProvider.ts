@@ -4,9 +4,10 @@
  *
  * Reaches the control-api OAuth broker through the workflow-approval gateway
  * (decision #6/B — a POST-only L7-allowlisted location, NOT a new direct egress
- * to control-api). The subject (userId | contextId) is baked into each provider
- * INSTANCE, and its cache lives in a closure local to that instance: a provider
- * built for user A can never POST — nor return — user B's token. The factory
+ * to control-api). The subject (a userId, or empty for the shared context
+ * identity) is baked into each provider INSTANCE, and its cache lives in a
+ * closure local to that instance: a provider built for user A can never POST —
+ * nor return — user B's token. The factory
  * builds a fresh provider per ClientKey, so per-user cache isolation is
  * structural, keyed by principal.
  *
@@ -42,8 +43,14 @@ const CACHE_EXPIRY_HEADROOM_MS = 30_000
 export const NULL_EXPIRY_MAX_AGE_MS = 5 * 60_000
 
 export interface BrokerTokenSubject {
+  /**
+   * The per-user grant subject. Absent (`{}`) for oauth-context, where control-api
+   * resolves the shared grant server-side from `server.spec.contextRef` and
+   * mcp-host transports NO context identity (invariant I1). There is deliberately
+   * no `contextId` here: the factory never sends one, so accepting it would be an
+   * unreachable branch that contradicts I1.
+   */
   userId?: string
-  contextId?: string
 }
 
 export interface BrokerTokenProviderDeps {
@@ -91,11 +98,10 @@ export function createBrokerTokenProvider(
       console.warn('[BrokerTokenProvider] control token unavailable; failing closed')
       return undefined
     }
-    const body: { mcpServerName: string; userId?: string; contextId?: string } = {
+    const body: { mcpServerName: string; userId?: string } = {
       mcpServerName: server.name,
     }
     if (subject.userId) body.userId = subject.userId
-    if (subject.contextId) body.contextId = subject.contextId
     const payload = JSON.stringify(body)
 
     const post = async (bearer: string): Promise<Response> =>
