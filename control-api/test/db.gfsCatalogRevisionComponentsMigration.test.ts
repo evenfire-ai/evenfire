@@ -10,10 +10,14 @@ describe('0105 GFS catalog revision components migration', () => {
     const migration = CONTROL_API_MIGRATIONS.find(
       candidate => candidate.version === '0105_gfs_catalog_revision_components'
     )
-    expect(migration).toBeDefined()
-    expect(CONTROL_API_MIGRATIONS[CONTROL_API_MIGRATIONS.length - 2]?.version).toBe(
-      '0104_composable_catalog_revisions'
+    const composableIndex = CONTROL_API_MIGRATIONS.findIndex(
+      candidate => candidate.version === '0104_composable_catalog_revisions'
     )
+    const gfsIndex = CONTROL_API_MIGRATIONS.findIndex(
+      candidate => candidate.version === '0105_gfs_catalog_revision_components'
+    )
+    expect(migration).toBeDefined()
+    expect(gfsIndex).toBe(composableIndex + 1)
 
     const recordedVersions = CONTROL_API_MIGRATIONS.filter(
       candidate => candidate.version !== migration?.version
