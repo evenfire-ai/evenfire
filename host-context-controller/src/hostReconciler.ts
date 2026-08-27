@@ -665,8 +665,14 @@ export class HostReconciler {
    * Whether this Host fronts an enabled `auth.type: oauth` mcp-server, gating
    * the derive-only `oauth:user-token` runtime scope. Fails CLOSED (false) when
    * the cross-CRD read throws: an uncertain read must never grant the scope.
-   * Computed ONCE per reconcile and threaded into BOTH the mint-scope derive
-   * and the drift hash so the two never diverge.
+   *
+   * Each call is an INDEPENDENT live point-in-time read (mirrors
+   * `hasChannelIngress`); the value is deliberately not cached across a
+   * reconcile. Callers that need one consistent value within a unit of work
+   * resolve it once and thread the same bool (see the issuance path, which
+   * threads it into the mint-scope derive and the drift hash so they never
+   * diverge); the deployment drift guard re-reads it on purpose to catch a
+   * scope change mid-reconcile.
    */
   private async frontsOAuthServer(host: HostCRD): Promise<boolean> {
     try {
