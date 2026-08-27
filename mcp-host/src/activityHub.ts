@@ -1,5 +1,6 @@
 import type { AuthorityBindingV2 } from '@clerum/action-context-contracts'
 import type {
+  ActivitySnapshotVisibility,
   HostActivityEvent,
   HostActivitySeverity,
   HostActivitySnapshotResponse,
@@ -97,7 +98,12 @@ export class HostActivityHub {
     return event
   }
 
-  snapshot(hostRef: string, limit: number, sinceEventId?: string): HostActivitySnapshotResponse {
+  snapshot(
+    hostRef: string,
+    limit: number,
+    sinceEventId?: string,
+    visibility?: ActivitySnapshotVisibility
+  ): HostActivitySnapshotResponse {
     const max = Math.min(Math.max(Number(limit) || 50, 1), 200)
     let minId = 0
     if (sinceEventId) {
@@ -105,6 +111,13 @@ export class HostActivityHub {
       if (match) minId = Number(match[1])
     }
     const filtered = this.buffer.filter(entry => {
+      if (
+        visibility &&
+        (entry.authorityV2?.userId !== visibility.userId ||
+          entry.authorityV2?.accessPathId !== visibility.accessPathId)
+      ) {
+        return false
+      }
       const match = entry.eventId.match(/^evt_(\d+)$/)
       const num = match ? Number(match[1]) : 0
       return num > minId

@@ -61,7 +61,7 @@ function makeReq(query: Record<string, string> = {}, userId?: string): Request {
       hostRef: 'chatllm',
       userId,
       actionContextV2: {
-        operationId: 'session.search',
+        operationId: 'session.read',
         userId,
         accessPathId: `ap1_${'a'.repeat(43)}`,
         target: { hostRef: 'mcp-host/chatllm' },

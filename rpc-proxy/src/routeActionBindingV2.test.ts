@@ -12,7 +12,7 @@ import type { UserDelegationV2Claims } from './userDelegationV2.js'
 
 function delegation(input: {
   operationId: ActionOperationId
-  resourceType: 'host' | 'mcp_server'
+  resourceType: 'host' | 'mcp_server' | 'runtime_session'
   resourceId: string
   target: Record<string, string>
 }): UserDelegationV2Claims {
@@ -113,6 +113,30 @@ describe('route action v2 binding', () => {
         claims
       )
     ).toThrow(RouteActionBindingError)
+  })
+
+  it('binds session search to the selected runtime host without query-derived authority', () => {
+    const claims = delegation({
+      operationId: 'session.read',
+      resourceType: 'runtime_session',
+      resourceId: 'mcp-host/chatllm',
+      target: { hostRef: 'mcp-host/chatllm' },
+    })
+
+    const bound = bindRouteActionV2(
+      request({
+        path: '/rpc/hosts/:hostRef/sessions/search',
+        method: 'GET',
+        params: { hostRef: 'chatllm' },
+        query: { q: 'budget', user: 'other-user' },
+      }),
+      claims
+    )
+
+    expect(bound).toMatchObject({
+      operationId: 'session.read',
+      target: { hostRef: 'mcp-host/chatllm' },
+    })
   })
 
   it('denies unclassified and internal MCP methods', () => {
