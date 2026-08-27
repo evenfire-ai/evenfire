@@ -216,6 +216,19 @@ export interface GfsRenameInput {
   ifMatch?: number
 }
 
+/**
+ * Move a resource to a new parent folder. Authority is parent-relative
+ * (control-api applyResourcePatch: write+delete on the old parent, write on
+ * the destination) — the server adjudicates it; the client sends only the
+ * destination id plus the resource's If-Match version.
+ */
+export interface GfsMoveInput {
+  resourceId: string
+  drive?: string
+  destinationId: string
+  ifMatch?: number
+}
+
 export interface GfsDeleteInput {
   resourceId: string
   drive?: string
@@ -322,6 +335,26 @@ async function renameGfsResource(
   const q = new URLSearchParams()
   q.set('drive', input.drive ?? DEFAULT_DRIVE)
   const body: Record<string, unknown> = { newName: input.newName }
+  if (input.ifMatch !== undefined) body.ifMatch = input.ifMatch
+  const path = `/api/v1/me/gfs/resources/${encodeURIComponent(input.resourceId)}?${q.toString()}`
+  const options = { body } as { token?: string; body?: unknown }
+  options[TRANSPORT_TOKEN_FIELD] = session
+  const payload = await transport.requestJson<GfsEnvelope<{ resourceId: string; version: number }>>(
+    'PATCH',
+    joinUrl(transport.baseUrl, path),
+    options
+  )
+  return unwrap(payload)
+}
+
+async function moveGfsResource(
+  transport: GfsTransport,
+  input: GfsMoveInput,
+  session: string
+): Promise<{ resourceId: string; version: number }> {
+  const q = new URLSearchParams()
+  q.set('drive', input.drive ?? DEFAULT_DRIVE)
+  const body: Record<string, unknown> = { newParentId: input.destinationId }
   if (input.ifMatch !== undefined) body.ifMatch = input.ifMatch
   const path = `/api/v1/me/gfs/resources/${encodeURIComponent(input.resourceId)}?${q.toString()}`
   const options = { body } as { token?: string; body?: unknown }
@@ -594,6 +627,13 @@ export class GfsClient {
     session: string
   ): Promise<{ resourceId: string; version: number }> {
     return renameGfsResource(this.transport, input, session)
+  }
+
+  async moveResource(
+    input: GfsMoveInput,
+    session: string
+  ): Promise<{ resourceId: string; version: number }> {
+    return moveGfsResource(this.transport, input, session)
   }
 
   async deleteResource(

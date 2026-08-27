@@ -42,9 +42,11 @@ export function SidebarNav({
   activeSandboxUiApp,
   availableSandboxUiApps,
   onCollapsedChange,
+  onNewChat,
   onOpenSandboxUiApp,
   onSettingsMenuOpenChange,
   onSelect,
+  toggleRequestId = 0,
 }: SidebarNavProps) {
   const { busy, me, handleLogout: onLogout } = useAuthContext()
   const { activeChatId, latestChatSessions, latestChatSessionsLoading, sessionStateByChatKey } =
@@ -67,6 +69,7 @@ export function SidebarNav({
     chatId: string
     title: string
   } | null>(null)
+  const lastToggleRequestIdRef = useRef(0)
   const desktopAppInfo = useDesktopAppInfo()
   const desktopVersionTooltip = formatDesktopAppVersionTooltip(desktopAppInfo)
   const sidebarRef = useRef<HTMLElement | null>(null)
@@ -88,6 +91,16 @@ export function SidebarNav({
   })
   useClickOutside(sidebarRef, mobileMenuOpen, () => setMobileMenuOpen(false))
   useClickOutside(sessionsRef, Boolean(sessionMenuId), () => setSessionMenuId(null))
+
+  useEffect(() => {
+    if (toggleRequestId <= lastToggleRequestIdRef.current) return
+    lastToggleRequestIdRef.current = toggleRequestId
+    if (isMobileSidebarViewport()) {
+      setMobileMenuOpen(open => !open)
+    } else {
+      onCollapsedChange(!collapsed)
+    }
+  }, [collapsed, onCollapsedChange, toggleRequestId])
 
   const email = me?.email
   const displayName = me?.name || email?.split('@')[0] || 'Unknown'
@@ -175,12 +188,6 @@ export function SidebarNav({
         label: 'Connectors',
         testId: 'nav-mcp-servers',
         icon: <IconConnectors />,
-      },
-      {
-        id: DESKTOP_ROUTES.files,
-        label: 'Global File System',
-        testId: 'nav-files',
-        icon: <IconAttachFile />,
       },
     ],
     []
@@ -353,7 +360,7 @@ export function SidebarNav({
                       data-testid="nav-new-chat"
                       onClick={event => {
                         event.stopPropagation()
-                        handleSelect(DESKTOP_ROUTES.chat)
+                        onNewChat()
                       }}
                       variant="ghost"
                     >
@@ -561,6 +568,27 @@ export function SidebarNav({
                   )}
               </React.Fragment>
             ))}
+
+            <div
+              className={`nav-link${navItem === DESKTOP_ROUTES.files ? ' active' : ''}`}
+              title={collapsed ? 'Files' : undefined}
+              data-tooltip="Files"
+            >
+              <NavItemControl
+                data-testid="nav-files"
+                className="nav-link-main"
+                onClick={() => handleSelect(DESKTOP_ROUTES.files)}
+                aria-label="Files"
+                leadingIcon={<IconContexts />}
+                trailingIcon={
+                  <span className="nav-tooltip" role="tooltip">
+                    Files
+                  </span>
+                }
+              >
+                Files
+              </NavItemControl>
+            </div>
           </nav>
 
           <div className="sidebar-footer">

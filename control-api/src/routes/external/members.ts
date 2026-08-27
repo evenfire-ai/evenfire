@@ -196,7 +196,8 @@ export function createExternalMembersRouter(): Router {
           managerUserId,
           req.params.userId,
           req.params.teamId,
-          role
+          role,
+          req.externalSessionAuthority
         )
         if ('error' in result) {
           if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
@@ -261,7 +262,8 @@ export function createExternalMembersRouter(): Router {
         const result = await deleteManagedMemberForUser(
           managerUserId,
           req.params.userId,
-          req.params.teamId
+          req.params.teamId,
+          req.externalSessionAuthority
         )
         if ('error' in result) {
           if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })

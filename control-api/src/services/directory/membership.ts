@@ -2,7 +2,11 @@ import bcrypt from 'bcryptjs'
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { config } from '../../config.js'
 import { type DbClient, pool, withTransaction } from '../../db.js'
-import { revokeAllUserSessions } from '../auth/userSessionService.js'
+import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
+import {
+  revokeAllUserSessions,
+  validateExternalSessionAuthorityContext,
+} from '../auth/userSessionService.js'
 import { registerAndSendInvitation } from '../invitationFlowRegistrationService.js'
 import { appendControlApiPermissionEventsInTransaction } from '../tracing/controlApiPermissionEvents.js'
 import type { InviteRole, TeamRole } from './types.js'
@@ -1249,10 +1253,10 @@ export async function setInvitationPasswordForUser(
     if (invitation.email.toLowerCase() !== normalizedEmail) {
       return { error: 'forbidden' as const }
     }
-    if (invitation.expires_at.getTime() <= Date.now()) {
-      return { error: 'expired' as const }
-    }
     if (invitation.purpose === 'password_reset') {
+      if (invitation.expires_at.getTime() <= Date.now()) {
+        return { error: 'expired' as const }
+      }
       if (invitation.status !== 'pending') {
         return { error: 'not_pending' as const }
       }
@@ -1263,6 +1267,12 @@ export async function setInvitationPasswordForUser(
       if (invitation.status !== 'accepted') {
         return { error: 'not_accepted' as const }
       }
+      if (
+        !invitation.accepted_at ||
+        invitation.accepted_at.getTime() > invitation.expires_at.getTime()
+      ) {
+        return { error: 'expired' as const }
+      }
     } else {
       return { error: 'not_found' as const }
     }
@@ -1270,6 +1280,9 @@ export async function setInvitationPasswordForUser(
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
     if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
     if (user.id !== trimmedUserId) {
+      return { error: 'forbidden' as const }
+    }
+    if (invitation.purpose !== 'password_reset' && invitation.accepted_user_id !== trimmedUserId) {
       return { error: 'forbidden' as const }
     }
     if (invitation.purpose !== 'password_reset' && user.password_hash) {
@@ -2024,7 +2037,8 @@ export async function updateManagedMemberRoleForUser(
   managerUserId: string,
   targetUserId: string,
   teamId: string,
-  role: TeamRole
+  role: TeamRole,
+  authority?: ExternalSessionAuthorityContext
 ) {
   if (managerUserId.trim() === targetUserId.trim()) {
     return { error: 'invalid_target' as const }
@@ -2034,6 +2048,12 @@ export async function updateManagedMemberRoleForUser(
     return { error: 'invalid_role' as const }
   }
   return withTransaction(async db => {
+    if (authority) {
+      const session = await validateExternalSessionAuthorityContext(authority, { db })
+      if (session.status !== 'valid' || session.identity.userId !== managerUserId.trim()) {
+        return { error: 'forbidden' as const }
+      }
+    }
     const locked = await db.query(
       `SELECT user_id::text AS user_id, role
          FROM team_members
@@ -2098,12 +2118,19 @@ export async function updateManagedMemberRoleForUser(
 export async function deleteManagedMemberForUser(
   managerUserId: string,
   targetUserId: string,
-  teamId: string
+  teamId: string,
+  authority?: ExternalSessionAuthorityContext
 ) {
   if (managerUserId.trim() === targetUserId.trim()) {
     return { error: 'invalid_target' as const }
   }
   return withTransaction(async db => {
+    if (authority) {
+      const session = await validateExternalSessionAuthorityContext(authority, { db })
+      if (session.status !== 'valid' || session.identity.userId !== managerUserId.trim()) {
+        return { error: 'forbidden' as const }
+      }
+    }
     const locked = await db.query(
       `SELECT user_id::text AS user_id, role
          FROM team_members

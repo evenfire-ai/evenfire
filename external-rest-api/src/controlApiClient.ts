@@ -38,7 +38,7 @@ const SAFE_RATE_LIMIT_RESPONSE_HEADERS = [
   'x-ratelimit-reset',
 ] as const
 
-function safeForwardableResponseHeaders(headers: Headers): Record<string, string> {
+function safeForwardableResponseHeaders(headers: Headers, status: number): Record<string, string> {
   const result: Record<string, string> = {}
   for (const name of SAFE_RATE_LIMIT_RESPONSE_HEADERS) {
     const raw = headers.get(name)
@@ -51,6 +51,15 @@ function safeForwardableResponseHeaders(headers: Headers): Record<string, string
   const requestId = headers.get('x-request-id')
   if (requestId && /^[A-Za-z0-9_-]{1,128}$/.test(requestId)) {
     result['x-request-id'] = requestId
+  }
+  if (status === 413) {
+    const rawUploadLength = headers.get('upload-length')
+    if (rawUploadLength && /^\d{1,16}$/.test(rawUploadLength)) {
+      const uploadLength = Number(rawUploadLength)
+      if (Number.isSafeInteger(uploadLength) && uploadLength >= 0) {
+        result['upload-length'] = String(uploadLength)
+      }
+    }
   }
   return result
 }
@@ -134,7 +143,7 @@ export async function controlApiRequestWithStatus<T>(
       `Control API ${method} ${path} returned non-JSON body (status=${response.status})`,
       502,
       { error: 'Upstream returned non-JSON body', status: response.status },
-      safeForwardableResponseHeaders(response.headers)
+      safeForwardableResponseHeaders(response.headers, 502)
     )
   }
 
@@ -147,7 +156,7 @@ export async function controlApiRequestWithStatus<T>(
       `Control API ${method} ${path} failed (${response.status}): ${errorMessage}`,
       response.status,
       parsed,
-      safeForwardableResponseHeaders(response.headers)
+      safeForwardableResponseHeaders(response.headers, response.status)
     )
   }
 
@@ -202,7 +211,7 @@ export async function controlApiBinaryRequestWithStatus(
       `Control API ${method} ${path} failed (${response.status})`,
       response.status,
       parsed,
-      safeForwardableResponseHeaders(response.headers)
+      safeForwardableResponseHeaders(response.headers, response.status)
     )
   }
 
@@ -267,7 +276,7 @@ export async function controlApiStreamRequest(
       `Control API ${method} ${path} failed (${response.status})`,
       response.status,
       parsed,
-      safeForwardableResponseHeaders(response.headers)
+      safeForwardableResponseHeaders(response.headers, response.status)
     )
   }
   return response

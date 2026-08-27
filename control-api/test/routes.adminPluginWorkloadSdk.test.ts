@@ -10,13 +10,23 @@ vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: vi.fn(),
 }))
 
-vi.mock('../src/db.js', () => ({
-  pool: {
+vi.mock('../src/db.js', () => {
+  // The grant upsert route now composes its enabled-ness gate + the upsert inside
+  // ONE carrier transaction (R1-H3 fase 2). `withTransaction` must invoke the
+  // callback with the (mocked) pool so the gate's `listEnabledModelsWithStaleFor
+  // Provider(provider, db)` read still hits `pool.query`; the per-model advisory
+  // lock helpers are no-op in a mocked DB.
+  const pool = {
     query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
     connect: vi.fn(),
-  },
-  withTransaction: vi.fn(),
-}))
+  }
+  return {
+    pool,
+    withTransaction: vi.fn(async (cb: (db: typeof pool) => unknown) => cb(pool)),
+    advisoryLockModelNames: vi.fn().mockResolvedValue(undefined),
+    boundCarrierTransactionIdleTimeout: vi.fn().mockResolvedValue(undefined),
+  }
+})
 
 vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
   const actual = await vi.importActual<typeof import('../src/services/pluginWorkloadSdkDb.js')>(
@@ -257,7 +267,8 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
           expect.objectContaining({ targetRef: 'openai-fallback', provider: 'openai' }),
         ]),
       }),
-      '11111111-1111-4111-8111-111111111111'
+      '11111111-1111-4111-8111-111111111111',
+      expect.anything() // carrier transaction client (R1-H3 fase 2)
     )
     expect(JSON.stringify(vi.mocked(sdkDb.upsertGrant).mock.calls)).not.toContain('secret-value')
   })
@@ -285,7 +296,8 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     expect(res.status).toBe(200)
     expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
       expect.objectContaining({ promptTargets: targets }),
-      '11111111-1111-4111-8111-111111111111'
+      '11111111-1111-4111-8111-111111111111',
+      expect.anything() // carrier transaction client (R1-H3 fase 2)
     )
   })
 
@@ -343,7 +355,8 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     expect(res.status).toBe(200)
     expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
       expect.objectContaining({ provider: 'vertex' }),
-      '11111111-1111-4111-8111-111111111111'
+      '11111111-1111-4111-8111-111111111111',
+      expect.anything() // carrier transaction client (R1-H3 fase 2)
     )
   })
 
@@ -410,7 +423,8 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     expect(res.status).toBe(200)
     expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
       expect.objectContaining({ capabilityFamily: 'clientNotifications', provider: undefined }),
-      '11111111-1111-4111-8111-111111111111'
+      '11111111-1111-4111-8111-111111111111',
+      expect.anything() // carrier transaction client (R1-H3 fase 2)
     )
   })
 
@@ -475,7 +489,8 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         // quotaLimits must be empty, not { maxRequestsPerRun: 10 }.
         quotaLimits: {},
       }),
-      '11111111-1111-4111-8111-111111111111'
+      '11111111-1111-4111-8111-111111111111',
+      expect.anything() // carrier transaction client (R1-H3 fase 2)
     )
   })
 
@@ -499,7 +514,8 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
       expect.objectContaining({
         quotaLimits: { maxInvocationsPerMinute: 30 },
       }),
-      '11111111-1111-4111-8111-111111111111'
+      '11111111-1111-4111-8111-111111111111',
+      expect.anything() // carrier transaction client (R1-H3 fase 2)
     )
   })
 
@@ -526,6 +542,252 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     expect(res.body.provider).toBe('zai')
     expect(res.body.models).toEqual(['glm-9-not-allowed'])
     expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+  })
+
+  // ── Pieza D: no-worsening tolerance for grant `allowed_models` (G3) ─────────
+  describe('no-worsening tolerance', () => {
+    const buildAppWithEmit = (emit: (event: unknown) => void) => {
+      const app = express()
+      app.use(express.json())
+      app.use((req, _res, next) => {
+        ;(req as unknown as { adminAuth: { sub?: string } }).adminAuth = { sub: DEFAULT_ADMIN_SUB }
+        next()
+      })
+      app.use(createAdminPluginWorkloadSdkRouter({ emitIncoherenceTolerated: emit as never }))
+      return app
+    }
+    // T1: derive the stored grant through the real row producer (`mapGrantRow`, the
+    // same mapper `listGrants` uses) rather than hand-shaping a grant object, so
+    // the fixture cannot drift from what the DB layer actually emits.
+    const makeStoredGrant = (
+      over: { promptTargets?: unknown; allowedModels?: string[] } = {}
+    ): sdkDb.PluginWorkloadSdkGrant =>
+      sdkDb.mapGrantRow({
+        id: 'g-stored',
+        recipe_namespace: validGrantBody.recipeNamespace,
+        recipe_name: validGrantBody.recipeName,
+        capability_family: 'promptBridge',
+        provider: 'zai',
+        allowed_models: over.allowedModels ?? validGrantBody.allowedModels,
+        prompt_targets: over.promptTargets ?? validGrantBody.promptTargets,
+        created_at: '2026-01-01T00:00:00.000Z',
+        updated_at: '2026-01-01T00:00:00.000Z',
+      })
+    const storedGrant = makeStoredGrant()
+
+    it('tolerates a disabled promptTarget unchanged when coverage is not reduced (200 + emits)', async () => {
+      // glm-4.7 is now disabled (enabled set omits it); the stored grant already
+      // referenced it and the write does not shrink allowed_models.
+      vi.mocked(pool.query).mockResolvedValue({
+        rows: [{ model: 'other-enabled' }],
+        rowCount: 1,
+      } as never)
+      vi.mocked(sdkDb.listGrants).mockResolvedValue([storedGrant] as never)
+      vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g1' } as never)
+      const emit = vi.fn()
+      const res = await request(buildAppWithEmit(emit))
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(validGrantBody)
+      expect(res.status).toBe(200)
+      expect(emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          resourceKind: 'grant',
+          namespace: 'sandbox-recipes',
+          name: 'sdk-recipe',
+          provider: 'zai',
+          model: 'glm-4.7',
+          gate: 'grant',
+        })
+      )
+      expect(sdkDb.upsertGrant).toHaveBeenCalled()
+    })
+
+    it('does NOT tolerate a coverage reduction around a disabled model → 400 (condition b)', async () => {
+      // Stored offered {glm-4.7, glm-extra}; the write drops glm-extra while
+      // keeping disabled glm-4.7 — a strict allowed_models reduction. Must 400.
+      vi.mocked(pool.query).mockResolvedValue({
+        rows: [{ model: 'other-enabled' }],
+        rowCount: 1,
+      } as never)
+      vi.mocked(sdkDb.listGrants).mockResolvedValue([
+        makeStoredGrant({ allowedModels: ['glm-4.7', 'glm-extra'] }),
+      ] as never)
+      const emit = vi.fn()
+      const res = await request(buildAppWithEmit(emit))
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(validGrantBody) // allowedModels: ['glm-4.7'] → glm-extra dropped
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('model_not_allowed')
+      expect(res.body.models).toEqual(['glm-4.7'])
+      expect(emit).not.toHaveBeenCalled()
+      expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+    })
+
+    it('does NOT tolerate a newly introduced disabled model → 400 (condition c)', async () => {
+      // glm-4.7 stays enabled; the write introduces a NEW disabled target glm-new
+      // absent from the stored grant. Even though coverage grows, (a)/(c) fail.
+      vi.mocked(pool.query).mockResolvedValue({
+        rows: [{ model: 'glm-4.7' }],
+        rowCount: 1,
+      } as never)
+      vi.mocked(sdkDb.listGrants).mockResolvedValue([storedGrant] as never)
+      const emit = vi.fn()
+      const res = await request(buildAppWithEmit(emit))
+        .post('/admin/plugin-workload-sdk/grants')
+        .send({
+          ...validGrantBody,
+          allowedModels: ['glm-4.7', 'glm-new'],
+          promptTargets: [
+            ...validGrantBody.promptTargets,
+            {
+              targetRef: 'new-target',
+              provider: 'zai',
+              model: 'glm-new',
+              credentialSlot: 'zai-api-key',
+            },
+          ],
+        })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('model_not_allowed')
+      expect(res.body.models).toEqual(['glm-new'])
+      expect(emit).not.toHaveBeenCalled()
+      expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+    })
+
+    it('does NOT tolerate promoting a disabled NON-default target to the default slot → 400 (mini-spec repro #3)', async () => {
+      // Stored default = glm-4.7 (enabled); glm-old is a disabled NON-default
+      // target. The write moves glm-old to promptTargets[0] (the default). Coverage
+      // is not reduced, but role-scoping rejects the promotion to default.
+      vi.mocked(pool.query).mockResolvedValue({
+        rows: [{ model: 'glm-4.7' }],
+        rowCount: 1,
+      } as never) // glm-old disabled
+      vi.mocked(sdkDb.listGrants).mockResolvedValue([
+        makeStoredGrant({
+          allowedModels: ['glm-4.7', 'glm-old'],
+          promptTargets: [
+            {
+              targetRef: 'primary-zai',
+              provider: 'zai',
+              model: 'glm-4.7',
+              credentialSlot: 'zai-api-key',
+            },
+            {
+              targetRef: 'secondary',
+              provider: 'zai',
+              model: 'glm-old',
+              credentialSlot: 'zai-api-key',
+            },
+          ],
+        }),
+      ] as never)
+      const emit = vi.fn()
+      const res = await request(buildAppWithEmit(emit))
+        .post('/admin/plugin-workload-sdk/grants')
+        .send({
+          ...validGrantBody,
+          allowedModels: ['glm-4.7', 'glm-old'],
+          defaultTargetRef: 'secondary',
+          promptTargets: [
+            {
+              targetRef: 'secondary',
+              provider: 'zai',
+              model: 'glm-old',
+              credentialSlot: 'zai-api-key',
+            },
+            {
+              targetRef: 'primary-zai',
+              provider: 'zai',
+              model: 'glm-4.7',
+              credentialSlot: 'zai-api-key',
+            },
+          ],
+        })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('model_not_allowed')
+      expect(res.body.models).toEqual(['glm-old'])
+      expect(emit).not.toHaveBeenCalled()
+      expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+    })
+
+    it('tolerates DEMOTING a disabled default target to a non-default slot → 200 (not worsening)', async () => {
+      // Stored default = glm-old (disabled). The write demotes it to a non-default
+      // slot (glm-4.7 becomes the new, enabled default). Losing activity is not
+      // worsening, so the disabled glm-old is tolerated at its non-default slot.
+      vi.mocked(pool.query).mockResolvedValue({
+        rows: [{ model: 'glm-4.7' }],
+        rowCount: 1,
+      } as never) // glm-old disabled, glm-4.7 enabled
+      vi.mocked(sdkDb.listGrants).mockResolvedValue([
+        makeStoredGrant({
+          allowedModels: ['glm-old', 'glm-4.7'],
+          promptTargets: [
+            {
+              targetRef: 'legacy',
+              provider: 'zai',
+              model: 'glm-old',
+              credentialSlot: 'zai-api-key',
+            },
+            {
+              targetRef: 'primary-zai',
+              provider: 'zai',
+              model: 'glm-4.7',
+              credentialSlot: 'zai-api-key',
+            },
+          ],
+        }),
+      ] as never)
+      vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g1' } as never)
+      const emit = vi.fn()
+      const res = await request(buildAppWithEmit(emit))
+        .post('/admin/plugin-workload-sdk/grants')
+        .send({
+          ...validGrantBody,
+          allowedModels: ['glm-4.7', 'glm-old'],
+          defaultTargetRef: 'primary-zai',
+          promptTargets: [
+            {
+              targetRef: 'primary-zai',
+              provider: 'zai',
+              model: 'glm-4.7',
+              credentialSlot: 'zai-api-key',
+            },
+            {
+              targetRef: 'legacy',
+              provider: 'zai',
+              model: 'glm-old',
+              credentialSlot: 'zai-api-key',
+            },
+          ],
+        })
+      expect(res.status).toBe(200)
+      expect(emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          resourceKind: 'grant',
+          provider: 'zai',
+          model: 'glm-old',
+          gate: 'grant',
+        })
+      )
+      expect(sdkDb.upsertGrant).toHaveBeenCalled()
+    })
+
+    it('does NOT emit the audit event when the upsert fails to persist (persist-safe)', async () => {
+      // A tolerable disabled default target, but upsertGrant throws → the write did
+      // not persist → no audit record must be emitted.
+      vi.mocked(pool.query).mockResolvedValue({
+        rows: [{ model: 'other-enabled' }],
+        rowCount: 1,
+      } as never)
+      vi.mocked(sdkDb.listGrants).mockResolvedValue([storedGrant] as never)
+      vi.mocked(sdkDb.upsertGrant).mockRejectedValue(new Error('db down'))
+      const emit = vi.fn()
+      const res = await request(buildAppWithEmit(emit))
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(validGrantBody)
+      expect(res.status).toBeGreaterThanOrEqual(500)
+      expect(emit).not.toHaveBeenCalled()
+    })
   })
 
   it('returns 400 when deleting without recipe scope', async () => {
@@ -588,5 +850,88 @@ describe('routes/admin/pluginWorkloadSdk — quota & audit', () => {
     expect(sdkDb.listInvocations).toHaveBeenCalledWith(
       expect.objectContaining({ method: undefined, status: undefined })
     )
+  })
+
+  // Fase 6 — soft quarantine of `stale` models on the grant write path. An ENABLED
+  // but `stale` model assigned to a NEW target answers 200 with an additive
+  // `warnings` array — NEVER a 400 — and a live reference already in the stored
+  // grant is not revalidated. Assert the HTTP body (T4).
+  describe('stale soft-quarantine warnings (Fase 6)', () => {
+    // Stored grant derived through the real row producer (`mapGrantRow`) so the
+    // fixture cannot drift from what the DB layer emits (T1).
+    const makeStoredGrant = (
+      over: { promptTargets?: unknown; allowedModels?: string[] } = {}
+    ): sdkDb.PluginWorkloadSdkGrant =>
+      sdkDb.mapGrantRow({
+        id: 'g-stored',
+        recipe_namespace: validGrantBody.recipeNamespace,
+        recipe_name: validGrantBody.recipeName,
+        capability_family: 'promptBridge',
+        provider: 'zai',
+        allowed_models: over.allowedModels ?? validGrantBody.allowedModels,
+        prompt_targets: over.promptTargets ?? validGrantBody.promptTargets,
+        created_at: '2026-01-01T00:00:00.000Z',
+        updated_at: '2026-01-01T00:00:00.000Z',
+      })
+
+    it('NEW target assigning an enabled+stale model → 200 + warnings, never 400', async () => {
+      // glm-4.7 is enabled AND stale; there is no stored grant → the assignment is
+      // new.
+      vi.mocked(pool.query).mockResolvedValue({
+        rows: [{ model: 'glm-4.7', stale: true }],
+        rowCount: 1,
+      } as never)
+      vi.mocked(sdkDb.listGrants).mockResolvedValue([])
+      vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g1' } as never)
+
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(validGrantBody)
+
+      expect(res.status).toBe(200)
+      expect(res.body.warnings).toEqual([
+        {
+          code: 'stale_model_assigned',
+          provider: 'zai',
+          model: 'glm-4.7',
+          field: 'promptTargets[0].model',
+        },
+      ])
+      expect(sdkDb.upsertGrant).toHaveBeenCalled()
+    })
+
+    it('EXISTING stale target (already in the stored grant) → 200 + NO warnings (not revalidated)', async () => {
+      vi.mocked(pool.query).mockResolvedValue({
+        rows: [{ model: 'glm-4.7', stale: true }],
+        rowCount: 1,
+      } as never)
+      // The stored grant already references glm-4.7 as its target.
+      vi.mocked(sdkDb.listGrants).mockResolvedValue([makeStoredGrant()] as never)
+      vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g1' } as never)
+
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(validGrantBody)
+
+      expect(res.status).toBe(200)
+      expect(res.body.warnings).toBeUndefined()
+      expect(sdkDb.upsertGrant).toHaveBeenCalled()
+    })
+
+    it('enabled non-stale target → 200 + NO warnings', async () => {
+      vi.mocked(pool.query).mockResolvedValue({
+        rows: [{ model: 'glm-4.7', stale: false }],
+        rowCount: 1,
+      } as never)
+      vi.mocked(sdkDb.listGrants).mockResolvedValue([])
+      vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g1' } as never)
+
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(validGrantBody)
+
+      expect(res.status).toBe(200)
+      expect(res.body.warnings).toBeUndefined()
+    })
   })
 })

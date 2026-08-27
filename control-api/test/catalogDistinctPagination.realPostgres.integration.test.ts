@@ -172,6 +172,7 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
       userId: input.userId,
       tokenHash: randomBytes(32).toString('hex'),
       issuedAt: Math.floor(Date.now() / 1_000),
+      authGeneration: 1,
     }
     const seen: string[] = []
     let cursor: string | null = null
@@ -341,7 +342,6 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
         sessionContract: 'v2',
         sessionRevision: '1',
         userRevision: '1',
-        catalogRevision: '1',
         authorizationRevision: '1',
         memberships: teamIds.map(teamId => ({ teamId, role: 'member' })),
       },
@@ -394,7 +394,6 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
         sessionContract: 'v2',
         sessionRevision: '1',
         userRevision: '1',
-        catalogRevision: '1',
         authorizationRevision: '1',
         memberships: teamIds.map(teamId => ({ teamId, role: 'member' })),
       },
@@ -818,6 +817,7 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
       userId: actor.userId,
       tokenHash: randomBytes(32).toString('hex'),
       issuedAt: Math.floor(Date.now() / 1_000),
+      authGeneration: 1,
     }
     const build = (admission: number) =>
       buildAccessCatalog(

@@ -79,7 +79,7 @@ test.describe('demo: Control UI credential-rotation journey', () => {
       await test.step('navigate: sidebar "Connectors" -> connectors list', async () => {
         await humanClick(
           page,
-          page.getByRole('link', { name: 'Installed connectors', exact: true })
+          page.getByRole('link', { name: 'Installed Connectors', exact: true })
         )
         await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
         await humanPause(page)

@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { externalRestPublicErrorHandler } from '../app.js'
-import { ControlApiError } from '../controlApiClient.js'
+import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
 import { sanitizeControlApiPublicError } from '../http/publicApiError.js'
 
 function appThrowing(error: Error) {
@@ -13,6 +13,8 @@ function appThrowing(error: Error) {
 }
 
 describe('External REST public error contract', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
   it('never reflects an internal upstream message, path, or secret-like value', async () => {
     const sentinel = 'oauth-secret-at-/var/run/internal/provider.json'
     const response = await request(appThrowing(new Error(sentinel))).get('/failure')
@@ -124,7 +126,9 @@ describe('External REST public error contract', () => {
 
   it('rebuilds every forwarded route class from a bounded typed envelope', () => {
     const sentinel = 'postgres://secret@internal/var/run/service.sock'
-    for (const status of [400, 401, 403, 404, 409, 410, 412, 422, 429, 500, 502, 503, 504]) {
+    for (const status of [
+      400, 401, 403, 404, 408, 409, 410, 411, 412, 413, 422, 425, 429, 500, 502, 503, 504, 507,
+    ]) {
       const sanitized = sanitizeControlApiPublicError(
         new ControlApiError(sentinel, status, {
           error: {
@@ -141,6 +145,78 @@ describe('External REST public error contract', () => {
       expect(JSON.stringify(sanitized?.body)).not.toContain(sentinel)
       expect(JSON.stringify(sanitized?.body)).not.toContain('made_up_internal_code')
     }
+  })
+
+  it.each([
+    [408, 'request_timeout', true, { 'retry-after': '7' }],
+    [411, 'length_required', false, {}],
+    [413, 'payload_too_large', false, { 'upload-length': '209715200' }],
+    [425, 'too_early', true, { 'retry-after': '7' }],
+    [507, 'insufficient_storage', false, {}],
+  ] as const)(
+    'preserves the safe typed public GFS contract for %s',
+    (status, expectedCode, retryable, expectedHeaders) => {
+      const sentinel = 'private upstream detail at postgres://secret@internal'
+      const sanitized = sanitizeControlApiPublicError(
+        new ControlApiError(
+          sentinel,
+          status,
+          { error: { code: expectedCode, message: sentinel, details: { secret: sentinel } } },
+          {
+            'retry-after': '7',
+            'upload-length': '209715200',
+            'x-ratelimit-limit': '16',
+            'x-internal-secret': sentinel,
+          }
+        ),
+        new Set([status])
+      )
+
+      expect(sanitized).toMatchObject({
+        status,
+        headers: expectedHeaders,
+        body: { error: { code: expectedCode, retryable } },
+      })
+      expect(JSON.stringify(sanitized)).not.toContain(sentinel)
+    }
+  )
+
+  it('preserves bounded upload size through the real Control API client and sanitizer boundary', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 'payload_too_large',
+              message: 'private upstream upload detail',
+            },
+          }),
+          {
+            status: 413,
+            headers: {
+              'content-type': 'application/json',
+              'upload-length': '209715200',
+              'x-internal-secret': 'must-not-cross',
+            },
+          }
+        )
+      )
+    )
+
+    const upstream = await controlApiRequest('PUT', '/external/gfs/resources/id/content').catch(
+      (error: unknown) => error
+    )
+    expect(upstream).toBeInstanceOf(ControlApiError)
+
+    const sanitized = sanitizeControlApiPublicError(upstream, new Set([413]))
+    expect(sanitized).toMatchObject({
+      status: 413,
+      headers: { 'upload-length': '209715200' },
+      body: { error: { code: 'payload_too_large', retryable: false } },
+    })
+    expect(JSON.stringify(sanitized)).not.toContain('private upstream')
+    expect(JSON.stringify(sanitized)).not.toContain('must-not-cross')
   })
 
   it('preserves only bounded access-path descriptors for an ambiguity response', () => {

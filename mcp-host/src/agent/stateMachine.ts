@@ -20,6 +20,7 @@ import type { ConversationStore } from '../core/conversation/conversationStore'
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import { PressureContextManager } from '../core/extensions/contextManager'
 import { STATELESS_CRON_APPROVAL_PROMPT } from '../core/extensions/mcpApprovalGateController'
+import type { GuardrailsConfig } from '../core/guardrails/config'
 import type { LlmPort } from '../core/interfaces'
 // Core architecture imports
 import { SimpleEventEmitter } from '../core/orchestration/eventEmitter'
@@ -200,6 +201,7 @@ export class AgentStateMachine extends EventEmitter {
 
   // Phase 6: Approval
   private approvalConfig: ApprovalConfig | undefined
+  private guardrailsConfig: GuardrailsConfig | undefined
 
   // Phase 7–8: Workspace memory & personalization
   private workspaceProvider: ScopedWorkspaceProvider | undefined
@@ -574,6 +576,12 @@ export class AgentStateMachine extends EventEmitter {
   /**
    * Phase 6: Set the approval configuration (from Host CRD or dev env).
    */
+  /** Guardrails block from the Host CRD (spec §5). Absent = no guardrails = today. */
+  setGuardrailsConfig(config: GuardrailsConfig | undefined): void {
+    this.guardrailsConfig = config
+    console.log('[Guardrail] Guardrails config set:', { rules: config?.rules?.length ?? 0 })
+  }
+
   setApprovalConfig(config: ApprovalConfig | undefined): void {
     this.approvalConfig = config
     console.log('[Agent] Approval config set:', config?.defaultPolicy || 'none')
@@ -1358,6 +1366,7 @@ export class AgentStateMachine extends EventEmitter {
       modelName: effective?.model ?? this.modelName,
       contextWindowTokens: effective?.contextWindowTokens,
       approvalConfig: this.approvalConfig,
+      guardrailsConfig: this.guardrailsConfig,
       coreEvents: this.coreEvents,
       cronScheduler: this.cronScheduler,
       taskLifecycle: this.lifecycle,

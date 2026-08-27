@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import fc from 'fast-check'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { config } from '../src/config.js'
@@ -69,6 +70,80 @@ describeRealPostgres('catalog producer SQL on real PostgreSQL', () => {
     }
   })
 
+  it('orders and resumes arbitrary PostgreSQL text by exact UTF-8 bytes', async () => {
+    const generated = fc.sample(
+      fc
+        .array(
+          fc.constantFrom(
+            'a',
+            'z',
+            'A',
+            'Z',
+            '0',
+            '9',
+            '-',
+            '_',
+            '.',
+            '/',
+            'é',
+            'e\u0301',
+            'Ω',
+            '😀'
+          ),
+          { minLength: 1, maxLength: 12 }
+        )
+        .map(parts => parts.join('')),
+      { seed: 106_026, numRuns: 200 }
+    )
+    const values = [
+      ...new Set(['alpha', 'Zeta', 'a_b', 'a-b', 'é', 'e\u0301', 'Ω', '😀', ...generated]),
+    ]
+    const expected = [...values].sort((left, right) =>
+      Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'))
+    )
+    const ordered = await databasePool.query(
+      `SELECT value
+         FROM unnest($1::text[]) value
+        ORDER BY catalog_utf8_bytes(value)`,
+      [values]
+    )
+    expect(ordered.rows.map(row => row.value)).toEqual(expected)
+
+    for (const after of expected) {
+      const resumed = await databasePool.query(
+        `SELECT value
+           FROM unnest($1::text[]) value
+          WHERE catalog_utf8_bytes(value) > catalog_utf8_bytes($2)
+          ORDER BY catalog_utf8_bytes(value)`,
+        [values, after]
+      )
+      expect(resumed.rows.map(row => row.value)).toEqual(
+        expected.filter(value => Buffer.from(value, 'utf8').compare(Buffer.from(after, 'utf8')) > 0)
+      )
+    }
+  })
+
+  it('proves native UUID order matches UTF-8 byte order for canonical UUID text', async () => {
+    const values = [
+      'ffffffff-ffff-4fff-bfff-ffffffffffff',
+      '00000000-0000-4000-8000-000000000000',
+      '7fffffff-ffff-4fff-bfff-ffffffffffff',
+      '80000000-0000-4000-8000-000000000000',
+      '0fffffff-ffff-4fff-bfff-ffffffffffff',
+    ]
+    const expected = [...values].sort((left, right) =>
+      Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'))
+    )
+    const ordered = await databasePool.query<{ value: string }>(
+      `SELECT value::text AS value
+         FROM unnest($1::uuid[]) AS candidate(value)
+        ORDER BY value`,
+      [values]
+    )
+
+    expect(ordered.rows.map(row => row.value)).toEqual(expected)
+  })
+
   it('parses and executes every bounded key and selected-ID hydration query', async () => {
     const budget = AccessExecutionBudget.create('catalog')
     const sourceStates: CatalogOperationalSourceState[] = OPERATIONAL_SOURCE_FAMILIES.map(
@@ -87,7 +162,6 @@ describeRealPostgres('catalog producer SQL on real PostgreSQL', () => {
         sessionContract: 'v2',
         sessionRevision: '1',
         userRevision: '1',
-        catalogRevision: '1',
         authorizationRevision: 'catalog-authorization-1',
         memberships: [],
       },

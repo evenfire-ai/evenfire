@@ -32,6 +32,7 @@ export type ConfiguredUserAccessIntent = Readonly<{
   sessionV2Acceptance: boolean
   sessionV2Issuance: boolean
   catalogMode: CatalogMode
+  teamGfsMembershipAdmissionLimit: number | null
   actionContextV2: boolean
   rpcDelegationV2: boolean
   desktopAllTeamMode: boolean
@@ -171,6 +172,12 @@ export function compileUserAccessPolicy(
 
   const wantsShadow = intent.catalogMode === 'shadow' || intent.catalogMode === 'serve_and_shadow'
   const wantsServe = intent.catalogMode === 'serve' || intent.catalogMode === 'serve_and_shadow'
+  if (wantsShadow || wantsServe) {
+    requireCondition(
+      intent.teamGfsMembershipAdmissionLimit !== null,
+      'catalog_team_gfs_membership_admission_missing'
+    )
+  }
   const advertisedCatalogFamilies =
     wantsShadow || wantsServe
       ? intersection(
@@ -308,7 +315,35 @@ function parseVersion(env: NodeJS.ProcessEnv, name: string): string | null {
   return raw
 }
 
+function parseOptionalPositiveSafeInteger(env: NodeJS.ProcessEnv, name: string): number | null {
+  const raw = env[name]?.trim()
+  if (!raw) return null
+  if (!/^[1-9][0-9]*$/.test(raw)) {
+    throw new UserAccessPolicyConfigurationError(`${name.toLowerCase()}_invalid`)
+  }
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new UserAccessPolicyConfigurationError(`${name.toLowerCase()}_invalid`)
+  }
+  return value
+}
+
 export function loadConfiguredUserAccessIntent(env: NodeJS.ProcessEnv): ConfiguredUserAccessIntent {
+  const catalogMode = parseEnum(
+    env,
+    'CONTROL_API_USER_ACCESS_CATALOG_MODE',
+    ['off', 'shadow', 'serve_and_shadow', 'serve'] as const,
+    'off'
+  )
+  const teamGfsMembershipAdmissionLimit = parseOptionalPositiveSafeInteger(
+    env,
+    'CONTROL_API_USER_ACCESS_TEAM_GFS_MEMBERSHIP_ADMISSION_LIMIT'
+  )
+  if (catalogMode !== 'off' && teamGfsMembershipAdmissionLimit === null) {
+    throw new UserAccessPolicyConfigurationError(
+      'control_api_user_access_team_gfs_membership_admission_limit_missing'
+    )
+  }
   return Object.freeze({
     legacyLifecycle: parseEnum(
       env,
@@ -318,12 +353,8 @@ export function loadConfiguredUserAccessIntent(env: NodeJS.ProcessEnv): Configur
     ),
     sessionV2Acceptance: parseBoolean(env, 'CONTROL_API_USER_ACCESS_SESSION_V2_ACCEPTANCE', true),
     sessionV2Issuance: parseBoolean(env, 'CONTROL_API_USER_ACCESS_SESSION_V2_ISSUANCE', false),
-    catalogMode: parseEnum(
-      env,
-      'CONTROL_API_USER_ACCESS_CATALOG_MODE',
-      ['off', 'shadow', 'serve_and_shadow', 'serve'] as const,
-      'off'
-    ),
+    catalogMode,
+    teamGfsMembershipAdmissionLimit,
     actionContextV2: parseBoolean(env, 'CONTROL_API_USER_ACCESS_ACTION_CONTEXT_V2', false),
     rpcDelegationV2: parseBoolean(env, 'CONTROL_API_USER_ACCESS_RPC_DELEGATION_V2', false),
     desktopAllTeamMode: parseBoolean(env, 'CONTROL_API_USER_ACCESS_DESKTOP_ALL_TEAM_MODE', false),
@@ -370,6 +401,20 @@ export const reconstructionReadiness: DeploymentReadiness = Object.freeze({
 })
 
 export const configuredUserAccessIntent = loadConfiguredUserAccessIntent(process.env)
+
+export function catalogBudgetOptionsForIntent(
+  intent: ConfiguredUserAccessIntent
+): Readonly<{ teamGfsMembershipAdmissionLimit?: number }> {
+  return intent.teamGfsMembershipAdmissionLimit === null
+    ? Object.freeze({})
+    : Object.freeze({
+        teamGfsMembershipAdmissionLimit: intent.teamGfsMembershipAdmissionLimit,
+      })
+}
+
+export const configuredCatalogBudgetOptions = catalogBudgetOptionsForIntent(
+  configuredUserAccessIntent
+)
 
 export function userAccessCapabilityManifest(policy: EffectiveUserAccessPolicy): Readonly<{
   policyVersion: string

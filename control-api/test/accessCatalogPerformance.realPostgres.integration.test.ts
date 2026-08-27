@@ -98,6 +98,7 @@ describeRealPostgres('aggregate catalog plans on real PostgreSQL', () => {
     userId,
     tokenHash: randomBytes(32).toString('hex'),
     issuedAt: Math.floor(Date.now() / 1_000),
+    authGeneration: 1,
   }
   let adminPool: Pool
   let databasePool: Pool

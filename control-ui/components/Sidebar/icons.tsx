@@ -1,5 +1,44 @@
 import React from 'react'
 
+export function IconCopy(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      stroke="currentColor"
+      strokeWidth="0"
+      aria-hidden="true"
+      data-solid="true"
+      {...props}
+    >
+      <path fill="none" d="M0 0h24v24H0z" />
+      <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2m0 16H8V7h11z" />
+    </svg>
+  )
+}
+
+type RelationshipRoleIconProps = {
+  createBadge?: boolean
+  relationshipRole?: 'admin' | 'member'
+}
+
+function IconCreateBadge() {
+  return (
+    <g>
+      <circle
+        cx="18"
+        cy="18"
+        r="4.25"
+        fill="var(--cu-bg-elevated)"
+        stroke="currentColor"
+        strokeWidth="2"
+      />
+      <path d="M18 15.75v4.5M15.75 18h4.5" />
+    </g>
+  )
+}
+
 export function IconWorkflow() {
   return (
     <svg
@@ -30,15 +69,13 @@ export function IconOutputs() {
       width="18"
       height="18"
       viewBox="0 0 24 24"
-      fill="none"
+      fill="currentColor"
       stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
+      strokeWidth="0"
+      aria-hidden="true"
+      data-solid="true"
     >
-      <path d="M3 16V8" />
-      <path d="M7 12h14" />
-      <path d="m17 8 4 4-4 4" />
+      <path d="m17 17 5-5-5-5-1.41 1.41L18.17 11H9v2h9.17l-2.58 2.59z" />
     </svg>
   )
 }
@@ -62,17 +99,17 @@ export function IconRobot() {
 export function IconFolder() {
   return (
     <svg
-      xmlns="http://www.w3.org/2000/svg"
       width="18"
       height="18"
-      viewBox="0 0 24 24"
-      fill="none"
       stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
+      fill="currentColor"
+      strokeWidth="0"
+      viewBox="0 0 512 512"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+      data-solid="true"
     >
-      <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
+      <path d="M464 128H272l-64-64H48C21.49 64 0 85.49 0 112v288c0 26.51 21.49 48 48 48h416c26.51 0 48-21.49 48-48V176c0-26.51-21.49-48-48-48z" />
     </svg>
   )
 }
@@ -330,6 +367,72 @@ export function IconServer() {
   )
 }
 
+export function IconImage() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      stroke="currentColor"
+      strokeWidth="0"
+      data-solid="true"
+    >
+      <g>
+        <path d="M18.435,3.06H5.565a2.5,2.5,0,0,0-2.5,2.5V18.44a2.507,2.507,0,0,0,2.5,2.5h12.87a2.507,2.507,0,0,0,2.5-2.5V5.56A2.5,2.5,0,0,0,18.435,3.06ZM4.065,5.56a1.5,1.5,0,0,1,1.5-1.5h12.87a1.5,1.5,0,0,1,1.5,1.5v8.66l-3.88-3.88a1.509,1.509,0,0,0-2.12,0l-4.56,4.57a.513.513,0,0,1-.71,0l-.56-.56a1.522,1.522,0,0,0-2.12,0l-1.92,1.92Zm15.87,12.88a1.5,1.5,0,0,1-1.5,1.5H5.565a1.5,1.5,0,0,1-1.5-1.5v-.75L6.7,15.06a.5.5,0,0,1,.35-.14.524.524,0,0,1,.36.14l.55.56a1.509,1.509,0,0,0,2.12,0l4.57-4.57a.5.5,0,0,1,.71,0l4.58,4.58Z" />
+        <path d="M8.062,10.565a2.5,2.5,0,1,1,2.5-2.5A2.5,2.5,0,0,1,8.062,10.565Zm0-4a1.5,1.5,0,1,0,1.5,1.5A1.5,1.5,0,0,0,8.062,6.565Z" />
+      </g>
+    </svg>
+  )
+}
+
+export function IconVideo() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      stroke="currentColor"
+      strokeWidth="0"
+      data-solid="true"
+    >
+      <path d="M0 4.75C0 3.784.784 3 1.75 3h20.5c.966 0 1.75.784 1.75 1.75v14.5A1.75 1.75 0 0 1 22.25 21H1.75A1.75 1.75 0 0 1 0 19.25Zm1.75-.25a.25.25 0 0 0-.25.25v14.5c0 .138.112.25.25.25h20.5a.25.25 0 0 0 .25-.25V4.75a.25.25 0 0 0-.25-.25Z" />
+      <path d="M9 15.584V8.416a.5.5 0 0 1 .77-.42l5.576 3.583a.5.5 0 0 1 0 .842L9.77 16.005a.5.5 0 0 1-.77-.42Z" />
+    </svg>
+  )
+}
+
+export function IconDocumentText() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 512 512"
+      fill="currentColor"
+      stroke="currentColor"
+      strokeWidth="0"
+    >
+      <path
+        fill="none"
+        strokeLinejoin="round"
+        strokeWidth="32"
+        d="M416 221.25V416a48 48 0 0 1-48 48H144a48 48 0 0 1-48-48V96a48 48 0 0 1 48-48h98.75a32 32 0 0 1 22.62 9.37l141.26 141.26a32 32 0 0 1 9.37 22.62z"
+      />
+      <path
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="32"
+        d="M256 56v120a32 32 0 0 0 32 32h120m-232 80h160m-160 80h160"
+      />
+    </svg>
+  )
+}
+
 export function IconBroadcast() {
   return (
     <svg
@@ -351,7 +454,10 @@ export function IconBroadcast() {
   )
 }
 
-export function IconUsers() {
+export function IconUsers({
+  createBadge = false,
+  relationshipRole,
+}: RelationshipRoleIconProps = {}) {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -363,10 +469,48 @@ export function IconUsers() {
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
+      aria-hidden={relationshipRole ? true : undefined}
+      data-relationship-role={relationshipRole}
+      data-create-badge={createBadge ? 'true' : undefined}
     >
       <path d="M18 21a8 8 0 0 0-16 0" />
       <circle cx="10" cy="8" r="5" />
       <path d="M22 20c0-3.37-2-6.5-4-8a5 5 0 0 0-.45-8.3" />
+      {createBadge ? <IconCreateBadge /> : null}
+    </svg>
+  )
+}
+
+export function IconShield({
+  createBadge = false,
+  relationshipRole,
+}: RelationshipRoleIconProps = {}) {
+  const isRelationshipIcon = relationshipRole !== undefined
+
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden={relationshipRole ? true : undefined}
+      data-relationship-role={relationshipRole}
+      data-create-badge={createBadge ? 'true' : undefined}
+    >
+      {isRelationshipIcon ? (
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" />
+      ) : (
+        <>
+          <path d="M12 3l7 3v5c0 4.5 -3 7.5 -7 9c-4 -1.5 -7 -4.5 -7 -9V6l7 -3z" />
+          <path d="M9 12l2 2l4 -4" />
+        </>
+      )}
+      {createBadge ? <IconCreateBadge /> : null}
     </svg>
   )
 }

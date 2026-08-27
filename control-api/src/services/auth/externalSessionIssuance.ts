@@ -1,18 +1,25 @@
-import type { DbClient } from '../../db.js'
-import type { TeamRole } from '../../profileTypes.js'
+import { type DbClient, withTransaction } from '../../db.js'
+import type { AuthClaims, TeamRole } from '../../profileTypes.js'
 import { signExternalSessionToken } from '../../utils/auth/externalSessionAuthToken.js'
 import {
   type EffectiveUserAccessPolicy,
   compareSemanticVersions,
 } from '../access/userAccessPolicy.js'
 import type { ExternalSessionClient } from './externalSessionAuthentication.js'
-import { createUserSession } from './userSessionService.js'
+import { createUserSession, validateLegacyUserSession } from './userSessionService.js'
 
 export type ExternalSessionContract = 'v1' | 'v2'
 
 export type ExternalSessionSelection =
   | { status: 'selected'; contract: ExternalSessionContract }
   | { status: 'upgrade_required'; reason: string }
+
+export type LegacyExternalSessionExchange =
+  | { status: 'issued'; token: string; role: TeamRole }
+  | { status: 'invalid_session' }
+  | { status: 'membership_not_found' }
+
+type SessionTransaction = <T>(work: (db: DbClient) => Promise<T>) => Promise<T>
 
 export function selectExternalSessionRepresentation(
   client: ExternalSessionClient,
@@ -87,4 +94,69 @@ export async function issueExternalUserSession(
     }),
     contract: 'v1',
   }
+}
+
+/**
+ * Revalidates and replaces a legacy V1 representation from one locked snapshot.
+ * Lock order: user/lifecycle -> epoch/revocation reads -> membership -> signing.
+ */
+export async function exchangeLegacyExternalUserSession(
+  input: {
+    token: string
+    claims: AuthClaims
+    userId: string
+    email: string
+    teamId: string
+  },
+  options: {
+    policy: EffectiveUserAccessPolicy
+    transaction?: SessionTransaction
+  }
+): Promise<LegacyExternalSessionExchange> {
+  if (
+    input.claims.userId !== input.userId ||
+    input.claims.email.toLowerCase() !== input.email.toLowerCase()
+  ) {
+    return { status: 'invalid_session' }
+  }
+  const run = options.transaction ?? withTransaction
+  return run(async db => {
+    const validation = await validateLegacyUserSession(input.token, input.claims, {
+      db,
+      lockUser: true,
+    })
+    if (validation.status !== 'valid') return { status: 'invalid_session' }
+
+    const membership = await db.query(
+      `SELECT tm.role, u.lifecycle_version
+         FROM users u
+         JOIN team_members tm ON tm.user_id = u.id
+        WHERE u.id = $1
+          AND LOWER(u.email) = LOWER($2)
+          AND tm.team_id = $3
+          AND tm.status = 'active'
+          AND u.lifecycle_state = 'active'
+        LIMIT 1
+        FOR UPDATE OF tm`,
+      [input.userId, input.email, input.teamId]
+    )
+    const row = membership.rows[0] as
+      | { role?: TeamRole; lifecycle_version?: number | string }
+      | undefined
+    if (!row?.role) return { status: 'membership_not_found' }
+
+    const issued = await issueExternalUserSession(
+      {
+        contract: 'v1',
+        userId: input.userId,
+        email: input.email,
+        teamId: input.teamId,
+        role: row.role,
+        authGeneration: Number(row.lifecycle_version),
+        authenticationMethods: [],
+      },
+      { db, policy: options.policy }
+    )
+    return { status: 'issued', token: issued.token, role: row.role }
+  })
 }

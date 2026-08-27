@@ -6,20 +6,43 @@ import { useClickOutside } from '@hooks/useClickOutside'
 import type { GfsResourceMenuProps } from './types'
 
 export function GfsResourceMenu({
+  createShareDisabled = false,
   resourceName,
   onManage,
   onCopyLink,
+  onCreateShare,
   onCreateFolder,
   onDelete,
   onOpen,
+  onOpenChange,
   onPreview,
   onDownload,
   onRename,
+  onMove,
 }: GfsResourceMenuProps) {
   const [open, setOpen] = useState(false)
   const menuRef = useRef<HTMLSpanElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const closeMenu = useCallback(() => setOpen(false), [])
+  const onOpenChangeRef = useRef(onOpenChange)
+  const prevOpenRef = useRef(false)
+
+  useEffect(() => {
+    onOpenChangeRef.current = onOpenChange
+  }, [onOpenChange])
+
+  useEffect(() => {
+    if (prevOpenRef.current === open) return
+    prevOpenRef.current = open
+    onOpenChangeRef.current?.(open)
+  }, [open])
+
+  useEffect(
+    () => () => {
+      if (prevOpenRef.current) onOpenChangeRef.current?.(false)
+    },
+    []
+  )
 
   useClickOutside(menuRef, open, closeMenu)
 
@@ -85,6 +108,15 @@ export function GfsResourceMenu({
               Manage
             </MenuItem>
           ) : null}
+          {onCreateShare ? (
+            <MenuItem
+              disabled={createShareDisabled}
+              role="menuitem"
+              onClick={() => runAction(onCreateShare)}
+            >
+              Create share
+            </MenuItem>
+          ) : null}
           {onOpen ? (
             <MenuItem role="menuitem" onClick={() => runAction(onOpen)}>
               Open folder
@@ -103,6 +135,11 @@ export function GfsResourceMenu({
           {onRename ? (
             <MenuItem role="menuitem" onClick={() => runAction(onRename)}>
               Rename
+            </MenuItem>
+          ) : null}
+          {onMove ? (
+            <MenuItem role="menuitem" onClick={() => runAction(onMove)}>
+              Move to…
             </MenuItem>
           ) : null}
           {onDownload ? (

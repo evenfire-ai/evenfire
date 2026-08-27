@@ -10,6 +10,7 @@ import {
   compareSemanticVersions,
 } from '../access/userAccessPolicy.js'
 import { resolveEffectiveUserAccessPolicy } from '../access/userAccessRuntimePolicy.js'
+import { legacyExternalSessionAuthGeneration } from './legacyV1Generation.js'
 import {
   type IssuedUserSession,
   renewUserSession,
@@ -60,6 +61,7 @@ export type ExternalSessionAuthorityContext = Readonly<
       userId: string
       tokenHash: string
       issuedAt: number
+      authGeneration: number
     }
   | {
       contract: 'v2'
@@ -177,15 +179,23 @@ export async function authenticateExternalUserSession(
     budget: options.budget,
   })
   if (validation.status !== 'valid') return validation
+  const authGeneration = legacyExternalSessionAuthGeneration(v1Claims)
+  if (authGeneration === null) {
+    return { status: 'invalid', reason: 'invalid_legacy_representation' }
+  }
   return {
     status: 'authenticated',
     contract: 'v1',
-    claims: v1Claims,
+    claims: Object.freeze({
+      ...v1Claims,
+      authGeneration,
+    }),
     authorityContext: Object.freeze({
       contract: 'v1',
       userId: v1Claims.userId,
       tokenHash: validation.identity.jti,
       issuedAt: v1Claims.iat!,
+      authGeneration,
     }),
     policy,
   }

@@ -61,8 +61,10 @@ describe('GfsDelegationPanel', () => {
     await waitFor(() => expect(onGrant).toHaveBeenCalledWith(['user:u2'], ['read'], false))
   })
 
-  it('shows Create share only when the caller holds the share bit', () => {
+  it('registers Create share only when the caller holds the share bit', async () => {
     const onCreateShare = vi.fn().mockResolvedValue(undefined)
+    let createShareAction: (() => void) | null = null
+    let createShareDisabled = true
     render(
       <GfsDelegationPanel
         affordances={{ canDelegate: true, grantableBits: ['read', 'share'], canCreateShare: true }}
@@ -70,9 +72,23 @@ describe('GfsDelegationPanel', () => {
         isDirectory={false}
         onGrant={vi.fn()}
         onCreateShare={onCreateShare}
+        onCreateShareActionChange={(action, disabled) => {
+          createShareAction = action
+          createShareDisabled = disabled
+        }}
       />
     )
-    expect(screen.getByRole('button', { name: 'Create share' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Create share' })).toBeNull()
+    expect(createShareDisabled).toBe(true)
+
+    fireEvent.focus(screen.getByRole('combobox', { name: PICKER_LABEL }))
+    fireEvent.click(screen.getByRole('option', { name: /Core Team/ }))
+    await waitFor(() => {
+      expect(createShareDisabled).toBe(false)
+      expect(createShareAction).not.toBeNull()
+    })
+    createShareAction?.()
+    await waitFor(() => expect(onCreateShare).toHaveBeenCalledWith(['team:team-1']))
   })
 
   it('surfaces a server no-escalation rejection mapped to its human message (fail-loud)', async () => {
@@ -192,7 +208,7 @@ describe('GfsDelegationPanel', () => {
     expect(screen.getByText(/limited to read and write/i)).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Read' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: /2 permissions/ })).toBeNull()
-    expect(screen.getByRole('button', { name: 'Create share' })).toHaveProperty('disabled', true)
+    expect(screen.queryByRole('button', { name: 'Create share' })).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
     await waitFor(() =>

@@ -4,6 +4,8 @@ import type { AuthClaims } from '../../profileTypes.js'
 import type { UserSessionV2Claims } from '../../utils/auth/userSessionV2Token.js'
 import {
   USER_SESSION_V2_TTL_SECONDS,
+  USER_SESSION_V2_TYPE,
+  USER_SESSION_V2_VERSION,
   signUserSessionV2Token,
 } from '../../utils/auth/userSessionV2Token.js'
 import {
@@ -11,6 +13,8 @@ import {
   withAccessDatabaseTransaction,
 } from '../access/accessDatabaseQuery.js'
 import type { AccessExecutionBudget } from '../access/accessExecutionBudget.js'
+import type { ExternalSessionAuthorityContext } from './externalSessionAuthentication.js'
+import { legacyExternalSessionAuthGeneration } from './legacyV1Generation.js'
 
 export const USER_SESSION_IDLE_LIFETIME_SECONDS = 14 * 24 * 60 * 60
 export const USER_SESSION_ABSOLUTE_LIFETIME_SECONDS = 30 * 24 * 60 * 60
@@ -59,7 +63,7 @@ export type IssuedUserSession = {
   identity: UserSessionIdentity
 }
 
-type SessionClock = { now?: Date }
+type SessionClock = { now?: Date | (() => Date) }
 
 function budgetedSessionDatabase(
   db: SessionDatabase,
@@ -72,6 +76,10 @@ function budgetedSessionDatabase(
 
 function atSecond(date: Date): Date {
   return new Date(Math.floor(date.getTime() / 1000) * 1000)
+}
+
+function resolveClock(now?: Date | (() => Date)): Date {
+  return typeof now === 'function' ? now() : (now ?? new Date())
 }
 
 function plusSeconds(date: Date, seconds: number): Date {
@@ -200,7 +208,7 @@ export async function createUserSession(
   },
   options: SessionClock & { db?: SessionDatabase } = {}
 ): Promise<IssuedUserSession> {
-  const now = atSecond(options.now ?? new Date())
+  const now = atSecond(resolveClock(options.now))
   const authenticatedAt = atSecond(input.authenticatedAt ?? now)
   const sid = randomUUID()
   const jti = randomUUID()
@@ -275,7 +283,7 @@ export async function validateUserSessionClaims(
   claims: UserSessionV2Claims,
   options: SessionClock & { db?: SessionDatabase; budget?: AccessExecutionBudget } = {}
 ): Promise<UserSessionValidation> {
-  const now = atSecond(options.now ?? new Date())
+  const now = atSecond(resolveClock(options.now))
   const work = async (db: SessionDatabase) => {
     const row = await loadSessionForUpdate(db, claims.sid)
     return validateLoadedSession(db, row, claims, now, true)
@@ -292,7 +300,7 @@ export async function renewUserSession(
   claims: UserSessionV2Claims,
   options: SessionClock & { db?: SessionDatabase; budget?: AccessExecutionBudget } = {}
 ): Promise<IssuedUserSession | UserSessionValidation> {
-  const now = atSecond(options.now ?? new Date())
+  const now = atSecond(resolveClock(options.now))
   const work = async (db: SessionDatabase) => {
     const row = await loadSessionForUpdate(db, claims.sid)
     const validation = await validateLoadedSession(db, row, claims, now, false)
@@ -380,12 +388,12 @@ export async function revokeAllUserSessions(
   userId: string,
   reason: string,
   db?: SessionDatabase,
-  now = new Date()
+  now: Date | (() => Date) = () => new Date()
 ): Promise<number> {
   const work = async (transaction: SessionDatabase) => {
-    const revokedAt = atSecond(now)
     const user = await transaction.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [userId])
     if ((user.rowCount ?? 0) === 0) return 0
+    const revokedAt = atSecond(resolveClock(now))
 
     await transaction.query(
       `INSERT INTO external_user_session_security_epochs(user_id, valid_after, reason, updated_at)
@@ -414,6 +422,111 @@ export async function revokeAllUserSessions(
   return db ? work(db) : withTransaction(work)
 }
 
+export async function validateExternalSessionAuthorityContext(
+  context: ExternalSessionAuthorityContext,
+  options: SessionClock & { db?: SessionDatabase } = {}
+): Promise<UserSessionValidation> {
+  const now = atSecond(resolveClock(options.now))
+  const work = async (db: SessionDatabase): Promise<UserSessionValidation> => {
+    if (context.contract === 'v2') {
+      const principal = await db.query(
+        `SELECT id
+           FROM users
+          WHERE id = $1
+            AND lifecycle_state = 'active'
+          FOR UPDATE`,
+        [context.userId]
+      )
+      if ((principal.rowCount ?? 0) === 0) {
+        return { status: 'revoked', reason: 'user_unavailable' }
+      }
+      const claims: UserSessionV2Claims = {
+        sub: context.userId,
+        sid: context.sid,
+        jti: context.jti,
+        sv: context.sessionVersion,
+        ver: USER_SESSION_V2_VERSION,
+        typ: USER_SESSION_V2_TYPE,
+        auth_time: 0,
+        amr: ['session'],
+        iat: 0,
+        exp: 0,
+      }
+      return validateLoadedSession(
+        db,
+        await loadSessionForUpdate(db, context.sid),
+        claims,
+        now,
+        false
+      )
+    }
+
+    const principal = await db.query(
+      `SELECT id, email, lifecycle_state, lifecycle_version
+         FROM users
+        WHERE id = $1
+        FOR UPDATE`,
+      [context.userId]
+    )
+    const user = principal.rows[0] as
+      | {
+          id: string
+          email: string
+          lifecycle_state: string
+          lifecycle_version: number | string
+        }
+      | undefined
+    if (!user) return { status: 'invalid', reason: 'user_not_found' }
+    if (
+      user.lifecycle_state !== 'active' ||
+      context.authGeneration !== Number(user.lifecycle_version)
+    ) {
+      return { status: 'revoked', reason: 'security_event' }
+    }
+
+    const authority = await db.query(
+      `SELECT epoch.valid_after,
+              EXISTS (
+                SELECT 1
+                  FROM external_v1_session_revocations revoked
+                 WHERE revoked.token_hash = $2
+                   AND revoked.user_id = $1
+                   AND revoked.expires_at > NOW()
+              ) AS token_revoked
+         FROM users u
+    LEFT JOIN external_user_session_security_epochs epoch ON epoch.user_id = u.id
+        WHERE u.id = $1
+        LIMIT 1`,
+      [context.userId, context.tokenHash]
+    )
+    const row = authority.rows[0] as
+      | {
+          valid_after: Date | string | null
+          token_revoked: boolean
+        }
+      | undefined
+    if (!row) return { status: 'invalid', reason: 'user_not_found' }
+    if (row.token_revoked) return { status: 'revoked', reason: 'logout' }
+    if (row.valid_after && context.issuedAt * 1000 <= dateOf(row.valid_after).getTime()) {
+      return { status: 'revoked', reason: 'security_event' }
+    }
+    return {
+      status: 'valid',
+      identity: {
+        userId: context.userId,
+        email: user.email,
+        sid: '',
+        jti: context.tokenHash,
+        sessionVersion: 0,
+        expiresAt: new Date(context.issuedAt * 1000),
+        absoluteExpiresAt: new Date(context.issuedAt * 1000),
+        authenticationMethods: [],
+      },
+    }
+  }
+  return work(options.db ?? pool)
+}
+
 function legacySessionFingerprint(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('hex')
 }
@@ -421,14 +534,21 @@ function legacySessionFingerprint(token: string): string {
 export async function validateLegacyUserSession(
   token: string,
   claims: AuthClaims,
-  options: { db?: SessionDatabase; budget?: AccessExecutionBudget } = {}
+  options: { db?: SessionDatabase; budget?: AccessExecutionBudget; lockUser?: boolean } = {}
 ): Promise<UserSessionValidation> {
   const issuedAt = claims.iat
   if (!issuedAt) return { status: 'invalid', reason: 'invalid_legacy_representation' }
-  if (!Number.isSafeInteger(claims.authGeneration) || Number(claims.authGeneration) < 1) {
+  const authGeneration = legacyExternalSessionAuthGeneration(claims)
+  if (authGeneration === null) {
     return { status: 'invalid', reason: 'invalid_legacy_representation' }
   }
   const work = async (db: SessionDatabase): Promise<UserSessionValidation> => {
+    if (options.lockUser) {
+      const locked = await db.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
+        claims.userId,
+      ])
+      if ((locked.rowCount ?? 0) === 0) return { status: 'revoked', reason: 'user_unavailable' }
+    }
     const result = await db.query(
       `SELECT u.id, u.lifecycle_state, u.lifecycle_version,
             epoch.valid_after,
@@ -455,11 +575,7 @@ export async function validateLegacyUserSession(
         }
       | undefined
     if (!row) return { status: 'invalid', reason: 'user_not_found' }
-    if (
-      row.lifecycle_state !== 'active' ||
-      !Number.isSafeInteger(claims.authGeneration) ||
-      Number(claims.authGeneration) !== Number(row.lifecycle_version)
-    ) {
+    if (row.lifecycle_state !== 'active' || authGeneration !== Number(row.lifecycle_version)) {
       return { status: 'revoked', reason: 'security_event' }
     }
     if (row.token_revoked) return { status: 'revoked', reason: 'logout' }
@@ -490,23 +606,30 @@ export async function revokeLegacyUserSession(
   token: string,
   claims: AuthClaims,
   reason: string,
-  db: SessionDatabase = pool,
+  db?: SessionDatabase,
   now = new Date()
 ): Promise<boolean> {
-  const result = await db.query(
-    `INSERT INTO external_v1_session_revocations(
-       token_hash, user_id, expires_at, revoked_at, reason
-     )
-     VALUES($1, $2, $3, $4, $5)
-     ON CONFLICT (token_hash) DO NOTHING
-     RETURNING token_hash`,
-    [
-      legacySessionFingerprint(token),
+  const work = async (transaction: SessionDatabase): Promise<boolean> => {
+    const user = await transaction.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
       claims.userId,
-      new Date(claims.exp * 1000),
-      atSecond(now),
-      reason,
-    ]
-  )
-  return (result.rowCount ?? 0) > 0
+    ])
+    if ((user.rowCount ?? 0) === 0) return false
+    const result = await transaction.query(
+      `INSERT INTO external_v1_session_revocations(
+         token_hash, user_id, expires_at, revoked_at, reason
+       )
+       VALUES($1, $2, $3, $4, $5)
+       ON CONFLICT (token_hash) DO NOTHING
+       RETURNING token_hash`,
+      [
+        legacySessionFingerprint(token),
+        claims.userId,
+        new Date(claims.exp * 1000),
+        atSecond(now),
+        reason,
+      ]
+    )
+    return (result.rowCount ?? 0) > 0
+  }
+  return db ? work(db) : withTransaction(work)
 }

@@ -11,6 +11,7 @@ import type {
   ExternalSessionClient,
   ExternalSessionPurpose,
 } from '../services/auth/externalSessionAuthentication.js'
+import { legacyExternalSessionAuthGeneration } from '../services/auth/legacyV1Generation.js'
 
 export type ExternalAuthedRequest = Request & {
   externalAuth?: AuthClaims
@@ -33,13 +34,8 @@ export type ExternalAuthedRequest = Request & {
  * same denial to avoid user enumeration.
  */
 export async function isCurrentExternalSession(claims: AuthClaims): Promise<boolean> {
-  const authGeneration = claims.authGeneration
-  if (
-    typeof authGeneration !== 'number' ||
-    !Number.isSafeInteger(authGeneration) ||
-    authGeneration < 1
-  )
-    return false
+  const authGeneration = legacyExternalSessionAuthGeneration(claims)
+  if (authGeneration === null) return false
   const result = await pool.query(
     `SELECT lifecycle_state, lifecycle_version
        FROM users

@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import jwt from 'jsonwebtoken'
 import { randomUUID } from 'node:crypto'
+import { config } from '../src/config.js'
 import type { EffectiveUserAccessPolicy } from '../src/services/access/userAccessPolicy.js'
 import {
   authenticateExternalUserSession,
@@ -69,6 +71,24 @@ function v1Token(): string {
   })
 }
 
+function preGenerationV1Token(): string {
+  return jwt.sign(
+    {
+      userId,
+      email: 'user@example.com',
+      teamId: '22222222-2222-4222-8222-222222222222',
+      role: 'member',
+    },
+    config.sessionJwtPrivateKey,
+    {
+      algorithm: 'RS256',
+      expiresIn: 3600,
+      issuer: config.jwtIssuer,
+      audience: config.jwtAudience,
+    }
+  )
+}
+
 function v2Token(identity = validIdentity()): string {
   return signUserSessionV2Token({
     sub: identity.userId,
@@ -93,10 +113,36 @@ describe('external user-session authentication boundary', () => {
 
     await expect(
       authenticateExternalUserSession(token, { purpose: 'protected', policy: policy() })
-    ).resolves.toMatchObject({ status: 'authenticated', contract: 'v1' })
+    ).resolves.toMatchObject({
+      status: 'authenticated',
+      contract: 'v1',
+      claims: { authGeneration: 1 },
+      authorityContext: { contract: 'v1', authGeneration: 1 },
+    })
     await expect(
       authenticateExternalUserSession(token, {
         purpose: 'verify',
+        policy: policy({ acceptV1: false, issueV1: false }),
+      })
+    ).resolves.toEqual({ status: 'invalid', reason: 'session_contract_not_accepted' })
+  })
+
+  it('subjects pre-generation v1 tokens to the same compatibility-drain gate', async () => {
+    const identity = validIdentity({ sid: '', sessionVersion: 0 })
+    sessionMocks.validateLegacyUserSession.mockResolvedValue({ status: 'valid', identity })
+    const token = preGenerationV1Token()
+
+    await expect(
+      authenticateExternalUserSession(token, { purpose: 'protected', policy: policy() })
+    ).resolves.toMatchObject({
+      status: 'authenticated',
+      contract: 'v1',
+      claims: { authGeneration: 1 },
+      authorityContext: { contract: 'v1', authGeneration: 1 },
+    })
+    await expect(
+      authenticateExternalUserSession(token, {
+        purpose: 'protected',
         policy: policy({ acceptV1: false, issueV1: false }),
       })
     ).resolves.toEqual({ status: 'invalid', reason: 'session_contract_not_accepted' })

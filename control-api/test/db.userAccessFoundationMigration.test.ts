@@ -10,7 +10,19 @@ vi.mock('../src/config.js', () => ({
 async function migrationSql(): Promise<string> {
   const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
   const migration = CONTROL_API_MIGRATIONS.find(
-    candidate => candidate.version === '0100_user_access_foundation'
+    candidate => candidate.version === '0101_user_access_foundation'
+  )
+  expect(migration).toBeDefined()
+
+  const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+  await migration!.apply({ query })
+  return query.mock.calls.map(call => String(call[0])).join('\n')
+}
+
+async function legacyEpochBackfillSql(): Promise<string> {
+  const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+  const migration = CONTROL_API_MIGRATIONS.find(
+    candidate => candidate.version === '0106_legacy_password_security_epoch_backfill'
   )
   expect(migration).toBeDefined()
 
@@ -107,7 +119,7 @@ describe('user-access foundation migration', () => {
     )
 
     const expected = new Map<string, string>([
-      ['authorization_catalog_revision', 'read'],
+      ['authorization_catalog_writer_components', 'read'],
       ['authorization_resource_revisions', 'upsert'],
       ['authorization_team_revisions', 'upsert'],
       ['authorization_user_revisions', 'upsert'],
@@ -124,5 +136,46 @@ describe('user-access foundation migration', () => {
     for (const [relation, profile] of expected) {
       expect(entries.get(relation), relation).toBe(profile)
     }
+  })
+
+  it('fixes forward historical password security epochs monotonically', async () => {
+    const sql = await legacyEpochBackfillSql()
+
+    expect(sql).toContain('external_user_session_security_epochs')
+    expect(sql).toContain('u.password_set_at IS NOT NULL')
+    expect(sql).toContain('GREATEST(')
+    expect(sql).toContain('historical_password_event')
+    expect(sql).not.toMatch(/DELETE\s+FROM\s+external_user_session_security_epochs/i)
+  })
+
+  it('dispatches the historical epoch fix-forward after already-recorded access migrations', async () => {
+    const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0106_legacy_password_security_epoch_backfill'
+    )
+    expect(migration).toBeDefined()
+    expect(CONTROL_API_MIGRATIONS.at(-1)?.version).toBe(
+      '0106_legacy_password_security_epoch_backfill'
+    )
+
+    const recordedVersions = CONTROL_API_MIGRATIONS.filter(
+      candidate => candidate.version !== migration?.version
+    ).map(candidate => ({ version: candidate.version }))
+    const clientQuery = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql.includes('SELECT version FROM schema_migrations')) {
+        return { rows: recordedVersions, rowCount: recordedVersions.length }
+      }
+      return { rows: [], rowCount: params?.length ?? 0 }
+    })
+    const connect = vi.fn(async () => ({ query: clientQuery, release: vi.fn() }))
+
+    await initDb({ connect })
+
+    const appliedSql = clientQuery.mock.calls.map(([sql]) => String(sql)).join('\n')
+    expect(appliedSql).toContain('historical_password_event')
+    expect(clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO schema_migrations'),
+      ['0106_legacy_password_security_epoch_backfill']
+    )
   })
 })

@@ -13,18 +13,12 @@ import { useChatThreadStateContext } from '@contexts/ChatThreadStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { Button, IconButton, MenuItem } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
+import { GfsFileIcon } from '@components/GfsFileIcon'
 import { MessageArtifactActions } from '@components/MessageArtifactActions'
 import { SecureHtmlPreview } from '@components/SecureHtmlPreview'
-import {
-  IconAttachFile,
-  IconConnectors,
-  IconContexts,
-  IconWorkflows,
-} from '@components/SidebarNav/icons'
+import { IconConnectors, IconContexts, IconWorkflows } from '@components/SidebarNav/icons'
 import { WorkflowRunArtifactActions } from '@components/WorkflowRunArtifactActions'
 import {
   AGENT_ERROR_CODE_LABELS,
@@ -33,6 +27,7 @@ import {
 } from '@constants/agents'
 import { HTML_PREVIEW_INLINE_MAX_BYTES } from '@constants/htmlPreview'
 import type { ChatMessageAttachment } from '../../../../src/types'
+import { chatMessageDomId } from '../../lib/chatLocalSearch'
 import {
   getChatMessageAttachmentTypeLabel,
   parseChatMessageDisplay,
@@ -46,6 +41,7 @@ import {
 import { resolveTaskActionState } from '../../pages/AgentsPage.helpers'
 import type { AgentChatMessage, ProgressStep, TaskProgress } from '../../uiTypes'
 import { ProgressStepper } from '../ProgressStepper'
+import { ChatMarkdownContent } from './ChatMarkdownContent'
 import { ChatStateBadge } from './ChatStateBadge'
 import { InFlightAssistantPlaceholder } from './InFlightAssistantPlaceholder'
 import { MessageTokens } from './MessageTokens'
@@ -134,12 +130,11 @@ function extractWorkflowArtifactScopeFromProgress(
   }
 }
 
-function getChatMessageAttachmentIcon(type: ChatMessageAttachment['type']) {
-  if (type === 'plugin') return <IconWorkflows />
-  if (type === 'connector') return <IconConnectors />
-  if (type === 'agent_file') return <IconContexts />
-  if (type === 'global_file') return <IconAttachFile />
-  return <IconAttachFile />
+function getChatMessageAttachmentIcon(attachment: ChatMessageAttachment) {
+  if (attachment.type === 'plugin') return <IconWorkflows />
+  if (attachment.type === 'connector') return <IconConnectors />
+  if (attachment.type === 'agent_file') return <IconContexts />
+  return <GfsFileIcon name={attachment.filename || attachment.label} />
 }
 
 function canDownloadResponseFileAttachment(attachment: ChatMessageAttachment): boolean {
@@ -191,7 +186,7 @@ function MessageAttachmentList({ attachments }: { attachments: ChatMessageAttach
               className={`composer-reference-icon message-attachment-icon composer-reference-icon--${iconTypeClass}`}
               aria-hidden="true"
             >
-              {getChatMessageAttachmentIcon(attachment.type)}
+              {getChatMessageAttachmentIcon(attachment)}
             </span>
             {isResponseFile ? (
               <span className="message-attachment-type-label">Generated file</span>
@@ -228,6 +223,9 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
     activeChatId,
     activityByMessageId,
     progressByMessageId,
+    localSearchQuery,
+    localSearchCurrentMatch,
+    semanticModelsByMessageId,
   } = useChatThreadStateContext()
   const {
     chatList,
@@ -567,6 +565,12 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                       const parsedUserMessage =
                         message.role === 'user' ? parseChatMessageDisplay(message.content) : null
                       const displayContent = parsedUserMessage?.content ?? message.content
+                      const semanticModel = semanticModelsByMessageId.get(message.id)
+                      if (!semanticModel) return null
+                      const activeSearchOccurrence =
+                        localSearchCurrentMatch?.messageId === message.id
+                          ? localSearchCurrentMatch.occurrence
+                          : null
                       const displayAttachments =
                         message.role === 'user'
                           ? message.attachments && message.attachments.length
@@ -610,6 +614,8 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                       return (
                         <article
                           key={message.messageKey}
+                          id={chatMessageDomId(message.id)}
+                          data-chat-message-id={message.id}
                           data-testid={message.role === 'assistant' ? 'agent-response' : undefined}
                           className={`chat-bubble ${message.role}${message.isError ? ' chat-bubble--error' : ''}${
                             htmlPreview || hasHtmlArtifactMention ? ' chat-bubble--wide' : ''
@@ -626,9 +632,17 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                     : ''}
                                 </div>
                                 <div className="error-bubble-message">
-                                  {message.content.length > 180
-                                    ? `${message.content.slice(0, 177)}...`
-                                    : message.content}
+                                  {localSearchQuery ? (
+                                    <ChatMarkdownContent
+                                      model={semanticModel}
+                                      query={localSearchQuery}
+                                      activeOccurrence={activeSearchOccurrence}
+                                    />
+                                  ) : message.content.length <= 180 ? (
+                                    message.content
+                                  ) : (
+                                    `${message.content.slice(0, 177)}...`
+                                  )}
                                 </div>
                                 <details className="error-bubble-details">
                                   <summary>Details</summary>
@@ -647,12 +661,20 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                 />
                               )}
                               {isJson ? (
-                                <pre className="message-block json-content">{displayContent}</pre>
+                                <pre className="message-block json-content">
+                                  <ChatMarkdownContent
+                                    model={semanticModel}
+                                    query={localSearchQuery}
+                                    activeOccurrence={activeSearchOccurrence}
+                                  />
+                                </pre>
                               ) : message.role === 'assistant' ? (
                                 <div className="message-block markdown-content">
-                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                    {displayContent}
-                                  </ReactMarkdown>
+                                  <ChatMarkdownContent
+                                    model={semanticModel}
+                                    query={localSearchQuery}
+                                    activeOccurrence={activeSearchOccurrence}
+                                  />
                                   {selectedAgent && !hasResponseFileAttachment && (
                                     <MessageArtifactActions
                                       hostRef={selectedAgent}
@@ -666,7 +688,13 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                   ) : null}
                                 </div>
                               ) : displayContent ? (
-                                <p className="message-block">{displayContent}</p>
+                                <p className="message-block">
+                                  <ChatMarkdownContent
+                                    model={semanticModel}
+                                    query={localSearchQuery}
+                                    activeOccurrence={activeSearchOccurrence}
+                                  />
+                                </p>
                               ) : null}
                               <MessageAttachmentList attachments={displayAttachments} />
                             </>

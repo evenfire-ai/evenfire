@@ -11,6 +11,8 @@ import { register } from 'prom-client'
 import { readOpenedArtifactBuffer, redactArtifactForDelivery } from './artifacts/artifactBytes'
 import type { ArtifactSecretEntry } from './artifacts/artifactRedaction'
 import type { RuntimeLifecycleGate } from './lifecycle/statelessHeartbeat'
+import './mcp/statusHeartbeatMetrics'
+import './observability/processMetrics'
 import { requireScope } from './server/authMiddleware'
 import {
   getRuntimeCallerContext,

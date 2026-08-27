@@ -215,7 +215,9 @@ function RegistryEntryDetailContent() {
       }
       return
     }
-    if (entry.entry_type === 'mcp-server') {
+    // Connectors and guardrail hooks both configure their install on the
+    // dedicated install page, which dispatches on entry_type.
+    if (entry.entry_type === 'mcp-server' || entry.entry_type === 'llm-hook') {
       const params = new URLSearchParams({ entry: entry.name, version: entry.version })
       router.push(CONTROL_ROUTES.marketplace.install(Object.fromEntries(params)))
       return
@@ -319,6 +321,12 @@ function RegistryEntryDetailContent() {
           <div className="cu-card">
             <div className="cu-card__body cu-marketplace-detail">
               <div className="cu-expandable-detail cu-marketplace-detail__overview">
+                <div className="cu-marketplace-detail__description-block">
+                  <span className="cu-expandable-field__label">Description</span>
+                  <p className="cu-expandable-detail__description">
+                    {entry.description || 'No description provided.'}
+                  </p>
+                </div>
                 <div className="cu-expandable-detail__fields">
                   <div className="cu-expandable-field">
                     <span className="cu-expandable-field__label">Version</span>
@@ -335,10 +343,6 @@ function RegistryEntryDetailContent() {
                     ) : (
                       <span className="cu-muted">—</span>
                     )}
-                  </div>
-                  <div className="cu-expandable-field">
-                    <span className="cu-expandable-field__label">Downloads</span>
-                    <span>{entry.downloads}</span>
                   </div>
                   <div className="cu-expandable-field">
                     <span>{entry.category || 'Uncategorized'}</span>
@@ -385,9 +389,6 @@ function RegistryEntryDetailContent() {
                     </div>
                   )}
                 </div>
-                <p className="cu-expandable-detail__description">
-                  {entry.description || 'No description provided.'}
-                </p>
               </div>
 
               {images.length > 0 ? (
@@ -443,6 +444,7 @@ function RegistryEntryDetailContent() {
 function labelForType(t: string): string {
   if (t === 'mcp-server') return 'Connector'
   if (t === 'recipe') return 'Recipe'
+  if (t === 'llm-hook') return 'Guardrail hook'
   return t
 }
 

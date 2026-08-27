@@ -597,11 +597,17 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
       .send({ contentBase64: 'AAAA' })
 
     expect(res.status).toBe(413)
-    expect(res.body.error.code).toBe('internal_error')
+    expect(res.body.error).toEqual({
+      code: 'payload_too_large',
+      message: 'The request payload is too large.',
+      correlationId: expect.any(String),
+      retryable: false,
+    })
     expect(res.headers['retry-after']).toBeUndefined()
-    expect(res.headers['upload-length']).toBeUndefined()
+    expect(res.headers['upload-length']).toBe('209715200')
     expect(res.headers['x-ratelimit-limit']).toBeUndefined()
     expect(res.headers['x-internal-secret']).toBeUndefined()
+    expect(JSON.stringify(res.body)).not.toContain('200 MiB')
   })
 
   it('propagates GFS transport statuses/body/headers without changing retry semantics', async () => {
@@ -610,6 +616,7 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     // a generic 500 before the client can apply that policy.
     for (const [status, error] of [
       [408, 'request_timeout'],
+      [411, 'length_required'],
       [425, 'too_early'],
       [500, 'gfsc_internal'],
       [502, 'gfsc_unreachable'],
@@ -633,18 +640,32 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
         .send({ contentBase64: 'AAAA' })
       expect(res.status).toBe(status)
       const expectedCode =
-        status === 502
-          ? 'upstream_unavailable'
-          : status === 503
-            ? 'authority_unavailable'
-            : status === 504
-              ? 'upstream_timeout'
-              : 'internal_error'
+        status === 408
+          ? 'request_timeout'
+          : status === 411
+            ? 'length_required'
+            : status === 425
+              ? 'too_early'
+              : status === 502
+                ? 'upstream_unavailable'
+                : status === 503
+                  ? 'authority_unavailable'
+                  : status === 504
+                    ? 'upstream_timeout'
+                    : status === 507
+                      ? 'insufficient_storage'
+                      : 'internal_error'
       expect(res.body.error.code).toBe(expectedCode)
       expect(res.headers['retry-after']).toBe(
-        status === 502 || status === 503 || status === 504 ? '7' : undefined
+        status === 408 || status === 425 || status === 502 || status === 503 || status === 504
+          ? '7'
+          : undefined
       )
       expect(res.headers['x-ratelimit-limit']).toBeUndefined()
+      expect(res.body.error.retryable).toBe(
+        status === 408 || status === 425 || status === 502 || status === 503 || status === 504
+      )
+      expect(JSON.stringify(res.body)).not.toContain('gfsc failure')
     }
   })
 

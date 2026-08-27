@@ -17,6 +17,7 @@ import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAcce
 import { authenticateExternalUserSession } from '../../services/auth/externalSessionAuthentication.js'
 import { renewExternalUserSession } from '../../services/auth/externalSessionAuthentication.js'
 import {
+  exchangeLegacyExternalUserSession,
   issueExternalUserSession,
   selectExternalSessionRepresentation,
 } from '../../services/auth/externalSessionIssuance.js'
@@ -81,6 +82,13 @@ function requireLegacySessionTokenPayload(req: Request, res: Response, next: Nex
   next()
 }
 
+function sendExternalLoginError(res: Response, error: string | undefined): Response {
+  if (error === 'password_not_set') {
+    return res.status(409).json({ error: 'password_not_set' })
+  }
+  return res.status(403).json({ error: 'membership_not_found' })
+}
+
 async function requireLegacyRpcSessionRateLimitContext(
   req: ExternalAuthedRequest,
   res: Response,
@@ -130,7 +138,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           name: google.name,
           picture: google.picture,
         })
-        if ('error' in login) return res.status(403).json({ error: login.error })
+        if ('error' in login) return sendExternalLoginError(res, login.error)
         const role = login.membership.role
         const selection = selectExternalSessionRepresentation(externalSessionClient(req), policy)
         if (selection.status !== 'selected') {
@@ -196,10 +204,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           return res.status(401).json({ error: 'Unauthorized' })
         }
         if ('error' in login) {
-          if (login.error === 'password_not_set') {
-            return res.status(409).json({ error: 'password_not_set' })
-          }
-          return res.status(403).json({ error: 'membership_not_found' })
+          return sendExternalLoginError(res, login.error)
         }
 
         const role = login.membership.role
@@ -310,6 +315,31 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
           return
         }
+        if (authentication.contract === 'v1') {
+          const exchange = await exchangeLegacyExternalUserSession(
+            {
+              token: currentToken,
+              claims: authentication.claims,
+              userId,
+              email,
+              teamId,
+            },
+            { policy: authentication.policy }
+          )
+          if (exchange.status === 'invalid_session') {
+            sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+            return
+          }
+          if (exchange.status === 'membership_not_found') {
+            return res.status(403).json({ error: 'membership_not_found' })
+          }
+          return res.status(200).json({
+            token: exchange.token,
+            sessionContract: 'v1',
+            deprecated: true,
+          })
+        }
+
         const membership = await pool.query(
           `SELECT tm.role, u.lifecycle_version
            FROM users u
@@ -330,30 +360,9 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         if (!liveRole) {
           return res.status(403).json({ error: 'membership_not_found' })
         }
-        if (authentication.contract === 'v2') {
-          return res.status(200).json({
-            token: currentToken,
-            sessionContract: 'v2',
-            deprecated: true,
-          })
-        }
-        const issued = await issueExternalUserSession(
-          {
-            contract: 'v1',
-            userId,
-            email,
-            teamId,
-            role: liveRole,
-            authGeneration: Number(
-              (membership.rows[0] as { lifecycle_version?: number | string }).lifecycle_version
-            ),
-            authenticationMethods: [],
-          },
-          { policy: authentication.policy }
-        )
         return res.status(200).json({
-          token: issued.token,
-          sessionContract: issued.contract,
+          token: currentToken,
+          sessionContract: 'v2',
           deprecated: true,
         })
       } catch {

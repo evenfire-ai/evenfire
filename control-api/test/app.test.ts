@@ -194,23 +194,46 @@ describe('app router wiring', () => {
       .send(payload)
       .expect(401)
 
-    vi.spyOn(pool, 'query')
-      .mockResolvedValueOnce({
-        rows: [
-          {
-            id: payload.userId,
-            lifecycle_state: 'active',
-            lifecycle_version: 1,
-            valid_after: null,
-            token_revoked: false,
-          },
-        ],
-        rowCount: 1,
-      })
-      .mockResolvedValueOnce({
-        rows: [{ role: payload.role, lifecycle_version: 1 }],
-        rowCount: 1,
-      })
+    vi.spyOn(pool, 'query').mockResolvedValueOnce({
+      rows: [
+        {
+          id: payload.userId,
+          lifecycle_state: 'active',
+          lifecycle_version: 1,
+          valid_after: null,
+          token_revoked: false,
+        },
+      ],
+      rowCount: 1,
+    })
+    const transactionQuery = vi.fn(async (sql: string) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [], rowCount: 0 }
+      if (sql.includes('SELECT id FROM users')) {
+        return { rows: [{ id: payload.userId }], rowCount: 1 }
+      }
+      if (sql.includes('external_user_session_security_epochs')) {
+        return {
+          rows: [
+            {
+              id: payload.userId,
+              lifecycle_state: 'active',
+              lifecycle_version: 1,
+              valid_after: null,
+              token_revoked: false,
+            },
+          ],
+          rowCount: 1,
+        }
+      }
+      if (sql.includes('JOIN team_members')) {
+        return { rows: [{ role: payload.role, lifecycle_version: 1 }], rowCount: 1 }
+      }
+      throw new Error(`unexpected session exchange query: ${sql}`)
+    })
+    vi.spyOn(pool, 'connect').mockResolvedValue({
+      query: transactionQuery,
+      release: vi.fn(),
+    } as never)
 
     const res = await request(app)
       .post('/api/v1/external/auth/session-token')
@@ -220,6 +243,13 @@ describe('app router wiring', () => {
       .send(payload)
       .expect(200)
     expect(res.body.token).toBeTruthy()
+    expect(transactionQuery.mock.calls.map(([sql]) => String(sql))).toEqual([
+      'BEGIN',
+      expect.stringContaining('SELECT id FROM users'),
+      expect.stringContaining('external_user_session_security_epochs'),
+      expect.stringContaining('JOIN team_members'),
+      'COMMIT',
+    ])
   })
 
   it('enforces UI auth for control-ui routes', async () => {

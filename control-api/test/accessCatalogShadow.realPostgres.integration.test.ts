@@ -56,6 +56,7 @@ describeRealPostgres('aggregate shadow physical statement budget on real Postgre
               userId: '10000000-0000-4000-8000-000000000001',
               tokenHash: 'shadow-test',
               issuedAt: 1,
+              authGeneration: 1,
             },
             family: 'team',
             legacyLogicalIds: [],

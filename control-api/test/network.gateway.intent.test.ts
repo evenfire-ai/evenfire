@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import {
+  boundedEnvBytesFromSource,
+  staticExportedBytesFromSource,
+} from './helpers/staticSourceAuthority.js'
+import { assertUploadV2TransportBounds } from './helpers/uploadV2TransportBounds.js'
 
 /** Paths are relative to this file: control-api/test/ → repo root is ../.. */
 const BASE = '../../deploy/base'
@@ -81,6 +86,18 @@ function locationBlock(config: string, marker: string): string {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function staticBytes(relPath: string, symbol: string): number {
+  return staticExportedBytesFromSource(read(relPath), symbol, relPath)
+}
+
+function boundedEnvBytes(
+  relPath: string,
+  property: string,
+  envName: string
+): { fallback: number; ceiling: number } {
+  return boundedEnvBytesFromSource(read(relPath), 'config', property, envName, relPath)
 }
 
 function expectCanonicalPublicEgressExceptions(): void {
@@ -368,46 +385,85 @@ describe('network/gateway intent (manifest-level)', () => {
   })
 
   it('keeps the GFS v2 part cap chain below the gateway request cap', () => {
-    // Upload v2 is indexed binary streaming: the 200 MiB product boundary is
-    // aggregate session metadata, while every request remains <=16 MiB. The
-    // old base64 ×4/3 invariant belongs only to the legacy JSON path and must not
-    // constrain the v2 product limit.
-    const GFSC_WRITE_CAP = 25165824 // 24 MiB — the funnel + gfsc authoritative cap
-
-    // 1. gfsc's write cap is actually plumbed to the pod. Without this env gfsc
-    //    falls back to its 16 MiB in-code default and a 16 MB file (22.4 MB body)
-    //    hard-413s while the client-side cap says it should have worked.
+    // Upload v2 is indexed binary streaming: product policy is writer-advertised
+    // session metadata, while protocol and per-request safety remain compiled.
+    // Do not compare the runtime product policy with a single-request body cap.
+    // The legacy JSON/base64 path still requires the HCC-owned gfsc body cap to
+    // agree with the profile funnel. It is not the Upload v2 product authority.
     const hccDeployment = read(`${BASE}/control-plane/host-context-controller.yaml`)
     const gfscCapMatch = hccDeployment.match(
-      /GFS_MAX_WRITE_BODY_BYTES[\s\S]{0,80}?value:\s*"?(\d+)"?/
+      /GFS_MAX_WRITE_BODY_BYTES[\s\S]{0,80}?value:\s*(["']?)(\d+)\1/
     )
     expect(
       gfscCapMatch,
       'GFS_MAX_WRITE_BODY_BYTES env must be set on the HCC deployment'
     ).not.toBeNull()
-    expect(Number(gfscCapMatch![1])).toBe(GFSC_WRITE_CAP)
+    const legacyGfscWriteCap = Number(gfscCapMatch![2])
+    const funnelConf = docContaining(
+      yamlDocs(read(`${BASE}/profiles/configmaps.yaml`)),
+      'name: profile-control-funnel-nginx'
+    )
+    const funnelCapMatch = funnelConf.match(/client_max_body_size\s+(\d+);/)
+    expect(funnelCapMatch, 'profile-control-funnel body cap not found').not.toBeNull()
+    const profileFunnelCap = Number(funnelCapMatch![1])
+    expect(profileFunnelCap).toBe(legacyGfscWriteCap)
 
-    // 2. Both clients advertise the same hard binary part cap and product cap.
-    const parseClientCaps = (relPath: string): { product: number; part: number } => {
-      const src = read(relPath)
-      const productMatch = src.match(/GFS_FILE_UPLOAD_MAX_BYTES\s*=\s*([0-9*\s]+)/)
-      const partMatch = src.match(/GFS_FILE_UPLOAD_MAX_PART_BYTES\s*=\s*([0-9*\s]+)/)
-      expect(productMatch, `GFS_FILE_UPLOAD_MAX_BYTES not found in ${relPath}`).not.toBeNull()
-      expect(partMatch, `GFS_FILE_UPLOAD_MAX_PART_BYTES not found in ${relPath}`).not.toBeNull()
-      // Only digits/`*`/spaces are matched, so evaluating the arithmetic is safe.
-      const evaluate = (value: string): number =>
-        Number(value.split('*').reduce((acc, n) => acc * Number(n.trim()), 1))
-      return { product: evaluate(productMatch![1]), part: evaluate(partMatch![1]) }
-    }
-    const webCaps = parseClientCaps('../../control-ui/app/constants/gfsFileUpload.ts')
-    const desktopCaps = parseClientCaps('../../desktop-app/ui/src/constants/gfsFileUpload.ts')
-    expect(webCaps).toEqual(desktopCaps)
-    expect(webCaps.product).toBe(209715200)
-    expect(webCaps.part).toBe(16777216)
-
-    // 3. A v2 binary request fits below the internal 24 MiB cap with headroom;
-    // the aggregate 200 MiB value never becomes a single request body.
-    expect(webCaps.part).toBeLessThan(GFSC_WRITE_CAP)
+    // The writer defines the absolute protocol and part bounds. Both packaged
+    // Desktop layers and Control UI mirror those wire limits, not product policy.
+    const writerProtocol = staticBytes(
+      '../../gfs-controller/src/upload/protocol.ts',
+      'GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES'
+    )
+    const writerPart = staticBytes(
+      '../../gfs-controller/src/upload/protocol.ts',
+      'GFS_UPLOAD_V2_MAX_PART_BYTES'
+    )
+    const protocolMirrors = [
+      staticBytes(
+        '../../control-ui/app/constants/gfsFileUpload.ts',
+        'GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES'
+      ),
+      staticBytes(
+        '../../desktop-app/ui/src/constants/gfsFileUpload.ts',
+        'GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES'
+      ),
+      staticBytes('../../desktop-app/src/gfs/upload.ts', 'GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES'),
+    ]
+    const partMirrors = [
+      staticBytes(
+        '../../control-ui/app/constants/gfsFileUpload.ts',
+        'GFS_FILE_UPLOAD_MAX_PART_BYTES'
+      ),
+      staticBytes(
+        '../../desktop-app/ui/src/constants/gfsFileUpload.ts',
+        'GFS_FILE_UPLOAD_MAX_PART_BYTES'
+      ),
+      staticBytes('../../desktop-app/src/gfs/upload.ts', 'GFS_UPLOAD_V2_MAX_PART_BYTES'),
+      staticBytes(
+        '../../control-ui/app/control-api/[...path]/route.ts',
+        'GFS_UPLOAD_MAX_PART_BYTES'
+      ),
+    ]
+    // Every relay defaults to the writer part maximum and refuses configuration
+    // above it. A part must also fit through the profile gateway with headroom.
+    const controlApiRelay = boundedEnvBytes(
+      '../src/config.ts',
+      'gfsUploadMaxPartBytes',
+      'CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES'
+    )
+    const externalRestRelay = boundedEnvBytes(
+      '../../external-rest-api/src/config.ts',
+      'gfsUploadMaxPartBytes',
+      'EXTERNAL_REST_API_GFS_UPLOAD_MAX_PART_BYTES'
+    )
+    assertUploadV2TransportBounds({
+      writerProtocol,
+      writerPart,
+      protocolMirrors,
+      partMirrors,
+      relayBounds: [controlApiRelay, externalRestRelay],
+      gatewayBytes: profileFunnelCap,
+    })
   })
 
   it('keeps control-api memory at >=768Mi in base AND the minikube overlay (RC3 OOM guard)', () => {
