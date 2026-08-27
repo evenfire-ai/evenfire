@@ -566,8 +566,12 @@ function ProviderCredentialBlock({
   present,
   disabled,
 }: ProviderCredentialBlockProps) {
+  const [replacingStoredKeys, setReplacingStoredKeys] = useState<ReadonlySet<string>>(
+    () => new Set()
+  )
   const chip = describeLlmCompleteness(group, present)
   const providerLabel = getProviderLabel(group.provider)
+  const storedKeySet = useMemo(() => new Set(wiring.existingKeys ?? []), [wiring.existingKeys])
   const blockValues = useMemo(() => {
     const values: Record<string, string> = {}
     for (const slot of slots) values[slot.dataKey] = wiring.draft[slot.dataKey] ?? ''
@@ -592,10 +596,14 @@ function ProviderCredentialBlock({
       {slots.map(slot => {
         const inputId = `${idPrefix}-${slot.dataKey}`
         const slotPresent = present(slot.dataKey)
+        const stored = storedKeySet.has(slot.dataKey)
+        const draftValue = wiring.draft[slot.dataKey] ?? ''
+        const replacingStored = replacingStoredKeys.has(slot.dataKey)
+        const showCredentialInput = !stored || replacingStored || draftValue.trim().length > 0
         return (
           <Field
             key={slot.dataKey}
-            htmlFor={inputId}
+            htmlFor={showCredentialInput ? inputId : undefined}
             label={
               <>
                 {slot.label}
@@ -612,27 +620,76 @@ function ProviderCredentialBlock({
               </>
             }
           >
-            {slot.multiline ? (
-              <TextAreaInput
-                id={inputId}
-                monospace
-                rows={5}
-                value={wiring.draft[slot.dataKey] ?? ''}
-                onChange={event => wiring.onChange(slot.dataKey, event.target.value)}
-                placeholder={slotPresent ? 'Stored — leave blank to keep' : slot.placeholder}
-                autoComplete="off"
-                disabled={disabled}
-              />
+            {showCredentialInput ? (
+              <div className="cu-llm-credential-replacement">
+                {slot.multiline ? (
+                  <TextAreaInput
+                    id={inputId}
+                    monospace
+                    rows={5}
+                    value={draftValue}
+                    onChange={event => wiring.onChange(slot.dataKey, event.target.value)}
+                    placeholder={
+                      stored ? `Enter a new ${slot.label.toLowerCase()}` : slot.placeholder
+                    }
+                    autoComplete="off"
+                    disabled={disabled}
+                  />
+                ) : (
+                  <TextInput
+                    id={inputId}
+                    type="password"
+                    autoComplete="off"
+                    value={draftValue}
+                    onChange={event => wiring.onChange(slot.dataKey, event.target.value)}
+                    placeholder={
+                      stored ? `Enter a new ${slot.label.toLowerCase()}` : slot.placeholder
+                    }
+                    disabled={disabled}
+                  />
+                )}
+                {stored ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      wiring.onChange(slot.dataKey, '')
+                      setReplacingStoredKeys(previous => {
+                        const next = new Set(previous)
+                        next.delete(slot.dataKey)
+                        return next
+                      })
+                    }}
+                    disabled={disabled}
+                  >
+                    Keep stored
+                  </Button>
+                ) : null}
+              </div>
             ) : (
-              <TextInput
-                id={inputId}
-                type="password"
-                autoComplete="off"
-                value={wiring.draft[slot.dataKey] ?? ''}
-                onChange={event => wiring.onChange(slot.dataKey, event.target.value)}
-                placeholder={slotPresent ? 'Stored — leave blank to keep' : slot.placeholder}
-                disabled={disabled}
-              />
+              <div className="cu-llm-credential-stored" role="status">
+                <span className="cu-llm-credential-stored__state">Stored</span>
+                <span className="cu-llm-credential-stored__hint">
+                  This credential is already configured securely.
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() =>
+                    setReplacingStoredKeys(previous => {
+                      const next = new Set(previous)
+                      next.add(slot.dataKey)
+                      return next
+                    })
+                  }
+                  disabled={disabled}
+                  aria-label={`Replace ${slot.label}`}
+                >
+                  Replace
+                </Button>
+              </div>
             )}
           </Field>
         )

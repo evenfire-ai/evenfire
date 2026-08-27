@@ -123,8 +123,9 @@ describe('RecipeSecretsPanel', () => {
     expect(screen.getByText('Owner: operator-secret-recipe')).toBeInTheDocument()
 
     fireEvent.click(
-      screen.getByRole('button', { name: 'Update recipe secret operator-api-credentials' })
+      screen.getByRole('button', { name: 'Actions for recipe secret operator-api-credentials' })
     )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
 
     expect(pushMock).toHaveBeenCalledWith(
       '/secrets/recipe/operator-api-credentials/edit?namespace=sandbox-recipes'

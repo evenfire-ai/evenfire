@@ -255,6 +255,10 @@ describe('LlmCredentialFields (additive provider editor)', () => {
     expect(within(group).queryByText(/already exists as a provider slot/i)).toBeNull()
     // Present in the Secret → never removable from here.
     expect(screen.queryByRole('button', { name: 'Remove Anthropic provider' })).toBeNull()
+    // Stored values stay hidden until replacement is requested.
+    fireEvent.click(
+      within(group).getByRole('button', { name: 'Replace extra credential slot value' })
+    )
     // Typing a value rewrites the stored key through the normal commit path.
     fireEvent.change(within(group).getByLabelText(/Extra credential slot value/i), {
       target: { value: 'sk-ant-new' },
@@ -348,6 +352,9 @@ describe('LlmCredentialFields — retiring stored extra slots', () => {
     )
     const group = sectionOf('Anthropic')
     const name = within(group).getByLabelText(/Extra credential slot key name/i)
+    fireEvent.click(
+      within(group).getByRole('button', { name: 'Replace extra credential slot value' })
+    )
     const value = within(group).getByLabelText(/Extra credential slot value/i)
 
     fireEvent.change(name, { target: { value: 'claude-api-key-fb2' } })
@@ -482,6 +489,7 @@ describe('LlmCredentialFields — retiring stored extra slots', () => {
     // One report on mount, establishing the (empty) live region.
     expect(onRemovedKeysChange.mock.calls).toHaveLength(1)
 
+    fireEvent.click(screen.getByRole('button', { name: 'Replace OpenAI API key' }))
     const input = screen.getByLabelText(/^OpenAI API key/i)
     for (const value of ['s', 'sk', 'sk-', 'sk-l']) {
       fireEvent.change(input, { target: { value } })

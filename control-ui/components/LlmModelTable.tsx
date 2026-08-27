@@ -9,13 +9,14 @@ import { FilterSelect } from './FilterSelect'
 import type { LlmModelTableProps } from './LlmModelTable.types'
 import { LlmProviderIcon } from './LlmProviderIcon'
 import { MissingPriceWarning } from './MissingPriceWarning'
+import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconModels } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconChevronRight, IconPencil, IconRefresh, IconX } from './icons'
+import { IconChevronRight, IconRefresh } from './icons'
 import { SelectInput } from './ui'
 
 type ModelSortKey = 'model' | 'vendor' | 'displayName' | 'contextWindow'
@@ -261,7 +262,6 @@ export function LlmModelTable({
     },
     { key: 'enabled', label: 'Enabled', width: '6rem' },
     { key: 'source', label: 'Source', width: '7rem' },
-    { key: 'catalogStatus', label: 'Catalog status', width: '8rem' },
     { key: 'actions', width: '5rem', align: 'right', ariaLabel: 'Actions' },
   ]
 
@@ -449,38 +449,25 @@ export function LlmModelTable({
                               {model.source === 'discovery' ? 'Discovered' : 'Manual'}
                             </span>
                           </td>
-                          <td>
-                            {model.stale === true ? (
-                              <span
-                                className="cu-px-badge cu-px-badge--warn"
-                                title="Missing from the latest live provider catalog. It remains available when enabled until an operator disables or removes it."
-                              >
-                                Stale
-                              </span>
-                            ) : null}
-                          </td>
                           <td className="cu-px-actions">
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--toolbar"
-                              onClick={() => onEdit(model.id)}
-                              aria-label={`Edit model ${model.provider}/${model.model}`}
-                            >
-                              <IconPencil width={16} height={16} />
-                            </button>
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                              onClick={() => void onDelete(model)}
-                              disabled={deletingId === model.id}
-                              aria-label={
-                                deletingId === model.id
-                                  ? 'Deleting model…'
-                                  : `Delete model ${model.provider}/${model.model}`
-                              }
-                            >
-                              <IconX width={16} height={16} />
-                            </button>
+                            <RowActionsMenu
+                              ariaLabel={`Actions for model ${model.provider}/${model.model}`}
+                              horizontalTrigger
+                              actions={[
+                                {
+                                  key: 'edit',
+                                  label: 'Edit',
+                                  onClick: () => onEdit(model.id),
+                                },
+                                {
+                                  key: 'delete',
+                                  label: deletingId === model.id ? 'Deleting…' : 'Delete',
+                                  danger: true,
+                                  disabled: deletingId === model.id,
+                                  onClick: () => void onDelete(model),
+                                },
+                              ]}
+                            />
                           </td>
                         </tr>
                       ))

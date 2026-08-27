@@ -10,6 +10,7 @@ import {
   networkPolicySafetyPassPoliciesTotal,
 } from './metrics'
 import {
+  DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE,
   NetworkPolicyReconciler,
   PUBLIC_EGRESS_EXCEPT_CIDRS,
   sameContextDesiredRevision,
@@ -5568,7 +5569,7 @@ describe('NetworkPolicyReconciler', () => {
           serverInventoryAuthoritative: () => true,
           onAuthoritativeRevocationComplete,
         })
-      ).rejects.toThrow(/Desired NetworkPolicy inventory changed/)
+      ).rejects.toThrow(DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE)
 
       expect(onAuthoritativeRevocationComplete).not.toHaveBeenCalled()
     })

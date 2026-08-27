@@ -9,6 +9,8 @@ import {
   adminWorkflowTriggerRateLimit,
   codexOAuthCallbackRateLimits,
   llmProviderAttemptAuthorizeRateLimits,
+  mcpHostWorkflowTriggerRateLimit,
+  mcpHostWorkflowTriggerRateLimitCredential,
   shouldSkipWorkflowGrantEdgeRateLimit,
   verifiedAdminRateLimitSubject,
   workflowAdminReadRateLimits,
@@ -16,10 +18,13 @@ import {
   workflowGrantReadRateLimit,
   workflowGrantReadRateLimits,
   workflowGrantWriteRateLimits,
+  workflowTriggerRateLimit,
+  workflowTriggerRateLimitCredential,
 } from '../src/routes/workflows/shared/rateLimit.js'
 
 const mockCheckAndIncrement = vi.hoisted(() => vi.fn())
 const mockVerifyAdminToken = vi.hoisted(() => vi.fn())
+const mockVerifyExternalSessionToken = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: (...args: unknown[]) => mockCheckAndIncrement(...args),
@@ -29,6 +34,9 @@ vi.mock('../src/observability/metrics.js', () => ({
 }))
 vi.mock('../src/utils/auth/adminAuthToken.js', () => ({
   verifyAdminToken: (token: string) => mockVerifyAdminToken(token),
+}))
+vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
+  verifyExternalSessionToken: (token: string) => mockVerifyExternalSessionToken(token),
 }))
 
 function signedClaims(sub: string) {
@@ -57,6 +65,15 @@ describe('routes/workflows/shared/rateLimit', () => {
     mockVerifyAdminToken.mockImplementation((token: string) =>
       token.startsWith('signed-') ? signedClaims(token.slice('signed-'.length)) : null
     )
+    mockVerifyExternalSessionToken.mockImplementation((token: string) => {
+      if (token === 'user-session-a' || token === 'user-session-a-rotated') {
+        return { userId: 'user-a' }
+      }
+      if (token === 'user-session-b') {
+        return { userId: 'user-b' }
+      }
+      return null
+    })
   })
 
   it('adminWorkflowRateLimitCredential accepts HttpOnly admin session cookies', () => {
@@ -436,5 +453,272 @@ describe('routes/workflows/shared/rateLimit', () => {
 
     expect(mockCheckAndIncrement).toHaveBeenCalledOnce()
     expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_grants_read:[0-9a-f]{32}$/)
+  })
+
+  it('workflowTriggerRateLimitCredential prefers verified userId over service bearer', () => {
+    const req = {
+      header(name: string) {
+        if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
+        if (name.toLowerCase() === 'x-user-session-token') return 'user-session-a'
+        return undefined
+      },
+    } as express.Request
+
+    expect(workflowTriggerRateLimitCredential(req)).toBe('user:user-a')
+  })
+
+  it('workflowTriggerRateLimitCredential reuses one userId across rotated session tokens', () => {
+    const reqFor = (token: string) =>
+      ({
+        header(name: string) {
+          if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
+          if (name.toLowerCase() === 'x-user-session-token') return token
+          return undefined
+        },
+      }) as express.Request
+
+    expect(workflowTriggerRateLimitCredential(reqFor('user-session-a'))).toBe('user:user-a')
+    expect(workflowTriggerRateLimitCredential(reqFor('user-session-a-rotated'))).toBe('user:user-a')
+  })
+
+  it('workflowTriggerRateLimitCredential keys unverified user tokens to IP, not the bearer', () => {
+    const req = {
+      ip: '203.0.113.10',
+      header(name: string) {
+        if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
+        if (name.toLowerCase() === 'x-user-session-token') return 'forged-session'
+        return undefined
+      },
+    } as express.Request
+
+    expect(workflowTriggerRateLimitCredential(req)).toMatch(/^ip:/)
+    expect(workflowTriggerRateLimitCredential(req)).not.toBe('service-token')
+  })
+
+  it('workflowTriggerRateLimitCredential keys a real signed session and rejects a forged one', async () => {
+    const actual = await vi.importActual<
+      typeof import('../src/utils/auth/externalSessionAuthToken.js')
+    >('../src/utils/auth/externalSessionAuthToken.js')
+    mockVerifyExternalSessionToken.mockImplementation(token =>
+      actual.verifyExternalSessionToken(token)
+    )
+
+    const signed = actual.signExternalSessionToken({
+      userId: 'user-signed-1',
+      email: 'signed@example.com',
+      teamId: 'team-1',
+      role: 'member',
+      authGeneration: 1,
+    })
+    const reqFor = (token: string) =>
+      ({
+        ip: '203.0.113.10',
+        header(name: string) {
+          if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
+          if (name.toLowerCase() === 'x-user-session-token') return token
+          return undefined
+        },
+      }) as express.Request
+
+    expect(workflowTriggerRateLimitCredential(reqFor(signed))).toBe('user:user-signed-1')
+    expect(workflowTriggerRateLimitCredential(reqFor('forged-not-a-jwt'))).toMatch(/^ip:/)
+    expect(workflowTriggerRateLimitCredential(reqFor('forged-not-a-jwt'))).not.toBe('service-token')
+  })
+
+  it('workflowTriggerRateLimitCredential ignores whitespace user tokens and falls back to bearer', () => {
+    const req = {
+      header(name: string) {
+        if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
+        if (name.toLowerCase() === 'x-user-session-token') return '   '
+        return undefined
+      },
+    } as express.Request
+
+    expect(workflowTriggerRateLimitCredential(req)).toBe('service-token')
+  })
+
+  it('workflowTriggerRateLimitCredential uses bearer when no user token is present', () => {
+    const req = {
+      header(name: string) {
+        if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
+        return undefined
+      },
+    } as express.Request
+
+    expect(workflowTriggerRateLimitCredential(req)).toBe('service-token')
+  })
+
+  it('mcpHostWorkflowTriggerRateLimitCredential ignores an injected user session header', () => {
+    const req = {
+      header(name: string) {
+        if (name.toLowerCase() === 'authorization') return 'Bearer mcp-host-control-token'
+        if (name.toLowerCase() === 'x-user-session-token') return 'user-session-a'
+        return undefined
+      },
+    } as express.Request
+
+    expect(mcpHostWorkflowTriggerRateLimitCredential(req)).toBe('mcp-host-control-token')
+  })
+
+  it('workflowTriggerRateLimit keys independent buckets for two users behind the same service bearer', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer service-token')
+      .set('x-user-session-token', 'user-session-a')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer service-token')
+      .set('x-user-session-token', 'user-session-b')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer service-token')
+      .set('x-user-session-token', 'user-session-a')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(3)
+    const [keyA, keyB, keyAAgain] = mockCheckAndIncrement.mock.calls.map(call => call[0])
+    expect(keyA).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+    expect(keyB).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+    expect(keyA).not.toBe(keyB)
+    expect(keyAAgain).toBe(keyA)
+  })
+
+  it('workflowTriggerRateLimit reuses one bucket for two tokens of the same verified user', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer service-token')
+      .set('x-user-session-token', 'user-session-a')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer service-token')
+      .set('x-user-session-token', 'user-session-a-rotated')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toBe(mockCheckAndIncrement.mock.calls[1]?.[0])
+  })
+
+  it('workflowTriggerRateLimit reuses one IP bucket for rotated unverified user tokens', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer service-token')
+      .set('x-user-session-token', 'forged-session-a')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer service-token')
+      .set('x-user-session-token', 'forged-session-b')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toBe(mockCheckAndIncrement.mock.calls[1]?.[0])
+  })
+
+  it('mcpHostWorkflowTriggerRateLimit stays on the bearer when a user session is injected', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.post('/trigger', mcpHostWorkflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer mcp-host-control-token')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer mcp-host-control-token')
+      .set('x-user-session-token', 'user-session-a')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer mcp-host-control-token')
+      .set('x-user-session-token', 'forged-session')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(3)
+    const [bearerOnly, injectedVerified, injectedForged] = mockCheckAndIncrement.mock.calls.map(
+      call => call[0]
+    )
+    expect(bearerOnly).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+    expect(injectedVerified).toBe(bearerOnly)
+    expect(injectedForged).toBe(bearerOnly)
+  })
+
+  it('workflowTriggerRateLimit falls back to the service bearer without a user token', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app).post('/trigger').set('Authorization', 'Bearer service-token').expect(200)
+    await request(app).post('/trigger').set('Authorization', 'Bearer service-token').expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toBe(mockCheckAndIncrement.mock.calls[1]?.[0])
   })
 })

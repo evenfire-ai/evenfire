@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import type { LlmPolicy, LlmProvider } from '@/lib/llm'
 
 export type McpServer = {
   metadata?: { name?: string; namespace?: string }
@@ -63,4 +64,18 @@ export type WizardSelectProps = {
   options: WizardSelectOption[]
   placeholder: string
   value: string
+}
+
+export type HostWizardValidationState = {
+  hostName: string
+  secretMode: 'existing' | 'new'
+  existingSecret: string
+  existingLlmSecret: string
+  newSecretName: string
+  llmKeyDraft: Record<string, string>
+  llmPolicy: LlmPolicy | undefined
+  provider: LlmProvider
+  modelName: string
+  connectionRef: string
+  codexModels: string[]
 }

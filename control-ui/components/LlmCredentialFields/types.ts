@@ -34,6 +34,10 @@ export type LlmCredentialFieldsProps = {
   // draft alone can never express a deletion (it is write-only, and blanking a
   // value is explicitly NOT deletion server-side). Create flows omit it.
   onRemovedKeysChange?: (keys: string[]) => void
+  // Provider sections already owned by another part of the form (for example
+  // the active primary/fallback routing editor). They stay out of this
+  // additive LLM Secret editor so a provider is never rendered twice.
+  excludedProviders?: LlmProvider[]
   // Render the "Add provider" picker as an always-open inline list instead of a
   // popover. Scroll-clipped surfaces (the update modal) must set it — an
   // absolute-positioned menu would open below the modal's visible fold.
