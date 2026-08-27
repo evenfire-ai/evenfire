@@ -15,7 +15,7 @@ import { HostIdentityTab } from '../../../components/HostIdentityTab'
 import { HostOverviewTab } from '../../../components/HostOverviewTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { LlmProviderSummary } from '../../../components/LlmProviderSummary'
-import { LlmSecretSelect } from '../../../components/LlmSecretSelect'
+import { LlmSecretSelect, type LlmSecretSelectOption } from '../../../components/LlmSecretSelect'
 import { LlmSecretUpdateModal } from '../../../components/LlmSecretUpdateModal'
 import { RowActionsMenu } from '../../../components/RowActionsMenu'
 import { IconRobot } from '../../../components/Sidebar/icons'
@@ -659,7 +659,7 @@ export default function HostDetailsPage() {
   )
 
   const llmSecretOptions = useMemo(() => {
-    const toOption = (name: string, keys: string[]) => {
+    const toOption = (name: string, keys: string[]): LlmSecretSelectOption => {
       const providers = getProvidersWithCompleteCredentials(keys)
       return {
         value: name,
@@ -675,7 +675,7 @@ export default function HostDetailsPage() {
       }
     }
 
-    const options = availableLlmSecrets.map(secret =>
+    const options: LlmSecretSelectOption[] = availableLlmSecrets.map(secret =>
       toOption(secret.name, Array.isArray(secret.keys) ? secret.keys : [])
     )
     if (secretRefDraft.trim() && !options.some(secret => secret.value === secretRefDraft.trim())) {
