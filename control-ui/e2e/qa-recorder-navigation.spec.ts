@@ -63,7 +63,7 @@ test.describe('optional QA recorder: Control UI navigation', () => {
 
     // 3) Connectors — sidebar href is /connectors (rewritten from /mcp-servers);
     //    the browser URL stays /connectors.
-    await mainNav.getByRole('link', { name: 'Installed connectors', exact: true }).click()
+    await mainNav.getByRole('link', { name: 'Installed Connectors', exact: true }).click()
     await expect(page).toHaveURL(/\/connectors\/?$/, { timeout: 20_000 })
     await expect(
       page.getByText('Browse connector deployments and context bindings.', { exact: true })

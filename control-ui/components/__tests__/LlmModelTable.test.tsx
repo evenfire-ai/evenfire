@@ -47,17 +47,11 @@ describe('LlmModelTable catalog-lifecycle columns', () => {
     expect(screen.queryByText('Manual')).not.toBeInTheDocument()
   })
 
-  it('shows the Stale badge only when stale is true', () => {
-    // 'Stale' is also the column header, so scope the assertion to the badge.
-    renderTable([{ ...baseModel, id: 'm-stale', source: 'discovery', stale: true }])
-    expandAnthropicModels()
-    expect(screen.getByText('Stale', { selector: '.cu-px-badge--warn' })).toBeInTheDocument()
-  })
-
-  it('omits the Stale badge when stale is false', () => {
-    renderTable([baseModel])
+  it('does not render the removed Catalog status column', () => {
+    renderTable([{ ...baseModel, id: 'm-stale', source: 'discovery', stale: true }, baseModel])
     expandAnthropicModels()
     expect(screen.queryByText('Stale', { selector: '.cu-px-badge--warn' })).toBeNull()
+    expect(screen.queryByRole('columnheader', { name: 'Catalog status' })).toBeNull()
   })
 
   it('defaults a legacy row without source/stale to Manual and not stale', () => {

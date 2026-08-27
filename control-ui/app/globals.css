@@ -18,14 +18,15 @@
   --cu-accent-muted: rgba(67, 119, 250, 0.2);
   --cu-link: #8faeff;
   --cu-link-hover: var(--cu-brand-light-blue);
-  --cu-danger: #ec7c72;
-  --cu-danger-hover: #f29a91;
+  --cu-color-primary: var(--cu-accent);
+  --cu-danger: #f87171;
+  --cu-danger-hover: #fca5a5;
   --cu-success: #66b88f;
   --cu-warning: #e8c27a;
   --cu-accent-rgb: 67, 119, 250;
   --cu-focus-rgb: 67, 119, 250;
   --cu-success-rgb: 102, 184, 143;
-  --cu-danger-rgb: 236, 124, 114;
+  --cu-danger-rgb: 248, 113, 113;
   --cu-warning-rgb: 232, 194, 122;
   --cu-edge-rgb: 94, 99, 108;
   --cu-panel-rgb: 20, 21, 24;
@@ -1499,14 +1500,19 @@ textarea.cu-input {
 }
 
 .cu-btn--danger {
-  background: linear-gradient(180deg, var(--cu-danger-hover) 0%, var(--cu-danger) 100%);
-  border-color: rgba(var(--cu-danger-rgb), 0.34);
-  color: var(--cu-text-inverse);
+  background: transparent;
+  border-color: rgba(var(--cu-danger-rgb), 0.55);
+  color: var(--cu-danger);
 }
 
 .cu-btn--danger:hover:not(:disabled) {
-  background: linear-gradient(180deg, var(--cu-danger) 0%, var(--cu-danger-hover) 100%);
-  border-color: rgba(var(--cu-danger-rgb), 0.48);
+  background: rgba(var(--cu-danger-rgb), 0.12);
+  border-color: var(--cu-danger);
+  color: var(--cu-danger-hover);
+}
+
+.cu-btn--danger:active:not(:disabled) {
+  background: rgba(var(--cu-danger-rgb), 0.2);
 }
 
 .cu-btn--sm {
@@ -2691,9 +2697,28 @@ textarea.cu-input {
 }
 
 .cu-marketplace-detail__overview {
+  flex-direction: column;
   border: 1px solid var(--cu-border-subtle);
   border-radius: var(--cu-radius-sm);
   background: rgba(var(--cu-edge-rgb), 0.06);
+}
+
+.cu-marketplace-detail__description-block {
+  display: grid;
+  flex: 0 0 auto;
+  gap: var(--cu-space-1);
+  width: 100%;
+}
+
+.cu-marketplace-detail__overview > .cu-expandable-detail__fields {
+  flex: 0 0 auto;
+  width: 100%;
+}
+
+.cu-marketplace-detail__description-block > .cu-expandable-detail__description {
+  order: 0;
+  width: 100%;
+  max-width: none;
 }
 
 .cu-create-top__eyebrow {
@@ -5195,6 +5220,14 @@ textarea.cu-input {
   margin-left: auto;
 }
 
+.cu-agent-connectors-table .cu-table__col-actions,
+.cu-agent-connectors-table .cu-table__cell-actions {
+  width: 6rem;
+  min-width: 6rem;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .cu-agent-detail-toolbar {
   position: sticky;
   top: 0;
@@ -5221,6 +5254,10 @@ textarea.cu-input {
 
 .cu-agent-detail-toolbar__actions .cu-btn--primary {
   min-width: var(--cu-create-action-min-width);
+}
+
+.cu-agent-model-actions {
+  margin-top: var(--cu-space-4);
 }
 
 .cu-agent-detail-scroll:has(> .cu-host-approval-section) {
@@ -6207,7 +6244,7 @@ textarea.cu-input {
   padding: var(--cu-space-3);
   border: 1px solid var(--cu-border-subtle);
   border-radius: var(--cu-radius-sm);
-  background: rgba(var(--cu-panel-rgb), 0.35);
+  background: var(--cu-bg-elevated);
 }
 
 .cu-agent-context-mcp-summary__head {
@@ -6238,10 +6275,8 @@ textarea.cu-input {
   display: flex;
   flex-wrap: wrap;
   gap: var(--cu-space-1);
-  max-height: 8rem;
   margin: 0;
   padding: 0;
-  overflow: auto;
   list-style: none;
 }
 
@@ -6249,10 +6284,10 @@ textarea.cu-input {
   max-width: 100%;
   padding: 0.2rem var(--cu-space-2);
   overflow: hidden;
-  border: 1px solid var(--cu-border-subtle);
+  border: 1px solid rgba(var(--cu-accent-rgb), 0.35);
   border-radius: var(--cu-radius-pill);
-  background: var(--cu-bg-elevated);
-  color: var(--cu-text-soft);
+  background: rgba(var(--cu-accent-rgb), 0.14);
+  color: var(--cu-text);
   font-size: 0.75rem;
   line-height: 1.35;
   text-overflow: ellipsis;
@@ -7427,6 +7462,517 @@ textarea.cu-input {
   width: min(36rem, 100%);
 }
 
+/* Hover card on the Context column — shows the same MCP-server list as the
+   agent-wizard's `cu-agent-context-mcp-summary` block. The wrapper is the
+   positioning context so the absolutely-positioned card sits just below the
+   link instead of clipping against the table cell. */
+.cu-host-context-hover {
+  position: relative;
+  display: inline-flex;
+  max-width: 100%;
+}
+
+.cu-host-context-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.75rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: var(--cu-radius-pill);
+  border: 1px solid var(--cu-border-subtle);
+  background: rgba(var(--cu-panel-rgb), 0.5);
+  color: var(--cu-text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.cu-host-context-hover > .cu-agent-context-mcp-summary {
+  position: absolute;
+  top: calc(100% + var(--cu-space-1));
+  left: 0;
+  z-index: 50;
+  min-width: 18rem;
+  max-width: 28rem;
+  box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, 0.18);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   HostOverviewTab — 2-column identity + configuration summary on the
+   agent detail Overview tab. Left column holds the identity card; right
+   column stacks Configuration, Access tiles, and MCP servers. */
+.cu-host-overview {
+  display: grid;
+  grid-template-columns: minmax(16rem, 22rem) 1fr;
+  gap: var(--cu-space-4);
+  align-items: start;
+}
+
+.cu-host-overview-identity {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--cu-space-2);
+  padding: var(--cu-space-5) var(--cu-space-4);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius);
+  background: var(--cu-bg-elevated);
+  text-align: center;
+}
+
+.cu-host-overview-identity__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 0.75em;
+  height: 0.75em;
+  margin-right: 0.3em;
+  vertical-align: -0.05em;
+  color: var(--cu-accent);
+  flex-shrink: 0;
+}
+
+.cu-host-overview-identity__icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.cu-host-overview-identity__avatar {
+  display: grid;
+  place-items: center;
+  width: 5rem;
+  height: 5rem;
+  border-radius: 999px;
+  background: linear-gradient(
+    135deg,
+    rgba(var(--cu-accent-rgb), 0.18),
+    rgba(var(--cu-accent-rgb), 0.04)
+  );
+  color: var(--cu-accent);
+  border: 1px solid rgba(var(--cu-accent-rgb), 0.25);
+}
+
+.cu-host-overview-identity__name {
+  min-width: 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.2;
+  margin-top: 0.25rem;
+}
+
+.cu-host-overview-identity__name-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  width: 100%;
+  max-width: 100%;
+}
+
+.cu-host-overview-identity__name-editor {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  width: 100%;
+  max-width: 100%;
+}
+
+.cu-host-overview-identity__name-input {
+  min-width: 0;
+  width: min(100%, 14rem);
+  text-align: center;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.cu-host-overview-identity__edit {
+  flex-shrink: 0;
+}
+
+.cu-host-overview-identity__description {
+  max-width: 100%;
+  color: var(--cu-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.cu-host-overview-identity__slug {
+  font-size: 0.875rem;
+  color: var(--cu-text-muted);
+}
+
+.cu-host-overview-identity__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8125rem;
+  color: var(--cu-text-muted);
+}
+
+.cu-host-overview-status__dot {
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 999px;
+  background: var(--cu-text-muted);
+}
+
+.cu-host-overview-status__dot--active {
+  background: var(--cu-success);
+  box-shadow: 0 0 0 3px rgba(var(--cu-success-rgb), 0.18);
+}
+
+.cu-host-overview-status__dot--inactive {
+  background: var(--cu-danger);
+}
+
+.cu-host-overview-status__dot--unknown {
+  background: var(--cu-warning);
+}
+
+.cu-host-overview-identity__divider {
+  width: 100%;
+  height: 1px;
+  background: var(--cu-border-subtle);
+  margin: var(--cu-space-2) 0;
+}
+
+.cu-host-overview-section-label {
+  margin: 0 0 var(--cu-space-2);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cu-text-muted);
+}
+
+/* Clickable section header inside an Overview card. Matches the rhythm of
+   `.cu-host-overview-section-label` (uppercase, muted) but reads as a
+   navigation affordance via the chevron + hover color shift. */
+.cu-host-overview-nav-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+  margin: 0 0 var(--cu-space-2);
+  padding: 0;
+  background: none;
+  border: none;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cu-text-muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.cu-host-overview-nav-header:hover:not(:disabled),
+.cu-host-overview-nav-header:focus-visible {
+  color: var(--cu-text);
+}
+
+.cu-host-overview-nav-header:disabled {
+  cursor: default;
+  color: var(--cu-text-muted);
+}
+
+.cu-host-overview-nav-header__label {
+  margin-right: var(--cu-space-2);
+}
+
+.cu-host-overview-nav-header__count {
+  min-width: 1.25rem;
+  padding: 0 0.35rem;
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-pill);
+  background: rgba(var(--cu-panel-rgb), 0.5);
+  color: var(--cu-text);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.cu-host-overview-nav-header__chev {
+  display: inline-block;
+  font-size: 0.875rem;
+  line-height: 1;
+  opacity: 0.6;
+  transition:
+    transform var(--cu-control-transition),
+    opacity var(--cu-control-transition);
+}
+
+.cu-host-overview-nav-header:hover:not(:disabled) .cu-host-overview-nav-header__chev,
+.cu-host-overview-nav-header:focus-visible .cu-host-overview-nav-header__chev {
+  transform: translateX(2px);
+  opacity: 1;
+}
+
+.cu-host-overview-identity__counts {
+  display: flex;
+  align-items: stretch;
+  gap: var(--cu-space-3);
+  width: 100%;
+  justify-content: center;
+}
+
+.cu-host-overview-identity__count-value {
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.cu-host-overview-identity__count-label {
+  font-size: 0.75rem;
+  color: var(--cu-text-muted);
+  text-transform: lowercase;
+}
+
+.cu-host-overview-identity__count-sep {
+  width: 1px;
+  background: var(--cu-border-subtle);
+}
+
+.cu-host-overview-context-chip {
+  font-size: 0.8125rem;
+  text-decoration: none;
+}
+
+.cu-host-overview-identity__uid {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8125rem;
+  color: var(--cu-text);
+}
+
+.cu-host-overview-identity__uid-text {
+  font-family: var(--cu-font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 0.75rem;
+  word-break: break-all;
+}
+
+.cu-host-overview-identity__meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem var(--cu-space-2);
+  width: 100%;
+  margin: 0;
+  text-align: left;
+  font-size: 0.75rem;
+  color: var(--cu-text-muted);
+}
+
+.cu-host-overview-identity__meta dt {
+  font-weight: 600;
+  color: var(--cu-text-soft);
+}
+
+.cu-host-overview-identity__meta dd {
+  margin: 0;
+  color: var(--cu-text);
+}
+
+.cu-host-overview-right {
+  display: grid;
+  gap: var(--cu-space-4);
+  min-width: 0;
+}
+
+.cu-host-overview-config {
+  display: grid;
+  gap: 0;
+}
+
+.cu-host-overview-config__row {
+  display: grid;
+  grid-template-columns: minmax(11rem, 16rem) 1fr;
+  gap: var(--cu-space-3);
+  padding: var(--cu-space-2) 0;
+  border-top: 1px solid var(--cu-border-subtle);
+  font-size: 0.8125rem;
+}
+
+.cu-host-overview-config__row:first-child {
+  border-top: none;
+}
+
+.cu-host-overview-config__setting {
+  color: var(--cu-text-muted);
+}
+
+.cu-host-overview-config__value {
+  color: var(--cu-text);
+  word-break: break-word;
+}
+
+.cu-host-overview-access {
+  display: grid;
+  gap: var(--cu-space-4);
+}
+
+.cu-host-overview-access__columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--cu-space-3);
+  align-items: start;
+}
+
+@media (max-width: 32rem) {
+  .cu-host-overview-access__columns {
+    grid-template-columns: 1fr;
+  }
+}
+
+.cu-host-overview-access__group {
+  display: grid;
+  gap: var(--cu-space-2);
+}
+
+.cu-host-overview-access__head {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+  min-height: 1.75rem;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cu-text-muted);
+}
+
+.cu-host-overview-access__head-icon {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 999px;
+  background: rgba(var(--cu-accent-rgb), 0.18);
+  color: var(--cu-accent);
+}
+
+.cu-host-overview-access__head-icon svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+.cu-host-overview-access__head-label {
+  margin-right: var(--cu-space-2);
+}
+
+.cu-host-overview-access__head-count {
+  min-width: 1.25rem;
+  padding: 0 0.35rem;
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-pill);
+  background: rgba(var(--cu-panel-rgb), 0.5);
+  color: var(--cu-text);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.cu-host-overview-access__people {
+  display: grid;
+  gap: var(--cu-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cu-host-overview-access__person {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+  min-height: 1.75rem;
+  padding: 0.15rem 0;
+}
+
+.cu-host-overview-access__dot {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: var(--cu-accent);
+  flex-shrink: 0;
+}
+
+.cu-host-overview-access__person-name {
+  font-size: 0.8125rem;
+  color: var(--cu-text);
+  word-break: break-word;
+}
+
+.cu-host-overview-access__empty {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--cu-text-muted);
+  min-height: 1.75rem;
+  display: flex;
+  align-items: center;
+}
+
+.cu-host-overview-mcp__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--cu-space-2);
+  margin-bottom: var(--cu-space-2);
+}
+
+.cu-host-overview-mcp__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--cu-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cu-host-overview-mcp__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  max-width: 100%;
+  padding: 0.2rem var(--cu-space-2);
+  overflow: hidden;
+  border: 1px solid rgba(var(--cu-accent-rgb), 0.35);
+  border-radius: var(--cu-radius-pill);
+  background: rgba(var(--cu-accent-rgb), 0.14);
+  color: var(--cu-text);
+  font-size: 0.75rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cu-host-overview-mcp__dot {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: var(--cu-accent);
+  flex-shrink: 0;
+}
+
+.cu-host-overview-mcp__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: var(--cu-space-2);
+  font-size: 0.8125rem;
+  color: var(--cu-link);
+}
+
+@media (max-width: 60rem) {
+  .cu-host-overview {
+    grid-template-columns: 1fr;
+  }
+}
+
 .cu-host-env-form--danger {
   border-color: rgba(var(--cu-danger-rgb), 0.38);
   background: rgba(var(--cu-danger-rgb), 0.06);
@@ -7627,6 +8173,98 @@ textarea.cu-input {
   margin: 0;
 }
 
+.cu-llm-credential-stored {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px dashed var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-panel);
+}
+
+.cu-llm-credential-stored__state {
+  color: var(--cu-success);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.cu-llm-credential-stored__hint {
+  flex: 1 1 12rem;
+  min-width: 0;
+  color: var(--cu-text-muted);
+  font-size: 0.8rem;
+}
+
+.cu-llm-credential-replacement {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.cu-llm-credential-replacement > .cu-input {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+.cu-agent-credential-set {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  padding: 1rem;
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: 8px;
+  background: var(--cu-bg-panel);
+}
+
+.cu-agent-credential-set__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.cu-agent-credential-set__eyebrow,
+.cu-agent-credential-set__providers-label {
+  display: block;
+  color: var(--cu-text-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.cu-agent-credential-set__title {
+  margin: 0.2rem 0 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.cu-agent-credential-set__head .cu-field__hint {
+  max-width: 48rem;
+  margin: 0.35rem 0 0;
+}
+
+.cu-agent-credential-set__providers {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--cu-border-subtle);
+}
+
+.cu-agent-additional-credentials {
+  border-style: dashed;
+}
+
+.cu-agent-additional-credentials__intro {
+  margin: 0;
+}
+
 .cu-slot-chip {
   display: inline-flex;
   align-items: center;
@@ -7666,6 +8304,14 @@ textarea.cu-input {
   grid-template-columns: 1fr 1fr auto;
   gap: 0.5rem;
   align-items: center;
+}
+
+.cu-llm-cred-extra .cu-llm-credential-replacement {
+  min-width: 0;
+}
+
+.cu-llm-cred-extra .cu-llm-credential-replacement > .cu-input {
+  min-width: 0;
 }
 
 /* Chip + optional remove icon-button on the right side of a group head. */
@@ -7847,10 +8493,6 @@ textarea.cu-input {
   filter: brightness(0) invert(1);
 }
 
-:root[data-theme='light'] .cu-llm-provider-icon[data-provider='zai'] img {
-  filter: brightness(0);
-}
-
 /* OpenAI ships a white-on-transparent mark, so on light surfaces it needs to be
    knocked back to black. Scoped to provider-level controls — the model dropdown
    reuses the same icon on a different treatment and must not inherit this. */
@@ -7917,6 +8559,157 @@ textarea.cu-input {
 
 .cu-llm-config__allowed-intro {
   margin: 0;
+}
+
+/* Read-only model configuration summary. It mirrors the editor's provider
+   blocks so operators can understand the configured model surface without
+   opening edit mode. */
+.cu-llm-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.cu-llm-summary__field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.cu-llm-summary__label {
+  color: var(--cu-text-soft);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.cu-llm-summary__value {
+  display: flex;
+  min-height: 2.6rem;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-elevated);
+  color: var(--cu-text);
+  font-size: 0.9375rem;
+}
+
+.cu-llm-summary__models {
+  display: flex;
+  min-height: 2.6rem;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-elevated);
+}
+
+.cu-llm-summary__model-chip {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid rgba(var(--cu-focus-rgb), 0.45);
+  border-radius: 6px;
+  background: rgba(var(--cu-focus-rgb), 0.12);
+  color: var(--cu-text);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.cu-llm-summary__all-models {
+  color: var(--cu-text-muted);
+  font-size: 0.8125rem;
+}
+
+.cu-llm-summary__fallback-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cu-space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cu-llm-summary__fallback {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cu-space-2);
+  padding: var(--cu-space-3);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-surface);
+}
+
+.cu-llm-summary__fallback-head,
+.cu-llm-summary__fallback-provider {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--cu-space-2);
+}
+
+.cu-llm-summary__fallback-head {
+  justify-content: space-between;
+}
+
+.cu-llm-summary__fallback-order {
+  color: var(--cu-text-soft);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.cu-llm-summary__credential-slot {
+  color: var(--cu-text-soft);
+  font-size: 0.75rem;
+}
+
+.cu-llm-summary__fallback-provider {
+  color: var(--cu-text);
+  font-size: 0.9375rem;
+}
+
+.cu-llm-summary__separator {
+  color: var(--cu-text-soft);
+}
+
+.cu-llm-summary__fallback-allowed {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.cu-llm-summary__empty {
+  color: var(--cu-text-soft);
+  font-size: 0.8125rem;
+}
+
+.cu-llm-secret-control {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+}
+
+.cu-llm-secret-control > .cu-agent-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+}
+
+.cu-llm-secret-control > .cu-input {
+  min-width: 0;
+  flex: 1;
+}
+
+.cu-llm-secret-control > .cu-btn--icon {
+  flex: 0 0 auto;
 }
 
 .cu-delete-zone {
