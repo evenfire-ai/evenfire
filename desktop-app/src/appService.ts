@@ -23,6 +23,7 @@ import {
   type DesktopUploadInput,
   type DesktopUploadSession,
   type DesktopUploadTransport,
+  formatGfsUploadLimit,
 } from './gfs/upload.js'
 import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandler.js'
 import { ApiError, requestJson, withTimeout } from './httpClient.js'
@@ -332,7 +333,7 @@ async function readBoundedLegacyFile(handle: fs.promises.FileHandle): Promise<Bu
     totalBytes += bytesRead
     if (totalBytes > LEGACY_GFS_MAX_FILE_BYTES) {
       throw new Error(
-        `This writer does not advertise resumable uploads; legacy GFS is limited to ${LEGACY_GFS_MAX_FILE_BYTES} bytes.`
+        `This writer does not advertise resumable uploads; legacy GFS is limited to ${formatGfsUploadLimit(LEGACY_GFS_MAX_FILE_BYTES)}.`
       )
     }
     chunks.push(chunk.subarray(0, bytesRead))
@@ -356,7 +357,7 @@ export async function legacyEncodedFile(filePath: string): Promise<string> {
     if (!info.isFile()) throw new Error('selected upload path is not a regular file')
     if (info.size > LEGACY_GFS_MAX_FILE_BYTES) {
       throw new Error(
-        `This writer does not advertise resumable uploads; legacy GFS is limited to ${LEGACY_GFS_MAX_FILE_BYTES} bytes.`
+        `This writer does not advertise resumable uploads; legacy GFS is limited to ${formatGfsUploadLimit(LEGACY_GFS_MAX_FILE_BYTES)}.`
       )
     }
 

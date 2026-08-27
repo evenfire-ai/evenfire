@@ -43,7 +43,12 @@ import {
   McpServerCrdStatus,
   McpServerResolvedEgressIP,
 } from './types'
-import { applyNetworkPolicy, getErrorCode, replaceWithConflictRetry } from './utils'
+import {
+  applyNetworkPolicy,
+  getErrorCode,
+  networkPolicyMatchesDesired,
+  replaceWithConflictRetry,
+} from './utils'
 
 type JsonPatchOperation = {
   op: 'add' | 'replace' | 'remove' | 'test'
@@ -386,8 +391,10 @@ export interface NetworkPolicyFullReconcileOptions {
   resolveCurrentServer?: (name: string) => McpServerCRD | undefined
   /**
    * Monotonic desired-state revisions fence ordinary watch events that arrive
-   * after an owner has completed its safety turn. Watch generations remain the
-   * separate authority fence for LIST -> WATCH recovery.
+   * after an owner has completed its safety turn. The in-flight NetworkPolicy
+   * pass also uses these revisions (plus cacheSynced) as its authority fence.
+   * Watch generations remain the delete-confirm / watch-effect lease, not the
+   * pass abort predicate.
    */
   contextDesiredRevision?: () => number
   serverDesiredRevision?: () => number
@@ -2827,7 +2834,8 @@ export class NetworkPolicyReconciler {
       // create's catch would issue a second create. Delegating from the top is
       // not an option either — the desired-state fence below needs the object
       // this request created, which applyNetworkPolicy does not return. The
-      // wiring below is kept identical to it on purpose.
+      // wiring below is kept identical to applyNetworkPolicy on purpose,
+      // including isUpToDate: networkPolicyMatchesDesired.
       await replaceWithConflictRetry<k8s.V1NetworkPolicy>({
         description: `policy "${name}" in ${namespace}`,
         logPrefix: '[NetPol]',
@@ -2837,6 +2845,7 @@ export class NetworkPolicyReconciler {
           this.networkingApi.replaceNamespacedNetworkPolicy({ name, namespace, body }),
         mutationAllowed: isCurrent,
         validateExisting: existing => this.assertPolicyOwnership(name, existing, desired, lane),
+        isUpToDate: networkPolicyMatchesDesired,
       })
       return isCurrent()
     }
