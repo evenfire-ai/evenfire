@@ -171,6 +171,23 @@ export interface Config {
   // event drops on long K8s watch disconnects. 0 disables.
   hostResyncIntervalSec: number
 
+  // Periodic NetworkPolicy convergence interval (seconds). Re-enters the
+  // coordinated single-flight pass (not a naked fullReconcile) so a dropped
+  // watch cannot leave stale allows. Default 0 disables the interval; startup
+  // still runs one convergence pass. Set via CONTEXT_MAPPER_NETPOL_RESYNC_SEC.
+  netPolResyncIntervalSec: number
+
+  // Absolute orphan-delete cap for a NetworkPolicy fullReconcile sweep.
+  // Candidates strictly above this count are refused (no deletes, no
+  // certification). Set via CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP.
+  netPolOrphanDeleteCap: number
+
+  // Percent orphan-delete cap (0-100) against the listed managed fleet.
+  // Candidates strictly above this fraction are refused. Inert on a tiny
+  // inventory where percent*fleet < 1. Set via
+  // CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT.
+  netPolOrphanDeleteCapPercent: number
+
   // Per-request deadline for finite Kubernetes calls on the serialized Host
   // convergence path. Watches keep their independent long-lived lifecycle.
   hostK8sRequestTimeoutMs: number
@@ -738,6 +755,15 @@ export const config: Config = {
   // Periodic Host resync (default 5 min). 0 disables watches-only self-heal
   // for runtime-auth degraded mcp-host pods; use only for diagnostic runs.
   hostResyncIntervalSec: getEnvInt('CONTEXT_MAPPER_HOST_RESYNC_SEC', 300),
+
+  // Periodic NetworkPolicy resync. Default 0 (disabled): startup still
+  // converges once; the interval is opt-in so a bad cache cannot periodically
+  // sweep. Unset or 0 → no interval.
+  netPolResyncIntervalSec: getEnvInt('CONTEXT_MAPPER_NETPOL_RESYNC_SEC', 0),
+  // Mass-delete guard for the namespace-wide orphan sweep. Thresholds are
+  // strict `>`: exactly N candidates still delete; N+1 refuses the pass.
+  netPolOrphanDeleteCap: getEnvInt('CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP', 10),
+  netPolOrphanDeleteCapPercent: getEnvInt('CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT', 20),
 
   // Every finite Kubernetes request that can hold Host convergence gets its
   // own deadline. Watch streams are intentionally excluded.

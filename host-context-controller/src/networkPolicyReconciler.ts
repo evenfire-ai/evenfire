@@ -32,6 +32,8 @@ import {
   sameMcpServerDesiredRevision,
 } from './mcpServerSafety'
 import {
+  netPolOrphanSweepCappedTotal,
+  netPolOrphansDeletedTotal,
   networkPolicySafetyPassDurationSeconds,
   networkPolicySafetyPassPoliciesTotal,
 } from './metrics'
@@ -75,6 +77,29 @@ type NetworkPolicyMutationOptions = {
 
 export const DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE =
   'Desired NetworkPolicy inventory changed during authoritative revocation'
+
+export const NETWORKPOLICY_ORPHAN_SWEEP_CAPPED_MESSAGE =
+  'NetworkPolicy orphan sweep refused: candidate count exceeds the delete cap'
+
+export type NetPolOrphanSweepCapReason = 'absolute' | 'percent'
+
+/**
+ * Mass-delete guard for the namespace-wide orphan sweep. Thresholds are
+ * strict `>`: exactly `absoluteCap` candidates still delete. The percent
+ * rule is inert on a tiny listed fleet (`percent*listed < 1`) so a single
+ * real orphan cannot look like a cache-wipe.
+ */
+export function evaluateNetPolOrphanSweepCap(
+  orphanCount: number,
+  listedManaged: number,
+  absoluteCap = config.netPolOrphanDeleteCap,
+  percentCap = config.netPolOrphanDeleteCapPercent
+): NetPolOrphanSweepCapReason | null {
+  if (orphanCount > absoluteCap) return 'absolute'
+  const percentThreshold = (listedManaged * percentCap) / 100
+  if (percentThreshold >= 1 && orphanCount > percentThreshold) return 'percent'
+  return null
+}
 
 export function sameContextDesiredRevision(expected: ContextCRD, current: ContextCRD): boolean {
   return (
@@ -1313,10 +1338,17 @@ export class NetworkPolicyReconciler {
     }
 
     const desiredContextIds = new Set(contexts.map(c => c.spec.contextId))
+    const desiredServerNames = new Set(servers.map(s => s.name))
+    const recordOrphanDelete = (lane: SafetyInventoryLane, deleted: boolean): void => {
+      if (!deleted) return
+      recordSafetyPassRevocation()
+      netPolOrphansDeletedTotal.inc({ lane })
+    }
     const cleanupOrphanedContextPolicies = async (
       policies: k8s.V1NetworkPolicy[],
       deletePolicy: (policy: k8s.V1NetworkPolicy) => Promise<boolean>,
-      describePolicy: (name: string, contextId: string) => string
+      describePolicy: (name: string, contextId: string) => string,
+      lane: SafetyInventoryLane
     ): Promise<void> => {
       if (!contextCleanupAuthoritative()) return
       for (const policy of policies) {
@@ -1330,7 +1362,7 @@ export class NetworkPolicyReconciler {
           console.warn(
             `[NetPol] Deleting malformed HCC-managed policy "${name}" without ${CONTEXT_LABEL}`
           )
-          if (await deletePolicy(policy)) recordSafetyPassRevocation()
+          recordOrphanDelete(lane, await deletePolicy(policy))
           continue
         }
         if (!desiredContextIds.has(contextId)) {
@@ -1346,7 +1378,7 @@ export class NetworkPolicyReconciler {
               return
             }
             console.log(describePolicy(name, contextId))
-            if (await deletePolicy(policy)) recordSafetyPassRevocation()
+            recordOrphanDelete(lane, await deletePolicy(policy))
           })
         }
       }
@@ -1413,6 +1445,38 @@ export class NetworkPolicyReconciler {
       allRpcProxyEgressPolicies.length +
       allExternalPolicies.length
 
+    // Count namespace-wide orphan candidates BEFORE any delete. A blown cache
+    // that lists a mass-delete must refuse the pass rather than sweep.
+    const isContextLaneOrphan = (policy: k8s.V1NetworkPolicy): boolean => {
+      const contextId = policy.metadata?.labels?.[CONTEXT_LABEL]
+      return !contextId || !desiredContextIds.has(contextId)
+    }
+    const isExternalLaneOrphan = (policy: k8s.V1NetworkPolicy): boolean => {
+      const serverName = policy.metadata?.labels?.[MCPSERVER_LABEL]
+      return !serverName || !desiredServerNames.has(serverName)
+    }
+    const orphanCandidates = [
+      ...allContextPolicies.filter(isContextLaneOrphan),
+      ...allContextEgressPolicies.filter(isContextLaneOrphan),
+      ...allRpcProxyEgressPolicies.filter(isContextLaneOrphan),
+      ...(options.serverInventoryComplete !== false && serverCleanupAuthoritative()
+        ? allExternalPolicies.filter(isExternalLaneOrphan)
+        : []),
+    ]
+    const listedManagedFleet =
+      allContextPolicies.length +
+      allContextEgressPolicies.length +
+      allRpcProxyEgressPolicies.length +
+      allExternalPolicies.length
+    const capReason = evaluateNetPolOrphanSweepCap(orphanCandidates.length, listedManagedFleet)
+    if (capReason) {
+      netPolOrphanSweepCappedTotal.inc({ reason: capReason })
+      console.warn(
+        `[NetPol] Orphan sweep capped (${capReason}): ${orphanCandidates.length} candidates of ${listedManagedFleet} listed managed policies; refusing deletes and withholding certification`
+      )
+      throw new Error(NETWORKPOLICY_ORPHAN_SWEEP_CAPPED_MESSAGE)
+    }
+
     // Delete orphaned Context policies across every L2 lane. Each lane uses
     // the canonical contextId effect key and rechecks authority plus live CRD
     // presence immediately before its delete.
@@ -1421,13 +1485,15 @@ export class NetworkPolicyReconciler {
       policy =>
         this.deleteSafetyPolicySnapshot(config.namespace, policy, contextCleanupAuthoritative),
       (name, contextId) =>
-        `[NetPol] Deleting orphaned policy "${name}" (context "${contextId}" no longer exists)`
+        `[NetPol] Deleting orphaned policy "${name}" (context "${contextId}" no longer exists)`,
+      'context-ingress'
     )
     await cleanupOrphanedContextPolicies(
       allContextEgressPolicies,
       policy =>
         this.deleteSafetyPolicySnapshot(config.hostNamespace, policy, contextCleanupAuthoritative),
-      name => `[NetPol] Deleting orphaned L2 egress policy "${name}"`
+      name => `[NetPol] Deleting orphaned L2 egress policy "${name}"`,
+      'context-host-egress'
     )
     await cleanupOrphanedContextPolicies(
       allRpcProxyEgressPolicies,
@@ -1437,7 +1503,8 @@ export class NetworkPolicyReconciler {
           policy,
           contextCleanupAuthoritative
         ),
-      name => `[NetPol] Deleting orphaned rpc-proxy egress policy "${name}"`
+      name => `[NetPol] Deleting orphaned rpc-proxy egress policy "${name}"`,
+      'context-rpc-egress'
     )
 
     let liveDesiredRevisionChanged = false
@@ -1477,7 +1544,6 @@ export class NetworkPolicyReconciler {
 
     // Clean up external egress policies for servers that no longer exist.
     if (options.serverInventoryComplete !== false && serverCleanupAuthoritative()) {
-      const desiredServerNames = new Set(servers.map(s => s.name))
       for (const policy of allExternalPolicies) {
         const serverName = policy.metadata?.labels?.[MCPSERVER_LABEL]
         if (!serverName) {
@@ -1491,15 +1557,14 @@ export class NetworkPolicyReconciler {
           console.warn(
             `[NetPol] Deleting malformed HCC-managed policy "${name}" without ${MCPSERVER_LABEL}`
           )
-          if (
+          recordOrphanDelete(
+            'external-egress',
             await this.deleteSafetyPolicySnapshot(
               config.namespace,
               policy,
               serverCleanupAuthoritative
             )
-          ) {
-            recordSafetyPassRevocation()
-          }
+          )
           continue
         }
         if (!desiredServerNames.has(serverName)) {
@@ -1522,15 +1587,14 @@ export class NetworkPolicyReconciler {
               return
             }
             console.log(`[NetPol] Deleting orphaned external egress policy "${name}"`)
-            if (
+            recordOrphanDelete(
+              'external-egress',
               await this.deleteSafetyPolicySnapshot(
                 config.namespace,
                 policy,
                 serverCleanupAuthoritative
               )
-            ) {
-              recordSafetyPassRevocation()
-            }
+            )
           })
         }
       }

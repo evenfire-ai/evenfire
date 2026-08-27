@@ -5,6 +5,7 @@ import * as dns from 'node:dns/promises'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { asApiserverNetworkPolicy } from './__tests__/asApiserverNetworkPolicy'
+import { config } from './config'
 import { confirmAuthoritativeMcpServerAbsence } from './mcpServerSafety'
 import {
   networkPolicySafetyPassDurationSeconds,
@@ -56,6 +57,8 @@ vi.mock('./config', () => ({
     // #299 sliding-window knobs read by reconcileExternalEgress.
     externalEgressOverlapSec: 300,
     externalEgressMaxEntries: 128,
+    netPolOrphanDeleteCap: 10,
+    netPolOrphanDeleteCapPercent: 20,
   },
 }))
 
@@ -73,6 +76,8 @@ vi.mock('node:dns/promises', () => ({
 vi.mock('./metrics', () => ({
   networkPolicySafetyPassDurationSeconds: { observe: vi.fn() },
   networkPolicySafetyPassPoliciesTotal: { inc: vi.fn() },
+  netPolOrphansDeletedTotal: { inc: vi.fn() },
+  netPolOrphanSweepCappedTotal: { inc: vi.fn() },
 }))
 
 function makeMockNetworkingApi() {
@@ -177,6 +182,8 @@ describe('NetworkPolicyReconciler', () => {
 
   beforeEach(() => {
     vi.useRealTimers()
+    config.netPolOrphanDeleteCap = 10
+    config.netPolOrphanDeleteCapPercent = 20
     mockApi = makeMockNetworkingApi()
     mockCustomApi = makeMockCustomApi()
     reconciler = makeReconciler(mockApi, undefined, mockCustomApi)

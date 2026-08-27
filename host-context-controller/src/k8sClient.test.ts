@@ -248,6 +248,7 @@ const mockConfig = vi.hoisted(() => ({
   runtimeNamespaces: ['mcp-server', 'mcp-host', 'sandbox-recipes', 'rpc-proxy'],
   hostK8sRequestTimeoutMs: 30_000,
   hostResyncIntervalSec: 0,
+  netPolResyncIntervalSec: 0,
   externalEgressResyncIntervalSec: 0,
   externalEgressRefreshFloorSec: 5,
   controlApiBaseUrl: 'http://control-api.test:8090',
@@ -607,6 +608,7 @@ describe('McpServerWatcher startup', () => {
     // per-test discipline.
     mocks.hasCertifiedSafetyInventory.mockReset().mockReturnValue(true)
     mockConfig.externalEgressResyncIntervalSec = 0 // keep periodic resync off by default
+    mockConfig.netPolResyncIntervalSec = 0
     mocks.ensureDefaultPolicies.mockReset().mockResolvedValue(undefined)
     mocks.netPolFullReconcile.mockReset().mockImplementation(async (...args: unknown[]) => {
       const options = args[2] as { onAuthoritativeRevocationComplete?: () => void } | undefined
@@ -10866,4 +10868,131 @@ describe('McpServerWatcher watch-recovery retry backoff (exponential, jittered, 
       await watcher.stop()
     }
   )
+})
+
+describe('McpServerWatcher NetworkPolicy periodic resync (#478)', () => {
+  async function startWatcherForNetPolResync(): Promise<McpServerWatcher> {
+    mocks.netPolFullReconcile.mockClear()
+    mocks.watch.mockReset().mockResolvedValue({ abort: vi.fn() })
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'communicationchannels') {
+        return { metadata: { resourceVersion: 'netpol-resync-cc-rv' }, items: [] }
+      }
+      return { items: [] }
+    })
+    const watcher = new McpServerWatcher()
+    stubAuthoritativeInventoryWatch(watcher, 'McpServer')
+    stubAuthoritativeInventoryWatch(watcher, 'Context')
+    vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startCommunicationChannelWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startLlmHookWatch').mockResolvedValue(undefined)
+    await watcher.start()
+    await vi.advanceTimersByTimeAsync(0)
+    return watcher
+  }
+
+  afterEach(() => {
+    vi.useRealTimers()
+    mockConfig.netPolResyncIntervalSec = 0
+    mocks.netPolFullReconcile.mockReset().mockImplementation(async (...args: unknown[]) => {
+      const options = args[2] as { onAuthoritativeRevocationComplete?: () => void } | undefined
+      options?.onAuthoritativeRevocationComplete?.()
+    })
+  })
+
+  it('M1: timer tick enters coordinated fullReconcile with the single-writer options bag', async () => {
+    vi.useFakeTimers()
+    mockConfig.netPolResyncIntervalSec = 300
+    const watcher = await startWatcherForNetPolResync()
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(300_000)
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(2)
+    expect(mocks.netPolFullReconcile).toHaveBeenLastCalledWith(
+      expect.any(Array),
+      expect.any(Array),
+      expect.objectContaining({
+        onAuthoritativeRevocationComplete: expect.any(Function),
+        runContextEffect: expect.any(Function),
+        contextInventoryAuthoritative: expect.any(Function),
+      })
+    )
+    await watcher.stop()
+  })
+  it('M2: a tick while a pass is in flight keeps one concurrent fullReconcile and trails after settle', async () => {
+    vi.useFakeTimers()
+    mockConfig.netPolResyncIntervalSec = 300
+    const activePass = deferred()
+    mocks.netPolFullReconcile
+      .mockReset()
+      .mockImplementationOnce(async (...args: unknown[]) => {
+        const options = args[2] as { onAuthoritativeRevocationComplete?: () => void } | undefined
+        options?.onAuthoritativeRevocationComplete?.()
+        await activePass.promise
+      })
+      .mockImplementation(async (...args: unknown[]) => {
+        const options = args[2] as { onAuthoritativeRevocationComplete?: () => void } | undefined
+        options?.onAuthoritativeRevocationComplete?.()
+      })
+    const watcher = await startWatcherForNetPolResync()
+    await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1))
+
+    await vi.advanceTimersByTimeAsync(300_000)
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
+
+    activePass.resolve()
+    await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(2))
+    await watcher.stop()
+  })
+
+  it('M5: unset/0 interval warns, registers no timer, and still runs startup once', async () => {
+    vi.useFakeTimers()
+    mockConfig.netPolResyncIntervalSec = 0
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const watcher = await startWatcherForNetPolResync()
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
+    expect(
+      warnSpy.mock.calls.some(call =>
+        String(call[0]).includes('NetworkPolicy periodic resync disabled')
+      )
+    ).toBe(true)
+    expect((watcher as any).netPolResyncTimer).toBeNull()
+
+    await vi.advanceTimersByTimeAsync(300_000)
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
+    warnSpy.mockRestore()
+    await watcher.stop()
+  })
+
+  it('M6: stop() clears the resync interval so later ticks do not reconcile', async () => {
+    vi.useFakeTimers()
+    mockConfig.netPolResyncIntervalSec = 300
+    const watcher = await startWatcherForNetPolResync()
+    const callsAfterStart = mocks.netPolFullReconcile.mock.calls.length
+    expect((watcher as any).netPolResyncTimer).not.toBeNull()
+
+    await watcher.stop()
+    expect((watcher as any).netPolResyncTimer).toBeNull()
+    await vi.advanceTimersByTimeAsync(300_000)
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(callsAfterStart)
+  })
+
+  it('S1: a timer tick while caches are unsynced defers and does not call fullReconcile', async () => {
+    vi.useFakeTimers()
+    mockConfig.netPolResyncIntervalSec = 300
+    const watcher = await startWatcherForNetPolResync()
+    await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1))
+    mocks.netPolFullReconcile.mockClear()
+    ;(watcher as any).contextCacheSynced = false
+    ;(watcher as any).mcpServerCacheSynced = false
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    await vi.advanceTimersByTimeAsync(300_000)
+    expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
+    expect(warnSpy.mock.calls.some(call => String(call[0]).includes('caches unsynced'))).toBe(true)
+    expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(true)
+    warnSpy.mockRestore()
+    await watcher.stop()
+  })
 })

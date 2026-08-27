@@ -889,6 +889,10 @@ export class McpServerWatcher implements McpServerProvider {
   // GlobalFileSystem stuck at Initializing converges to Ready (and seeds its
   // root directories) once the writer is up. Disabled when interval <= 0 (tests).
   private gfsResyncTimer: ReturnType<typeof setInterval> | null = null
+  // Periodic NetworkPolicy resync (#478): re-enters the coordinated
+  // single-flight pass. Disabled by default (interval <= 0); startup still
+  // runs one convergence. Never call netPolReconciler.fullReconcile from here.
+  private netPolResyncTimer: ReturnType<typeof setInterval> | null = null
 
   constructor() {
     if (!kc) {
@@ -2845,6 +2849,18 @@ export class McpServerWatcher implements McpServerProvider {
       )
     }
 
+    const netPolResyncSec = config.netPolResyncIntervalSec
+    if (netPolResyncSec > 0) {
+      this.netPolResyncTimer = setInterval(() => {
+        void this.runInitialNetworkPolicyConvergence()
+      }, netPolResyncSec * 1000)
+      console.log(`[K8s] NetworkPolicy periodic resync enabled (every ${netPolResyncSec}s)`)
+    } else {
+      console.warn(
+        '[K8s] NetworkPolicy periodic resync disabled; dropped watch events will not self-heal stale NetworkPolicy allows through controller-driven convergence until another Context or McpServer event triggers reconciliation.'
+      )
+    }
+
     const externalEgressResyncSec = config.externalEgressResyncIntervalSec
     // #205 delegates external-egress periodic resync to the convergence
     // coordinator. Its runResyncCore drives reconcileExternalEgress, so the
@@ -4515,6 +4531,10 @@ export class McpServerWatcher implements McpServerProvider {
     if (this.gfsResyncTimer) {
       clearInterval(this.gfsResyncTimer)
       this.gfsResyncTimer = null
+    }
+    if (this.netPolResyncTimer) {
+      clearInterval(this.netPolResyncTimer)
+      this.netPolResyncTimer = null
     }
     for (const timer of this.initialConvergenceRetryTimers.values()) {
       clearTimeout(timer)

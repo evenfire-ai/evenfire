@@ -127,6 +127,18 @@ export const networkPolicySafetyPassPoliciesTotal = counter({
   labelNames: ['operation'] as const,
 })
 
+export const netPolOrphansDeletedTotal = counter({
+  name: 'clerum_hcc_netpol_orphans_deleted_total',
+  help: 'Orphan NetworkPolicies deleted by an HCC fullReconcile sweep.',
+  labelNames: ['lane'] as const,
+})
+
+export const netPolOrphanSweepCappedTotal = counter({
+  name: 'clerum_hcc_netpol_orphan_sweep_capped_total',
+  help: 'NetworkPolicy orphan sweeps that refused deletes because the candidate count exceeded the absolute or percent cap.',
+  labelNames: ['reason'] as const,
+})
+
 export const contextReconciliationsTotal = counter({
   name: 'clerum_hcc_context_reconciliations_total',
   help: 'Total Context CRD reconciliations',
