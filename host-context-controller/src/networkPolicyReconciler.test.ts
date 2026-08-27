@@ -1,4 +1,4 @@
-import { type Mock, beforeEach, describe, expect, it, vi } from 'vitest'
+import { type Mock, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import type { RecordWithTtl } from 'node:dns'
 import * as dns from 'node:dns/promises'
@@ -213,6 +213,155 @@ describe('NetworkPolicyReconciler', () => {
       false
     )
     expect(sameContextDesiredRevision(expected, { ...reordered, generation: 8 })).toBe(false)
+  })
+
+  describe('sameContextDesiredRevision mutation table (content identity)', () => {
+    const companionServer: McpServerCRD = {
+      name: 'alpha',
+      namespace: 'mcp-server',
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/alpha:test',
+        transport: { type: 'streamableHttp', port: 3000 },
+        egressBindings: [{ cidr: '1.2.3.4/32', port: 443, protocol: 'TCP' }],
+      },
+    }
+    const base: ContextCRD = {
+      name: 'default',
+      namespace: 'mcp-server',
+      uid: 'context-uid',
+      generation: 7,
+      spec: {
+        contextId: 'default',
+        mcpServers: ['alpha'],
+        sharedFileSystems: [{ name: 'workspace', mountPath: '/workspace' }],
+      },
+    }
+
+    function stableJson(value: unknown): string {
+      if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+      if (value && typeof value === 'object') {
+        const record = value as Record<string, unknown>
+        return `{${Object.keys(record)
+          .sort()
+          .map(key => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+          .join(',')}}`
+      }
+      return JSON.stringify(value) ?? 'undefined'
+    }
+
+    function renderContextAllow(
+      context: ContextCRD,
+      server: McpServerCRD = companionServer
+    ): string {
+      return stableJson((reconciler as any).buildContextAllowPolicies(context, server))
+    }
+
+    function renderExactHostEgress(server: McpServerCRD): string {
+      const binding = server.spec.egressBindings?.[0]
+      if (!binding?.cidr) return 'none'
+      return stableJson(
+        (reconciler as any).buildExactHostEgressPolicy(server, 'exact-host-egress', binding, [
+          binding.cidr,
+        ])
+      )
+    }
+
+    it('G8: ContextCRD compared fields have no escape hatch besides status', () => {
+      type ContextCompared = 'name' | 'namespace' | 'uid' | 'generation' | 'spec'
+      type ContextEscapes = Exclude<keyof ContextCRD, ContextCompared | 'status'>
+      expectTypeOf<ContextEscapes>().toEqualTypeOf<never>()
+    })
+
+    it('C1: spec.contextId change fails the comparator and changes the rendered allow policies', () => {
+      const mutated: ContextCRD = {
+        ...base,
+        spec: { ...base.spec, contextId: 'other' },
+      }
+      expect(sameContextDesiredRevision(base, mutated)).toBe(false)
+      expect(renderContextAllow(mutated)).not.toBe(renderContextAllow(base))
+    })
+
+    it('C2: name change fails the comparator and changes the rendered allow policies', () => {
+      const mutated: ContextCRD = { ...base, name: 'other-context' }
+      expect(sameContextDesiredRevision(base, mutated)).toBe(false)
+      expect(renderContextAllow(mutated)).not.toBe(renderContextAllow(base))
+    })
+
+    it.each([
+      ['add', ['alpha', 'beta']],
+      ['remove', []],
+      ['rename', ['renamed']],
+    ] as const)('C3: spec.mcpServers %s fails the comparator', (_label, mcpServers) => {
+      const mutated: ContextCRD = {
+        ...base,
+        spec: { ...base.spec, mcpServers: [...mcpServers] },
+      }
+      expect(sameContextDesiredRevision(base, mutated)).toBe(false)
+    })
+
+    it('C4: status-only change matches and keeps the rendered allow policies identical', () => {
+      const mutated: ContextCRD = {
+        ...base,
+        status: {
+          sharedFileSystems: [{ name: 'workspace', mountPath: '/workspace', phase: 'Mounted' }],
+        },
+      }
+      expect(sameContextDesiredRevision(base, mutated)).toBe(true)
+      expect(renderContextAllow(mutated)).toBe(renderContextAllow(base))
+    })
+
+    it('C5: spec key reorder matches and keeps the rendered allow policies identical', () => {
+      const mutated: ContextCRD = {
+        name: base.name,
+        namespace: base.namespace,
+        uid: base.uid,
+        generation: base.generation,
+        spec: {
+          sharedFileSystems: [{ mountPath: '/workspace', name: 'workspace' }],
+          mcpServers: ['alpha'],
+          contextId: 'default',
+        },
+      }
+      expect(sameContextDesiredRevision(base, mutated)).toBe(true)
+      expect(renderContextAllow(mutated)).toBe(renderContextAllow(base))
+    })
+
+    it('C6: undefined-valued spec key matches and keeps the rendered allow policies identical', () => {
+      const mutated: ContextCRD = {
+        ...base,
+        spec: { ...base.spec, description: undefined },
+      }
+      expect(sameContextDesiredRevision(base, mutated)).toBe(true)
+      expect(renderContextAllow(mutated)).toBe(renderContextAllow(base))
+    })
+
+    it('S1: server name change changes the rendered allow policies', () => {
+      const mutated: McpServerCRD = { ...companionServer, name: 'beta' }
+      expect(renderContextAllow(base, mutated)).not.toBe(renderContextAllow(base))
+    })
+
+    it('S3: spec.transport.port change changes the rendered allow policies', () => {
+      const mutated: McpServerCRD = {
+        ...companionServer,
+        spec: {
+          ...companionServer.spec,
+          transport: { ...companionServer.spec.transport, port: 4000 },
+        },
+      }
+      expect(renderContextAllow(base, mutated)).not.toBe(renderContextAllow(base))
+    })
+
+    it('S4: egressBindings change changes the rendered exact-host egress policy', () => {
+      const mutated: McpServerCRD = {
+        ...companionServer,
+        spec: {
+          ...companionServer.spec,
+          egressBindings: [{ cidr: '8.8.8.8/32', port: 443, protocol: 'TCP' }],
+        },
+      }
+      expect(renderExactHostEgress(mutated)).not.toBe(renderExactHostEgress(companionServer))
+    })
   })
 
   it('records the authoritative safety-pass inventory, completed revocations, and duration', async () => {
