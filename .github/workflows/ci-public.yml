@@ -277,6 +277,19 @@ jobs:
         working-directory: control-ui
         run: npm run build
 
+  e2e-vitest-node-unit:
+    name: E2E Vitest node-unit (tests/e2e)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
+      - name: Run descriptor-bound fixture unit suites
+        run: E2E_VITEST_SUITE_GROUP=node-unit bash scripts/e2e/run-vitest-e2e.sh
+
   # ─── Registry contract — boot evenfire-registry and drive the real client ──
   # Catches wire-format drift in clerumRegistryClient.ts before merge. Requires
   # CROSS_REPO_READ_TOKEN (a fine-grained PAT with Contents:read on the sibling
@@ -504,6 +517,9 @@ jobs:
 
       - name: Test GFS Upload v2 cross-client geometry contract
         run: bash scripts/tests/test-gfs-upload-v2-geometry-contract.sh
+
+      - name: Test E2E Vitest node-unit public gate
+        run: bash scripts/tests/test-e2e-vitest-node-unit-gate.sh
 
       - name: Test GFS real-Postgres Minikube runner contract
         run: bash scripts/tests/test-gfs-real-pg-minikube-gate.sh
