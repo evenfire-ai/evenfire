@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, expectTypeOf, it, vi } from 'vitest'
 import {
   confirmAuthoritativeMcpServerAbsence,
   isMcpServerStatusOnlyUpdate,
@@ -116,6 +116,53 @@ describe('sameMcpServerDesiredRevision', () => {
 
     expect(sameMcpServerDesiredRevision(expected, current)).toBe(true)
     expect(sameMcpServerDesiredRevision(current, expected)).toBe(true)
+  })
+
+  it('S3: rejects a transport port change', () => {
+    const expected = makeServer()
+    expect(
+      sameMcpServerDesiredRevision(
+        expected,
+        makeServer({
+          spec: { ...expected.spec, transport: { ...expected.spec.transport, port: 4000 } },
+        })
+      )
+    ).toBe(false)
+  })
+
+  it('S4: rejects an egressBindings change', () => {
+    const expected = makeServer({
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/web-search:test',
+        transport: { type: 'streamableHttp', port: 3000 },
+        egressBindings: [{ cidr: '1.2.3.4/32', port: 443, protocol: 'TCP' }],
+      },
+    })
+    expect(
+      sameMcpServerDesiredRevision(
+        expected,
+        makeServer({
+          spec: {
+            ...expected.spec,
+            egressBindings: [{ cidr: '8.8.8.8/32', port: 443, protocol: 'TCP' }],
+          },
+        })
+      )
+    ).toBe(false)
+  })
+
+  it('G8: McpServerCRD compared fields have no escape hatch besides status', () => {
+    type McpServerCompared =
+      | 'name'
+      | 'namespace'
+      | 'uid'
+      | 'generation'
+      | 'spec'
+      | 'annotations'
+      | 'labels'
+    type McpServerEscapes = Exclude<keyof McpServerCRD, McpServerCompared | 'status'>
+    expectTypeOf<McpServerEscapes>().toEqualTypeOf<never>()
   })
 })
 

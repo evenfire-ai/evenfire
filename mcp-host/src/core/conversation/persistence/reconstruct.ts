@@ -148,7 +148,6 @@ export function reconstructPendingApproval(row: PendingApprovalRow): PendingAppr
     // NOT degrade a reactive-consent suspension into a generic approval.
     reason: normalizeConnectReason(row.reason),
     mcpServerName: row.mcp_server_name ?? undefined,
-    provider: row.provider ?? undefined,
   }
 }
 

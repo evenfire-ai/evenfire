@@ -37,11 +37,10 @@ export interface TaskPendingApproval {
   displayName: string
   // U5 (mcp-oauth reactive consent): `reason === 'connect_required'` marks an
   // OAuth "Connect <server>" suspension (vs a generic tool approval);
-  // `mcpServerName`/`provider` identify the server and correlate the deep-link
+  // `mcpServerName` identifies the server and correlates the deep-link
   // completion back to this task. Absent on ordinary approval suspensions.
   reason?: string
   mcpServerName?: string
-  provider?: string
 }
 
 /**

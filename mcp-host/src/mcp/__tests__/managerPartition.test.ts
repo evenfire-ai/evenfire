@@ -88,6 +88,18 @@ function oauthUserServer(name = 'gh'): McpServerInfo {
   }
 }
 
+function oauthContextServer(name = 'ctx-gh'): McpServerInfo {
+  return {
+    name,
+    contextRef: 'ctx-1',
+    transport: { type: 'streamableHttp', url: `http://${name}/mcp` },
+    // Shared-identity oauth: the seam routes every caller to ONE SHARED partition.
+    authKind: 'oauth-context',
+    enabled: true,
+    status: { deployed: true, ready: true },
+  }
+}
+
 /** Records (server, principal) each provider was built for and the tokens it hands out. */
 function recordingFactory(): {
   factory: McpTokenProviderFactory
@@ -317,6 +329,65 @@ describe('Broker principal binding: POST subject is the caller, never crossed', 
 
     // No per-user call yet → the representative must not have brokered any grant.
     expect(bodies).toEqual([])
+  })
+})
+
+// ─── oauth-context dispatch (U6-host: shared identity) ───────────────────────
+//
+// The load-bearing invariant of the oauth-context sabor (manager.callTool
+// `isOauthUser = authKind === 'oauth-user'`, factory main.ts:844): a context
+// server routes EVERY caller to the single SHARED partition — it never opens a
+// per-user partition, and that one connection carries the context Bearer. All
+// other manager tests use oauthUserServer; without this case a regression that
+// per-user-partitioned a context server, or dropped its context Bearer, would
+// stay green (R1-M2, T5).
+
+describe('oauth-context routes every caller to the single SHARED partition', () => {
+  /** Mirrors main.ts createMcpTokenProviderFactory for authKind='oauth-context':
+   *  the SHARED representative itself resolves the (context) token; NO per-user
+   *  provider is ever built. Records every (server, principal) built. */
+  function contextFactory(): {
+    factory: McpTokenProviderFactory
+    built: Array<{ server: string; principal: string }>
+  } {
+    const built: Array<{ server: string; principal: string }> = []
+    const factory: McpTokenProviderFactory = (server, principal) => {
+      built.push({
+        server: server.name,
+        principal: principal.kind === 'shared' ? 'shared' : principal.userId,
+      })
+      // Even the SHARED representative of a context server carries the context
+      // Bearer (unlike oauth-user, whose representative is token-less).
+      return { resolve: async () => 'context-bearer', refresh: async () => 'context-bearer' }
+    }
+    return { factory, built }
+  }
+
+  it('alice and bob reuse one SHARED connection with the context Bearer, no per-user partition', async () => {
+    const { factory, built } = contextFactory()
+    const manager = new McpManager(undefined, undefined, factory)
+    await manager.addServer(oauthContextServer())
+    // addServer opened exactly the SHARED representative.
+    const transportsAfterRepresentative = sdk.transports.length
+
+    const a = await manager.callTool('ctx-gh__do', {}, { userId: 'alice' })
+    const b = await manager.callTool('ctx-gh__do', {}, { userId: 'bob' })
+
+    // (b) Both callers succeed on the SAME shared connection — no new transport.
+    expect(a.isError).toBe(false)
+    expect(b.isError).toBe(false)
+    expect(sdk.transports.length).toBe(transportsAfterRepresentative)
+
+    // (c) That one connection carries the context Bearer for both callers.
+    expect((a.result as { authorization?: string }).authorization).toBe('Bearer context-bearer')
+    expect((b.result as { authorization?: string }).authorization).toBe('Bearer context-bearer')
+
+    // (a) No per-user partition was ever built — only the SHARED representative,
+    // and it is not idle-evictable (the per-user eviction sweep is a no-op).
+    expect(built.every(x => x.principal === 'shared')).toBe(true)
+    expect(manager.getConnectedServers()).toEqual(['ctx-gh'])
+    expect(manager.evictIdleUserPartitions(0)).toBe(0)
+    expect(manager.getConnectedServers()).toEqual(['ctx-gh'])
   })
 })
 

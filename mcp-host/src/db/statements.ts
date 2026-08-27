@@ -273,7 +273,6 @@ export function prepareStatements(db: Database): PreparedStatements {
                pa.tool_name,
                pa.reason,
                pa.mcp_server_name,
-               pa.provider,
                ROW_NUMBER() OVER (
                  PARTITION BY pa.session_id
                  ORDER BY pa.registered_at ASC, pa.request_id ASC
@@ -287,8 +286,7 @@ export function prepareStatements(db: Database): PreparedStatements {
              pa.request_id AS pending_request_id,
              pa.tool_name AS pending_tool_name,
              pa.reason AS pending_reason,
-             pa.mcp_server_name AS pending_mcp_server_name,
-             pa.provider AS pending_provider
+             pa.mcp_server_name AS pending_mcp_server_name
         FROM scoped_sessions s
         LEFT JOIN ranked_approvals pa
           ON pa.session_id = s.id
@@ -392,12 +390,12 @@ export function prepareStatements(db: Database): PreparedStatements {
         request_id, session_id, task_id, tool_name, tool_call_id,
         parameters, description, context_snapshot, completed_results,
         intent_summary, source_message, registered_at, expires_at, trace_context,
-        reason, mcp_server_name, provider
+        reason, mcp_server_name
       ) VALUES (
         @request_id, @session_id, @task_id, @tool_name, @tool_call_id,
         @parameters, @description, @context_snapshot, @completed_results,
         @intent_summary, @source_message, @registered_at, @expires_at, @trace_context,
-        @reason, @mcp_server_name, @provider
+        @reason, @mcp_server_name
       )
       ON CONFLICT(request_id) DO UPDATE SET
         task_id = excluded.task_id,

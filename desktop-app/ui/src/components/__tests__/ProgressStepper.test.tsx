@@ -471,9 +471,11 @@ describe('ProgressStepper — connect_required suspension (U5, T5 invariant c)',
     expect(screen.queryByTestId('connect-mcp-btn')).toBeNull()
   })
 
-  it('FIX2: connect_required WITHOUT an actionable onConnect falls back to Approve/Deny (no dead-end)', () => {
+  it('connect_required WITHOUT an actionable onConnect never renders Approve/Deny (R3-L2)', () => {
     // Defensive: if mcpServerName were ever empty the caller leaves onConnect
-    // undefined — the block must still be actionable, never a suspended dead-end.
+    // undefined. This must NOT fall back to Approve/Deny — approving would resume
+    // with no grant → another 401 → a re-suspension loop. It renders an
+    // explanatory suspended state instead; Cancel remains available.
     render(
       <ProgressStepper
         progress={makeProgress({
@@ -487,15 +489,17 @@ describe('ProgressStepper — connect_required suspension (U5, T5 invariant c)',
         })}
         onApprove={vi.fn()}
         onDeny={vi.fn()}
+        onCancel={vi.fn()}
         // onConnect intentionally omitted
       />
     )
-    // No Connect button (nothing to connect to), but Approve/Deny are present.
+    // Nothing to connect to, and — the fix — no Approve/Deny loop trap either.
     expect(screen.queryByTestId('connect-mcp-btn')).toBeNull()
-    expect(screen.getByTestId('approval-approve-btn')).toBeDefined()
-    expect(screen.getByTestId('approval-deny-btn')).toBeDefined()
-    // Falls back to the generic label, not a half-rendered connect prompt.
-    expect(screen.queryByText(/to continue$/)).toBeNull()
+    expect(screen.queryByTestId('approval-approve-btn')).toBeNull()
+    expect(screen.queryByTestId('approval-deny-btn')).toBeNull()
+    // An explanatory suspended state, with Cancel still available.
+    expect(screen.getByText(/must be reconnected to continue/)).toBeDefined()
+    expect(screen.getByTestId('progress-cancel-btn')).toBeDefined()
   })
 })
 

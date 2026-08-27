@@ -346,10 +346,21 @@ async function handleMcpOAuthCallback(
     return { kind: 'invalid_state', reason: 'binding_mismatch' }
   }
 
-  const exchanged = await exchangeAuthCode(subject.decl, subject.namespace, input, deps)
-  if (exchanged.kind !== 'ok') return exchanged
-  const { provider, parsed } = exchanged
-
+  // ─── Membership guards run BEFORE the token exchange (R3-L1) ──────────────
+  // These guards depend only on the signed claims + the resolved subject
+  // (`subject.contextRef`, `deps.userContextsReader`, `claims.userId`) — never
+  // on the token. Running them first means a user removed from the Context
+  // during the ~600s mint→callback window fails here instead of first driving
+  // `exchangeAuthCode`, which burns the single-use auth-code against the
+  // provider and yields a real token only to discard it at a 403. The mint is
+  // still the primary gate, so this is not exploitable head-on; it just avoids
+  // the pointless exchange + code burn. Persistence (below) stays after the
+  // exchange, unchanged.
+  //
+  // `contextRef` is set iff this is a context-scoped grant that passed the
+  // membership guard; the persistence dispatch below keys off it (non-undefined
+  // ⇒ shared bootstrap), which also re-narrows it to `string` without a `!`.
+  let contextRef: string | undefined
   if (subject.grantScope === 'context') {
     // Shared identity — the coordinate is the server's authoritative contextRef.
     // Without it there is nothing safe to key the grant on: fail closed.
@@ -363,11 +374,20 @@ async function handleMcpOAuthCallback(
     if (!contextIds.includes(subject.contextRef)) {
       return { kind: 'context_membership_denied' }
     }
+    contextRef = subject.contextRef
+  }
+
+  const exchanged = await exchangeAuthCode(subject.decl, subject.namespace, input, deps)
+  if (exchanged.kind !== 'ok') return exchanged
+  const { provider, parsed } = exchanged
+
+  if (contextRef !== undefined) {
+    // Context-scoped grant, membership already verified above.
     await bootstrapSharedOAuthGrant(deps.db, deps.encryptionKey, {
       ownerKind: 'mcpserver',
       recipeNamespace: subject.namespace,
       recipeName: claims.mcpServerName,
-      contextId: subject.contextRef,
+      contextId: contextRef,
       oauthClientId: input.oauthClientId,
       // Bootstrapper = the signed initiator. Audit-only, first-wins on conflict.
       bootstrappedByUserId: claims.userId,

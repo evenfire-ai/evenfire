@@ -424,7 +424,7 @@ describe('AppService GFS upload security scope', () => {
 
       await expect(
         service.startGfsFileUpload('parent-rid', 'oversized-legacy.bin', filePath, 'main')
-      ).rejects.toThrow(`legacy GFS is limited to ${16 * 1024 * 1024} bytes`)
+      ).rejects.toThrow('legacy GFS is limited to 16 MiB')
       expect(service.gfsClient.createResource).not.toHaveBeenCalled()
       expect(service.gfsClient.replaceFile).not.toHaveBeenCalled()
     } finally {

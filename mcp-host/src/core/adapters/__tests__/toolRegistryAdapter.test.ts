@@ -150,7 +150,7 @@ describe('McpToolRegistryAdapter', () => {
         toolName: 'monday-server__list_boards',
         result: { error: 'MCP server monday-server auth failed (401)' },
         isError: true,
-        connectRequired: { mcpServerName: 'monday-server', provider: 'monday' },
+        connectRequired: { mcpServerName: 'monday-server' },
       })),
     } as any
 
@@ -161,7 +161,7 @@ describe('McpToolRegistryAdapter', () => {
     const output = await tool!.execute({})
     // The consumer observes the typed metadata marker, not an opaque error.
     expect(output.metadata).toEqual({
-      connect_required: { mcpServerName: 'monday-server', provider: 'monday' },
+      connect_required: { mcpServerName: 'monday-server' },
     })
     expect(output.is_error).toBe(true)
   })

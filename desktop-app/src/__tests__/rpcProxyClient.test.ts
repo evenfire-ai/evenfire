@@ -404,7 +404,7 @@ describe('RpcProxyClient.listSessions', () => {
     })
   })
 
-  it('surfaces U5 connect_required pendingApproval fields (reason/mcpServerName/provider)', async () => {
+  it('surfaces U5 connect_required pendingApproval fields (reason/mcpServerName) and drops a dead provider', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
@@ -419,6 +419,8 @@ describe('RpcProxyClient.listSessions', () => {
             displayName: 'clickup: create task',
             reason: 'connect_required',
             mcpServerName: 'mcp-clickup',
+            // Even if a legacy server still emits `provider`, the parser drops it:
+            // under HCC v2 it is always undefined and no renderer/action consumes it.
             provider: 'clickup',
           },
           turns: [],
@@ -426,17 +428,16 @@ describe('RpcProxyClient.listSessions', () => {
       })
     )
 
-    await expect(
-      client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')
-    ).resolves.toMatchObject({
+    const result = await client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')
+    expect(result).toMatchObject({
       pendingApproval: {
         requestId: 'req-1',
         displayName: 'clickup: create task',
         reason: 'connect_required',
         mcpServerName: 'mcp-clickup',
-        provider: 'clickup',
       },
     })
+    expect(result.pendingApproval).not.toHaveProperty('provider')
   })
 
   it('keeps generic pendingApproval byte-identical when the U5 fields are absent (back-compat)', async () => {

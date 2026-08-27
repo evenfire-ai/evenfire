@@ -808,12 +808,11 @@ export type TaskProgressStreamEvent =
         displayName: string
         reason: string
         // U5 (mcp-oauth reactive consent): present ONLY when
-        // `reason === 'connect_required'` — the mcp-host emitter attaches these
-        // so the desktop renders a "Connect <server>" prompt (not the generic
+        // `reason === 'connect_required'` — the mcp-host emitter attaches this so
+        // the desktop renders a "Connect <server>" prompt (not the generic
         // approval prompt) and correlates the later deep-link completion back to
         // this suspension by `mcpServerName`. Absent for `approval_required`.
         mcpServerName?: string
-        provider?: string
       }
     }
   | { type: 'cancelled'; data: { taskId: string; reason: string } }
@@ -884,12 +883,11 @@ export interface PendingApprovalLite {
   displayName: string
   // U5 (mcp-oauth reactive consent): additive. `reason === 'connect_required'`
   // marks a suspension that needs an OAuth "Connect <server>" flow rather than a
-  // generic tool approval; `mcpServerName`/`provider` identify the server to
-  // connect and correlate the deep-link completion back to this suspension.
+  // generic tool approval; `mcpServerName` identifies the server to connect and
+  // correlates the deep-link completion back to this suspension.
   // Absent on ordinary `approval_required` suspensions (byte-identical there).
   reason?: string
   mcpServerName?: string
-  provider?: string
 }
 
 /**

@@ -256,6 +256,5 @@ export interface ToolCallResult {
    */
   connectRequired?: {
     mcpServerName: string
-    provider?: string
   }
 }

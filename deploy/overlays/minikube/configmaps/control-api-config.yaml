@@ -40,7 +40,8 @@ data:
   # by the user's browser and NOT matching the provider's registered redirect URI.
   # Locally the user consents in their own browser, so the callback must land on
   # the port-forwarded loopback. Register this EXACT literal as the redirect URI
-  # in each provider's OAuth app: http://127.0.0.1:8090/api/v1/oauth-callback/<oauth.id>.
+  # in each provider's OAuth app: the CONTROL_API_OAUTH_CALLBACK_BASE_URL value
+  # below, suffixed with /api/v1/oauth-callback/<oauth.id>.
   # (Distinct from RPC_PROXY_OAUTH_CALLBACK_BASE_URL, which is the legacy
   # recipe/embed flow and uses `localhost` — do not conflate them.)
   CONTROL_API_OAUTH_CALLBACK_BASE_URL: 'http://127.0.0.1:8090'

@@ -935,7 +935,7 @@ describe('TaskExecutor', () => {
         name: 'monday__list_boards',
         content: 'MCP server monday auth failed (401)',
         is_error: true,
-        metadata: { connect_required: { mcpServerName: 'monday', provider: 'monday' } },
+        metadata: { connect_required: { mcpServerName: 'monday' } },
       })
       // Second resume (user connected) → the SAME tool now succeeds.
       .mockResolvedValueOnce({
@@ -960,7 +960,6 @@ describe('TaskExecutor', () => {
     expect(connectCall?.[2]).toMatchObject({
       reason: 'connect_required',
       mcpServerName: 'monday',
-      provider: 'monday',
       tool_name: 'monday__list_boards',
       tool_call_id: 'tc_1',
     })

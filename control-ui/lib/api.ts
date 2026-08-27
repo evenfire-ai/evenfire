@@ -50,6 +50,11 @@ export type Metadata = {
    * optimistic-concurrency precondition (docs/architecture/stateless-invariants.md).
    */
   resourceVersion?: string
+  /** K8s-standard creation timestamp (RFC3339). Not in the type for older
+   *  endpoints but carried by the new admin payloads. */
+  creationTimestamp?: string
+  /** K8s-standard resource UID. Same caveat as creationTimestamp. */
+  uid?: string
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_CONTROL_API_BASE_URL || '/control-api'

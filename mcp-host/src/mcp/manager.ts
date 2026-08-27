@@ -858,7 +858,7 @@ export class McpManager {
             toolName: fullToolName,
             result: { error: error.message },
             isError: true,
-            connectRequired: { mcpServerName: serverName, provider: info.oauth?.provider },
+            connectRequired: { mcpServerName: serverName },
           }
         }
         return {

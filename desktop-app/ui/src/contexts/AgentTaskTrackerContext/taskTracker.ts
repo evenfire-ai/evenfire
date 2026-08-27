@@ -594,7 +594,6 @@ export class TaskTracker implements AgentTaskTracker {
                 // resume the right task. Undefined for ordinary approvals.
                 reason: sd.reason,
                 mcpServerName: sd.mcpServerName,
-                provider: sd.provider,
               }
             : undefined
         })
