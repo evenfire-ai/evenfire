@@ -145,7 +145,7 @@ export const netPolOrphansDeletedTotal = counter({
 
 export const netPolOrphanSweepCappedTotal = counter({
   name: 'clerum_hcc_netpol_orphan_sweep_capped_total',
-  help: 'NetworkPolicy orphan sweeps that refused deletes because the candidate count exceeded the absolute or percent cap.',
+  help: 'NetworkPolicy orphan sweeps that refused deletes because the candidate count exceeded the absolute or percent cap. The pass still certifies.',
   labelNames: ['reason'] as const,
 })
 

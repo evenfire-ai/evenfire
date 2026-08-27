@@ -248,7 +248,7 @@ describe('NetworkPolicy orphan sweep cap (#478)', () => {
     expect(netPolOrphanSweepCappedTotal.inc).not.toHaveBeenCalled()
   })
 
-  it('M4: N+1 orphans refuse every delete, increment absolute cap, skip certification', async () => {
+  it('M4: N+1 orphans refuse every delete, increment absolute cap, and still certify', async () => {
     const orphans = Array.from({ length: 11 }, (_, i) =>
       orphanContextAllow(`ctx-orphan-${i}-old-server`, `orphan-context-${i}`)
     )
@@ -256,24 +256,39 @@ describe('NetworkPolicy orphan sweep cap (#478)', () => {
     const complete = vi.fn()
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
-    await expect(
-      reconciler.fullReconcile([], [], {
-        ensureDefaults: false,
-        contextInventoryAuthoritative: () => true,
-        serverInventoryAuthoritative: () => true,
-        onAuthoritativeRevocationComplete: complete,
-      })
-    ).rejects.toThrow(NETWORKPOLICY_ORPHAN_SWEEP_CAPPED_MESSAGE)
+    await reconciler.fullReconcile([], [], {
+      ensureDefaults: false,
+      contextInventoryAuthoritative: () => true,
+      serverInventoryAuthoritative: () => true,
+      onAuthoritativeRevocationComplete: complete,
+    })
+    await reconciler.fullReconcile([], [], {
+      ensureDefaults: false,
+      contextInventoryAuthoritative: () => true,
+      serverInventoryAuthoritative: () => true,
+      onAuthoritativeRevocationComplete: complete,
+    })
+    await reconciler.fullReconcile([], [], {
+      ensureDefaults: false,
+      contextInventoryAuthoritative: () => true,
+      serverInventoryAuthoritative: () => true,
+      onAuthoritativeRevocationComplete: complete,
+    })
 
     expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
     expect(netPolOrphanSweepCappedTotal.inc).toHaveBeenCalledWith({ reason: 'absolute' })
-    expect(netPolOrphanSweepCappedTotal.inc).toHaveBeenCalledTimes(1)
+    expect(netPolOrphanSweepCappedTotal.inc).toHaveBeenCalledTimes(3)
     expect(netPolOrphansDeletedTotal.inc).not.toHaveBeenCalled()
-    expect(complete).not.toHaveBeenCalled()
+    expect(complete).toHaveBeenCalledTimes(3)
+    expect(
+      warnSpy.mock.calls.some(call =>
+        String(call[0]).includes(NETWORKPOLICY_ORPHAN_SWEEP_CAPPED_MESSAGE)
+      )
+    ).toBe(true)
     warnSpy.mockRestore()
   })
 
-  it('M4 sibling: orphans over the percent share refuse with reason=percent', async () => {
+  it('M4 sibling: orphans over the percent share refuse deletes with reason=percent and still certify', async () => {
     const orphans = Array.from({ length: 5 }, (_, i) =>
       orphanContextAllow(`ctx-orphan-${i}-old-server`, `orphan-context-${i}`)
     )
@@ -281,18 +296,16 @@ describe('NetworkPolicy orphan sweep cap (#478)', () => {
     const complete = vi.fn()
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
-    await expect(
-      reconciler.fullReconcile([], [], {
-        ensureDefaults: false,
-        contextInventoryAuthoritative: () => true,
-        serverInventoryAuthoritative: () => true,
-        onAuthoritativeRevocationComplete: complete,
-      })
-    ).rejects.toThrow(NETWORKPOLICY_ORPHAN_SWEEP_CAPPED_MESSAGE)
+    await reconciler.fullReconcile([], [], {
+      ensureDefaults: false,
+      contextInventoryAuthoritative: () => true,
+      serverInventoryAuthoritative: () => true,
+      onAuthoritativeRevocationComplete: complete,
+    })
 
     expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
     expect(netPolOrphanSweepCappedTotal.inc).toHaveBeenCalledWith({ reason: 'percent' })
-    expect(complete).not.toHaveBeenCalled()
+    expect(complete).toHaveBeenCalledOnce()
     warnSpy.mockRestore()
   })
   it('S2: absolute cap is strict >; exactly N deletes and N+1 refuses', async () => {
@@ -319,17 +332,15 @@ describe('NetworkPolicy orphan sweep cap (#478)', () => {
     const completeEleven = vi.fn()
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
-    await expect(
-      reconciler.fullReconcile([], [], {
-        ensureDefaults: false,
-        contextInventoryAuthoritative: () => true,
-        serverInventoryAuthoritative: () => true,
-        onAuthoritativeRevocationComplete: completeEleven,
-      })
-    ).rejects.toThrow(NETWORKPOLICY_ORPHAN_SWEEP_CAPPED_MESSAGE)
+    await reconciler.fullReconcile([], [], {
+      ensureDefaults: false,
+      contextInventoryAuthoritative: () => true,
+      serverInventoryAuthoritative: () => true,
+      onAuthoritativeRevocationComplete: completeEleven,
+    })
     expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
     expect(netPolOrphanSweepCappedTotal.inc).toHaveBeenCalledWith({ reason: 'absolute' })
-    expect(completeEleven).not.toHaveBeenCalled()
+    expect(completeEleven).toHaveBeenCalledOnce()
     warnSpy.mockRestore()
   })
 

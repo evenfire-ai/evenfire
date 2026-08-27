@@ -178,8 +178,9 @@ export interface Config {
   netPolResyncIntervalSec: number
 
   // Absolute orphan-delete cap for a NetworkPolicy fullReconcile sweep.
-  // Candidates strictly above this count are refused (no deletes, no
-  // certification). Set via CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP.
+  // Candidates strictly above this count refuse deletes and increment the
+  // cap metric; the pass still certifies. Set via
+  // CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP.
   netPolOrphanDeleteCap: number
 
   // Percent orphan-delete cap (0-100) against the listed managed fleet.
@@ -761,7 +762,8 @@ export const config: Config = {
   // sweep. Unset or 0 → no interval.
   netPolResyncIntervalSec: getEnvInt('CONTEXT_MAPPER_NETPOL_RESYNC_SEC', 0),
   // Mass-delete guard for the namespace-wide orphan sweep. Thresholds are
-  // strict `>`: exactly N candidates still delete; N+1 refuses the pass.
+  // strict `>`: exactly N candidates still delete; N+1 refuses deletes and
+  // still certifies.
   netPolOrphanDeleteCap: getEnvInt('CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP', 10),
   netPolOrphanDeleteCapPercent: getEnvInt('CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT', 20),
 

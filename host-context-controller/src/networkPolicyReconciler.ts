@@ -90,8 +90,9 @@ export type NetPolOrphanSweepCapReason = 'absolute' | 'percent'
  * real orphan cannot look like a cache-wipe.
  *
  * Runs on every `fullReconcile` (startup, event-driven, and the resync
- * timer), not only a periodic tick. A legitimate bulk offboarding above
- * the cap withholds certification until an operator raises the env.
+ * timer), not only a periodic tick. A trip refuses the orphan deletes and
+ * increments the cap metric; the pass still certifies the rest of the
+ * inventory (#478: alert and do not delete — not "and do not certify").
  */
 export function evaluateNetPolOrphanSweepCap(
   orphanCount: number,
@@ -1476,40 +1477,47 @@ export class NetworkPolicyReconciler {
     if (capReason) {
       netPolOrphanSweepCappedTotal.inc({ reason: capReason })
       console.warn(
-        `[NetPol] Orphan sweep capped (${capReason}): ${orphanCandidates.length} candidates of ${listedManagedFleet} listed managed policies; refusing deletes and withholding certification`
+        `[NetPol] ${NETWORKPOLICY_ORPHAN_SWEEP_CAPPED_MESSAGE} (${capReason}): ${orphanCandidates.length} candidates of ${listedManagedFleet} listed managed policies; refusing deletes and continuing certification`
       )
-      throw new Error(NETWORKPOLICY_ORPHAN_SWEEP_CAPPED_MESSAGE)
     }
 
     // Delete orphaned Context policies across every L2 lane. Each lane uses
     // the canonical contextId effect key and rechecks authority plus live CRD
-    // presence immediately before its delete.
-    await cleanupOrphanedContextPolicies(
-      allContextPolicies,
-      policy =>
-        this.deleteSafetyPolicySnapshot(config.namespace, policy, contextCleanupAuthoritative),
-      (name, contextId) =>
-        `[NetPol] Deleting orphaned policy "${name}" (context "${contextId}" no longer exists)`,
-      'context-ingress'
-    )
-    await cleanupOrphanedContextPolicies(
-      allContextEgressPolicies,
-      policy =>
-        this.deleteSafetyPolicySnapshot(config.hostNamespace, policy, contextCleanupAuthoritative),
-      name => `[NetPol] Deleting orphaned L2 egress policy "${name}"`,
-      'context-host-egress'
-    )
-    await cleanupOrphanedContextPolicies(
-      allRpcProxyEgressPolicies,
-      policy =>
-        this.deleteSafetyPolicySnapshot(
-          config.rpcProxyNamespace,
-          policy,
-          contextCleanupAuthoritative
-        ),
-      name => `[NetPol] Deleting orphaned rpc-proxy egress policy "${name}"`,
-      'context-rpc-egress'
-    )
+    // presence immediately before its delete. A cap trip skips this sweep
+    // (and the external-orphan loop below) so a blown cache cannot mass-delete,
+    // then the pass still certifies live inventory.
+    if (!capReason) {
+      await cleanupOrphanedContextPolicies(
+        allContextPolicies,
+        policy =>
+          this.deleteSafetyPolicySnapshot(config.namespace, policy, contextCleanupAuthoritative),
+        (name, contextId) =>
+          `[NetPol] Deleting orphaned policy "${name}" (context "${contextId}" no longer exists)`,
+        'context-ingress'
+      )
+      await cleanupOrphanedContextPolicies(
+        allContextEgressPolicies,
+        policy =>
+          this.deleteSafetyPolicySnapshot(
+            config.hostNamespace,
+            policy,
+            contextCleanupAuthoritative
+          ),
+        name => `[NetPol] Deleting orphaned L2 egress policy "${name}"`,
+        'context-host-egress'
+      )
+      await cleanupOrphanedContextPolicies(
+        allRpcProxyEgressPolicies,
+        policy =>
+          this.deleteSafetyPolicySnapshot(
+            config.rpcProxyNamespace,
+            policy,
+            contextCleanupAuthoritative
+          ),
+        name => `[NetPol] Deleting orphaned rpc-proxy egress policy "${name}"`,
+        'context-rpc-egress'
+      )
+    }
 
     let liveDesiredRevisionChanged = false
     for (const context of contexts) {
@@ -1547,7 +1555,7 @@ export class NetworkPolicyReconciler {
     }
 
     // Clean up external egress policies for servers that no longer exist.
-    if (options.serverInventoryComplete !== false && serverCleanupAuthoritative()) {
+    if (!capReason && options.serverInventoryComplete !== false && serverCleanupAuthoritative()) {
       for (const policy of allExternalPolicies) {
         const serverName = policy.metadata?.labels?.[MCPSERVER_LABEL]
         if (!serverName) {

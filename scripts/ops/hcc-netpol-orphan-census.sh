@@ -13,7 +13,8 @@
 # The running controller still applies compiled defaults in that case
 # (absolute 10, percent 20 — host-context-controller/src/config.ts).
 # `controller_cap_would_trip` answers that question so a reader cannot
-# treat live_cap_would_trip=none as "the sweep will proceed".
+# treat live_cap_would_trip=none as "the controller will delete".
+# A trip refuses deletes only; the pass still certifies.
 #
 # Double-samples 90s apart. Adjudicates only when the desired Context +
 # McpServer identity set is identical across samples; otherwise
