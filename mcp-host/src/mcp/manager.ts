@@ -340,7 +340,11 @@ export class McpManager {
       this.pendingAdmissions.delete(key)
       this.installConnectedClient(key, serverConfig, client)
       control.onCommit?.()
-      console.log(`[McpManager] Installed client: ${key}`)
+      console.log(
+        `[McpManager] Installed client for server "${serverConfig.name}" (${
+          ownsServerStatus ? 'shared' : 'per-user'
+        } partition)`
+      )
       return 'applied'
     } catch (error) {
       if (!isCurrent() || this.pendingAdmissions.get(key)?.attempt !== attempt) {
@@ -349,7 +353,12 @@ export class McpManager {
         return 'stale'
       }
       this.pendingAdmissions.delete(key)
-      console.error(`[McpManager] Failed to install client ${key}:`, error)
+      console.error(
+        `[McpManager] Failed to install client for server "${serverConfig.name}" (${
+          ownsServerStatus ? 'shared' : 'per-user'
+        } partition):`,
+        error
+      )
       // Only the SHARED/eager path owns the per-serverName status transition. A
       // per-user admission failure must leave the representative's status intact.
       if (ownsServerStatus) this.recordAdmissionFailure(serverConfig, error)
