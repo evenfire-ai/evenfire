@@ -2,8 +2,8 @@ import type { Request, Response } from 'express'
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { createHash } from 'node:crypto'
 import { rateLimitMiddleware } from '../../../middleware/rateLimitMiddleware.js'
+import type { WorkflowCaller } from '../../../services/workflows/types.js'
 import { verifyAdminToken } from '../../../utils/auth/adminAuthToken.js'
-import { verifyExternalSessionToken } from '../../../utils/auth/externalSessionAuthToken.js'
 import { CONTROL_UI_ADMIN_SESSION_COOKIE, readCookie } from '../../../utils/auth/sessionCookies.js'
 import { extractBearerToken } from '../../../utils/extractBearerToken.js'
 
@@ -171,23 +171,22 @@ function unverifiedTriggerIpCredential(req: Request): string {
   return `ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
 }
 
-/** Stable per-account key. Raw tokens rotate and must not mint new buckets. */
-function verifiedUserSessionRateLimitSubject(token: string): string | null {
-  const userId = verifyExternalSessionToken(token)?.userId
-  return userId ? `user:${userId}` : null
+function boundExternalWorkflowCaller(req: Request): WorkflowCaller | undefined {
+  return (req as Request & { externalWorkflowCaller?: WorkflowCaller }).externalWorkflowCaller
 }
 
 /**
- * External trigger lane: prefer the verified Profile userId when
- * external-rest-api forwards both a service bearer and x-user-session-token.
- * An unverified session header falls back to IP so rotation cannot evade the cap.
+ * External trigger lane: use the user-session caller already authenticated by
+ * the single external-session boundary. Unbound or unverified session headers
+ * fall back to IP so token rotation cannot mint raw-token buckets.
  */
 export function workflowTriggerRateLimitCredential(req: Request): string | null {
+  const caller = boundExternalWorkflowCaller(req)
+  if (caller?.kind === 'user-session') return `user:${caller.claims.userId}`
+
   const userSessionToken = String(req.header('x-user-session-token') || '').trim()
   if (userSessionToken) {
-    return (
-      verifiedUserSessionRateLimitSubject(userSessionToken) || unverifiedTriggerIpCredential(req)
-    )
+    return unverifiedTriggerIpCredential(req)
   }
 
   const cookie = readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)

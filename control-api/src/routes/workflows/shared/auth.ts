@@ -31,6 +31,10 @@ export type AdminWorkflowAuthedRequest = Request & {
   adminWorkflowCaller?: Extract<WorkflowCaller, { kind: 'admin-ui' }>
 }
 
+export type ExternalWorkflowAuthedRequest = Request & {
+  externalWorkflowCaller?: Extract<WorkflowCaller, { kind: 'user-session' }>
+}
+
 export async function requireAdminWorkflowCaller(
   req: Request,
   res: Response
@@ -106,6 +110,46 @@ export async function requireExternalWorkflowCaller(
     res.status(503).json({ error: 'authority_unavailable' })
     return null
   }
+}
+
+export async function requireExternalWorkflowCallerMiddleware(
+  req: ExternalWorkflowAuthedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const caller = await requireExternalWorkflowCaller(req, res)
+    if (!caller) return
+    req.externalWorkflowCaller = caller
+    next()
+  } catch (error) {
+    next(error)
+  }
+}
+
+export function externalWorkflowCaller(
+  req: Request
+): ExternalWorkflowAuthedRequest['externalWorkflowCaller'] {
+  return (req as ExternalWorkflowAuthedRequest).externalWorkflowCaller
+}
+
+export function requireBoundExternalWorkflowCaller(req: Request, res: Response) {
+  const caller = externalWorkflowCaller(req)
+  if (!caller) {
+    if (!res.headersSent) {
+      res.status(401).json({ error: 'Unauthorized' })
+    }
+    return null
+  }
+  return caller
+}
+
+export function bindExternalWorkflowAuth(req: Request, res: Response, next: NextFunction): void {
+  void requireExternalWorkflowCallerMiddleware(
+    req as ExternalWorkflowAuthedRequest,
+    res,
+    next
+  ).catch(next)
 }
 
 export function requireMcpHostControlWorkflowCaller(

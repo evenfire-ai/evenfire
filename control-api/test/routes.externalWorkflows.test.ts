@@ -137,15 +137,37 @@ describe('routes/external/workflows', () => {
       expiresInSeconds: 600,
     })
     mockIsAdminTokenRevoked.mockResolvedValue(false)
-    mockAuthenticateExternalUserSession.mockImplementation(token =>
-      token === 'user-session-token'
-        ? Promise.resolve({
-            status: 'authenticated',
+    mockAuthenticateExternalUserSession.mockImplementation(token => {
+      if (token === 'user-session-token' || token === 'user-session-token-rotated') {
+        return Promise.resolve({
+          status: 'authenticated',
+          contract: 'v1',
+          claims: USER_SESSION_CLAIMS,
+          authorityContext: {
             contract: 'v1',
-            claims: USER_SESSION_CLAIMS,
-          })
-        : Promise.resolve({ status: 'invalid', reason: 'invalid_representation' })
-    )
+            userId: USER_SESSION_CLAIMS.userId,
+            tokenHash: `${token}-hash`,
+            issuedAt: USER_SESSION_CLAIMS.iat,
+            authGeneration: USER_SESSION_CLAIMS.authGeneration,
+          },
+        })
+      }
+      if (token === 'user-session-token-b') {
+        return Promise.resolve({
+          status: 'authenticated',
+          contract: 'v1',
+          claims: { ...USER_SESSION_CLAIMS, userId: 'user-456' },
+          authorityContext: {
+            contract: 'v1',
+            userId: 'user-456',
+            tokenHash: `${token}-hash`,
+            issuedAt: USER_SESSION_CLAIMS.iat,
+            authGeneration: USER_SESSION_CLAIMS.authGeneration,
+          },
+        })
+      }
+      return Promise.resolve({ status: 'invalid', reason: 'invalid_representation' })
+    })
     mockVerifyAdminToken.mockImplementation(token =>
       token === 'admin-token' ? ADMIN_CLAIMS : null
     )
@@ -586,14 +608,6 @@ describe('routes/external/workflows', () => {
     }
 
     it('keys independent trigger buckets for two user sessions behind the same service bearer', async () => {
-      mockVerifyExternalSessionToken.mockImplementation(token => {
-        if (token === 'user-session-token') return USER_SESSION_CLAIMS
-        if (token === 'user-session-token-b') {
-          return { ...USER_SESSION_CLAIMS, userId: 'user-456' }
-        }
-        return null
-      })
-
       await gateway.createResource('workflowrecipes', VALID_RECIPE as never, RECIPE_NS)
       mockRateLimiterAllowed()
       mockPoolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }).mockResolvedValueOnce({
@@ -630,13 +644,6 @@ describe('routes/external/workflows', () => {
     })
 
     it('reuses one trigger bucket for two session tokens of the same verified user', async () => {
-      mockVerifyExternalSessionToken.mockImplementation(token => {
-        if (token === 'user-session-token' || token === 'user-session-token-rotated') {
-          return USER_SESSION_CLAIMS
-        }
-        return null
-      })
-
       await gateway.createResource('workflowrecipes', VALID_RECIPE as never, RECIPE_NS)
       mockRateLimiterAllowed()
       mockPoolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }).mockResolvedValueOnce({

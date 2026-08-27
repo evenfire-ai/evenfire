@@ -20,7 +20,6 @@ import {
 
 const mockCheckAndIncrement = vi.hoisted(() => vi.fn())
 const mockVerifyAdminToken = vi.hoisted(() => vi.fn())
-const mockVerifyExternalSessionToken = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: (...args: unknown[]) => mockCheckAndIncrement(...args),
@@ -30,9 +29,6 @@ vi.mock('../src/observability/metrics.js', () => ({
 }))
 vi.mock('../src/utils/auth/adminAuthToken.js', () => ({
   verifyAdminToken: (token: string) => mockVerifyAdminToken(token),
-}))
-vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
-  verifyExternalSessionToken: (token: string) => mockVerifyExternalSessionToken(token),
 }))
 
 function signedClaims(sub: string) {
@@ -61,15 +57,6 @@ describe('routes/workflows/shared/rateLimit', () => {
     mockVerifyAdminToken.mockImplementation((token: string) =>
       token.startsWith('signed-') ? signedClaims(token.slice('signed-'.length)) : null
     )
-    mockVerifyExternalSessionToken.mockImplementation((token: string) => {
-      if (token === 'user-session-a' || token === 'user-session-a-rotated') {
-        return { userId: 'user-a' }
-      }
-      if (token === 'user-session-b') {
-        return { userId: 'user-b' }
-      }
-      return null
-    })
   })
 
   it('adminWorkflowRateLimitCredential accepts HttpOnly admin session cookies', () => {
@@ -428,8 +415,24 @@ describe('routes/workflows/shared/rateLimit', () => {
     expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_grants_read:[0-9a-f]{32}$/)
   })
 
-  it('workflowTriggerRateLimitCredential prefers verified userId over service bearer', () => {
+  function externalWorkflowReq(userId: string, headers: Record<string, string> = {}) {
+    return {
+      externalWorkflowCaller: {
+        kind: 'user-session',
+        claims: { userId },
+      },
+      header(name: string) {
+        return headers[name.toLowerCase()]
+      },
+    } as express.Request
+  }
+
+  it('workflowTriggerRateLimitCredential prefers bound userId over service bearer', () => {
     const req = {
+      externalWorkflowCaller: {
+        kind: 'user-session',
+        claims: { userId: 'user-a' },
+      },
       header(name: string) {
         if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
         if (name.toLowerCase() === 'x-user-session-token') return 'user-session-a'
@@ -440,18 +443,23 @@ describe('routes/workflows/shared/rateLimit', () => {
     expect(workflowTriggerRateLimitCredential(req)).toBe('user:user-a')
   })
 
-  it('workflowTriggerRateLimitCredential reuses one userId across rotated session tokens', () => {
-    const reqFor = (token: string) =>
-      ({
-        header(name: string) {
-          if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
-          if (name.toLowerCase() === 'x-user-session-token') return token
-          return undefined
-        },
-      }) as express.Request
-
-    expect(workflowTriggerRateLimitCredential(reqFor('user-session-a'))).toBe('user:user-a')
-    expect(workflowTriggerRateLimitCredential(reqFor('user-session-a-rotated'))).toBe('user:user-a')
+  it('workflowTriggerRateLimitCredential reuses one userId across rotated bound sessions', () => {
+    expect(
+      workflowTriggerRateLimitCredential(
+        externalWorkflowReq('user-a', {
+          authorization: 'Bearer service-token',
+          'x-user-session-token': 'user-session-a',
+        })
+      )
+    ).toBe('user:user-a')
+    expect(
+      workflowTriggerRateLimitCredential(
+        externalWorkflowReq('user-a', {
+          authorization: 'Bearer service-token',
+          'x-user-session-token': 'user-session-a-rotated',
+        })
+      )
+    ).toBe('user:user-a')
   })
 
   it('workflowTriggerRateLimitCredential keys unverified user tokens to IP, not the bearer', () => {
@@ -468,21 +476,7 @@ describe('routes/workflows/shared/rateLimit', () => {
     expect(workflowTriggerRateLimitCredential(req)).not.toBe('service-token')
   })
 
-  it('workflowTriggerRateLimitCredential keys a real signed session and rejects a forged one', async () => {
-    const actual = await vi.importActual<
-      typeof import('../src/utils/auth/externalSessionAuthToken.js')
-    >('../src/utils/auth/externalSessionAuthToken.js')
-    mockVerifyExternalSessionToken.mockImplementation(token =>
-      actual.verifyExternalSessionToken(token)
-    )
-
-    const signed = actual.signExternalSessionToken({
-      userId: 'user-signed-1',
-      email: 'signed@example.com',
-      teamId: 'team-1',
-      role: 'member',
-      authGeneration: 1,
-    })
+  it('workflowTriggerRateLimitCredential does not verify raw signed sessions directly', () => {
     const reqFor = (token: string) =>
       ({
         ip: '203.0.113.10',
@@ -493,7 +487,7 @@ describe('routes/workflows/shared/rateLimit', () => {
         },
       }) as express.Request
 
-    expect(workflowTriggerRateLimitCredential(reqFor(signed))).toBe('user:user-signed-1')
+    expect(workflowTriggerRateLimitCredential(reqFor('signed-session-token'))).toMatch(/^ip:/)
     expect(workflowTriggerRateLimitCredential(reqFor('forged-not-a-jwt'))).toMatch(/^ip:/)
     expect(workflowTriggerRateLimitCredential(reqFor('forged-not-a-jwt'))).not.toBe('service-token')
   })
@@ -544,6 +538,22 @@ describe('routes/workflows/shared/rateLimit', () => {
     })
 
     const app = express()
+    app.use((req, _res, next) => {
+      const token = req.header('x-user-session-token')
+      if (token === 'user-session-a') {
+        ;(req as express.Request & { externalWorkflowCaller?: unknown }).externalWorkflowCaller = {
+          kind: 'user-session',
+          claims: { userId: 'user-a' },
+        }
+      }
+      if (token === 'user-session-b') {
+        ;(req as express.Request & { externalWorkflowCaller?: unknown }).externalWorkflowCaller = {
+          kind: 'user-session',
+          claims: { userId: 'user-b' },
+        }
+      }
+      next()
+    })
     app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
       res.status(200).json({ ok: true })
     })
@@ -583,6 +593,16 @@ describe('routes/workflows/shared/rateLimit', () => {
     })
 
     const app = express()
+    app.use((req, _res, next) => {
+      const token = req.header('x-user-session-token')
+      if (token === 'user-session-a' || token === 'user-session-a-rotated') {
+        ;(req as express.Request & { externalWorkflowCaller?: unknown }).externalWorkflowCaller = {
+          kind: 'user-session',
+          claims: { userId: 'user-a' },
+        }
+      }
+      next()
+    })
     app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
       res.status(200).json({ ok: true })
     })
