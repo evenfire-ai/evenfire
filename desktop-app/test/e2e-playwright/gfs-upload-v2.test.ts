@@ -12,6 +12,7 @@ import {
   uniqueGfsFixtureName,
 } from '../../../tests/e2e/gfsUiFixtures'
 import {
+  E2E_GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES,
   GFS_UPLOAD_V2_BOUNDARIES,
   createDiskUploadFixture,
   createOversizedDiskUploadFixture,
@@ -480,7 +481,9 @@ test.describe('GFS Upload v2 — packaged Desktop runtime product policy', () =>
         rejectedSource.filePath
       )
       await expect(
-        appPage.getByRole('alert').filter({ hasText: `GFS writer limit is ${lowerMax} bytes` })
+        appPage
+          .getByRole('alert')
+          .filter({ hasText: `GFS writer permits files up to ${lowerMax / (1024 * 1024)} MiB` })
       ).toBeVisible({ timeout: 30_000 })
       expect(
         countGfsCreateSessions(fixture.resourceId, rejectedSource.fileName, getE2EUserId())
@@ -513,7 +516,9 @@ test.describe('GFS Upload v2 — approved negative Desktop journeys', () => {
   )
   test.setTimeout(45 * 60_000)
 
-  test('rejects a 209715201-byte file through the visible Desktop action', async ({ appPage }) => {
+  test('rejects a file one byte above the compatibility default through the visible Desktop action', async ({
+    appPage,
+  }) => {
     const fixtureName = uniqueGfsFixtureName('e2e-gfs-v2-negative-oversize-desktop')
     let cleanupFixture: ReturnType<typeof seedGfsDirectoryFixture> | undefined
     let cleanupSource: Awaited<ReturnType<typeof createOversizedDiskUploadFixture>> | undefined
@@ -537,7 +542,9 @@ test.describe('GFS Upload v2 — approved negative Desktop journeys', () => {
         source.filePath
       )
       await expect(
-        appPage.getByRole('alert').filter({ hasText: 'GFS writer limit is 209715200 bytes' })
+        appPage.getByRole('alert').filter({
+          hasText: `GFS writer permits files up to ${E2E_GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES / (1024 * 1024)} MiB`,
+        })
       ).toBeVisible({ timeout: 15_000 })
       await expect
         .poll(
