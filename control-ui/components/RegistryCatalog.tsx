@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { FilterSelect } from '@components/FilterSelect'
 import { MarketplaceTabs } from '@components/MarketplaceTabs'
-import { type RowAction, RowActionsMenu } from '@components/RowActionsMenu'
+import { type RowActionMenuItem, RowActionsMenu } from '@components/RowActionsMenu'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { IconStore } from '@components/Sidebar/icons'
 import { SkeletonTableRows } from '@components/SkeletonTableRows'
@@ -434,7 +434,7 @@ export default function RegistryCatalog() {
                                       setRemoveTarget(entry)
                                     },
                                   },
-                                ] satisfies RowAction[]
+                                ] satisfies RowActionMenuItem[]
                               }
                             />
                           </td>

@@ -15,26 +15,50 @@ import type {
 
 export function Button({
   block = false,
+  children,
   className,
+  disabled = false,
+  icon = false,
+  loading = false,
   size = 'md',
+  toolbar = false,
   type = 'button',
   variant = 'secondary',
   ...props
 }: ButtonProps) {
   return (
     <button
+      aria-busy={loading || undefined}
       className={cn(
         'cu-btn',
         variant === 'primary' && 'cu-btn--primary',
-        variant === 'ghost' && 'cu-btn--ghost',
+        (variant === 'ghost' || variant === 'ghost-danger') && 'cu-btn--ghost',
+        variant === 'ghost-danger' && !icon && 'cu-btn--ghost-danger',
+        // `cu-btn--icon.cu-btn--toolbar` sets `color` at specificity 0,2,0, which
+        // would beat `cu-btn--ghost-danger` at 0,1,0 and render a delete glyph
+        // grey. `cu-btn--danger-icon` is the existing class that already gets
+        // this combination right, so reuse it rather than recomposing.
+        variant === 'ghost-danger' && icon && 'cu-btn--danger-icon',
         variant === 'danger' && 'cu-btn--danger',
         size === 'sm' && 'cu-btn--sm',
         block && 'cu-btn--block',
+        icon && 'cu-btn--icon',
+        toolbar && 'cu-btn--toolbar',
         className
       )}
+      disabled={disabled || loading}
       type={type}
       {...props}
-    />
+    >
+      {loading ? (
+        <span className="cu-btn__content">
+          <span aria-hidden="true" className="cu-btn__spinner" />
+          {children}
+        </span>
+      ) : (
+        children
+      )}
+    </button>
   )
 }
 

@@ -194,7 +194,7 @@ function ConnectorContexts({
       {onAdd ? (
         <button
           type="button"
-          className="cu-btn cu-btn--secondary cu-btn--sm cu-connector-context-access__add"
+          className="cu-btn cu-btn--sm cu-connector-context-access__add"
           disabled={busy}
           onClick={onAdd}
         >

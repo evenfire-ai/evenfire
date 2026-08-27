@@ -772,7 +772,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                                   <div className="cu-row-actions cu-row-actions--wrap">
                                     <button
                                       type="button"
-                                      className="cu-btn cu-btn--secondary cu-btn--sm"
+                                      className="cu-btn cu-btn--sm"
                                       onClick={() => void resendPendingInvitation(invitation)}
                                       disabled={
                                         (busy && !loaded) || resendingInvitationId === invitation.id
@@ -902,7 +902,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                                   {user.passwordPendingFromAcceptedInvitation ? (
                                     <button
                                       type="button"
-                                      className="cu-btn cu-btn--secondary cu-btn--sm cu-nowrap"
+                                      className="cu-btn cu-btn--sm cu-nowrap"
                                       onClick={event => {
                                         event.stopPropagation()
                                         void resendPasswordSetupInvitation(user)
