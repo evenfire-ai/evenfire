@@ -183,7 +183,7 @@ export default function RegistryCatalog() {
     return (
       <button
         type="button"
-        className={`cu-link cu-link--sm cu-table__sort-link${isActive ? ' is-active' : ''}`}
+        className={`cu-table__sort-link${isActive ? ' is-active' : ''}`}
         onClick={() => toggleSort(key)}
         aria-label={`Sort by ${label.toLowerCase()} ${nextDirection}`}
         aria-pressed={isActive}

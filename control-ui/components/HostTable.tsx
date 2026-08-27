@@ -7,6 +7,7 @@ import { LlmProviderIcon } from './LlmProviderIcon'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconRobot } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
+import { TableEmptyRow } from './TableEmptyRow'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -199,8 +200,23 @@ export function HostTable({
           </table>
         </div>
       ) : filteredRows.length === 0 ? (
-        <div className="cu-empty">
-          {normalizedSearch ? 'No agents match this search.' : 'No agents found.'}
+        <div className="cu-table-wrap">
+          <table className="cu-table cu-table--header-band">
+            <thead>
+              <TableHeaderRow columns={HOST_COLUMNS} />
+            </thead>
+            <tbody>
+              <TableEmptyRow
+                colSpan={HOST_COLUMNS.length}
+                message={normalizedSearch ? 'No agents match this search.' : 'No agents found.'}
+                action={
+                  normalizedSearch
+                    ? { label: 'Clear search', onSelect: () => setSearchQuery('') }
+                    : undefined
+                }
+              />
+            </tbody>
+          </table>
         </div>
       ) : (
         <div className="cu-table-wrap">
