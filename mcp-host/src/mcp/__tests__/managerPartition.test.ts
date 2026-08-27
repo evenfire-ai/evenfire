@@ -611,3 +611,35 @@ describe('R4-M3 — detachServer purges the clients map for every ClientKey', ()
     expect(sdk.transports.length).toBe(3)
   })
 })
+
+// ─── R4-M4 · replaceServer keeps the SHARED representative (keepKey) alive ─────
+//
+// evictPartitionsExcept skips `keepKey` (the freshly-installed SHARED
+// representative). Removing `if (key === keepKey) continue` evicts it too, but
+// that mutant is MASKED whenever a per-user partition exists (M2's
+// representativeClient fallback returns the per-user client, so
+// getConnectedServers/getAllTools stay green). This test pins the invariant with
+// ZERO per-user partitions, where nothing can mask an evicted representative.
+//
+// NOTE (interdependence with M2, not fixed here): if a per-user partition were
+// present, the M2 fallback would keep getConnectedServers green even with the
+// representative evicted — this test deliberately holds no per-user partition so
+// it pins keepKey directly given the current code.
+
+describe('R4-M4 — replaceServer keeps the SHARED representative alive', () => {
+  it('the SHARED representative survives the swap (no per-user partitions to mask it)', async () => {
+    const { factory } = recordingFactory()
+    const manager = new McpManager(undefined, undefined, factory)
+    await manager.addServer(oauthUserServer())
+
+    // No per-user calls: the only ClientKey is the SHARED representative.
+    const outcome = await manager.replaceServer(oauthUserServer())
+    expect(outcome).toBe('applied')
+
+    // Representative survived → catalog + connectivity intact. With the keepKey
+    // skip removed, evictPartitionsExcept would delete the SHARED key and both
+    // would be empty.
+    expect(manager.getConnectedServers()).toEqual(['gh'])
+    expect(manager.getAllTools().map(t => t.name)).toEqual(['gh__do'])
+  })
+})
