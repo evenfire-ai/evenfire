@@ -12,9 +12,10 @@ import {
 } from '../../lib/api'
 import { collectWorkflowRecipeSecretRefs } from '../../lib/workflowRecipeSecretRefs'
 import { useConfirmDialog } from '../ConfirmDialog'
+import { RowActionsMenu } from '../RowActionsMenu'
 import { TablePanelHeader } from '../TablePanelHeader'
 import { useToast } from '../Toast'
-import { IconPencil, IconRefresh, IconX } from '../icons'
+import { IconRefresh } from '../icons'
 
 type RecipeSecretStatus = 'provisioned' | 'missing'
 
@@ -285,33 +286,30 @@ export function RecipeSecretsPanel({
                         Add
                       </button>
                     ) : (
-                      <div style={{ display: 'inline-flex', gap: '0.35rem' }}>
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--icon cu-btn--toolbar"
-                          onClick={() => navigateToEdit(row.name, row.namespace)}
-                          aria-label={`Update recipe secret ${row.name}`}
-                        >
-                          <IconPencil width={16} height={16} />
-                        </button>
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                          onClick={() => void deleteRow(row)}
-                          disabled={
-                            !row.uid ||
-                            !row.resourceVersion ||
-                            deletingName === `${row.namespace}/${row.name}`
-                          }
-                          aria-label={
-                            deletingName === `${row.namespace}/${row.name}`
-                              ? 'Deleting…'
-                              : `Delete recipe secret ${row.name}`
-                          }
-                        >
-                          <IconX width={16} height={16} />
-                        </button>
-                      </div>
+                      <RowActionsMenu
+                        ariaLabel={`Actions for recipe secret ${row.name}`}
+                        horizontalTrigger
+                        actions={[
+                          {
+                            key: 'edit',
+                            label: 'Update',
+                            onClick: () => navigateToEdit(row.name, row.namespace),
+                          },
+                          {
+                            key: 'delete',
+                            label:
+                              deletingName === `${row.namespace}/${row.name}`
+                                ? 'Deleting…'
+                                : 'Delete',
+                            danger: true,
+                            disabled:
+                              !row.uid ||
+                              !row.resourceVersion ||
+                              deletingName === `${row.namespace}/${row.name}`,
+                            onClick: () => void deleteRow(row),
+                          },
+                        ]}
+                      />
                     )}
                   </td>
                 </tr>

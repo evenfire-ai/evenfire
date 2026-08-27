@@ -321,6 +321,12 @@ function RegistryEntryDetailContent() {
           <div className="cu-card">
             <div className="cu-card__body cu-marketplace-detail">
               <div className="cu-expandable-detail cu-marketplace-detail__overview">
+                <div className="cu-marketplace-detail__description-block">
+                  <span className="cu-expandable-field__label">Description</span>
+                  <p className="cu-expandable-detail__description">
+                    {entry.description || 'No description provided.'}
+                  </p>
+                </div>
                 <div className="cu-expandable-detail__fields">
                   <div className="cu-expandable-field">
                     <span className="cu-expandable-field__label">Version</span>
@@ -337,10 +343,6 @@ function RegistryEntryDetailContent() {
                     ) : (
                       <span className="cu-muted">—</span>
                     )}
-                  </div>
-                  <div className="cu-expandable-field">
-                    <span className="cu-expandable-field__label">Downloads</span>
-                    <span>{entry.downloads}</span>
                   </div>
                   <div className="cu-expandable-field">
                     <span>{entry.category || 'Uncategorized'}</span>
@@ -387,9 +389,6 @@ function RegistryEntryDetailContent() {
                     </div>
                   )}
                 </div>
-                <p className="cu-expandable-detail__description">
-                  {entry.description || 'No description provided.'}
-                </p>
               </div>
 
               {images.length > 0 ? (

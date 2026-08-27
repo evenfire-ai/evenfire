@@ -6,13 +6,14 @@ import { getProviderDisplayLabel } from '@lib/llm'
 import type { LlmPriceTableProps } from './LlmPriceTable.types'
 import { LlmProviderIcon } from './LlmProviderIcon'
 import { MissingPriceWarning } from './MissingPriceWarning'
+import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconPrice } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconPencil, IconRefresh, IconX } from './icons'
+import { IconRefresh } from './icons'
 
 const PRICE_COLUMNS: TableHeaderColumn[] = [
   { key: 'provider', label: 'Provider', width: '10%' },
@@ -205,27 +206,24 @@ export function LlmPriceTable({
                       </span>
                     </td>
                     <td className="cu-px-actions">
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--icon cu-btn--toolbar"
-                        onClick={() => onEdit(price.id)}
-                        aria-label={`Edit price ${price.provider}/${price.model}`}
-                      >
-                        <IconPencil width={16} height={16} />
-                      </button>
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                        onClick={() => void onDelete(price)}
-                        disabled={deletingId === price.id}
-                        aria-label={
-                          deletingId === price.id
-                            ? 'Deleting price…'
-                            : `Delete price ${price.provider}/${price.model}`
-                        }
-                      >
-                        <IconX width={16} height={16} />
-                      </button>
+                      <RowActionsMenu
+                        ariaLabel={`Actions for price ${price.provider}/${price.model}`}
+                        horizontalTrigger
+                        actions={[
+                          {
+                            key: 'edit',
+                            label: 'Edit',
+                            onClick: () => onEdit(price.id),
+                          },
+                          {
+                            key: 'delete',
+                            label: deletingId === price.id ? 'Deleting price…' : 'Delete',
+                            danger: true,
+                            disabled: deletingId === price.id,
+                            onClick: () => void onDelete(price),
+                          },
+                        ]}
+                      />
                     </td>
                   </tr>
                 )
@@ -267,15 +265,17 @@ export function LlmPriceTable({
                       <span className="cu-px-badge cu-px-badge--warn">Missing</span>
                     </td>
                     <td className="cu-px-actions">
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--icon cu-btn--toolbar"
-                        onClick={() => onAddMissingPrice(item)}
-                        aria-label={`Add price for ${label}`}
-                        title={`Add price for ${label}`}
-                      >
-                        <IconPencil width={16} height={16} />
-                      </button>
+                      <RowActionsMenu
+                        ariaLabel={`Actions for price ${label}`}
+                        horizontalTrigger
+                        actions={[
+                          {
+                            key: 'add',
+                            label: 'Add price',
+                            onClick: () => onAddMissingPrice(item),
+                          },
+                        ]}
+                      />
                     </td>
                   </tr>
                 )
