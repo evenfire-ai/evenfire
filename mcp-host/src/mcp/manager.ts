@@ -181,7 +181,8 @@ export class McpManager {
   private installConnectedClient(
     key: string,
     serverConfig: McpServerInfo,
-    client: McpClient
+    client: McpClient,
+    ownsServerStatus: boolean
   ): void {
     this.clients.set(key, client)
     this.serverInfos.set(serverConfig.name, serverConfig)
@@ -193,7 +194,14 @@ export class McpManager {
     }
     keys.add(key)
 
-    this.statusTracker.markConnected(serverConfig.name, client.availableTools.length)
+    // Only the SHARED/eager owner writes the per-serverName status (symmetric
+    // with the gated markConnecting / recordAdmissionFailure in
+    // connectAndInstall). A per-user admission must NOT flip the representative's
+    // status to `connected` with its own partition's toolCount — a caller reading
+    // the per-serverName status would then see a down representative as connected.
+    if (ownsServerStatus) {
+      this.statusTracker.markConnected(serverConfig.name, client.availableTools.length)
+    }
   }
 
   private claimClientCleanup(client: McpClient): McpDetachedServerCleanup | undefined {
@@ -338,7 +346,7 @@ export class McpManager {
         return 'stale'
       }
       this.pendingAdmissions.delete(key)
-      this.installConnectedClient(key, serverConfig, client)
+      this.installConnectedClient(key, serverConfig, client, ownsServerStatus)
       control.onCommit?.()
       console.log(
         `[McpManager] Installed client for server "${serverConfig.name}" (${
@@ -415,7 +423,8 @@ export class McpManager {
 
     // Commit is synchronous: readers see either the complete previous
     // revision or the complete connected candidate, never a missing server.
-    this.installConnectedClient(key, serverConfig, candidate)
+    // replaceServer is always the SHARED/eager coordinator path → owns status.
+    this.installConnectedClient(key, serverConfig, candidate, true)
     control.onCommit?.()
 
     // The desired config changed for the whole server → per-user partitions are
