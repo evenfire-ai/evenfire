@@ -194,6 +194,28 @@ Tests updated in the same commit: `HostTable.test.tsx` (hover card now asserts a
   - RFC1123/displayName gating for generated private-context names → suite against `lib/agentContext.ts` (kept/extended for the generalized generator).
 - **Playwright e2e** (`tests/e2e/playwright/control-ui/`): specs that walked the Contexts section are rewritten to the user-visible replacement path or deleted when the whole subject is gone (`contexts.spec.ts`). Selector constants updated.
 - **QA-recorder specs** (`control-ui/e2e/qa-recorder-*.spec.ts`) + their `package.json` scripts: context-section journeys removed; connector/team journeys rewritten to agent-centric paths.
+- **New main-suite e2e regression catalog** (`tests/e2e/playwright/control-ui/`, built 2026-08-27) — 15 new specs + 1 extended, covering every §12 manual flow as automation:
+
+  | Spec | Covers (§12 flow) |
+  | --- | --- |
+  | `contexts.spec.ts` (extended) | A1–A5 incl. real private-slug → owning agent Connectors tab |
+  | `agents-connectors-hover.spec.ts` | B1–B2 |
+  | `agent-create-wizard.spec.ts` | B3 (rail labels + vocab; full creation stays in `qa-recorder-agent-create`) |
+  | `agent-connectors-tab.spec.ts` | B4 |
+  | `connectors-agent-access.spec.ts` | C1–C4 (incl. shared-scope confirm) |
+  | `connector-create-access-step.spec.ts` | C5–C6 |
+  | `connector-edit-access-tab.spec.ts` | C7–C9 |
+  | `marketplace-install-flow.spec.ts` | D1–D2 light (skips when no registry entries deployed; never clicks Install) |
+  | `member-access-tab.spec.ts` | E1–E3 (+ API round-trip verification, original mappings restored) |
+  | `team-access-tab.spec.ts` | E4 (+ legacy tab redirect) |
+  | `team-create-wizard.spec.ts` | E5 |
+  | `users-teams-access-column.spec.ts` | E6 |
+  | `agent-files-mounted-by.spec.ts` | F1–F2 (read-only; no PVC seeding) |
+  | `recipe-scope-copy.spec.ts` | G1–G2 |
+  | `token-budget-scope-label.spec.ts` | G3 |
+  | `global-no-context-vocab.spec.ts` | Global negative check across 7 routes |
+
+  Seeding goes through new `controlApi` helpers in `helpers/api-client.ts` (`createContext`, `createMcpServer`, user/team context GET/PUT, `createTeam`, `createBudget`, SFS list). Run with `make minikube-pf-all` then `cd tests/e2e/playwright && npx playwright test --project=control-ui <spec>`; env: `CONTROL_UI_URL` (default `:3000`), `CONTROL_API_URL` (default `:8090`), `TEST_ADMIN_USERNAME`/`TEST_ADMIN_PASSWORD` (default `admin`/`changeme123!`). Typecheck gate: `npx tsc -p tsconfig.typecheck.json` (added config — the package tsconfig lacks node types/rootDir for a clean standalone `tsc` run).
 - Verification per phase: `cd control-ui && npx tsc --noEmit && npm test` (no lint script exists in control-ui; typecheck via `tsc --noEmit`).
 
 ## 10. Progress log (append-only)
@@ -209,6 +231,7 @@ Tests updated in the same commit: `HostTable.test.tsx` (hover card now asserts a
 | 2026-08-26 | 4 | Product e2e `control-ui/e2e/registry-install.spec.ts` migrated: install flows drop the removed Context step (one fewer Continue; access scope is provisioned silently); J1 manual-create flows rewritten to the current form (egress via "Advanced options" disclosure on the Connector step, optional Access step passed through, "No credentials required" radio before submit). API-level sections (contextRef payloads, context1 allowlist assertions) intentionally unchanged — the backend contract is untouched. Full vitest 1700/1700 + `tsc` green after migration. |
 | 2026-08-27 | audit | Fresh-eyes residual audit (independent pass) + fixes. **Backend re-verified untouched**: `git diff --name-only a584c259a..HEAD` contains zero files outside `control-ui/`, `docs/`, `tests/e2e/` (an apparent `host-context-controller` diff was `origin/dev` moving forward under us mid-run — PR #471, someone else's lane; our branch never touched it). Leaks fixed: (1) RecipeEditor L1 Option B still said "a private Context \"wf-<recipeName>\"" (earlier scripted replace had silently missed it) → "a private connector scope"; (2) `lib/recipeValidator.ts` INFO hint same reword; (3) `lib/contextMutation.ts` default messages neutralized ("A required version is unavailable…", "This access changed since it was loaded…") + `hosts/[name]` regex updated + connectors page now also intercepts the version-unavailable path; (4) token-budget dimension label `context_ref` "Context" → "Connector scope"; (5) "Stored context and provenance" trace-detail heading → "Stored details and provenance"; (6) stale qa-recorder-connector-edit assertion on the removed context-slug meta now asserts it does NOT render. Tests updated (RecipeEditor, GovernedTraceDetails). Remaining "context" words verified as §2.5 exclusions: kubectl `--context` flags in recipe-status hints (kubeconfig syntax), manifest `contextRef` prose (wire format), raw-id fallback labels (by design, muted), `host-context-controller` service label, LLM "User context" (USER.md), guardrail `may add context`, plus intentional legacy redirects in `next.config.js`. Full vitest 1700/1700, `tsc` clean. No backend changes. |
 | 2026-08-27 | docs | Source-of-truth restructured after the audit: added §11 (audit report: backend-untouched proof incl. the `origin/dev`-moved warning, leak/fix table, verified intentional remnants), §12 (full click-by-click manual tester walkthrough, tables A–G + global negative check), renumbered open questions to §13; extended the §2.5 exclusion list to the complete audited set; corrected §4 E1 (hover card shows a neutral "Connectors" heading, not the agent name) and the §6.4 heading typo. |
+| 2026-08-27 | e2e | Built the full e2e regression catalog for the §12 flows: 15 new specs + `contexts.spec.ts` extended with the real-slug resolver case (112 tests / 24 files listed for the control-ui project). Extended `helpers/api-client.ts` with context/mcp-server/user-team-contexts/team/budget seeding + teardown helpers (all against the unchanged wire API). Added `tests/e2e/playwright/tsconfig.typecheck.json` so the package typechecks standalone (`npx tsc -p tsconfig.typecheck.json` → clean; the shipped tsconfig lacks node types + a covering rootDir). No specs executed here (no cluster) — they run under the normal `make test-playwright-control-ui` / T2 lane. control-ui unit suite re-verified 1700/1700. No backend changes. |
 
 ## 11. Post-implementation audit (2026-08-27)
 

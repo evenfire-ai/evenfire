@@ -4,6 +4,7 @@
  * The /contexts section is gone from the UI; legacy deep links resolve
  * client-side to user-facing destinations instead of dead-ending.
  */
+import { controlApi } from '../helpers/api-client'
 import { expect, test } from '../helpers/auth-fixture'
 import { CUI_DASHBOARD } from '../helpers/selectors'
 
@@ -42,5 +43,42 @@ test.describe('Control UI — Contexts removal', () => {
         .getByText(/^Agents( \(\d+\))?$/)
         .first()
     ).toBeVisible({ timeout: 15_000 })
+  })
+
+  test('/contexts/<private-slug> resolves to the owning agent Connectors tab', async ({
+    authedPage,
+  }) => {
+    const runId = Date.now()
+    const ctxName = `e2e-pw-resolver-ctx-${runId}`
+    const hostName = `e2e-pw-resolver-host-${runId}`
+    try {
+      await controlApi.ensureContextDeleted(ctxName)
+      await controlApi.createContext({
+        metadata: { name: ctxName },
+        spec: { contextId: ctxName, description: 'contexts.spec.ts redirect fixture' },
+      })
+      await controlApi.ensureHostDeleted(hostName)
+      await controlApi.createHost({
+        metadata: { name: hostName },
+        spec: {
+          host: hostName,
+          contextRef: ctxName,
+          secretRef: '',
+          channels: [],
+          model: { provider: 'openai', name: 'gpt-5.4-mini' },
+        },
+      })
+
+      await authedPage.goto(`${CONTROL_UI_URL}/contexts/${encodeURIComponent(ctxName)}`)
+      await authedPage.waitForURL(`**/agents/${hostName}/connectors`, { timeout: 15_000 })
+      expect(authedPage.url()).toContain(`/agents/${hostName}/connectors`)
+
+      // Deep link carrying a tab suffix resolves to the same destination.
+      await authedPage.goto(`${CONTROL_UI_URL}/contexts/${encodeURIComponent(ctxName)}/connectors`)
+      await authedPage.waitForURL(`**/agents/${hostName}/connectors`, { timeout: 15_000 })
+    } finally {
+      await controlApi.ensureHostDeleted(hostName)
+      await controlApi.ensureContextDeleted(ctxName)
+    }
   })
 })
