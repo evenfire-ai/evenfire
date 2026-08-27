@@ -126,6 +126,40 @@ function requireProfileUiBaseUrlForBrowserAction(): string {
 }
 
 /**
+ * Guarded wrapper around `shell.openExternal` for URLs that originate in data
+ * (server responses, config, deep-links) rather than fixed constants. Electron
+ * hands a non-web scheme (`file:`, `javascript:`, `data:`, a custom protocol
+ * such as `clerum://`) straight to the OS protocol handler, so every
+ * data-derived URL is scheme-checked before it can reach the browser.
+ *
+ * `requireHttps` pins OAuth authorize URLs to `https:` — real providers never
+ * issue a plaintext authorize endpoint. The default also permits `http:` for
+ * profile-ui links, which legitimately run on `http://localhost` in local dev
+ * (see `normalizeExplicitProfileUiBaseUrl`, which accepts both schemes).
+ *
+ * On rejection only the offending scheme is surfaced — never the full URL,
+ * whose query string may carry tokens or other secrets.
+ */
+async function openExternalDataUrl(
+  rawUrl: string,
+  options: { requireHttps?: boolean } = {}
+): Promise<void> {
+  const value = String(rawUrl ?? '')
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new Error('Refusing to open a malformed external URL')
+  }
+  const allowedProtocols = options.requireHttps ? ['https:'] : ['https:', 'http:']
+  if (!allowedProtocols.includes(parsed.protocol)) {
+    throw new Error(`Refusing to open external URL with unsupported scheme "${parsed.protocol}"`)
+  }
+  const { shell } = await import('electron')
+  await shell.openExternal(value)
+}
+
+/**
  * Finite-operation scope matrix — the single source of truth for the exact
  * scope array each finite (single request/response) Host RPC operation requests,
  * keyed by operation family (plan §11.4). EVERY entry carries HOST_WAKE_SCOPE:
@@ -1590,8 +1624,7 @@ export class AppService {
         `${activation.profileUiBaseUrl.replace(/\/+$/, '')}/`
       )
       profileUiUrl.searchParams.set('email', activation.email)
-      const { shell } = await import('electron')
-      await shell.openExternal(profileUiUrl.toString())
+      await openExternalDataUrl(profileUiUrl.toString())
       return {
         profileUiUrl: profileUiUrl.toString(),
         appName: activation.appName,
@@ -1620,8 +1653,7 @@ export class AppService {
     const profileUiBaseUrl = requireProfileUiBaseUrlForBrowserAction()
     const profileUiUrl = new URL('/forgot-password', `${profileUiBaseUrl.replace(/\/+$/, '')}/`)
     if (normalizedEmail) profileUiUrl.searchParams.set('email', normalizedEmail)
-    const { shell } = await import('electron')
-    await shell.openExternal(profileUiUrl.toString())
+    await openExternalDataUrl(profileUiUrl.toString())
     return { profileUiUrl: profileUiUrl.toString() }
   }
 
@@ -1641,8 +1673,7 @@ export class AppService {
         : '/settings/profile'
     const profileUiUrl = new URL(socialPath, `${profileUiBaseUrl.replace(/\/+$/, '')}/`)
     if (options.action === 'password') profileUiUrl.searchParams.set('action', 'password')
-    const { shell } = await import('electron')
-    await shell.openExternal(profileUiUrl.toString())
+    await openExternalDataUrl(profileUiUrl.toString())
     return { profileUiUrl: profileUiUrl.toString() }
   }
 
@@ -4497,8 +4528,7 @@ export class AppService {
         : await dialog.showMessageBox(opts)
       if (result.response !== 1) return
     }
-    const { shell } = await import('electron')
-    await shell.openExternal(result.authorizeUrl)
+    await openExternalDataUrl(result.authorizeUrl, { requireHttps: true })
   }
 
   /**
@@ -4543,8 +4573,7 @@ export class AppService {
         throw error
       }
     }
-    const { shell } = await import('electron')
-    await shell.openExternal(result.authorizeUrl)
+    await openExternalDataUrl(result.authorizeUrl, { requireHttps: true })
   }
 
   /**
