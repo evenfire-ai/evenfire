@@ -64,6 +64,7 @@ import {
   initialConvergencePassResultsTotal,
   initialConvergenceRetriesTotal,
   initialConvergenceSwallowedTotal,
+  netPolResyncTicksSkippedTotal,
 } from './metrics'
 import {
   DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE,
@@ -2853,12 +2854,18 @@ export class McpServerWatcher implements McpServerProvider {
       )
     }
 
-    // Interval > 0 is an ops enable, not a merge default. Issue #478: before
-    // any non-zero value, add a freshness gate or use a controller-runtime
-    // 10h-scale period. 300s is too aggressive while passes last minutes.
+    // Interval > 0 is an ops enable, not a merge default. Issue #478: with
+    // this skip-if-in-flight guard the chosen enable is 1500s. Without it the
+    // floor would be 3600s. 300s is not a valid enable while passes last
+    // minutes (treadmill ⇔ pass duration ≥ period). Event-driven coalescing
+    // is unchanged; only this timer trigger is filtered.
     const netPolResyncSec = config.netPolResyncIntervalSec
     if (netPolResyncSec > 0) {
       this.netPolResyncTimer = setInterval(() => {
+        if (this.initialConvergenceRuns.has('NetworkPolicy')) {
+          netPolResyncTicksSkippedTotal.inc({ reason: 'pass-in-flight' })
+          return
+        }
         void this.runInitialNetworkPolicyConvergence({ ensureDefaults: true })
       }, netPolResyncSec * 1000)
       console.log(`[K8s] NetworkPolicy periodic resync enabled (every ${netPolResyncSec}s)`)

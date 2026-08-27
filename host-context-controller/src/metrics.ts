@@ -149,6 +149,12 @@ export const netPolOrphanSweepCappedTotal = counter({
   labelNames: ['reason'] as const,
 })
 
+export const netPolResyncTicksSkippedTotal = counter({
+  name: 'clerum_hcc_netpol_resync_ticks_skipped_total',
+  help: 'Periodic NetworkPolicy resync ticks skipped because a convergence pass was already in flight.',
+  labelNames: ['reason'] as const,
+})
+
 export const contextReconciliationsTotal = counter({
   name: 'clerum_hcc_context_reconciliations_total',
   help: 'Total Context CRD reconciliations',

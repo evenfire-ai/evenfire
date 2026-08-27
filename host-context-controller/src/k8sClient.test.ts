@@ -54,7 +54,8 @@ async function readLabeledConvergenceMetric(
   name:
     | 'clerum_hcc_initial_convergence_swallowed_total'
     | 'clerum_hcc_initial_convergence_effects_dropped_total'
-    | 'clerum_hcc_initial_convergence_pass_results_total',
+    | 'clerum_hcc_initial_convergence_pass_results_total'
+    | 'clerum_hcc_netpol_resync_ticks_skipped_total',
   labels: Record<string, string>
 ): Promise<number> {
   const metric = registry.getSingleMetric(name)
@@ -11350,7 +11351,7 @@ describe('McpServerWatcher NetworkPolicy periodic resync (#478)', () => {
     )
     await watcher.stop()
   })
-  it('M2: a tick while a pass is in flight keeps one concurrent fullReconcile and trails after settle', async () => {
+  it('M2: a tick while a pass is in flight is skipped and does not trail', async () => {
     vi.useFakeTimers()
     mockConfig.netPolResyncIntervalSec = 300
     const activePass = deferred()
@@ -11367,15 +11368,26 @@ describe('McpServerWatcher NetworkPolicy periodic resync (#478)', () => {
       })
     const watcher = await startWatcherForNetPolResync()
     await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1))
+    const skippedBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_netpol_resync_ticks_skipped_total',
+      { reason: 'pass-in-flight' }
+    )
 
     await vi.advanceTimersByTimeAsync(300_000)
+    expect((watcher as any).initialConvergenceRuns.get('NetworkPolicy')?.trailingRequested).toBe(
+      false
+    )
     expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_netpol_resync_ticks_skipped_total', {
+        reason: 'pass-in-flight',
+      })
+    ).toBe(skippedBefore + 1)
 
     activePass.resolve()
-    await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(2))
-    expect(mocks.netPolFullReconcile.mock.calls[1]?.[2]).toEqual(
-      expect.objectContaining({ ensureDefaults: true })
-    )
+    await flushMicrotasks()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
     await watcher.stop()
   })
 
