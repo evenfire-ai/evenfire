@@ -425,7 +425,12 @@ export function ProgressStepper({
       <div data-testid="progress-stepper" className="progress-stepper status-suspended">
         <div className="stepper-suspended-row">
           <span className="stepper-suspended-icon">&#9888;</span>
-          <span className="stepper-suspended-label">
+          <span
+            className="stepper-suspended-label"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
             {canConnect
               ? `Connect ${connectServer} to continue`
               : isConnect
