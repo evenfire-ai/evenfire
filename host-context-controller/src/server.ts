@@ -20,6 +20,7 @@ import { mcpHostApiRequestsTotal, registry } from './metrics'
 import {
   type ReadinessInventoryDetail,
   type ReadinessReason,
+  probeReadinessReasonsFromDetail,
   readinessReasonsFromDetail,
 } from './readinessGate'
 import { McpServersResponse } from './types'
@@ -80,6 +81,8 @@ export class McpHostApiRateLimiter {
   }
 }
 
+type ReadinessLane = 'probe' | 'request'
+
 type ReadinessState =
   | { ready: true; status: 'ready' }
   | {
@@ -101,17 +104,19 @@ export class ContextMapperServer {
   private providerAuthoritativeFn: () => boolean
   private hostAuthoritativeFn: () => boolean
   private readinessDetailFn: (() => ReadinessInventoryDetail) | undefined
+  private probeAuthoritativeFn: (() => boolean) | undefined
   private ready = false
   private lastReadinessTransitionKey = ''
+  private lastProbeReadinessTransitionKey = ''
 
   constructor(
     provider: McpServerProvider,
     port: number = config.port,
     hostReconciler?: HostReconciler,
     hasDesktopFn?: (hostRef: string) => boolean,
-    // Fails closed. /ready is the assertion that no stale allow is live, and a
-    // caller that omits this gate gets no type error, so the default must
-    // withhold readiness rather than grant it.
+    // Fails closed. Per-request data endpoints assert that no stale allow is
+    // live, and a caller that omits this gate gets no type error, so the
+    // default must withhold authority rather than grant it.
     providerAuthoritativeFn: () => boolean = () => false,
     // Desktop status needs ONLY Host inventory authority, not the full
     // readiness inventory. Fails closed like providerAuthoritativeFn: a caller
@@ -119,7 +124,12 @@ export class ContextMapperServer {
     hostAuthoritativeFn: () => boolean = () => false,
     mcpAuthenticator?: McpApiAuthenticator,
     mcpAuthorization?: McpAuthorizationService,
-    readinessDetailFn?: () => ReadinessInventoryDetail
+    readinessDetailFn?: () => ReadinessInventoryDetail,
+    // Optional kubelet /ready gate. When omitted, /ready falls back to
+    // providerAuthoritativeFn (6-clause) so omitting this argument can never
+    // weaken readiness. Production wires resolveProbeAuthoritativeFn so the
+    // probe ignores phase-2 certification.
+    probeAuthoritativeFn?: () => boolean
   ) {
     this.provider = provider
     this.port = port
@@ -131,6 +141,7 @@ export class ContextMapperServer {
     this.providerAuthoritativeFn = providerAuthoritativeFn
     this.hostAuthoritativeFn = hostAuthoritativeFn
     this.readinessDetailFn = readinessDetailFn
+    this.probeAuthoritativeFn = probeAuthoritativeFn
   }
 
   /**
@@ -153,57 +164,92 @@ export class ContextMapperServer {
     this.ready = ready
   }
 
-  private collectReadinessReasons(): ReadinessReason[] | undefined {
+  private collectLaneReasons(lane: ReadinessLane): ReadinessReason[] | undefined {
     if (!this.readinessDetailFn) return undefined
     try {
-      return readinessReasonsFromDetail(this.readinessDetailFn())
+      const detail = this.readinessDetailFn()
+      return lane === 'probe'
+        ? probeReadinessReasonsFromDetail(detail)
+        : readinessReasonsFromDetail(detail)
     } catch (err) {
-      readinessLog.error('readiness detail check failed', { err })
+      readinessLog.error(
+        lane === 'probe' ? 'probe readiness detail check failed' : 'readiness detail check failed',
+        { err, lane }
+      )
       return undefined
     }
   }
 
-  private emitReadinessTransition(state: ReadinessState): void {
+  private emitReadinessTransition(state: ReadinessState, lane: ReadinessLane): void {
+    const keyHolder =
+      lane === 'probe' ? 'lastProbeReadinessTransitionKey' : 'lastReadinessTransitionKey'
     const reasons = !state.ready ? (state.reasons ?? []) : []
     const key = `${state.ready}:${state.status}:${reasons.join(',')}`
-    if (key === this.lastReadinessTransitionKey) return
-    this.lastReadinessTransitionKey = key
+    if (key === this[keyHolder]) return
+    this[keyHolder] = key
     if (state.ready) {
-      readinessLog.info('readiness became ready')
+      readinessLog.info('readiness became ready', { lane })
       return
     }
-    readinessLog.warn('readiness not ready', { status: state.status, reasons })
+    readinessLog.warn('readiness not ready', { lane, status: state.status, reasons })
   }
 
-  private getReadinessState(): ReadinessState {
+  private evaluateAuthoritativeLane(
+    lane: ReadinessLane,
+    authoritativeFn: () => boolean
+  ): ReadinessState {
     if (!this.ready) {
       const starting: ReadinessState = {
         ready: false,
         status: 'starting',
         message: 'Context mapper is still starting',
       }
-      this.emitReadinessTransition(starting)
+      this.emitReadinessTransition(starting, lane)
       return starting
     }
 
     try {
-      if (this.providerAuthoritativeFn()) {
+      if (authoritativeFn()) {
         const ready: ReadinessState = { ready: true, status: 'ready' }
-        this.emitReadinessTransition(ready)
+        this.emitReadinessTransition(ready, lane)
         return ready
       }
     } catch (err) {
-      readinessLog.error('provider authority readiness check failed', { err })
+      readinessLog.error(
+        lane === 'probe'
+          ? 'probe authority readiness check failed'
+          : 'provider authority readiness check failed',
+        { err, lane }
+      )
     }
 
     const degraded: ReadinessState = {
       ready: false,
       status: 'degraded',
-      message: 'Context mapper provider inventory is not authoritative',
-      reasons: this.collectReadinessReasons(),
+      message:
+        lane === 'probe'
+          ? 'Context mapper watch inventory is not fresh'
+          : 'Context mapper provider inventory is not authoritative',
+      reasons: this.collectLaneReasons(lane),
     }
-    this.emitReadinessTransition(degraded)
+    this.emitReadinessTransition(degraded, lane)
     return degraded
+  }
+
+  private getReadinessState(): ReadinessState {
+    return this.evaluateAuthoritativeLane('request', this.providerAuthoritativeFn)
+  }
+
+  /**
+   * Kubelet /ready state. When probeAuthoritativeFn is omitted, fall back to
+   * the 6-clause provider gate so omitting the 10th constructor argument
+   * cannot weaken readiness.
+   */
+  private getProbeReadinessState(): ReadinessState {
+    if (this.probeAuthoritativeFn === undefined) {
+      return this.getReadinessState()
+    }
+    return this.evaluateAuthoritativeLane('probe', this.probeAuthoritativeFn)
   }
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -253,9 +299,9 @@ export class ContextMapperServer {
       return
     }
 
-    // Readiness check
+    // Readiness check — watch freshness only when a probe gate is wired.
     if (req.method === 'GET' && url.pathname === '/ready') {
-      const readiness = this.getReadinessState()
+      const readiness = this.getProbeReadinessState()
       const body: { status: string; ready: boolean; reasons?: ReadinessReason[] } = {
         status: readiness.status,
         ready: readiness.ready,
@@ -599,7 +645,7 @@ export class ContextMapperServer {
         'GET /': 'This information page',
         'GET /health': "Health check endpoint - returns { status: 'ok', ready: boolean }",
         'GET /ready':
-          'Readiness endpoint - returns 200 after warm-up while provider inventory is authoritative',
+          'Readiness endpoint - returns 200 after warm-up while watch inventory is fresh',
         'GET /api/v1/mcpservers': 'List all McpServer resources',
         'GET /api/v2/hosts/self/mcpservers': 'List MCP servers for the authenticated Host',
         'POST /api/v2/hosts/self/mcpservers/credential':
