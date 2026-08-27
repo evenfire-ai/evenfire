@@ -2288,6 +2288,10 @@ export class HostReconciler {
         )
         return
       }
+      // The outer read above treats 404 as a transient throw so this Host
+      // reconcile requeues and recreates. The helper read below is the #472
+      // contract: 404 means gone, return, and the next Host reconcile
+      // recreates. Same object, two 404 policies — accepted, not a bug.
       try {
         await replaceWithConflictRetry({
           description: `channel-reader Deployment "${name}"`,
