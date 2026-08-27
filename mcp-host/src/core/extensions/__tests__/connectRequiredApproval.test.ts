@@ -49,4 +49,15 @@ describe('buildConnectRequiredApproval', () => {
     expect(approval.tool_source_ref).toBe('monday')
     expect(typeof approval.request_id).toBe('string')
   })
+
+  it('uses the authoritative server name for a server whose own name contains "__" (R3-L3)', () => {
+    // getMcpServerPrefix splits on the FIRST '__' → 'my' for this tool, but the
+    // authoritative server name is 'my__srv'. tool_source_ref must match the HITL
+    // gate's sourceRef (the whole server name), not the truncated prefix.
+    const approval = buildConnectRequiredApproval(
+      { id: 'call-2', name: 'my__srv__do', arguments: {} },
+      { mcpServerName: 'my__srv' }
+    )
+    expect(approval.tool_source_ref).toBe('my__srv')
+  })
 })

@@ -83,7 +83,12 @@ export function buildConnectRequiredApproval(
     request_id: randomUUID(),
     tool_name: call.name,
     tool_kind: 'mcp_server_tool',
-    tool_source_ref: getMcpServerPrefix(call.name),
+    // The authoritative server name is the marker's mcpServerName (set from the
+    // manager's sourceRef), mirroring the HITL gate's createSuspension
+    // (tool_source_ref = traceDescriptor.sourceRef). getMcpServerPrefix splits on
+    // the FIRST '__', so it truncates a server whose own name contains '__';
+    // reuse the marker to keep both suspension paths consistent (R3-L3).
+    tool_source_ref: marker.mcpServerName,
     parameters: call.arguments,
     description: `Connect ${marker.mcpServerName} to continue`,
     tool_call_id: call.id,
