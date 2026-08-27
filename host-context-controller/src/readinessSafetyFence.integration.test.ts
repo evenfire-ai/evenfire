@@ -12,13 +12,20 @@
  * predicate, and the HTTP server are the production classes, so the assertion
  * is end-to-end: a delete that loses its uid/resourceVersion precondition
  * during the additive phase — the 409 a second writer produces, and every
- * rollout opens a two-replica window for one — must turn /ready from 200 into
- * 503, and a later clean pass must turn it back.
+ * rollout opens a two-replica window for one — must 503 per-request data
+ * endpoints while /ready stays 200 (watch freshness only), and a later clean
+ * pass must reopen the API.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as http from 'http'
 import { McpServerWatcher } from './k8sClient'
 import { registry } from './metrics'
+import {
+  resolveHostAuthoritativeFn,
+  resolveProbeAuthoritativeFn,
+  resolveProviderAuthoritativeFn,
+  resolveReadinessDetailFn,
+} from './readinessGate'
 import { ContextMapperServer } from './server'
 
 const mocks = vi.hoisted(() => ({
@@ -146,6 +153,20 @@ async function readyStatus(server: InstanceType<typeof ContextMapperServer>): Pr
   })
 }
 
+async function apiStatus(server: InstanceType<typeof ContextMapperServer>): Promise<number> {
+  const listener = (server as unknown as { server: http.Server | null }).server
+  const address = listener?.address()
+  if (!address || typeof address === 'string') throw new Error('readiness listener never bound')
+  return new Promise((resolve, reject) => {
+    http
+      .get({ host: '127.0.0.1', port: address.port, path: '/api/v1/mcpservers' }, res => {
+        res.resume()
+        res.on('end', () => resolve(res.statusCode ?? 0))
+      })
+      .on('error', reject)
+  })
+}
+
 /** Aligns every revocation counter so only the fence can gate readiness. */
 
 async function readLabeledMetric(name: string, labels: Record<string, string>): Promise<number> {
@@ -177,7 +198,7 @@ function alignRevocationCounters(watcher: InstanceType<typeof McpServerWatcher>)
   w.networkPolicyRevocationServerRevision = w.mcpServerDesiredRevision
 }
 
-describe('readiness withdrawal on a real lost delete fence', () => {
+describe('lost delete fence: per-request 503 while /ready stays 200', () => {
   let watcher: InstanceType<typeof McpServerWatcher>
   let server: InstanceType<typeof ContextMapperServer>
 
@@ -191,8 +212,17 @@ describe('readiness withdrawal on a real lost delete fence', () => {
     mocks.replaceNamespacedNetworkPolicy.mockResolvedValue({})
     mocks.readNamespacedNetworkPolicy.mockResolvedValue(stalePolicy)
     watcher = new McpServerWatcher()
-    server = new ContextMapperServer(watcher, 0, undefined, undefined, () =>
-      watcher.isReadinessInventoryAuthoritative()
+    server = new ContextMapperServer(
+      watcher,
+      0,
+      undefined,
+      undefined,
+      resolveProviderAuthoritativeFn(watcher),
+      resolveHostAuthoritativeFn(watcher),
+      undefined,
+      undefined,
+      resolveReadinessDetailFn(watcher),
+      resolveProbeAuthoritativeFn(watcher)
     )
     await server.start()
     server.setReady(true)
@@ -203,7 +233,7 @@ describe('readiness withdrawal on a real lost delete fence', () => {
     await watcher.stop()
   })
 
-  it('turns /ready from 200 to 503 when the additive phase loses a delete fence, and back on a clean pass', async () => {
+  it('503s the data path when the additive phase loses a delete fence, keeps /ready 200, and reopens the API on a clean pass', async () => {
     const reconciler = (watcher as unknown as { netPolReconciler: any }).netPolReconciler
     alignRevocationCounters(watcher)
 
@@ -217,6 +247,7 @@ describe('readiness withdrawal on a real lost delete fence', () => {
       onAuthoritativeRevocationComplete: () => {},
     })
     alignRevocationCounters(watcher)
+    expect(await apiStatus(server)).toBe(200)
     expect(await readyStatus(server)).toBe(200)
 
     // The stale allow only becomes visible after the authoritative phase has
@@ -248,7 +279,8 @@ describe('readiness withdrawal on a real lost delete fence', () => {
     // Only the fence knows this pass left an allow it classified as stale.
     alignRevocationCounters(watcher)
     expect(reconciler.hasCertifiedSafetyInventory()).toBe(false)
-    expect(await readyStatus(server)).toBe(503)
+    expect(await apiStatus(server)).toBe(503)
+    expect(await readyStatus(server)).toBe(200)
 
     // The retry lands: the allow is gone and the pass certifies again.
     mocks.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
@@ -261,10 +293,11 @@ describe('readiness withdrawal on a real lost delete fence', () => {
     })
     alignRevocationCounters(watcher)
     expect(reconciler.hasCertifiedSafetyInventory()).toBe(true)
+    expect(await apiStatus(server)).toBe(200)
     expect(await readyStatus(server)).toBe(200)
   })
 
-  it('withholds readiness when the authoritative pass loses a delete fence under a provided safety snapshot', async () => {
+  it('503s the data path when the authoritative pass loses a delete fence under a provided safety snapshot', async () => {
     const reconciler = (watcher as unknown as { netPolReconciler: any }).netPolReconciler
     alignRevocationCounters(watcher)
 
@@ -278,6 +311,7 @@ describe('readiness withdrawal on a real lost delete fence', () => {
       onAuthoritativeRevocationComplete: () => {},
     })
     alignRevocationCounters(watcher)
+    expect(await apiStatus(server)).toBe(200)
     expect(await readyStatus(server)).toBe(200)
 
     // Unlike the additive-phase test above, the stale allow is visible to the
@@ -326,7 +360,8 @@ describe('readiness withdrawal on a real lost delete fence', () => {
 
     alignRevocationCounters(watcher)
     expect(reconciler.hasCertifiedSafetyInventory()).toBe(false)
-    expect(await readyStatus(server)).toBe(503)
+    expect(await apiStatus(server)).toBe(503)
+    expect(await readyStatus(server)).toBe(200)
 
     // A clean authoritative pass re-certifies and reopens the gate.
     mocks.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
@@ -339,6 +374,7 @@ describe('readiness withdrawal on a real lost delete fence', () => {
     })
     alignRevocationCounters(watcher)
     expect(reconciler.hasCertifiedSafetyInventory()).toBe(true)
+    expect(await apiStatus(server)).toBe(200)
     expect(await readyStatus(server)).toBe(200)
   })
 
@@ -377,6 +413,7 @@ describe('readiness withdrawal on a real lost delete fence', () => {
       onAuthoritativeRevocationComplete: () => {},
     })
     alignRevocationCounters(watcher)
+    expect(await apiStatus(server)).toBe(200)
     expect(await readyStatus(server)).toBe(200)
 
     // The authoritative pass loses its delete fence under the provided
@@ -407,7 +444,8 @@ describe('readiness withdrawal on a real lost delete fence', () => {
     ).rejects.toThrow()
     alignRevocationCounters(watcher)
     expect(reconciler.hasCertifiedSafetyInventory()).toBe(false)
-    expect(await readyStatus(server)).toBe(503)
+    expect(await apiStatus(server)).toBe(503)
+    expect(await readyStatus(server)).toBe(200)
 
     // Fire a same-identity MODIFIED delta. Its scoped revocation completes
     // (its label-scoped LISTs are clean) and it carries a delta certificate,
@@ -433,7 +471,8 @@ describe('readiness withdrawal on a real lost delete fence', () => {
       expect(w.networkPolicyRevocationContextRevision).not.toBe(w.contextDesiredRevision)
       expect(reconciler.hasCertifiedSafetyInventory()).toBe(false)
       alignRevocationCounters(watcher)
-      expect(await readyStatus(server)).toBe(503)
+      expect(await apiStatus(server)).toBe(503)
+      expect(await readyStatus(server)).toBe(200)
     } finally {
       warnSpy.mockRestore()
     }
@@ -475,6 +514,7 @@ describe('readiness withdrawal on a real lost delete fence', () => {
       onAuthoritativeRevocationComplete: () => {},
     })
     alignRevocationCounters(watcher)
+    expect(await apiStatus(server)).toBe(200)
     expect(await readyStatus(server)).toBe(200)
 
     // The delta certificate is captured now, while the fence is still certified.
@@ -525,7 +565,8 @@ describe('readiness withdrawal on a real lost delete fence', () => {
       expect(w.networkPolicyRevocationContextRevision).not.toBe(w.contextDesiredRevision)
       expect(reconciler.hasCertifiedSafetyInventory()).toBe(false)
       alignRevocationCounters(watcher)
-      expect(await readyStatus(server)).toBe(503)
+      expect(await apiStatus(server)).toBe(503)
+      expect(await readyStatus(server)).toBe(200)
     } finally {
       warnSpy.mockRestore()
     }

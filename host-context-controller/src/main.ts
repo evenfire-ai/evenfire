@@ -23,6 +23,7 @@ import { McpApiAuthenticator } from './mcpApiAuthentication'
 import { McpAuthorizationService } from './mcpAuthorization'
 import {
   resolveHostAuthoritativeFn,
+  resolveProbeAuthoritativeFn,
   resolveProviderAuthoritativeFn,
   resolveReadinessDetailFn,
 } from './readinessGate'
@@ -150,6 +151,11 @@ async function main(): Promise<void> {
   // dev (R2-M1). See resolveHostAuthoritativeFn.
   const hostAuthoritativeFn = resolveHostAuthoritativeFn(watcher)
   const readinessDetailFn = resolveReadinessDetailFn(watcher)
+  // /ready uses watch freshness only. Phase-2 certification stays on the
+  // per-request gate (providerAuthoritativeFn). Omitting this 10th argument
+  // would keep /ready on the 6-clause predicate and kubelet would evict
+  // during an uncertified safety window.
+  const probeAuthoritativeFn = resolveProbeAuthoritativeFn(watcher)
 
   // Stateless heartbeat consumption — mcp-host pods authenticate their
   // heartbeats toward control-api's /mcp-host facade (control-api is the
@@ -192,7 +198,8 @@ async function main(): Promise<void> {
     hostAuthoritativeFn,
     mcpAuthenticator,
     mcpAuthorization,
-    readinessDetailFn
+    readinessDetailFn,
+    probeAuthoritativeFn
   )
   await server.start()
 
