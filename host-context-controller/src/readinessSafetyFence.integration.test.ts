@@ -18,6 +18,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as http from 'http'
 import { McpServerWatcher } from './k8sClient'
+import { registry } from './metrics'
 import { ContextMapperServer } from './server'
 
 const mocks = vi.hoisted(() => ({
@@ -146,6 +147,27 @@ async function readyStatus(server: InstanceType<typeof ContextMapperServer>): Pr
 }
 
 /** Aligns every revocation counter so only the fence can gate readiness. */
+
+async function readLabeledMetric(name: string, labels: Record<string, string>): Promise<number> {
+  const metric = registry.getSingleMetric(name)
+  if (!metric) throw new Error(`${name} is not registered`)
+  const snapshot = await metric.get()
+  return (
+    snapshot.values.find(entry =>
+      Object.entries(labels).every(([key, value]) => entry.labels[key] === value)
+    )?.value ?? 0
+  )
+}
+
+async function readLaneSuccessTimestamp(lane: string): Promise<number> {
+  const metric = registry.getSingleMetric(
+    'clerum_hcc_initial_convergence_last_success_timestamp_seconds'
+  )
+  if (!metric) throw new Error('last_success metric is not registered')
+  const snapshot = await metric.get()
+  return snapshot.values.find(entry => entry.labels.lane === lane)?.value ?? 0
+}
+
 function alignRevocationCounters(watcher: InstanceType<typeof McpServerWatcher>): void {
   const w = watcher as unknown as Record<string, unknown>
   w.mcpServerCacheSynced = true
@@ -507,5 +529,87 @@ describe('readiness withdrawal on a real lost delete fence', () => {
     } finally {
       warnSpy.mockRestore()
     }
+  })
+
+  it('G9: certifies a real authoritative pass through watch-generation churn without authority-lost', async () => {
+    const w = watcher as unknown as Record<string, any>
+    w.contextCacheSynced = true
+    w.mcpServerCacheSynced = true
+    w.hostCacheSynced = true
+    w.contextWatchGeneration = 11
+    w.mcpWatchGeneration = 13
+    w.contexts.set('alpha', alphaContext)
+    const generationBefore = {
+      context: w.contextWatchGeneration,
+      server: w.mcpWatchGeneration,
+    }
+    const revisionBefore = {
+      context: w.contextDesiredRevision,
+      server: w.mcpServerDesiredRevision,
+    }
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const swallowedBefore = await readLabeledMetric(
+      'clerum_hcc_initial_convergence_swallowed_total',
+      { lane: 'NetworkPolicy', sink: 'authority-lost' }
+    )
+    const abortedBefore = await readLabeledMetric(
+      'clerum_hcc_initial_convergence_pass_results_total',
+      { lane: 'NetworkPolicy', result: 'aborted-authority' }
+    )
+    const certifiedBefore = await readLabeledMetric(
+      'clerum_hcc_initial_convergence_pass_results_total',
+      { lane: 'NetworkPolicy', result: 'certified' }
+    )
+    const successBefore = await readLaneSuccessTimestamp('NetworkPolicy')
+    let lists = 0
+    mocks.listNamespacedNetworkPolicy.mockImplementation(async () => {
+      lists += 1
+      if (lists === 1) {
+        w.contextWatchGeneration += 2
+        w.mcpWatchGeneration += 2
+      }
+      return { items: [] }
+    })
+    mocks.deleteNamespacedNetworkPolicy.mockResolvedValue({})
+
+    await w.runInitialNetworkPolicyConvergence()
+
+    expect(lists).toBeGreaterThan(0)
+    expect(w.contextWatchGeneration).toBe(generationBefore.context + 2)
+    expect(w.mcpWatchGeneration).toBe(generationBefore.server + 2)
+    expect(w.contextDesiredRevision).toBe(revisionBefore.context)
+    expect(w.mcpServerDesiredRevision).toBe(revisionBefore.server)
+    expect(
+      warnSpy.mock.calls.some(
+        call => String(call[0]) === '[K8s] pass ended without certifying: inventory authority lost'
+      )
+    ).toBe(false)
+    expect(
+      await readLabeledMetric('clerum_hcc_initial_convergence_swallowed_total', {
+        lane: 'NetworkPolicy',
+        sink: 'authority-lost',
+      })
+    ).toBe(swallowedBefore)
+    expect(
+      await readLabeledMetric('clerum_hcc_initial_convergence_pass_results_total', {
+        lane: 'NetworkPolicy',
+        result: 'aborted-authority',
+      })
+    ).toBe(abortedBefore)
+    expect(
+      await readLabeledMetric('clerum_hcc_initial_convergence_pass_results_total', {
+        lane: 'NetworkPolicy',
+        result: 'certified',
+      })
+    ).toBe(certifiedBefore + 1)
+    expect(await readLaneSuccessTimestamp('NetworkPolicy')).toBeGreaterThan(successBefore)
+    expect(w.networkPolicyRevocationContextRevision).toBe(w.contextDesiredRevision)
+    expect(w.networkPolicyRevocationServerRevision).toBe(w.mcpServerDesiredRevision)
+    expect(w.netPolReconciler.hasCertifiedSafetyInventory()).toBe(true)
+    warnSpy.mockRestore()
+    logSpy.mockRestore()
+    errorSpy.mockRestore()
   })
 })
