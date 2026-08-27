@@ -163,6 +163,8 @@ describe('CodexSubscriptionProvider', () => {
     const result = await provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
     expect(result.usage_reported).toBe(false)
     expect(result.usage).toEqual({ input_tokens: 0, output_tokens: 0, total_tokens: 0 })
+    expect(result.providerAttemptId).toBe('attempt-1')
+    expect(result.providerAttemptIndex).toBe(1)
   })
 
   it('omits MCP tools and caps natives at the Codex maxTools limit', () => {

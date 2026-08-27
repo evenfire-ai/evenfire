@@ -114,4 +114,24 @@ describe('Codex execution ticket', () => {
     )
     expect(hash).not.toContain('prompt')
   })
+
+  it('rejects a ticket that is missing a numeric exp claim', async () => {
+    const token = jwt.sign(
+      {
+        ...binding,
+        jti: randomUUID(),
+        typ: 'codex-execution-ticket',
+        provider: 'codex-subscription',
+      },
+      config.adminJwtPrivateKey,
+      {
+        algorithm: 'RS256',
+        issuer: config.adminJwtIssuer,
+        audience: CODEX_EXECUTION_TICKET_AUDIENCE,
+      }
+    )
+    expect(typeof jwt.decode(token)).toBe('object')
+    expect((jwt.decode(token) as jwt.JwtPayload).exp).toBeUndefined()
+    expect(verifyCodexExecutionTicket(token)).toBeNull()
+  })
 })

@@ -588,6 +588,8 @@ describe('LlmBridge authorized multi-provider fallback', () => {
       ...OK,
       usage_reported: false,
       usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      providerAttemptId: 'attempt-codex',
+      providerAttemptIndex: 1,
     }))
     const { bridge, credentialCalls, resolver } = makeBridge({ 'gpt-5.1': provider })
     const issuer = { issue: vi.fn() }
@@ -603,5 +605,40 @@ describe('LlmBridge authorized multi-provider fallback', () => {
     expect(resolver.resolve).not.toHaveBeenCalled()
     expect(credentialCalls).toEqual([])
     expect(JSON.stringify(result)).not.toMatch(/ticket|authorization|refreshToken|accessToken/i)
+    expect(result.providerAttemptId).toBe('attempt-codex')
+    expect(result.providerAttemptIndex).toBe(1)
+  })
+
+  it('does not execute a Codex target while its circuit is open', async () => {
+    const codex: PromptBridgeTarget = {
+      targetRef: 'codex-primary',
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+      credentialSlot: '',
+      connectionRef: 'team-plus',
+    }
+    const provider = new FakeProvider(async () => ({
+      ...OK,
+      usage_reported: false,
+      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      providerAttemptId: 'attempt-codex',
+      providerAttemptIndex: 1,
+    }))
+    const openBreaker = new CircuitBreaker({ minSamples: 1, failureRateThreshold: 0 })
+    openBreaker.record(false)
+    const { bridge, providerCalls } = makeBridge(
+      { 'gpt-5.1': provider },
+      undefined,
+      () => openBreaker
+    )
+
+    await expect(
+      bridge.complete({
+        ...request,
+        targets: [{ target: codex }],
+      })
+    ).rejects.toMatchObject({ code: 'provider_unavailable' })
+    expect(providerCalls).toEqual([])
+    expect(provider.completeSingleTurn).not.toHaveBeenCalled()
   })
 })

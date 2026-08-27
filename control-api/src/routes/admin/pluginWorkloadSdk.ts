@@ -11,10 +11,13 @@ import {
   withTransaction,
 } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
+import type { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { createPluginWorkloadSdkAdminRateLimit } from '../../middleware/pluginWorkloadSdkRateLimits.js'
+import { rootLogger } from '../../observability/logger.js'
 import { isCodexAssignmentAllowed } from '../../services/codexSubscriptionCatalog.js'
 import {
+  CODEX_CONNECTION_REF_ANNOTATION,
   assertCodexConnectionKey,
   isCodexUnassignedConnectionKey,
 } from '../../services/codexSubscriptionConnection.js'
@@ -327,6 +330,15 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
       ...(brokerBacked ? { connectionRef } : {}),
     })
   }
+  const brokerKeys = new Set(
+    targets
+      .filter(target => isBrokerBackedProvider(target.provider))
+      .map(target => target.connectionRef ?? '')
+  )
+  if (brokerKeys.size > 1) {
+    res.status(400).json({ error: 'codex_connection_ref_conflict' })
+    return null
+  }
   return targets
 }
 
@@ -350,7 +362,15 @@ export interface AdminPluginWorkloadSdkRouterDeps {
    * guarantee is testable through the seam; defaults to the shared emitter.
    */
   emitIncoherenceTolerated?: EmitHostSpecIncoherenceTolerated
+  /**
+   * Stamps `clerum.io/codex-connection-ref` on the WorkflowRecipe after a
+   * Codex promptBridge upsert. Authorize attests that annotation, not the
+   * Postgres grant row, so a successful choose must persist it.
+   */
+  gateway?: Pick<K8sGateway, 'patchResourceAnnotations'>
 }
+
+const log = rootLogger.child({ module: 'admin-plugin-workload-sdk' })
 
 export function createAdminPluginWorkloadSdkRouter(
   deps: AdminPluginWorkloadSdkRouterDeps = {}
@@ -739,6 +759,26 @@ export function createAdminPluginWorkloadSdkRouter(
       // Grant PERSISTED: NOW emit any Pieza D tolerations (never before the upsert
       // lands, so a failed upsert leaves no audit record — mini-spec 01).
       for (const event of pendingGrantTolerations) emitIncoherenceTolerated(event)
+      const brokerConnectionRef = promptTargets.find(target =>
+        isBrokerBackedProvider(target.provider)
+      )?.connectionRef
+      if (capabilityFamily === 'promptBridge' && brokerConnectionRef && deps.gateway) {
+        try {
+          await deps.gateway.patchResourceAnnotations(
+            'workflowrecipes',
+            recipeName,
+            { [CODEX_CONNECTION_REF_ANNOTATION]: brokerConnectionRef },
+            recipeNamespace
+          )
+        } catch (err) {
+          log.error(
+            { err, recipeNamespace, recipeName },
+            'failed to stamp Codex connection annotation on WorkflowRecipe'
+          )
+          res.status(503).json({ error: 'recipe_annotation_stamp_failed' })
+          return
+        }
+      }
       // Fase 6: attach any soft-quarantine warnings additively (older clients
       // ignore the field). Absent when there is nothing to warn about.
       res

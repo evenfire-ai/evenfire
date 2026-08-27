@@ -54,6 +54,8 @@ vi.mock('../src/services/codexSubscriptionCatalog.js', () => ({
 
 const DEFAULT_ADMIN_SUB = '11111111-1111-4111-8111-111111111111'
 
+const patchResourceAnnotations = vi.fn().mockResolvedValue({})
+
 function buildApp(sub: string | null = DEFAULT_ADMIN_SUB) {
   const app = express()
   app.use(express.json())
@@ -61,7 +63,7 @@ function buildApp(sub: string | null = DEFAULT_ADMIN_SUB) {
     ;(req as unknown as { adminAuth: { sub?: string } }).adminAuth = sub === null ? {} : { sub }
     next()
   })
-  app.use(createAdminPluginWorkloadSdkRouter())
+  app.use(createAdminPluginWorkloadSdkRouter({ gateway: { patchResourceAnnotations } }))
   return app
 }
 
@@ -107,6 +109,8 @@ beforeEach(() => {
   vi.mocked(pool.query).mockResolvedValue({ rows: [{ model: 'glm-4.7' }], rowCount: 1 } as never)
   vi.mocked(isCodexAssignmentAllowed).mockReset()
   vi.mocked(isCodexAssignmentAllowed).mockResolvedValue(false)
+  patchResourceAnnotations.mockReset()
+  patchResourceAnnotations.mockResolvedValue({})
 })
 
 describe('routes/admin/pluginWorkloadSdk — grants', () => {
@@ -600,6 +604,45 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         '11111111-1111-4111-8111-111111111111',
         expect.anything() // carrier transaction client (R1-H3 fase 2)
       )
+      expect(patchResourceAnnotations).toHaveBeenCalledWith(
+        'workflowrecipes',
+        'sdk-recipe',
+        { 'clerum.io/codex-connection-ref': 'team-plus' },
+        'sandbox-recipes'
+      )
+    })
+
+    it('returns 503 when the recipe annotation cannot be stamped after a Codex upsert', async () => {
+      vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g-codex' } as never)
+      vi.mocked(isCodexAssignmentAllowed).mockResolvedValue(true)
+      patchResourceAnnotations.mockRejectedValueOnce(new Error('apiserver down'))
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(codexGrantBody)
+      expect(res.status).toBe(503)
+      expect(res.body.error).toBe('recipe_annotation_stamp_failed')
+    })
+
+    it('rejects two Codex targets that name different grants', async () => {
+      vi.mocked(isCodexAssignmentAllowed).mockResolvedValue(true)
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send({
+          ...codexGrantBody,
+          promptTargets: [
+            codexGrantBody.promptTargets[0],
+            {
+              targetRef: 'codex-fallback',
+              provider: 'codex-subscription',
+              model: 'gpt-5.4',
+              credentialSlot: '',
+              connectionRef: 'team-other',
+            },
+          ],
+        })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('codex_connection_ref_conflict')
+      expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
     })
 
     it('fails closed when the connection is unknown, revoked, or does not offer the model', async () => {

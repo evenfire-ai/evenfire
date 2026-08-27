@@ -356,6 +356,10 @@ describe('WorkflowReconciler Codex scope provenance', () => {
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalled()
     expect(issuedScopes()).not.toContain('llm:codex:execute')
     expect(proxyPolicyBodies(networkingApi)).toEqual([])
+    expect(networkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
+      name: CODEX_PROXY_POLICY,
+      namespace: sandboxNamespace,
+    })
   })
 
   it('does not mint Codex scope or egress when the allowlist ConfigMap times out', async () => {
@@ -369,5 +373,9 @@ describe('WorkflowReconciler Codex scope provenance', () => {
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalled()
     expect(issuedScopes()).not.toContain('llm:codex:execute')
     expect(proxyPolicyBodies(networkingApi)).toEqual([])
+    expect(networkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
+      name: CODEX_PROXY_POLICY,
+      namespace: sandboxNamespace,
+    })
   })
 })

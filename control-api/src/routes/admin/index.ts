@@ -44,7 +44,7 @@ export function createAdminRouter(gateway: K8sGateway): Router {
   router.use(createAdminContextRouter())
   router.use(createAdminAgentsRouter())
   router.use(createAdminPersonalizationRouter(gateway))
-  router.use(createAdminPluginWorkloadSdkRouter())
+  router.use(createAdminPluginWorkloadSdkRouter({ gateway }))
   router.use(createAdminUsageRouter())
   router.use(createAdminLlmPricesRouter())
   router.use(createAdminLlmModelsRouter(gateway))

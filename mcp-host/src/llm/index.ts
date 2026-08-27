@@ -21,11 +21,6 @@ export type { ClassifiedError, SingleTurnProvider } from './types'
 const DEFAULT_CODEX_AUTHORIZE_GATEWAY =
   'http://nginx-workflow-approval-gateway.control-plane.svc.cluster.local:8092'
 
-function sanitizeLogValue(value: unknown): string {
-  const raw = typeof value === 'string' ? value : String(value ?? '')
-  return JSON.stringify(raw.replace(/[\r\n\u2028\u2029]/g, ''))
-}
-
 function createCodexRuntimeDeps() {
   const gateway = (config.mcpHostGatewayUrl ?? '').trim() || DEFAULT_CODEX_AUTHORIZE_GATEWAY
   return {
@@ -68,7 +63,7 @@ export function createLLMProvider(
   const modelName = modelConfig?.name
 
   if (!isLlmProvider(provider)) {
-    console.error('[LLM] Unknown provider: ' + sanitizeLogValue(provider))
+    console.error('[LLM] Unknown provider')
     return null
   }
 
@@ -79,13 +74,7 @@ export function createLLMProvider(
   const credentials = keys[provider] ?? {}
   for (const slot of descriptorFor(provider).credentialSlots) {
     if (slot.required && !credentials[slot.dataKey]) {
-      console.error(
-        '[LLM] ' +
-          sanitizeLogValue(provider) +
-          ' credential ' +
-          sanitizeLogValue(slot.dataKey) +
-          ' not found in secrets'
-      )
+      console.error('[LLM] required credential missing from secrets')
       return null
     }
   }
@@ -104,12 +93,7 @@ export function createLLMProvider(
       provider === 'codex-subscription' ? { codex: createCodexRuntimeDeps() } : undefined
     )
   } catch (err) {
-    console.error(
-      '[LLM] failed to construct ' +
-        sanitizeLogValue(provider) +
-        ': ' +
-        sanitizeLogValue(err instanceof Error ? err.message : 'error')
-    )
+    console.error('[LLM] failed to construct provider')
     return null
   }
 }

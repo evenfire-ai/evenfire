@@ -20,7 +20,8 @@
  *     fixture instead of the public internet. No live ChatGPT OAuth is used.
  */
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { request as httpsRequest } from 'node:https'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -193,32 +194,81 @@ function makeControlApiMock(): {
  * given to fetchFn has already passed the unmodified origin policy
  * (assertAllowedUpstreamUrl + assertResolvedUpstream); only the socket
  * destination changes, mirroring what the in-cluster NetworkPolicy/DNS pin
- * would do for a test upstream.
+ * would do for a test upstream. TLS is verified against the run-generated
+ * CA (SAN IP:127.0.0.1); certificate validation is never disabled.
  */
 function rewriteFetch(url: string | URL | Request, init?: RequestInit): Promise<Response> {
   const parsed = new URL(String(url))
   expect(parsed.origin).toBe('https://chatgpt.com')
   const target = new URL(parsed.pathname + parsed.search, UPSTREAM_BASE)
-  return fetch(target, init)
+  return trustedLoopbackFetch(target, init)
 }
 
 async function upstreamCounters(): Promise<Record<string, number>> {
-  const res = await fetch(`${UPSTREAM_BASE}/internal/counters`)
+  const res = await trustedLoopbackFetch(`${UPSTREAM_BASE}/internal/counters`)
   return (await res.json()) as Record<string, number>
 }
 
 let upstream: ChildProcess | undefined
 let workdir: string
 let servers: ProxyServers | undefined
-let previousTlsReject: string | undefined
+let fixtureCa: Buffer | undefined
+
+function trustedLoopbackFetch(url: string | URL, init?: RequestInit): Promise<Response> {
+  if (!fixtureCa) {
+    return Promise.reject(new Error('fixture CA is not ready'))
+  }
+  const target = new URL(String(url))
+  const headers: Record<string, string> = {}
+  if (init?.headers) {
+    new Headers(init.headers).forEach((value, key) => {
+      headers[key] = value
+    })
+  }
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest(
+      {
+        hostname: target.hostname,
+        port: target.port,
+        path: `${target.pathname}${target.search}`,
+        method: init?.method ?? 'GET',
+        headers,
+        ca: fixtureCa,
+        rejectUnauthorized: true,
+      },
+      res => {
+        const chunks: Buffer[] = []
+        res.on('data', chunk => chunks.push(chunk as Buffer))
+        res.on('end', () => {
+          const headerBag = new Headers()
+          for (const [key, value] of Object.entries(res.headers)) {
+            if (typeof value === 'string') headerBag.set(key, value)
+            else if (Array.isArray(value)) headerBag.set(key, value.join(', '))
+          }
+          resolve(
+            new Response(Buffer.concat(chunks), {
+              status: res.statusCode ?? 500,
+              headers: headerBag,
+            })
+          )
+        })
+      }
+    )
+    req.on('error', reject)
+    const body = init?.body
+    if (body == null) {
+      req.end()
+      return
+    }
+    if (typeof body === 'string' || body instanceof Uint8Array || Buffer.isBuffer(body)) {
+      req.end(body)
+      return
+    }
+    reject(new Error('unsupported request body in hermetic fixture fetch'))
+  })
+}
 
 beforeAll(async () => {
-  // The fixture is TLS-only with a run-generated self-signed certificate
-  // (never committed). All traffic stays on 127.0.0.1, so disabling TLS
-  // verification for this isolated test process does not weaken any
-  // production path.
-  previousTlsReject = process.env.NODE_TLS_REJECT_UNAUTHORIZED
-  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
   workdir = mkdtempSync(join(tmpdir(), 'codex-hermetic-'))
   const certPath = join(workdir, 'tls.crt')
   const keyPath = join(workdir, 'tls.key')
@@ -237,10 +287,13 @@ beforeAll(async () => {
       '-out',
       certPath,
       '-subj',
-      '/CN=codex-test-upstream.local',
+      '/CN=127.0.0.1',
+      '-addext',
+      'subjectAltName=IP:127.0.0.1',
     ],
     { stdio: 'ignore' }
   )
+  fixtureCa = readFileSync(certPath)
   upstream = spawn(process.execPath, [FIXTURE_UPSTREAM], {
     env: {
       ...process.env,
@@ -269,11 +322,6 @@ afterAll(async () => {
   await servers?.close()
   upstream?.kill('SIGTERM')
   rmSync(workdir, { recursive: true, force: true })
-  if (previousTlsReject === undefined) {
-    delete process.env.NODE_TLS_REJECT_UNAUTHORIZED
-  } else {
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = previousTlsReject
-  }
 })
 
 describe('hermetic authorize → proxy → fixture upstream → finalize', () => {

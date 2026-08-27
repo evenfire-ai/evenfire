@@ -5,7 +5,6 @@ import { deriveOAuthEncryptionKey } from '../oauth/encryption.js'
 import { rootLogger } from '../observability/logger.js'
 import { chatgptAccountIdFromJwt } from './chatgptAccountId.js'
 import {
-  getSafeCodexSubscriptionConnection,
   getSafeCodexSubscriptionConnectionById,
   loadCodexSubscriptionSecrets,
 } from './codexSubscriptionConnection.js'
@@ -194,9 +193,13 @@ export async function redeemLlmProviderAttempt(
       )
     }
 
-    const connection = attempt.connectionId
-      ? await getSafeCodexSubscriptionConnectionById(tx, attempt.connectionId)
-      : await getSafeCodexSubscriptionConnection(tx)
+    if (!attempt.connectionId) {
+      throw new LlmProviderAttemptRedeemError(
+        'connection_unavailable',
+        'Codex attempt is missing a connection binding'
+      )
+    }
+    const connection = await getSafeCodexSubscriptionConnectionById(tx, attempt.connectionId)
     if (
       !connection ||
       connection.status !== 'connected' ||

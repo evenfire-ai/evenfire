@@ -32,6 +32,26 @@ const CLAIMS = {
   connectionRevision: 3,
 }
 
+const CONNECTION_ID = '11111111-1111-1111-1111-111111111111'
+const SAFE_CONNECTION = {
+  id: CONNECTION_ID,
+  connectionKey: 'team-plus',
+  displayName: 'Team Plus',
+  createdBy: null,
+  status: 'connected' as const,
+  credentialRevision: 3,
+  catalogRevision: 4,
+  accountFingerprint: 'fp',
+  catalogStatus: 'ready' as const,
+  catalogSyncedAt: new Date(),
+  lastRefreshAt: null,
+  lastAuthAt: new Date(),
+  refreshLockHeld: false,
+  revokedAt: null,
+  createdAt: new Date(),
+  updatedAt: new Date(),
+}
+
 describe('redeemLlmProviderAttempt', () => {
   beforeEach(() => {
     config.codexSubscriptionEnabled = true
@@ -59,30 +79,16 @@ describe('redeemLlmProviderAttempt', () => {
       policyHash: CLAIMS.policyHash,
       budgetReservationId: CLAIMS.budgetReservationId,
       connectionRevision: CLAIMS.connectionRevision,
-      connectionId: null,
+      connectionId: CONNECTION_ID,
       status: 'authorized',
       outcome: null,
       createdAt: new Date(),
     })
     vi.spyOn(store, 'markLlmProviderAttemptTicketRedeemed').mockResolvedValue(true)
-    vi.spyOn(connection, 'getSafeCodexSubscriptionConnection').mockResolvedValue({
-      id: '11111111-1111-1111-1111-111111111111',
-      connectionKey: 'deployment-default',
-      displayName: 'Default deployment',
-      createdBy: null,
-      status: 'connected',
-      credentialRevision: 3,
-      catalogRevision: 4,
-      accountFingerprint: 'fp',
-      catalogStatus: 'ready',
-      catalogSyncedAt: new Date(),
-      lastRefreshAt: null,
-      lastAuthAt: new Date(),
-      refreshLockHeld: false,
-      revokedAt: null,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    })
+    vi.spyOn(connection, 'getSafeCodexSubscriptionConnectionById').mockResolvedValue(
+      SAFE_CONNECTION
+    )
+    vi.spyOn(connection, 'getSafeCodexSubscriptionConnection').mockResolvedValue(SAFE_CONNECTION)
   })
 
   it('returns only the usable access token and frozen transport metadata', async () => {
@@ -144,23 +150,11 @@ describe('redeemLlmProviderAttempt', () => {
   })
 
   it('refuses to redeem a pre-revoke ticket after the grant is revoked', async () => {
-    vi.mocked(connection.getSafeCodexSubscriptionConnection).mockResolvedValueOnce({
-      id: '11111111-1111-1111-1111-111111111111',
-      connectionKey: 'team-plus',
-      displayName: 'Team Plus',
-      createdBy: null,
+    vi.mocked(connection.getSafeCodexSubscriptionConnectionById).mockResolvedValueOnce({
+      ...SAFE_CONNECTION,
       status: 'revoked',
       credentialRevision: 4,
-      catalogRevision: 4,
-      accountFingerprint: null,
-      catalogStatus: 'ready',
-      catalogSyncedAt: new Date(),
-      lastRefreshAt: null,
-      lastAuthAt: new Date(),
-      refreshLockHeld: false,
       revokedAt: new Date(),
-      createdAt: new Date(),
-      updatedAt: new Date(),
     })
     await expect(
       redeemLlmProviderAttempt(
@@ -177,6 +171,46 @@ describe('redeemLlmProviderAttempt', () => {
         }
       )
     ).rejects.toMatchObject({ code: 'connection_unavailable' })
+  })
+
+  it('refuses to fall back to the reserved grant when the attempt has no connectionId', async () => {
+    vi.mocked(store.loadLlmProviderAttempt).mockResolvedValueOnce({
+      id: CLAIMS.providerAttemptId,
+      callerKind: 'host',
+      hostRef: CLAIMS.hostRef,
+      recipeNamespace: null,
+      recipeName: null,
+      invocationId: CLAIMS.invocationId,
+      attemptGeneration: CLAIMS.attemptGeneration,
+      providerAttemptIndex: 1,
+      provider: 'codex-subscription',
+      model: CLAIMS.model,
+      requestHash: CLAIMS.requestHash,
+      policyRevision: CLAIMS.policyRevision,
+      policyHash: CLAIMS.policyHash,
+      budgetReservationId: CLAIMS.budgetReservationId,
+      connectionRevision: CLAIMS.connectionRevision,
+      connectionId: null,
+      status: 'authorized',
+      outcome: null,
+      createdAt: new Date(),
+    })
+    await expect(
+      redeemLlmProviderAttempt(
+        { executionTicket: 'ticket', requestHash: CLAIMS.requestHash },
+        {
+          enabled: true,
+          db: { query: vi.fn() },
+          getConnectionById: vi.fn(),
+          withTransaction: async work => work({ query: vi.fn() } as never),
+          loadSecrets: async () => {
+            throw new Error('should not load secrets without a connection binding')
+          },
+          encryptionKey: Buffer.alloc(32),
+        }
+      )
+    ).rejects.toMatchObject({ code: 'connection_unavailable' })
+    expect(connection.getSafeCodexSubscriptionConnection).not.toHaveBeenCalled()
   })
 
   it('is disabled when the flag is off', async () => {

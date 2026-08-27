@@ -230,4 +230,41 @@ describe('resolveHostAssignedConnectionKey', () => {
       code: 'host_binding_mismatch',
     })
   })
+
+  it('fails closed when the SDK grant connectionRef disagrees with the recipe annotation', async () => {
+    const gateway = {
+      getResource: vi.fn().mockResolvedValue({
+        metadata: { annotations: { 'clerum.io/codex-connection-ref': 'team-plus' } },
+      }),
+    }
+    await expect(
+      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/codex-recipe', {
+        listSdkCodexConnectionRefs: async () => ['team-other'],
+      })
+    ).rejects.toMatchObject({ code: 'host_binding_mismatch' })
+  })
+
+  it('fails closed when the recipe annotation is unassigned but the SDK grant chose a key', async () => {
+    const gateway = {
+      getResource: vi.fn().mockResolvedValue({ metadata: { annotations: {} } }),
+    }
+    await expect(
+      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/codex-recipe', {
+        listSdkCodexConnectionRefs: async () => ['team-plus'],
+      })
+    ).rejects.toMatchObject({ code: 'host_binding_mismatch' })
+  })
+
+  it('accepts a recipe whose SDK grant matches the stamped annotation', async () => {
+    const gateway = {
+      getResource: vi.fn().mockResolvedValue({
+        metadata: { annotations: { 'clerum.io/codex-connection-ref': 'team-plus' } },
+      }),
+    }
+    await expect(
+      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/codex-recipe', {
+        listSdkCodexConnectionRefs: async () => ['team-plus'],
+      })
+    ).resolves.toBe('team-plus')
+  })
 })

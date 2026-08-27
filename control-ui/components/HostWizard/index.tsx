@@ -21,6 +21,7 @@ import { cn } from '@/lib/cn'
 import {
   CODEX_UNASSIGNED_CONNECTION_KEY,
   type CodexSubscriptionConnectionView,
+  isAssignableCodexGrant,
   listCodexConnectionModels,
   listCodexSubscriptionConnections,
 } from '@/lib/codexSubscription'
@@ -328,15 +329,13 @@ export function HostWizard({
         })
         .filter(option => option !== null)
         .sort((left, right) => left.value.localeCompare(right.value)),
-      ...codexConnections
-        .filter(row => row.status !== 'revoked')
-        .map(row => ({
-          group: 'ChatGPT subscriptions',
-          value: credentialSelectValue('', row.connectionKey),
-          label: row.displayName || row.connectionKey,
-          meta: 'ChatGPT subscription',
-          providers: [{ id: 'codex-subscription', label: 'ChatGPT' }],
-        })),
+      ...codexConnections.filter(isAssignableCodexGrant).map(row => ({
+        group: 'ChatGPT subscriptions',
+        value: credentialSelectValue('', row.connectionKey),
+        label: row.displayName || row.connectionKey,
+        meta: 'ChatGPT subscription',
+        providers: [{ id: 'codex-subscription', label: 'ChatGPT' }],
+      })),
     ],
     [codexConnections, existingSecrets]
   )

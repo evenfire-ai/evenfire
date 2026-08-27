@@ -303,6 +303,21 @@ export class LlmBridge {
         isLlmProvider(authorized.target.provider) &&
         descriptorFor(authorized.target.provider).authMode === 'oauth-broker'
       ) {
+        if (!breaker.allow()) {
+          lastProviderError = new ClassifiedProviderError(
+            { code: LlmErrorCode.ApiCallFailed, retryable: true },
+            new PluginWorkloadError(
+              'provider_unavailable',
+              'LLM provider circuit is open',
+              true,
+              'provider_unavailable'
+            )
+          )
+          if (index === request.targets.length - 1) {
+            throw lastProviderError.toPluginWorkloadError()
+          }
+          continue
+        }
         try {
           const completion = await this.attempt(
             { target: authorized.target, keys: {}, llmSecretName: '' },
@@ -562,7 +577,12 @@ export class LlmBridge {
     credential: BrokeredCredential,
     request: LlmBridgeRequest,
     breaker: CircuitBreaker
-  ): Promise<Pick<LlmBridgeResult, 'model' | 'content' | 'usage' | 'finishReason'>> {
+  ): Promise<
+    Pick<
+      LlmBridgeResult,
+      'model' | 'content' | 'usage' | 'finishReason' | 'providerAttemptId' | 'providerAttemptIndex'
+    >
+  > {
     if (request.timeoutMs <= 0) {
       throw new PluginWorkloadError(
         'provider_unavailable',
@@ -636,6 +656,14 @@ export class LlmBridge {
         content: response.content,
         usage: { inputTokens, outputTokens },
         finishReason: mapFinishReason(response.finish_reason),
+        ...(typeof response.providerAttemptId === 'string' && response.providerAttemptId
+          ? { providerAttemptId: response.providerAttemptId }
+          : {}),
+        ...(typeof response.providerAttemptIndex === 'number' &&
+        Number.isInteger(response.providerAttemptIndex) &&
+        response.providerAttemptIndex >= 1
+          ? { providerAttemptIndex: response.providerAttemptIndex }
+          : {}),
       }
     } catch (error) {
       if (error instanceof PluginWorkloadError) throw error

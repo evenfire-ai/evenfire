@@ -191,12 +191,14 @@ describe('HostDetailsPage identity integration', () => {
 
     const picker = await screen.findByRole('button', { name: 'LLM Secret' })
     expect(picker).toHaveTextContent('openai-secret')
+    expect(picker).toBeDisabled()
     expect(picker.querySelectorAll('img')).toHaveLength(2)
     expect(picker.querySelector('img')).toHaveAttribute('src', '/provider-icons/openai.svg')
     expect(picker.querySelectorAll('img')[1]).toHaveAttribute('src', '/provider-icons/claude.svg')
     expect(screen.queryByRole('combobox')).toBeNull()
 
-    fireEvent.click(picker)
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    fireEvent.click(screen.getByRole('button', { name: 'LLM Secret' }))
 
     const zaiOption = screen.getByRole('option', { name: /zai-secret/ })
     expect(zaiOption).toHaveTextContent('Providers: Z.AI')

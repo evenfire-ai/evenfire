@@ -91,7 +91,7 @@ async function parseJsonResponse(res: Response): Promise<unknown> {
 }
 
 export function formatApiError(res: Response, text: string): Error {
-  let detail = text
+  let detail: string
   let parsedBody: Record<string, unknown> | null = null
   try {
     const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
@@ -1367,7 +1367,7 @@ export async function sfsUpload(
       handler?.()
       throw new Error('401 Unauthorized - session expired, please sign in again')
     }
-    let detail = text
+    let detail: string
     try {
       const parsed = JSON.parse(text) as { error?: { message?: string; code?: string } }
       detail = parsed.error?.message || parsed.error?.code || text

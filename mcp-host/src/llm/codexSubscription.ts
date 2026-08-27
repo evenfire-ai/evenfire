@@ -184,6 +184,8 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         result.outcome === 'canceled' || result.outcome === 'unknown'
           ? FinishReason.Unknown
           : FinishReason.Stop,
+      providerAttemptId: result.providerAttemptId,
+      providerAttemptIndex: result.providerAttemptIndex,
     }
   }
 
@@ -244,12 +246,13 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     ) {
       throw new CodexAuthorizeError('no_grant', 'Codex catalog policy binding is missing')
     }
+    const providerAttemptIndex = context.providerAttemptIndex ?? this.nextProviderAttemptIndex++
     const authorized = await this.deps.authorizer.authorize({
       request,
       requestHash,
       invocationId: context.invocationId ?? request.requestId,
       attemptGeneration: context.attemptGeneration ?? 1,
-      providerAttemptIndex: context.providerAttemptIndex ?? this.nextProviderAttemptIndex++,
+      providerAttemptIndex,
       policyRevision: context.policyRevision,
       policyHash: context.policyHash,
       hostRef: context.hostRef,
@@ -260,12 +263,17 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     if (!('accessToken' in authorized)) {
       // Bound: authorize returns ticket material only.
     }
-    return this.deps.proxy.stream({
+    const streamed = await this.deps.proxy.stream({
       executionTicket: authorized.executionTicket,
       requestHash: authorized.requestHash,
       request,
       signal: options?.signal,
     })
+    return {
+      ...streamed,
+      providerAttemptId: authorized.providerAttemptId,
+      providerAttemptIndex,
+    }
   }
 
   private buildRequest(

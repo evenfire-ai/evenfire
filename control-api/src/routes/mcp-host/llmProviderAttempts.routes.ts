@@ -12,6 +12,7 @@ import {
   LlmProviderAttemptAuthorizeError,
   authorizeLlmProviderAttempt,
 } from '../../services/llmProviderAttemptAuthorizer.js'
+import { listGrants } from '../../services/pluginWorkloadSdkDb.js'
 import { llmProviderAttemptAuthorizeRateLimits } from '../workflows/shared/rateLimit.js'
 
 const log = rootLogger.child({ module: 'mcp-host-llm-provider-attempts' })
@@ -44,7 +45,10 @@ function sendAuthorizeError(res: Response, err: unknown): void {
 
 export async function resolveHostAssignedConnectionKey(
   gateway: Pick<K8sGateway, 'getResource'>,
-  hostRef: string
+  hostRef: string,
+  opts?: {
+    listSdkCodexConnectionRefs?: (namespace: string, recipeName: string) => Promise<string[]>
+  }
 ): Promise<string> {
   if (hostRef.includes('/')) {
     // Workflow callers attest as `namespace/recipeName`. The grant identity is
@@ -64,10 +68,27 @@ export async function resolveHostAssignedConnectionKey(
         recipeName,
         recipeNamespace
       )) as { metadata?: { annotations?: Record<string, string> } }
-      return readHostCodexConnectionRef(
+      const annotated = readHostCodexConnectionRef(
         recipe?.metadata?.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
       )
-    } catch {
+      if (opts?.listSdkCodexConnectionRefs) {
+        const grantRefs = [
+          ...new Set(
+            (await opts.listSdkCodexConnectionRefs(recipeNamespace, recipeName))
+              .map(ref => ref.trim())
+              .filter(Boolean)
+          ),
+        ]
+        if (grantRefs.length > 1 || (grantRefs.length === 1 && grantRefs[0] !== annotated)) {
+          throw new LlmProviderAttemptAuthorizeError(
+            'host_binding_mismatch',
+            'SDK grant connectionRef does not match the recipe annotation'
+          )
+        }
+      }
+      return annotated
+    } catch (err) {
+      if (err instanceof LlmProviderAttemptAuthorizeError) throw err
       throw new LlmProviderAttemptAuthorizeError(
         'host_binding_mismatch',
         'Recipe assignment could not be attested'
@@ -101,7 +122,17 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
       }
       try {
         const result = await authorizeLlmProviderAttempt(claims, req.body, {
-          resolveConnectionKey: hostRef => resolveHostAssignedConnectionKey(gateway, hostRef),
+          resolveConnectionKey: hostRef =>
+            resolveHostAssignedConnectionKey(gateway, hostRef, {
+              listSdkCodexConnectionRefs: async (namespace, recipeName) => {
+                const grants = await listGrants({ recipeNamespace: namespace, recipeName })
+                return grants.flatMap(grant =>
+                  grant.promptTargets
+                    .map(target => target.connectionRef)
+                    .filter((ref): ref is string => typeof ref === 'string' && ref.length > 0)
+                )
+              },
+            }),
         })
         res.status(200).json(result)
       } catch (err) {

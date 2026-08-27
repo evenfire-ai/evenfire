@@ -272,12 +272,14 @@ describe('WorkflowRecipeReconciler', () => {
       },
     })
     const workflowReconcile = vi.fn()
+    const setCodexReconcileContext = vi.fn()
     ;(
       reconciler as unknown as {
         config: { pluginWorkloadSdkEnabled: boolean }
         workflowReconciler: {
           reconcile: typeof workflowReconcile
           reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+          setCodexReconcileContext: typeof setCodexReconcileContext
         }
       }
     ).config.pluginWorkloadSdkEnabled = true
@@ -286,9 +288,14 @@ describe('WorkflowRecipeReconciler', () => {
         workflowReconciler: {
           reconcile: typeof workflowReconcile
           reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+          setCodexReconcileContext: typeof setCodexReconcileContext
         }
       }
-    ).workflowReconciler = { reconcile: workflowReconcile, reconcilePluginWorkloadSdkOnly }
+    ).workflowReconciler = {
+      reconcile: workflowReconcile,
+      reconcilePluginWorkloadSdkOnly,
+      setCodexReconcileContext,
+    }
 
     const recipe = makeRecipe({
       spec: {
@@ -301,11 +308,18 @@ describe('WorkflowRecipeReconciler', () => {
     const result = await reconciler.reconcile(recipe)
 
     expect(result.phase).toBe('active')
+    expect(setCodexReconcileContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recipeName: 'test-recipe',
+        runtimeScopeRecipeName: 'test-recipe',
+      })
+    )
     expect(reconcilePluginWorkloadSdkOnly).toHaveBeenCalledWith(
       'test-recipe',
       'uid-123',
       'sandbox-recipes',
-      recipe.spec
+      recipe.spec,
+      'test-recipe'
     )
     expect(workflowReconcile).not.toHaveBeenCalled()
   })

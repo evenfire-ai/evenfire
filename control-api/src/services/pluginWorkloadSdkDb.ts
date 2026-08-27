@@ -188,9 +188,10 @@ export interface PluginWorkloadSdkPromptTarget {
   /**
    * Codex subscription grant (connection key) this target executes against.
    * Required for oauth-broker providers, absent for API-key providers. The
-   * grant is only *chosen* here — it must already exist and be connected; the
-   * runtime attestation authority stays the recipe-level
-   * `clerum.io/codex-connection-ref` annotation resolved by the authorizer.
+   * grant is only *chosen* here — it must already exist and be connected.
+   * Control-api stamps the matching `clerum.io/codex-connection-ref`
+   * annotation; authorize attests that annotation and fail-closes if this
+   * field disagrees.
    */
   connectionRef?: string
 }

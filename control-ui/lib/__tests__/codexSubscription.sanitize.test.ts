@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { sanitizeCodexConnection } from '../codexSubscription'
+import {
+  type CodexSubscriptionConnectionView,
+  isAssignableCodexGrant,
+  sanitizeCodexConnection,
+} from '../codexSubscription'
 
-function connected(overrides: Record<string, unknown> = {}) {
+function connected(
+  overrides: Partial<CodexSubscriptionConnectionView> = {}
+): CodexSubscriptionConnectionView {
   return {
     connectionKey: 'codex-aaa',
     status: 'connected',
@@ -32,5 +38,14 @@ describe('sanitizeCodexConnection', () => {
     expect(() => sanitizeCodexConnection(connected({ connectionKey: undefined }))).toThrow(
       /connection key is invalid/
     )
+  })
+})
+
+describe('isAssignableCodexGrant', () => {
+  it('accepts only a connected grant whose catalog is ready', () => {
+    expect(isAssignableCodexGrant(connected())).toBe(true)
+    expect(isAssignableCodexGrant(connected({ status: 'connecting' }))).toBe(false)
+    expect(isAssignableCodexGrant(connected({ catalogStatus: 'never_synced' }))).toBe(false)
+    expect(isAssignableCodexGrant(connected({ status: 'revoked' }))).toBe(false)
   })
 })

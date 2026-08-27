@@ -559,18 +559,24 @@ describe('HostDetailsPage current model and credential flow', () => {
   })
 
   it('changes the linked LLM Secret from the inline credentials dropdown', async () => {
+    setupApiMocks(formLoadHost, refetchedHost, [
+      { name: 'openai-secret', keys: ['openai-api-key'] },
+      { name: 'openai-secret-b', keys: ['openai-api-key'] },
+    ])
     const view = render(<HostDetailsPage />)
     navigateToTab(view, 'model')
     await screen.findByText('Current model')
 
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
     fireEvent.click(screen.getByRole('button', { name: 'LLM Secret' }))
-    fireEvent.click(screen.getByRole('option', { name: /anthropic-secret/ }))
+    fireEvent.click(screen.getByRole('option', { name: /openai-secret-b/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save model configuration' }))
 
     await waitFor(() =>
       expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
     )
     const payload = findHostPutPayload() as { spec: Record<string, unknown> }
-    expect(payload.spec.secretRef).toBe('anthropic-secret')
+    expect(payload.spec.secretRef).toBe('openai-secret-b')
     expect(payload.spec.model).toEqual(baseSpec.model)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })

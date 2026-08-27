@@ -18,25 +18,37 @@ const COMPONENT_RE = /^\[([^\]]+)\]\s*/
 const SENSITIVE_KEY_RE =
   /password|secret|token|authorization|cookie|api[_-]?key|dsn|private|refresh|credential|account[_-]?id/i
 const UNSAFE_OBJECT_KEY = /^(?:__proto__|constructor|prototype)$/
+const SAFE_OBJECT_KEY = /^[A-Za-z0-9._-]{1,64}$/
 
 const originalLog = console.log.bind(console)
 const originalError = console.error.bind(console)
 const originalWarn = console.warn.bind(console)
 
-function redactReplacer(key: string, value: unknown): unknown {
-  if (value === process.env) return '[Redacted]'
-  if (UNSAFE_OBJECT_KEY.test(key)) return undefined
-  if (key && SENSITIVE_KEY_RE.test(key)) return '[Redacted]'
-  return value
+function isSafeObjectKey(key: string): boolean {
+  return SAFE_OBJECT_KEY.test(key) && !UNSAFE_OBJECT_KEY.test(key)
 }
 
-export function redactUnknown(value: unknown, key?: string): unknown {
+function cloneRedacted(value: unknown, key?: string): unknown {
   if (value === process.env) return '[Redacted]'
   if (key && SENSITIVE_KEY_RE.test(key)) return '[Redacted]'
   if (value === undefined) return undefined
   if (typeof value !== 'object' || value === null) return value
+  if (Array.isArray(value)) return value.map(item => cloneRedacted(item))
+  const out: Record<string, unknown> = Object.create(null)
+  for (const nextKey of Object.keys(value as object)) {
+    if (!isSafeObjectKey(nextKey)) continue
+    if (SENSITIVE_KEY_RE.test(nextKey)) {
+      out[nextKey] = '[Redacted]'
+      continue
+    }
+    out[nextKey] = cloneRedacted((value as Record<string, unknown>)[nextKey], nextKey)
+  }
+  return out
+}
+
+export function redactUnknown(value: unknown, key?: string): unknown {
   try {
-    return JSON.parse(JSON.stringify(value, redactReplacer)) as unknown
+    return cloneRedacted(value, key)
   } catch {
     return '[Unserializable]'
   }
@@ -58,14 +70,17 @@ function emit(level: string, args: unknown[]): void {
 
   const match = raw.match(COMPONENT_RE)
   if (match) {
-    component = match[1]
-    msg = raw.slice(match[0].length)
+    const parsed = match[1] ?? ''
+    if (SAFE_OBJECT_KEY.test(parsed)) {
+      component = parsed
+      msg = raw.slice(match[0].length)
+    }
   }
 
   const entry: Record<string, string> = {
     timestamp: new Date().toISOString(),
     level,
-    msg: msg.trim(),
+    msg: msg.replace(/[\r\n\u2028\u2029]/g, ' ').trim(),
   }
 
   if (component) {

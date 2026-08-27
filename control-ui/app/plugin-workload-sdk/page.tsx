@@ -1,7 +1,6 @@
 'use client'
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useRouter } from 'next/navigation'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { SectionSearchInput } from '@components/SectionSearchInput'
@@ -32,6 +31,7 @@ import {
 } from '@lib/api'
 import {
   type CodexSubscriptionConnectionView,
+  isAssignableCodexGrant,
   listCodexConnectionModels,
   listCodexSubscriptionConnections,
 } from '@lib/codexSubscription'
@@ -125,7 +125,6 @@ async function fetchUsersByRefs(userRefs: string[]): Promise<AdminUser[]> {
 }
 
 export default function PluginWorkloadSdkPage() {
-  const router = useRouter()
   const { confirm, confirmDialog } = useConfirmDialog()
   const { showToast } = useToast()
   const [view, setView] = useState<SdkView>('grants')
@@ -536,11 +535,7 @@ function GrantFormModal({
     listCodexSubscriptionConnections()
       .then(connections => {
         if (cancelled) return
-        setCodexConnections(
-          connections.filter(
-            connection => connection.status === 'connected' && connection.catalogStatus === 'ready'
-          )
-        )
+        setCodexConnections(connections.filter(isAssignableCodexGrant))
       })
       .catch(() => {
         // Fail closed: without a readable connection list no Codex target can

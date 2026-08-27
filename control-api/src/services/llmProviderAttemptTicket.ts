@@ -85,7 +85,8 @@ export function verifyCodexExecutionTicket(ticket: string): CodexExecutionTicket
       typeof claims.model !== 'string' ||
       typeof claims.requestHash !== 'string' ||
       typeof claims.policyHash !== 'string' ||
-      typeof claims.budgetReservationId !== 'string'
+      typeof claims.budgetReservationId !== 'string' ||
+      typeof claims.exp !== 'number'
     ) {
       return null
     }

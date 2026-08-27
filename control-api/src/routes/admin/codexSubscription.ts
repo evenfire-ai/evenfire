@@ -30,6 +30,7 @@ import {
 import {
   type CodexOAuthDeps,
   CodexSubscriptionOAuthError,
+  ensureFreshCodexAccessToken,
   getCodexSubscriptionConnection,
   pollCodexDevice,
   refreshCodexSubscriptionConnection,
@@ -438,6 +439,9 @@ export function createAdminCodexSubscriptionRouter(
       }
       const db = dbClient()
       const connectionKey = keyFromReq(req)
+      await ensureFreshCodexAccessToken(
+        oauthDeps(req, resolveBrowserRedirectUri(req), connectionKey)
+      )
       const secrets = await loadCodexSubscriptionSecrets(
         db,
         deriveOAuthEncryptionKey(config.oauthEncryptionKey),

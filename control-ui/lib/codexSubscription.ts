@@ -25,6 +25,12 @@ export type CodexAssignableHost = {
 
 export const CODEX_UNASSIGNED_CONNECTION_KEY = 'unassigned'
 
+export function isAssignableCodexGrant(
+  row: Pick<CodexSubscriptionConnectionView, 'status' | 'catalogStatus'>
+): boolean {
+  return row.status === 'connected' && row.catalogStatus === 'ready'
+}
+
 export type CodexSubscriptionConnectionView = {
   id?: string
   connectionKey: string

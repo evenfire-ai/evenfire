@@ -2707,11 +2707,14 @@ export class WorkflowRecipeReconciler {
         message: 'Plugin Workload SDK subsystem not initialized — missing clerum-wrc-signing-key',
       }
     }
+    const runtimeScopeRecipeName = await this.workflowRuntimeScopeRecipeName(recipe)
+    await this.bindCodexReconcileContext(recipe, runtimeScopeRecipeName)
     return this.workflowReconciler.reconcilePluginWorkloadSdkOnly(
       recipe.metadata.name,
       recipe.metadata.uid ?? '',
       recipe.metadata.namespace,
-      recipe.spec
+      recipe.spec,
+      runtimeScopeRecipeName
     )
   }
 

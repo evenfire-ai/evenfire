@@ -2821,6 +2821,12 @@ export class WorkflowReconciler {
     // deploys the mcp-host (and its NetworkPolicy lanes) before any run is
     // triggered. The artifact-reader/snippet-runner stay run-only.
     const mcpHostLaneLive = !awaitsTriggeredRun || eagerSdkMcpHost
+    const includeMcpHost = runtime.network.includeMcpHost && mcpHostLaneLive
+    const codexProjection = this.projectCodex(
+      spec,
+      recipeName,
+      this.codexContext?.runtimeScopeRecipeName ?? recipeName
+    )
     const npConfig: NetworkPolicyConfig = {
       recipeName,
       sandboxNamespace: this.deps.config.sandboxNamespace,
@@ -2830,12 +2836,8 @@ export class WorkflowReconciler {
       mcpHostPort: 8080,
       artifactReaderPort: 8080,
       snippetRunnerPort: 8095,
-      includeMcpHost: runtime.network.includeMcpHost && mcpHostLaneLive,
-      includeCodexProxyEgress:
-        this.projectCodex(spec, recipeName, this.codexContext?.runtimeScopeRecipeName ?? recipeName)
-          .requiresCodexProxyEgress &&
-        runtime.network.includeMcpHost &&
-        mcpHostLaneLive,
+      includeMcpHost,
+      includeCodexProxyEgress: codexProjection.requiresCodexProxyEgress && includeMcpHost,
       // A stepless eager SDK host has no coordinator pod. Keep the mcp-host
       // control/egress lanes, but do not manufacture coordinator policies
       // whose selectors can never match a real workload.
@@ -2942,7 +2944,12 @@ export class WorkflowReconciler {
     }
     const policyNames = new Set(policies.map(policy => policy.metadata?.name))
     const codexProxyPolicyName = `${recipeName}-mcp-host-to-codex-proxy`
-    if (!policyNames.has(codexProxyPolicyName)) {
+    const codexProjection = this.projectCodex(
+      spec,
+      recipeName,
+      this.codexContext?.runtimeScopeRecipeName ?? recipeName
+    )
+    if (!policyNames.has(codexProxyPolicyName) && codexProjection.eligibility !== 'uncertain') {
       await this.safeDelete(() =>
         this.deps.networkingApi.deleteNamespacedNetworkPolicy({
           name: codexProxyPolicyName,

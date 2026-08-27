@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { register } from 'prom-client'
 import { ALL_PROVIDERS, descriptorFor } from '../llm/registryCore'
 import {

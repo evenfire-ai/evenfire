@@ -11,6 +11,7 @@ const oauth = vi.hoisted(() => ({
   pollDevice: vi.fn(),
   refresh: vi.fn(),
   revoke: vi.fn(),
+  ensureFresh: vi.fn(),
 }))
 
 const catalog = vi.hoisted(() => ({
@@ -29,6 +30,7 @@ vi.mock('../src/services/codexSubscriptionOAuth.js', async () => {
     pollCodexDevice: oauth.pollDevice,
     refreshCodexSubscriptionConnection: oauth.refresh,
     revokeCodexSubscription: oauth.revoke,
+    ensureFreshCodexAccessToken: oauth.ensureFresh,
   }
 })
 
@@ -143,6 +145,7 @@ describe('admin Codex subscription routes', () => {
     catalog.sync.mockReset()
     catalog.listOffered.mockReset()
     catalog.listOffered.mockResolvedValue(['gpt-5.1'])
+    oauth.ensureFresh.mockResolvedValue(undefined)
     vi.mocked(pool.query).mockReset()
   })
 
@@ -346,7 +349,23 @@ describe('admin Codex subscription routes', () => {
     )
     expect(res.status).toBe(200)
     expect(res.body.added).toBe(8)
+    expect(oauth.ensureFresh).toHaveBeenCalledTimes(1)
     expect(materialize).toHaveBeenCalledTimes(1)
+    assertNoLeak(res.body)
+  })
+
+  it('does not publish the runtime ConfigMap when catalog sync cannot refresh the access token', async () => {
+    const materialize = vi.fn(async () => {})
+    oauth.ensureFresh.mockRejectedValueOnce(
+      new CodexSubscriptionOAuthError('reauth_required', 'refresh token rejected')
+    )
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/catalog/sync'
+    )
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('reauth_required')
+    expect(catalog.sync).not.toHaveBeenCalled()
+    expect(materialize).not.toHaveBeenCalled()
     assertNoLeak(res.body)
   })
 

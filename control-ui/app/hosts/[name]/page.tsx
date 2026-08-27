@@ -31,6 +31,7 @@ import type { ContextResource, ContextSpec, HostSecretResource } from '../../../
 import {
   CODEX_UNASSIGNED_CONNECTION_KEY,
   type CodexSubscriptionConnectionView,
+  isAssignableCodexGrant,
   listCodexConnectionModels,
   listCodexSubscriptionConnections,
 } from '../../../lib/codexSubscription'
@@ -681,7 +682,7 @@ export default function HostDetailsPage() {
     if (secretRefDraft.trim() && !options.some(secret => secret.value === secretRefDraft.trim())) {
       options.unshift(toOption(secretRefDraft.trim(), currentSecretKeys))
     }
-    for (const row of codexConnections.filter(item => item.status !== 'revoked')) {
+    for (const row of codexConnections.filter(isAssignableCodexGrant)) {
       options.push({
         group: 'ChatGPT subscriptions',
         value: credentialSelectValue('', row.connectionKey),
@@ -694,7 +695,7 @@ export default function HostDetailsPage() {
       connectionRefDraft &&
       connectionRefDraft !== CODEX_UNASSIGNED_CONNECTION_KEY &&
       !codexConnections.some(
-        row => row.connectionKey === connectionRefDraft && row.status !== 'revoked'
+        row => row.connectionKey === connectionRefDraft && isAssignableCodexGrant(row)
       )
     ) {
       options.push({
@@ -801,52 +802,6 @@ export default function HostDetailsPage() {
       return false
     } finally {
       setBusy(false)
-    }
-  }
-
-  async function saveSecretRef(nextSecretRef: string): Promise<void> {
-    const normalizedSecretRef = nextSecretRef.trim()
-    if (!normalizedSecretRef) throw new Error('Select an LLM Secret.')
-
-    setBusy(true)
-    setError('')
-    try {
-      const currentHost = await getHost(routeName)
-      const nextSpec = {
-        ...currentHost.spec,
-        secretRef: normalizedSecretRef,
-      }
-      const formResourceVersion = formResourceVersionRef.current
-      await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
-        ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
-        spec: nextSpec,
-      })
-      setSecretRefDraft(normalizedSecretRef)
-      await loadData('none')
-      showToast('LLM Secret link updated.', { tone: 'success' })
-    } catch (e) {
-      const status = (e as { status?: number } | null)?.status
-      const code = (e as { code?: string } | null)?.code
-      const message =
-        status === 409 && code === 'conflict'
-          ? 'This agent changed since you opened the form. Reload to see the latest, then re-apply your change.'
-          : e instanceof Error
-            ? e.message
-            : 'Failed to change the linked LLM Secret'
-      setError(message)
-      throw new Error(message)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleSecretRefChange(nextSecretRef: string): Promise<void> {
-    if (nextSecretRef === secretRefDraft) return
-    try {
-      await saveSecretRef(nextSecretRef)
-    } catch {
-      // saveSecretRef surfaces the server error in the page banner. Keep the
-      // controlled select on the previously saved value when the write fails.
     }
   }
 
@@ -1158,7 +1113,7 @@ export default function HostDetailsPage() {
             onSaveDisplayName={nextDisplayName => saveHost(nextDisplayName)}
             onSaveLifecycle={nextStateless => {
               setStatelessDraft(nextStateless)
-              return saveHost(hostDisplayDraft, nextStateless)
+              return saveHost(hostDisplaySaved, nextStateless)
             }}
             createdAt={hostCreatedAt}
           />
@@ -1196,13 +1151,7 @@ export default function HostDetailsPage() {
                     id="model-secret"
                     value={credentialSelectValue(secretRefDraft, connectionRefDraft)}
                     ariaLabel={credentialFieldLabel}
-                    onChange={value => {
-                      if (!editingModel && parseCredentialSelect(value).kind === 'secret') {
-                        void handleSecretRefChange(value)
-                        return
-                      }
-                      handleCredentialChange(value)
-                    }}
+                    onChange={handleCredentialChange}
                     options={llmSecretOptions}
                     placeholder={
                       isCodexAssignment
@@ -1215,7 +1164,7 @@ export default function HostDetailsPage() {
                           ? 'No LLM Secret available'
                           : 'Select an LLM Secret...'
                     }
-                    disabled={busy}
+                    disabled={busy || !editingModel}
                   />
                   <button
                     type="button"
