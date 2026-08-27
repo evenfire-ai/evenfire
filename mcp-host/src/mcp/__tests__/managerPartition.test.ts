@@ -155,6 +155,19 @@ describe('ClientKey — SHARED sentinel never collides with a real userId', () =
     )
   })
 
+  it('sentinel-lookalike userIds never collide with the SHARED key', () => {
+    // fc.string() effectively never emits the values that could plausibly
+    // collide (the 's' discriminator, the 'shared' word, the serverName, or the
+    // serialized shared key itself), so pin them explicitly: the ['u',…] vs
+    // ['s',…] tuple discriminator must keep every real user distinct from SHARED.
+    const serverName = 'srv'
+    const sharedKey = serializeClientKey(serverName, SHARED_PRINCIPAL)
+    const adversarial = ['s', 'shared', 'SHARED', '', ' ', serverName, 'u', sharedKey]
+    for (const userId of adversarial) {
+      expect(serializeClientKey(serverName, userPrincipal(userId))).not.toBe(sharedKey)
+    }
+  })
+
   it('serialization is injective over (serverName, principal) and round-trips serverName', () => {
     fc.assert(
       fc.property(fc.string(), fc.string(), fc.string(), (serverName, a, b) => {
