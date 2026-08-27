@@ -139,6 +139,17 @@ const nextConfig = {
         destination: '/connectors/:name/edit/access',
         permanent: true,
       },
+      // Users & Teams "Contexts" tabs renamed to "Access".
+      {
+        source: '/users-and-teams/users/:id/contexts',
+        destination: '/users-and-teams/users/:id/access',
+        permanent: true,
+      },
+      {
+        source: '/users-and-teams/teams/:id/contexts',
+        destination: '/users-and-teams/teams/:id/access',
+        permanent: true,
+      },
       { source: '/marketplace', destination: '/marketplace/connectors', permanent: true },
       { source: '/cost-and-usage', destination: '/cost-and-usage/usage', permanent: true },
       {

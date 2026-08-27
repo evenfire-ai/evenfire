@@ -16,6 +16,7 @@ import { IconUsers } from '../../../../components/Sidebar/icons'
 import { IconCheck, IconMoreHorizontal, IconPencil, IconX } from '../../../../components/icons'
 import {
   AdminTeamPendingInvitation,
+  ContextResource,
   HostResource,
   TeamMember,
   addAdminTeamMember,
@@ -42,12 +43,12 @@ import { formatTeamRole, permissionsForTeamRole } from '../../../../lib/teamRole
 
 type Role = 'admin' | 'inviter' | 'member'
 
-type TeamTab = 'members' | 'contexts' | 'agents'
-const TEAM_TABS: TeamTab[] = ['members', 'contexts', 'agents']
+type TeamTab = 'members' | 'access' | 'agents'
+const TEAM_TABS: TeamTab[] = ['members', 'access', 'agents']
 
 const TEAM_TAB_LABELS: Record<TeamTab, string> = {
   members: 'Members',
-  contexts: 'Contexts',
+  access: 'Access',
   agents: 'Agents',
 }
 
@@ -181,6 +182,7 @@ export default function TeamDetailsPage() {
   const [deletedContextIds, setDeletedContextIds] = useState<string[]>([])
   const [selectedContextIdsToAdd, setSelectedContextIdsToAdd] = useState<string[]>([])
   const [hosts, setHosts] = useState<HostResource[]>([])
+  const [contextResources, setContextResources] = useState<ContextResource[]>([])
   const [assignedAgentNames, setAssignedAgentNames] = useState<string[]>([])
   const [observedAgentNames, setObservedAgentNames] = useState<string[]>([])
   const [selectedAgentNamesToAdd, setSelectedAgentNamesToAdd] = useState<string[]>([])
@@ -199,6 +201,31 @@ export default function TeamDetailsPage() {
     spec?: { contextId?: string }
   }) {
     return String(item.spec?.contextId || item.metadata?.name || '').trim()
+  }
+
+  // Rows are context IDs on the wire, but the user sees what that access
+  // means: the owning agent(s) for private scopes, the stored display name
+  // for anything else, and the raw id as a last-resort muted fallback.
+  function accessLabelFor(contextId: string): { label: string; resolved: boolean } {
+    const owners = (hosts || [])
+      .map(host => {
+        const ref = String(
+          (host.spec as { contextRef?: string } | undefined)?.contextRef || ''
+        ).trim()
+        if (ref !== contextId) return ''
+        return (
+          String((host.spec as { host?: string } | undefined)?.host || '').trim() ||
+          String(host.metadata?.name || '')
+        )
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b))
+    if (owners.length > 0) return { label: owners.join(', '), resolved: true }
+    const display = contextResources
+      .find(item => contextIdFromResource(item as never) === contextId)
+      ?.spec?.displayName?.trim()
+    if (display) return { label: display, resolved: true }
+    return { label: contextId, resolved: false }
   }
 
   async function loadTeamData(
@@ -257,6 +284,7 @@ export default function TeamDetailsPage() {
         ])
         setUsers(Array.isArray(usersData.items) ? usersData.items : [])
         setHosts(Array.isArray(hostsData.items) ? hostsData.items : [])
+        setContextResources((contextsData.items || []) as ContextResource[])
         const ids = (contextsData.items || [])
           .map(item => contextIdFromResource(item as never))
           .filter(Boolean)
@@ -479,16 +507,17 @@ export default function TeamDetailsPage() {
       setSelectedContextIdsToAdd([])
       showToast(message, { tone: 'success' })
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to update team contexts')
+      setError(e instanceof Error ? e.message : 'Failed to update team access')
     } finally {
       setBusy(false)
     }
   }
 
-  async function removeContextAccess(contextId: string) {
+  async function removeAccess(contextId: string) {
+    const target = accessLabelFor(contextId).label
     const shouldRemove = await confirm({
-      title: 'Remove Context Access',
-      message: `Remove ${teamName || 'this team'}'s access to ${contextId}?`,
+      title: 'Remove Access',
+      message: `Remove ${teamName || 'this team'}'s access to ${target}?`,
       confirmLabel: 'Remove access',
       tone: 'danger',
     })
@@ -496,7 +525,7 @@ export default function TeamDetailsPage() {
 
     await saveContexts(
       assignedContextIds.filter(id => id !== contextId),
-      'Team contexts updated.'
+      'Team access updated.'
     )
   }
 
@@ -571,8 +600,9 @@ export default function TeamDetailsPage() {
     () =>
       availableContextIds
         .filter(contextId => !assignedContextIds.includes(contextId))
-        .map(contextId => ({ value: contextId, label: contextId })),
-    [assignedContextIds, availableContextIds]
+        .map(contextId => ({ value: contextId, label: accessLabelFor(contextId).label })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [assignedContextIds, availableContextIds, contextResources, hosts]
   )
   const availableAgentOptions = useMemo(
     () =>
@@ -657,7 +687,7 @@ export default function TeamDetailsPage() {
           ? 'Name the new team.'
           : initialLoading
             ? 'Loading team details...'
-            : 'Members, contexts, and agent access.'
+            : 'Members, connector access, and agents.'
       }
       tabAriaLabel="Team sections"
       tabs={
@@ -970,7 +1000,7 @@ export default function TeamDetailsPage() {
                 </>
               )}
 
-              {activeTab === 'contexts' && (
+              {activeTab === 'access' && (
                 <>
                   <div
                     style={{
@@ -983,7 +1013,7 @@ export default function TeamDetailsPage() {
                     }}
                   >
                     <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-                      Contexts this team may access.
+                      Agents and connector scopes this team may access.
                     </p>
                     <button
                       type="button"
@@ -991,7 +1021,7 @@ export default function TeamDetailsPage() {
                       onClick={() => setShowAddContext(true)}
                       disabled={busy}
                     >
-                      Add context
+                      Add access
                     </button>
                   </div>
                   {initialLoading ? (
@@ -1011,40 +1041,39 @@ export default function TeamDetailsPage() {
                     </div>
                   ) : assignedContextIds.length === 0 ? (
                     <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
-                      No contexts linked.
+                      No access assigned yet.
                     </div>
                   ) : (
                     <div role="list">
-                      {assignedContextIds.map(contextId => (
-                        <div key={contextId} className="cu-access-row" role="listitem">
-                          <button
-                            type="button"
-                            className="cu-link"
-                            onClick={() => router.push(CONTROL_ROUTES.contexts.detail(contextId))}
-                          >
-                            {contextId}
-                          </button>
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void removeContextAccess(contextId)}
-                            disabled={busy}
-                            title="Remove"
-                            aria-label="Remove context"
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
-                        </div>
-                      ))}
+                      {assignedContextIds.map(contextId => {
+                        const target = accessLabelFor(contextId)
+                        return (
+                          <div key={contextId} className="cu-access-row" role="listitem">
+                            <span className={target.resolved ? undefined : 'cu-muted'}>
+                              {target.label}
+                            </span>
+                            <button
+                              type="button"
+                              className="cu-btn cu-btn--icon cu-btn--danger-icon"
+                              onClick={() => void removeAccess(contextId)}
+                              disabled={busy}
+                              title="Remove"
+                              aria-label="Remove access"
+                            >
+                              <IconX width={16} height={16} />
+                            </button>
+                          </div>
+                        )
+                      })}
                     </div>
                   )}
                   {!initialLoading && deletedContextIds.length > 0 && (
                     <>
-                      <p className="cu-muted cu-deleted-access-heading">Deleted contexts</p>
+                      <p className="cu-muted cu-deleted-access-heading">Removed access</p>
                       <div role="list">
                         {deletedContextIds.map(contextId => (
                           <div key={contextId} className="cu-access-row" role="listitem">
-                            <span>{contextId}</span>
+                            <span>{accessLabelFor(contextId).label}</span>
                             <span className="cu-muted">Deleted</span>
                           </div>
                         ))}
@@ -1367,12 +1396,12 @@ export default function TeamDetailsPage() {
           <div
             className="cu-modal-panel cu-modal-panel--selection"
             role="dialog"
-            aria-labelledby="add-context-title"
+            aria-labelledby="add-access-title"
             onClick={e => e.stopPropagation()}
           >
             <div className="cu-modal-panel__head">
-              <strong id="add-context-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add context
+              <strong id="add-access-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
+                Add access
               </strong>
               <button
                 type="button"
@@ -1386,17 +1415,17 @@ export default function TeamDetailsPage() {
             </div>
 
             <div className="cu-field">
-              <label htmlFor="team-context-picker">Contexts</label>
+              <label htmlFor="team-access-picker">Access</label>
               <SelectionDropdown
-                id="team-context-picker"
+                id="team-access-picker"
                 inline
                 value={selectedContextIdsToAdd}
                 onChange={setSelectedContextIdsToAdd}
                 options={availableContextOptions}
-                placeholder="Select contexts"
-                searchPlaceholder="Search contexts..."
-                selectionLabel="Selected contexts"
-                emptyLabel="No available contexts."
+                placeholder="Select access"
+                searchPlaceholder="Search access..."
+                selectionLabel="Selected access"
+                emptyLabel="No additional access available."
                 disabled={busy}
               />
             </div>
@@ -1416,15 +1445,13 @@ export default function TeamDetailsPage() {
                 onClick={() => {
                   void saveContexts(
                     [...assignedContextIds, ...selectedContextIdsToAdd],
-                    selectedContextIdsToAdd.length === 1
-                      ? 'Team context updated.'
-                      : 'Team contexts updated.'
+                    'Team access updated.'
                   )
                   setShowAddContext(false)
                 }}
                 disabled={busy || selectedContextIdsToAdd.length === 0}
               >
-                {selectedContextIdsToAdd.length > 1 ? 'Add contexts' : 'Add context'}
+                Add access
               </button>
             </div>
           </div>

@@ -30,7 +30,7 @@ type Role = 'admin' | 'inviter' | 'member'
 
 type TeamCreateStep = 0 | 1 | 2 | 3
 
-const STEPS = ['Team', 'Members', 'Contexts', 'Agents'] as const
+const STEPS = ['Team', 'Members', 'Access', 'Agents'] as const
 
 const STEP_DETAILS = [
   {
@@ -44,9 +44,9 @@ const STEP_DETAILS = [
     subtitle: 'Choose initial team members and roles.',
   },
   {
-    description: 'Map context access',
-    title: 'Contexts',
-    subtitle: 'Select the contexts this team can access.',
+    description: 'Map access',
+    title: 'Access',
+    subtitle: 'Choose the agents and connector scopes this team can use.',
   },
   {
     description: 'Map agent access',
@@ -72,6 +72,7 @@ export default function CreateTeamPage() {
 
   const [loadingReferenceData, setLoadingReferenceData] = useState(true)
   const [users, setUsers] = useState<AdminUser[]>([])
+  const [contextResources, setContextResources] = useState<ContextResource[]>([])
   const [availableContextIds, setAvailableContextIds] = useState<string[]>([])
   const [hosts, setHosts] = useState<HostResource[]>([])
   const [teamName, setTeamName] = useState('')
@@ -96,6 +97,7 @@ export default function CreateTeamPage() {
           getHosts(),
         ])
         setUsers(Array.isArray(usersResponse.items) ? usersResponse.items : [])
+        setContextResources((contextsResponse.items || []) as ContextResource[])
         setAvailableContextIds(
           (contextsResponse.items || [])
             .map((item: ContextResource) => contextIdFromResource(item))
@@ -130,9 +132,38 @@ export default function CreateTeamPage() {
       })),
     [users]
   )
+  // Options keep context IDs as values (the write model) but show what the
+  // access means: the owning agent(s), else the stored display name.
   const contextOptions = useMemo(
-    () => availableContextIds.map(contextId => ({ value: contextId, label: contextId })),
-    [availableContextIds]
+    () => {
+      const resolveLabel = (contextId: string): string => {
+        const owners = hosts
+          .map(host => {
+            const ref = String(
+              (host.spec as { contextRef?: string } | undefined)?.contextRef || ''
+            ).trim()
+            if (ref !== contextId) return ''
+            return (
+              String((host.spec as { host?: string } | undefined)?.host || '').trim() ||
+              String(host.metadata?.name || '')
+            )
+          })
+          .filter(Boolean)
+          .sort((a, b) => a.localeCompare(b))
+        if (owners.length > 0) return owners.join(', ')
+        return (
+          contextResources
+            .find(item => contextIdFromResource(item as never) === contextId)
+            ?.spec?.displayName?.trim() || contextId
+        )
+      }
+      return availableContextIds.map(contextId => ({
+        value: contextId,
+        label: resolveLabel(contextId),
+      }))
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [availableContextIds, contextResources, hosts]
   )
   const agentOptions = useMemo(
     () =>
@@ -407,24 +438,26 @@ export default function CreateTeamPage() {
             {step === 2 ? (
               <div className="cu-form-stack cu-agent-form-stack--wide">
                 {loadingReferenceData ? (
-                  <div className="cu-muted cu-muted-note--compact">Loading contexts...</div>
+                  <div className="cu-muted cu-muted-note--compact">Loading access...</div>
                 ) : contextOptions.length > 0 ? (
-                  <Field htmlFor="new-team-context-picker" label="Contexts">
+                  <Field htmlFor="new-team-access-picker" label="Access">
                     <SelectionDropdown
-                      id="new-team-context-picker"
+                      id="new-team-access-picker"
                       options={contextOptions}
                       value={selectedContextIds}
                       onChange={setSelectedContextIds}
-                      placeholder="Select contexts"
-                      searchPlaceholder="Search contexts..."
-                      selectionLabel="Selected contexts"
-                      emptyLabel="No contexts match your search."
+                      placeholder="Select access"
+                      searchPlaceholder="Search access..."
+                      selectionLabel="Selected access"
+                      emptyLabel="Nothing matches your search."
                       disabled={saving}
                       showSelectedChips={false}
                     />
                   </Field>
                 ) : (
-                  <div className="cu-muted cu-muted-note--compact">No contexts available.</div>
+                  <div className="cu-muted cu-muted-note--compact">
+                    No access available to grant.
+                  </div>
                 )}
               </div>
             ) : null}

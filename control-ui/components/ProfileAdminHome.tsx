@@ -592,7 +592,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                           {renderTeamSortButton('agents', 'Agents')}
                         </th>
                         <th style={{ width: '5rem', textAlign: 'right' }}>
-                          {renderTeamSortButton('contexts', 'Contexts')}
+                          {renderTeamSortButton('contexts', 'Access')}
                         </th>
                         <th style={{ width: '4.5rem', textAlign: 'right' }} aria-label="Actions" />
                       </tr>
@@ -619,7 +619,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                           {renderTeamSortButton('agents', 'Agents')}
                         </th>
                         <th style={{ width: '5rem', textAlign: 'right' }}>
-                          {renderTeamSortButton('contexts', 'Contexts')}
+                          {renderTeamSortButton('contexts', 'Access')}
                         </th>
                         <th style={{ width: '4.5rem', textAlign: 'right' }} aria-label="Actions" />
                       </tr>
@@ -1085,7 +1085,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
             </div>
             <p className="cu-muted" style={{ fontSize: '0.875rem', margin: '0 0 1rem' }}>
               Permanently delete <strong>{teamToDelete.name}</strong> and all memberships, pending
-              invitations, and team context/agent mappings. This cannot be undone.
+              invitations, and team access/agent mappings. This cannot be undone.
             </p>
             {deleteDialogError ? (
               <div className="cu-banner cu-banner--error" style={{ marginBottom: '0.75rem' }}>

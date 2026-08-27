@@ -9,7 +9,7 @@ const USER_DETAIL_TABS = [
   'contact',
   'approval-dms',
   'communication-channels',
-  'contexts',
+  'access',
   'teams',
   'agents',
 ]
