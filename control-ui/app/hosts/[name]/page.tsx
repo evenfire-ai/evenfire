@@ -19,7 +19,7 @@ import { LlmSecretSelect } from '../../../components/LlmSecretSelect'
 import { LlmSecretUpdateModal } from '../../../components/LlmSecretUpdateModal'
 import { RowActionsMenu } from '../../../components/RowActionsMenu'
 import { IconRobot } from '../../../components/Sidebar/icons'
-import { IconCheck, IconMoreHorizontal, IconPencil, IconX } from '../../../components/icons'
+import { IconMoreHorizontal, IconPencil, IconX } from '../../../components/icons'
 import {
   apiSend,
   getHost,
@@ -195,7 +195,6 @@ export default function HostDetailsPage() {
 
   const [editingModel, setEditingModel] = useState(false)
   const [llmSecretModalOpen, setLlmSecretModalOpen] = useState(false)
-  const [editingContext, setEditingContext] = useState(false)
   const [showDeleteAgentConfirm, setShowDeleteAgentConfirm] = useState(false)
   const [deletingAgent, setDeletingAgent] = useState(false)
   const [deleteAgentDialogError, setDeleteAgentDialogError] = useState('')
@@ -678,10 +677,45 @@ export default function HostDetailsPage() {
     if (secretRefDraft.trim() && !options.some(secret => secret.value === secretRefDraft.trim())) {
       options.unshift(toOption(secretRefDraft.trim(), currentSecretKeys))
     }
+    for (const row of codexConnections.filter(item => item.status !== 'revoked')) {
+      options.push({
+        group: 'ChatGPT subscriptions',
+        value: credentialSelectValue('', row.connectionKey),
+        label: row.displayName || row.connectionKey,
+        meta: 'ChatGPT subscription',
+        providers: [{ id: 'codex-subscription', label: 'ChatGPT' }],
+      })
+    }
+    if (
+      connectionRefDraft &&
+      connectionRefDraft !== CODEX_UNASSIGNED_CONNECTION_KEY &&
+      !codexConnections.some(
+        row => row.connectionKey === connectionRefDraft && row.status !== 'revoked'
+      )
+    ) {
+      options.push({
+        group: 'ChatGPT subscriptions',
+        value: credentialSelectValue('', connectionRefDraft),
+        label: `${connectionRefDraft} (unavailable)`,
+        meta: 'ChatGPT subscription',
+        providers: [{ id: 'codex-subscription', label: 'ChatGPT' }],
+      })
+    }
     return options
-  }, [availableLlmSecrets, currentSecretKeys, secretRefDraft])
+  }, [availableLlmSecrets, codexConnections, connectionRefDraft, currentSecretKeys, secretRefDraft])
+
+  const chainRequiresSecret = llmChainRequiresSecret(providerDraft, llmPolicyDraft?.fallbacks)
+  const isCodexAssignment = providerDraft === 'codex-subscription'
+  const isCodexUnassigned =
+    isCodexAssignment &&
+    (!connectionRefDraft.trim() || connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY)
+  const assignedCodexLabel =
+    codexConnections.find(row => row.connectionKey === connectionRefDraft)?.displayName ||
+    connectionRefDraft
+  const credentialFieldLabel = isCodexAssignment ? 'Credential' : 'LLM Secret'
 
   const linkedSecretProviderMismatch =
+    chainRequiresSecret &&
     secretRefDraft.trim().length > 0 &&
     currentSecretKeys.length > 0 &&
     !isProviderUsable(providerDraft, key => currentSecretKeys.includes(key))
@@ -913,6 +947,10 @@ export default function HostDetailsPage() {
             : {}),
         },
       }
+      // Host identity is metadata.name / the route slug. Never persist
+      // hostRef/userId as execution authority on this write.
+      delete nextSpec.hostRef
+      delete nextSpec.userId
       // These fields are owned by this editor. Delete them first so removing
       // the last fallback or clearing an allowlist is persisted as an actual
       // field removal under the facade's full-replace semantics.
@@ -1137,70 +1175,33 @@ export default function HostDetailsPage() {
 
             <div className="cu-form-stack">
               <div className="cu-field">
-                <label htmlFor="model-secret">Credential</label>
+                <label htmlFor="model-secret">{credentialFieldLabel}</label>
                 <div className="cu-llm-secret-control">
-                  {editingModel ? (
-                    <select
-                      id="model-secret"
-                      className="cu-select"
-                      aria-label="Credential"
-                      value={credentialSelectValue(secretRefDraft, connectionRefDraft)}
-                      onChange={event => handleCredentialChange(event.target.value)}
-                      disabled={busy}
-                    >
-                      <option value="">Select a credential…</option>
-                      {llmSecretOptions.map(option => (
-                        <option key={option.value} value={credentialSelectValue(option.value, '')}>
-                          {option.label}
-                        </option>
-                      ))}
-                      {codexConnections.some(row => row.status !== 'revoked') ||
-                      (connectionRefDraft &&
-                        connectionRefDraft !== CODEX_UNASSIGNED_CONNECTION_KEY) ? (
-                        <optgroup label="ChatGPT subscriptions">
-                          {codexConnections
-                            .filter(row => row.status !== 'revoked')
-                            .map(row => (
-                              <option
-                                key={row.connectionKey}
-                                value={credentialSelectValue('', row.connectionKey)}
-                              >
-                                {row.displayName || row.connectionKey}
-                              </option>
-                            ))}
-                          {connectionRefDraft &&
-                          connectionRefDraft !== CODEX_UNASSIGNED_CONNECTION_KEY &&
-                          !codexConnections.some(
-                            row =>
-                              row.connectionKey === connectionRefDraft && row.status !== 'revoked'
-                          ) ? (
-                            <option value={credentialSelectValue('', connectionRefDraft)}>
-                              {connectionRefDraft} (unavailable)
-                            </option>
-                          ) : null}
-                        </optgroup>
-                      ) : null}
-                    </select>
-                  ) : (
-                    <LlmSecretSelect
-                      id="model-secret"
-                      value={secretRefDraft}
-                      ariaLabel="Credential"
-                      onChange={value => void handleSecretRefChange(value)}
-                      options={llmSecretOptions}
-                      placeholder={
-                        providerDraft === 'codex-subscription'
-                          ? connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY
-                            ? 'No ChatGPT subscription assigned'
-                            : codexConnections.find(row => row.connectionKey === connectionRefDraft)
-                                ?.displayName || connectionRefDraft
-                          : llmSecretOptions.length === 0
-                            ? 'No LLM Secret available'
-                            : 'Select an LLM Secret...'
+                  <LlmSecretSelect
+                    id="model-secret"
+                    value={credentialSelectValue(secretRefDraft, connectionRefDraft)}
+                    ariaLabel={credentialFieldLabel}
+                    onChange={value => {
+                      if (!editingModel && parseCredentialSelect(value).kind === 'secret') {
+                        void handleSecretRefChange(value)
+                        return
                       }
-                      disabled={busy || providerDraft === 'codex-subscription'}
-                    />
-                  )}
+                      handleCredentialChange(value)
+                    }}
+                    options={llmSecretOptions}
+                    placeholder={
+                      isCodexAssignment
+                        ? isCodexUnassigned
+                          ? 'No credential assigned'
+                          : assignedCodexLabel
+                        : llmSecretOptions.filter(
+                              option => !option.group || option.group === 'API keys'
+                            ).length === 0
+                          ? 'No LLM Secret available'
+                          : 'Select an LLM Secret...'
+                    }
+                    disabled={busy}
+                  />
                   <button
                     type="button"
                     className="cu-btn cu-btn--icon cu-btn--toolbar"
@@ -1232,6 +1233,11 @@ export default function HostDetailsPage() {
                     onPrimaryChange={next => {
                       setProviderDraft(next.provider)
                       setModelNameDraft(next.model)
+                      if (next.provider !== 'codex-subscription') {
+                        setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
+                        setCodexModels([])
+                        setGrantCatalogError('')
+                      }
                     }}
                     policy={llmPolicyDraft}
                     onPolicyChange={setLlmPolicyDraft}
