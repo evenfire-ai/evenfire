@@ -893,6 +893,10 @@ export class McpServerWatcher implements McpServerProvider {
   // single-flight pass. Disabled by default (interval <= 0); startup still
   // runs one convergence. Never call netPolReconciler.fullReconcile from here.
   private netPolResyncTimer: ReturnType<typeof setInterval> | null = null
+  // Set by a timer tick so the next coordinated NetworkPolicy pass re-applies
+  // L0/L1 defaults (class D). Startup and event-driven entry leave this false
+  // — start() already ran ensureDefaultPolicies as a bootstrap barrier.
+  private netPolConvergenceEnsureDefaults = false
 
   constructor() {
     if (!kc) {
@@ -2855,7 +2859,7 @@ export class McpServerWatcher implements McpServerProvider {
     const netPolResyncSec = config.netPolResyncIntervalSec
     if (netPolResyncSec > 0) {
       this.netPolResyncTimer = setInterval(() => {
-        void this.runInitialNetworkPolicyConvergence()
+        void this.runInitialNetworkPolicyConvergence({ ensureDefaults: true })
       }, netPolResyncSec * 1000)
       console.log(`[K8s] NetworkPolicy periodic resync enabled (every ${netPolResyncSec}s)`)
     } else {
@@ -3036,7 +3040,12 @@ export class McpServerWatcher implements McpServerProvider {
     }
   }
 
-  private runInitialNetworkPolicyConvergence(): Promise<void> {
+  private runInitialNetworkPolicyConvergence(options?: {
+    ensureDefaults?: boolean
+  }): Promise<void> {
+    if (options?.ensureDefaults) {
+      this.netPolConvergenceEnsureDefaults = true
+    }
     return this.runInitialConvergence('NetworkPolicy')
   }
 
@@ -3123,9 +3132,11 @@ export class McpServerWatcher implements McpServerProvider {
         this.mcpServerCacheSynced &&
         this.mcpServerDesiredRevision === capturedSafetyCertificate.serverRevision
       console.log('[K8s] Running initial NetworkPolicy background reconciliation...')
+      const ensureDefaults = this.netPolConvergenceEnsureDefaults
+      this.netPolConvergenceEnsureDefaults = false
       await this.netPolReconciler.fullReconcile(initialContexts, initialServers, {
         serverInventoryComplete,
-        ensureDefaults: false,
+        ensureDefaults,
         contextInventoryAuthoritative,
         serverInventoryAuthoritative,
         runContextEffect: (contextId, work) =>
@@ -4566,6 +4577,7 @@ export class McpServerWatcher implements McpServerProvider {
       clearInterval(this.netPolResyncTimer)
       this.netPolResyncTimer = null
     }
+    this.netPolConvergenceEnsureDefaults = false
     for (const timer of this.initialConvergenceRetryTimers.values()) {
       clearTimeout(timer)
     }

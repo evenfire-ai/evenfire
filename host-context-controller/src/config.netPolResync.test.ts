@@ -44,4 +44,21 @@ describe('NetworkPolicy resync and orphan-sweep config (#478)', () => {
     expect(config.netPolOrphanDeleteCap).toBe(8)
     expect(config.netPolOrphanDeleteCapPercent).toBe(25)
   })
+
+  it('accepts an explicit 0 absolute cap (refuse any orphan delete)', async () => {
+    const { config } = await loadConfig({ CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP: '0' })
+    expect(config.netPolOrphanDeleteCap).toBe(0)
+  })
+
+  it('fails loud when the absolute orphan-delete cap is negative', async () => {
+    await expect(loadConfig({ CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP: '-1' })).rejects.toThrow(
+      /CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP/
+    )
+  })
+
+  it('fails loud when the percent orphan-delete cap is negative', async () => {
+    await expect(
+      loadConfig({ CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT: '-1' })
+    ).rejects.toThrow(/CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT/)
+  })
 })

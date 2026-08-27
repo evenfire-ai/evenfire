@@ -16,6 +16,15 @@
 # treat live_cap_would_trip=none as "the controller will delete".
 # A trip refuses deletes only; the pass still certifies.
 #
+# Namespaces: mapper and host must be set on the Deployment (they are in
+# deploy/base). rpc-proxy may be omitted — the live line stays UNSET and
+# is labelled `(controller applies compiled default: rpc-proxy)`, same
+# two-tier shape as live_cap vs controller_cap. Sampling then uses that
+# compiled default. Do not declare the key in deploy/ to unblock the job.
+#
+# This census reflects on-cluster orphans by policy-type, not the
+# controller's current pass authority gate.
+#
 # Double-samples 90s apart. Adjudicates only when the desired Context +
 # McpServer identity set is identical across samples; otherwise
 # INCONCLUSIVE_RERUN.
@@ -61,14 +70,27 @@ ORPHAN_CAP_PCT="$(deployment_env CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT
 echo "[census] live Deployment env:"
 echo "  CONTEXT_MAPPER_NAMESPACE=${MAPPER_NS}"
 echo "  CONTEXT_MAPPER_HOST_NAMESPACE=${HOST_NS}"
-echo "  CONTEXT_MAPPER_RPC_PROXY_NAMESPACE=${RPC_NS}"
+COMPILED_RPC_NS_DEFAULT=rpc-proxy
+if [[ "${RPC_NS}" == "UNSET" ]]; then
+  echo "  CONTEXT_MAPPER_RPC_PROXY_NAMESPACE=UNSET (controller applies compiled default: ${COMPILED_RPC_NS_DEFAULT})"
+else
+  echo "  CONTEXT_MAPPER_RPC_PROXY_NAMESPACE=${RPC_NS}"
+fi
 echo "  CONTEXT_MAPPER_NETPOL_RESYNC_SEC=${RESYNC_SEC}"
 echo "  CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP=${ORPHAN_CAP}"
 echo "  CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT=${ORPHAN_CAP_PCT}"
 
-if [[ "${MAPPER_NS}" == "UNSET" || "${HOST_NS}" == "UNSET" || "${RPC_NS}" == "UNSET" ]]; then
-  echo "[census] FATAL: Deployment did not declare mapper/host/rpc-proxy namespaces; refusing to invent defaults" >&2
+if [[ "${MAPPER_NS}" == "UNSET" || "${HOST_NS}" == "UNSET" ]]; then
+  echo "[census] FATAL: Deployment did not declare mapper/host namespaces; refusing to invent defaults" >&2
   exit 2
+fi
+
+# Base manifests omit CONTEXT_MAPPER_RPC_PROXY_NAMESPACE; the controller
+# compiles rpc-proxy (config.ts). Sample with that default; the live line
+# above already labelled UNSET vs compiled so we do not print a code
+# default as a cluster fact.
+if [[ "${RPC_NS}" == "UNSET" ]]; then
+  RPC_NS="${COMPILED_RPC_NS_DEFAULT}"
 fi
 
 # One read-only snapshot of desired identities + orphan candidates.

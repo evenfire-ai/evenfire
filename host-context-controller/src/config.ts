@@ -179,7 +179,8 @@ export interface Config {
 
   // Absolute orphan-delete cap for a NetworkPolicy fullReconcile sweep.
   // Candidates strictly above this count refuse deletes and increment the
-  // cap metric; the pass still certifies. Set via
+  // cap metric; the pass still certifies. 0 refuses every orphan delete.
+  // Negative values fail loud at load. Set via
   // CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP.
   netPolOrphanDeleteCap: number
 
@@ -280,6 +281,14 @@ function getEnvInt(key: string, defaultValue: number): number {
   if (!value) return defaultValue
   const parsed = parseInt(value, 10)
   return isNaN(parsed) ? defaultValue : parsed
+}
+
+/** Reject negative orphan-delete caps. 0 is a valid never-delete kill-switch. */
+function requireNonNegativeEnvInt(key: string, value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${key} must be a non-negative integer, got '${process.env[key] ?? ''}'`)
+  }
+  return value
 }
 
 export function parseExternalEgressDnsTimeoutMs(raw: string | undefined): number {
@@ -764,8 +773,14 @@ export const config: Config = {
   // Mass-delete guard for the namespace-wide orphan sweep. Thresholds are
   // strict `>`: exactly N candidates still delete; N+1 refuses deletes and
   // still certifies.
-  netPolOrphanDeleteCap: getEnvInt('CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP', 10),
-  netPolOrphanDeleteCapPercent: getEnvInt('CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT', 20),
+  netPolOrphanDeleteCap: requireNonNegativeEnvInt(
+    'CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP',
+    getEnvInt('CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP', 10)
+  ),
+  netPolOrphanDeleteCapPercent: requireNonNegativeEnvInt(
+    'CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT',
+    getEnvInt('CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT', 20)
+  ),
 
   // Every finite Kubernetes request that can hold Host convergence gets its
   // own deadline. Watch streams are intentionally excluded.

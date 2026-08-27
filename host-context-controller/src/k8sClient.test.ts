@@ -11332,12 +11332,17 @@ describe('McpServerWatcher NetworkPolicy periodic resync (#478)', () => {
     const watcher = await startWatcherForNetPolResync()
     expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
 
+    expect(mocks.netPolFullReconcile.mock.calls[0]?.[2]).toEqual(
+      expect.objectContaining({ ensureDefaults: false })
+    )
+
     await vi.advanceTimersByTimeAsync(300_000)
     expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(2)
     expect(mocks.netPolFullReconcile).toHaveBeenLastCalledWith(
       expect.any(Array),
       expect.any(Array),
       expect.objectContaining({
+        ensureDefaults: true,
         onAuthoritativeRevocationComplete: expect.any(Function),
         runContextEffect: expect.any(Function),
         contextInventoryAuthoritative: expect.any(Function),
@@ -11368,6 +11373,9 @@ describe('McpServerWatcher NetworkPolicy periodic resync (#478)', () => {
 
     activePass.resolve()
     await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(2))
+    expect(mocks.netPolFullReconcile.mock.calls[1]?.[2]).toEqual(
+      expect.objectContaining({ ensureDefaults: true })
+    )
     await watcher.stop()
   })
 
