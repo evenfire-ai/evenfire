@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
+import { SelectionDropdown } from '@components/SelectionDropdown'
 import { useToast } from '@components/Toast'
 import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
@@ -11,10 +12,23 @@ import { HostAccessTab } from '../../../components/HostAccessTab'
 import { HostAdvancedTab } from '../../../components/HostAdvancedTab'
 import type { HostGuardrails } from '../../../components/HostGuardrailsSection/types'
 import { HostIdentityTab } from '../../../components/HostIdentityTab'
+import { HostOverviewTab } from '../../../components/HostOverviewTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
+import { LlmProviderSummary } from '../../../components/LlmProviderSummary'
+import { LlmSecretSelect } from '../../../components/LlmSecretSelect'
+import { LlmSecretUpdateModal } from '../../../components/LlmSecretUpdateModal'
+import { RowActionsMenu } from '../../../components/RowActionsMenu'
 import { IconRobot } from '../../../components/Sidebar/icons'
-import { IconCheck, IconPencil, IconX } from '../../../components/icons'
-import { apiSend, getHost, getHostDetailBundle } from '../../../lib/api'
+import { IconCheck, IconMoreHorizontal, IconPencil, IconX } from '../../../components/icons'
+import {
+  apiSend,
+  getHost,
+  getHostDetailBundle,
+  getMcpServers,
+  updateContext,
+} from '../../../lib/api'
+import type { ContextResource, ContextSpec, HostSecretResource } from '../../../lib/api'
+import { buildContextUpdatePayload, contextMutationError } from '../../../lib/contextMutation'
 import { useLlmAllowedModels } from '../../../lib/hooks/useLlmAllowedModels'
 import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '../../../lib/hostWorkflowControl'
 import {
@@ -23,17 +37,15 @@ import {
   type LlmPolicy,
   type LlmProvider,
   buildAllowedModelsSpec,
-  getActiveCredentialKeys,
   getModelOptions,
   getProviderLabel,
+  getProvidersWithCompleteCredentials,
   isProviderUsable,
   normalizeAllowedModels,
   normalizeLlmPolicy,
   normalizeProvider,
-  projectCredentialDraft,
   resolveDefaultModel,
   validateLlmPolicy,
-  validateLlmSecretData,
 } from '../../../lib/llm'
 import type { HostTab } from './types'
 
@@ -41,7 +53,7 @@ const TAB_LABELS: Record<HostTab, string> = {
   details: 'Overview',
   model: 'Models & creds',
   advanced: 'Advanced',
-  contexts: 'Context',
+  connectors: 'Connectors',
   access: 'Access',
   identity: 'Identity',
 }
@@ -50,7 +62,7 @@ const TAB_SLUGS: Record<HostTab, string> = {
   details: 'overview',
   model: 'model',
   advanced: 'advanced',
-  contexts: 'contexts',
+  connectors: 'connectors',
   access: 'access',
   identity: 'identity',
 }
@@ -66,6 +78,84 @@ function friendlyLifecycleReason(reason: string): string {
     return 'Not suspending: active scheduled tasks keep this agent awake'
   }
   return reason
+}
+
+function contextResourceName(context: ContextResource | null): string {
+  return String(context?.metadata?.name || context?.spec?.contextId || '').trim()
+}
+
+function normalizeConnectorNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return Array.from(
+    new Set(
+      value
+        .map(String)
+        .map(name => name.trim())
+        .filter(Boolean)
+    )
+  )
+}
+
+function agentConnectorMutationError(error: unknown): string {
+  if ((error as { status?: unknown } | null)?.status === 409) {
+    return 'This agent’s connectors changed since they were loaded. Reload the agent and try again.'
+  }
+  if (error instanceof Error && /context version is unavailable/i.test(error.message)) {
+    return 'This agent’s connector settings are missing a server version. Reload the agent and try again.'
+  }
+  return contextMutationError(error, 'Failed to update connectors for this agent.')
+}
+
+function AgentActionsMenu({ busy, onDelete }: { busy: boolean; onDelete: () => void }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    function handleDocClick(event: MouseEvent) {
+      if (!ref.current?.contains(event.target as Node)) setOpen(false)
+    }
+    function handleEsc(event: KeyboardEvent) {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', handleDocClick)
+    document.addEventListener('keydown', handleEsc)
+    return () => {
+      document.removeEventListener('mousedown', handleDocClick)
+      document.removeEventListener('keydown', handleEsc)
+    }
+  }, [open])
+
+  return (
+    <div ref={ref} className="cu-kebab">
+      <button
+        type="button"
+        aria-label="Agent actions"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="cu-btn cu-btn--icon cu-btn--ghost cu-kebab__trigger"
+        onClick={() => setOpen(value => !value)}
+        disabled={busy}
+      >
+        <IconMoreHorizontal width={16} height={16} />
+      </button>
+      {open ? (
+        <div role="menu" className="cu-kebab__menu">
+          <button
+            type="button"
+            role="menuitem"
+            className="cu-kebab__item cu-kebab__item--danger"
+            onClick={() => {
+              setOpen(false)
+              onDelete()
+            }}
+          >
+            Delete agent
+          </button>
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 export default function HostDetailsPage() {
@@ -91,8 +181,8 @@ export default function HostDetailsPage() {
   const [error, setError] = useState('')
   const [initialLoading, setInitialLoading] = useState(true)
 
-  const [editingOverview, setEditingOverview] = useState(false)
   const [editingModel, setEditingModel] = useState(false)
+  const [llmSecretModalOpen, setLlmSecretModalOpen] = useState(false)
   const [editingContext, setEditingContext] = useState(false)
   const [showDeleteAgentConfirm, setShowDeleteAgentConfirm] = useState(false)
   const [deletingAgent, setDeletingAgent] = useState(false)
@@ -100,18 +190,8 @@ export default function HostDetailsPage() {
 
   const [hostNameDraft, setHostNameDraft] = useState(routeName)
   const [hostDisplayDraft, setHostDisplayDraft] = useState('')
+  const [hostDescription, setHostDescription] = useState('')
   const [contextRefDraft, setContextRefDraft] = useState('')
-  // Last server-backed snapshot of the Overview-owned fields, captured at every
-  // (re)load. Cancel (and re-opening Edit) reverts the whole class of Overview
-  // drafts to THIS — the last SAVED state — so a discarded edit (e.g. a Display
-  // name typed then cancelled) can never leak into a later saveHost PUT.
-  const savedOverviewRef = useRef({
-    hostName: routeName,
-    hostDisplay: '',
-    contextRef: '',
-    channels: [] as string[],
-    stateless: false,
-  })
   const [providerDraft, setProviderDraft] = useState<LlmProvider>('openai')
   // Model options are the operator allowlist (enabled only). The host's saved
   // model is always kept selectable even if it fell out of the allowlist
@@ -123,19 +203,16 @@ export default function HostDetailsPage() {
   } = useLlmAllowedModels()
   const [modelNameDraft, setModelNameDraft] = useState('')
   const [secretRefDraft, setSecretRefDraft] = useState('')
+  const [availableLlmSecrets, setAvailableLlmSecrets] = useState<HostSecretResource[]>([])
   // Fallback policy (spec §3-R5). `undefined` = the Host has no llmPolicy.
   const [llmPolicyDraft, setLlmPolicyDraft] = useState<LlmPolicy | undefined>(undefined)
+  // Keep the last server-backed policy separate from the editable draft. A
+  // model edit may contain an unsaved fallback slot, but Secret retirement
+  // must be guarded by the policy that is actually active on the Host.
+  const [persistedLlmPolicy, setPersistedLlmPolicy] = useState<LlmPolicy | undefined>(undefined)
   // Per-host model allowlist subset (spec.allowedModels, Topic 3a). Empty = the
   // host offers the full global allowlist per provider (back-compat default).
   const [allowedModelsDraft, setAllowedModelsDraft] = useState<HostAllowedModel[]>([])
-  // Write-only credential rotations for this Host's Secret (spec Topic 1b R5).
-  // A blank field leaves the stored key unchanged; a typed value rotates ONLY
-  // that dataKey via the merge PUT. Reset on every (re)load.
-  const [llmKeyDraft, setLlmKeyDraft] = useState<Record<string, string>>({})
-  // Extra fallback slots whose stored key can be retired after their fallback
-  // was removed (spec Topic 1b R5: offer to RETIRE via removeKeys). Applied on
-  // save unless the operator opts out.
-  const [retireCandidates, setRetireCandidates] = useState<string[]>([])
   // Data keys present per LLM Secret name, so the fallback credentialSlot
   // dropdown can offer extra keys (e.g. `claude-api-key-fb1`) — never free text.
   const [secretKeysByName, setSecretKeysByName] = useState<Record<string, string[]>>({})
@@ -144,14 +221,31 @@ export default function HostDetailsPage() {
     undefined
   )
   const [guardrailsData, setGuardrailsData] = useState<HostGuardrails | undefined>(undefined)
+  // Overview tab — read-only summary. Kept in sync with the host spec by loadData.
+  const [contextMcpServers, setContextMcpServers] = useState<string[]>([])
+  // The agent's private connector context is an implementation detail. Keep the
+  // full resource locally so connector writes can preserve additive spec fields
+  // and carry the resourceVersion without exposing the context in the UI.
+  const [agentContext, setAgentContext] = useState<ContextResource | null>(null)
+  const [availableConnectorNames, setAvailableConnectorNames] = useState<string[]>([])
+  const [connectorCatalogLoaded, setConnectorCatalogLoaded] = useState(false)
+  const [connectorCatalogLoading, setConnectorCatalogLoading] = useState(false)
+  const [showAddConnector, setShowAddConnector] = useState(false)
+  const [selectedConnectorNames, setSelectedConnectorNames] = useState<string[]>([])
+  const [hostStatusLabel, setHostStatusLabel] = useState('Unknown')
+  const [hostStatusTone, setHostStatusTone] = useState<'active' | 'inactive' | 'unknown'>('unknown')
+  const [hostCreatedAt, setHostCreatedAt] = useState('')
+  const [accessSummary, setAccessSummary] = useState<{
+    memberCount: number
+    teamCount: number
+    memberNames: string[]
+    teamNames: string[]
+  }>({ memberCount: 0, teamCount: 0, memberNames: [], teamNames: [] })
   const [statelessDraft, setStatelessDraft] = useState(false)
   const [savedStateless, setSavedStateless] = useState(false)
   const [lifecycleState, setLifecycleState] = useState('')
   const [lifecycleReason, setLifecycleReason] = useState('')
   const [statelessRejectionMessage, setStatelessRejectionMessage] = useState('')
-
-  const [availableContexts, setAvailableContexts] = useState<string[]>([])
-  const [availableSecrets, setAvailableSecrets] = useState<string[]>([])
 
   const providerModelOptions = useMemo(
     () => getModelOptions(allowedCatalog, providerDraft),
@@ -173,18 +267,17 @@ export default function HostDetailsPage() {
       allowedCatalog
     )
   }, [allowedModelsDraft, allowedCatalog, providerDraft, llmPolicyDraft])
-  // The effective subset grouped by provider, for the read-only Overview summary.
-  // Empty = the host is unrestricted (offers the full global allowlist).
-  const allowedModelsSummary = useMemo(() => {
-    const byProvider = new Map<string, string[]>()
-    for (const entry of effectiveAllowedModelsSpec) {
-      const list = byProvider.get(entry.provider) ?? []
-      if (!list.includes(entry.model)) list.push(entry.model)
-      byProvider.set(entry.provider, list)
-    }
-    return Array.from(byProvider.entries()).map(([provider, models]) => ({ provider, models }))
-  }, [effectiveAllowedModelsSpec])
-
+  const protectedCredentialSlots = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (persistedLlmPolicy?.fallbacks ?? [])
+            .map(fallback => String(fallback.credentialSlot || '').trim())
+            .filter(Boolean)
+        )
+      ),
+    [persistedLlmPolicy]
+  )
   // Mount race: if the host loaded before the allowlist and it had NO saved
   // model, loadData resolved the draft to '' — seed the default once the
   // catalog arrives. Never overrides a non-empty draft (a saved model that
@@ -222,14 +315,15 @@ export default function HostDetailsPage() {
     setError('')
     try {
       const detail = await getHostDetailBundle(routeName)
-      const { host, contexts: contextsList, secrets: secretsList } = detail
+      const { host, contexts: contextsList, secrets: secretsList, agentUsers, agentTeams } = detail
       if (!mountedRef.current) return
       const spec = host.spec || {}
+      const nextPersistedLlmPolicy = normalizeLlmPolicy(spec.llmPolicy)
+      setPersistedLlmPolicy(nextPersistedLlmPolicy)
       // AP-6: remember the version of THIS read — the edit drafts below are
       // built from it, so it is the correct precondition for the eventual save.
       formResourceVersionRef.current = String(host.metadata?.resourceVersion || '')
       if (resetDrafts === 'all' || resetDrafts === 'overview') {
-        // Snapshot the saved Overview state so Cancel/Edit can revert to it.
         const overview = {
           hostName: String(host.metadata?.name || routeName),
           hostDisplay: String(spec.host || host.metadata?.name || routeName),
@@ -237,12 +331,62 @@ export default function HostDetailsPage() {
           channels: Array.isArray(spec.channels) ? spec.channels.map(String).filter(Boolean) : [],
           stateless: spec.lifecycle?.stateless === true,
         }
-        savedOverviewRef.current = overview
         setHostNameDraft(overview.hostName)
         setHostDisplayDraft(overview.hostDisplay)
+        setHostDescription(String(spec.description || '').trim())
         setContextRefDraft(overview.contextRef)
         setChannelsDraft(overview.channels)
         setStatelessDraft(overview.stateless)
+        // Overview read-only summary: linked context's MCP servers + access counts.
+        const ref = overview.contextRef.trim()
+        const matched = (contextsList || []).find(
+          item => String(item.spec?.contextId || item.metadata?.name || '').trim() === ref
+        ) as ContextResource | undefined
+        setAgentContext(matched ?? null)
+        const servers = normalizeConnectorNames(matched?.spec?.mcpServers)
+        setContextMcpServers(servers)
+        setAccessSummary({
+          memberCount: Array.isArray(agentUsers) ? agentUsers.length : 0,
+          teamCount: Array.isArray(agentTeams) ? agentTeams.length : 0,
+          memberNames: Array.isArray(agentUsers)
+            ? (
+                agentUsers as Array<{
+                  displayName?: string | null
+                  name?: string | null
+                  email?: string
+                }>
+              )
+                .map(item => String(item.displayName || item.name || item.email || '').trim())
+                .filter(Boolean)
+            : [],
+          teamNames: Array.isArray(agentTeams)
+            ? (agentTeams as Array<{ name?: string }>)
+                .map(item => String(item.name || '').trim())
+                .filter(Boolean)
+            : [],
+        })
+        // Overview read-only: status, created/updated timestamps, UID.
+        // K8s carries lifecycle.state on status. Map active/suspended/etc. to a
+        // simple active/inactive/unknown tone for the badge.
+        const lifecycleState = String(
+          (host.status as { lifecycle?: { state?: string } } | undefined)?.lifecycle?.state || ''
+        ).trim()
+        const lowerState = lifecycleState.toLowerCase()
+        if (lowerState === 'active' || lowerState === 'ready') {
+          setHostStatusLabel('Active')
+          setHostStatusTone('active')
+        } else if (lowerState === 'blocked' || lowerState === 'failed') {
+          setHostStatusLabel(lifecycleState || 'Inactive')
+          setHostStatusTone('inactive')
+        } else if (lifecycleState) {
+          setHostStatusLabel(lifecycleState)
+          setHostStatusTone('unknown')
+        } else {
+          setHostStatusLabel('Active')
+          setHostStatusTone('active')
+        }
+        const createdAt = String(host.metadata?.creationTimestamp || '').trim()
+        setHostCreatedAt(createdAt)
       }
       const nextProvider = normalizeProvider(
         String((spec.model as { provider?: string } | undefined)?.provider || 'openai')
@@ -259,13 +403,10 @@ export default function HostDetailsPage() {
             resolveDefaultModel(nextProvider, getModelOptions(allowedCatalog, nextProvider))
         )
         setSecretRefDraft(String(spec.secretRef || ''))
-        setLlmPolicyDraft(normalizeLlmPolicy(spec.llmPolicy))
+        setLlmPolicyDraft(nextPersistedLlmPolicy)
         // Hydrate the per-host model subset from the saved spec (Topic 3a); absent
         // → [] = unrestricted (offers the full global allowlist per provider).
         setAllowedModelsDraft(normalizeAllowedModels(spec.allowedModels))
-        // Write-only surfaces reset only when this tab is reloaded or saved.
-        setLlmKeyDraft({})
-        setRetireCandidates([])
       }
       const rawTools = (spec.approval as { tools?: Record<string, boolean> } | undefined)?.tools
       setApprovalToolsData(rawTools && typeof rawTools === 'object' ? rawTools : undefined)
@@ -290,22 +431,20 @@ export default function HostDetailsPage() {
           : ''
       )
 
-      const contextIds = (contextsList || [])
-        .map(item => String(item.spec?.contextId || item.metadata?.name || '').trim())
-        .filter(Boolean)
-      setAvailableContexts(Array.from(new Set(contextIds)).sort((a, b) => a.localeCompare(b)))
-      const secretNames = (secretsList || []).map(item => item.name.trim()).filter(Boolean)
-      setAvailableSecrets(Array.from(new Set(secretNames)).sort((a, b) => a.localeCompare(b)))
-
       // Map each Secret to its data-key NAMES (never values), already carried by
       // the detail bundle. Feeds the fallback credentialSlot dropdown's extra
       // keys (e.g. `claude-api-key-fb1`, spec R4.5.6) without a second fetch.
       const keysMap: Record<string, string[]> = {}
+      const secretOptions: HostSecretResource[] = []
       for (const item of secretsList || []) {
         const name = item.name.trim()
-        if (name) keysMap[name] = Array.isArray(item.keys) ? item.keys : []
+        if (!name) continue
+        const keys = Array.isArray(item.keys) ? item.keys : []
+        keysMap[name] = keys
+        secretOptions.push({ name, keys })
       }
       setSecretKeysByName(keysMap)
+      setAvailableLlmSecrets(secretOptions)
     } catch (e) {
       if (!mountedRef.current) return
       setError(e instanceof Error ? e.message : 'Failed to load agent details')
@@ -321,48 +460,141 @@ export default function HostDetailsPage() {
     void loadData()
   }, [routeName])
 
+  async function openAddConnectorDialog() {
+    setSelectedConnectorNames([])
+    setShowAddConnector(true)
+    setError('')
+    if (connectorCatalogLoaded || connectorCatalogLoading) return
+
+    setConnectorCatalogLoading(true)
+    try {
+      const response = await getMcpServers()
+      const names = (response.items || [])
+        .map(item => String(item.metadata?.name || '').trim())
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b))
+      setAvailableConnectorNames(Array.from(new Set(names)))
+      setConnectorCatalogLoaded(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load available connectors.')
+    } finally {
+      setConnectorCatalogLoading(false)
+    }
+  }
+
+  async function saveAgentConnectors(nextServers: string[]): Promise<boolean> {
+    const contextName = contextResourceName(agentContext)
+    const contextVersion = agentContext?.metadata?.resourceVersion
+    if (!contextName) {
+      setError(
+        'Connector settings are not available for this agent yet. Reload the agent and try again.'
+      )
+      return false
+    }
+
+    const normalizedServers = normalizeConnectorNames(nextServers)
+    const currentSpec = (agentContext?.spec || {}) as Record<string, unknown>
+    const contextId = String(currentSpec.contextId || contextName).trim()
+    if (!contextId) {
+      setError(
+        'Connector settings are not available for this agent yet. Reload the agent and try again.'
+      )
+      return false
+    }
+
+    setBusy(true)
+    setError('')
+    try {
+      const updated = await updateContext(
+        contextName,
+        buildContextUpdatePayload(contextVersion, {
+          ...currentSpec,
+          contextId,
+          mcpServers: normalizedServers,
+        } as ContextSpec)
+      )
+      const updatedContext: ContextResource = {
+        ...agentContext,
+        ...updated,
+        metadata: { ...agentContext.metadata, ...(updated?.metadata || {}) },
+        spec: {
+          ...agentContext.spec,
+          ...(updated?.spec || {}),
+          contextId,
+          mcpServers: normalizedServers,
+        },
+      }
+      setAgentContext(updatedContext)
+      setContextMcpServers(normalizedServers)
+      showToast('Connectors updated.', { tone: 'success' })
+      return true
+    } catch (e) {
+      setError(agentConnectorMutationError(e))
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function removeAgentConnector(server: string) {
+    const shouldRemove = await confirm({
+      title: 'Remove connector from this agent?',
+      message: `Remove ${server} from ${routeName}?`,
+      confirmLabel: 'Remove connector',
+      tone: 'danger',
+    })
+    if (!shouldRemove) return
+    await saveAgentConnectors(contextMcpServers.filter(item => item !== server))
+  }
+
   const currentSecretKeys = useMemo(
     () => secretKeysByName[secretRefDraft] ?? [],
     [secretKeysByName, secretRefDraft]
   )
 
-  // Track fallback removals: when a fallback with its OWN stored extra slot is
-  // dropped and no remaining entry references that key, offer to retire it
-  // (spec Topic 1b R5). Re-adding a fallback that reclaims the key un-offers it.
-  function handlePolicyChange(next: LlmPolicy | undefined) {
-    const stored = new Set(currentSecretKeys)
-    const stillInUse = getActiveCredentialKeys(providerDraft, next)
-    const removedExtraSlots = (llmPolicyDraft?.fallbacks ?? [])
-      .map(fallback => fallback.credentialSlot)
-      .filter((slot): slot is string => Boolean(slot))
-      .filter(slot => stored.has(slot) && !stillInUse.has(slot))
-    setRetireCandidates(current => {
-      const set = new Set(current)
-      for (const slot of removedExtraSlots) set.add(slot)
-      for (const slot of Array.from(set)) if (stillInUse.has(slot)) set.delete(slot)
-      return Array.from(set)
-    })
-    setLlmPolicyDraft(next)
-  }
+  const llmSecretOptions = useMemo(() => {
+    const toOption = (name: string, keys: string[]) => {
+      const providers = getProvidersWithCompleteCredentials(keys)
+      return {
+        value: name,
+        label: name,
+        meta:
+          providers.length > 0
+            ? `Providers: ${providers.map(getProviderLabel).join(', ')}`
+            : 'No recognized provider credentials',
+        providers:
+          providers.length > 0
+            ? providers.map(id => ({ id, label: getProviderLabel(id) }))
+            : undefined,
+      }
+    }
 
-  // Revert every Overview-owned draft to the last SAVED snapshot. Used by Cancel
-  // and by Edit-open so an edit session always starts from server-backed values
-  // — never a stale draft left behind by a prior discarded edit (any Overview
-  // field, not just Display name: the whole class shares this reset).
-  function resetOverviewDrafts() {
-    const saved = savedOverviewRef.current
-    setHostNameDraft(saved.hostName)
-    setHostDisplayDraft(saved.hostDisplay)
-    // contextRef is written by the Overview save (saveHost), so reset it here to
-    // block a stale leak — EXCEPT while the Context tab has a live edit open: it
-    // is a legitimate concurrent writer of contextRefDraft (its editingContext
-    // session), and reverting an in-progress selection would silently discard it.
-    if (!editingContext) setContextRefDraft(saved.contextRef)
-    setChannelsDraft(saved.channels)
-    setStatelessDraft(saved.stateless)
-  }
+    const options = availableLlmSecrets.map(secret =>
+      toOption(secret.name, Array.isArray(secret.keys) ? secret.keys : [])
+    )
+    if (secretRefDraft.trim() && !options.some(secret => secret.value === secretRefDraft.trim())) {
+      options.unshift(toOption(secretRefDraft.trim(), currentSecretKeys))
+    }
+    return options
+  }, [availableLlmSecrets, currentSecretKeys, secretRefDraft])
 
-  async function saveHost(): Promise<boolean> {
+  const linkedSecretProviderMismatch =
+    secretRefDraft.trim().length > 0 &&
+    currentSecretKeys.length > 0 &&
+    !isProviderUsable(providerDraft, key => currentSecretKeys.includes(key))
+
+  const connectorOptions = useMemo(
+    () =>
+      availableConnectorNames
+        .filter(name => !contextMcpServers.includes(name))
+        .map(name => ({ value: name, label: name })),
+    [availableConnectorNames, contextMcpServers]
+  )
+
+  async function saveHost(
+    nextDisplayName = hostDisplayDraft,
+    nextStateless = statelessDraft
+  ): Promise<boolean> {
     const nextHostName = hostNameDraft.trim()
     if (!nextHostName) return false
 
@@ -381,13 +613,13 @@ export default function HostDetailsPage() {
       // semantics — omitting them is what keeps them intact).
       const nextSpec: Record<string, unknown> = {
         ...currentHost.spec,
-        host: hostDisplayDraft.trim() || nextHostName,
+        host: nextDisplayName.trim() || nextHostName,
         contextRef: contextRefDraft.trim(),
         channels: channelsDraft,
         // Echo spec.lifecycle explicitly: the admin facade full-replaces the
         // spec, so leaving lifecycle implicit would strip the stateless flag.
-        ...(statelessDraft || currentLifecycle
-          ? { lifecycle: { ...currentLifecycle, stateless: statelessDraft } }
+        ...(nextStateless || currentLifecycle
+          ? { lifecycle: { ...currentLifecycle, stateless: nextStateless } }
           : {}),
         ...(channelsDraft.length > 0 && currentWorkflowControl === undefined
           ? { workflowControl: { scopes: [...FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES] } }
@@ -431,17 +663,57 @@ export default function HostDetailsPage() {
     }
   }
 
-  // Scoped save for the "Model & credentials" tab. Owns provider/model,
-  // secretRef, the opt-in fallback policy, the per-host model allowlist, and
-  // write-only credential rotations/retirements. All other spec fields
-  // (identity, context, channels, lifecycle) are preserved via the
-  // `...currentHost.spec` spread (full-replace semantics).
-  async function saveModelAndCredentials(): Promise<boolean> {
-    // Client-side mirror of control-api's write gate (spec R5.3): block a save
-    // with an out-of-allowlist fallback model before the round-trip. Skip the
-    // check when the allowlist failed to load (`allowedCatalog` empty) — every
-    // model would falsely flag as "not enabled"; the backend 422 stays the
-    // source of truth for that case (matching how spec.model has no client gate).
+  async function saveSecretRef(nextSecretRef: string): Promise<void> {
+    const normalizedSecretRef = nextSecretRef.trim()
+    if (!normalizedSecretRef) throw new Error('Select an LLM Secret.')
+
+    setBusy(true)
+    setError('')
+    try {
+      const currentHost = await getHost(routeName)
+      const nextSpec = {
+        ...currentHost.spec,
+        secretRef: normalizedSecretRef,
+      }
+      const formResourceVersion = formResourceVersionRef.current
+      await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
+        ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
+        spec: nextSpec,
+      })
+      setSecretRefDraft(normalizedSecretRef)
+      await loadData('none')
+      showToast('LLM Secret link updated.', { tone: 'success' })
+    } catch (e) {
+      const status = (e as { status?: number } | null)?.status
+      const code = (e as { code?: string } | null)?.code
+      const message =
+        status === 409 && code === 'conflict'
+          ? 'This agent changed since you opened the form. Reload to see the latest, then re-apply your change.'
+          : e instanceof Error
+            ? e.message
+            : 'Failed to change the linked LLM Secret'
+      setError(message)
+      throw new Error(message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleSecretRefChange(nextSecretRef: string): Promise<void> {
+    if (nextSecretRef === secretRefDraft) return
+    try {
+      await saveSecretRef(nextSecretRef)
+    } catch {
+      // saveSecretRef surfaces the server error in the page banner. Keep the
+      // controlled select on the previously saved value when the write fails.
+    }
+  }
+
+  async function saveModelConfiguration(): Promise<boolean> {
+    if (!modelNameDraft.trim()) {
+      setError('Choose a current model before saving.')
+      return false
+    }
     if (llmPolicyDraft && allowedCatalog.length > 0) {
       const policyErrors = validateLlmPolicy(llmPolicyDraft, allowedCatalog)
       if (policyErrors.length > 0) {
@@ -449,14 +721,6 @@ export default function HostDetailsPage() {
         return false
       }
     }
-
-    // The full allowlist validation above is skipped when the catalog failed to
-    // load (`allowedCatalog` empty), which also skips the triggerOn check inside
-    // `validateLlmPolicy`. An explicitly-empty `triggerOn` on a policy that HAS
-    // fallbacks means "fail over on nothing" — the runtime silently disables
-    // failover. Guard it here regardless of the catalog (least-surprising: block
-    // rather than persist a policy that quietly no-ops), so the operator never
-    // saves a self-disabled policy just because the allowlist was unavailable.
     if (
       llmPolicyDraft &&
       llmPolicyDraft.fallbacks.length > 0 &&
@@ -466,115 +730,68 @@ export default function HostDetailsPage() {
       setError(LLM_EMPTY_TRIGGER_ERROR)
       return false
     }
-
-    // Asymmetric usable gate (spec Topic 1b): block save when the PRIMARY
-    // provider isn't usable. "Usable" counts both a stored key (existingKeys)
-    // and a freshly typed rotation, so switching to a provider whose key is
-    // already stored stays allowed. Enforced only when we have real key signal —
-    // the Secret listed at least one key OR the operator typed a rotation. An
-    // empty/unlisted key set is treated as unknown (the backend stays the source
-    // of truth), so the save is never blocked by stale listing.
-    const primaryPresent = (dataKey: string): boolean =>
-      (llmKeyDraft[dataKey] ?? '').trim().length > 0 || currentSecretKeys.includes(dataKey)
-    const typedAnyCredential = Object.values(llmKeyDraft).some(value => value.trim().length > 0)
     if (
       secretRefDraft.trim() &&
-      (currentSecretKeys.length > 0 || typedAnyCredential) &&
-      !isProviderUsable(providerDraft, primaryPresent)
+      currentSecretKeys.length > 0 &&
+      !isProviderUsable(providerDraft, key => currentSecretKeys.includes(key))
     ) {
-      setError(`Add the ${getProviderLabel(providerDraft)} credential for the primary model.`)
-      return false
-    }
-
-    // Write-only credential rotations + slot retirement (merge PUT, never a
-    // full replace — a full replace of this shared Secret would drop fallback
-    // keys the operator didn't re-type). The draft is PROJECTED onto the active
-    // domain first, so a value typed for a since-unmounted provider (primary
-    // switched, or a fallback removed) is neither validated nor written — no
-    // stale block, no orphan key. Then validate cross-slot shape up front.
-    const activeCredentialKeys = getActiveCredentialKeys(providerDraft, llmPolicyDraft)
-    const rotatedData = projectCredentialDraft(llmKeyDraft, activeCredentialKeys)
-    const removeKeys = retireCandidates.filter(key => !(key in rotatedData))
-    // Cross-slot shape check on the rotated keys only. Note: rotating one half of
-    // the Bedrock pair fails this (both must be written together) — matching the
-    // server contract; the operator re-enters both to rotate either.
-    const credentialSlotErrors = validateLlmSecretData(rotatedData)
-    if (credentialSlotErrors.length > 0) {
-      setError(credentialSlotErrors[0])
+      setError(
+        `The linked LLM Secret does not contain a usable ${getProviderLabel(providerDraft)} credential. Update the linked credentials or choose another secret.`
+      )
       return false
     }
 
     setBusy(true)
     setError('')
     try {
-      // Re-fetch to preserve fields outside this tab's domain (full replace).
       const currentHost = await getHost(routeName)
       const nextSpec: Record<string, unknown> = {
         ...currentHost.spec,
-        secretRef: secretRefDraft.trim(),
         model: {
           provider: providerDraft,
           name: modelNameDraft.trim(),
         },
       }
-      // Opt-in fallback policy: set it when configured, otherwise drop it so a
-      // Host with no policy stays exactly as today (full-replace semantics).
+      // These fields are owned by this editor. Delete them first so removing
+      // the last fallback or clearing an allowlist is persisted as an actual
+      // field removal under the facade's full-replace semantics.
+      delete nextSpec.llmPolicy
+      delete nextSpec.allowedModels
       if (llmPolicyDraft && llmPolicyDraft.fallbacks.length > 0) {
         nextSpec.llmPolicy = llmPolicyDraft
-      } else {
-        delete nextSpec.llmPolicy
       }
-      // Per-host model allowlist subset (Topic 3a): emit only genuine subsets
-      // (providers the operator restricted); drop the field entirely when every
-      // provider is unrestricted so absent=all-global holds (full-replace
-      // semantics — a Host that restricts nothing saves exactly as today).
       if (effectiveAllowedModelsSpec.length > 0) {
         nextSpec.allowedModels = effectiveAllowedModelsSpec
-      } else {
-        delete nextSpec.allowedModels
       }
 
       const formResourceVersion = formResourceVersionRef.current
       await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
-        // AP-6: carry the resourceVersion captured at form load so the API
-        // rejects this save with 409 {error:'conflict'} if the Host changed
-        // while the operator was editing, instead of silently overwriting the
-        // concurrent change with this form's stale echo.
         ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
         spec: nextSpec,
       })
-      // Rotate/retire credentials on the Host's own Secret with merge:true so
-      // other providers' stored keys are preserved (spec Topic 1b R5). removeKeys
-      // retires the extra slots left behind by removed fallbacks.
-      if (secretRefDraft.trim() && (Object.keys(rotatedData).length > 0 || removeKeys.length > 0)) {
-        await apiSend('PUT', '/api/v1/admin/secrets', {
-          name: secretRefDraft.trim(),
-          merge: true,
-          ...(Object.keys(rotatedData).length > 0 ? { stringData: rotatedData } : {}),
-          ...(removeKeys.length > 0 ? { removeKeys } : {}),
-        })
-      }
-      // Refresh server-backed state and this tab's saved values without
-      // clobbering a still-open Overview draft.
       await loadData('model')
-      showToast('Model & credentials saved.', { tone: 'success' })
+      setEditingModel(false)
+      showToast('Model configuration saved.', { tone: 'success' })
       return true
     } catch (e) {
       const status = (e as { status?: number } | null)?.status
       const code = (e as { code?: string } | null)?.code
       if (status === 409 && code === 'conflict') {
-        // AP-6 conflict (see saveHost for full rationale): the Host changed
-        // between the form-load read and this save. Reload to re-apply.
         setError(
           "This agent changed since you opened the form (another edit, or the agent's own lifecycle state updated). Reload to see the latest, then re-apply your change."
         )
       } else {
-        setError(e instanceof Error ? e.message : 'Failed to save model & credentials')
+        setError(e instanceof Error ? e.message : 'Failed to save model configuration')
       }
       return false
     } finally {
       setBusy(false)
     }
+  }
+
+  async function cancelModelEdit() {
+    setEditingModel(false)
+    await loadData('model')
   }
 
   const persistApprovalTools = useCallback(
@@ -681,339 +898,178 @@ export default function HostDetailsPage() {
       subtitle="Configuration and access for this agent."
       tabAriaLabel="Agent sections"
       tabClassName="cu-tabs--compact"
-      contentClassName={
-        activeTab === 'advanced' || (activeTab === 'model' && editingModel)
-          ? 'cu-agent-detail-card'
-          : undefined
-      }
+      contentClassName={activeTab === 'advanced' ? 'cu-agent-detail-card' : undefined}
       tabs={HOST_TABS.map(tab => ({
         value: tab,
         label: TAB_LABELS[tab],
         href: hostTabHref(tab),
       }))}
       title={`Agent: ${routeName}`}
+      titleActions={
+        <AgentActionsMenu
+          busy={busy || deletingAgent}
+          onDelete={() => {
+            setDeleteAgentDialogError('')
+            setShowDeleteAgentConfirm(true)
+          }}
+        />
+      }
     >
       <div className="cu-agent-detail-scroll">
         {activeTab === 'details' && (
+          <HostOverviewTab
+            hostName={routeName}
+            displayName={hostDisplayDraft}
+            description={hostDescription}
+            statusLabel={hostStatusLabel}
+            statusTone={hostStatusTone}
+            contextRef={contextRefDraft}
+            contextMcpServers={contextMcpServers}
+            contextMcpTotal={contextMcpServers.length}
+            modelPrimary={modelNameDraft}
+            modelProviderLine={
+              modelNameDraft ? `${getProviderLabel(providerDraft)} · ${modelNameDraft}` : ''
+            }
+            stateless={statelessDraft}
+            lifecycleState={lifecycleState}
+            lifecycleReason={friendlyLifecycleReason(lifecycleReason)}
+            statelessRejectionMessage={statelessRejectionMessage}
+            accessSummary={accessSummary}
+            onNavigate={tab => selectTab(tab)}
+            onSaveDisplayName={nextDisplayName => saveHost(nextDisplayName)}
+            onSaveLifecycle={nextStateless => {
+              setStatelessDraft(nextStateless)
+              return saveHost(hostDisplayDraft, nextStateless)
+            }}
+            createdAt={hostCreatedAt}
+          />
+        )}
+
+        {activeTab === 'model' && (
           <>
-            {statelessRejectionMessage ? (
-              <div className="cu-banner cu-banner--warning" style={{ marginBottom: '1rem' }}>
-                <strong>Stateless mode rejected:</strong> {statelessRejectionMessage}
-              </div>
-            ) : null}
             <div className="cu-agent-detail-heading">
-              <div
-                style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}
-              >
-                <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-                  Agent configuration and settings.
-                </p>
-                {savedStateless && lifecycleState ? (
-                  <span className="cu-chip">
-                    {`Lifecycle: ${lifecycleState}${
-                      lifecycleReason ? ` — ${friendlyLifecycleReason(lifecycleReason)}` : ''
-                    }`}
-                  </span>
-                ) : null}
-              </div>
+              <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
+                Provider, current model, allowed models, fallback policy, and credentials for this
+                agent.
+              </p>
               <div className="cu-agent-detail-heading__actions">
-                {editingOverview ? (
-                  <>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--ghost cu-btn--sm"
-                      onClick={() => {
-                        // Discard any unsaved Overview edits before leaving edit
-                        // mode, so the read-only view and the next save reflect
-                        // the last SAVED state — not the abandoned draft.
-                        resetOverviewDrafts()
-                        setEditingOverview(false)
-                      }}
-                      disabled={busy}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--primary"
-                      onClick={async () => {
-                        // AP-6: stay in edit mode on failure so the operator's
-                        // draft survives alongside the error/conflict banner.
-                        if (await saveHost()) {
-                          setEditingOverview(false)
-                        }
-                      }}
-                      disabled={busy || !hostNameDraft.trim()}
-                    >
-                      {busy ? 'Saving…' : 'Save'}
-                    </button>
-                  </>
-                ) : (
+                {!editingModel ? (
                   <button
                     type="button"
                     className="cu-btn cu-btn--ghost cu-btn--sm"
                     onClick={() => {
-                      // Defensive: start every edit session from the last SAVED
-                      // snapshot, so a stale draft never leaks into this Overview
-                      // save. resetOverviewDrafts deliberately leaves contextRef
-                      // untouched while the Context tab is mid-edit — that tab is a
-                      // legitimate live writer of contextRefDraft, not a stale
-                      // leftover, so its in-progress selection must be preserved.
-                      resetOverviewDrafts()
-                      setEditingOverview(true)
+                      setError('')
+                      setEditingModel(true)
                     }}
                     disabled={busy}
                   >
                     Edit
                   </button>
-                )}
+                ) : null}
               </div>
             </div>
+
             <div className="cu-form-stack">
               <div className="cu-field">
-                <label htmlFor="host-name">Name</label>
-                {editingOverview ? (
-                  <>
-                    <input id="host-name" value={hostNameDraft} readOnly />
-                    <span className="cu-field__hint">
-                      This is the agent identifier, not editable.
-                    </span>
-                  </>
-                ) : (
-                  <div className="cu-field__readonly">{hostNameDraft}</div>
-                )}
-              </div>
-              <div className="cu-field">
-                <label htmlFor="host-display">Display name</label>
-                {editingOverview ? (
-                  <input
-                    id="host-display"
-                    value={hostDisplayDraft}
-                    onChange={e => setHostDisplayDraft(e.target.value)}
-                    disabled={busy}
-                    autoFocus
+                <label htmlFor="model-secret">LLM Secret</label>
+                <div className="cu-llm-secret-control">
+                  <LlmSecretSelect
+                    id="model-secret"
+                    value={secretRefDraft}
+                    ariaLabel="LLM Secret"
+                    onChange={value => void handleSecretRefChange(value)}
+                    options={llmSecretOptions}
+                    placeholder={
+                      llmSecretOptions.length === 0
+                        ? 'No LLM Secret available'
+                        : 'Select an LLM Secret...'
+                    }
+                    disabled={busy || llmSecretOptions.length === 0}
                   />
-                ) : (
-                  <div className="cu-field__readonly">{hostDisplayDraft}</div>
-                )}
-              </div>
-              <div className="cu-field" style={{ marginBottom: 0 }}>
-                <label htmlFor="host-agent-type">Type</label>
-                {editingOverview ? (
-                  <>
-                    <select
-                      id="host-agent-type"
-                      value={statelessDraft ? 'stateless' : 'stateful'}
-                      onChange={e => setStatelessDraft(e.target.value === 'stateless')}
-                      disabled={busy}
-                    >
-                      <option value="stateful">Stateful (always on)</option>
-                      <option value="stateless">Stateless (suspends when idle)</option>
-                    </select>
-                    <span className="cu-field__hint">
-                      Stateless agents suspend after the idle window and wake on demand.
-                      Communication channels keep stateless agents always-on unless the cluster
-                      explicitly enables wake-on-interaction; desktop still requires a stateful
-                      agent.
-                    </span>
-                  </>
-                ) : (
-                  <div className="cu-field__readonly">
-                    {statelessDraft ? 'Stateless (suspends when idle)' : 'Stateful (always on)'}
+                  <button
+                    type="button"
+                    className="cu-btn cu-btn--icon cu-btn--toolbar"
+                    onClick={() => setLlmSecretModalOpen(true)}
+                    disabled={busy || !secretRefDraft.trim()}
+                    aria-label="Edit LLM Secret credentials"
+                    title="Edit LLM Secret credentials"
+                  >
+                    <IconPencil width={16} height={16} />
+                  </button>
+                </div>
+                <span className="cu-field__hint">
+                  Select the LLM Secret linked to this agent. Use the pencil to edit its stored
+                  credentials.
+                </span>
+                {linkedSecretProviderMismatch ? (
+                  <div className="cu-banner cu-banner--warning">
+                    The linked secret does not contain a usable {getProviderLabel(providerDraft)}{' '}
+                    credential. Choose another secret or edit its credentials before saving model
+                    configuration.
                   </div>
-                )}
+                ) : null}
               </div>
-            </div>
-
-            {!initialLoading && (
-              <div
-                style={{
-                  marginTop: '2rem',
-                  paddingTop: '1.25rem',
-                  borderTop: '1px solid var(--cu-border)',
-                }}
-              >
-                <p className="cu-section-title" style={{ marginBottom: '0.5rem' }}>
-                  Danger zone
-                </p>
-                <p className="cu-muted" style={{ fontSize: '0.8125rem', marginBottom: '0.75rem' }}>
-                  Permanently delete this agent and its direct access mappings.
-                </p>
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--ghost cu-btn--sm"
-                  style={{ color: 'var(--cu-danger)' }}
-                  onClick={() => {
-                    setDeleteAgentDialogError('')
-                    setShowDeleteAgentConfirm(true)
-                  }}
-                  disabled={busy}
-                >
-                  Delete agent...
-                </button>
-              </div>
-            )}
-          </>
-        )}
-
-        {activeTab === 'model' && (
-          <>
-            <div className={editingModel ? 'cu-agent-detail-toolbar' : 'cu-agent-detail-heading'}>
-              <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-                Provider, allowed models, fallback policy, and credentials for this agent.
-              </p>
-              <div
-                className={
-                  editingModel
-                    ? 'cu-agent-detail-toolbar__actions'
-                    : 'cu-agent-detail-heading__actions'
-                }
-              >
-                {editingModel ? (
-                  <>
+              {editingModel ? (
+                <>
+                  <LlmProviderConfig
+                    provider={providerDraft}
+                    model={modelNameDraft}
+                    onPrimaryChange={next => {
+                      setProviderDraft(next.provider)
+                      setModelNameDraft(next.model)
+                    }}
+                    policy={llmPolicyDraft}
+                    onPolicyChange={setLlmPolicyDraft}
+                    allowedModels={allowedModelsDraft}
+                    onAllowedModelsChange={setAllowedModelsDraft}
+                    catalog={allowedCatalog}
+                    catalogLoading={modelsLoading}
+                    catalogError={modelsError}
+                    modelLabel="Current model"
+                    secretKeys={currentSecretKeys}
+                    disabled={busy}
+                  />
+                  <div className="cu-create-actions">
                     <button
                       type="button"
                       className="cu-btn cu-btn--ghost cu-btn--sm"
-                      onClick={() => setEditingModel(false)}
+                      onClick={() => void cancelModelEdit()}
                       disabled={busy}
                     >
-                      Cancel
+                      Cancel model changes
                     </button>
                     <button
                       type="button"
                       className="cu-btn cu-btn--primary"
-                      onClick={async () => {
-                        // AP-6: stay in edit mode on failure so the operator's
-                        // draft survives alongside the error/conflict banner.
-                        if (await saveModelAndCredentials()) {
-                          setEditingModel(false)
-                        }
-                      }}
+                      onClick={() => void saveModelConfiguration()}
                       disabled={busy}
                     >
-                      {busy ? 'Saving…' : 'Save'}
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    type="button"
-                    className="cu-btn cu-btn--ghost cu-btn--sm"
-                    onClick={() => setEditingModel(true)}
-                    disabled={busy}
-                  >
-                    Edit
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {!editingModel ? (
-              <div className="cu-form-stack">
-                <div className="cu-field">
-                  <label htmlFor="model-provider">Model provider</label>
-                  <div className="cu-field__readonly">{getProviderLabel(providerDraft)}</div>
-                </div>
-                <div className="cu-field">
-                  <label htmlFor="model-allowed">Allowed models</label>
-                  {allowedModelsSummary.length > 0 ? (
-                    <ul className="cu-llm-policy__summary">
-                      {allowedModelsSummary.map(entry => (
-                        <li key={entry.provider} className="cu-field__readonly">
-                          {getProviderLabel(entry.provider)} · {entry.models.join(', ')}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <div className="cu-field__readonly">
-                      All models — this agent offers every enabled model for its provider(s).
-                    </div>
-                  )}
-                </div>
-                <div className="cu-field">
-                  <label htmlFor="model-secret">Secret reference</label>
-                  <div className="cu-field__readonly">{secretRefDraft || '-'}</div>
-                </div>
-                <div className="cu-field">
-                  <label htmlFor="model-fallback">Fallback policy</label>
-                  {llmPolicyDraft && llmPolicyDraft.fallbacks.length > 0 ? (
-                    <ol className="cu-llm-policy__summary">
-                      {llmPolicyDraft.fallbacks.map((entry, index) => (
-                        <li key={index} className="cu-field__readonly">
-                          {getProviderLabel(entry.provider)} · {entry.model || '-'}
-                          {entry.credentialSlot ? ` · ${entry.credentialSlot}` : ''}
-                        </li>
-                      ))}
-                    </ol>
-                  ) : (
-                    <div className="cu-field__readonly">No fallback configured.</div>
-                  )}
-                </div>
-              </div>
-            ) : (
-              <>
-                {retireCandidates.length > 0 ? (
-                  <div className="cu-banner cu-banner--warning" style={{ marginBottom: '0.75rem' }}>
-                    <span>
-                      Removed fallback left stored key(s): {retireCandidates.join(', ')}. They will
-                      be deleted from the Secret when you save.
-                    </span>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--ghost cu-btn--sm"
-                      onClick={() => setRetireCandidates([])}
-                      disabled={busy}
-                    >
-                      Keep them
+                      {busy ? 'Saving…' : 'Save model configuration'}
                     </button>
                   </div>
-                ) : null}
-                <div className="cu-form-stack" style={{ marginBottom: '1rem' }}>
-                  <div className="cu-field">
-                    <label htmlFor="host-secret">Secret reference</label>
-                    <select
-                      id="host-secret"
-                      value={secretRefDraft}
-                      onChange={e => setSecretRefDraft(e.target.value)}
-                      disabled={busy}
-                    >
-                      <option value="">Select LLM secret</option>
-                      {availableSecrets.map(secretName => (
-                        <option key={secretName} value={secretName}>
-                          {secretName}
-                        </option>
-                      ))}
-                      {secretRefDraft && !availableSecrets.includes(secretRefDraft) ? (
-                        <option value={secretRefDraft}>{secretRefDraft} (custom)</option>
-                      ) : null}
-                    </select>
-                  </div>
-                </div>
-                <LlmProviderConfig
+                </>
+              ) : (
+                <LlmProviderSummary
                   provider={providerDraft}
                   model={modelNameDraft}
-                  onPrimaryChange={next => {
-                    setProviderDraft(next.provider)
-                    setModelNameDraft(next.model)
-                  }}
+                  allowedModels={effectiveAllowedModelsSpec}
                   policy={llmPolicyDraft}
-                  onPolicyChange={handlePolicyChange}
-                  allowedModels={allowedModelsDraft}
-                  onAllowedModelsChange={setAllowedModelsDraft}
-                  catalog={allowedCatalog}
-                  catalogLoading={modelsLoading}
-                  catalogError={modelsError}
-                  replacePrimaryModelWithAllowedModels
-                  credentials={{
-                    draft: llmKeyDraft,
-                    onChange: (dataKey, value) =>
-                      setLlmKeyDraft(prev => ({ ...prev, [dataKey]: value })),
-                    existingKeys: currentSecretKeys,
-                  }}
-                  secretKeys={currentSecretKeys}
-                  disabled={busy}
                 />
-              </>
-            )}
+              )}
+            </div>
+
+            {llmSecretModalOpen && secretRefDraft.trim() ? (
+              <LlmSecretUpdateModal
+                key={secretRefDraft}
+                secretName={secretRefDraft}
+                existingKeys={currentSecretKeys}
+                protectedCredentialSlots={protectedCredentialSlots}
+                onClose={() => setLlmSecretModalOpen(false)}
+                onChanged={async () => {
+                  await loadData('none')
+                }}
+              />
+            ) : null}
           </>
         )}
 
@@ -1029,16 +1085,28 @@ export default function HostDetailsPage() {
           />
         )}
 
-        {activeTab === 'contexts' && (
+        {activeTab === 'connectors' && (
           <>
-            <p className="cu-muted" style={{ fontSize: '0.875rem', marginBottom: '1rem' }}>
-              Associated context for this agent.
-            </p>
+            <div className="cu-agent-detail-heading">
+              <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
+                Connectors available to this agent.
+              </p>
+              <div className="cu-agent-detail-heading__actions">
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--primary cu-btn--sm"
+                  onClick={() => void openAddConnectorDialog()}
+                  disabled={busy || !agentContext}
+                >
+                  Add connector
+                </button>
+              </div>
+            </div>
             <div className="cu-table-wrap">
-              <table className="cu-table cu-table--header-band cu-table--static-rows">
+              <table className="cu-table cu-table--header-band cu-table--static-rows cu-agent-connectors-table">
                 <thead>
                   <tr>
-                    <th>Context</th>
+                    <th>Connector</th>
                     <th className="cu-table__col-actions">Actions</th>
                   </tr>
                 </thead>
@@ -1049,78 +1117,141 @@ export default function HostDetailsPage() {
                         Loading…
                       </td>
                     </tr>
-                  ) : (
+                  ) : contextMcpServers.length === 0 ? (
                     <tr>
-                      <td>
-                        {editingContext ? (
-                          <select
-                            className="cu-input cu-host-context-select"
-                            value={contextRefDraft}
-                            onChange={e => setContextRefDraft(e.target.value)}
-                            disabled={busy}
-                            autoFocus
-                            onKeyDown={e => {
-                              if (e.key === 'Escape') {
-                                setEditingContext(false)
-                              }
-                            }}
-                          >
-                            <option value="">Select context</option>
-                            {availableContexts.map(contextId => (
-                              <option key={contextId} value={contextId}>
-                                {contextId}
-                              </option>
-                            ))}
-                          </select>
-                        ) : contextRefDraft.trim() ? (
-                          <button
-                            type="button"
-                            className="cu-link"
-                            onClick={() =>
-                              router.push(CONTROL_ROUTES.contexts.detail(contextRefDraft.trim()))
-                            }
-                          >
-                            {contextRefDraft}
-                          </button>
-                        ) : (
-                          <span className="cu-table__cell-muted">No context selected</span>
-                        )}
-                      </td>
-                      <td className="cu-table__cell-actions">
-                        {editingContext ? (
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--toolbar"
-                            onClick={async () => {
-                              if (await saveHost()) {
-                                setEditingContext(false)
-                              }
-                            }}
-                            disabled={busy}
-                            aria-label="Save context"
-                            title="Save context"
-                          >
-                            <IconCheck width={16} height={16} />
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--toolbar"
-                            onClick={() => setEditingContext(true)}
-                            disabled={busy}
-                            aria-label="Edit context"
-                            title="Edit context"
-                          >
-                            <IconPencil width={16} height={16} />
-                          </button>
-                        )}
+                      <td colSpan={2} className="cu-empty">
+                        No connectors attached yet.
                       </td>
                     </tr>
+                  ) : (
+                    contextMcpServers.map(server => (
+                      <tr key={server}>
+                        <td>
+                          <span className="cu-table__cell-name">{server}</span>
+                        </td>
+                        <td className="cu-table__cell-actions">
+                          <div className="cu-table-actions">
+                            <RowActionsMenu
+                              ariaLabel={`Actions for connector ${server}`}
+                              horizontalTrigger
+                              actions={[
+                                {
+                                  key: 'remove',
+                                  label: 'Remove connector',
+                                  danger: true,
+                                  disabled: busy,
+                                  onClick: () => void removeAgentConnector(server),
+                                },
+                              ]}
+                            />
+                          </div>
+                        </td>
+                      </tr>
+                    ))
                   )}
                 </tbody>
               </table>
             </div>
           </>
+        )}
+
+        {showAddConnector && (
+          <div
+            className="cu-modal-backdrop"
+            role="presentation"
+            onMouseDown={event => {
+              if (event.target === event.currentTarget && !busy) {
+                setShowAddConnector(false)
+                setSelectedConnectorNames([])
+              }
+            }}
+          >
+            <section
+              className="cu-modal-panel cu-modal-panel--selection"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="add-agent-connector-title"
+              onMouseDown={event => event.stopPropagation()}
+            >
+              <div className="cu-modal-panel__head">
+                <h3 id="add-agent-connector-title" className="cu-modal-panel__title">
+                  Add connectors
+                </h3>
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--icon cu-btn--ghost"
+                  onClick={() => {
+                    setShowAddConnector(false)
+                    setSelectedConnectorNames([])
+                  }}
+                  disabled={busy}
+                  aria-label="Close"
+                >
+                  <IconX width={18} height={18} />
+                </button>
+              </div>
+
+              <p className="cu-modal-copy">
+                Select the connectors this agent can use. You can change this later.
+              </p>
+
+              {connectorCatalogLoading ? (
+                <div className="cu-empty">Loading available connectors…</div>
+              ) : (
+                <div className="cu-field">
+                  <label htmlFor="agent-connector-picker">Connectors</label>
+                  <SelectionDropdown
+                    id="agent-connector-picker"
+                    inline
+                    value={selectedConnectorNames}
+                    onChange={setSelectedConnectorNames}
+                    options={connectorOptions}
+                    placeholder="Select connectors"
+                    searchPlaceholder="Search connectors..."
+                    selectionLabel="Selected connectors"
+                    emptyLabel="No additional connectors available."
+                    disabled={busy}
+                  />
+                </div>
+              )}
+
+              <div className="cu-modal-panel__foot">
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--ghost cu-btn--sm"
+                  onClick={() => {
+                    setShowAddConnector(false)
+                    setSelectedConnectorNames([])
+                  }}
+                  disabled={busy}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--primary"
+                  onClick={async () => {
+                    const saved = await saveAgentConnectors([
+                      ...contextMcpServers,
+                      ...selectedConnectorNames,
+                    ])
+                    if (saved) {
+                      setShowAddConnector(false)
+                      setSelectedConnectorNames([])
+                    }
+                  }}
+                  disabled={
+                    busy ||
+                    connectorCatalogLoading ||
+                    selectedConnectorNames.length === 0 ||
+                    !agentContext
+                  }
+                >
+                  {selectedConnectorNames.length > 1 ? 'Add connectors' : 'Add connector'}
+                </button>
+              </div>
+            </section>
+          </div>
         )}
 
         {activeTab === 'identity' && <HostIdentityTab hostName={routeName} />}

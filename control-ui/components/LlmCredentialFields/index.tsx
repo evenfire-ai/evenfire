@@ -93,6 +93,7 @@ export function LlmCredentialFields({
   disabled = false,
   existingKeys,
   onRemovedKeysChange,
+  excludedProviders = [],
   pickerInline = false,
 }: LlmCredentialFieldsProps) {
   const [extraSlots, setExtraSlots] = useState<ExtraSlot[]>(() =>
@@ -107,9 +108,14 @@ export function LlmCredentialFields({
   // with the mount (the update modal mounts fresh per row; the create flow
   // remounts per step) — a remount is auto-cured by the draft term below.
   const [manuallyAdded, setManuallyAdded] = useState<ReadonlySet<LlmProvider>>(() => new Set())
+  const [replacingStoredKeys, setReplacingStoredKeys] = useState<ReadonlySet<string>>(
+    () => new Set()
+  )
+  const [replacingExtraKeys, setReplacingExtraKeys] = useState<ReadonlySet<string>>(() => new Set())
   const nextExtraId = useRef(0)
 
   const existingKeySet = useMemo(() => new Set(existingKeys ?? []), [existingKeys])
+  const excludedProviderSet = useMemo(() => new Set(excludedProviders), [excludedProviders])
   const present = (dataKey: string): boolean =>
     (draft[dataKey] ?? '').trim().length > 0 || existingKeySet.has(dataKey)
 
@@ -124,21 +130,25 @@ export function LlmCredentialFields({
     const visible = new Set<LlmProvider>()
     for (const key of existingKeySet) {
       const provider = providerForDataKey(key)
-      if (provider) visible.add(provider)
+      if (provider && !excludedProviderSet.has(provider)) visible.add(provider)
     }
     for (const [key, value] of Object.entries(draft)) {
       if (value.trim().length === 0) continue
       const provider = providerForDataKey(key)
-      if (provider) visible.add(provider)
+      if (provider && !excludedProviderSet.has(provider)) visible.add(provider)
     }
-    for (const provider of manuallyAdded) visible.add(provider)
+    for (const provider of manuallyAdded) {
+      if (!excludedProviderSet.has(provider)) visible.add(provider)
+    }
     return visible
-  }, [draft, existingKeySet, manuallyAdded])
+  }, [draft, existingKeySet, excludedProviderSet, manuallyAdded])
 
   // Filtering LLM_CREDENTIAL_GROUPS (instead of iterating the sets) keeps the
   // canonical package order regardless of the order providers were added.
   const visibleGroups = LLM_CREDENTIAL_GROUPS.filter(group => visibleProviders.has(group.provider))
-  const addableGroups = LLM_CREDENTIAL_GROUPS.filter(group => !visibleProviders.has(group.provider))
+  const addableGroups = LLM_CREDENTIAL_GROUPS.filter(
+    group => !visibleProviders.has(group.provider) && !excludedProviderSet.has(group.provider)
+  )
 
   // The picker is a MENU, not a selection: it never holds a value (see the
   // `value={[]}` below), so each addable provider is just an entry with its
@@ -395,10 +405,14 @@ export function LlmCredentialFields({
             {group.slots.map(slot => {
               const inputId = `${ID_PREFIX}-${slot.dataKey}`
               const slotPresent = present(slot.dataKey)
+              const stored = existingKeySet.has(slot.dataKey)
+              const draftValue = draft[slot.dataKey] ?? ''
+              const replacingStored = replacingStoredKeys.has(slot.dataKey)
+              const showCredentialInput = !stored || replacingStored || draftValue.trim().length > 0
               return (
                 <Field
                   key={slot.dataKey}
-                  htmlFor={inputId}
+                  htmlFor={showCredentialInput ? inputId : undefined}
                   label={
                     <>
                       {slot.label}
@@ -415,27 +429,76 @@ export function LlmCredentialFields({
                     </>
                   }
                 >
-                  {slot.multiline ? (
-                    <TextAreaInput
-                      id={inputId}
-                      monospace
-                      rows={5}
-                      value={draft[slot.dataKey] ?? ''}
-                      onChange={event => onChange(slot.dataKey, event.target.value)}
-                      placeholder={slot.placeholder}
-                      autoComplete="off"
-                      disabled={disabled}
-                    />
+                  {showCredentialInput ? (
+                    <div className="cu-llm-credential-replacement">
+                      {slot.multiline ? (
+                        <TextAreaInput
+                          id={inputId}
+                          monospace
+                          rows={5}
+                          value={draftValue}
+                          onChange={event => onChange(slot.dataKey, event.target.value)}
+                          placeholder={
+                            stored ? `Enter a new ${slot.label.toLowerCase()}` : slot.placeholder
+                          }
+                          autoComplete="off"
+                          disabled={disabled}
+                        />
+                      ) : (
+                        <TextInput
+                          id={inputId}
+                          type="password"
+                          autoComplete="off"
+                          value={draftValue}
+                          onChange={event => onChange(slot.dataKey, event.target.value)}
+                          placeholder={
+                            stored ? `Enter a new ${slot.label.toLowerCase()}` : slot.placeholder
+                          }
+                          disabled={disabled}
+                        />
+                      )}
+                      {stored ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => {
+                            onChange(slot.dataKey, '')
+                            setReplacingStoredKeys(previous => {
+                              const next = new Set(previous)
+                              next.delete(slot.dataKey)
+                              return next
+                            })
+                          }}
+                          disabled={disabled}
+                        >
+                          Keep stored
+                        </Button>
+                      ) : null}
+                    </div>
                   ) : (
-                    <TextInput
-                      id={inputId}
-                      type="password"
-                      autoComplete="off"
-                      value={draft[slot.dataKey] ?? ''}
-                      onChange={event => onChange(slot.dataKey, event.target.value)}
-                      placeholder={slot.placeholder}
-                      disabled={disabled}
-                    />
+                    <div className="cu-llm-credential-stored" role="status">
+                      <span className="cu-llm-credential-stored__state">Stored</span>
+                      <span className="cu-llm-credential-stored__hint">
+                        This credential is already configured securely.
+                      </span>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() =>
+                          setReplacingStoredKeys(previous => {
+                            const next = new Set(previous)
+                            next.add(slot.dataKey)
+                            return next
+                          })
+                        }
+                        disabled={disabled}
+                        aria-label={`Replace ${slot.label}`}
+                      >
+                        Replace
+                      </Button>
+                    </div>
                   )}
                 </Field>
               )
@@ -462,10 +525,12 @@ export function LlmCredentialFields({
                 slot.committedKey !== null &&
                 slot.committedKey !== slot.existingKey &&
                 slot.value.trim().length === 0
+              const storedExtra = slot.existingKey !== null && slot.committedKey === null
+              const showExtraValueInput =
+                !storedExtra || replacingExtraKeys.has(slot.id) || slot.value.trim().length > 0
               return (
                 <Field
                   key={slot.id}
-                  htmlFor={inputId}
                   label={`Additional credential slot`}
                   description={
                     renameNeedsValue
@@ -484,16 +549,65 @@ export function LlmCredentialFields({
                       invalid={Boolean(error)}
                       disabled={disabled}
                     />
-                    <TextInput
-                      id={inputId}
-                      type="password"
-                      autoComplete="off"
-                      value={slot.value}
-                      onChange={event => commitExtraSlot(slot, slot.nameInput, event.target.value)}
-                      placeholder="credential value"
-                      aria-label="Extra credential slot value"
-                      disabled={disabled}
-                    />
+                    {showExtraValueInput ? (
+                      <div className="cu-llm-credential-replacement">
+                        <TextInput
+                          id={inputId}
+                          type="password"
+                          autoComplete="off"
+                          value={slot.value}
+                          onChange={event =>
+                            commitExtraSlot(slot, slot.nameInput, event.target.value)
+                          }
+                          placeholder={
+                            storedExtra ? 'Enter a new credential value' : 'credential value'
+                          }
+                          aria-label="Extra credential slot value"
+                          disabled={disabled}
+                        />
+                        {storedExtra ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => {
+                              commitExtraSlot(slot, slot.nameInput, '')
+                              setReplacingExtraKeys(previous => {
+                                const next = new Set(previous)
+                                next.delete(slot.id)
+                                return next
+                              })
+                            }}
+                            disabled={disabled}
+                          >
+                            Keep stored
+                          </Button>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <div className="cu-llm-credential-stored" role="status">
+                        <span className="cu-llm-credential-stored__state">Stored</span>
+                        <span className="cu-llm-credential-stored__hint">
+                          This credential is already configured securely.
+                        </span>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() =>
+                            setReplacingExtraKeys(previous => {
+                              const next = new Set(previous)
+                              next.add(slot.id)
+                              return next
+                            })
+                          }
+                          disabled={disabled}
+                          aria-label="Replace extra credential slot value"
+                        >
+                          Replace
+                        </Button>
+                      </div>
+                    )}
                     <button
                       type="button"
                       className="cu-btn cu-btn--icon cu-btn--danger-icon"

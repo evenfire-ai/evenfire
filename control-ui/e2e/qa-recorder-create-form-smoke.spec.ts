@@ -70,12 +70,12 @@ test.describe('optional QA recorder: Control UI create-form smoke', () => {
     await screenshotAndLog(page, testInfo, 'control-ui-create-connector')
   })
 
-  test('Create agent form mounts and steps to context', async ({ page }, testInfo) => {
+  test('Create agent form mounts and steps to model & credentials', async ({ page }, testInfo) => {
     await openCreatePage(page, '/agents/new')
     await expectShell(
       page,
       'Create agent',
-      'Provision a new agent with context, credentials, and access.'
+      'Provision a new agent with connectors, credentials, and access.'
     )
     await expect(page.getByPlaceholder('agent-name')).toBeVisible({ timeout: 20_000 })
 
@@ -85,7 +85,7 @@ test.describe('optional QA recorder: Control UI create-form smoke', () => {
       .getByRole('button', { name: 'Next', exact: true })
     await expect(next).toBeEnabled()
     await next.click()
-    await expect(page.getByText('Create new context', { exact: true })).toBeVisible({
+    await expect(page.getByText('Model & credentials', { exact: true })).toBeVisible({
       timeout: 20_000,
     })
 

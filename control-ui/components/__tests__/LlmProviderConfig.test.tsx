@@ -131,6 +131,21 @@ describe('LlmProviderConfig (spec Topic 1b — domain projection + usable gate)'
     const primary = screen.getByLabelText('OpenAI credentials')
     expect(within(primary).queryByText(/Add the OpenAI credential/i)).not.toBeInTheDocument()
     expect(within(primary).getAllByLabelText('present').length).toBeGreaterThan(0)
+    expect(within(primary).getByRole('status')).toHaveTextContent(/Stored/i)
+    expect(
+      within(primary).queryByLabelText(/OpenAI API key/i, { selector: 'input' })
+    ).not.toBeInTheDocument()
+  })
+
+  it('reveals a stored credential input only when replacement is requested', () => {
+    render(<Harness existingKeys={['openai-api-key']} />)
+    const primary = screen.getByLabelText('OpenAI credentials')
+
+    fireEvent.click(within(primary).getByRole('button', { name: 'Replace OpenAI API key' }))
+
+    expect(within(primary).getByLabelText(/OpenAI API key/i)).toBeInTheDocument()
+    expect(within(primary).getByPlaceholderText(/Enter a new openai api key/i)).toBeInTheDocument()
+    expect(within(primary).getByRole('button', { name: 'Keep stored' })).toBeInTheDocument()
   })
 
   it('starts fallbacks at ZERO and adds a same-provider fallback that reuses the primary key', () => {
