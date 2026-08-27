@@ -3,7 +3,12 @@
 #
 # get/list only — never create, patch, replace, or delete.
 # Classifies by clerum.io/policy-type in {context-allow, rpc-proxy-egress,
-# external-egress}. Do not treat managed-by alone as membership.
+# external-egress}, plus the controller's `repairable` class: managed-by
+# present, policy-type absent, reserved name (ctx-/rpc-egress-/ext-egress-).
+# That last set is what a policy-type-strip corruption looks like; omitting
+# it can print VERDICT=CLEAN while the controller counts those objects and
+# may trip the cap. This is not the full four-lane classifier (reserved
+# names without owner labels can over-count vs the controller).
 #
 # CONTEXT_MAPPER_* knobs are read from the live host-context-controller
 # Deployment. Code defaults are never printed as cluster facts: an absent
@@ -22,8 +27,9 @@
 # two-tier shape as live_cap vs controller_cap. Sampling then uses that
 # compiled default. Do not declare the key in deploy/ to unblock the job.
 #
-# This census reflects on-cluster orphans by policy-type, not the
-# controller's current pass authority gate.
+# This census reflects on-cluster orphans by policy-type plus the
+# reserved-name repairable approximation, not the controller's current
+# pass authority gate.
 #
 # Double-samples 90s apart. Adjudicates only when the desired Context +
 # McpServer identity set is identical across samples; otherwise
@@ -93,8 +99,30 @@ if [[ "${RPC_NS}" == "UNSET" ]]; then
   RPC_NS="${COMPILED_RPC_NS_DEFAULT}"
 fi
 
+# Typed policy-type membership, plus the reserved-name repairable class
+# (managed-by present, policy-type absent). Shared by listed + orphan filters.
+CENSUS_MANAGED_JQ='
+  def policy_type: .metadata.labels["clerum.io/policy-type"];
+  def is_typed:
+    policy_type == "context-allow"
+    or policy_type == "rpc-proxy-egress"
+    or policy_type == "external-egress";
+  def is_untyped_repairable:
+    .metadata.labels["clerum.io/managed-by"] == "host-context-controller"
+    and (policy_type == null)
+    and (
+      (.metadata.name // "" | startswith("ctx-"))
+      or (.metadata.name // "" | startswith("rpc-egress-"))
+      or (.metadata.name // "" | startswith("ext-egress-"))
+    );
+  def is_census_managed: is_typed or is_untyped_repairable;
+  def census_lane:
+    if policy_type == "external-egress"
+       or (policy_type == null and (.metadata.name // "" | startswith("ext-egress-")))
+    then "external" else "context" end;
+'
+
 # One read-only snapshot of desired identities + orphan candidates.
-# Filters on policy-type, not managed-by.
 sample_state() {
   local contexts_json servers_json np_json
   contexts_json="$(kc get contexts.clerum.io -n "${MAPPER_NS}" -o json)"
@@ -107,27 +135,27 @@ sample_state() {
     } | jq -s "{items: [.[].items[]?]}"
   )"
 
-  local desired_contexts desired_servers listed orphans orphan_count
+  local desired_contexts desired_servers listed untyped orphans orphan_count
   desired_contexts="$(printf "%s" "${contexts_json}" | jq -r '[.items[]?.spec.contextId // empty] | unique | sort | join(",")')"
   desired_servers="$(printf "%s" "${servers_json}" | jq -r '[.items[]?.metadata.name // empty] | unique | sort | join(",")')"
-  listed="$(printf "%s" "${np_json}" | jq -r '[.items[] | select((.metadata.labels["clerum.io/policy-type"] == "context-allow") or (.metadata.labels["clerum.io/policy-type"] == "rpc-proxy-egress") or (.metadata.labels["clerum.io/policy-type"] == "external-egress"))] | length')"
+  listed="$(printf "%s" "${np_json}" | jq -r "${CENSUS_MANAGED_JQ} [.items[] | select(is_census_managed)] | length")"
+  untyped="$(printf "%s" "${np_json}" | jq -r "${CENSUS_MANAGED_JQ} [.items[] | select(is_untyped_repairable)] | length")"
 
-  orphans="$(printf "%s" "${np_json}" | jq -r --arg ctxs "${desired_contexts}" --arg srvs "${desired_servers}" '
+  orphans="$(printf "%s" "${np_json}" | jq -r --arg ctxs "${desired_contexts}" --arg srvs "${desired_servers}" "${CENSUS_MANAGED_JQ}"'
     ($ctxs | split(",") | map(select(length>0))) as $desiredCtx
     | ($srvs | split(",") | map(select(length>0))) as $desiredSrv
     | .items[]
-    | .metadata.labels["clerum.io/policy-type"] as $t
-    | select($t == "context-allow" or $t == "rpc-proxy-egress" or $t == "external-egress")
+    | select(is_census_managed)
     | . as $p
     | (
-        if $t == "external-egress" then
+        if census_lane == "external" then
           ($p.metadata.labels["clerum.io/mcpserver"] as $s | ($s == null) or (($desiredSrv | index($s)) == null))
         else
           ($p.metadata.labels["clerum.io/context"] as $c | ($c == null) or (($desiredCtx | index($c)) == null))
         end
       )
     | select(.)
-    | [$p.metadata.namespace, $p.metadata.name, $t]
+    | [$p.metadata.namespace, $p.metadata.name, ($p.metadata.labels["clerum.io/policy-type"] // "repairable-untyped")]
     | @tsv
   ')"
 
@@ -140,6 +168,7 @@ sample_state() {
   printf "DESIRED_CONTEXTS=%s\n" "${desired_contexts}"
   printf "DESIRED_SERVERS=%s\n" "${desired_servers}"
   printf "LISTED_MANAGED=%s\n" "${listed}"
+  printf "REPAIRABLE_UNTYPED=%s\n" "${untyped}"
   printf "ORPHAN_COUNT=%s\n" "${orphan_count}"
   printf "ORPHANS<<EOF\n"
   printf "%s\n" "${orphans}"
@@ -179,8 +208,9 @@ fi
 
 ORPHAN_COUNT="$(parse_field "${SAMPLE2}" ORPHAN_COUNT)"
 LISTED="$(parse_field "${SAMPLE2}" LISTED_MANAGED)"
+REPAIRABLE_UNTYPED="$(parse_field "${SAMPLE2}" REPAIRABLE_UNTYPED)"
 echo "[census] desired set identical across samples"
-echo "[census] listed_managed=${LISTED} orphan_count=${ORPHAN_COUNT}"
+echo "[census] listed_managed=${LISTED} repairable_untyped=${REPAIRABLE_UNTYPED} orphan_count=${ORPHAN_COUNT}"
 echo "[census] orphans (namespace name policy-type):"
 printf "%s" "${SAMPLE2}" | sed -n "/^ORPHANS<<EOF/,/^EOF/{ /^ORPHANS<<EOF/d; /^EOF/d; p; }"
 
@@ -189,8 +219,16 @@ printf "%s" "${SAMPLE2}" | sed -n "/^ORPHANS<<EOF/,/^EOF/{ /^ORPHANS<<EOF/d; /^E
 COMPILED_ABS_DEFAULT=10
 COMPILED_PCT_DEFAULT=20
 
+is_uint() {
+  [[ "$1" =~ ^[0-9]+$ ]]
+}
+
 cap_would_trip() {
   local orphan_count="$1" listed="$2" abs="$3" pct="$4"
+  if ! is_uint "${orphan_count}" || ! is_uint "${listed}" || ! is_uint "${abs}" || ! is_uint "${pct}"; then
+    printf "malformed"
+    return
+  fi
   if [[ "${orphan_count}" -gt "${abs}" ]]; then
     printf "absolute"
   elif [[ "${listed}" -gt 0 && $((listed * pct)) -ge 100 && $((orphan_count * 100)) -gt $((listed * pct)) ]]; then
@@ -201,12 +239,21 @@ cap_would_trip() {
 }
 
 CAP_REASON="none"
-if [[ "${ORPHAN_CAP}" != "UNSET" && "${ORPHAN_COUNT}" -gt "${ORPHAN_CAP}" ]]; then
-  CAP_REASON="absolute"
-elif [[ "${ORPHAN_CAP_PCT}" != "UNSET" && "${LISTED}" -gt 0 ]]; then
-  # Integer compare of orphan*100 > listed*percent, inert when percent*listed < 100.
-  if [[ $((LISTED * ORPHAN_CAP_PCT)) -ge 100 && $((ORPHAN_COUNT * 100)) -gt $((LISTED * ORPHAN_CAP_PCT)) ]]; then
-    CAP_REASON="percent"
+if [[ "${ORPHAN_CAP}" != "UNSET" ]]; then
+  if ! is_uint "${ORPHAN_CAP}"; then
+    CAP_REASON="malformed"
+  elif [[ "${ORPHAN_COUNT}" -gt "${ORPHAN_CAP}" ]]; then
+    CAP_REASON="absolute"
+  fi
+fi
+if [[ "${CAP_REASON}" == "none" && "${ORPHAN_CAP_PCT}" != "UNSET" ]]; then
+  if ! is_uint "${ORPHAN_CAP_PCT}"; then
+    CAP_REASON="malformed"
+  elif [[ "${LISTED}" -gt 0 ]]; then
+    # Integer compare of orphan*100 > listed*percent, inert when percent*listed < 100.
+    if [[ $((LISTED * ORPHAN_CAP_PCT)) -ge 100 && $((ORPHAN_COUNT * 100)) -gt $((LISTED * ORPHAN_CAP_PCT)) ]]; then
+      CAP_REASON="percent"
+    fi
   fi
 fi
 
@@ -214,9 +261,13 @@ CONTROLLER_ABS="${ORPHAN_CAP}"
 CONTROLLER_PCT="${ORPHAN_CAP_PCT}"
 if [[ "${CONTROLLER_ABS}" == "UNSET" ]]; then
   CONTROLLER_ABS="${COMPILED_ABS_DEFAULT}"
+elif ! is_uint "${CONTROLLER_ABS}"; then
+  CONTROLLER_ABS="malformed"
 fi
 if [[ "${CONTROLLER_PCT}" == "UNSET" ]]; then
   CONTROLLER_PCT="${COMPILED_PCT_DEFAULT}"
+elif ! is_uint "${CONTROLLER_PCT}"; then
+  CONTROLLER_PCT="malformed"
 fi
 CONTROLLER_CAP_REASON="$(cap_would_trip "${ORPHAN_COUNT}" "${LISTED}" "${CONTROLLER_ABS}" "${CONTROLLER_PCT}")"
 

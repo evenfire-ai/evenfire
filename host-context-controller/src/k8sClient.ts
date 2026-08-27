@@ -3115,6 +3115,9 @@ export class McpServerWatcher implements McpServerProvider {
       initialConvergenceSwallowedTotal.inc({ lane: 'NetworkPolicy', sink: 'unsynced' })
       observeInitialNetworkPolicyPass(startedAtMs, 'deferred-unsynced')
       this.scheduleInitialConvergenceRetry('NetworkPolicy')
+      // A timer tick may have requested defaults. This path never reached
+      // fullReconcile, so drop the flag: event/retry entry stays false.
+      this.netPolConvergenceEnsureDefaults = false
       return
     }
     let authoritativeRevocationCompleted = false

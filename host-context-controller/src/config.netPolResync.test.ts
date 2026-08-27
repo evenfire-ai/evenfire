@@ -61,4 +61,22 @@ describe('NetworkPolicy resync and orphan-sweep config (#478)', () => {
       loadConfig({ CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT: '-1' })
     ).rejects.toThrow(/CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT/)
   })
+
+  it.each(['2e1', '10.9', '12abc', '0x1F'] as const)(
+    'fails loud when the absolute orphan-delete cap is non-canonical (%s)',
+    async raw => {
+      await expect(loadConfig({ CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP: raw })).rejects.toThrow(
+        /CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP/
+      )
+    }
+  )
+
+  it.each(['2e1', '10.9', '12abc'] as const)(
+    'fails loud when the percent orphan-delete cap is non-canonical (%s)',
+    async raw => {
+      await expect(
+        loadConfig({ CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT: raw })
+      ).rejects.toThrow(/CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT/)
+    }
+  )
 })

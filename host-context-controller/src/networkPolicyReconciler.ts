@@ -93,6 +93,9 @@ export type NetPolOrphanSweepCapReason = 'absolute' | 'percent'
  * timer), not only a periodic tick. A trip refuses the orphan deletes and
  * increments the cap metric; the pass still certifies the rest of the
  * inventory (#478: alert and do not delete — not "and do not certify").
+ * One cap over the sum of all lanes (not per-lane): a trip leaves those
+ * orphans in place until an operator raises the env. The operator signal
+ * is `clerum_hcc_netpol_orphan_sweep_capped_total`.
  */
 export function evaluateNetPolOrphanSweepCap(
   orphanCount: number,
@@ -1462,19 +1465,21 @@ export class NetworkPolicyReconciler {
       const serverName = policy.metadata?.labels?.[MCPSERVER_LABEL]
       return !serverName || !desiredServerNames.has(serverName)
     }
+    const countExternalLane =
+      options.serverInventoryComplete !== false && serverCleanupAuthoritative()
     const orphanCandidates = [
       ...allContextPolicies.filter(isContextLaneOrphan),
       ...allContextEgressPolicies.filter(isContextLaneOrphan),
       ...allRpcProxyEgressPolicies.filter(isContextLaneOrphan),
-      ...(options.serverInventoryComplete !== false && serverCleanupAuthoritative()
-        ? allExternalPolicies.filter(isExternalLaneOrphan)
-        : []),
+      ...(countExternalLane ? allExternalPolicies.filter(isExternalLaneOrphan) : []),
     ]
+    // Count the external fleet with the same gate as orphanCandidates so a
+    // mid-pass authority flip cannot inflate the percent denominator.
     const listedManagedFleet =
       allContextPolicies.length +
       allContextEgressPolicies.length +
       allRpcProxyEgressPolicies.length +
-      allExternalPolicies.length
+      (countExternalLane ? allExternalPolicies.length : 0)
     const capReason = evaluateNetPolOrphanSweepCap(orphanCandidates.length, listedManagedFleet)
     if (capReason) {
       netPolOrphanSweepCappedTotal.inc({ reason: capReason })

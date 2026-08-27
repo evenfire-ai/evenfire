@@ -184,9 +184,9 @@ export interface Config {
   // CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP.
   netPolOrphanDeleteCap: number
 
-  // Percent orphan-delete cap (0-100) against the listed managed fleet.
-  // Candidates strictly above this fraction are refused. Inert on a tiny
-  // inventory where percent*fleet < 1. Set via
+  // Percent orphan-delete cap against the listed managed fleet. Candidates
+  // strictly above this fraction are refused. Inert on a tiny inventory
+  // where percent*fleet < 1. Values above 100 never fire. Set via
   // CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT.
   netPolOrphanDeleteCapPercent: number
 
@@ -289,6 +289,20 @@ function requireNonNegativeEnvInt(key: string, value: number): number {
     throw new Error(`${key} must be a non-negative integer, got '${process.env[key] ?? ''}'`)
   }
   return value
+}
+
+/**
+ * Unsigned base-10 integer, including 0. Rejects the parseInt coercions
+ * (`2e1`→2, `10.9`→10, `12abc`→12) that getEnvInt would swallow.
+ */
+function requireCanonicalNonNegativeEnvInt(key: string, defaultValue: number): number {
+  const raw = process.env[key]
+  if (raw === undefined || raw === '') return defaultValue
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`${key} must be an unsigned base-10 integer, got '${raw}'`)
+  }
+  const parsed = Number(raw)
+  return requireNonNegativeEnvInt(key, parsed)
 }
 
 export function parseExternalEgressDnsTimeoutMs(raw: string | undefined): number {
@@ -773,13 +787,13 @@ export const config: Config = {
   // Mass-delete guard for the namespace-wide orphan sweep. Thresholds are
   // strict `>`: exactly N candidates still delete; N+1 refuses deletes and
   // still certifies.
-  netPolOrphanDeleteCap: requireNonNegativeEnvInt(
+  netPolOrphanDeleteCap: requireCanonicalNonNegativeEnvInt(
     'CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP',
-    getEnvInt('CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP', 10)
+    10
   ),
-  netPolOrphanDeleteCapPercent: requireNonNegativeEnvInt(
+  netPolOrphanDeleteCapPercent: requireCanonicalNonNegativeEnvInt(
     'CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT',
-    getEnvInt('CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT', 20)
+    20
   ),
 
   // Every finite Kubernetes request that can hold Host convergence gets its

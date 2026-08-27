@@ -4893,8 +4893,9 @@ describe('McpServerWatcher startup', () => {
       { lane: 'NetworkPolicy', result: 'deferred-unsynced' }
     )
 
-    await (watcher as any).runInitialNetworkPolicyConvergence()
+    await (watcher as any).runInitialNetworkPolicyConvergence({ ensureDefaults: true })
 
+    expect((watcher as any).netPolConvergenceEnsureDefaults).toBe(false)
     expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
     expect(warnSpy.mock.calls.some(call => String(call[0]).includes('caches unsynced'))).toBe(true)
     expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(3)
@@ -11437,6 +11438,8 @@ describe('McpServerWatcher NetworkPolicy periodic resync (#478)', () => {
     expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
     expect(warnSpy.mock.calls.some(call => String(call[0]).includes('caches unsynced'))).toBe(true)
     expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(true)
+    // Tick requested defaults; the unsynced path never reached fullReconcile.
+    expect((watcher as any).netPolConvergenceEnsureDefaults).toBe(false)
     warnSpy.mockRestore()
     await watcher.stop()
   })
