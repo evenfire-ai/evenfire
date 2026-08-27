@@ -3987,6 +3987,76 @@ describe('McpServerWatcher startup', () => {
     await watcher.stop()
   })
 
+  // G5: the Context half of the lease fence. The retired-lease test below drops
+  // BOTH cacheSynced flags, so the still-false McpServer side masks the Context
+  // conjunct: context effects require `!contextInventoryAuthoritative() ||
+  // !serverInventoryAuthoritative()`, while server effects check the server side
+  // alone. Deleting `this.contextCacheSynced &&` from the pass fence therefore
+  // left the whole suite green. Retire ONLY the Context lease here, and keep the
+  // McpServer side fully authoritative, so nothing can mask it.
+  //
+  // This matters because the pass fence is content identity now: retireContextWatch
+  // clears contextCacheSynced WITHOUT moving contextDesiredRevision and without a
+  // re-LIST, so cacheSynced is the only remaining fail-closed signal on that path.
+  it('G5: aborts a NetworkPolicy pass when only the Context lease is retired', async () => {
+    const firstPassStarted = deferred()
+    const releaseFirstPass = deferred()
+    const appliedContexts: string[] = []
+    let pass = 0
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextWatchGeneration = 11
+    ;(watcher as any).mcpWatchGeneration = 13
+    ;(watcher as any).contexts.set('ctx-a', {
+      name: 'ctx-a',
+      namespace: 'mcp-server',
+      spec: { contextId: 'ctx-a', mcpServers: ['srv-a'] },
+    })
+    ;(watcher as any).servers.set('srv-a', {
+      name: 'srv-a',
+      namespace: 'mcp-server',
+      spec: {
+        contextRef: 'ctx-a',
+        image: 'clerum/srv-a:v1',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    mocks.netPolFullReconcile.mockImplementation(async (contexts, servers, options) => {
+      pass += 1
+      if (pass === 1) {
+        firstPassStarted.resolve(undefined)
+        await releaseFirstPass.promise
+      }
+      await Promise.all(
+        contexts.map((context: { spec: { contextId: string } }) =>
+          options.runContextEffect(context.spec.contextId, async () => {
+            appliedContexts.push(context.spec.contextId)
+          })
+        )
+      )
+    })
+
+    const stalePass = (watcher as any).runInitialNetworkPolicyConvergence()
+    await firstPassStarted.promise
+    const revisionBefore = (watcher as any).contextDesiredRevision
+    ;(watcher as any).retireContextWatch()
+    // The lease is gone but the desired state never moved: only cacheSynced
+    // can fail this pass closed.
+    expect((watcher as any).contextDesiredRevision).toBe(revisionBefore)
+    expect((watcher as any).mcpServerCacheSynced).toBe(true)
+    releaseFirstPass.resolve(undefined)
+    await stalePass
+
+    expect(appliedContexts).toEqual([])
+    expect(
+      warnSpy.mock.calls.some(call =>
+        String(call[0]).includes('pass ended without certifying: inventory authority lost')
+      )
+    ).toBe(true)
+  })
+
   it('fences NetworkPolicy positive effects when their inventory leases are retired', async () => {
     const firstPassStarted = deferred()
     const releaseFirstPass = deferred()
