@@ -102,8 +102,6 @@ export interface PendingApprovalRow {
   reason: string | null
   /** U5 (migration 013) — oauth mcp-server to connect (reason='connect_required'). */
   mcp_server_name: string | null
-  /** U5 (migration 013) — OAuth provider for the connect UI (reason='connect_required'). */
-  provider: string | null
 }
 
 export interface SessionCountersUpdate {
@@ -133,7 +131,7 @@ export interface PersistedSessionSummary {
   // suspension into a generic approval.
   pending_approval: Pick<
     PendingApprovalRow,
-    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name' | 'provider'
+    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name'
   > | null
 }
 
@@ -142,7 +140,7 @@ export interface PersistedSessionMessagePage {
   messages: MessageRow[]
   pending_approval: Pick<
     PendingApprovalRow,
-    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name' | 'provider'
+    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name'
   > | null
   total_turns: number
   first_turn_number: number | null

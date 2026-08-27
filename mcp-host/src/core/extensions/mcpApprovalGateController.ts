@@ -45,7 +45,6 @@ export function getMcpServerPrefix(toolName: string): string | null {
 /** Typed `connect_required` marker carried on a tool result's metadata. */
 export interface ConnectRequiredMarker {
   mcpServerName: string
-  provider?: string
 }
 
 /**
@@ -64,15 +63,14 @@ export function extractConnectRequiredMarker(
   const marker = raw as Record<string, unknown>
   const mcpServerName = typeof marker.mcpServerName === 'string' ? marker.mcpServerName : undefined
   if (!mcpServerName) return null
-  const provider = typeof marker.provider === 'string' ? marker.provider : undefined
-  return { mcpServerName, provider }
+  return { mcpServerName }
 }
 
 /**
  * Build a durable `connect_required` suspension for a tool call whose live
  * execution surfaced a 401 on an oauth mcp-server (spec §U5). Reuses the SAME
  * `PendingApproval` machinery as the HITL gate; `reason='connect_required'` +
- * `mcpServerName`/`provider` steer the desktop connect UI and are persisted so a
+ * `mcpServerName` steers the desktop connect UI and is persisted so a
  * cold restart never degrades this into a generic approval. The caller fills in
  * `context_snapshot`/`completed_results`/`intent_summary` so the resume path
  * re-executes the SAME tool once the user connects.
@@ -85,14 +83,18 @@ export function buildConnectRequiredApproval(
     request_id: randomUUID(),
     tool_name: call.name,
     tool_kind: 'mcp_server_tool',
-    tool_source_ref: getMcpServerPrefix(call.name),
+    // The authoritative server name is the marker's mcpServerName (set from the
+    // manager's sourceRef), mirroring the HITL gate's createSuspension
+    // (tool_source_ref = traceDescriptor.sourceRef). getMcpServerPrefix splits on
+    // the FIRST '__', so it truncates a server whose own name contains '__';
+    // reuse the marker to keep both suspension paths consistent (R3-L3).
+    tool_source_ref: marker.mcpServerName,
     parameters: call.arguments,
     description: `Connect ${marker.mcpServerName} to continue`,
     tool_call_id: call.id,
     context_snapshot: [],
     reason: 'connect_required',
     mcpServerName: marker.mcpServerName,
-    provider: marker.provider,
   }
 }
 

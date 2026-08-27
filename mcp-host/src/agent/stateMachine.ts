@@ -73,11 +73,10 @@ export interface PendingApprovalInfo {
   since: string
   // U5 — suspension discriminator, mirrored from the underlying PendingApproval
   // so the polling projections match the SSE `suspended` event. Absent reason ⇒
-  // generic HITL approval (back-compat). mcpServerName/provider set iff
+  // generic HITL approval (back-compat). mcpServerName set iff
   // reason==='connect_required' (oauth connect flow).
   reason?: 'approval_required' | 'connect_required'
   mcpServerName?: string
-  provider?: string
 }
 
 /**
@@ -919,15 +918,12 @@ export class AgentStateMachine extends EventEmitter {
           since: entry?.registeredAt?.toISOString() ?? new Date().toISOString(),
           // U5 — thread the connect_required discriminator; omitted for generic
           // approvals so the legacy shape is byte-identical (back-compat).
-          // mcpServerName/provider ride ONLY connect_required, matching the SSE
+          // mcpServerName rides ONLY connect_required, matching the SSE
           // producer and the other polling projections (no stray field on a
           // corrupt/legacy row whose reason normalized away).
           ...(approval.reason ? { reason: approval.reason } : {}),
           ...(approval.reason === 'connect_required' && approval.mcpServerName
             ? { mcpServerName: approval.mcpServerName }
-            : {}),
-          ...(approval.reason === 'connect_required' && approval.provider
-            ? { provider: approval.provider }
             : {}),
         })
       }
@@ -1001,14 +997,11 @@ export class AgentStateMachine extends EventEmitter {
       // reconstructs the connect suspension, matching the SSE `suspended` event.
       // Omitted for generic approvals (back-compat).
       ...(approval.reason ? { reason: approval.reason } : {}),
-      // mcpServerName/provider ride ONLY the connect_required discriminator, matching
+      // mcpServerName rides ONLY the connect_required discriminator, matching
       // the SSE producer (sseProgressReporter) — so corrupt/legacy rows can never emit
       // a stray field without its reason.
       ...(approval.reason === 'connect_required' && approval.mcpServerName
         ? { mcpServerName: approval.mcpServerName }
-        : {}),
-      ...(approval.reason === 'connect_required' && approval.provider
-        ? { provider: approval.provider }
         : {}),
     })
   }

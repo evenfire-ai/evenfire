@@ -2014,12 +2014,9 @@ async function handleTaskResult(
           // reconnecting desktop rebuilds a "Connect <server>" suspension, not a
           // generic approval. Omitted for generic approvals (back-compat).
           ...(result.approval.reason ? { reason: result.approval.reason } : {}),
-          // mcpServerName/provider ride ONLY connect_required, matching the SSE producer.
+          // mcpServerName rides ONLY connect_required, matching the SSE producer.
           ...(result.approval.reason === 'connect_required' && result.approval.mcpServerName
             ? { mcpServerName: result.approval.mcpServerName }
-            : {}),
-          ...(result.approval.reason === 'connect_required' && result.approval.provider
-            ? { provider: result.approval.provider }
             : {}),
         },
         model: result.model,

@@ -158,7 +158,7 @@ class ConnectRequiredTool implements Tool {
       content: 'MCP server monday auth failed (401)',
       duration_ms: 1,
       is_error: true,
-      metadata: { connect_required: { mcpServerName: 'monday', provider: 'monday' } },
+      metadata: { connect_required: { mcpServerName: 'monday' } },
     }
   }
 }
@@ -182,7 +182,6 @@ describe('U5 — connect_required inline suspension (auto-approved / cron path)'
     expect(pendingApproval).toMatchObject({
       reason: 'connect_required',
       mcpServerName: 'monday',
-      provider: 'monday',
       tool_name: 'monday__list_boards',
       tool_call_id: 'call-1',
     })

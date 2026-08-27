@@ -28,7 +28,6 @@ interface Props {
     // suspended replays.
     reason?: string
     mcpServerName?: string
-    provider?: string
   }
 }
 

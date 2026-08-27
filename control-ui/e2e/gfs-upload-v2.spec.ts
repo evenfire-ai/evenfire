@@ -9,6 +9,7 @@ import {
   uniqueGfsFixtureName,
 } from '../../tests/e2e/gfsUiFixtures'
 import {
+  E2E_GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES,
   GFS_UPLOAD_V2_BOUNDARIES,
   createDiskUploadFixture,
   createOversizedDiskUploadFixture,
@@ -425,7 +426,9 @@ test.describe('GFS Upload v2 — Control UI runtime product policy', () => {
       await dialog.getByLabel('Choose file to upload').setInputFiles(rejectedSource.filePath)
       await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
       await expect(
-        page.getByRole('status').filter({ hasText: `GFS writer limit is ${lowerMax} bytes` })
+        page
+          .getByRole('status')
+          .filter({ hasText: `GFS writer permits files up to ${lowerMax / (1024 * 1024)} MiB` })
       ).toBeVisible({ timeout: 30_000 })
       expect(
         await getGfsChildResourceSummary({
@@ -458,7 +461,9 @@ test.describe('GFS Upload v2 — approved negative Control UI journeys', () => {
   )
   test.setTimeout(45 * 60_000)
 
-  test('rejects a 209715201-byte file through the visible upload modal', async ({ page }) => {
+  test('rejects a file one byte above the compatibility default through the visible upload modal', async ({
+    page,
+  }) => {
     const fixtureName = uniqueGfsFixtureName('e2e-gfs-v2-negative-oversize-ui')
     let cleanupFixture: ReturnType<typeof seedGfsDirectoryFixture> | undefined
     let cleanupSource: Awaited<ReturnType<typeof createOversizedDiskUploadFixture>> | undefined
@@ -473,7 +478,9 @@ test.describe('GFS Upload v2 — approved negative Control UI journeys', () => {
       await dialog.getByLabel('Choose file to upload').setInputFiles(source.filePath)
       await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
       await expect(
-        page.getByRole('status').filter({ hasText: 'GFS writer limit is 209715200 bytes' })
+        page.getByRole('status').filter({
+          hasText: `GFS writer permits files up to ${E2E_GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES / (1024 * 1024)} MiB`,
+        })
       ).toBeVisible({ timeout: 15_000 })
       await expect
         .poll(

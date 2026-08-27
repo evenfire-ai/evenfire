@@ -978,7 +978,7 @@ export class TaskExecutor {
         }
         const reporter = progressReporterRegistry.get(this.taskId)
         if (reporter) {
-          // U5 — carry the reason (+ mcpServerName/provider for connect_required)
+          // U5 — carry the reason (+ mcpServerName for connect_required)
           // so the desktop distinguishes an OAuth-consent suspension from the
           // default HITL gate. Absent reason → 'approval_required' (back-compat).
           reporter.emitSuspended(
@@ -987,7 +987,6 @@ export class TaskExecutor {
             {
               reason: result.approval.reason ?? 'approval_required',
               mcpServerName: result.approval.mcpServerName,
-              provider: result.approval.provider,
             }
           )
         }

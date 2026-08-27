@@ -5,6 +5,7 @@ import {
   type GfsUploadStatus,
   allowsLegacyCapabilityFallback,
   assertGfsFileUploadSize,
+  formatGfsUploadLimit,
   isAmbiguousUploadStatus,
   isRetryableUploadStatus,
   normalizeInstabilityFailureThreshold,
@@ -24,6 +25,15 @@ describe('assertGfsFileUploadSize', () => {
     expect(() => assertGfsFileUploadSize(1024 * 1024 * 1024 + 1)).toThrow(
       'GFS uploads cannot exceed the 1 GiB Upload v2 protocol maximum.'
     )
+  })
+})
+
+describe('formatGfsUploadLimit', () => {
+  it('uses binary units for exact MiB boundaries without changing byte-accurate values', () => {
+    expect(formatGfsUploadLimit(300 * 1024 * 1024)).toBe('300 MiB')
+    expect(formatGfsUploadLimit(16 * 1024 * 1024)).toBe('16 MiB')
+    expect(formatGfsUploadLimit(1)).toBe('1 byte')
+    expect(formatGfsUploadLimit(1024 * 1024 * 1024)).toBe('1 GiB')
   })
 })
 
@@ -85,7 +95,7 @@ describe('uploadGfsFileLegacy', () => {
         name: file.name,
         target: { operation: 'create', parentRid: 'parent-legacy-limit' },
       })
-    ).rejects.toThrow(`legacy GFS is limited to ${GFS_LEGACY_UPLOAD_MAX_BYTES} bytes`)
+    ).rejects.toThrow('legacy GFS is limited to 16 MiB')
     expect(arrayBuffer).not.toHaveBeenCalled()
     expect(fetchMock).not.toHaveBeenCalled()
   })
@@ -244,7 +254,7 @@ describe('GfsUploadJob', () => {
         name: file.name,
         target: { operation: 'create', parentRid: 'parent-ceiling' },
       }).start()
-    ).rejects.toThrow('writer limit is 1 bytes')
+    ).rejects.toThrow('writer permits files up to 1 byte')
     expect(createCalls).toBe(0)
   })
 
@@ -312,7 +322,7 @@ describe('GfsUploadJob', () => {
         name: file.name,
         target: { operation: 'create', parentRid: 'parent-runtime-lower' },
       }).start()
-    ).rejects.toThrow(`GFS writer limit is ${100 * 1024 * 1024} bytes`)
+    ).rejects.toThrow('GFS writer permits files up to 100 MiB')
     expect(createCalls).toBe(0)
   })
 
@@ -391,7 +401,7 @@ describe('GfsUploadJob', () => {
       }).start()
     ).rejects.toThrow()
     expect(compatibilityWarning).toHaveBeenCalledWith(
-      'GFS Upload v2 writer omitted maxFileBytes; using the 209715200-byte compatibility limit.'
+      'GFS Upload v2 writer omitted maxFileBytes; using the 200 MiB compatibility limit.'
     )
     expect(createCalls).toBe(1)
     expect(file.size).toBeLessThanOrEqual(compatibilityMaxFileBytes)

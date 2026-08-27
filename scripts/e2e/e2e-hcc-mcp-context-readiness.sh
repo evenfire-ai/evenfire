@@ -165,9 +165,10 @@ wait_until_fast() {
   while :; do
     "$@" && return 0
     rc=$?
-    # rc=2 is a fatal, non-retryable ordering violation (e.g. 200 observed with
-    # a stale policy still present): stop polling immediately so a later clean
-    # poll cannot mask it. rc=1 is benign "not ready yet".
+    # rc=2 is a fatal, non-retryable ordering violation (e.g. identity-stable
+    # allow already gone when /ready first becomes 200): stop polling immediately
+    # so a later clean poll cannot mask it. rc=1 is benign "not ready yet".
+    # After A1, /ready 200 with a divergent stale allow is rc=1, not rc=2.
     if [ "$rc" -eq 2 ]; then
       echo "FATAL ordering violation while waiting for ${description}: ${HCC_READY_PROBE_DIAGNOSTIC:-unset}" >&2
       return 2
@@ -877,13 +878,12 @@ safety_pass_metrics_certify() {
 }
 
 hcc_ready_after_stale_policy_revoked() {
-  # A single poll that sees 200 WHILE the stale policy is still present is a
-  # safety-contract violation and must be FATAL, never retried: retrying lets a
-  # later poll (policy already revoked) turn the violation into a false PASS.
-  # rc=2 signals that fatal ordering violation to wait_until_fast; rc=1 is a
-  # benign "not ready yet, keep polling". The sub-0.5s window where revocation
-  # races the probe inside one poll stays unobservable on THIS signal — the
-  # third signal (M6, /metrics) covers it.
+  # A1: /ready is watch freshness only. 200 while a divergent policy is still
+  # present is the intended kubelet window, not a fatal ordering violation.
+  # This wait succeeds only when BOTH the probe is ready AND the stale allow
+  # is gone. rc=1 = retry. Do not return rc=2 from /ready+stale — that would
+  # abort the first poll after watches sync. The third signal (M6, /metrics)
+  # still proves an authoritative pass measured and revoked.
   local policy_absent_before=0
   external_egress_policy_absent && policy_absent_before=1
   probe_new_hcc_ready_endpoint || return 1
@@ -893,8 +893,7 @@ hcc_ready_after_stale_policy_revoked() {
     # this poll cannot adjudicate the order. Retry to adjudicate cleanly.
     return 1
   fi
-  HCC_READY_PROBE_DIAGNOSTIC="HCC_READY_PROBE category=ready-200-with-stale-policy-present"
-  return 2
+  return 1
 }
 
 # Canonical, order-stable projection of the single external-egress policy for the
