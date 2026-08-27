@@ -201,6 +201,8 @@ export default function HostDetailsPage() {
 
   const [hostNameDraft, setHostNameDraft] = useState(routeName)
   const [hostDisplayDraft, setHostDisplayDraft] = useState('')
+  const [hostDisplaySaved, setHostDisplaySaved] = useState('')
+  const [editingDisplayName, setEditingDisplayName] = useState(false)
   const [hostDescription, setHostDescription] = useState('')
   const [contextRefDraft, setContextRefDraft] = useState('')
   const [providerDraft, setProviderDraft] = useState<LlmProvider>('openai')
@@ -430,6 +432,8 @@ export default function HostDetailsPage() {
         }
         setHostNameDraft(overview.hostName)
         setHostDisplayDraft(overview.hostDisplay)
+        setHostDisplaySaved(overview.hostDisplay)
+        setEditingDisplayName(false)
         setHostDescription(String(spec.description || '').trim())
         setContextRefDraft(overview.contextRef)
         setChannelsDraft(overview.channels)
@@ -1123,7 +1127,18 @@ export default function HostDetailsPage() {
         {activeTab === 'details' && (
           <HostOverviewTab
             hostName={routeName}
-            displayName={hostDisplayDraft}
+            displayName={hostDisplaySaved || hostDisplayDraft}
+            editingName={editingDisplayName}
+            nameDraft={hostDisplayDraft}
+            onNameDraftChange={setHostDisplayDraft}
+            onStartNameEdit={() => {
+              setHostDisplayDraft(hostDisplayDraft || hostDisplaySaved)
+              setEditingDisplayName(true)
+            }}
+            onCancelNameEdit={() => {
+              setHostDisplayDraft(hostDisplaySaved)
+              setEditingDisplayName(false)
+            }}
             description={hostDescription}
             statusLabel={hostStatusLabel}
             statusTone={hostStatusTone}
