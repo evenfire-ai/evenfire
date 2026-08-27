@@ -138,6 +138,21 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       })
       await expect(page.getByLabel('Agent access')).toBeVisible()
 
+      // Legacy deep link: the removed Context tab's /edit/context URL must
+      // permanently redirect to the Access tab (next.config.js rewrite) so
+      // old bookmarks and shared links keep reaching the section.
+      await page.goto(
+        `${CONTROL_UI_URL}/connectors/${encodeURIComponent(connectorName)}/edit/context`
+      )
+      await expect(page).toHaveURL(
+        new RegExp(`/connectors/${encodeURIComponent(connectorName)}/edit/access$`),
+        { timeout: 20_000 }
+      )
+      await expect(page.getByRole('heading', { name: 'Agent access', exact: true })).toBeVisible({
+        timeout: 20_000,
+      })
+      await screenshotAndLog(page, testInfo, 'control-ui-connector-edit-legacy-redirect')
+
       await page.getByRole('tab', { name: 'External Egress', exact: true }).click()
 
       // Image is rendered as static read-only text (not an editable input).

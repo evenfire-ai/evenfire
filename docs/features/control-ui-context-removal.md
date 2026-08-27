@@ -216,6 +216,24 @@ Tests updated in the same commit: `HostTable.test.tsx` (hover card now asserts a
   | `global-no-context-vocab.spec.ts` | Global negative check across 7 routes |
 
   Seeding goes through new `controlApi` helpers in `helpers/api-client.ts` (`createContext`, `createMcpServer`, user/team context GET/PUT, `createTeam`, `createBudget`, SFS list). Run with `make minikube-pf-all` then `cd tests/e2e/playwright && npx playwright test --project=control-ui <spec>`; env: `CONTROL_UI_URL` (default `:3000`), `CONTROL_API_URL` (default `:8090`), `TEST_ADMIN_USERNAME`/`TEST_ADMIN_PASSWORD` (default `admin`/`changeme123!`). Typecheck gate: `npx tsc -p tsconfig.typecheck.json` (added config — the package tsconfig lacks node types/rootDir for a clean standalone `tsc` run).
+- **QA-recorder video-evidence journeys** (`control-ui/e2e/qa-recorder-*.spec.ts`, built 2026-08-27) — one journey = one video (WebM) + named PNGs under `.local-notes/qa-recorder/runs/control-ui/`, each with its own `npm run qa:recorder:<name>` script:
+
+  | Script | Covers (§12) | Mutating |
+  | --- | --- | --- |
+  | `qa:recorder:context-redirects` | A1–A5 | yes (seeds throwaway ctx+host) |
+  | `qa:recorder:agent-connectors` | B1, B2, B4 | yes |
+  | `qa:recorder:connectors-agent-access` | C1–C4 incl. shared-scope confirm | yes |
+  | `qa:recorder:connector-create-access` | C5–C6 incl. silent private-scope capture | yes |
+  | `qa-recorder-connector-edit` (extended) | C7–C9 incl. legacy `/edit/context` redirect | yes |
+  | `qa:recorder:marketplace-install` | D1–D3 incl. post-install grant | yes (skips when no registry entry) |
+  | `qa:recorder:member-access` | E1–E3 + E6 column checks | yes (restores original mappings) |
+  | `qa:recorder:team-access` | E4 + legacy tab redirect | yes |
+  | `qa:recorder:agent-files-mounted-by` | F1–F2 | no |
+  | `qa:recorder:recipe-scope-copy` | G1–G2 | yes |
+  | `qa:recorder:token-budget-scope` | G3 | yes |
+  | `qa:recorder:context-vocab-sweep` | Global negative check, 8 routes | no |
+
+  Prerequisites for video evidence: `npm run qa:recorder:install` (once), `make minikube-pf-all`, and a repo-root `.env.qa-recorder` copied from the committed `.env.qa-recorder.example` containing the admin identity (`E2E_ADMIN_USER`/`E2E_ADMIN_PASSWORD`) and `QA_RECORDER_CONFIRM_MUTATIONS=1` for the mutating journeys. Journeys follow the recorder contract (`docs/testing/optional-playwright-qa-recorder.md`): loopback-only target guard, explicit opt-in before any write, and full API cleanup in `finally`.
 - Verification per phase: `cd control-ui && npx tsc --noEmit && npm test` (no lint script exists in control-ui; typecheck via `tsc --noEmit`).
 
 ## 10. Progress log (append-only)
@@ -232,6 +250,7 @@ Tests updated in the same commit: `HostTable.test.tsx` (hover card now asserts a
 | 2026-08-27 | audit | Fresh-eyes residual audit (independent pass) + fixes. **Backend re-verified untouched**: `git diff --name-only a584c259a..HEAD` contains zero files outside `control-ui/`, `docs/`, `tests/e2e/` (an apparent `host-context-controller` diff was `origin/dev` moving forward under us mid-run — PR #471, someone else's lane; our branch never touched it). Leaks fixed: (1) RecipeEditor L1 Option B still said "a private Context \"wf-<recipeName>\"" (earlier scripted replace had silently missed it) → "a private connector scope"; (2) `lib/recipeValidator.ts` INFO hint same reword; (3) `lib/contextMutation.ts` default messages neutralized ("A required version is unavailable…", "This access changed since it was loaded…") + `hosts/[name]` regex updated + connectors page now also intercepts the version-unavailable path; (4) token-budget dimension label `context_ref` "Context" → "Connector scope"; (5) "Stored context and provenance" trace-detail heading → "Stored details and provenance"; (6) stale qa-recorder-connector-edit assertion on the removed context-slug meta now asserts it does NOT render. Tests updated (RecipeEditor, GovernedTraceDetails). Remaining "context" words verified as §2.5 exclusions: kubectl `--context` flags in recipe-status hints (kubeconfig syntax), manifest `contextRef` prose (wire format), raw-id fallback labels (by design, muted), `host-context-controller` service label, LLM "User context" (USER.md), guardrail `may add context`, plus intentional legacy redirects in `next.config.js`. Full vitest 1700/1700, `tsc` clean. No backend changes. |
 | 2026-08-27 | docs | Source-of-truth restructured after the audit: added §11 (audit report: backend-untouched proof incl. the `origin/dev`-moved warning, leak/fix table, verified intentional remnants), §12 (full click-by-click manual tester walkthrough, tables A–G + global negative check), renumbered open questions to §13; extended the §2.5 exclusion list to the complete audited set; corrected §4 E1 (hover card shows a neutral "Connectors" heading, not the agent name) and the §6.4 heading typo. |
 | 2026-08-27 | e2e | Built the full e2e regression catalog for the §12 flows: 15 new specs + `contexts.spec.ts` extended with the real-slug resolver case (112 tests / 24 files listed for the control-ui project). Extended `helpers/api-client.ts` with context/mcp-server/user-team-contexts/team/budget seeding + teardown helpers (all against the unchanged wire API). Added `tests/e2e/playwright/tsconfig.typecheck.json` so the package typechecks standalone (`npx tsc -p tsconfig.typecheck.json` → clean; the shipped tsconfig lacks node types + a covering rootDir). No specs executed here (no cluster) — they run under the normal `make test-playwright-control-ui` / T2 lane. control-ui unit suite re-verified 1700/1700. No backend changes. |
+| 2026-08-27 | e2e | Built the QA-recorder video-evidence journeys: 11 new `qa-recorder-*` specs + `qa-recorder-connector-edit` extended with the legacy-tab redirect, each with a dedicated `qa:recorder:<name>` npm script (62 tests / 45 files listed under the recorder config). Journeys follow the recorder contract (loopback guard, `QA_RECORDER_CONFIRM_MUTATIONS` opt-in for mutating journeys, `screenshotAndLog` at every step, full API cleanup in `finally`). Committed the previously-missing `.env.qa-recorder.example` (referenced by the recorder doc but never tracked) with the exact keys the journeys need. Verification: control-ui `tsc --noEmit` clean, recorder `--list` clean, unit suite 1700/1700. No backend changes. |
 
 ## 11. Post-implementation audit (2026-08-27)
 
