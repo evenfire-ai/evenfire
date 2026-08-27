@@ -11,7 +11,7 @@ import {
   AccessExecutionCancelledError,
 } from './accessExecutionBudget.js'
 import type { CatalogFamily } from './catalogContracts.js'
-import { configuredUserAccessIntent } from './userAccessPolicy.js'
+import { configuredCatalogBudgetOptions, configuredUserAccessIntent } from './userAccessPolicy.js'
 import { resolveEffectiveUserAccessPolicy } from './userAccessRuntimePolicy.js'
 
 const SHADOW_MAX_IDENTITIES = 100
@@ -124,7 +124,8 @@ export async function compareAccessCatalogShadow(
     return 'skipped_unavailable'
   }
 
-  const parent = options.budget ?? AccessExecutionBudget.create('catalog')
+  const parent =
+    options.budget ?? AccessExecutionBudget.create('catalog', configuredCatalogBudgetOptions)
   let child: AccessExecutionBudget | undefined
   try {
     child = parent.child({

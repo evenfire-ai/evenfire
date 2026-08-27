@@ -63,8 +63,10 @@ describe('AccessExecutionBudget', () => {
   it('reserves child capacity and returns only unused capacity on close', () => {
     const parent = AccessExecutionBudget.create('catalog', {
       limits: { producerCalls: 4, objects: 4 },
+      teamGfsMembershipAdmissionLimit: 3,
     })
     const child = parent.child({ producerCalls: 2, objects: 3 })
+    expect(child.teamGfsMembershipAdmissionLimit).toBe(3)
     expect(parent.remaining('producerCalls')).toBe(2)
     expect(parent.remaining('objects')).toBe(1)
     child.charge({ kind: 'producerCalls' })
@@ -73,6 +75,17 @@ describe('AccessExecutionBudget', () => {
     expect(parent.remaining('producerCalls')).toBe(3)
     expect(parent.remaining('objects')).toBe(2)
     parent.close()
+  })
+
+  it('requires an explicit positive Team-GFS membership admission when supplied', () => {
+    expect(() =>
+      AccessExecutionBudget.create('catalog', { teamGfsMembershipAdmissionLimit: 0 })
+    ).toThrow(AccessBudgetConfigurationError)
+    const budget = AccessExecutionBudget.create('catalog', {
+      teamGfsMembershipAdmissionLimit: 1,
+    })
+    expect(budget.teamGfsMembershipAdmissionLimit).toBe(1)
+    budget.close()
   })
 
   it('bounds producer concurrency and releases slots after completion', async () => {

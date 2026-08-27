@@ -16,11 +16,12 @@ import { resolveEffectiveUserAccessPolicy } from '../src/services/access/userAcc
 const allFamilies = new Set(CATALOG_FAMILIES)
 
 function intent(overrides: Partial<ConfiguredUserAccessIntent> = {}): ConfiguredUserAccessIntent {
-  return {
+  const configured: ConfiguredUserAccessIntent = {
     legacyLifecycle: 'issue_and_accept',
     sessionV2Acceptance: true,
     sessionV2Issuance: false,
     catalogMode: 'off',
+    teamGfsMembershipAdmissionLimit: null,
     actionContextV2: false,
     rpcDelegationV2: false,
     desktopAllTeamMode: false,
@@ -30,6 +31,9 @@ function intent(overrides: Partial<ConfiguredUserAccessIntent> = {}): Configured
     minimumClientEnforcement: false,
     ...overrides,
   }
+  return configured.catalogMode !== 'off' && overrides.teamGfsMembershipAdmissionLimit === undefined
+    ? { ...configured, teamGfsMembershipAdmissionLimit: 4 }
+    : configured
 }
 
 function readiness(overrides: Partial<DeploymentReadiness> = {}): DeploymentReadiness {

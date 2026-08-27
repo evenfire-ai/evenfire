@@ -27,7 +27,10 @@ import { resolveLiveAuthorization } from '../../services/access/liveAuthorizatio
 import { validateOperationTarget } from '../../services/access/operationTarget.js'
 import { canonicalEnvironmentId } from '../../services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../../services/access/resourceIdentity.js'
-import { userAccessCapabilityManifest } from '../../services/access/userAccessPolicy.js'
+import {
+  configuredCatalogBudgetOptions,
+  userAccessCapabilityManifest,
+} from '../../services/access/userAccessPolicy.js'
 import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAccessRuntimePolicy.js'
 
 const CATALOG_RATE_LIMIT_PER_MINUTE = 10
@@ -40,7 +43,10 @@ export function attachAccessExecutionBudget(
   next: () => void
 ): void {
   const kind = req.method === 'GET' && req.path.endsWith('/catalog') ? 'catalog' : 'action'
-  const budget = AccessExecutionBudget.create(kind)
+  const budget = AccessExecutionBudget.create(
+    kind,
+    kind === 'catalog' ? configuredCatalogBudgetOptions : undefined
+  )
   req.accessExecutionBudget = budget
   let settled = false
   const detach = () => {
