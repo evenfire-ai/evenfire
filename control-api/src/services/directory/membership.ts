@@ -1253,10 +1253,10 @@ export async function setInvitationPasswordForUser(
     if (invitation.email.toLowerCase() !== normalizedEmail) {
       return { error: 'forbidden' as const }
     }
-    if (invitation.expires_at.getTime() <= Date.now()) {
-      return { error: 'expired' as const }
-    }
     if (invitation.purpose === 'password_reset') {
+      if (invitation.expires_at.getTime() <= Date.now()) {
+        return { error: 'expired' as const }
+      }
       if (invitation.status !== 'pending') {
         return { error: 'not_pending' as const }
       }
@@ -1267,6 +1267,12 @@ export async function setInvitationPasswordForUser(
       if (invitation.status !== 'accepted') {
         return { error: 'not_accepted' as const }
       }
+      if (
+        !invitation.accepted_at ||
+        invitation.accepted_at.getTime() > invitation.expires_at.getTime()
+      ) {
+        return { error: 'expired' as const }
+      }
     } else {
       return { error: 'not_found' as const }
     }
@@ -1274,6 +1280,9 @@ export async function setInvitationPasswordForUser(
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
     if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
     if (user.id !== trimmedUserId) {
+      return { error: 'forbidden' as const }
+    }
+    if (invitation.purpose !== 'password_reset' && invitation.accepted_user_id !== trimmedUserId) {
       return { error: 'forbidden' as const }
     }
     if (invitation.purpose !== 'password_reset' && user.password_hash) {
