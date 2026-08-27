@@ -1,9 +1,9 @@
 # Removing "Context" from the Control UI — Implementation Run
 
-**Status:** Implemented on branch `feat/context-removal` (all phases 0–4 complete). This document is the source of truth for the change; the progress log in §10 is append-only history.
+**Status:** Implemented on branch `feat/context-removal` (phases 0–4 complete, post-implementation audit clean — §11). This document is the source of truth for the change; the progress log in §10 is append-only history, and §12 is the full click-by-click manual test walkthrough.
 **Branch:** `feat/context-removal` (base: `origin/dev` @ `a584c259a`, which includes `feat/ux-improvements-29`).
 **Scope:** `control-ui/**` only. **No backend, CRD, or API-contract changes.** Every existing API call keeps its exact endpoint, payload, and field names.
-**Audience:** Engineers executing/reviewing the change, and human testers validating it.
+**Audience:** Engineers executing/reviewing the change, and human testers validating it (start at §1, then §12).
 
 ---
 
@@ -24,7 +24,7 @@
 
 **Nothing changes on the wire**: same endpoints, same payloads (`contextRef`, `contextIds`, `mcpServers`, `security.allowContextRef`, …). The k8s Context resource still exists and is still written by the frontend — it is just never *shown*.
 
-Old `/contexts/*` bookmarks are redirected (see §6.3), not 404'd.
+Old `/contexts/*` bookmarks are redirected (see §6.3), not 404'd. For the full click-by-click validation walkthrough, go to **§12**.
 
 ---
 
@@ -34,7 +34,17 @@ Old `/contexts/*` bookmarks are redirected (see §6.3), not 404'd.
 2. **Additive-spec discipline preserved.** Every context `PUT` still goes through `buildContextUpdatePayload()` with the loaded `resourceVersion`; unknown spec fields (e.g. `spec.gfs`) still survive edits. The spec-preservation contract tests were re-homed (see §7.3).
 3. **Redirect, don't strand.** Every removed route shape has a redirect (§6.3).
 4. **Labels resolved client-side.** Private contexts are displayed via the owning agent (`host.spec.contextRef` join); fallback chain: owning agent(s) → `spec.displayName` → raw id (muted).
-5. **Out-of-scope "context" words stay:** LLM context window, guardrail `may_add_context` permission, React contexts, `context.params` in route handlers, JSON keys (`security.allowContextRef`, `contextRef`, `contextIds`, `mountedByContexts`).
+5. **Out-of-scope "context" words stay** (complete list, re-verified by the §11 audit):
+   - LLM "context window" (`context_window_tokens`, model forms/tables/discovery).
+   - Guardrail hook permission "May add context" (`may_add_context`) — prompt context injected into tool calls.
+   - LLM prompt "User context" / `## User Context` (USER.md background in the agent Identity tab).
+   - React contexts (`AuthContext`, `ThemeContext`, `ToastContext`, …) and `context: { params }` route-handler signatures.
+   - Wire-format identifiers: `spec.contextRef`, `contextIds`, `security.allowContextRef`, `mountedByContexts`, and `contextRef` prose inside recipe manifest templates (JSON the user edits is wire format).
+   - `kubectl --context=<name>` flags in recipe-status debug hints (kubeconfig syntax, standard kubectl meaning).
+   - The `host-context-controller` service label in trace filters (real infra service name, HCC).
+   - Raw-scope-id fallback labels (muted, last resort) when neither an owning agent nor a `displayName` resolves — see §2.4.
+   - Intentional legacy redirects in `next.config.js` (invisible plumbing for old bookmarks).
+   - Internal code identifiers (function/variable/type names such as `agentContext`, `getContexts`, `contextResources`) and code comments.
 6. **No half-states.** Within a phase a screen is either fully old-vocabulary or fully new-vocabulary.
 
 ## 3. Product decisions (locked for this run)
@@ -58,13 +68,13 @@ Old `/contexts/*` bookmarks are redirected (see §6.3), not 404'd.
 
 | Item | Surface | Change | Status |
 | --- | --- | --- | --- |
-| E1 | Agents list ▸ Connectors column hover card (`components/HostTable.tsx`) | Header shows the **agent's name** + "Connectors" heading instead of the raw private-context slug; clicking navigates to that agent's own Connectors tab (`/agents/<name>/connectors`), never `/contexts/<slug>` | ✅ Done |
+| E1 | Agents list ▸ Connectors column hover card (`components/HostTable.tsx`) | Card shows a neutral **"Connectors" heading + count + server names** — never the raw private-context slug; clicking navigates to that agent's own Connectors tab (`/agents/<name>/connectors`), never `/contexts/<slug>` | ✅ Done |
 | E2 | Create-agent failure copy (`components/HostWizard/index.tsx`) | "The agent connector context could not be created…" → "We couldn't finish setting up this agent's connectors — please try again." | ✅ Done |
 | E3 | Agent connectors tab error mapping (`app/hosts/[name]/page.tsx`) | `agentConnectorMutationError()` already intercepts the 409/"version unavailable" cases with agent-flavored copy; final fallback now passes a connector-flavored message so `contextMutationError()` defaults can never surface | ✅ Done |
 
 Tests updated in the same commit: `HostTable.test.tsx` (hover card now asserts agent-name heading + agent connectors navigation).
 
-**Flow after Phase 0 (new):** Agents list ▸ hover Connectors count ▸ card titled "`<agent name>` · Connectors" listing server names ▸ click → agent detail ▸ Connectors tab.
+**Flow after Phase 0 (new):** Agents list ▸ hover the Connectors count ▸ card titled "Connectors" with count + server names (slug never renders — test-locked) ▸ click → agent detail ▸ Connectors tab.
 
 ## 5. Phase 1 — Category B: connector flows stop speaking "Context"
 
@@ -139,7 +149,7 @@ Tests updated in the same commit: `HostTable.test.tsx` (hover card now asserts a
 - `/contexts/<slug>` (any tab suffix ignored) → load hosts + contexts; if exactly the host with `spec.contextRef === slug` exists → `router.replace('/agents/<host>/connectors')`; otherwise → `/agents`.
 - API/lookup failure → `/agents` (fail safe, never a dead end).
 
-### 6.4 New flow ( tester view)
+### 6.4 New flow (tester view)
 
 1. Old bookmark `…/contexts/research-agent-48213/connectors` lands on `…/agents/research-agent/connectors` (owning agent resolved).
 2. Unknown slug `…/contexts/legacy-thing` lands on the Agents list.
@@ -172,7 +182,7 @@ Tests updated in the same commit: `HostTable.test.tsx` (hover card now asserts a
 | D1 | `/agent-files` list | Column "Mounted by Contexts" → "Mounted by"; mount names resolved to owning agent names where possible; subtitle → "Workspace volumes that agents can mount read-only into their pods." |
 | D2 | SFS create subtitle | Same reword |
 | D3 | SFS detail mount chip | "not mounted by any Context" → "not mounted by any agent"; "mounted by X" resolves private contexts to agent names |
-| D4 | Recipe editor L1 banner | Reworded to "shared connector scope" language; JSON keys (`security.allowContextRef`, `spec.contextRef`) untouched (wire format) |
+| D4 | Recipe editor L1 banner | Reworded to "shared connector scope" language (Option B wording completed in the §11 audit); JSON keys (`security.allowContextRef`, `spec.contextRef`) untouched (wire format) |
 | D5 | Workflow run modal infra error | "…MCP server, Context allowlist, and ready endpoints…" → "…MCP server, connector access, and ready endpoints…" |
 | D6 | Workflow access panel | "…in the matching context." → "…in the matching connector scope." |
 | D7 | `components/ResourceTable.tsx` | Dead code (zero importers) → deleted |
@@ -197,9 +207,112 @@ Tests updated in the same commit: `HostTable.test.tsx` (hover card now asserts a
 | 2026-08-26 | 3 | Category A implemented + e2e migration for phases 0–3. Deleted: `/contexts` pages (`page`, `new`, `[name]`, `[name]/[tab]`), `components/ContextTable.tsx`, sidebar item/type/order, `DashboardLayout` branch, `CONTROL_ROUTES.contexts` builders, `createFlowLoading.createContext`, stale `/contexts/:name/shared-files` redirect. Added `app/contexts/[[...slug]]/page.tsx` legacy resolver (slug → owning agent's Connectors tab via `spec.contextRef` join; unknown/`new`/failures → `/agents`). Tests: contexts suites + `ContextTable.test.tsx` deleted; **spec-preservation contract re-homed** to `HostDetailsPage.connectors.test.tsx` (unknown `spec.gfs` + `resourceVersion` survive agent-side connector PUTs); RFC1123 generation stays covered by `lib/__tests__/agentContext.test.ts`; `Sidebar.test.tsx` order, `AuthContext.test.tsx` URL fixture updated. E2e: main `contexts.spec.ts` rewritten as redirect/no-sidebar regression; `auth.spec.ts`, `channels.spec.ts`, `mcp-servers.spec.ts`, `helpers/selectors.ts` cleaned. QA-recorder: 4 context specs deleted + their npm scripts; connector-edit/navigation/onboarding-combo/team-create/create-form-smoke/connectors/shared-fs-upload migrated to agent-access flows (API-created contexts where a context fixture is needed). Full vitest + `tsc` green. No backend changes. |
 | 2026-08-26 | 4 | Category D + close-out. SFS list column → "Mounted by" with mount refs resolved to owning agent names (failure-tolerant hosts/contexts enrichment); SFS create subtitle + loading-skeleton copy reworded; SFS detail chip "not mounted by any agent" / "mounted by <agents>" (invisible scopes don't count); recipe editor L1 banner speaks "shared connector scope" (JSON keys untouched); workflow-run infra error → "connector access"; workflow access panel description reworded; dead `ResourceTable.tsx` deleted. New shared `lib/accessScopeLabels.ts` (scope id → agent/display label join) now backs users/teams Access tabs and SFS surfaces. Residual sweep: missed "Contexts:" meta line on connector egress tab removed; `createFlowLoading` SFS copy fixed; verified remaining "context" strings are all §3 exclusions (LLM prompt "User context", guardrail `may_add context`, service name `host-context-controller`, internal identifiers). **Verification:** full vitest 1700/1700, `tsc --noEmit` clean, `next build` compiles with `/contexts/[[...slug]]` as the only contexts route. No backend changes. |
 | 2026-08-26 | 4 | Product e2e `control-ui/e2e/registry-install.spec.ts` migrated: install flows drop the removed Context step (one fewer Continue; access scope is provisioned silently); J1 manual-create flows rewritten to the current form (egress via "Advanced options" disclosure on the Connector step, optional Access step passed through, "No credentials required" radio before submit). API-level sections (contextRef payloads, context1 allowlist assertions) intentionally unchanged — the backend contract is untouched. Full vitest 1700/1700 + `tsc` green after migration. |
-| 2026-08-27 | audit | Fresh-eyes residual audit (independent pass) + fixes. **Backend re-verified untouched**: `git diff --name-only a584c259a..HEAD` contains zero files outside `control-ui/`, `docs/`, `tests/e2e/` (an apparent `host-context-controller` diff was `origin/dev` moving forward under us mid-run — PR #471, someone else's lane; our branch never touched it). Leaks fixed: (1) RecipeEditor L1 Option B still said "a private Context \"wf-<recipeName>\"" (earlier scripted replace had silently missed it) → "a private connector scope"; (2) `lib/recipeValidator.ts` INFO hint same reword; (3) `lib/contextMutation.ts` default messages neutralized ("A required version is unavailable…", "This access changed since it was loaded…") + `hosts/[name]` regex updated + connectors page now also intercepts the version-unavailable path; (4) token-budget dimension label `context_ref` "Context" → "Connector scope"; (5) "Stored context and provenance" trace-detail heading → "Stored details and provenance"; (6) stale qa-recorder-connector-edit assertion on the removed context-slug meta now asserts it does NOT render. Tests updated (RecipeEditor, GovernedTraceDetails). Remaining "context" words verified as §3 exclusions: kubectl `--context` flags in recipe-status hints (kubeconfig syntax), manifest `contextRef` prose (wire format), raw-id fallback labels (by design, muted), `host-context-controller` service label, LLM "User context" (USER.md), guardrail `may add context`, plus intentional legacy redirects in `next.config.js`. Full vitest 1700/1700, `tsc` clean. No backend changes. |
+| 2026-08-27 | audit | Fresh-eyes residual audit (independent pass) + fixes. **Backend re-verified untouched**: `git diff --name-only a584c259a..HEAD` contains zero files outside `control-ui/`, `docs/`, `tests/e2e/` (an apparent `host-context-controller` diff was `origin/dev` moving forward under us mid-run — PR #471, someone else's lane; our branch never touched it). Leaks fixed: (1) RecipeEditor L1 Option B still said "a private Context \"wf-<recipeName>\"" (earlier scripted replace had silently missed it) → "a private connector scope"; (2) `lib/recipeValidator.ts` INFO hint same reword; (3) `lib/contextMutation.ts` default messages neutralized ("A required version is unavailable…", "This access changed since it was loaded…") + `hosts/[name]` regex updated + connectors page now also intercepts the version-unavailable path; (4) token-budget dimension label `context_ref` "Context" → "Connector scope"; (5) "Stored context and provenance" trace-detail heading → "Stored details and provenance"; (6) stale qa-recorder-connector-edit assertion on the removed context-slug meta now asserts it does NOT render. Tests updated (RecipeEditor, GovernedTraceDetails). Remaining "context" words verified as §2.5 exclusions: kubectl `--context` flags in recipe-status hints (kubeconfig syntax), manifest `contextRef` prose (wire format), raw-id fallback labels (by design, muted), `host-context-controller` service label, LLM "User context" (USER.md), guardrail `may add context`, plus intentional legacy redirects in `next.config.js`. Full vitest 1700/1700, `tsc` clean. No backend changes. |
+| 2026-08-27 | docs | Source-of-truth restructured after the audit: added §11 (audit report: backend-untouched proof incl. the `origin/dev`-moved warning, leak/fix table, verified intentional remnants), §12 (full click-by-click manual tester walkthrough, tables A–G + global negative check), renumbered open questions to §13; extended the §2.5 exclusion list to the complete audited set; corrected §4 E1 (hover card shows a neutral "Connectors" heading, not the agent name) and the §6.4 heading typo. |
 
-## 11. Open questions / follow-ups (non-blocking)
+## 11. Post-implementation audit (2026-08-27)
+
+An independent fresh-eyes pass over every rendered surface (JSX text, aria-labels, titles, tooltips, placeholders, toasts, confirms, table headers, step arrays, loading skeletons, e2e copy assertions) after all phases landed.
+
+### 11.1 Backend-untouched proof
+
+- `git diff --name-only a584c259a..HEAD` (our true merge base) contains **zero files outside `control-ui/`, `docs/`, `tests/e2e/`** — no backend service, chart, or CRD was modified.
+- All wire contracts byte-identical: `contextRef` / `contextIds` / `mcpServers` payloads, `GET/PUT /admin/{users,teams}/:id/contexts`, `POST /admin/contexts`, `POST /admin/registry/install` (still receives a `contextRef`; the install endpoint's 400-on-missing-`contextRef` and the McpServer CRD's required `spec.contextRef` are why the frontend silently provisions private scopes — decisions D3 and §5.3).
+- ⚠️ Diff-hygiene note: `origin/dev` moved forward **while this branch was being implemented** (PR #471, `feat/460-hcc-networkpolicy-noop-gates`, touching `host-context-controller`). Diffing against a freshly-fetched `origin/dev` makes those files appear — they are **not part of this lane**. Always diff against the recorded base `a584c259a`.
+
+### 11.2 Leaks found and fixed (commit `734fba71a`)
+
+| # | Leak | Where it surfaced | Fix |
+| --- | --- | --- | --- |
+| 1 | Recipe editor L1 error, Option B still said `a private Context "wf-<recipeName>"` — the phase-4 scripted replace had silently missed this one string (indentation mismatch) | `components/RecipeEditor.tsx` "Cannot deploy: policy violation" banner + deploy-block reason | → "a private connector scope" |
+| 2 | `recipeValidator` INFO hint with the same wording | Rendered issue list for every transport recipe omitting `spec.contextRef` (the common case) | Same reword |
+| 3 | `contextMutation.ts` default messages ("Context version is unavailable…", "This Context changed…") could surface on the connectors page via `error.message` passthrough when `buildContextUpdatePayload` throws without a `resourceVersion` | Connectors list error banner | Defaults neutralized ("A required version is unavailable…", "This access changed since it was loaded…"); `hosts/[name]` interceptor regex updated; connectors page now also intercepts the version-unavailable path |
+| 4 | Token-budget dimension label `context_ref` rendered as **"Context"** in scope chips/search | Cost & Usage ▸ Token Budgets, for budgets scoped on `context_ref` | → "Connector scope" |
+| 5 | Trace-detail heading "Stored context and provenance" (audit-event payload, not the CRD — but ambiguous to a tester hunting the word) | Traces ▸ Administrative ▸ event detail | → "Stored details and provenance" |
+| 6 | Stale e2e assertion expecting the context slug in the connector-edit meta block (UI removed in phase 4, spec migrated in phase 3) | `e2e/qa-recorder-connector-edit.spec.ts` | Now asserts the slug does **not** render |
+
+Tests updated alongside: `RecipeEditor.test.tsx` (new wording), `GovernedTraceDetails.test.tsx` (new heading). Post-fix verification: **vitest 1700/1700, `tsc --noEmit` clean**.
+
+### 11.3 Verified intentional remnants
+
+Everything below was checked in context and is a §2.5 exclusion, not a leak: kubectl `--context=` hints, manifest `contextRef` prose, `host-context-controller` service label, LLM "User context" (USER.md), guardrail "May add context", raw-id muted fallbacks, `next.config.js` legacy redirects, internal identifiers/comments, and the negative-guard tests (asserting "Context" does *not* appear in the wizard/summary).
+
+## 12. Manual tester flows (click-by-click walkthrough)
+
+**Prerequisites:** a running Control UI deployment, at least one existing agent, logged in as admin. Expected strings are quoted exactly; anything else is a bug.
+
+### A. Navigation & legacy links
+
+| # | Navigate to | Do this | Expected |
+| --- | --- | --- | --- |
+| A1 | Left sidebar | Look at the items | **No "Contexts" entry.** Order: Users & Teams, Agents, Marketplace, Installed Connectors, Installed Plugins, Installed Guardrails, Files, External Channels, LLM Models, Secrets, Cost & Usage (Settings in footer) |
+| A2 | URL bar ▸ `/contexts` | Enter | Brief "Taking you to the right place…" → lands on **/agents** |
+| A3 | URL bar ▸ `/contexts/new` | Enter | Lands on **/agents** |
+| A4 | URL bar ▸ `/contexts/total-nonsense-xyz` | Enter | Lands on **/agents** |
+| A5 | URL bar ▸ `/contexts/<private-slug>` (get one via `kubectl get host <agent> -o jsonpath='{.spec.contextRef}'`) | Enter | Lands on **that agent's detail ▸ Connectors tab** |
+
+### B. Agents
+
+| # | Navigate to | Do this | Expected |
+| --- | --- | --- | --- |
+| B1 | **Agents** list | Hover the number in the **Connectors** column | Tooltip titled **"Connectors"** + count + connector names; the private slug **never** appears (test-locked) |
+| B2 | Same | Click the count number | Opens that agent's detail ▸ **Connectors tab** |
+| B3 | Agents ▸ **Create agent** | Walk the whole wizard | Steps: Agent → Model & Credentials → Access → Add Connectors. No context step or context name anywhere; finish with connectors selected — the agent works |
+| B4 | Agent detail ▸ **Connectors** tab | Add a connector, then remove one | Writes succeed; toast "Connectors updated."; even error paths stay agent-flavored (open the tab in two windows and save both — the second says "This agent's connectors changed since they were loaded. Reload the agent and try again.") |
+
+### C. Connectors
+
+| # | Navigate to | Do this | Expected |
+| --- | --- | --- | --- |
+| C1 | **Installed Connectors** | Read the section subtitle | "Browse connector deployments and **agent access**." |
+| C2 | Same | Click a row to expand ▸ **Access** section | Three groups: **Agents** (one row per agent, each with a ✕), read-only **Teams** and **Users**. Raw context names/slugs never render; scopes with no owning agent are invisible |
+| C3 | Expanded row | Click ✕ next to an agent | Connector removed for that agent ("Connector X removed from agent Y."). If several agents share one connector set, a confirm explains the change applies to all of them |
+| C4 | Expanded row | **Add agents** → pick 1–2 agents → **Add to agent(s)** | Toast "Connector X added to agent Y." / "…added to N agents."; agents appear in the group |
+| C5 | Connectors ▸ **Create Connector** | Walk the form | Steps: **Connector → Access → Secrets**. Access step = optional "Agents" multi-select with an "Access preview" (who can already use the selected agents) |
+| C6 | Same | Select **no** agents and finish | Connector is created successfully; info copy explains no agent can use it yet |
+| C7 | Connectors ▸ row kebab ▸ **Edit** | Look at the tabs | Tabs: **Credentials / External Egress / Access** (no "Context") |
+| C8 | Edit ▸ **Access** tab | Read | Heading **"Agent access"**, read-only Agents/Teams/Users; empty case: "No agents have access to this connector yet." |
+| C9 | URL bar ▸ `/connectors/<name>/edit/context` | Enter | Redirects to `…/edit/access` |
+
+### D. Marketplace install
+
+| # | Navigate to | Do this | Expected |
+| --- | --- | --- | --- |
+| D1 | **Marketplace** ▸ pick a connector ▸ **Install** | Walk the flow | Steps: **Package → Credentials → Install**. No context selection anywhere |
+| D2 | Same | Finish the install | Success dialog: "…is installed. **Give agents access from the Installed Connectors list**…" — no context mentioned |
+| D3 | **Installed Connectors** | Find the just-installed connector | Shows "No agents have access yet." until granted via C4 |
+
+### E. Users & Teams
+
+| # | Navigate to | Do this | Expected |
+| --- | --- | --- | --- |
+| E1 | **Users & Teams** ▸ Users ▸ a member | Look at the tabs | Tab is **"Access"** (URL `…/users/<id>/access`), not "Contexts" |
+| E2 | Member ▸ **Access** tab | Read the rows | Each row shows the **owning agent's name** (or shared set), not a slug; ✕ = "Remove access" with confirm "Remove <member>'s access to <agent>?" |
+| E3 | Same | **Add access** | Picker lists agent names; submit → toast "Access updated." |
+| E4 | Users & Teams ▸ Teams ▸ a team | Tabs + subtitle | Tab **"Access"**; subtitle "Members, connector access, and agents."; same add/remove behavior; old URL `…/teams/<id>/contexts` redirects to `…/access` |
+| E5 | Users & Teams ▸ Teams ▸ **New team** | Walk the wizard | Steps: Team → Members → **Access** → Agents. Access step says "Choose the agents and connector scopes this team can use." and lists agent names |
+| E6 | Users & Teams ▸ Teams table | Look at the columns | Column header **"Access"** (was "Contexts"); sorting still works |
+| E7 | Team ▸ kebab ▸ Delete team | Read the warning | "…all memberships, pending invitations, and team access/agent mappings…" |
+
+### F. Agent Files (SharedFileSystems)
+
+| # | Navigate to | Do this | Expected |
+| --- | --- | --- | --- |
+| F1 | **Files ▸ Agent Files** | Look at the table | Column **"Mounted by"** showing **agent names** (or —); subtitle "Workspace volumes that agents can mount read-only into their pods." |
+| F2 | Agent Files ▸ open one | Look at the metadata chip | "mounted by <agent names>" or "not mounted by any agent" — never a context slug |
+
+### G. Plugins / workflows / budgets (copy checks)
+
+| # | Navigate to | Do this | Expected |
+| --- | --- | --- | --- |
+| G1 | **Installed Plugins** ▸ create/edit an agentic recipe that sets `spec.contextRef` | Read the validation banner | "…shared **connector scope**… WRC will auto-create a **private connector scope**…" — no "Context" word |
+| G2 | Recipe with a transport workload and `contextRef` omitted | Read the INFO issue | "Omitted — WRC will auto-create a private connector scope…" |
+| G3 | Cost & Usage ▸ Token Budgets | Open a budget scoped on `context_ref` (if one exists) | Chip reads "**Connector scope**: \<id\>", not "Context" |
+| G4 | Run a workflow before its infra is ready | Read the error toast | "…MCP server, **connector access**, and ready endpoints…" |
+
+**Global negative check:** a full-page text search for "Context" in the rendered UI should only ever match the §2.5 exclusions (kubectl `--context` hints in recipe status, "User context" in the agent Identity tab, "May add context" guardrail permission, "host-context-controller" in traces).
+
+## 13. Open questions / follow-ups (non-blocking)
 
 - Lint rule against reintroducing user-facing "context" copy (CI grep with §2.5 exclusions) — proposed, not yet implemented.
 - Support/debug visibility of an agent's private context slug (collapsed "Advanced" row) — rejected for now; fully invisible.
