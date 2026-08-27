@@ -643,3 +643,48 @@ describe('R4-M4 — replaceServer keeps the SHARED representative alive', () => 
     expect(manager.getAllTools().map(t => t.name)).toEqual(['gh__do'])
   })
 })
+
+// ─── R4-M5 · a terminal McpAuthError evicts the per-user partition (T5) ────────
+//
+// The PR body states a terminal McpAuthError "then evicts the partition", but no
+// test pinned it: removing `this.evictPartition(key)` from callTool's McpAuthError
+// branch stayed green. The McpAuthError is produced by the REAL client (a 401 that
+// survives its single forced-refresh retry — T1, never hand-minted). Observable of
+// the eviction: the NEXT call by the same user must RE-ADMIT a fresh partition
+// (a fresh factory build), instead of reusing the still-connected stale client.
+
+describe('R4-M5 — a terminal McpAuthError evicts the per-user partition', () => {
+  it('re-admits the per-user partition on the next call after a terminal 401', async () => {
+    const { factory, built } = recordingFactory()
+    const manager = new McpManager(undefined, undefined, factory)
+    await manager.addServer(oauthUserServer())
+
+    // callTool throws a structured 401 on both the initial call and the client's
+    // single forced-refresh retry → the real client raises a terminal
+    // McpAuthError(401), which the manager treats as a terminal auth failure.
+    let phase: '401' | 'ok' = '401'
+    sdk.callToolImpl = async () => {
+      if (phase === '401') {
+        const err = new Error('http 401') as Error & { code: number }
+        err.code = 401
+        throw err
+      }
+      return { content: [{ type: 'text', text: 'ok' }] }
+    }
+
+    const first = await manager.callTool('gh__do', {}, { userId: 'alice' })
+    expect(first.isError).toBe(true)
+    expect(first.connectRequired).toEqual({ mcpServerName: 'gh' })
+    // Alice's partition was admitted exactly once so far (the 401 reconnect reuses
+    // the same tokenProvider — it does NOT rebuild via the manager factory).
+    expect(built.filter(b => b.principal === 'alice')).toHaveLength(1)
+
+    // The partition must have been evicted → the next call RE-ADMITS alice (a
+    // second factory build). Without evictPartition, the still-connected stale
+    // client is reused and no second admission happens.
+    phase = 'ok'
+    const second = await manager.callTool('gh__do', {}, { userId: 'alice' })
+    expect(second.isError).toBe(false)
+    expect(built.filter(b => b.principal === 'alice')).toHaveLength(2)
+  })
+})
