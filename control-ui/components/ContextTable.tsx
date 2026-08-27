@@ -2,13 +2,14 @@
 
 import React, { useMemo, useState } from 'react'
 import { ContextResource } from '../lib/api'
+import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconGroupWork } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconPencil, IconRefresh, IconX } from './icons'
+import { IconRefresh } from './icons'
 
 type ContextRef = { name: string }
 
@@ -163,40 +164,25 @@ export function ContextTable({
                     {mcpServers.length}
                   </td>
                   <td style={{ textAlign: 'right' }}>
-                    <div
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '0.5rem',
-                        flexWrap: 'wrap',
-                        justifyContent: 'flex-end',
-                      }}
-                    >
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--icon cu-btn--toolbar"
-                        onClick={event => {
-                          event.stopPropagation()
-                          onEdit({ name })
-                        }}
-                        onKeyDown={event => event.stopPropagation()}
-                        aria-label={`Edit context ${name}`}
-                      >
-                        <IconPencil width={16} height={16} />
-                      </button>
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                        onClick={event => {
-                          event.stopPropagation()
-                          void onDelete({ name })
-                        }}
-                        onKeyDown={event => event.stopPropagation()}
-                        disabled={deletingKey === key}
-                        aria-label={deletingKey === key ? 'Deleting…' : `Delete context ${name}`}
-                      >
-                        <IconX width={16} height={16} />
-                      </button>
+                    <div className="cu-table-actions">
+                      <RowActionsMenu
+                        ariaLabel={`Actions for context ${name}`}
+                        horizontalTrigger
+                        actions={[
+                          {
+                            key: 'edit',
+                            label: 'Edit',
+                            onClick: () => onEdit({ name }),
+                          },
+                          {
+                            key: 'delete',
+                            label: deletingKey === key ? 'Deleting…' : 'Delete',
+                            danger: true,
+                            disabled: deletingKey === key,
+                            onClick: () => void onDelete({ name }),
+                          },
+                        ]}
+                      />
                     </div>
                   </td>
                 </tr>

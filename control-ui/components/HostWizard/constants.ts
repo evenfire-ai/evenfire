@@ -2,18 +2,13 @@ export const HOST_SECRET_LABEL_KEY = 'clerum.io/host-secret'
 export const HOST_SECRET_LABEL_VALUE = 'true'
 export const HOST_NAMESPACE = 'mcp-host'
 
-export const STEPS = ['Agent', 'Context', 'Model & Credentials', 'Access'] as const
+export const STEPS = ['Agent', 'Model & Credentials', 'Access', 'Add Connectors'] as const
 
 export const STEP_DETAILS = [
   {
     description: 'Define identity & namespace',
     title: 'Agent identity',
     subtitle: 'Give your agent a unique name within the selected namespace.',
-  },
-  {
-    description: 'Attach knowledge sources',
-    title: 'Context',
-    subtitle: 'Choose the context and MCP servers this agent can use.',
   },
   {
     description: 'Choose model and credentials',
@@ -24,5 +19,10 @@ export const STEP_DETAILS = [
     description: 'Set permissions and sharing',
     title: 'Access',
     subtitle: 'Grant members or teams permission to use this agent.',
+  },
+  {
+    description: 'Choose available connectors',
+    title: 'Add connectors',
+    subtitle: 'Choose the connectors this agent can use. You can leave this empty.',
   },
 ] as const

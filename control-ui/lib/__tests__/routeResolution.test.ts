@@ -28,7 +28,22 @@ function applyRule(pathname: string, rule: RouteRule): string | null {
     return rule.destination.replace(':path*', rest).replace(/\/$/, '') || '/'
   }
 
-  return pathname === rule.source ? rule.destination : null
+  const sourceParts = rule.source.split('/')
+  const pathnameParts = pathname.split('/')
+  if (sourceParts.length !== pathnameParts.length) return null
+
+  const params: Record<string, string> = {}
+  for (let index = 0; index < sourceParts.length; index += 1) {
+    const sourcePart = sourceParts[index]
+    const pathnamePart = pathnameParts[index]
+    if (sourcePart.startsWith(':')) {
+      params[sourcePart.slice(1)] = pathnamePart
+    } else if (sourcePart !== pathnamePart) {
+      return null
+    }
+  }
+
+  return rule.destination.replace(/:([^/]+)/g, (match, name: string) => params[name] ?? match)
 }
 
 function appRoutePatterns(): RegExp[] {
@@ -150,6 +165,11 @@ describe('CONTROL_ROUTES App Router resolution', () => {
           destination: '/agents/:name/advanced',
           permanent: true,
         },
+        {
+          source: '/agents/:name/contexts',
+          destination: '/agents/:name/connectors',
+          permanent: true,
+        },
       ])
     )
   })
@@ -158,11 +178,33 @@ describe('CONTROL_ROUTES App Router resolution', () => {
     const redirects = ((await nextConfig.redirects?.()) ?? []) as RouteRule[]
     const rewrites = ((await nextConfig.rewrites?.()) ?? []) as RouteRule[]
     const appRoutes = appRoutePatterns()
-    const legacySlugs = ['member-access', 'team-access', 'approvals', 'env-vars']
+    const legacySlugs = ['member-access', 'team-access', 'approvals', 'env-vars', 'contexts']
 
     for (const slug of legacySlugs) {
       const pathname = `/agents/foo/${slug}`
       expect(resolvesToAppRoute(pathname, redirects, rewrites, appRoutes)).toBe(true)
     }
+  })
+
+  it('redirects the legacy agent Contexts deep link to the Connectors experience', async () => {
+    const redirects = ((await nextConfig.redirects?.()) ?? []) as RouteRule[]
+    const rewrites = ((await nextConfig.rewrites?.()) ?? []) as RouteRule[]
+    const appRoutes = appRoutePatterns()
+
+    // Direct-route regression: before this compatibility rule, the /agents
+    // rewrite reached hosts/[name]/[tab] with tab="contexts", which called
+    // notFound() because the renamed tab only accepted "connectors".
+    expect(resolvesToAppRoute('/agents/demo-agent/contexts', redirects, rewrites, appRoutes)).toBe(
+      true
+    )
+    expect(redirects).toEqual(
+      expect.arrayContaining([
+        {
+          source: '/agents/:name/contexts',
+          destination: '/agents/:name/connectors',
+          permanent: true,
+        },
+      ])
+    )
   })
 })
