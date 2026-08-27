@@ -717,7 +717,9 @@ describe('HostWizard — create-only seam + compensation (R5-C1/R5-B1, V-1, V-7)
     // Observable (T4): the friendly per-resource collision message is shown —
     // NOT the raw K8s AlreadyExists text.
     await waitFor(() => {
-      expect(screen.getByText(/agent connector context could not be created/i)).toBeInTheDocument()
+      expect(
+        screen.getByText(/couldn.t finish setting up this agent.s connectors/i)
+      ).toBeInTheDocument()
     })
     expect(
       vi
@@ -849,7 +851,7 @@ describe('HostWizard — create-only seam + compensation (R5-C1/R5-B1, V-1, V-7)
     })
     // The friendly collision text must NOT appear (coded 409 is not a collision).
     expect(
-      screen.queryByText(/agent connector context could not be created/i)
+      screen.queryByText(/couldn.t finish setting up this agent.s connectors/i)
     ).not.toBeInTheDocument()
     // Boundary rule still applies: the secret created before the failing context
     // is compensated (host never created), but nothing beyond that.

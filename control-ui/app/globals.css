@@ -6182,7 +6182,7 @@ textarea.cu-input {
   font-weight: 600;
 }
 
-.cu-agent-context-mcp-summary {
+.cu-agent-connectors-summary {
   display: grid;
   gap: var(--cu-space-2);
   padding: var(--cu-space-3);
@@ -6191,7 +6191,7 @@ textarea.cu-input {
   background: var(--cu-bg-elevated);
 }
 
-.cu-agent-context-mcp-summary__head {
+.cu-agent-connectors-summary__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -6203,7 +6203,7 @@ textarea.cu-input {
   text-transform: uppercase;
 }
 
-.cu-agent-context-mcp-summary__head > span:last-child {
+.cu-agent-connectors-summary__head > span:last-child {
   display: inline-grid;
   place-items: center;
   min-width: 1.5rem;
@@ -6215,7 +6215,7 @@ textarea.cu-input {
   font-variant-numeric: tabular-nums;
 }
 
-.cu-agent-context-mcp-summary__list {
+.cu-agent-connectors-summary__list {
   display: flex;
   flex-wrap: wrap;
   gap: var(--cu-space-1);
@@ -6224,7 +6224,7 @@ textarea.cu-input {
   list-style: none;
 }
 
-.cu-agent-context-mcp-summary__list li {
+.cu-agent-connectors-summary__list li {
   max-width: 100%;
   padding: 0.2rem var(--cu-space-2);
   overflow: hidden;
@@ -6238,7 +6238,7 @@ textarea.cu-input {
   white-space: nowrap;
 }
 
-.cu-agent-context-mcp-summary > .cu-muted {
+.cu-agent-connectors-summary > .cu-muted {
   margin: 0;
   font-size: 0.8125rem;
 }
@@ -7499,21 +7499,16 @@ textarea.cu-input {
   gap: var(--cu-space-4);
 }
 
-.cu-host-context-select {
-  width: min(36rem, 100%);
-}
-
-/* Hover card on the Context column — shows the same MCP-server list as the
-   agent-wizard's `cu-agent-context-mcp-summary` block. The wrapper is the
-   positioning context so the absolutely-positioned card sits just below the
-   link instead of clipping against the table cell. */
-.cu-host-context-hover {
+/* Hover card on the Connectors column — shows the agent's MCP-server list.
+   The wrapper is the positioning context so the absolutely-positioned card
+   sits just below the link instead of clipping against the table cell. */
+.cu-host-connectors-hover {
   position: relative;
   display: inline-flex;
   max-width: 100%;
 }
 
-.cu-host-context-count {
+.cu-host-connectors-count {
   display: inline-grid;
   place-items: center;
   min-width: 1.75rem;
@@ -7527,7 +7522,7 @@ textarea.cu-input {
   line-height: 1.2;
 }
 
-.cu-host-context-hover > .cu-agent-context-mcp-summary {
+.cu-host-connectors-hover > .cu-agent-connectors-summary {
   position: absolute;
   top: calc(100% + var(--cu-space-1));
   left: 0;

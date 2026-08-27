@@ -191,6 +191,7 @@ Tests updated in the same commit: `HostTable.test.tsx` (hover card now asserts a
 | Date | Phase | Entry |
 | --- | --- | --- |
 | 2026-08-26 | — | Document created; baseline verified at `a584c259a`; research inventories completed (surfaces + test impact) |
+| 2026-08-26 | 0 | E1/E2/E3 implemented: hover card shows neutral "Connectors" heading (no slug), click opens the agent's own Connectors tab (`onOpenConnectors`), wizard failure copy reworded, error mapping verified interceptor-covered. CSS family renamed (`cu-agent-connectors-summary*`, `cu-host-connectors-*`; dead `cu-host-context-select` removed). Tests: `HostTable.test.tsx` (+slug-never-renders invariant, +click-navigation), `HostWizard.test.tsx` copy. `tsc --noEmit` + full vitest green (1743 passed). No backend changes. |
 
 ## 11. Open questions / follow-ups (non-blocking)
 

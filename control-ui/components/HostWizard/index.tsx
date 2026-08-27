@@ -572,7 +572,7 @@ export function HostWizard({
       const generatedContextName = await createPrivateContext(
         normalizedHostName,
         Array.from(new Set(selectedMcp)),
-        'The agent connector context could not be created — please try again.'
+        'We couldn’t finish setting up this agent’s connectors — please try again.'
       )
       created.push({ kind: 'context', name: generatedContextName })
 
