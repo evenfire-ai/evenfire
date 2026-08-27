@@ -2,8 +2,14 @@
  * U5 seam — reactive OAuth-consent classification in `manager.callTool`.
  *
  * Invariants pinned here (spec §U5 must-fix):
- *  - 401 on an oauth server → typed `connectRequired` marker (mcpServerName +
- *    provider), NOT a flattened opaque error.
+ *  - 401 on an oauth server → typed `connectRequired` marker carrying
+ *    `mcpServerName`, NOT a flattened opaque error. The marker's `provider` is
+ *    always undefined here because HCC v2 never forwards the OAuth provider to
+ *    mcp-host: `decodeMcpServer` (the sole producer of `McpServerInfo`) emits
+ *    `authKind` and never an `oauth` block, so `info.oauth?.provider` in the
+ *    gate resolves to undefined. The connect UI keys the consent flow off
+ *    `mcpServerName` and resolves the provider server-side (control-api), so the
+ *    absent `provider` is dead-but-harmless. See the `oauthUserServer` fixture.
  *  - 403 on an oauth server → TERMINAL: plain error, NO connectRequired marker.
  *  - 401 on a static (non-oauth) server → NO connectRequired marker (only oauth
  *    has a consent flow).
@@ -55,14 +61,20 @@ function httpError(status: number): () => Promise<never> {
   }
 }
 
-function oauthUserServer(name = 'monday', provider = 'monday'): McpServerInfo {
+// Fixtures mirror EXACTLY what `decodeMcpServer` (contextMapperClient.ts) emits
+// from the HCC v2 inventory (T1): `authKind` is the only OAuth-derived field on
+// the wire; `auth`/`oauth`/`contextRef` are never produced (the decoder even
+// rejects `auth`/`contextRef` as forbidden authority metadata). The reactive
+// consent gate keys strictly on `authKind` (manager.ts), so `authKind` — not a
+// hand-built `oauth` block — is what makes the marker fire.
+function oauthUserServer(name = 'monday'): McpServerInfo {
   return {
     name,
-    contextRef: 'ctx-1',
     transport: { type: 'streamableHttp', url: `http://${name}/mcp` },
-    auth: { type: 'oauth' },
-    oauth: { grantScope: 'user', provider },
     enabled: true,
+    authRequired: true,
+    credentialRevision: 'rev-1',
+    authKind: 'oauth-user',
     status: { deployed: true, ready: true },
   }
 }
@@ -70,10 +82,11 @@ function oauthUserServer(name = 'monday', provider = 'monday'): McpServerInfo {
 function staticServer(name = 'airtable'): McpServerInfo {
   return {
     name,
-    contextRef: 'ctx-1',
     transport: { type: 'streamableHttp', url: `http://${name}/mcp` },
-    auth: { type: 'none' },
     enabled: true,
+    authRequired: true,
+    credentialRevision: 'rev-1',
+    authKind: 'static',
     status: { deployed: true, ready: true },
   }
 }
@@ -91,21 +104,23 @@ beforeEach(() => {
 })
 
 describe('manager.callTool — U5 reactive consent classification', () => {
-  it('401 on an oauth server → typed connect_required marker (mcpServerName + provider)', async () => {
+  it('401 on an oauth server → typed connect_required marker (mcpServerName; provider undefined under HCC v2)', async () => {
     const manager = new McpManager(undefined, undefined, tokenFactory())
-    await manager.addServer(oauthUserServer('monday', 'monday'))
+    await manager.addServer(oauthUserServer('monday'))
 
     // Two 401s: initial + the client's single forced-refresh retry → McpAuthError(401).
     state.callToolQueue = [httpError(401), httpError(401)]
     const result = await manager.callTool('monday__do', {}, { userId: 'alice' })
 
     expect(result.isError).toBe(true)
-    expect(result.connectRequired).toEqual({ mcpServerName: 'monday', provider: 'monday' })
+    // provider is undefined by design: HCC v2 forwards only authKind, never the
+    // OAuth provider, so the gate's `info.oauth?.provider` resolves to undefined.
+    expect(result.connectRequired).toEqual({ mcpServerName: 'monday', provider: undefined })
   })
 
   it('403 on an oauth server → terminal, NO connect_required marker', async () => {
     const manager = new McpManager(undefined, undefined, tokenFactory())
-    await manager.addServer(oauthUserServer('monday', 'monday'))
+    await manager.addServer(oauthUserServer('monday'))
 
     // 403 is terminal immediately in the client — no refresh/retry.
     state.callToolQueue = [httpError(403)]
