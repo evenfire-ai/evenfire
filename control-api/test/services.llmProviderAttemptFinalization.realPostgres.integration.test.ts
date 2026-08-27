@@ -36,6 +36,7 @@ describeRealPostgres('Codex attempt finalization on real PostgreSQL', () => {
   )
   let adminPool: Pool
   let pool: Pool
+  let connectionId: string
 
   async function runTx<T>(work: (tx: Pool) => Promise<T>): Promise<T> {
     const client = await pool.connect()
@@ -72,12 +73,13 @@ describeRealPostgres('Codex attempt finalization on real PostgreSQL', () => {
     await adminPool.query(`CREATE DATABASE ${quoteIdent(database)}`)
     pool = new Pool({ connectionString })
     await initDb({ connect: () => pool.connect() })
-    await insertInitialCodexSubscriptionConnection(pool, KEY, {
+    const connection = await insertInitialCodexSubscriptionConnection(pool, KEY, {
       refreshToken: 'refresh-secret',
       accessToken: 'access-usable',
       chatgptAccountId: 'acct_test_1',
       accountFingerprint: 'fp-final',
     })
+    connectionId = connection.id
   }, 60_000)
 
   afterAll(async () => {
@@ -103,6 +105,7 @@ describeRealPostgres('Codex attempt finalization on real PostgreSQL', () => {
       policyHash: 'e'.repeat(64),
       budgetReservationId: 'unbudgeted',
       connectionRevision: 1,
+      connectionId,
     })
     const issued = await issueRegisteredCodexExecutionTicket(pool, {
       sub: 'host/research-host',
