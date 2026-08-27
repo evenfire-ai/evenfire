@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
-import { applyNetworkPolicy } from '../utils'
+import { applyNetworkPolicy, networkPolicyMatchesDesired } from '../utils'
 import { asApiserverNetworkPolicy, updatedPolicyLogs } from './asApiserverNetworkPolicy'
 
 function desiredPolicy(): k8s.V1NetworkPolicy {
@@ -100,11 +100,11 @@ describe('applyNetworkPolicy no-op gate', () => {
 
   it('GATE-NP-1: mutationAllowed false after create-409 skips replace on drift', async () => {
     const desired = desiredPolicy()
+    const drifted = asApiserverNetworkPolicy(desired, { port: 9090 })
+    expect(networkPolicyMatchesDesired(desired, drifted)).toBe(false)
     const api = fakeNetworkingApi()
     api.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
-    api.readNamespacedNetworkPolicy.mockResolvedValue(
-      asApiserverNetworkPolicy(desired, { port: 9090 })
-    )
+    api.readNamespacedNetworkPolicy.mockResolvedValue(drifted)
     const mutationAllowed = vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false)
 
     await applyNetworkPolicy(
@@ -116,6 +116,7 @@ describe('applyNetworkPolicy no-op gate', () => {
       mutationAllowed
     )
 
+    expect(mutationAllowed).toHaveBeenCalledTimes(2)
     expect(api.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
   })
 })

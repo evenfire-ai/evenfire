@@ -254,7 +254,9 @@ function isServiceObject(value: unknown): value is Record<string, unknown> {
  * replace would be a no-op. Canonicalize first: the apiserver default-fills
  * policyTypes and ports[].protocol=TCP, and key order is not stable (#307).
  * Arrays stay in author order (#214). Doubt or a malformed object returns
- * false (fail-open-to-write).
+ * false (fail-open-to-write). Distinct from `sameNetworkPolicySpec` (spec-only
+ * safety-inventory filter, no default-fill) and `egressSignature` (#299
+ * no-churn fingerprint). Do not unify those predicates here (#473).
  */
 export function networkPolicyMatchesDesired(
   desired: k8s.V1NetworkPolicy | undefined,

@@ -5,9 +5,17 @@ import type * as k8s from '@kubernetes/client-node'
  * Recorded kube-apiserver GET of a NetworkPolicy after client-node decode
  * (`from` → `_from`), not a field list copied from the comparator.
  * Stamp controller-owned name/labels/podSelector/rules via
- * `asApiserverNetworkPolicy`. When a newer apiserver default-fills a field,
- * refresh this blob so the suite goes red until the comparator learns it.
+ * `asApiserverNetworkPolicy`. Nested port defaults are merged from this blob
+ * (and `RECORDED_DEFAULT_PORT`) onto desired ports so a newer apiserver
+ * default-fill goes red until the comparator learns it. Do not reconstruct
+ * ports from desired alone.
  */
+
+/** Recorded apiserver default-fill on a port that omits protocol. */
+const RECORDED_DEFAULT_PORT: k8s.V1NetworkPolicyPort = { protocol: 'TCP' }
+
+/** Recorded apiserver policyTypes when the live object has egress rules. */
+const RECORDED_EGRESS_POLICY_TYPES: string[] = ['Ingress', 'Egress']
 export const RECORDED_NETWORKPOLICY: k8s.V1NetworkPolicy = {
   apiVersion: 'networking.k8s.io/v1',
   kind: 'NetworkPolicy',
@@ -47,18 +55,27 @@ export const RECORDED_NETWORKPOLICY: k8s.V1NetworkPolicy = {
 
 function stampPorts(
   rules: k8s.V1NetworkPolicyIngressRule[] | k8s.V1NetworkPolicyEgressRule[] | undefined,
+  recordedRules: typeof rules,
   driftPort?: number
 ): typeof rules {
   if (!rules) return rules
   return rules.map((rule, ruleIndex) => {
-    if (!rule.ports) return { ...rule }
+    const recordedRule = recordedRules?.[ruleIndex]
+    if (!rule.ports) return { ...recordedRule, ...rule, ports: undefined }
     return {
+      ...recordedRule,
       ...rule,
-      ports: rule.ports.map((port, portIndex) => ({
-        ...port,
-        protocol: port.protocol ?? 'TCP',
-        port: ruleIndex === 0 && portIndex === 0 && driftPort !== undefined ? driftPort : port.port,
-      })),
+      ports: rule.ports.map((port, portIndex) => {
+        const recordedPort = recordedRule?.ports?.[portIndex]
+        return {
+          ...RECORDED_DEFAULT_PORT,
+          ...recordedPort,
+          ...port,
+          protocol: port.protocol ?? recordedPort?.protocol ?? RECORDED_DEFAULT_PORT.protocol,
+          port:
+            ruleIndex === 0 && portIndex === 0 && driftPort !== undefined ? driftPort : port.port,
+        }
+      }),
     }
   })
 }
@@ -74,8 +91,8 @@ export function asApiserverNetworkPolicy(
     explicitTypes && explicitTypes.length > 0
       ? explicitTypes
       : hasEgress
-        ? ['Ingress', 'Egress']
-        : ['Ingress']
+        ? [...RECORDED_EGRESS_POLICY_TYPES]
+        : [...(recorded.spec?.policyTypes ?? ['Ingress'])]
   return {
     ...recorded,
     metadata: {
@@ -93,8 +110,12 @@ export function asApiserverNetworkPolicy(
       ...recorded.spec,
       podSelector: desired.spec?.podSelector ?? {},
       policyTypes,
-      ingress: stampPorts(desired.spec?.ingress, drift?.port),
-      egress: stampPorts(desired.spec?.egress, desired.spec?.ingress ? undefined : drift?.port),
+      ingress: stampPorts(desired.spec?.ingress, recorded.spec?.ingress, drift?.port),
+      egress: stampPorts(
+        desired.spec?.egress,
+        recorded.spec?.egress,
+        desired.spec?.ingress ? undefined : drift?.port
+      ),
     },
   }
 }

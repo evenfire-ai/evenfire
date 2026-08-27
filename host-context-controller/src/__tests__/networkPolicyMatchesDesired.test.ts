@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
 import { networkPolicyMatchesDesired } from '../utils'
-import { asApiserverNetworkPolicy } from './asApiserverNetworkPolicy'
+import { RECORDED_NETWORKPOLICY, asApiserverNetworkPolicy } from './asApiserverNetworkPolicy'
 
 function desiredPolicy(overrides: Partial<k8s.V1NetworkPolicy> = {}): k8s.V1NetworkPolicy {
   return {
@@ -176,5 +176,48 @@ describe('networkPolicyMatchesDesired', () => {
     expect(desired.spec?.ingress?.[0]?.ports).toBeUndefined()
     expect(existing.spec?.ingress?.[0]?.ports).toBeUndefined()
     expect(networkPolicyMatchesDesired(desired, existing)).toBe(true)
+  })
+
+  it('CMP-NP-11: UDP is not stripped; UDP vs TCP is not equivalent', () => {
+    const desired: k8s.V1NetworkPolicy = {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: { name: 'np', namespace: 'ns', labels: { app: 'np' } },
+      spec: {
+        podSelector: { matchLabels: { app: 'np' } },
+        egress: [{ ports: [{ port: 53, protocol: 'UDP' }] }],
+      },
+    }
+    const existing = asApiserverNetworkPolicy(desired)
+    expect(existing.spec?.egress?.[0]?.ports?.[0]?.protocol).toBe('UDP')
+    expect(networkPolicyMatchesDesired(desired, existing)).toBe(true)
+
+    const tcpLive = asApiserverNetworkPolicy(desired)
+    const tcpPort = tcpLive.spec?.egress?.[0]?.ports?.[0]
+    expect(tcpPort).toBeDefined()
+    tcpPort!.protocol = 'TCP'
+    expect(networkPolicyMatchesDesired(desired, tcpLive)).toBe(false)
+  })
+
+  it('CMP-NP-12: recorded nested port fields survive the overlay', () => {
+    const desired = desiredPolicy()
+    const existing = asApiserverNetworkPolicy(desired)
+    const recordedPort = RECORDED_NETWORKPOLICY.spec?.ingress?.[0]?.ports?.[0]
+    const livePort = existing.spec?.ingress?.[0]?.ports?.[0] as Record<string, unknown> | undefined
+    expect(recordedPort).toBeDefined()
+    expect(livePort).toBeDefined()
+    for (const key of Object.keys(recordedPort as object)) {
+      if (key === 'port') continue
+      expect(livePort![key]).toEqual((recordedPort as Record<string, unknown>)[key])
+    }
+  })
+
+  it('CMP-NP-13: empty egress array vs omitted fails open to write', () => {
+    const omitted = desiredPolicy()
+    const emptyEgress: k8s.V1NetworkPolicy = {
+      ...omitted,
+      spec: { ...omitted.spec, egress: [] },
+    }
+    expect(networkPolicyMatchesDesired(emptyEgress, asApiserverNetworkPolicy(omitted))).toBe(false)
   })
 })

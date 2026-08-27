@@ -2046,6 +2046,64 @@ describe('NetworkPolicyReconciler', () => {
       expect(wrote).toBeGreaterThan(0)
     })
 
+    it('WRITES through create-409 when renewalDue so the inner no-op gate cannot veto M1', async () => {
+      const server: McpServerCRD = {
+        name: 'renew-409-mcp',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'dev',
+          image: 'renew:latest',
+          transport: { type: 'streamableHttp', url: 'http://renew:3000', port: 3000 },
+          egressBindings: [{ dns: 'api.example.com', port: 443 }],
+        },
+      }
+      await reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      const written = (
+        mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as { body: k8s.V1NetworkPolicy }
+      ).body
+
+      const annotations = { ...(written.metadata?.annotations ?? {}) }
+      const state = JSON.parse(annotations['clerum.io/egress-fqdn-state']) as Array<{
+        expiresAt: number
+      }>
+      for (const e of state) e.expiresAt = Date.now() + 1000
+      annotations['clerum.io/egress-fqdn-state'] = JSON.stringify(state)
+
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValue({
+        items: [
+          {
+            metadata: {
+              name: written.metadata?.name,
+              labels: written.metadata?.labels,
+              annotations,
+            },
+            spec: written.spec,
+          },
+        ],
+      })
+      mockApi.createNamespacedNetworkPolicy.mockRejectedValue(
+        Object.assign(new Error('already exists'), { code: 409 })
+      )
+      mockApi.readNamespacedNetworkPolicy.mockResolvedValue({
+        apiVersion: 'networking.k8s.io/v1',
+        kind: 'NetworkPolicy',
+        metadata: {
+          name: written.metadata?.name,
+          namespace: written.metadata?.namespace,
+          labels: written.metadata?.labels,
+          annotations,
+          resourceVersion: '9',
+        },
+        spec: written.spec,
+      })
+      mockApi.createNamespacedNetworkPolicy.mockClear()
+      mockApi.replaceNamespacedNetworkPolicy.mockClear()
+
+      await reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      expect(mockApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
+      expect(mockApi.replaceNamespacedNetworkPolicy).toHaveBeenCalled()
+    })
+
     it('DROPS a blocked/private IP rehydrated from a tampered annotation (issue #299 M3 defense-in-depth)', async () => {
       const server: McpServerCRD = {
         name: 'tamper-mcp',
@@ -5631,12 +5689,14 @@ describe('NetworkPolicyReconciler', () => {
           ) => k8s.V1NetworkPolicy
         }
       ).buildExactHostEgressPolicy(server, desiredName, binding, ['104.18.0.0/16'])
-      mockApi.createNamespacedNetworkPolicy.mockRejectedValueOnce(
+      mockApi.createNamespacedNetworkPolicy.mockRejectedValue(
         Object.assign(new Error('already exists'), { code: 409 })
       )
-      mockApi.readNamespacedNetworkPolicy.mockResolvedValueOnce(asApiserverNetworkPolicy(desired))
+      mockApi.readNamespacedNetworkPolicy.mockResolvedValue(asApiserverNetworkPolicy(desired))
 
       expect(await reconcileExternalEgressSafety()).toBe(true)
+      expect(mockApi.createNamespacedNetworkPolicy).toHaveBeenCalled()
+      expect(mockApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
       expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
 
