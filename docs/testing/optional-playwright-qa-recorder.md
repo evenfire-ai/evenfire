@@ -43,7 +43,10 @@ the exact admin identity from `.env.qa-recorder`, and records a WebM + PNG under
 needed); only the `agent-create` journey above mutates. See
 [control-ui-headful-journeys.md](./control-ui-headful-journeys.md) for the full
 status table. Run one with `npm run qa:recorder:<journey>` or all with
-`npm run qa:recorder:all`.
+`npm run qa:recorder:all`. Videos are WebM (Playwright/Chromium native); convert
+the evidence bundle to H.264 MP4 with `npm run qa:recorder:convert-mp4`
+(`scripts/qa-recorder/convert-videos-mp4.sh`, `--replace` drops the WebM
+originals).
 
 ### Desktop App: Settings and chat
 

@@ -1,6 +1,6 @@
 {
   "name": "clerum-control-ui",
-  "version": "0.1.466",
+  "version": "0.1.467",
   "private": true,
   "scripts": {
     "dev": "NEXT_IGNORE_INCORRECT_LOCKFILE=1 next dev",
@@ -55,6 +55,7 @@
     "qa:recorder:member-removed-access": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-member-removed-access.spec.ts",
     "qa:recorder:connectors-search-agent": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-connectors-search-agent.spec.ts",
     "qa:recorder:all": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts",
+    "qa:recorder:convert-mp4": "bash ../scripts/qa-recorder/convert-videos-mp4.sh",
     "test": "vitest run",
     "test:watch": "vitest"
   },
