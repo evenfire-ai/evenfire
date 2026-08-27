@@ -122,29 +122,35 @@ describe('replaceWithConflictRetry order and retry', () => {
     expect(replace).not.toHaveBeenCalled()
   })
 
-  it('TOCTOU-NP-3: replace 409 then second read 404 returns without a third replace', async () => {
-    const read = vi.fn().mockResolvedValueOnce(existing).mockRejectedValueOnce({ code: 404 })
-    const replace = vi.fn().mockRejectedValueOnce({ code: 409 })
-    const validateExisting = vi.fn()
+  it.each([
+    { form: 'code', error: { code: 404 } },
+    { form: 'statusCode', error: { response: { statusCode: 404 } } },
+  ])(
+    'TOCTOU-NP-3: replace 409 then second read 404 ($form) returns without a third replace',
+    async ({ error }) => {
+      const read = vi.fn().mockResolvedValueOnce(existing).mockRejectedValueOnce(error)
+      const replace = vi.fn().mockRejectedValueOnce({ code: 409 })
+      const validateExisting = vi.fn()
 
-    await expect(
-      replaceWithConflictRetry({
-        description: 'Service "svc"',
-        logPrefix: '[Test]',
-        body: desired,
-        mergeExisting: preserveServiceAssignedFields,
-        isUpToDate: () => false,
-        validateExisting,
-        read,
-        replace,
-      })
-    ).resolves.toBeUndefined()
+      await expect(
+        replaceWithConflictRetry({
+          description: 'Service "svc"',
+          logPrefix: '[Test]',
+          body: desired,
+          mergeExisting: preserveServiceAssignedFields,
+          isUpToDate: () => false,
+          validateExisting,
+          read,
+          replace,
+        })
+      ).resolves.toBeUndefined()
 
-    expect(read).toHaveBeenCalledTimes(2)
-    expect(validateExisting).toHaveBeenCalledOnce()
-    expect(replace).toHaveBeenCalledOnce()
-    expect(replace.mock.calls[0][0].metadata?.resourceVersion).toBe('9')
-  })
+      expect(read).toHaveBeenCalledTimes(2)
+      expect(validateExisting).toHaveBeenCalledOnce()
+      expect(replace).toHaveBeenCalledOnce()
+      expect(replace.mock.calls[0][0].metadata?.resourceVersion).toBe('9')
+    }
+  )
 
   it('TOCTOU-NP-4: network Error without code is rethrown', async () => {
     const networkErr = new Error('socket hang up')
@@ -168,6 +174,29 @@ describe('replaceWithConflictRetry order and retry', () => {
     expect(read).toHaveBeenCalledOnce()
     expect(validateExisting).not.toHaveBeenCalled()
     expect(replace).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { form: 'code', error: { code: 404 } },
+    { form: 'statusCode', error: { response: { statusCode: 404 } } },
+  ])('TOCTOU-NP-5: helper replace 404 ($form) still throws', async ({ error }) => {
+    const read = vi.fn().mockResolvedValue(existing)
+    const replace = vi.fn().mockRejectedValue(error)
+
+    await expect(
+      replaceWithConflictRetry({
+        description: 'Service "svc"',
+        logPrefix: '[Test]',
+        body: desired,
+        mergeExisting: preserveServiceAssignedFields,
+        isUpToDate: () => false,
+        read,
+        replace,
+      })
+    ).rejects.toBe(error)
+
+    expect(read).toHaveBeenCalledOnce()
+    expect(replace).toHaveBeenCalledOnce()
   })
 
   it('RETRY-SVC-2: post-409 re-read that matches skips the second replace', async () => {
