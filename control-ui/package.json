@@ -1,6 +1,6 @@
 {
   "name": "clerum-control-ui",
-  "version": "0.1.465",
+  "version": "0.1.466",
   "private": true,
   "scripts": {
     "dev": "NEXT_IGNORE_INCORRECT_LOCKFILE=1 next dev",
@@ -51,6 +51,9 @@
     "qa:recorder:recipe-scope-copy": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-recipe-scope-copy.spec.ts",
     "qa:recorder:token-budget-scope": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-token-budget-scope.spec.ts",
     "qa:recorder:context-vocab-sweep": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-context-vocab-sweep.spec.ts",
+    "qa:recorder:agent-connectors-conflict": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-agent-connectors-conflict.spec.ts",
+    "qa:recorder:member-removed-access": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-member-removed-access.spec.ts",
+    "qa:recorder:connectors-search-agent": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-connectors-search-agent.spec.ts",
     "qa:recorder:all": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts",
     "test": "vitest run",
     "test:watch": "vitest"
