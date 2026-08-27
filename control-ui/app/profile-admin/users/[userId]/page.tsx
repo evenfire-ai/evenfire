@@ -10,6 +10,7 @@ import { TeamRolePermissionEditor } from '@components/TeamRolePermissionEditor'
 import { useToast } from '@components/Toast'
 import { CheckboxField } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { accessScopeLabeler } from '@lib/accessScopeLabels'
 import { partitionVisibleAccess } from '@lib/accessVisibility'
 import { getAgentDisplayName } from '@lib/agentName'
 import type { DeleteCandidateTeam } from '@lib/profileAdminDelete'
@@ -220,26 +221,12 @@ export default function UserDetailsPage() {
   // Rows are context IDs on the wire, but the user sees what that access
   // means: the owning agent(s) for private scopes, the stored display name
   // for anything else, and the raw id as a last-resort muted fallback.
+  const accessLabeler = useMemo(
+    () => accessScopeLabeler(contextResources, hosts || []),
+    [contextResources, hosts]
+  )
   function accessLabelFor(contextId: string): { label: string; resolved: boolean } {
-    const owners = (hosts || [])
-      .map(host => {
-        const ref = String(
-          (host.spec as { contextRef?: string } | undefined)?.contextRef || ''
-        ).trim()
-        if (ref !== contextId) return ''
-        return (
-          String((host.spec as { host?: string } | undefined)?.host || '').trim() ||
-          String(host.metadata?.name || '')
-        )
-      })
-      .filter(Boolean)
-      .sort((a, b) => a.localeCompare(b))
-    if (owners.length > 0) return { label: owners.join(', '), resolved: true }
-    const display = contextResources
-      .find(item => contextIdFromResource(item as never) === contextId)
-      ?.spec?.displayName?.trim()
-    if (display) return { label: display, resolved: true }
-    return { label: contextId, resolved: false }
+    return accessLabeler(contextId)
   }
 
   async function loadData() {

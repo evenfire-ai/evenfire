@@ -441,16 +441,6 @@ export default function EditMcpServerPage() {
                     <strong>Image:</strong>{' '}
                     <code>{typeof server.spec?.image === 'string' ? server.spec.image : '-'}</code>
                   </div>
-                  <div>
-                    <strong>Contexts:</strong>{' '}
-                    <code>
-                      {loadingContexts
-                        ? 'Loading…'
-                        : contextListError
-                          ? 'Unavailable'
-                          : contextNames.join(', ') || '-'}
-                    </code>
-                  </div>
                 </div>
 
                 <EgressEditor

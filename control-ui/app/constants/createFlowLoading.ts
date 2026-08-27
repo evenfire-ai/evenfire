@@ -52,7 +52,7 @@ export const CREATE_FLOW_LOADING = {
   createSharedFileSystem: {
     iconKey: 'shared-files',
     title: 'Create SharedFileSystem',
-    subtitle: 'Provision workspace storage that Contexts can mount read-only into agent pods.',
+    subtitle: 'Provision workspace storage that agents can mount read-only into their pods.',
     backLabel: 'Back to Agent Files',
     steps: ['Storage', 'Access', 'Folders'],
     stepFlowClassName: 'cu-create-step-flow--3',

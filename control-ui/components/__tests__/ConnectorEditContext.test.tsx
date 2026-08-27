@@ -102,6 +102,5 @@ describe('connector edit agent access', () => {
     rerender(<EditMcpServerPage />)
     expect(screen.getByRole('textbox', { name: 'Egress rules' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Save egress' })).toBeEnabled()
-    expect(screen.getByText('Unavailable')).toBeInTheDocument()
   })
 })
