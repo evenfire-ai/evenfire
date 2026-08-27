@@ -4649,15 +4649,6 @@ export class HostReconciler {
 }
 
 /**
- * Kubernetes persists server metadata and defaulted Deployment/PodSpec fields
- * that HCC does not author. Remove only those known fields before comparing
- * the objects; every HCC-authored field stays exact so an intentional removal
- * or change still causes a rollout. Keep this allowlist conservative: an
- * unknown admission mutation must compare as drift rather than be silently
- * ignored. Pod-template annotations are merged by preserveDeploymentAnnotations
- * before this comparison.
- */
-/**
  * True when the desired Role matches the live object on the fields HCC authors:
  * `rbacLabels` and `rules` in author order. Server metadata and annotations are
  * ignored — the builder does not write annotations, and comparing them would
@@ -4689,6 +4680,15 @@ function canonicalizeLabelKeys(labels: Record<string, string>): Record<string, s
   return canonical
 }
 
+/**
+ * Kubernetes persists server metadata and defaulted Deployment/PodSpec fields
+ * that HCC does not author. Remove only those known fields before comparing
+ * the objects; every HCC-authored field stays exact so an intentional removal
+ * or change still causes a rollout. Keep this allowlist conservative: an
+ * unknown admission mutation must compare as drift rather than be silently
+ * ignored. Pod-template annotations are merged by preserveDeploymentAnnotations
+ * before this comparison.
+ */
 function deploymentMatchesDesired(desired: k8s.V1Deployment, existing: k8s.V1Deployment): boolean {
   return (
     JSON.stringify(normalizeDeploymentForComparison(desired)) ===
