@@ -168,6 +168,41 @@ describe('createBrokerTokenProvider — fail-closed contract', () => {
     await expect(p.resolve()).rejects.toThrow(/malformed/)
   })
 
+  it('200 with a present-but-malformed expiresAt string → throws (fail-closed) and caches nothing (R4-L2)', async () => {
+    // A non-expiring token is expiresAt:null/absent. A PRESENT string that
+    // Date.parse cannot read is a defect, not a non-expiring token: collapsing it
+    // to null would reuse it under the NULL_EXPIRY_MAX_AGE_MS cap. It must fail
+    // closed (throw), and leave no cache — a second resolve() must re-consult the
+    // broker, never silently serve a stored token.
+    const f = stubFetch(() => jsonResponse(200, { token: 'tok', expiresAt: 'not-a-date' }))
+    const p = createBrokerTokenProvider({ name: 'gh' }, { userId: 'alice' }, deps(f))
+    await expect(p.resolve()).rejects.toThrow(/expiresAt/)
+    // No stale cache: the retry re-POSTs (still malformed → still throws), never a
+    // silent token from a cached entry.
+    await expect(p.resolve()).rejects.toThrow(/expiresAt/)
+    expect(f).toHaveBeenCalledTimes(2)
+  })
+
+  it('200 with a present non-string expiresAt (number) → throws (fail-closed)', async () => {
+    // Any present-but-non-string expiresAt is malformed too — only absent/null is
+    // the legitimate non-expiring shape.
+    const f = stubFetch(() => jsonResponse(200, { token: 'tok', expiresAt: 1_700_000_000_000 }))
+    const p = createBrokerTokenProvider({ name: 'gh' }, { userId: 'alice' }, deps(f))
+    await expect(p.resolve()).rejects.toThrow(/expiresAt/)
+  })
+
+  it('200 with expiresAt:null → non-expiring, returns the token (the malformed frontier)', async () => {
+    // Fixes the boundary against the malformed case above: explicit null is the
+    // valid non-expiring contract (control-api emits it for Notion/ClickUp) and
+    // still returns a cacheable token.
+    const f = stubFetch(() => jsonResponse(200, { token: 'tok', expiresAt: null }))
+    const p = createBrokerTokenProvider({ name: 'gh' }, { userId: 'alice' }, deps(f))
+    expect(await p.resolve()).toBe('tok')
+    // Cached as non-expiring — a second resolve serves from cache (no re-POST).
+    expect(await p.resolve()).toBe('tok')
+    expect(f).toHaveBeenCalledTimes(1)
+  })
+
   it('missing gateway URL → undefined, no fetch', async () => {
     const f = stubFetch(() => jsonResponse(200, { token: 't', expiresAt: null }))
     const p = createBrokerTokenProvider(
