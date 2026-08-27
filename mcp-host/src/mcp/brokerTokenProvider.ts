@@ -28,6 +28,18 @@ import type { McpTokenProvider } from './client'
 export const DEFAULT_BROKER_FETCH_TIMEOUT_MS = 10_000
 /** Reuse a cached token only with this much headroom before its expiry. */
 const CACHE_EXPIRY_HEADROOM_MS = 30_000
+/**
+ * Hard re-consult interval for a NON-expiring token (`expiresAt:null`). control-api
+ * emits this shape for providers whose upstream token never expires — Notion and
+ * ClickUp always (`parseTokenResponse` hard-codes `expiresIn: undefined`), any
+ * other provider when its response omits `expires_in`. Without a cap, an ACTIVE
+ * partition (used within the manager idle window, so never evicted) would keep
+ * serving such a token forever, and because a non-expiring upstream never 401s,
+ * the mcp-server-401 → refresh → no_grant revocation backstop never fires either:
+ * a grant revoked in control-api would be honored indefinitely. Re-consulting the
+ * broker at least this often bounds that revocation latency (R1-M1).
+ */
+export const NULL_EXPIRY_MAX_AGE_MS = 5 * 60_000
 
 export interface BrokerTokenSubject {
   userId?: string
@@ -66,7 +78,7 @@ export function createBrokerTokenProvider(
   const fetchImpl = deps.fetchImpl ?? fetch
   const timeoutMs = deps.timeoutMs ?? DEFAULT_BROKER_FETCH_TIMEOUT_MS
   const now = deps.now ?? (() => Date.now())
-  let cached: { token: string; expiresAtMs: number | null } | undefined
+  let cached: { token: string; expiresAtMs: number | null; cachedAtMs: number } | undefined
 
   const fetchToken = async (): Promise<string | undefined> => {
     const gatewayUrl = deps.gatewayUrl()?.trim()
@@ -126,13 +138,20 @@ export function createBrokerTokenProvider(
     }
 
     if (res.status === 200) {
+      // Reset up front so ANY throw below (a malformed JSON body from res.json(),
+      // or the empty-token guard) leaves no stale entry behind — no error branch
+      // may keep a token the caller can later reuse (R1-L1).
+      cached = undefined
       const data = (await res.json()) as { token?: unknown; expiresAt?: unknown }
       if (typeof data.token !== 'string' || data.token.length === 0) {
-        cached = undefined
         throw new Error(`mcp-oauth broker returned malformed 200 body for ${server.name}`)
       }
       const parsed = typeof data.expiresAt === 'string' ? Date.parse(data.expiresAt) : NaN
-      cached = { token: data.token, expiresAtMs: Number.isNaN(parsed) ? null : parsed }
+      cached = {
+        token: data.token,
+        expiresAtMs: Number.isNaN(parsed) ? null : parsed,
+        cachedAtMs: now(),
+      }
       return data.token
     }
     // no_grant / insufficient_scope → fail closed as "no token".
@@ -147,13 +166,20 @@ export function createBrokerTokenProvider(
 
   return {
     resolve: async () => {
-      // Re-validate the grant on every (re)connect; only reuse a cached token
-      // with comfortable headroom before expiry.
-      if (
-        cached &&
-        (cached.expiresAtMs === null || cached.expiresAtMs - now() > CACHE_EXPIRY_HEADROOM_MS)
-      ) {
-        return cached.token
+      // Reuse a cached token only while it is demonstrably fresh; otherwise
+      // re-consult the broker so a revoked grant stops being honored within a
+      // bounded window. Two freshness regimes:
+      //   - expiring token → reuse while it keeps CACHE_EXPIRY_HEADROOM_MS of
+      //     headroom before its own expiry.
+      //   - non-expiring token (expiresAtMs === null) → reuse only within
+      //     NULL_EXPIRY_MAX_AGE_MS of when it was cached; see that constant for
+      //     why an unbounded reuse would honor a revoked grant forever (R1-M1).
+      if (cached) {
+        const fresh =
+          cached.expiresAtMs === null
+            ? now() - cached.cachedAtMs < NULL_EXPIRY_MAX_AGE_MS
+            : cached.expiresAtMs - now() > CACHE_EXPIRY_HEADROOM_MS
+        if (fresh) return cached.token
       }
       return fetchToken()
     },

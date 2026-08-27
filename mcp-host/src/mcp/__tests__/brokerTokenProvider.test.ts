@@ -68,6 +68,38 @@ describe('createBrokerTokenProvider — fail-closed contract', () => {
     expect(f).toHaveBeenCalledTimes(2)
   })
 
+  it('re-consults the broker for a non-expiring (expiresAt:null) token once its max age elapses (R1-M1)', async () => {
+    // control-api emits expiresAt:null for non-expiring upstream tokens (Notion/
+    // ClickUp always). An ACTIVE partition never idle-evicts and such a token
+    // never 401s upstream, so without a hard re-consult cap a grant revoked in
+    // control-api would be honored forever. Assert the cap re-consults the broker
+    // and fails closed once the grant is gone.
+    let clock = 1_000_000
+    let revoked = false
+    const f = stubFetch(() =>
+      revoked
+        ? jsonResponse(404, { error: 'no_grant' })
+        : jsonResponse(200, { token: 'tok', expiresAt: null })
+    )
+    const p = createBrokerTokenProvider(
+      { name: 'gh' },
+      { userId: 'alice' },
+      deps(f, { now: () => clock })
+    )
+    expect(await p.resolve()).toBe('tok')
+    expect(f).toHaveBeenCalledTimes(1)
+    // Still within the max age → cached, no re-consult.
+    clock += 60_000
+    expect(await p.resolve()).toBe('tok')
+    expect(f).toHaveBeenCalledTimes(1)
+    // Past the max age (1h ≫ NULL_EXPIRY_MAX_AGE_MS) → re-consults the broker;
+    // the grant is now revoked → fail-closed undefined, call not forwarded.
+    clock += 3_600_000
+    revoked = true
+    expect(await p.resolve()).toBeUndefined()
+    expect(f).toHaveBeenCalledTimes(2)
+  })
+
   it('refresh() forces a fresh POST even when a valid token is cached', async () => {
     const f = stubFetch(() => jsonResponse(200, { token: 'tok', expiresAt: null }))
     const p = createBrokerTokenProvider({ name: 'gh' }, { userId: 'alice' }, deps(f))
