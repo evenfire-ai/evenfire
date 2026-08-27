@@ -23,9 +23,17 @@ import {
   updateRecipe,
   validateRecipeServer,
 } from '../lib/api'
+import {
+  CODEX_CONNECTION_REF_ANNOTATION,
+  CODEX_UNASSIGNED_CONNECTION_KEY,
+  type CodexSubscriptionConnectionView,
+  isAssignableCodexGrant,
+  listCodexSubscriptionConnections,
+} from '../lib/codexSubscription'
 import { analyzeWorkflowRecipeEgress } from '../lib/egressModel'
 import type { EgressBinding, EgressEditorStatus } from '../lib/egressModel'
-import { brokerBackedRecipeAuthoringError } from '../lib/llm'
+import { OPENAI_SUBSCRIPTION_PROVIDER, brokerBackedRecipeAuthoringError } from '../lib/llm'
+import { credentialSelectValue, parseCredentialSelect } from '../lib/llmCredentialSelect'
 import { DEFAULT_OPERATOR_DEFAULTS, applyDefaults } from '../lib/recipeDefaults'
 import {
   type RecipeSecretNamespaces,
@@ -41,6 +49,7 @@ import { validateRecipe } from '../lib/recipeValidator'
 import { CreateFlowPanel } from './CreateFlowPanel'
 import { CreateStepFlow } from './CreateStepFlow'
 import { EgressEditor } from './EgressEditor'
+import { LlmSecretSelect, type LlmSecretSelectOption } from './LlmSecretSelect'
 import { RecipeDefaultsPanel } from './RecipeDefaultsPanel'
 import { WorkflowAccessPanel } from './WorkflowAccessPanel'
 
@@ -78,6 +87,32 @@ function checkPolicyL1(parsed: { spec?: unknown } | null): ServerValidationError
     }
   }
   return null
+}
+
+function readRecipeAgentProvider(spec: unknown): string {
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return ''
+  const agent = (spec as { agent?: unknown }).agent
+  if (!agent || typeof agent !== 'object' || Array.isArray(agent)) return ''
+  return typeof (agent as { provider?: unknown }).provider === 'string'
+    ? (agent as { provider: string }).provider.trim()
+    : ''
+}
+
+function readRecipeCodexGrantAnnotation(
+  resource?: { metadata?: { annotations?: Record<string, string> } } | null
+): string {
+  const raw = resource?.metadata?.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
+function recipeGrantAnnotations(provider: string, connectionRef: string): Record<string, string> {
+  if (provider !== OPENAI_SUBSCRIPTION_PROVIDER) {
+    return { [CODEX_CONNECTION_REF_ANNOTATION]: '' }
+  }
+  const parsed = parseCredentialSelect(credentialSelectValue('', connectionRef))
+  return {
+    [CODEX_CONNECTION_REF_ANNOTATION]: parsed.kind === 'subscription' ? parsed.connectionKey : '',
+  }
 }
 
 type TransportWorkloadEditorTarget = {
@@ -1545,6 +1580,24 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
       cancelled = true
     }
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void listCodexSubscriptionConnections()
+      .then(rows => {
+        if (!cancelled) setCodexConnections(rows)
+      })
+      .catch(() => {
+        if (!cancelled) setCodexConnections([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    setCodexConnectionRef(readRecipeCodexGrantAnnotation(currentInitial))
+  }, [currentInitial])
   const secretNamespaces = useMemo(
     () =>
       resolveRecipeSecretNamespaces({
@@ -1560,6 +1613,10 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
     }
     return EXAMPLE_JSON
   })
+  const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
+  const [codexConnectionRef, setCodexConnectionRef] = useState(() =>
+    readRecipeCodexGrantAnnotation(initial)
+  )
 
   const [step, setStep] = useState<Step>('input')
   const [validation, setValidation] = useState<ValidationResult | null>(null)
@@ -1602,6 +1659,43 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
       return null
     }
   }, [jsonInput])
+
+  const isCodexRecipe = useMemo(() => {
+    try {
+      const parsed = JSON.parse(jsonInput) as { spec?: unknown }
+      return readRecipeAgentProvider(parsed.spec) === OPENAI_SUBSCRIPTION_PROVIDER
+    } catch {
+      return false
+    }
+  }, [jsonInput])
+
+  const codexGrantOptions = useMemo<LlmSecretSelectOption[]>(() => {
+    const options: LlmSecretSelectOption[] = codexConnections
+      .filter(isAssignableCodexGrant)
+      .map(row => ({
+        group: 'ChatGPT subscriptions',
+        value: credentialSelectValue('', row.connectionKey),
+        label: row.displayName || row.connectionKey,
+        meta: 'ChatGPT subscription',
+        providers: [{ id: 'codex-subscription', label: 'ChatGPT' }],
+      }))
+    if (
+      codexConnectionRef &&
+      codexConnectionRef !== CODEX_UNASSIGNED_CONNECTION_KEY &&
+      !codexConnections.some(
+        row => row.connectionKey === codexConnectionRef && isAssignableCodexGrant(row)
+      )
+    ) {
+      options.unshift({
+        group: 'ChatGPT subscriptions',
+        value: credentialSelectValue('', codexConnectionRef),
+        label: `${codexConnectionRef} (unavailable)`,
+        meta: 'ChatGPT subscription',
+        providers: [{ id: 'codex-subscription', label: 'ChatGPT' }],
+      })
+    }
+    return options
+  }, [codexConnections, codexConnectionRef])
 
   const deploying = deployPhase !== 'idle'
 
@@ -1675,6 +1769,10 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
       name: string
       namespace?: string
     }
+    const grantAnnotations = recipeGrantAnnotations(
+      readRecipeAgentProvider(specToUse),
+      codexConnectionRef
+    )
 
     try {
       // Resolve namespaces before grants fallback below. Secret values are not
@@ -1692,7 +1790,7 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
       // L2 decides if the CRD is structurally and policy-valid. Missing
       // declarative Secret refs come back as pending credentials and do not
       // block creation; real validation errors still fail closed here.
-      const brokerError = brokerBackedRecipeAuthoringError(specToUse)
+      const brokerError = brokerBackedRecipeAuthoringError(specToUse, codexConnectionRef)
       if (brokerError) {
         setServerValidation({
           valid: false,
@@ -1704,7 +1802,7 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
       setDeployPhase('validating')
       const l2 = await validateRecipeServer(
         {
-          metadata: { name: bodyMeta.name },
+          metadata: { name: bodyMeta.name, annotations: grantAnnotations },
           spec: specToUse,
         },
         { mode: isEdit ? 'edit' : 'create' }
@@ -1717,7 +1815,10 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
 
       if (isEdit) {
         setDeployPhase('creating')
-        await updateRecipe(name, { spec: specToUse })
+        await updateRecipe(name, {
+          spec: specToUse,
+          metadata: { annotations: grantAnnotations },
+        })
         setDetectedSecrets([])
         // Edit-mode workflow access is already persisted live by the panel on
         // each click; nothing to do here.
@@ -1730,7 +1831,10 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
       // side (Phase 8 split). Response body carries the resolved namespace
       // so the grants PUT can target it exactly without client inference.
       setDeployPhase('creating')
-      const created = await createRecipe({ metadata: { name }, spec: specToUse })
+      const created = await createRecipe({
+        metadata: { name, annotations: grantAnnotations },
+        spec: specToUse,
+      })
       setDetectedSecrets([])
 
       if (
@@ -2418,6 +2522,27 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
               showHeader={false}
             />
           ))}
+
+        {step === 'confirm' && isCodexRecipe ? (
+          <div className="cu-recipe-status-panel" data-testid="codex-recipe-grant">
+            <div style={{ fontWeight: 700, marginBottom: 8 }}>ChatGPT grant</div>
+            <p style={{ margin: '0 0 10px', color: 'var(--cu-text-muted)' }}>
+              Choose an existing ChatGPT grant. The recipe stores it as{' '}
+              <code>clerum.io/codex-connection-ref</code>.
+            </p>
+            <LlmSecretSelect
+              id="codex-recipe-grant"
+              ariaLabel="ChatGPT grant"
+              value={credentialSelectValue('', codexConnectionRef)}
+              onChange={value => {
+                const parsed = parseCredentialSelect(value)
+                setCodexConnectionRef(parsed.kind === 'subscription' ? parsed.connectionKey : '')
+              }}
+              options={codexGrantOptions}
+              placeholder="Choose a ChatGPT grant"
+            />
+          </div>
+        ) : null}
 
         {/* Policy banner — appears when L1 (client) or L2 (server) rejects. */}
         {step === 'confirm' && (l1Live || serverValidationMessages.length > 0) && (

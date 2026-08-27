@@ -659,27 +659,31 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
       expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
     })
 
-    it('rejects a Codex target without a connectionRef', async () => {
+    it('accepts a stored Codex target without connectionRef as unassigned', async () => {
+      vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g-legacy' } as never)
       const { connectionRef: _omitted, ...targetWithoutConnection } =
         codexGrantBody.promptTargets[0]!
       const res = await request(buildApp())
         .post('/admin/plugin-workload-sdk/grants')
         .send({ ...codexGrantBody, promptTargets: [targetWithoutConnection] })
-      expect(res.status).toBe(400)
-      expect(res.body.error).toContain('connectionRef')
-      expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+      expect(res.status).toBe(200)
+      expect(isCodexAssignmentAllowed).not.toHaveBeenCalled()
+      expect(patchResourceAnnotations).not.toHaveBeenCalled()
+      expect(sdkDb.upsertGrant).toHaveBeenCalled()
     })
 
-    it('rejects the unassigned sentinel as a Codex connection choice', async () => {
+    it('accepts the unassigned sentinel as a stored Codex target', async () => {
+      vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g-legacy' } as never)
       const res = await request(buildApp())
         .post('/admin/plugin-workload-sdk/grants')
         .send({
           ...codexGrantBody,
           promptTargets: [{ ...codexGrantBody.promptTargets[0]!, connectionRef: 'unassigned' }],
         })
-      expect(res.status).toBe(400)
-      expect(res.body.error).toContain('connectionRef')
-      expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+      expect(res.status).toBe(200)
+      expect(isCodexAssignmentAllowed).not.toHaveBeenCalled()
+      expect(patchResourceAnnotations).not.toHaveBeenCalled()
+      expect(sdkDb.upsertGrant).toHaveBeenCalled()
     })
 
     it('rejects a static credentialSlot on a Codex (oauth-broker) target', async () => {

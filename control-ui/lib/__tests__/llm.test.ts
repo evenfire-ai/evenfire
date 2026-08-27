@@ -301,10 +301,16 @@ describe('broker-backed authoring helpers', () => {
 
   it('rejects Codex recipe authoring that omits the model, ships a secretRef, or uses cost', () => {
     expect(
+      brokerBackedRecipeAuthoringError(
+        { agent: { provider: 'codex-subscription', model: 'gpt-5.1' } },
+        'team-plus'
+      )
+    ).toBeNull()
+    expect(
       brokerBackedRecipeAuthoringError({
         agent: { provider: 'codex-subscription', model: 'gpt-5.1' },
       })
-    ).toBeNull()
+    ).toMatch(/ChatGPT grant/)
     expect(
       brokerBackedRecipeAuthoringError({
         agent: { provider: 'codex-subscription' },

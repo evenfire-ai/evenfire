@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   createCodexCatalogTransportFromEnv,
   createCodexProxyCatalogTransport,
+  isCodexAssignmentAllowed,
   pickCodexGrantModel,
   planCodexCatalogReconcile,
   syncCodexSubscriptionCatalog,
@@ -214,5 +215,75 @@ describe('Codex proxy catalog transport', () => {
     await expect(transport.listModels({ accessToken: 'tok-live' })).resolves.toEqual({
       outcome: 'unavailable',
     })
+  })
+})
+
+describe('isCodexAssignmentAllowed', () => {
+  function connectionRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: '11111111-1111-4111-8111-111111111111',
+      connection_key: 'team-plus',
+      display_name: 'Team Plus',
+      default_model: 'gpt-5.1',
+      created_by: null,
+      status: 'connected',
+      credential_revision: 1,
+      catalog_revision: 4,
+      account_fingerprint: 'fp',
+      catalog_status: 'ready',
+      catalog_synced_at: new Date(),
+      last_refresh_at: new Date(),
+      last_auth_at: new Date(),
+      refresh_lock_token: null,
+      refresh_lock_expires_at: null,
+      revoked_at: null,
+      created_at: new Date(),
+      updated_at: new Date(),
+      ...overrides,
+    }
+  }
+
+  it('allows a connected ready grant that offers an enabled model', async () => {
+    const db = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [connectionRow()] })
+        .mockResolvedValueOnce({ rows: [{ enabled: true, stale: false }] }),
+    }
+    await expect(isCodexAssignmentAllowed(db as never, 'team-plus', 'gpt-5.1')).resolves.toBe(true)
+  })
+
+  it('rejects unassigned, revoked, stale, and not-ready grants', async () => {
+    await expect(
+      isCodexAssignmentAllowed({ query: vi.fn() } as never, 'unassigned', 'gpt-5.1')
+    ).resolves.toBe(false)
+
+    const revoked = {
+      query: vi.fn().mockResolvedValueOnce({
+        rows: [connectionRow({ status: 'revoked', revoked_at: new Date() })],
+      }),
+    }
+    await expect(isCodexAssignmentAllowed(revoked as never, 'team-plus', 'gpt-5.1')).resolves.toBe(
+      false
+    )
+
+    const stale = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [connectionRow()] })
+        .mockResolvedValueOnce({ rows: [{ enabled: true, stale: true }] }),
+    }
+    await expect(isCodexAssignmentAllowed(stale as never, 'team-plus', 'gpt-5.1')).resolves.toBe(
+      false
+    )
+
+    const unavailable = {
+      query: vi.fn().mockResolvedValueOnce({
+        rows: [connectionRow({ catalog_status: 'unavailable' })],
+      }),
+    }
+    await expect(
+      isCodexAssignmentAllowed(unavailable as never, 'team-plus', 'gpt-5.1')
+    ).resolves.toBe(false)
   })
 })

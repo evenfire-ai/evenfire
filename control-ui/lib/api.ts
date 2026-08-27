@@ -2469,6 +2469,7 @@ export type WorkflowRecipeResource = {
     namespace?: string
     creationTimestamp?: string
     labels?: Record<string, string>
+    annotations?: Record<string, string>
   }
   spec?: Record<string, unknown>
   status?: WorkflowRecipeStatus
@@ -2500,7 +2501,7 @@ export async function getRecipe(name: string) {
 }
 
 export async function createRecipe(payload: {
-  metadata: { name: string; namespace?: string }
+  metadata: { name: string; namespace?: string; annotations?: Record<string, string> }
   spec: Record<string, unknown>
 }) {
   return apiSend(
@@ -2535,7 +2536,7 @@ export type ServerValidationResult =
 // let the reconciler catch at L4.
 export async function validateRecipeServer(
   recipe: {
-    metadata: { name: string; namespace?: string }
+    metadata: { name: string; namespace?: string; annotations?: Record<string, string> }
     spec: Record<string, unknown>
   },
   opts: { mode?: 'create' | 'edit' } = {}
@@ -2558,7 +2559,13 @@ export async function validateRecipeServer(
   throw new Error(`${res.status} ${res.statusText} - ${text}`)
 }
 
-export async function updateRecipe(name: string, payload: { spec: Record<string, unknown> }) {
+export async function updateRecipe(
+  name: string,
+  payload: {
+    spec: Record<string, unknown>
+    metadata?: { annotations?: Record<string, string> }
+  }
+) {
   return apiSend(
     'PUT',
     `/api/v1/admin/recipes/${encodeURIComponent(name)}`,

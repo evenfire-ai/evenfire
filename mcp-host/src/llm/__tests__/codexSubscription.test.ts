@@ -248,6 +248,21 @@ describe('CodexSubscriptionProvider', () => {
     expect(classified.retryable).toBe(false)
   })
 
+  it('does not treat a revoked grant as a retryable provider outage', () => {
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
+    const revoked = provider.classifyError(new CodexAuthorizeError('no_grant', 'revoked'))
+    expect(revoked.code).toBe(LlmErrorCode.AuthenticationFailed)
+    expect(revoked.retryable).toBe(false)
+    expect(classifyFailoverClass(revoked.code, revoked.retryable)).toBe('auth')
+
+    const transient = provider.classifyError(
+      new CodexAuthorizeError('connection_unavailable', 'catalog unavailable')
+    )
+    expect(transient.code).toBe(LlmErrorCode.ModelOverloaded)
+    expect(transient.retryable).toBe(true)
+    expect(classifyFailoverClass(transient.code, transient.retryable)).toBe('provider_unavailable')
+  })
+
   it('maps transient proxy failures onto failover-eligible classes', () => {
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
     const unavailable = provider.classifyError(

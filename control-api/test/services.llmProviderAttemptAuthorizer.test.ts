@@ -161,18 +161,31 @@ describe('authorizeLlmProviderAttempt', () => {
     ).rejects.toMatchObject({ code: 'invalid_request' })
   })
 
-  it('rejects disconnected and reauth connections as connection_unavailable', async () => {
+  it('rejects disconnected catalogs as connection_unavailable', async () => {
     vi.mocked(current.getConnection).mockResolvedValueOnce(
       connection({ status: 'disconnected' }) as never
     )
     await expect(authorizeLlmProviderAttempt(claims(), body(), current)).rejects.toMatchObject({
       code: 'connection_unavailable',
     })
+  })
+
+  it('rejects reauth and revoked grants as no_grant', async () => {
     vi.mocked(current.getConnection).mockResolvedValueOnce(
       connection({ status: 'reauth_required' }) as never
     )
     await expect(authorizeLlmProviderAttempt(claims(), body(), current)).rejects.toMatchObject({
-      code: 'connection_unavailable',
+      code: 'no_grant',
+    })
+    vi.mocked(current.getConnection).mockResolvedValueOnce(
+      connection({ status: 'revoked', revokedAt: new Date() }) as never
+    )
+    await expect(authorizeLlmProviderAttempt(claims(), body(), current)).rejects.toMatchObject({
+      code: 'no_grant',
+    })
+    vi.mocked(current.getConnection).mockResolvedValueOnce(null)
+    await expect(authorizeLlmProviderAttempt(claims(), body(), current)).rejects.toMatchObject({
+      code: 'no_grant',
     })
   })
 
@@ -267,10 +280,10 @@ describe('authorizeLlmProviderAttempt', () => {
 
     await expect(
       authorizeLlmProviderAttempt(claims({ hostRefs: ['agent-a'] }), body(), shared)
-    ).rejects.toMatchObject({ code: 'connection_unavailable' })
+    ).rejects.toMatchObject({ code: 'no_grant' })
     await expect(
       authorizeLlmProviderAttempt(claims({ hostRefs: ['agent-b'] }), body(), shared)
-    ).rejects.toMatchObject({ code: 'connection_unavailable' })
+    ).rejects.toMatchObject({ code: 'no_grant' })
 
     const live = await authorizeLlmProviderAttempt(
       claims({ hostRefs: ['agent-c'] }),

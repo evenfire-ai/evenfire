@@ -248,6 +248,65 @@ describe.sequential('routes/admin/recipes', () => {
     expect(res.body.metadata.namespace).toBe(SANDBOX_NS)
   })
 
+  function codexSubscriptionRecipe(name: string, connectionRef?: string) {
+    return {
+      metadata: {
+        name,
+        ...(connectionRef !== undefined
+          ? { annotations: { 'clerum.io/codex-connection-ref': connectionRef } }
+          : {}),
+      },
+      spec: {
+        agent: { provider: 'codex-subscription', model: 'gpt-5.1' },
+        triggers: { onDemand: { allowedActors: ['user'] } },
+        steps: [{ id: 'draft', instruction: 'Write', timeoutSeconds: 600 }],
+      },
+    }
+  }
+
+  it('POST /admin/recipes — stamps a named Codex grant annotation', async () => {
+    const res = await api
+      .post('/admin/recipes')
+      .send(codexSubscriptionRecipe('codex-granted', 'team-plus'))
+      .expect(201)
+    expect(res.body.metadata.annotations).toEqual({
+      'clerum.io/codex-connection-ref': 'team-plus',
+    })
+  })
+
+  it('POST /admin/recipes — rejects a Codex recipe without a named grant', async () => {
+    const res = await api
+      .post('/admin/recipes')
+      .send(codexSubscriptionRecipe('codex-missing'))
+      .expect(422)
+    expect(res.body.errors[0].rule).toBe('codexRecipeGrantRequired')
+  })
+
+  it('POST /admin/recipes/validate — rejects a Codex recipe with an unassigned grant', async () => {
+    const res = await api
+      .post('/admin/recipes/validate')
+      .send(codexSubscriptionRecipe('codex-unassigned', 'unassigned'))
+      .expect(422)
+    expect(res.body.valid).toBe(false)
+    expect(res.body.errors[0].rule).toBe('codexRecipeGrantRequired')
+  })
+
+  it('PUT /admin/recipes/:name — clears a leftover Codex grant when the agent is no longer Codex', async () => {
+    await api
+      .post('/admin/recipes')
+      .send(codexSubscriptionRecipe('codex-then-openai', 'team-plus'))
+      .expect(201)
+    const res = await api
+      .put('/admin/recipes/codex-then-openai')
+      .send({
+        spec: { workloads: [{ id: 'svc', type: 'deployment', image: 'my-image:latest' }] },
+      })
+      .expect(200)
+    expect(res.body.metadata.annotations).toEqual({
+      'clerum.io/codex-connection-ref': '',
+    })
+  })
+
   it('POST /admin/recipes — accepts declared cluster-local sibling egressBindings', async () => {
     const res = await api
       .post('/admin/recipes')

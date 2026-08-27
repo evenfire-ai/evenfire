@@ -25,6 +25,9 @@ export type CodexAssignableHost = {
 
 export const CODEX_UNASSIGNED_CONNECTION_KEY = 'unassigned'
 
+/** Recipe grant identity. Recipes have no CRD `connectionRef` field. */
+export const CODEX_CONNECTION_REF_ANNOTATION = 'clerum.io/codex-connection-ref'
+
 export function isAssignableCodexGrant(
   row: Pick<CodexSubscriptionConnectionView, 'status' | 'catalogStatus'>
 ): boolean {

@@ -7,6 +7,7 @@ import {
   PROVIDER_NON_SECRET_ENV,
   isLlmProviderId,
 } from '@clerum/llm-providers'
+import { CODEX_UNASSIGNED_CONNECTION_KEY } from './codexSubscription'
 
 // The canonical provider set, labels and credential slots live in the shared
 // @clerum/llm-providers package (spec §3-R4) — this module derives its
@@ -273,8 +274,12 @@ export function budgetUnitAllowedForProviders(
 }
 
 // Recipe authoring guard: a broker-backed agent must name an explicit model
-// and must not carry an LLM secretRef or a cost-unit budget.
-export function brokerBackedRecipeAuthoringError(spec: Record<string, unknown>): string | null {
+// and must not carry an LLM secretRef or a cost-unit budget. The grant lives
+// on metadata.annotations[clerum.io/codex-connection-ref], not in spec.
+export function brokerBackedRecipeAuthoringError(
+  spec: Record<string, unknown>,
+  connectionRef?: string
+): string | null {
   const agent = spec.agent
   if (!agent || typeof agent !== 'object' || Array.isArray(agent)) return null
   const record = agent as Record<string, unknown>
@@ -291,6 +296,10 @@ export function brokerBackedRecipeAuthoringError(spec: Record<string, unknown>):
   if (budget && typeof budget === 'object' && !Array.isArray(budget)) {
     const unit = (budget as Record<string, unknown>).unit
     if (unit === 'cost') return 'Codex subscription budgets must use unit tokens, not cost.'
+  }
+  const grant = typeof connectionRef === 'string' ? connectionRef.trim() : ''
+  if (!grant || grant === CODEX_UNASSIGNED_CONNECTION_KEY) {
+    return 'Codex subscription recipes must choose an existing ChatGPT grant.'
   }
   return null
 }

@@ -252,7 +252,7 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
     const provider = typeof raw.provider === 'string' ? raw.provider.trim() : ''
     const model = typeof raw.model === 'string' ? raw.model.trim() : ''
     const credentialSlot = typeof raw.credentialSlot === 'string' ? raw.credentialSlot.trim() : ''
-    const connectionRef = typeof raw.connectionRef === 'string' ? raw.connectionRef.trim() : ''
+    let connectionRef = typeof raw.connectionRef === 'string' ? raw.connectionRef.trim() : ''
     if (!targetRef || targetRef.length > MAX_ALLOWLIST_ENTRY_LENGTH || targetRef.includes('*')) {
       res
         .status(400)
@@ -281,20 +281,21 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
         })
         return null
       }
-      // The target only CHOOSES an existing Codex grant. Reject the missing /
-      // unassigned / malformed key here; existence, connection status, and
-      // model offer are re-validated against the catalog inside the upsert
-      // transaction (fail closed on every unknown/revoked/not-offered case).
-      try {
-        if (!connectionRef || isCodexUnassignedConnectionKey(connectionRef)) {
-          throw new Error('missing_connection_ref')
+      // Named keys must be well-formed. Missing or `unassigned` is allowed so
+      // a previously stored Codex target can be edited without inventing a
+      // grant. Spend still fail-closes at authorize until the operator picks
+      // a live connection. Malformed keys stay rejected.
+      if (connectionRef && !isCodexUnassignedConnectionKey(connectionRef)) {
+        try {
+          assertCodexConnectionKey(connectionRef)
+        } catch {
+          res.status(400).json({
+            error: `promptTargets[${index}].connectionRef must name an existing Codex subscription connection`,
+          })
+          return null
         }
-        assertCodexConnectionKey(connectionRef)
-      } catch {
-        res.status(400).json({
-          error: `promptTargets[${index}].connectionRef must name an existing Codex subscription connection`,
-        })
-        return null
+      } else {
+        connectionRef = ''
       }
     } else {
       if (connectionRef) {
@@ -561,17 +562,17 @@ export function createAdminPluginWorkloadSdkRouter(
             // Codex (oauth-broker) targets are validated against the chosen
             // grant's per-connection catalog, not the flat `llm_allowed_models`
             // union: only a model offered AND enabled (non-stale) on that
-            // exact connected grant may be authorized. Unknown, unassigned,
-            // revoked, and not-offered all fail closed with a stable error.
-            // No Pieza D toleration applies — a Codex grant that lost a model
-            // must be re-pointed explicitly, never silently kept.
+            // exact connected grant may be authorized. Missing/unassigned is
+            // allowed so a stored target remains editable; spend still
+            // fail-closes at authorize. Named unknown/revoked/not-offered
+            // keys fail closed. No Pieza D silent keep.
             for (const target of promptTargets) {
               if (!isBrokerBackedProvider(target.provider)) continue
-              const allowed = await isCodexAssignmentAllowed(
-                db,
-                target.connectionRef ?? '',
-                target.model
-              )
+              const connectionRef = target.connectionRef ?? ''
+              if (!connectionRef || isCodexUnassignedConnectionKey(connectionRef)) {
+                continue
+              }
+              const allowed = await isCodexAssignmentAllowed(db, connectionRef, target.model)
               if (!allowed) {
                 throw new GrantModelGateError({
                   error: 'codex_connection_not_allowed',

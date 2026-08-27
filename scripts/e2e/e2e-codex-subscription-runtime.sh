@@ -221,9 +221,22 @@ token = (
 payload = token.split(".")[1]
 payload += "=" * (-len(payload) % 4)
 data = json.loads(base64.urlsafe_b64decode(payload))
-scopes = data.get("scp") or data.get("scope") or []
-if isinstance(scopes, str):
-    scopes = scopes.split()
+# Control JWTs emit `scopes` (array). Access tokens put Codex scopes in
+# `workflowControlScopes` and a space-delimited `scope`. Legacy `scp` is
+# kept as a fallback so a rotated claim shape cannot silently miss the grant.
+raw_scopes = (
+    data.get("scopes")
+    or data.get("workflowControlScopes")
+    or data.get("scp")
+    or data.get("scope")
+    or []
+)
+if isinstance(raw_scopes, str):
+    scopes = raw_scopes.split()
+elif isinstance(raw_scopes, list):
+    scopes = [item for item in raw_scopes if isinstance(item, str)]
+else:
+    scopes = []
 print(json.dumps({
     "has_codex_execute": "llm:codex:execute" in scopes,
     "scope_count": len(scopes),

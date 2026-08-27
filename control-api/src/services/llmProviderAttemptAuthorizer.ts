@@ -257,18 +257,26 @@ export async function authorizeLlmProviderAttempt(
   return resolvedDeps.withTransaction(async tx => {
     const db: DbClient = tx
     const connection = await resolvedDeps.getConnection(db, connectionKey)
+    // Terminal grant failures must not look like a retryable proxy outage.
+    // Missing, revoked, and auth-rejected rows require a new grant or
+    // operator re-auth — failover onto another provider is the wrong recovery.
     if (
       !connection ||
-      connection.status !== 'connected' ||
       connection.revokedAt ||
+      connection.status === 'revoked' ||
+      connection.status === 'reauth_required' ||
       connection.catalogStatus === 'auth-rejected'
     ) {
       throw new LlmProviderAttemptAuthorizeError(
-        'connection_unavailable',
-        'Codex subscription connection is not usable'
+        'no_grant',
+        'Codex subscription grant is missing, revoked, or requires re-authentication'
       )
     }
-    if (connection.catalogStatus === 'unavailable' || connection.catalogStatus === 'never_synced') {
+    if (
+      connection.status !== 'connected' ||
+      connection.catalogStatus === 'unavailable' ||
+      connection.catalogStatus === 'never_synced'
+    ) {
       throw new LlmProviderAttemptAuthorizeError(
         'connection_unavailable',
         'Codex subscription catalog is not ready'
