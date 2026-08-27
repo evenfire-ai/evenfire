@@ -599,7 +599,7 @@ describe('RecipeEditor — validation flow', () => {
     expect(screen.getByText('Blocking errors')).toBeInTheDocument()
     expect(screen.getByText('Informational notes')).toBeInTheDocument()
     expect(screen.getByText(/env name looks sensitive/)).toBeInTheDocument()
-    expect(screen.getByText(/WRC will auto-create a private Context/)).toBeInTheDocument()
+    expect(screen.getByText(/WRC will auto-create a private connector scope/)).toBeInTheDocument()
   })
 
   it('blocks reserved WorkflowRecipe secret names and invalid secret keys during validation', () => {

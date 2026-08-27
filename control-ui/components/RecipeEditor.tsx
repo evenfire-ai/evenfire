@@ -72,7 +72,7 @@ function checkPolicyL1(parsed: { spec?: unknown } | null): ServerValidationError
         `  • Option A — opt in to sharing: add \`"security": { "allowContextRef": true }\` to spec, ` +
         `and ensure a WorkflowRecipePolicy with \`allowContextRef: true\` exists in the target namespace.\n` +
         `  • Option B — keep it private: remove \`spec.contextRef\` entirely. ` +
-        `WRC will auto-create a private Context "wf-<recipeName>" for this recipe, ` +
+        `WRC will auto-create a private connector scope for this recipe, ` +
         `with no first-party server sharing and no policy required.`,
     }
   }

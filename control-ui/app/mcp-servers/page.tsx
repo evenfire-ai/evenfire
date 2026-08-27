@@ -156,6 +156,9 @@ function connectorAccessMutationError(error: unknown, fallback: string): string 
   if ((error as { status?: unknown } | null)?.status === 409) {
     return 'This connector’s access changed since it was loaded. Reload the page and try again.'
   }
+  if (error instanceof Error && /required version is unavailable/i.test(error.message)) {
+    return 'This connector’s access is missing a server version. Reload the page and try again.'
+  }
   return contextMutationError(error, fallback)
 }
 

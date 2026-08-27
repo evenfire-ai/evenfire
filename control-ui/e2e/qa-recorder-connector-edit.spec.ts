@@ -140,12 +140,12 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
 
       await page.getByRole('tab', { name: 'External Egress', exact: true }).click()
 
-      // Image and access scopes are rendered as static read-only text (not
-      // editable inputs).
+      // Image is rendered as static read-only text (not an editable input).
       const meta = page.locator('.cu-connector-edit-meta')
       await expect(meta).toBeVisible({ timeout: 20_000 })
       await expect(meta.getByText('qa-recorder/example:dev')).toBeVisible()
-      await expect(meta.getByText(connectorContextName)).toBeVisible()
+      // The private scope slug must NOT surface anywhere on this page.
+      await expect(meta.getByText(connectorContextName)).toHaveCount(0)
 
       // External Egress: switch to exact-CIDR mode and add one public CIDR + port.
       // 8.8.8.8/32 is a valid public target; the model rejects private/doc ranges.
