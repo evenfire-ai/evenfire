@@ -982,6 +982,30 @@ async function applyAuthorizationRevisionTriggers(db: DbClient): Promise<void> {
   `)
 }
 
+export async function backfillLegacyPasswordSecurityEpochs(db: DbClient): Promise<void> {
+  await db.query(`
+    INSERT INTO external_user_session_security_epochs(user_id, valid_after, reason, updated_at)
+    SELECT u.id, u.password_set_at, 'historical_password_event', u.password_set_at
+      FROM users u
+     WHERE u.password_set_at IS NOT NULL
+    ON CONFLICT (user_id) DO UPDATE
+      SET valid_after = GREATEST(
+            external_user_session_security_epochs.valid_after,
+            EXCLUDED.valid_after
+          ),
+          reason = CASE
+            WHEN external_user_session_security_epochs.valid_after < EXCLUDED.valid_after
+              THEN EXCLUDED.reason
+            ELSE external_user_session_security_epochs.reason
+          END,
+          updated_at = CASE
+            WHEN external_user_session_security_epochs.valid_after < EXCLUDED.valid_after
+              THEN EXCLUDED.updated_at
+            ELSE external_user_session_security_epochs.updated_at
+          END;
+  `)
+}
+
 async function applyUserAccessRuntimePrivileges(db: DbClient): Promise<void> {
   await db.query(`
     REVOKE ALL PRIVILEGES ON TABLE

@@ -9,6 +9,7 @@ import {
   applyCatalogUtf8OrderingSchema,
   applyComposableCatalogRevisionSchema,
   applyUserAccessFoundationSchema,
+  backfillLegacyPasswordSecurityEpochs,
 } from './services/access/userAccessFoundationSchema.js'
 import { applyInvitationDeliveryCommandFoundation } from './services/directory/invitationDeliverySchema.js'
 import {
@@ -5961,6 +5962,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     // converge on the same trigger/function/backfill state.
     version: '0105_gfs_catalog_revision_components',
     apply: applyComposableCatalogRevisionSchema,
+  },
+  {
+    version: '0106_legacy_password_security_epoch_backfill',
+    apply: backfillLegacyPasswordSecurityEpochs,
   },
 ]
 
