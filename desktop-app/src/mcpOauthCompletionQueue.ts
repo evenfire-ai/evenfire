@@ -18,6 +18,21 @@ export interface McpOauthCompletion {
   provider: string
 }
 
+/**
+ * Default cap-eviction hook: log the silent drop so an over-cap queue (an
+ * abnormal flood of deep links before the renderer drains) is observable in
+ * the main-process log. Only NON-sensitive context is emitted — the server and
+ * provider identity plus the cap — never the deep-link URL, its query, or any
+ * token.
+ */
+function warnOnCapEvict(evicted: McpOauthCompletion, capacity: number): void {
+  console.warn('[McpOauthCompletion] queue at capacity, dropping oldest pending completion', {
+    mcpServerName: evicted.mcpServerName,
+    provider: evicted.provider,
+    capacity,
+  })
+}
+
 export class McpOauthCompletionQueue {
   private readonly pending: McpOauthCompletion[] = []
 
@@ -25,10 +40,18 @@ export class McpOauthCompletionQueue {
    * @param deliver Sends the completion to the renderer, returning `true` iff it
    *   was accepted (window alive AND renderer past its ready handshake). A
    *   `false` return means "not ready" → the completion is queued.
+   * @param onCapEvict Invoked with the dropped completion and the cap whenever a
+   *   push exceeds `maxSize`. Defaults to a `console.warn`; injectable so the
+   *   observability is unit-testable. The eviction policy is unchanged (still
+   *   drops the OLDEST) — this only makes the drop observable.
    */
   constructor(
     private readonly deliver: (completion: McpOauthCompletion) => boolean,
-    private readonly maxSize = 20
+    private readonly maxSize = 20,
+    private readonly onCapEvict: (
+      evicted: McpOauthCompletion,
+      capacity: number
+    ) => void = warnOnCapEvict
   ) {}
 
   /** Deliver now if the renderer accepts it; otherwise queue for `drain()`. */
@@ -41,7 +64,10 @@ export class McpOauthCompletionQueue {
     )
     if (duplicate) return
     this.pending.push(completion)
-    if (this.pending.length > this.maxSize) this.pending.shift()
+    if (this.pending.length > this.maxSize) {
+      const evicted = this.pending.shift()
+      if (evicted) this.onCapEvict(evicted, this.maxSize)
+    }
   }
 
   /**
