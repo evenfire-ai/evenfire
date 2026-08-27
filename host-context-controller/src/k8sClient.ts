@@ -2849,6 +2849,9 @@ export class McpServerWatcher implements McpServerProvider {
       )
     }
 
+    // Interval > 0 is an ops enable, not a merge default. Issue #478: before
+    // any non-zero value, add a freshness gate or use a controller-runtime
+    // 10h-scale period. 300s is too aggressive while passes last minutes.
     const netPolResyncSec = config.netPolResyncIntervalSec
     if (netPolResyncSec > 0) {
       this.netPolResyncTimer = setInterval(() => {

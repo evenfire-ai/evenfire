@@ -49,6 +49,14 @@ function gauge(options: {
  */
 const RECONCILE_LATENCY_BUCKETS = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 15, 45, 120] as const
 
+/**
+ * Pass-duration buckets. Shared admission histograms top at 120s; GKE watch
+ * recycle and the #462 duration criterion need an explicit 300s cut plus tails.
+ */
+export const NETWORKPOLICY_PASS_DURATION_BUCKETS = [
+  1, 5, 15, 60, 120, 300, 600, 1200, 1800, 3600,
+] as const
+
 /** Idempotent Histogram helper mirroring counter()/gauge(). */
 function histogram(options: {
   name: string
@@ -113,12 +121,14 @@ export const initialConvergencePassDurationSeconds = histogram({
   name: 'clerum_hcc_initial_convergence_pass_duration_seconds',
   help: 'Seconds spent in an initial background convergence pass, labeled by named result.',
   labelNames: ['lane', 'result'] as const,
+  buckets: NETWORKPOLICY_PASS_DURATION_BUCKETS,
 })
 
 export const networkPolicySafetyPassDurationSeconds = histogram({
   name: 'clerum_hcc_networkpolicy_safety_pass_duration_seconds',
   help: 'Seconds until an authoritative NetworkPolicy safety pass has revoked stale allows.',
   labelNames: ['outcome'] as const,
+  buckets: NETWORKPOLICY_PASS_DURATION_BUCKETS,
 })
 
 export const networkPolicySafetyPassPoliciesTotal = counter({
