@@ -50,6 +50,11 @@ export type Metadata = {
    * optimistic-concurrency precondition (docs/architecture/stateless-invariants.md).
    */
   resourceVersion?: string
+  /** K8s-standard creation timestamp (RFC3339). Not in the type for older
+   *  endpoints but carried by the new admin payloads. */
+  creationTimestamp?: string
+  /** K8s-standard resource UID. Same caveat as creationTimestamp. */
+  uid?: string
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_CONTROL_API_BASE_URL || '/control-api'
@@ -3023,11 +3028,29 @@ export type RegistryEntry = {
           service?: { name?: string; namespace?: string; port?: number }
           remote?: { baseUrl?: string }
         }
-        lifecyclePoints?: string[] // "preCall" | "moderate" | "postCallSuccess" | "onError"
+        // The CRD enumerates six: the four LLM-lane points below plus the tool
+        // lane's preToolUse/postToolUse.
+        lifecyclePoints?: string[] // "preCall" | "moderate" | "postCallSuccess" | "onError" | "preToolUse" | "postToolUse"
         path?: string
         credentialSchema?: CredentialSchema
         defaultConfig?: Record<string, unknown>
         requiredEgress?: unknown
+        // What the hook author says the hook needs to function. Advisory: it
+        // seeds the install form, but the operator's selection is the grant and
+        // stays bounded by Host.spec.guardrails.capabilityCeiling.
+        requiredCapabilities?: HookCapability[]
+        // The author's suggested runtime posture, used to pre-fill the install
+        // form. `orderHint` is a word, not the CRD's numeric `order`.
+        authorDefaults?: {
+          failMode?: 'open' | 'closed'
+          orderHint?: string
+          timeoutMs?: number
+          onUnavailable?: {
+            mode?: 'strict' | 'breaker'
+            failureThreshold?: number
+            cooldownMs?: number
+          }
+        }
       })
     | null
   artifact_refs: Record<string, unknown> | null

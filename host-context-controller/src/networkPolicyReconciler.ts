@@ -43,7 +43,12 @@ import {
   McpServerCrdStatus,
   McpServerResolvedEgressIP,
 } from './types'
-import { applyNetworkPolicy, getErrorCode, replaceWithConflictRetry } from './utils'
+import {
+  applyNetworkPolicy,
+  getErrorCode,
+  networkPolicyMatchesDesired,
+  replaceWithConflictRetry,
+} from './utils'
 
 type JsonPatchOperation = {
   op: 'add' | 'replace' | 'remove' | 'test'
@@ -67,6 +72,9 @@ type NetworkPolicyMutationOptions = {
    */
   honorsLostFence?: boolean
 }
+
+export const DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE =
+  'Desired NetworkPolicy inventory changed during authoritative revocation'
 
 export function sameContextDesiredRevision(expected: ContextCRD, current: ContextCRD): boolean {
   return (
@@ -1576,7 +1584,7 @@ export class NetworkPolicyReconciler {
       contextCleanupAuthoritative() &&
       serverCleanupAuthoritative()
     ) {
-      throw new Error('Desired NetworkPolicy inventory changed during authoritative revocation')
+      throw new Error(DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE)
     }
 
     if (
@@ -2824,7 +2832,8 @@ export class NetworkPolicyReconciler {
       // create's catch would issue a second create. Delegating from the top is
       // not an option either — the desired-state fence below needs the object
       // this request created, which applyNetworkPolicy does not return. The
-      // wiring below is kept identical to it on purpose.
+      // wiring below is kept identical to applyNetworkPolicy on purpose,
+      // including isUpToDate: networkPolicyMatchesDesired.
       await replaceWithConflictRetry<k8s.V1NetworkPolicy>({
         description: `policy "${name}" in ${namespace}`,
         logPrefix: '[NetPol]',
@@ -2834,6 +2843,7 @@ export class NetworkPolicyReconciler {
           this.networkingApi.replaceNamespacedNetworkPolicy({ name, namespace, body }),
         mutationAllowed: isCurrent,
         validateExisting: existing => this.assertPolicyOwnership(name, existing, desired, lane),
+        isUpToDate: networkPolicyMatchesDesired,
       })
       return isCurrent()
     }

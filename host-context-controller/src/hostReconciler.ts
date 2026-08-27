@@ -60,6 +60,7 @@ import {
   preserveDeploymentAnnotations,
   preserveServiceAssignedFields,
   replaceWithConflictRetry,
+  serviceMatchesDesired,
 } from './utils'
 
 export type { EffectiveHostLifecycle } from './statelessLifecycle.types'
@@ -2219,6 +2220,7 @@ export class HostReconciler {
           logPrefix: '[HostReconciler]',
           body: service,
           mergeExisting: preserveServiceAssignedFields,
+          isUpToDate: serviceMatchesDesired,
           read: () => this.coreApi.readNamespacedService({ name, namespace: ns }),
           replace: body =>
             this.coreApi.replaceNamespacedService({
@@ -2227,7 +2229,6 @@ export class HostReconciler {
               body,
             }),
         })
-        console.log(`[HostReconciler] Updated channel-reader Service "${name}"`)
       } catch (replaceErr) {
         console.error(
           `[HostReconciler] Failed to update channel-reader Service "${name}":`,
@@ -3064,6 +3065,7 @@ export class HostReconciler {
             logPrefix: '[HostReconciler]',
             body: service,
             mergeExisting: preserveServiceAssignedFields,
+            isUpToDate: serviceMatchesDesired,
             read: () =>
               this.coreApi.readNamespacedService({
                 namespace: host.namespace,
@@ -3076,7 +3078,6 @@ export class HostReconciler {
                 body,
               }),
           })
-          console.log(`[HostReconciler] Updated Service "${host.name}"`)
         } catch (updateError) {
           console.error(`[HostReconciler] Failed to update Service "${host.name}":`, updateError)
         }

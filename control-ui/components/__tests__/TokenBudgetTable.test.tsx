@@ -73,10 +73,12 @@ describe('TokenBudgetTable', () => {
     const onToggle = vi.fn().mockResolvedValue(undefined)
     renderTable({ onEdit, onDelete, onToggle })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Edit budget Monthly OpenAI cap' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for budget Monthly OpenAI cap' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit' }))
     expect(onEdit).toHaveBeenCalledWith('budget-1')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Delete budget Monthly OpenAI cap' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for budget Monthly OpenAI cap' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
     expect(onDelete).toHaveBeenCalledWith(budgets[0])
 
     fireEvent.click(screen.getByRole('button', { name: 'Disable budget Monthly OpenAI cap' }))

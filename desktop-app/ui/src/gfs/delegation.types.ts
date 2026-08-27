@@ -15,6 +15,8 @@ export interface GfsDelegationSubjectOption {
   badge?: string
 }
 
+export type GfsCreateShareActionChange = (action: (() => void) | null, disabled: boolean) => void
+
 export interface GfsDelegationPanelProps {
   affordances: DelegationAffordances
   subjectOptions: GfsDelegationSubjectOption[]
@@ -24,6 +26,7 @@ export interface GfsDelegationPanelProps {
   isDirectory: boolean
   onGrant: (subjectKeys: string[], bits: string[], inherit: boolean) => Promise<void>
   onCreateShare?: (subjectKeys: string[]) => Promise<void>
+  onCreateShareActionChange?: GfsCreateShareActionChange
 }
 
 /**

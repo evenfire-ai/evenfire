@@ -24,6 +24,16 @@ vi.mock('@hooks/domain/useMcpServersDataController', () => ({
   useMcpServersDataController: () => ({ globalMcpServers: [], mcpServersByAgent: {} }),
 }))
 
+vi.mock('@hooks/domain/useSearchPluginsAppsController', () => ({
+  useSearchPluginsAppsController: () => ({
+    plugins: [],
+    apps: [],
+    loading: false,
+    error: null,
+    ensureLoaded: vi.fn(async () => undefined),
+  }),
+}))
+
 vi.mock('@hooks/domain/useTeamsDataController', () => ({
   useTeamsDataController: () => ({
     teams: [],
