@@ -124,7 +124,9 @@ describe('External REST public error contract', () => {
 
   it('rebuilds every forwarded route class from a bounded typed envelope', () => {
     const sentinel = 'postgres://secret@internal/var/run/service.sock'
-    for (const status of [400, 401, 403, 404, 409, 410, 412, 422, 429, 500, 502, 503, 504]) {
+    for (const status of [
+      400, 401, 403, 404, 408, 409, 410, 411, 412, 413, 422, 425, 429, 500, 502, 503, 504, 507,
+    ]) {
       const sanitized = sanitizeControlApiPublicError(
         new ControlApiError(sentinel, status, {
           error: {
@@ -142,6 +144,40 @@ describe('External REST public error contract', () => {
       expect(JSON.stringify(sanitized?.body)).not.toContain('made_up_internal_code')
     }
   })
+
+  it.each([
+    [408, 'request_timeout', true, { 'retry-after': '7' }],
+    [411, 'length_required', false, {}],
+    [413, 'payload_too_large', false, { 'upload-length': '209715200' }],
+    [425, 'too_early', true, { 'retry-after': '7' }],
+    [507, 'insufficient_storage', false, {}],
+  ] as const)(
+    'preserves the safe typed public GFS contract for %s',
+    (status, expectedCode, retryable, expectedHeaders) => {
+      const sentinel = 'private upstream detail at postgres://secret@internal'
+      const sanitized = sanitizeControlApiPublicError(
+        new ControlApiError(
+          sentinel,
+          status,
+          { error: { code: expectedCode, message: sentinel, details: { secret: sentinel } } },
+          {
+            'retry-after': '7',
+            'upload-length': '209715200',
+            'x-ratelimit-limit': '16',
+            'x-internal-secret': sentinel,
+          }
+        ),
+        new Set([status])
+      )
+
+      expect(sanitized).toMatchObject({
+        status,
+        headers: expectedHeaders,
+        body: { error: { code: expectedCode, retryable } },
+      })
+      expect(JSON.stringify(sanitized)).not.toContain(sentinel)
+    }
+  )
 
   it('preserves only bounded access-path descriptors for an ambiguity response', () => {
     const pathId = `ap1_${'a'.repeat(43)}`
