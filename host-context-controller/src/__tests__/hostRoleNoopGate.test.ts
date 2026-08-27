@@ -112,4 +112,51 @@ describe('Host ensureHostRole no-op gate', () => {
       log.mockRestore()
     }
   })
+
+  it('NOOP-ROLE-3: extra live rule still replaces once', async () => {
+    rbacApi.createNamespacedRole.mockRejectedValue({ code: 409 })
+    let existing: k8s.V1Role | undefined
+    rbacApi.readNamespacedRole.mockImplementation(() => {
+      const live = structuredClone(desiredFromCreate(rbacApi))
+      live.rules = [...(live.rules ?? []), { apiGroups: [''], resources: ['pods'], verbs: ['get'] }]
+      existing = asApiserverRole(live)
+      return Promise.resolve(existing)
+    })
+    const log = vi.spyOn(console, 'log')
+    try {
+      await (reconciler as any).ensureHostRole(host)
+      expect(existing?.rules?.length).toBe((desiredFromCreate(rbacApi).rules?.length ?? 0) + 1)
+      expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
+      expect(updatedRoleLogs(log, '"host-chatllm-config-reader"')).toEqual([
+        '[HostReconciler] Updated Role "host-chatllm-config-reader"',
+      ])
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  it('NOOP-ROLE-4: extra live secret verb still replaces once', async () => {
+    rbacApi.createNamespacedRole.mockRejectedValue({ code: 409 })
+    let existing: k8s.V1Role | undefined
+    rbacApi.readNamespacedRole.mockImplementation(() => {
+      const live = structuredClone(desiredFromCreate(rbacApi))
+      const secretRule = live.rules?.find(
+        (rule: k8s.V1PolicyRule) => rule.resources?.[0] === 'secrets' && rule.verbs?.includes('get')
+      )
+      secretRule!.verbs = [...(secretRule!.verbs ?? []), 'update']
+      existing = asApiserverRole(live)
+      return Promise.resolve(existing)
+    })
+    const log = vi.spyOn(console, 'log')
+    try {
+      await (reconciler as any).ensureHostRole(host)
+      expect(existing?.rules?.some(rule => rule.verbs?.includes('update'))).toBe(true)
+      expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
+      expect(updatedRoleLogs(log, '"host-chatllm-config-reader"')).toEqual([
+        '[HostReconciler] Updated Role "host-chatllm-config-reader"',
+      ])
+    } finally {
+      log.mockRestore()
+    }
+  })
 })
