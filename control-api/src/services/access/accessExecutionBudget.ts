@@ -252,11 +252,11 @@ export class AccessExecutionBudget {
     if (
       teamGfsMembershipAdmissionLimit !== null &&
       (!Number.isSafeInteger(teamGfsMembershipAdmissionLimit) ||
-        teamGfsMembershipAdmissionLimit < 0)
+        teamGfsMembershipAdmissionLimit < 1)
     ) {
       throw new AccessBudgetConfigurationError(
         'objects',
-        'team GFS membership admission must be a non-negative safe integer'
+        'team GFS membership admission must be a positive safe integer'
       )
     }
     const controller = new AbortController()

@@ -5,6 +5,10 @@ import { config } from '../src/config.js'
 import { type DbClient, initDb } from '../src/db.js'
 import { K8sGateway } from '../src/k8s.js'
 import { buildAccessCatalog } from '../src/services/access/accessCatalogCoordinator.js'
+import {
+  AccessBudgetExceededError,
+  AccessExecutionBudget,
+} from '../src/services/access/accessExecutionBudget.js'
 import type { AccessCapability } from '../src/services/access/capabilityRegistry.js'
 import { CATALOG_FAMILIES, type CatalogFamily } from '../src/services/access/catalogContracts.js'
 import { resolveLiveAuthorization } from '../src/services/access/liveAuthorizationResolver.js'
@@ -15,6 +19,10 @@ import {
 } from '../src/services/access/operationalAccessIndexer.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
+import {
+  catalogBudgetOptionsForIntent,
+  loadConfiguredUserAccessIntent,
+} from '../src/services/access/userAccessPolicy.js'
 import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
 import { TemporaryKubernetesApi } from './helpers/temporaryKubernetesApi.js'
 
@@ -418,6 +426,46 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       }
     })
   }
+
+  it('enforces the operator-configured Team-GFS admission through the production budget contract', async () => {
+    const intent = loadConfiguredUserAccessIntent({
+      CONTROL_API_USER_ACCESS_CATALOG_MODE: 'serve',
+      CONTROL_API_USER_ACCESS_TEAM_GFS_MEMBERSHIP_ADMISSION_LIMIT: '1',
+    })
+    const budget = AccessExecutionBudget.create('catalog', catalogBudgetOptionsForIntent(intent))
+    try {
+      await expect(
+        buildAccessCatalog(
+          { session, families: ['gfs_resource'], limit: 100 },
+          { transaction: transaction(databasePool), budget }
+        )
+      ).resolves.toMatchObject({ complete: true, items: [{ resource: { type: 'gfs_resource' } }] })
+    } finally {
+      budget.close()
+    }
+
+    const secondTeamId = randomUUID()
+    await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, 'Admission Overflow Team')`, [
+      secondTeamId,
+    ])
+    await databasePool.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       VALUES ($1, $2, 'member', 'active')`,
+      [secondTeamId, userId]
+    )
+    const exhausted = AccessExecutionBudget.create('catalog', catalogBudgetOptionsForIntent(intent))
+    try {
+      await expect(
+        buildAccessCatalog(
+          { session, families: ['gfs_resource'], limit: 100 },
+          { transaction: transaction(databasePool), budget: exhausted }
+        )
+      ).rejects.toBeInstanceOf(AccessBudgetExceededError)
+    } finally {
+      exhausted.close()
+      await databasePool.query(`DELETE FROM teams WHERE id = $1`, [secondTeamId])
+    }
+  })
 
   it('preserves both direct/team provenance across duplicate filesystem mounts', async () => {
     const catalog = await buildAccessCatalog(

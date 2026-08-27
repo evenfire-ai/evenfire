@@ -41,6 +41,7 @@ import { CatalogProducerContractError } from './catalogProducerSupport.js'
 import { requireCatalogProducer } from './catalogProducers.js'
 import { canonicalEnvironmentId } from './operationalAccessProjection.js'
 import type { CanonicalResourceIdentity } from './resourceIdentity.js'
+import { configuredCatalogBudgetOptions } from './userAccessPolicy.js'
 
 export type PublicCatalogAccessPath = Readonly<{
   accessPathId: string
@@ -368,7 +369,9 @@ export async function buildAccessCatalog(
     options.budget ??
     AccessExecutionBudget.create('catalog', {
       limits: options.limits,
-      teamGfsMembershipAdmissionLimit: options.teamGfsMembershipAdmissionLimit,
+      teamGfsMembershipAdmissionLimit:
+        options.teamGfsMembershipAdmissionLimit ??
+        configuredCatalogBudgetOptions.teamGfsMembershipAdmissionLimit,
     })
   const ownedBudget = options.budget ? null : budget
   try {
