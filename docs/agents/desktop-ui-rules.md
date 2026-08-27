@@ -34,6 +34,9 @@ existing local contracts, not renderer styling or page-layout rules.
 
 ## Visual and component architecture
 
-`desktop-app/ui/docs/STYLE_STANDARDIZATION.md` is authoritative for renderer
-tokens, shared CSS ownership, Common controls, page placement, page shells,
-tabs, DataGrid, feedback surfaces, and style-rule enforcement.
+Shared feedback and accessibility semantics, including toast versus inline
+status placement, are owned by `docs/agents/frontend-style-rules.md`.
+`desktop-app/ui/docs/STYLE_STANDARDIZATION.md` is authoritative for
+Desktop-specific renderer tokens, shared CSS ownership, Common controls, page
+placement, page shells, tabs, DataGrid, visual/layout treatment for feedback
+components, and style-rule enforcement.
