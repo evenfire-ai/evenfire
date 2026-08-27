@@ -79,4 +79,13 @@ describe('NetworkPolicy resync and orphan-sweep config (#478)', () => {
       ).rejects.toThrow(/CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT/)
     }
   )
+
+  it.each(['25m', '1e3', '-5', '0.5', '2e1', 'abc'] as const)(
+    'fails loud when the resync interval is non-canonical (%s)',
+    async raw => {
+      await expect(loadConfig({ CONTEXT_MAPPER_NETPOL_RESYNC_SEC: raw })).rejects.toThrow(
+        /CONTEXT_MAPPER_NETPOL_RESYNC_SEC/
+      )
+    }
+  )
 })

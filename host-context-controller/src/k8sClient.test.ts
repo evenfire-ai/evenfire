@@ -11352,6 +11352,29 @@ describe('McpServerWatcher NetworkPolicy periodic resync (#478)', () => {
     )
     await watcher.stop()
   })
+
+  it('M1 sibling: event-driven pass after a tick does not inherit ensureDefaults', async () => {
+    vi.useFakeTimers()
+    mockConfig.netPolResyncIntervalSec = 300
+    const watcher = await startWatcherForNetPolResync()
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(300_000)
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(2)
+    expect(mocks.netPolFullReconcile.mock.calls[1]?.[2]).toEqual(
+      expect.objectContaining({ ensureDefaults: true })
+    )
+
+    await (watcher as any).runInitialNetworkPolicyConvergence()
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(3)
+    expect(mocks.netPolFullReconcile).toHaveBeenLastCalledWith(
+      expect.any(Array),
+      expect.any(Array),
+      expect.objectContaining({ ensureDefaults: false })
+    )
+    await watcher.stop()
+  })
+
   it('M2: a tick while a pass is in flight is skipped and does not trail', async () => {
     vi.useFakeTimers()
     mockConfig.netPolResyncIntervalSec = 300

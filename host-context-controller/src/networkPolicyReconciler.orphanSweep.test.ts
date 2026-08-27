@@ -288,6 +288,39 @@ describe('NetworkPolicy orphan sweep cap (#478)', () => {
     warnSpy.mockRestore()
   })
 
+  it('M4 sibling: cap trip also refuses external-egress deletes and still certifies', async () => {
+    const orphans = Array.from({ length: 11 }, (_, i) =>
+      orphanContextAllow(`ctx-orphan-${i}-old-server`, `orphan-context-${i}`)
+    )
+    stubOrphanLists(mockApi, {
+      context: orphans,
+      external: [
+        orphanExternalEgress('ext-egress-orphan-server-old-example-com-443', 'orphan-server'),
+      ],
+    })
+    const complete = vi.fn()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    await reconciler.fullReconcile([], [], {
+      ensureDefaults: false,
+      contextInventoryAuthoritative: () => true,
+      serverInventoryAuthoritative: () => true,
+      onAuthoritativeRevocationComplete: complete,
+    })
+
+    expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'ext-egress-orphan-server-old-example-com-443',
+        namespace: 'mcp-server',
+      })
+    )
+    expect(netPolOrphanSweepCappedTotal.inc).toHaveBeenCalledWith({ reason: 'absolute' })
+    expect(netPolOrphansDeletedTotal.inc).not.toHaveBeenCalled()
+    expect(complete).toHaveBeenCalledOnce()
+    warnSpy.mockRestore()
+  })
+
   it('M4 sibling: orphans over the percent share refuse deletes with reason=percent and still certify', async () => {
     const orphans = Array.from({ length: 5 }, (_, i) =>
       orphanContextAllow(`ctx-orphan-${i}-old-server`, `orphan-context-${i}`)

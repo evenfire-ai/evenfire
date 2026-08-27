@@ -12,8 +12,8 @@
 #
 # CONTEXT_MAPPER_* knobs are read from the live host-context-controller
 # Deployment. Code defaults are never printed as cluster facts: an absent
-# env is UNSET. `live_cap_would_trip` therefore stays none when the
-# Deployment omitted the cap keys.
+# env is UNSET. `live_cap_would_trip` is UNSET when the Deployment omitted
+# both cap keys (not `none` — that means "evaluated, would not trip").
 #
 # The running controller still applies compiled defaults in that case
 # (absolute 10, percent 20 — host-context-controller/src/config.ts).
@@ -33,7 +33,8 @@
 #
 # Double-samples 90s apart. Adjudicates only when the desired Context +
 # McpServer identity set is identical across samples; otherwise
-# INCONCLUSIVE_RERUN.
+# INCONCLUSIVE_RERUN. A sample that listed zero managed policies is
+# INCONCLUSIVE_EMPTY, never CLEAN.
 #
 # Usage:
 #   CONTEXT=<kube-context> ./scripts/ops/hcc-netpol-orphan-census.sh
@@ -54,11 +55,17 @@ kc() {
 }
 
 # Live Deployment env only. Missing keys are UNSET — never substitute
-# controller source defaults as cluster facts.
+# controller source defaults as cluster facts. A kubectl failure is not
+# an absent key: fail closed instead of printing UNSET.
 deployment_env() {
   local key="$1"
   local value
-  value="$(kc -n "${HCC_NS}" get deploy "${HCC_DEPLOYMENT}" -o "jsonpath={.spec.template.spec.containers[0].env[?(@.name==\"${key}\")].value}" 2>/dev/null || true)"
+  local rc=0
+  value="$(kc -n "${HCC_NS}" get deploy "${HCC_DEPLOYMENT}" -o "jsonpath={.spec.template.spec.containers[0].env[?(@.name==\"${key}\")].value}")" || rc=$?
+  if [[ "${rc}" -ne 0 ]]; then
+    echo "[census] FATAL: kubectl failed reading ${key} from ${HCC_NS}/${HCC_DEPLOYMENT} (exit ${rc})" >&2
+    exit 2
+  fi
   if [[ -z "${value}" ]]; then
     printf "UNSET"
   else
@@ -132,7 +139,7 @@ sample_state() {
       kc get networkpolicy -n "${MAPPER_NS}" -o json
       kc get networkpolicy -n "${HOST_NS}" -o json
       kc get networkpolicy -n "${RPC_NS}" -o json
-    } | jq -s "{items: [.[].items[]?]}"
+    } | jq -s '{items: [.[].items[]?] | unique_by(.metadata.uid // ((.metadata.namespace // "") + "/" + (.metadata.name // "")))}'
   )"
 
   local desired_contexts desired_servers listed untyped orphans orphan_count
@@ -162,7 +169,7 @@ sample_state() {
   if [[ -z "${orphans}" ]]; then
     orphan_count=0
   else
-    orphan_count="$(printf "%s\n" "${orphans}" | grep -c . || true)"
+    orphan_count="$(printf "%s\n" "${orphans}" | awk 'NF { n++ } END { print n+0 }')"
   fi
 
   printf "DESIRED_CONTEXTS=%s\n" "${desired_contexts}"
@@ -238,8 +245,20 @@ cap_would_trip() {
   fi
 }
 
+if ! is_uint "${LISTED}" || ! is_uint "${ORPHAN_COUNT}"; then
+  echo "[census] live_cap_would_trip=malformed"
+  echo "[census] compiled_default_absolute=${COMPILED_ABS_DEFAULT} compiled_default_percent=${COMPILED_PCT_DEFAULT}"
+  echo "[census] controller_cap_would_trip=malformed (listed_managed or orphan_count is not an unsigned integer)"
+  echo "[census] VERDICT=INCONCLUSIVE_EMPTY"
+  echo "[census] listed_managed or orphan_count is not an unsigned integer; do not treat this as CLEAN" >&2
+  echo "[census] hint: re-check CONTEXT, mapper/host/rpc-proxy namespaces, and kubectl connectivity" >&2
+  exit 4
+fi
+
 CAP_REASON="none"
-if [[ "${ORPHAN_CAP}" != "UNSET" ]]; then
+if [[ "${ORPHAN_CAP}" == "UNSET" && "${ORPHAN_CAP_PCT}" == "UNSET" ]]; then
+  CAP_REASON="UNSET"
+elif [[ "${ORPHAN_CAP}" != "UNSET" ]]; then
   if ! is_uint "${ORPHAN_CAP}"; then
     CAP_REASON="malformed"
   elif [[ "${ORPHAN_COUNT}" -gt "${ORPHAN_CAP}" ]]; then
@@ -274,6 +293,12 @@ CONTROLLER_CAP_REASON="$(cap_would_trip "${ORPHAN_COUNT}" "${LISTED}" "${CONTROL
 echo "[census] live_cap_would_trip=${CAP_REASON}"
 echo "[census] compiled_default_absolute=${COMPILED_ABS_DEFAULT} compiled_default_percent=${COMPILED_PCT_DEFAULT}"
 echo "[census] controller_cap_would_trip=${CONTROLLER_CAP_REASON} (live env, else compiled defaults)"
+if [[ "${LISTED}" -eq 0 ]]; then
+  echo "[census] VERDICT=INCONCLUSIVE_EMPTY"
+  echo "[census] listed zero managed NetworkPolicies; \"found nothing\" is not CLEAN"
+  echo "[census] hint: re-check CONTEXT, CONTEXT_MAPPER_RPC_PROXY_NAMESPACE, and kubectl connectivity"
+  exit 4
+fi
 if [[ "${ORPHAN_COUNT}" -eq 0 ]]; then
   echo "[census] VERDICT=CLEAN"
 else

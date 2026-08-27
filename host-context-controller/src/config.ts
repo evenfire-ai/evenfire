@@ -174,7 +174,8 @@ export interface Config {
   // Periodic NetworkPolicy convergence interval (seconds). Re-enters the
   // coordinated single-flight pass (not a naked fullReconcile) so a dropped
   // watch cannot leave stale allows. Default 0 disables the interval; startup
-  // still runs one convergence pass. Set via CONTEXT_MAPPER_NETPOL_RESYNC_SEC.
+  // still runs one convergence pass. Non-canonical values fail loud at load.
+  // Set via CONTEXT_MAPPER_NETPOL_RESYNC_SEC.
   netPolResyncIntervalSec: number
 
   // Absolute orphan-delete cap for a NetworkPolicy fullReconcile sweep.
@@ -783,7 +784,7 @@ export const config: Config = {
   // Periodic NetworkPolicy resync. Default 0 (disabled): startup still
   // converges once; the interval is opt-in so a bad cache cannot periodically
   // sweep. Unset or 0 → no interval.
-  netPolResyncIntervalSec: getEnvInt('CONTEXT_MAPPER_NETPOL_RESYNC_SEC', 0),
+  netPolResyncIntervalSec: requireCanonicalNonNegativeEnvInt('CONTEXT_MAPPER_NETPOL_RESYNC_SEC', 0),
   // Mass-delete guard for the namespace-wide orphan sweep. Thresholds are
   // strict `>`: exactly N candidates still delete; N+1 refuses deletes and
   // still certifies.
