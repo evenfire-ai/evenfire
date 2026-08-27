@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { externalRestPublicErrorHandler } from '../app.js'
-import { ControlApiError } from '../controlApiClient.js'
+import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
 import { sanitizeControlApiPublicError } from '../http/publicApiError.js'
 
 function appThrowing(error: Error) {
@@ -13,6 +13,8 @@ function appThrowing(error: Error) {
 }
 
 describe('External REST public error contract', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
   it('never reflects an internal upstream message, path, or secret-like value', async () => {
     const sentinel = 'oauth-secret-at-/var/run/internal/provider.json'
     const response = await request(appThrowing(new Error(sentinel))).get('/failure')
@@ -178,6 +180,44 @@ describe('External REST public error contract', () => {
       expect(JSON.stringify(sanitized)).not.toContain(sentinel)
     }
   )
+
+  it('preserves bounded upload size through the real Control API client and sanitizer boundary', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 'payload_too_large',
+              message: 'private upstream upload detail',
+            },
+          }),
+          {
+            status: 413,
+            headers: {
+              'content-type': 'application/json',
+              'upload-length': '209715200',
+              'x-internal-secret': 'must-not-cross',
+            },
+          }
+        )
+      )
+    )
+
+    const upstream = await controlApiRequest('PUT', '/external/gfs/resources/id/content').catch(
+      (error: unknown) => error
+    )
+    expect(upstream).toBeInstanceOf(ControlApiError)
+
+    const sanitized = sanitizeControlApiPublicError(upstream, new Set([413]))
+    expect(sanitized).toMatchObject({
+      status: 413,
+      headers: { 'upload-length': '209715200' },
+      body: { error: { code: 'payload_too_large', retryable: false } },
+    })
+    expect(JSON.stringify(sanitized)).not.toContain('private upstream')
+    expect(JSON.stringify(sanitized)).not.toContain('must-not-cross')
+  })
 
   it('preserves only bounded access-path descriptors for an ambiguity response', () => {
     const pathId = `ap1_${'a'.repeat(43)}`
