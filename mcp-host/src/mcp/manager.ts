@@ -784,6 +784,31 @@ export class McpManager {
         }
       }
       key = this.userKey(serverName, userId)
+      // Fail-closed: replicate the eager addServer admission gates
+      // (enabled → authoritative → ready, manager.ts:276-305) before opening a
+      // per-user connection with the caller's OAuth token. serverInfos retains
+      // disabled/not-ready/non-authoritative servers (each skip branch there
+      // does serverInfos.set before returning), so without this gate a lazy
+      // per-user admission would connect and execute against a server the
+      // operator disabled or that is not ready. A non-admissible server is
+      // operator intent (disabled) or transient/unauthoritative infra
+      // (not_ready) — NOT an auth failure, so surface it distinctly from the
+      // "Authentication required" cases above.
+      if (!info?.enabled) {
+        return {
+          toolName: fullToolName,
+          result: { error: `MCP server disabled: ${serverName}` },
+          isError: true,
+        }
+      }
+      if (info.status?.authoritative === false || !info.status?.ready) {
+        const detail = info.status?.message ? ` (${info.status.message})` : ''
+        return {
+          toolName: fullToolName,
+          result: { error: `MCP server not ready: ${serverName}${detail}` },
+          isError: true,
+        }
+      }
       try {
         await this.ensureClient(serverName, userId)
       } catch (error) {
