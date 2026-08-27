@@ -133,6 +133,12 @@ const nextConfig = {
         destination: '/agents/:name/connectors',
         permanent: true,
       },
+      // Connector edit "Context" tab renamed to "Access".
+      {
+        source: '/connectors/:name/edit/context',
+        destination: '/connectors/:name/edit/access',
+        permanent: true,
+      },
       { source: '/marketplace', destination: '/marketplace/connectors', permanent: true },
       { source: '/cost-and-usage', destination: '/cost-and-usage/usage', permanent: true },
       {

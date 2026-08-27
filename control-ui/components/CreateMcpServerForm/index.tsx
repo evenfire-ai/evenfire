@@ -15,21 +15,20 @@ import {
   getContext,
   getContextTeams,
   getContextUsers,
-  getContexts,
   getHosts,
   listOrgImages,
   updateContext,
 } from '@/lib/api'
-import type { EnvSecretKeyMapping, EnvVar, OrgImage } from '@/lib/api'
-import type { EgressBinding } from '@/lib/api'
+import type { EgressBinding, EnvSecretKeyMapping, EnvVar, HostResource, OrgImage } from '@/lib/api'
 import { buildContextUpdatePayload } from '@/lib/contextMutation'
 import type { EgressEditorStatus } from '@/lib/egressModel'
+import { createPrivateContext } from '@/lib/privateContext'
 import { EgressEditor } from '../EgressEditor'
 import { DEFAULT_REGISTRY_HOST, buildImageCoordinate } from '../PublisherView/dockerCredential'
 import { MCP_SERVER_NAME_PATTERN, TRANSPORT_TYPES } from './constants'
 import type { CreateMcpServerFormProps, TransportType } from './types'
 
-const STEPS = ['Connector', 'Context', 'Secrets'] as const
+const STEPS = ['Connector', 'Access', 'Secrets'] as const
 
 const STEP_DETAILS = [
   {
@@ -39,8 +38,8 @@ const STEP_DETAILS = [
   },
   {
     description: 'Choose connector access',
-    title: 'Context',
-    subtitle: 'Choose where this connector will be available and review who can use it.',
+    title: 'Access',
+    subtitle: 'Optionally choose the agents that can use this connector right away.',
   },
   {
     description: 'Environment and credentials',
@@ -49,19 +48,23 @@ const STEP_DETAILS = [
   },
 ] as const
 
-type ContextAccess = {
-  agents: Array<{ id: string; label: string }>
+type AccessPreview = {
   teams: Array<{ id: string; label: string }>
   users: Array<{ id: string; label: string }>
 }
 
-const EMPTY_CONTEXT_ACCESS: ContextAccess = { agents: [], teams: [], users: [] }
+const EMPTY_ACCESS_PREVIEW: AccessPreview = { teams: [], users: [] }
 
-const CONTEXT_ACCESS_GROUPS: Array<{ key: keyof ContextAccess; title: string }> = [
+const ACCESS_PREVIEW_GROUPS: Array<{ key: keyof AccessPreview; title: string }> = [
   { key: 'users', title: 'Users' },
   { key: 'teams', title: 'Teams' },
-  { key: 'agents', title: 'Agents' },
 ]
+
+type AgentAccessTarget = {
+  name: string
+  label: string
+  contextRef: string
+}
 
 type OrgImageOption = {
   value: string
@@ -197,13 +200,13 @@ export function CreateMcpServerForm({
   const [transportType, setTransportType] = useState<TransportType>('streamableHttp')
   const [port, setPort] = useState(3000)
   const [description, setDescription] = useState('')
-  const [contextRef, setContextRef] = useState('')
-  const [contexts, setContexts] = useState<Array<{ name: string }>>([])
-  const [contextsLoading, setContextsLoading] = useState(true)
-  const [contextsError, setContextsError] = useState('')
-  const [contextAccess, setContextAccess] = useState<ContextAccess>(EMPTY_CONTEXT_ACCESS)
-  const [contextAccessError, setContextAccessError] = useState('')
-  const [loadingContextAccess, setLoadingContextAccess] = useState(false)
+  const [selectedAgentNames, setSelectedAgentNames] = useState<string[]>([])
+  const [agentTargets, setAgentTargets] = useState<AgentAccessTarget[]>([])
+  const [agentsLoading, setAgentsLoading] = useState(true)
+  const [agentsError, setAgentsError] = useState('')
+  const [accessPreview, setAccessPreview] = useState<AccessPreview>(EMPTY_ACCESS_PREVIEW)
+  const [accessPreviewError, setAccessPreviewError] = useState('')
+  const [loadingAccessPreview, setLoadingAccessPreview] = useState(false)
   const [orgImages, setOrgImages] = useState<OrgImage[]>([])
   const [orgImageScope, setOrgImageScope] = useState('')
   const [managed, setManaged] = useState(true)
@@ -236,18 +239,12 @@ export function CreateMcpServerForm({
       hasCompleteSecretMapping &&
       !hasIncompleteSecretMapping)
   const canSubmit =
-    Boolean(name && image && contextRef) &&
-    nameValid &&
-    egressValid &&
-    credentialsConfigured &&
-    !submitting
+    Boolean(name && image) && nameValid && egressValid && credentialsConfigured && !submitting
   const connectorComplete = Boolean(name && image && nameValid) && egressValid
-  const contextComplete = Boolean(contextRef)
-  const canContinue = step === 0 ? connectorComplete : step === 1 ? contextComplete : egressValid
-  const contextOptions = useMemo(
-    () => contexts.map(context => ({ value: context.name, label: context.name })),
-    [contexts]
-  )
+  // The Access step is optional: a connector with no agents selected is valid
+  // and simply is not reachable by any agent until one is granted from the
+  // Installed Connectors list.
+  const canContinue = step === 0 ? connectorComplete : true
   const orgImageOptions = useMemo<OrgImageOption[]>(() => {
     if (!orgImageScope) return []
 
@@ -271,27 +268,32 @@ export function CreateMcpServerForm({
 
   useEffect(() => {
     let cancelled = false
-    setContextsLoading(true)
-    setContextsError('')
+    setAgentsLoading(true)
+    setAgentsError('')
 
-    getContexts()
+    getHosts()
       .then(result => {
         if (cancelled) return
-        const nextContexts = (result.items ?? [])
-          .map(context => ({
-            name: context.metadata?.name ?? context.spec?.contextId ?? '',
-          }))
-          .filter(context => context.name)
-        setContexts(nextContexts)
-        setContextRef(previous => previous || nextContexts[0]?.name || '')
+        const targets = ((result.items ?? []) as HostResource[])
+          .map(host => {
+            const agentName = host.metadata?.name || ''
+            const contextRef = String(host.spec?.contextRef ?? '').trim()
+            const label = getAgentDisplayName(agentName) || agentName
+            return { name: agentName, label, contextRef }
+          })
+          .filter(target => target.name && target.contextRef)
+          .sort((left, right) => left.label.localeCompare(right.label))
+        setAgentTargets(targets)
       })
       .catch(loadError => {
         if (cancelled) return
-        setContexts([])
-        setContextsError(loadError instanceof Error ? loadError.message : 'Failed to load contexts')
+        setAgentTargets([])
+        setAgentsError(
+          loadError instanceof Error ? loadError.message : 'Failed to load available agents'
+        )
       })
       .finally(() => {
-        if (!cancelled) setContextsLoading(false)
+        if (!cancelled) setAgentsLoading(false)
       })
 
     return () => {
@@ -299,65 +301,84 @@ export function CreateMcpServerForm({
     }
   }, [])
 
+  // Preview: the users/teams that already have access to the selected agents.
+  // Adding this connector makes it usable by exactly those people.
+  const selectedContextRefs = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          selectedAgentNames
+            .map(agentName => agentTargets.find(target => target.name === agentName)?.contextRef)
+            .filter((ref): ref is string => Boolean(ref))
+        )
+      ),
+    [selectedAgentNames, agentTargets]
+  )
+
   useEffect(() => {
-    const selectedContext = contextRef.trim()
-    if (!selectedContext) {
-      setContextAccess(EMPTY_CONTEXT_ACCESS)
-      setContextAccessError('')
-      setLoadingContextAccess(false)
+    if (selectedContextRefs.length === 0) {
+      setAccessPreview(EMPTY_ACCESS_PREVIEW)
+      setAccessPreviewError('')
+      setLoadingAccessPreview(false)
       return
     }
 
     let cancelled = false
-    setLoadingContextAccess(true)
-    setContextAccessError('')
+    setLoadingAccessPreview(true)
+    setAccessPreviewError('')
 
     void (async () => {
-      const [usersResult, teamsResult, hostsResult] = await Promise.allSettled([
-        getContextUsers(selectedContext),
-        getContextTeams(selectedContext),
-        getHosts(),
-      ])
+      const results = await Promise.all(
+        selectedContextRefs.map(async contextRef => {
+          const [usersResult, teamsResult] = await Promise.allSettled([
+            getContextUsers(contextRef),
+            getContextTeams(contextRef),
+          ])
+          return { usersResult, teamsResult }
+        })
+      )
       if (cancelled) return
 
-      const failed =
-        usersResult.status === 'rejected' ||
-        teamsResult.status === 'rejected' ||
-        hostsResult.status === 'rejected'
-      setContextAccess({
-        users:
-          usersResult.status === 'fulfilled'
-            ? (usersResult.value.items ?? []).map(user => ({
-                id: user.id,
-                label: user.displayName || user.name || user.email || user.id,
-              }))
-            : [],
-        teams:
-          teamsResult.status === 'fulfilled'
-            ? (teamsResult.value.items ?? []).map(team => ({ id: team.id, label: team.name }))
-            : [],
-        agents:
-          hostsResult.status === 'fulfilled'
-            ? (hostsResult.value.items ?? [])
-                .filter(host => String(host.spec?.contextRef ?? '').trim() === selectedContext)
-                .map(host => {
-                  const agentName = host.metadata?.name || 'unknown'
-                  return { id: agentName, label: getAgentDisplayName(agentName) || agentName }
-                })
-            : [],
+      const failed = results.some(
+        result =>
+          result.usersResult.status === 'rejected' || result.teamsResult.status === 'rejected'
+      )
+      const users = results.flatMap(result =>
+        result.usersResult.status === 'fulfilled'
+          ? (result.usersResult.value.items ?? []).map(user => ({
+              id: user.id,
+              label: user.displayName || user.name || user.email || user.id,
+            }))
+          : []
+      )
+      const teams = results.flatMap(result =>
+        result.teamsResult.status === 'fulfilled'
+          ? (result.teamsResult.value.items ?? []).map(team => ({
+              id: team.id,
+              label: team.name || team.id,
+            }))
+          : []
+      )
+      const byLabel = (left: { label: string }, right: { label: string }) =>
+        left.label.localeCompare(right.label)
+      const dedupe = <T extends { id: string }>(items: T[]): T[] =>
+        Array.from(new Map(items.map(item => [item.id, item])).values())
+      setAccessPreview({
+        users: dedupe(users).sort(byLabel),
+        teams: dedupe(teams).sort(byLabel),
       })
-      setContextAccessError(
+      setAccessPreviewError(
         failed
           ? 'Some access information could not be loaded. The lists below may be incomplete.'
           : ''
       )
-      setLoadingContextAccess(false)
+      setLoadingAccessPreview(false)
     })()
 
     return () => {
       cancelled = true
     }
-  }, [contextRef])
+  }, [selectedContextRefs])
 
   useEffect(() => {
     let cancelled = false
@@ -384,8 +405,7 @@ export function CreateMcpServerForm({
 
   function canSelectStep(targetStep: number) {
     if (targetStep <= step) return true
-    if (targetStep === 1) return connectorComplete
-    return connectorComplete && contextComplete
+    return connectorComplete
   }
 
   const handleEgressChange = useCallback(
@@ -475,9 +495,38 @@ export function CreateMcpServerForm({
     setSubmitting(true)
     setError('')
 
+    // Resolve the write targets: the distinct private scopes of the selected
+    // agents. With no selection the connector gets its own private scope (an
+    // implementation detail, same as Marketplace installs) so the resource
+    // contract stays satisfied without exposing any concept to the user.
+    const selectedTargets = selectedAgentNames
+      .map(agentName => agentTargets.find(target => target.name === agentName))
+      .filter((target): target is AgentAccessTarget => Boolean(target))
+    const selectedContextRefs = Array.from(
+      new Set(selectedTargets.map(target => target.contextRef))
+    )
+
+    let primaryContextRef: string
+    try {
+      primaryContextRef =
+        selectedContextRefs[0] ??
+        (await createPrivateContext(
+          {
+            subject: name,
+            description: `Connector access scope for ${name}`,
+            mcpServers: [name],
+          },
+          'We couldn’t finish creating this connector — please try again.'
+        ))
+    } catch (scopeError) {
+      setError(formatCreateError(scopeError))
+      setSubmitting(false)
+      return
+    }
+
     const spec: Parameters<typeof createMcpServer>[0]['spec'] = {
       image,
-      contextRef,
+      contextRef: primaryContextRef,
       description: description || undefined,
       enabled: true,
       managed,
@@ -544,27 +593,40 @@ export function CreateMcpServerForm({
         spec,
       })
 
-      try {
-        const context = await getContext(contextRef)
-        const existingServers = context.spec?.mcpServers ?? []
+      // Give the selected agents access. Each agent's private scope gets an
+      // additive write with its own loaded resourceVersion; failures are
+      // collected so the operator knows the connector itself was created.
+      const failedAgents: string[] = []
+      await Promise.all(
+        selectedContextRefs.map(async contextRef => {
+          try {
+            const context = await getContext(contextRef)
+            const existingServers = context.spec?.mcpServers ?? []
 
-        if (!existingServers.includes(name)) {
-          await updateContext(
-            contextRef,
-            buildContextUpdatePayload(context.metadata?.resourceVersion, {
-              contextId: context.spec?.contextId ?? contextRef,
-              description: context.spec?.description,
-              mcpServers: [...existingServers, name],
-              sharedFileSystems: context.spec?.sharedFileSystems ?? [],
-            })
-          )
-        }
-      } catch (contextError) {
+            if (!existingServers.includes(name)) {
+              await updateContext(
+                contextRef,
+                buildContextUpdatePayload(context.metadata?.resourceVersion, {
+                  contextId: context.spec?.contextId ?? contextRef,
+                  description: context.spec?.description,
+                  mcpServers: [...existingServers, name],
+                  sharedFileSystems: context.spec?.sharedFileSystems ?? [],
+                })
+              )
+            }
+          } catch {
+            const affected = selectedTargets
+              .filter(target => target.contextRef === contextRef)
+              .map(target => target.label)
+            failedAgents.push(...affected)
+          }
+        })
+      )
+
+      if (failedAgents.length > 0) {
         setError(
-          `Connector created, but failed to add it to Context "${contextRef}" allowlist. ` +
-            `Please add "${name}" to the Context manually. (${
-              contextError instanceof Error ? contextError.message : String(contextError)
-            })`
+          `Connector created, but we couldn't give access to ${failedAgents.join(', ')}. ` +
+            `Grant "${name}" to those agents from the Installed Connectors list.`
         )
         setSubmitting(false)
         return
@@ -774,73 +836,97 @@ export function CreateMcpServerForm({
             <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
               <section className="cu-form-section">
                 <div className="cu-form-section__header">
-                  <h3 className="cu-form-section__title">Context access</h3>
+                  <h3 className="cu-form-section__title">Agent access</h3>
                   <p className="cu-form-section__description">
-                    Choose the context where this connector will be available. The access lists
-                    update for the selected context.
+                    Optionally choose the agents that can use this connector right away. You can
+                    also grant access later from the Installed Connectors list.
                   </p>
                 </div>
                 <Field
                   description={
-                    contextsLoading
-                      ? 'Loading available contexts...'
-                      : contexts.length > 0
-                        ? "The connector will be added to this context's allowlist."
-                        : 'Create a context before creating a connector.'
+                    agentsLoading
+                      ? 'Loading available agents...'
+                      : selectedAgentNames.length > 0
+                        ? 'The connector will be usable by everyone who already has access to the selected agents.'
+                        : 'No agents selected: the connector is created but cannot be used by any agent until you grant access.'
                   }
-                  error={contextsError || undefined}
-                  label="Context"
-                  required
+                  error={agentsError || undefined}
+                  label="Agents"
                 >
                   <SelectionDropdown
-                    id="create-connector-context"
-                    multiple={false}
-                    onChange={next => setContextRef(next[0] ?? '')}
-                    disabled={submitting || contextsLoading || contexts.length === 0}
-                    value={contextRef ? [contextRef] : []}
-                    options={contextOptions}
-                    placeholder={contextsLoading ? 'Loading contexts...' : 'Select a context...'}
-                    searchPlaceholder="Search contexts..."
-                    emptyLabel="No contexts available."
-                    selectionLabel="Context"
-                    showSelectedChips={false}
+                    id="create-connector-agents"
+                    multiple
+                    onChange={setSelectedAgentNames}
+                    disabled={submitting || agentsLoading}
+                    value={selectedAgentNames}
+                    options={agentTargets.map(target => ({
+                      value: target.name,
+                      label: target.label,
+                    }))}
+                    placeholder={agentsLoading ? 'Loading agents...' : 'Select agents...'}
+                    searchPlaceholder="Search agents..."
+                    emptyLabel="No agents available."
+                    selectionLabel="Selected agents"
                   />
                 </Field>
 
-                {loadingContextAccess ? (
-                  <p className="cu-muted">Loading context access…</p>
-                ) : contextRef ? (
+                {loadingAccessPreview ? (
+                  <p className="cu-muted">Loading agent access…</p>
+                ) : selectedAgentNames.length > 0 ? (
                   <>
-                    {contextAccessError ? (
+                    {accessPreviewError ? (
                       <p className="cu-banner cu-banner--warn" role="status">
-                        {contextAccessError}
+                        {accessPreviewError}
                       </p>
                     ) : null}
-                    <div className="cu-registry-context-access__intro">
+                    <div className="cu-entity-access__intro">
                       <span>Access preview</span>
-                      <p>These people and agents can use this connector in {contextRef}.</p>
+                      <p>
+                        These people already have access to the selected agents and will be able to
+                        use this connector.
+                      </p>
                     </div>
-                    <section className="cu-registry-context-access" aria-label="Context access">
-                      {CONTEXT_ACCESS_GROUPS.map(group => (
+                    <section className="cu-entity-access" aria-label="Agent access preview">
+                      <section className="cu-entity-access__group" data-kind="agents">
+                        <div className="cu-entity-access__heading">
+                          <h4>Agents</h4>
+                          <span>{selectedAgentNames.length}</span>
+                        </div>
+                        <ul className="cu-entity-access__list">
+                          {selectedAgentNames.map(agentName => {
+                            const target = agentTargets.find(
+                              candidate => candidate.name === agentName
+                            )
+                            return (
+                              <li key={agentName}>
+                                <span>{target?.label ?? agentName}</span>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      </section>
+                      {ACCESS_PREVIEW_GROUPS.map(group => (
                         <section
-                          className="cu-registry-context-access__group"
+                          className="cu-entity-access__group"
                           data-kind={group.key}
                           key={group.key}
                         >
-                          <div className="cu-registry-context-access__heading">
+                          <div className="cu-entity-access__heading">
                             <h4>{group.title}</h4>
-                            <span>{contextAccess[group.key].length}</span>
+                            <span>{accessPreview[group.key].length}</span>
                           </div>
-                          {contextAccess[group.key].length > 0 ? (
-                            <ul className="cu-registry-context-access__list">
-                              {contextAccess[group.key].map(principal => (
+                          {accessPreview[group.key].length > 0 ? (
+                            <ul className="cu-entity-access__list">
+                              {accessPreview[group.key].map(principal => (
                                 <li key={principal.id}>
                                   <span>{principal.label}</span>
                                 </li>
                               ))}
                             </ul>
                           ) : (
-                            <p className="cu-muted">No {group.title.toLowerCase()} have access.</p>
+                            <p className="cu-muted">
+                              No {group.title.toLowerCase()} have access yet.
+                            </p>
                           )}
                         </section>
                       ))}

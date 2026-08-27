@@ -7,7 +7,7 @@ import { buildContextList, buildContextResource } from '../../test/fixtures/cont
 
 const replace = vi.fn()
 const push = vi.fn()
-let activeTab = 'context'
+let activeTab = 'access'
 
 vi.mock('next/navigation', () => ({
   useParams: () => ({ name: 'search', tab: activeTab }),
@@ -50,10 +50,10 @@ vi.mock('../../lib/api', async importOriginal => {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
-  activeTab = 'context'
+  activeTab = 'access'
 })
 
-describe('connector edit Context access', () => {
+describe('connector edit agent access', () => {
   it('does not expose a stale legacy contextRef after allowlist membership is removed', async () => {
     vi.mocked(api.getMcpServer).mockResolvedValue({
       metadata: { name: 'search' },
@@ -70,7 +70,10 @@ describe('connector edit Context access', () => {
 
     render(<EditMcpServerPage />)
 
-    expect(await screen.findByLabelText('Connector contexts')).toHaveTextContent('Contexts: None')
+    expect(
+      await screen.findByText('No agents have access to this connector yet.')
+    ).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Agent access' })).toBeInTheDocument()
     expect(screen.queryByText('removed-context')).not.toBeInTheDocument()
     await waitFor(() => expect(api.getMcpServer).toHaveBeenCalledWith('search'))
     expect(api.getContextUsers).not.toHaveBeenCalled()
@@ -78,7 +81,7 @@ describe('connector edit Context access', () => {
     expect(api.getHosts).not.toHaveBeenCalled()
   })
 
-  it('keeps credentials and egress usable when the Context list is unavailable', async () => {
+  it('keeps credentials and egress usable when the agent access list is unavailable', async () => {
     vi.mocked(api.getMcpServer).mockResolvedValue({
       metadata: { name: 'search' },
       spec: { image: 'example/search:latest' },
@@ -88,7 +91,7 @@ describe('connector edit Context access', () => {
     const { rerender } = render(<EditMcpServerPage />)
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Context access data is unavailable. Try again later.'
+      'Agent access data is unavailable. Try again later.'
     )
 
     activeTab = 'credentials'

@@ -38,8 +38,8 @@ export const CREATE_FLOW_LOADING = {
     title: 'Create connector',
     subtitle: 'Register a new connector and optionally create its managed deployment metadata.',
     backLabel: 'Back to connectors',
-    steps: ['Connector', 'Runtime', 'Network', 'Secrets'],
-    stepFlowClassName: 'cu-create-step-flow--4',
+    steps: ['Connector', 'Access', 'Secrets'],
+    stepFlowClassName: 'cu-create-step-flow--3',
   },
   createMember: {
     iconKey: 'users',
@@ -76,10 +76,10 @@ export const CREATE_FLOW_LOADING = {
   installRegistryEntry: {
     iconKey: 'store',
     title: 'Install from Marketplace',
-    subtitle: 'Install a Marketplace entry into your cluster and bind it to a context.',
+    subtitle: 'Install a Marketplace entry into your cluster.',
     backLabel: 'Back to Marketplace',
-    steps: ['Package', 'Install'],
-    stepFlowClassName: 'cu-create-step-flow--2',
+    steps: ['Package', 'Credentials', 'Install'],
+    stepFlowClassName: 'cu-create-step-flow--3',
   },
   installPlugin: {
     iconKey: 'workflow',

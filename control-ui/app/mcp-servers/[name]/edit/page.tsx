@@ -175,7 +175,7 @@ export default function EditMcpServerPage() {
       } catch {
         if (!cancelled) {
           setContextNames([])
-          setContextListError('Context access data is unavailable. Try again later.')
+          setContextListError('Agent access data is unavailable. Try again later.')
         }
       } finally {
         if (!cancelled) setLoadingContexts(false)
@@ -305,7 +305,7 @@ export default function EditMcpServerPage() {
             <CreatePageHeader
               icon={<IconCable />}
               title={`Edit Connector: ${name}`}
-              subtitle="Review context access, rotate credentials, and update external egress for this connector."
+              subtitle="Review agent access, rotate credentials, and update external egress for this connector."
               backLabel="Back to connectors"
               onBack={backToList}
             />
@@ -363,38 +363,35 @@ export default function EditMcpServerPage() {
                   registryCredentialSource={registryCredentialSource}
                 />
               </div>
-            ) : activeTab === 'context' ? (
+            ) : activeTab === 'access' ? (
               <div className="cu-connector-edit-form cu-connector-edit-content">
-                <section className="cu-form-section" aria-labelledby="connector-context-title">
+                <section className="cu-form-section" aria-labelledby="connector-access-title">
                   <div className="cu-form-section__header">
-                    <h2 id="connector-context-title" className="cu-form-section__title">
-                      Context access
+                    <h2 id="connector-access-title" className="cu-form-section__title">
+                      Agent access
                     </h2>
                     <p className="cu-form-section__description">
-                      This connector is available in the contexts shown below. Context assignments
-                      are derived from the current Context allowlists and cannot be changed here
-                      yet.
+                      This connector is available to the agents, teams, and users shown below.
+                      Assignments are derived from the current access setup and cannot be changed
+                      here yet.
                     </p>
                   </div>
 
                   {loadingContexts ? (
                     <p className="cu-muted" role="status">
-                      Loading contexts…
+                      Loading agent access…
                     </p>
                   ) : contextListError ? (
                     <div className="cu-banner cu-banner--warn" role="alert">
                       {contextListError}
                     </div>
-                  ) : (
-                    <p className="cu-connector-edit-context-name" aria-label="Connector contexts">
-                      Contexts:{' '}
-                      <strong>{contextNames.length > 0 ? contextNames.join(', ') : 'None'}</strong>
-                    </p>
-                  )}
+                  ) : contextNames.length === 0 ? (
+                    <p className="cu-muted">No agents have access to this connector yet.</p>
+                  ) : null}
 
                   {!loadingContexts && !contextListError && contextNames.length > 0 ? (
                     loadingContextAccess ? (
-                      <p className="cu-muted">Loading context access…</p>
+                      <p className="cu-muted">Loading agent access…</p>
                     ) : (
                       <>
                         {contextAccessError ? (
@@ -402,19 +399,19 @@ export default function EditMcpServerPage() {
                             {contextAccessError}
                           </p>
                         ) : null}
-                        <section className="cu-registry-context-access" aria-label="Context access">
+                        <section className="cu-entity-access" aria-label="Agent access">
                           {CONTEXT_ACCESS_GROUPS.map(group => (
                             <section
-                              className="cu-registry-context-access__group"
+                              className="cu-entity-access__group"
                               data-kind={group.key}
                               key={group.key}
                             >
-                              <div className="cu-registry-context-access__heading">
+                              <div className="cu-entity-access__heading">
                                 <h4>{group.title}</h4>
                                 <span>{contextAccess[group.key].length}</span>
                               </div>
                               {contextAccess[group.key].length > 0 ? (
-                                <ul className="cu-registry-context-access__list">
+                                <ul className="cu-entity-access__list">
                                   {contextAccess[group.key].map(principal => (
                                     <li key={principal.id}>
                                       <span>{principal.label}</span>

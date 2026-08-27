@@ -10,6 +10,8 @@ import type {
   ConnectorAccessPrincipal,
   ConnectorAccessSummary,
   ConnectorAccessSummaryMap,
+  ConnectorAgentBinding,
+  ConnectorAgentTarget,
 } from '../../components/McpServerTable.types'
 import { useToast } from '../../components/Toast'
 import {
@@ -23,11 +25,7 @@ import {
   updateContext,
 } from '../../lib/api'
 import type { ContextResource, ContextSpec, HostResource, McpServerResource } from '../../lib/api'
-import {
-  contextNamesForConnector,
-  mergeAccessSummaries,
-  sortAccessPrincipals,
-} from '../../lib/connectorAccess'
+import { mergeAccessSummaries, sortAccessPrincipals } from '../../lib/connectorAccess'
 import { buildContextUpdatePayload, contextMutationError } from '../../lib/contextMutation'
 
 function resourceName(resource: { metadata?: { name?: string } }): string {
@@ -47,20 +45,72 @@ function getContextRef(resource: { spec?: Record<string, unknown> }): string {
   return typeof contextRef === 'string' ? contextRef.trim() : ''
 }
 
-function agentsForContext(hosts: HostResource[], contextRef: string): ConnectorAccessPrincipal[] {
-  return sortAccessPrincipals(
-    hosts
-      .filter(host => getContextRef(host) === contextRef)
-      .map(host => {
-        const name = resourceName(host)
-        return { id: name, label: name }
-      })
-  )
+function contextName(context: ContextResource): string {
+  return String(context.metadata?.name || context.spec?.contextId || '').trim()
 }
 
+function contextSpec(context: ContextResource): ContextSpec {
+  const name = contextName(context)
+  return {
+    contextId: context.spec?.contextId || name,
+    description: context.spec?.description,
+    mcpServers: Array.isArray(context.spec?.mcpServers) ? context.spec.mcpServers : [],
+    sharedFileSystems: context.spec?.sharedFileSystems ?? [],
+  }
+}
+
+// The agents an operator can grant connector access to. Each agent resolves to
+// its private context (the write target); the context itself stays invisible.
+function agentTargetsFromHosts(hosts: HostResource[]): ConnectorAgentTarget[] {
+  return hosts
+    .map(host => {
+      const name = resourceName(host)
+      const displayName =
+        String((host.spec as { host?: string } | undefined)?.host || '').trim() || name
+      return { name, label: displayName, contextRef: getContextRef(host) }
+    })
+    .filter(target => target.contextRef && target.name !== 'unknown')
+    .sort((left, right) => left.label.localeCompare(right.label))
+}
+
+// Per-connector write units: every context that carries the connector and is
+// owned by at least one agent becomes one binding listing those agents.
+// Contexts with no owning agent (per-install and workflow-recipe private
+// scopes) are intentionally invisible — they are not user-managed.
+function bindingsByConnectorFromContexts(
+  contexts: ContextResource[],
+  agentTargets: ConnectorAgentTarget[]
+): Record<string, ConnectorAgentBinding[]> {
+  const targetsByContextRef = new Map<string, ConnectorAccessPrincipal[]>()
+  for (const target of agentTargets) {
+    const principals = targetsByContextRef.get(target.contextRef) ?? []
+    principals.push({ id: target.name, label: target.label })
+    targetsByContextRef.set(target.contextRef, principals)
+  }
+
+  const bindings: Record<string, ConnectorAgentBinding[]> = {}
+  for (const context of contexts) {
+    const ref = contextName(context)
+    const agents = targetsByContextRef.get(ref)
+    if (!ref || !agents || agents.length === 0) continue
+    for (const serverName of context.spec?.mcpServers ?? []) {
+      const list = bindings[serverName] ?? []
+      list.push({ contextRef: ref, agents: sortAccessPrincipals(agents) })
+      bindings[serverName] = list
+    }
+  }
+  for (const list of Object.values(bindings)) {
+    list.sort((left, right) =>
+      (left.agents[0]?.label ?? '').localeCompare(right.agents[0]?.label ?? '')
+    )
+  }
+  return bindings
+}
+
+// User/team access summaries stay context-derived (read-only groups in the
+// table); the agents group itself comes from the bindings above.
 async function loadContextAccess(
-  contextRef: string,
-  hosts: HostResource[]
+  contextRef: string
 ): Promise<readonly [ConnectorAccessSummary, boolean]> {
   const [usersResult, teamsResult] = await Promise.allSettled([
     getContextUsers(contextRef),
@@ -94,12 +144,24 @@ async function loadContextAccess(
 
   return [
     {
-      agents: agentsForContext(hosts, contextRef),
+      agents: [],
       users,
       teams,
     },
     accessLoadFailed,
   ] as const
+}
+
+function connectorAccessMutationError(error: unknown, fallback: string): string {
+  if ((error as { status?: unknown } | null)?.status === 409) {
+    return 'This connector’s access changed since it was loaded. Reload the page and try again.'
+  }
+  return contextMutationError(error, fallback)
+}
+
+function agentListLabel(agents: ConnectorAccessPrincipal[]): string {
+  if (agents.length === 1) return agents[0].label
+  return `${agents.length} agents`
 }
 
 export default function McpServersPage() {
@@ -109,12 +171,14 @@ export default function McpServersPage() {
   const [error, setError] = useState('')
   const [mcpServers, setMcpServers] = useState<McpServerResource[]>([])
   const [contexts, setContexts] = useState<ContextResource[]>([])
+  const [agentTargets, setAgentTargets] = useState<ConnectorAgentTarget[]>([])
+  const [bindingsByConnectorName, setBindingsByConnectorName] = useState<
+    Record<string, ConnectorAgentBinding[]>
+  >({})
   const [accessByConnectorKey, setAccessByConnectorKey] = useState<ConnectorAccessSummaryMap>({})
   const [accessWarning, setAccessWarning] = useState('')
   const [deletingKey, setDeletingKey] = useState<string | null>(null)
-  const [updatingContextMembershipKey, setUpdatingContextMembershipKey] = useState<string | null>(
-    null
-  )
+  const [updatingAgentAccessKey, setUpdatingAgentAccessKey] = useState<string | null>(null)
   const { confirm, confirmDialog } = useConfirmDialog()
 
   async function loadAll() {
@@ -130,16 +194,22 @@ export default function McpServersPage() {
       const connectors = (serversResult.items || []) as McpServerResource[]
       const hosts = (hostsResult.items || []) as HostResource[]
       const nextContexts = (contextsResult.items || []) as ContextResource[]
-      const contextRefs = [
+      const nextAgentTargets = agentTargetsFromHosts(hosts)
+      const nextBindings = bindingsByConnectorFromContexts(nextContexts, nextAgentTargets)
+
+      // Read-only user/team summaries are merged across the agent-owned
+      // scopes that carry each connector (bindings), so the visible access
+      // grid never depends on invisible orphan contexts.
+      const managedContextRefs = [
         ...new Set(
-          nextContexts
-            .map(context => String(context.metadata?.name || context.spec?.contextId || '').trim())
-            .filter(Boolean)
+          Object.values(nextBindings)
+            .flat()
+            .map(binding => binding.contextRef)
         ),
       ]
       const accessResults = await Promise.all(
-        contextRefs.map(
-          async contextRef => [contextRef, await loadContextAccess(contextRef, hosts)] as const
+        managedContextRefs.map(
+          async contextRef => [contextRef, await loadContextAccess(contextRef)] as const
         )
       )
       const accessByContext = new Map(
@@ -154,10 +224,10 @@ export default function McpServersPage() {
       const nextAccessByConnectorKey = connectors.reduce<ConnectorAccessSummaryMap>(
         (acc, connector) => {
           const connectorName = resourceName(connector)
-          const connectorContexts = contextNamesForConnector(nextContexts, connectorName)
-          if (connectorContexts.length > 0) {
+          const bindingRefs = (nextBindings[connectorName] ?? []).map(binding => binding.contextRef)
+          if (bindingRefs.length > 0) {
             acc[connectorKey(connector)] = mergeAccessSummaries(
-              connectorContexts.map(
+              bindingRefs.map(
                 contextRef =>
                   accessByContext.get(contextRef) ?? { agents: [], users: [], teams: [] }
               )
@@ -169,6 +239,8 @@ export default function McpServersPage() {
       )
       setMcpServers(connectors)
       setContexts(nextContexts)
+      setAgentTargets(nextAgentTargets)
+      setBindingsByConnectorName(nextBindings)
       setAccessByConnectorKey(nextAccessByConnectorKey)
     } catch (e) {
       if (isSilentApiError(e)) return
@@ -201,38 +273,19 @@ export default function McpServersPage() {
     }
   }
 
-  function handleOpenContext(contextName: string) {
-    const trimmed = contextName.trim()
-    if (!trimmed) return
-    router.push(CONTROL_ROUTES.contexts.connectors(trimmed))
-  }
-
-  function contextName(context: ContextResource): string {
-    return String(context.metadata?.name || context.spec?.contextId || '').trim()
-  }
-
-  function contextSpec(context: ContextResource): ContextSpec {
-    const name = contextName(context)
-    return {
-      contextId: context.spec?.contextId || name,
-      description: context.spec?.description,
-      mcpServers: Array.isArray(context.spec?.mcpServers) ? context.spec.mcpServers : [],
-      sharedFileSystems: context.spec?.sharedFileSystems ?? [],
-    }
-  }
-
-  async function addConnectorToContexts(
+  async function addConnectorToAgents(
     server: { name: string; namespace: string },
-    contextNames: string[]
+    agents: Array<{ name: string; contextRef: string }>
   ) {
     const key = `${server.namespace}/${server.name}`
-    const targets = contexts.filter(context => contextNames.includes(contextName(context)))
-    if (targets.length !== contextNames.length) {
-      setError('One or more selected contexts could not be loaded. Please refresh and try again.')
+    const contextRefs = [...new Set(agents.map(agent => agent.contextRef))]
+    const targets = contexts.filter(context => contextRefs.includes(contextName(context)))
+    if (targets.length !== contextRefs.length) {
+      setError('One or more selected agents could not be resolved. Please refresh and try again.')
       return
     }
 
-    setUpdatingContextMembershipKey(key)
+    setUpdatingAgentAccessKey(key)
     setError('')
     try {
       await Promise.all(
@@ -250,48 +303,61 @@ export default function McpServersPage() {
       )
       await loadAll()
       showToast(
-        contextNames.length === 1
-          ? `Connector ${server.name} added to context.`
-          : `Connector ${server.name} added to ${contextNames.length} contexts.`,
+        agents.length === 1
+          ? `Connector ${server.name} added to agent ${agents[0].name}.`
+          : `Connector ${server.name} added to ${agents.length} agents.`,
         { tone: 'success' }
       )
     } catch (e) {
       if (isSilentApiError(e)) return
-      setError(contextMutationError(e, `Failed to add ${server.name} to contexts`))
+      setError(connectorAccessMutationError(e, `Failed to give agents access to ${server.name}`))
     } finally {
-      setUpdatingContextMembershipKey(null)
+      setUpdatingAgentAccessKey(null)
     }
   }
 
-  async function removeConnectorFromContext(
+  async function removeConnectorFromAgents(
     server: { name: string; namespace: string },
-    targetContextName: string
+    binding: ConnectorAgentBinding
   ) {
     const key = `${server.namespace}/${server.name}`
-    const target = contexts.find(context => contextName(context) === targetContextName)
+    const target = contexts.find(context => contextName(context) === binding.contextRef)
     if (!target) {
-      setError('Context could not be loaded. Please refresh and try again.')
+      setError('This agent’s connector set could not be loaded. Please refresh and try again.')
       return
     }
 
-    setUpdatingContextMembershipKey(key)
+    if (binding.agents.length > 1) {
+      const sharedNames = binding.agents.map(agent => agent.label).join(', ')
+      const shouldRemove = await confirm({
+        title: 'Remove Connector Access',
+        message: `Remove connector ${server.name} from ${binding.agents.length} agents (${sharedNames})? These agents share one connector set, so the change applies to all of them.`,
+        confirmLabel: 'Remove',
+        tone: 'danger',
+      })
+      if (!shouldRemove) return
+    }
+
+    setUpdatingAgentAccessKey(key)
     setError('')
     try {
       const spec = contextSpec(target)
       await updateContext(
-        targetContextName,
+        binding.contextRef,
         buildContextUpdatePayload(target.metadata?.resourceVersion, {
           ...spec,
           mcpServers: spec.mcpServers.filter(name => name !== server.name),
         })
       )
       await loadAll()
-      showToast(`Connector ${server.name} removed from ${targetContextName}.`, { tone: 'success' })
+      showToast(`Connector ${server.name} removed from ${agentListLabel(binding.agents)}.`, {
+        tone: 'success',
+      })
     } catch (e) {
       if (isSilentApiError(e)) return
-      setError(contextMutationError(e, `Failed to remove ${server.name} from context`))
+      setError(connectorAccessMutationError(e, `Failed to remove ${server.name} from agent access`))
     } finally {
-      setUpdatingContextMembershipKey(null)
+      setUpdatingAgentAccessKey(null)
     }
   }
 
@@ -310,17 +376,11 @@ export default function McpServersPage() {
       <McpServerTable
         items={mcpServers as any}
         accessByConnectorKey={accessByConnectorKey}
-        contexts={contexts
-          .map(context => ({
-            name: contextName(context),
-            description: context.spec?.description,
-            mcpServers: context.spec?.mcpServers ?? [],
-          }))
-          .filter(context => context.name)}
-        onOpenContext={handleOpenContext}
-        onAddToContexts={addConnectorToContexts}
-        onRemoveFromContext={removeConnectorFromContext}
-        updatingContextMembershipKey={updatingContextMembershipKey}
+        agentBindingsByConnectorName={bindingsByConnectorName}
+        agentTargets={agentTargets}
+        onAddToAgents={addConnectorToAgents}
+        onRemoveFromAgents={removeConnectorFromAgents}
+        updatingAgentAccessKey={updatingAgentAccessKey}
         onDelete={handleDelete}
         onEdit={server => router.push(CONTROL_ROUTES.connectors.edit(server.name))}
         deletingKey={deletingKey}

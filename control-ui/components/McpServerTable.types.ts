@@ -50,20 +50,33 @@ export type McpServerItem = {
 
 export type ServerRef = { name: string; namespace: string }
 
-export type ConnectorContextBinding = {
+// One write-unit of connector access: the agents that share the underlying
+// private context. The contextRef is internal plumbing for the owning page's
+// PUT and is never rendered.
+export type ConnectorAgentBinding = {
+  contextRef: string
+  agents: ConnectorAccessPrincipal[]
+}
+
+// An agent the operator can grant a connector to. Carries the agent's private
+// contextRef so the page can resolve the write target without another lookup.
+export type ConnectorAgentTarget = {
   name: string
-  description?: string
-  mcpServers: string[]
+  label: string
+  contextRef: string
 }
 
 export type McpServerTableProps = {
   items: McpServerItem[]
   accessByConnectorKey?: Record<string, ConnectorAccessSummary>
-  contexts?: ConnectorContextBinding[]
-  onOpenContext?: (contextName: string) => void
-  onAddToContexts?: (server: ServerRef, contextNames: string[]) => Promise<void>
-  onRemoveFromContext?: (server: ServerRef, contextName: string) => Promise<void>
-  updatingContextMembershipKey?: string | null
+  agentBindingsByConnectorName?: Record<string, ConnectorAgentBinding[]>
+  agentTargets?: ConnectorAgentTarget[]
+  onAddToAgents?: (
+    server: ServerRef,
+    agents: Array<{ name: string; contextRef: string }>
+  ) => Promise<void>
+  onRemoveFromAgents?: (server: ServerRef, binding: ConnectorAgentBinding) => Promise<void>
+  updatingAgentAccessKey?: string | null
   onDelete?: (server: ServerRef) => Promise<void>
   onEdit?: (server: ServerRef) => void
   deletingKey?: string | null
