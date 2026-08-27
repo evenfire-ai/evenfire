@@ -1211,6 +1211,7 @@ export function useAppController() {
     selectedAgent: nav.selectedAgent,
     selectedAgentRoute: nav.selectedAgentRoute,
     selectedContext: nav.selectedContext,
+    selectedContextTab: nav.selectedContextTab,
     selectedTeam: nav.selectedTeam,
     setSelectedAgent: nav.setSelectedAgent,
     setSelectedContext: nav.setSelectedContext,

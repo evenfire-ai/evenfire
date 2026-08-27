@@ -1,24 +1,33 @@
 // @vitest-environment jsdom
-import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { RpcConnectorsResult } from '../../../../src/types'
 import { desktopQueryKeys } from '../../hooks/domain/queryKeys'
 import { McpServersPage } from '../McpServersPage'
 
+// Capture the navigation handlers the page deep-links through. Hoisted so the
+// vi.mock factory can reference it.
+const navMock = vi.hoisted(() => ({
+  handleOpenContextDetails: vi.fn(),
+  handleOpenAgentWorkspace: vi.fn(),
+}))
+vi.mock('../../contexts/NavigationContext', () => ({
+  useNavigationContext: () => navMock,
+}))
+
 /**
  * T1: the fixture is typed as `RpcConnectorsResult` — the exact contract the IPC
  * bridge resolves from rpc-proxy's `GET /api/v1/rpc/connectors` (U1). The
- * compiler rejects any field the producer would not emit, and the U1 layer has
- * its own real-producer (Postgres + upsertOAuthGrant) integration tests.
- * T4: assertions are on the OBSERVABLE chip label + action the user sees.
+ * payload is grouped BY AGENT; the page dedups it to one row per
+ * `(server, context)`. Fixture exercises dedup (two agents, same context, same
+ * server), a contextless connector, and the tri-state chip + actionability.
  */
 const CONNECTORS: RpcConnectorsResult = {
   userId: 'user-1',
   agents: [
     {
-      name: 'agent-alpha',
+      name: 'agent-zeta',
       contextRef: 'ctx-team',
       connectors: [
         {
@@ -41,6 +50,34 @@ const CONNECTORS: RpcConnectorsResult = {
           provider: 'google',
           authKind: 'oauth-context',
           grantScope: 'context',
+          status: 'requires_setup',
+        },
+      ],
+    },
+    {
+      name: 'agent-alpha',
+      contextRef: 'ctx-team',
+      connectors: [
+        // Same context + server as agent-zeta's monday → dedups to ONE row.
+        // AGENTS = both; representative (for actions) = agent-alpha (alphabetical).
+        {
+          name: 'monday',
+          provider: 'monday',
+          authKind: 'oauth-user',
+          grantScope: 'user',
+          status: 'authorized',
+        },
+      ],
+    },
+    {
+      name: 'agent-orphan',
+      contextRef: null,
+      connectors: [
+        {
+          name: 'loner',
+          provider: 'loner',
+          authKind: 'oauth-user',
+          grantScope: 'user',
           status: 'requires_setup',
         },
       ],
@@ -73,55 +110,128 @@ function renderPage(result: RpcConnectorsResult) {
   )
 }
 
-describe('McpServersPage — tri-state chip + actionability (T5#3, T4)', () => {
+const allRows = (container: HTMLElement) =>
+  Array.from(container.querySelectorAll<HTMLElement>('.mcp-servers-data-table tbody tr'))
+const rowName = (row: HTMLElement) =>
+  row.querySelector('.context-id-cell')?.textContent?.trim() ?? ''
+const contextText = (row: HTMLElement) =>
+  row.querySelector('.reference-tag--context .reference-tag__label')?.textContent?.trim() ?? null
+const chipText = (row: HTMLElement) => row.querySelector('.ui-pill')?.textContent?.trim() ?? null
+const rowByName = (rows: HTMLElement[], name: string) => {
+  const row = rows.find(r => rowName(r).startsWith(name))
+  if (!row) throw new Error(`row not found for ${name}`)
+  return row
+}
+
+describe('McpServersPage — da-table layout + navigation', () => {
   afterEach(() => {
     cleanup()
-    vi.restoreAllMocks()
+    vi.clearAllMocks()
     delete (window as { clerum?: unknown }).clerum
   })
 
-  it('distinguishes the 3 statuses and only authorized/requires_setup are actionable', async () => {
+  it('(a) clicking a row deep-links to that context Connectors tab', async () => {
+    installClerum(CONNECTORS)
+    const { container } = renderPage(CONNECTORS)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Connectors' })).toBeTruthy())
+
+    const mondayRow = rowByName(allRows(container), 'monday')
+    expect(contextText(mondayRow)).toBe('ctx-team')
+    fireEvent.click(mondayRow)
+
+    expect(navMock.handleOpenContextDetails).toHaveBeenCalledWith('ctx-team', 'mcp-servers')
+  })
+
+  it('(b) mouse OR keyboard on Authorize/Disconnect fires the action WITHOUT navigating', () => {
+    const rpc = installClerum(CONNECTORS)
+    const { container } = renderPage(CONNECTORS)
+    const rows = allRows(container)
+
+    // Disconnect on the authorized monday row: acts under the representative
+    // (agent-alpha, alphabetical) and does NOT trigger the row navigation.
+    const mondayRow = rowByName(rows, 'monday')
+    const disconnectBtn = within(mondayRow).getByRole('button', { name: 'Disconnect' })
+    fireEvent.click(disconnectBtn)
+    expect(rpc.disconnectMcpServer).toHaveBeenCalledWith('monday', 'agent-alpha', undefined, {
+      shared: false,
+    })
+    expect(navMock.handleOpenContextDetails).not.toHaveBeenCalled()
+
+    // Keyboard regression: Enter/Space on the button must NOT bubble to the
+    // row's clickableRowProps onKeyDown and navigate. (Repro: without the
+    // button's onKeyDown stopPropagation this calls handleOpenContextDetails.)
+    fireEvent.keyDown(disconnectBtn, { key: 'Enter' })
+    fireEvent.keyDown(disconnectBtn, { key: ' ' })
+    expect(navMock.handleOpenContextDetails).not.toHaveBeenCalled()
+
+    // Authorize on the requires_setup clickup row.
+    const clickupRow = rowByName(rows, 'clickup')
+    const authorizeBtn = within(clickupRow).getByRole('button', { name: 'Authorize' })
+    fireEvent.click(authorizeBtn)
+    expect(rpc.connectMcpServer).toHaveBeenCalledWith('clickup', 'agent-zeta', undefined, {
+      confirmShared: false,
+    })
+    fireEvent.keyDown(authorizeBtn, { key: 'Enter' })
+    expect(navMock.handleOpenContextDetails).not.toHaveBeenCalled()
+  })
+
+  it('(c) mouse OR keyboard on an agent chip opens the agent WITHOUT navigating the row', () => {
     installClerum(CONNECTORS)
     const { container } = renderPage(CONNECTORS)
 
-    // The agent group renders once the query resolves.
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'agent-alpha' })).toBeTruthy())
+    const mondayRow = rowByName(allRows(container), 'monday')
+    // monday is listed by agent-alpha AND agent-zeta.
+    const chip = within(mondayRow).getByRole('button', { name: 'Open agent agent-zeta' })
+    fireEvent.click(chip)
+    expect(navMock.handleOpenAgentWorkspace).toHaveBeenCalledWith('agent-zeta', 'mcp-servers')
+    expect(navMock.handleOpenContextDetails).not.toHaveBeenCalled()
 
-    const rows = Array.from(container.querySelectorAll<HTMLElement>('.da-grid__body .da-grid__row'))
-    // One row per connector in the fixture.
-    expect(rows).toHaveLength(4)
+    // Keyboard regression: Enter on the chip must not navigate the row. (jsdom
+    // doesn't synthesize a click from keydown, so the positive open-agent path
+    // is covered by the mouse click above; here we assert the navigation guard.)
+    fireEvent.keyDown(chip, { key: 'Enter' })
+    expect(navMock.handleOpenContextDetails).not.toHaveBeenCalled()
+  })
 
-    const rowByFirstCellText = (needle: string) => {
-      const row = rows.find(r => (r.textContent ?? '').includes(needle))
-      if (!row) throw new Error(`row not found for ${needle}`)
-      return row
-    }
-    const chipText = (row: HTMLElement) =>
-      row.querySelector('.ui-pill')?.textContent?.trim() ?? null
-    const buttonNames = (row: HTMLElement) =>
+  it('(d) a contextless row is not clickable and never navigates', () => {
+    installClerum(CONNECTORS)
+    const { container } = renderPage(CONNECTORS)
+
+    const lonerRow = rowByName(allRows(container), 'loner')
+    expect(contextText(lonerRow)).toBeNull()
+    // No button semantics on the row itself (only the inner action button).
+    expect(lonerRow.getAttribute('role')).toBeNull()
+    fireEvent.click(lonerRow)
+    expect(navMock.handleOpenContextDetails).not.toHaveBeenCalled()
+  })
+
+  it('(e) distinguishes the 3 statuses and only authorized/requires_setup are actionable', () => {
+    installClerum(CONNECTORS)
+    const { container } = renderPage(CONNECTORS)
+    const rows = allRows(container)
+
+    const buttonLabels = (row: HTMLElement) =>
       within(row)
         .queryAllByRole('button')
+        // Drop the row-surface button (its label starts with "Open connectors").
         .map(b => b.textContent?.trim())
+        .filter(label => label === 'Authorize' || label === 'Disconnect')
 
-    // authorized → "Authorized" chip + Disconnect only.
-    const authorizedRow = rowByFirstCellText('monday')
-    expect(chipText(authorizedRow)).toBe('Authorized')
-    expect(buttonNames(authorizedRow)).toEqual(['Disconnect'])
+    const monday = rowByName(rows, 'monday')
+    expect(chipText(monday)).toBe('Authorized')
+    expect(buttonLabels(monday)).toEqual(['Disconnect'])
 
-    // requires_setup (oauth-user) → "Requires setup" chip + Authorize only.
-    const requiresRow = rowByFirstCellText('clickup')
-    expect(chipText(requiresRow)).toBe('Requires setup')
-    expect(buttonNames(requiresRow)).toEqual(['Authorize'])
+    const clickup = rowByName(rows, 'clickup')
+    expect(chipText(clickup)).toBe('Requires setup')
+    expect(buttonLabels(clickup)).toEqual(['Authorize'])
 
-    // no_oauth → "No OAuth" chip + NO action button (not actionable on this rail).
-    const noOauthRow = rowByFirstCellText('filesystem')
-    expect(chipText(noOauthRow)).toBe('No OAuth')
-    expect(buttonNames(noOauthRow)).toEqual([])
+    const filesystem = rowByName(rows, 'filesystem')
+    expect(chipText(filesystem)).toBe('No OAuth')
+    expect(buttonLabels(filesystem)).toEqual([])
 
-    // oauth-context requires_setup → actionable AND flagged as shared/team-wide.
-    const sharedRow = rowByFirstCellText('shared-drive')
-    expect(chipText(sharedRow)).toBe('Requires setup')
-    expect(buttonNames(sharedRow)).toEqual(['Authorize'])
-    expect(within(sharedRow).getByText(/Shared by the team/i)).toBeTruthy()
+    // oauth-user status pill surfaces the blast-radius caption as a tooltip.
+    expect(monday.querySelector('.ui-pill')?.getAttribute('title')).toMatch(
+      /Affects all your agents/i
+    )
   })
 })

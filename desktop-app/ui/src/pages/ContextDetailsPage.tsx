@@ -1,10 +1,17 @@
 import { useEffect, useMemo, useState } from 'react'
-import { DataTable, EmptyState, ReferenceTag, TabButton } from '@components/Common'
+import { Button, DataTable, EmptyState, Pill, ReferenceTag, TabButton } from '@components/Common'
 import { PageBreadcrumb } from '@components/PageBreadcrumb'
 import { ResourceBreadcrumbSwitcher } from '@components/ResourceBreadcrumbSwitcher'
+import { scopeCaption, statusPresentation } from '@lib/connectorPresentation'
+import { deriveConnectorRows } from '@lib/connectorRows'
 import { SharedFilesTab } from '../components/SharedFilesTab'
 import { useAuthContext } from '../contexts/AuthContext'
 import { useNavigationContext } from '../contexts/NavigationContext'
+import {
+  type ConnectorActionInput,
+  isActionableConnector,
+  useConnectorsController,
+} from '../hooks/domain/useConnectorsController'
 import { useContextsDataController } from '../hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '../hooks/domain/useMcpServersDataController'
 import { useTeamsDataController } from '../hooks/domain/useTeamsDataController'
@@ -16,6 +23,7 @@ export function ContextDetailsPage() {
   const { accessCatalog: contextsAccessCatalog } = useContextsDataController()
   const {
     selectedContext,
+    selectedContextTab,
     handleBackToContexts,
     handleOpenContextDetails,
     handleOpenTeamDetails,
@@ -35,12 +43,25 @@ export function ContextDetailsPage() {
     mcpServerMappingUnavailableMessage,
   } = useMcpServersDataController({ selectedContext })
   const { teams, currentTeamId, teamMembers, teamDirectory } = useTeamsDataController()
+  // Same app-coordinated query as the top-level Connectors panel (shared
+  // queryKey → reads cache, no second fetch). We overlay its tri-state grant +
+  // Authorize/Disconnect onto the context's connector rows via the SAME
+  // controller (D4: single action/confirmation path, not a re-implementation).
+  const {
+    agents: connectorAgents,
+    pendingKey: connectorPendingKey,
+    authorize: authorizeConnector,
+    disconnect: disconnectConnector,
+  } = useConnectorsController()
 
-  const [activeTab, setActiveTab] = useState<ContextTab>('agents')
+  // Land on the tab the navigation requested (defaults to 'agents'); re-sync
+  // when either the context or the requested tab changes so a deep-link to the
+  // same context but a different tab still switches.
+  const [activeTab, setActiveTab] = useState<ContextTab>(selectedContextTab ?? 'agents')
 
   useEffect(() => {
-    setActiveTab('agents')
-  }, [selectedContext])
+    setActiveTab(selectedContextTab ?? 'agents')
+  }, [selectedContext, selectedContextTab])
 
   const selectedContextDetails = useMemo(() => {
     if (!selectedContext || !contextsAccessCatalog) return null
@@ -232,12 +253,6 @@ export function ContextDetailsPage() {
     return [...deduped.values()]
   }, [contextTeamRows, me, selectedContextDetails])
 
-  const mappingSourceLabel = (source: string): string => {
-    if (source === 'context-map') return 'Context map'
-    if (source === 'agent-derived') return 'Agent derived'
-    return 'Workspace preview'
-  }
-
   const hasContextCatalogMcpMap = useMemo(() => {
     if (!selectedContext || !mcpAccessCatalog?.contextMcpServers) return false
     return Object.prototype.hasOwnProperty.call(mcpAccessCatalog.contextMcpServers, selectedContext)
@@ -303,6 +318,16 @@ export function ContextDetailsPage() {
 
   const contextMcpServerMappingAvailable =
     selectedContextMcpServerMappingAvailable || contextMcpServerDetails.length > 0
+
+  // Read-model rows for THIS context only, indexed by server name so each table
+  // row can look up its grant/actions. Empty (no status/actions) when the
+  // connectors query is not yet cached — graceful degrade, never a fetch.
+  const connectorRowByName = useMemo(() => {
+    const rows = deriveConnectorRows(
+      connectorAgents.filter(agent => agent.contextRef === selectedContext)
+    )
+    return new Map(rows.map(row => [row.connector.name, row]))
+  }, [connectorAgents, selectedContext])
 
   const contextMcpUnavailableBody = useMemo(() => {
     if (!selectedContext) return mcpServerMappingUnavailableMessage
@@ -541,9 +566,6 @@ export function ContextDetailsPage() {
                     <th className="da-table__col-header" scope="col">
                       Server
                     </th>
-                    <th className="da-table__col-header" scope="col">
-                      URL
-                    </th>
                     <th className="da-table__col-header da-table__col-header--center" scope="col">
                       Agents
                     </th>
@@ -551,60 +573,115 @@ export function ContextDetailsPage() {
                       Mapped agent names
                     </th>
                     <th className="da-table__col-header" scope="col">
-                      Source
+                      Status
+                    </th>
+                    <th className="da-table__col-header da-table__col-header--right" scope="col">
+                      Actions
                     </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {contextMcpServerDetails.map(server => (
-                    <tr key={server.name}>
-                      <td className="da-table__cell">
-                        <span className="context-mcp-server-name">{server.name}</span>
-                      </td>
-                      <td className="da-table__cell">
-                        <span className="context-mcp-url">
-                          {server.url ? (
-                            <code>{server.url}</code>
+                  {contextMcpServerDetails.map(server => {
+                    // Overlay the shared read-model onto this mapping row. No
+                    // match (or query not cached) → no status/actions, degrade
+                    // to a muted dash rather than fabricating a grant.
+                    const connectorRow = connectorRowByName.get(server.name)
+                    const connector = connectorRow?.connector
+                    const presentation = connector ? statusPresentation(connector.status) : null
+                    const caption = connector ? scopeCaption(connector) : null
+                    const busy = connectorRow ? connectorPendingKey === connectorRow.key : false
+                    // Same action contract as the top-level panel: mint under
+                    // the row's representative agent for THIS context.
+                    const actionInput: ConnectorActionInput | null = connectorRow
+                      ? {
+                          agentName: connectorRow.representativeAgent,
+                          contextRef: connectorRow.contextRef,
+                          connector: connectorRow.connector,
+                        }
+                      : null
+                    const actionable = Boolean(
+                      connector && isActionableConnector(connector) && actionInput
+                    )
+                    return (
+                      <tr key={server.name}>
+                        <td className="da-table__cell">
+                          <span className="context-mcp-server-name">{server.name}</span>
+                        </td>
+                        <td className="da-table__cell da-table__cell--center">
+                          <span className="context-mcp-count">{server.mappedAgentCount}</span>
+                        </td>
+                        <td className="da-table__cell">
+                          {server.mappedAgents.length > 0 ? (
+                            <span className="reference-tag-list">
+                              {server.mappedAgents.map(agentName => (
+                                <ReferenceTag
+                                  key={`${server.name}:${agentName}`}
+                                  kind="agent"
+                                  onClick={() => handleOpenAgentWorkspace(agentName, 'mcp-servers')}
+                                  title={agentName}
+                                  aria-label={`Open connectors for agent ${agentName}`}
+                                >
+                                  {/* Visible agent name (spec.host). mappedAgents
+                                      can include cross-team agents (from scoped
+                                      context detail sources) absent from the
+                                      catalog map, so fall back to the identifier
+                                      for those — not the Decision #6 `|| name`
+                                      guard. */}
+                                  {agentDisplayByName[agentName] ?? agentName}
+                                </ReferenceTag>
+                              ))}
+                            </span>
                           ) : (
-                            <span className="muted">-</span>
+                            <span className="context-mcp-agent-list">-</span>
                           )}
-                        </span>
-                      </td>
-                      <td className="da-table__cell da-table__cell--center">
-                        <span className="context-mcp-count">{server.mappedAgentCount}</span>
-                      </td>
-                      <td className="da-table__cell">
-                        {server.mappedAgents.length > 0 ? (
-                          <span className="reference-tag-list">
-                            {server.mappedAgents.map(agentName => (
-                              <ReferenceTag
-                                key={`${server.name}:${agentName}`}
-                                kind="agent"
-                                onClick={() => handleOpenAgentWorkspace(agentName, 'mcp-servers')}
-                                title={agentName}
-                                aria-label={`Open connectors for agent ${agentName}`}
+                        </td>
+                        <td className="da-table__cell">
+                          {presentation ? (
+                            <Pill tone={presentation.tone} size="sm" title={caption ?? undefined}>
+                              {presentation.label}
+                            </Pill>
+                          ) : (
+                            <span className="agent-table-muted">—</span>
+                          )}
+                        </td>
+                        <td className="da-table__cell da-table__cell--right">
+                          {actionable && actionInput ? (
+                            connector?.status === 'authorized' ? (
+                              <Button
+                                color="danger"
+                                disabled={busy}
+                                loading={busy}
+                                onClick={event => {
+                                  event.stopPropagation()
+                                  disconnectConnector(actionInput).catch(() => undefined)
+                                }}
+                                size="sm"
+                                variant="ghost"
                               >
-                                {/* Visible agent name (spec.host). mappedAgents
-                                    can include cross-team agents (from scoped
-                                    context detail sources) absent from the
-                                    catalog map, so fall back to the identifier
-                                    for those — not the Decision #6 `|| name`
-                                    guard. */}
-                                {agentDisplayByName[agentName] ?? agentName}
-                              </ReferenceTag>
-                            ))}
-                          </span>
-                        ) : (
-                          <span className="context-mcp-agent-list">-</span>
-                        )}
-                      </td>
-                      <td className="da-table__cell">
-                        <span className="context-mcp-source">
-                          {mappingSourceLabel(server.mappingSource)}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
+                                Disconnect
+                              </Button>
+                            ) : (
+                              <Button
+                                color="primary"
+                                disabled={busy}
+                                loading={busy}
+                                onClick={event => {
+                                  event.stopPropagation()
+                                  authorizeConnector(actionInput).catch(() => undefined)
+                                }}
+                                size="sm"
+                                variant="soft"
+                              >
+                                Authorize
+                              </Button>
+                            )
+                          ) : (
+                            <span className="agent-table-muted">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </DataTable>
             )}
