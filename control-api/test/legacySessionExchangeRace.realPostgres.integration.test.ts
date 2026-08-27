@@ -6,7 +6,10 @@ import { type DbClient, initDb } from '../src/db.js'
 import type { AuthClaims } from '../src/profileTypes.js'
 import type { EffectiveUserAccessPolicy } from '../src/services/access/userAccessPolicy.js'
 import { exchangeLegacyExternalUserSession } from '../src/services/auth/externalSessionIssuance.js'
-import { validateLegacyUserSession } from '../src/services/auth/userSessionService.js'
+import {
+  revokeAllUserSessions,
+  validateLegacyUserSession,
+} from '../src/services/auth/userSessionService.js'
 import { verifyUserPassword } from '../src/services/directory/login.js'
 import {
   setInvitationPasswordForUser,
@@ -386,4 +389,174 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
       }
     }
   )
+
+  it('invalidates source and replacement when revoke-all waits behind exchange', async () => {
+    const source = await principal('revoke-all-exchange-first')
+    const exchangeReady = deferred<{ result: { status: string; token?: string }; pid: number }>()
+    const releaseExchange = deferred()
+    const exchange = exchangeLegacyExternalUserSession(
+      {
+        token: source.token,
+        claims: source.claims,
+        userId: source.userId,
+        email: source.email,
+        teamId: source.teamId,
+      },
+      {
+        policy,
+        transaction: async work => {
+          const client = await databasePool.connect()
+          try {
+            await client.query('BEGIN')
+            const result = await work(client as unknown as DbClient)
+            exchangeReady.resolve({ result, pid: await backendPid(client) })
+            await releaseExchange.promise
+            await client.query('COMMIT')
+            return result
+          } catch (error) {
+            await client.query('ROLLBACK')
+            throw error
+          } finally {
+            client.release()
+          }
+        },
+      }
+    )
+    const lockedExchange = await exchangeReady.promise
+    expect(lockedExchange.result.status).toBe('issued')
+
+    try {
+      const cutoff = new Date(Date.now() - 1_000)
+      const revokeAll = revokeAllUserSessions(source.userId, 'user_revoked_all', undefined, cutoff)
+      await waitForBlockedBy(lockedExchange.pid)
+      cutoff.setTime(Date.now() + 1_000)
+      releaseExchange.resolve()
+      const issued = await exchange
+      await revokeAll
+
+      expect(issued.status).toBe('issued')
+      if (issued.status !== 'issued') throw new Error('exchange did not issue a token')
+      const replacementClaims = verifyExternalSessionToken(issued.token)
+      if (!replacementClaims) throw new Error('replacement token was not producer-shaped')
+      await expect(
+        validateLegacyUserSession(issued.token, replacementClaims, { db: databasePool })
+      ).resolves.toMatchObject({ status: 'revoked' })
+      await expect(
+        validateLegacyUserSession(source.token, source.claims, { db: databasePool })
+      ).resolves.toMatchObject({ status: 'revoked' })
+    } finally {
+      releaseExchange.resolve()
+    }
+  })
+
+  it('rejects exchange when revoke-all wins the user lock first', async () => {
+    const source = await principal('revoke-all-first')
+    const gate = await databasePool.connect()
+    try {
+      await gate.query('BEGIN')
+      await gate.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [source.userId])
+      const gatePid = await backendPid(gate)
+      const exchangeStarted = deferred<number>()
+      const exchange = exchangeLegacyExternalUserSession(
+        {
+          token: source.token,
+          claims: source.claims,
+          userId: source.userId,
+          email: source.email,
+          teamId: source.teamId,
+        },
+        {
+          policy,
+          transaction: async work => {
+            const client = await databasePool.connect()
+            try {
+              await client.query('BEGIN')
+              exchangeStarted.resolve(await backendPid(client))
+              const result = await work(client as unknown as DbClient)
+              await client.query('COMMIT')
+              return result
+            } catch (error) {
+              await client.query('ROLLBACK')
+              throw error
+            } finally {
+              client.release()
+            }
+          },
+        }
+      )
+      const exchangePid = await exchangeStarted.promise
+      await waitForBlock(exchangePid, gatePid)
+
+      await revokeAllUserSessions(
+        source.userId,
+        'user_revoked_all',
+        gate,
+        new Date(Date.now() + 1_000)
+      )
+      await gate.query('COMMIT')
+
+      await expect(exchange).resolves.toEqual({ status: 'invalid_session' })
+      await expect(
+        validateLegacyUserSession(source.token, source.claims, { db: databasePool })
+      ).resolves.toMatchObject({ status: 'revoked' })
+      await expect(
+        exchangeLegacyExternalUserSession(
+          {
+            token: source.token,
+            claims: source.claims,
+            userId: source.userId,
+            email: source.email,
+            teamId: source.teamId,
+          },
+          { policy }
+        )
+      ).resolves.toEqual({ status: 'invalid_session' })
+    } finally {
+      await gate.query('ROLLBACK').catch(() => undefined)
+      gate.release()
+    }
+  })
+
+  it('keeps revoke-all rollback safe and monotonic on real PostgreSQL', async () => {
+    const source = await principal('revoke-all-monotonic')
+    const rollback = await databasePool.connect()
+    try {
+      await rollback.query('BEGIN')
+      await revokeAllUserSessions(
+        source.userId,
+        'rollback',
+        rollback,
+        new Date('2026-08-27T12:00:00Z')
+      )
+      await rollback.query('ROLLBACK')
+    } finally {
+      await rollback.query('ROLLBACK').catch(() => undefined)
+      rollback.release()
+    }
+    await expect(
+      validateLegacyUserSession(source.token, source.claims, { db: databasePool })
+    ).resolves.toMatchObject({ status: 'valid' })
+
+    await revokeAllUserSessions(
+      source.userId,
+      'older',
+      databasePool,
+      new Date('2026-08-27T12:00:00Z')
+    )
+    await revokeAllUserSessions(
+      source.userId,
+      'newer',
+      databasePool,
+      new Date('2026-08-27T12:00:05Z')
+    )
+
+    const epoch = await databasePool.query<{ valid_after: Date; reason: string }>(
+      `SELECT valid_after, reason
+         FROM external_user_session_security_epochs
+        WHERE user_id = $1`,
+      [source.userId]
+    )
+    expect(epoch.rows[0]?.valid_after.toISOString()).toBe('2026-08-27T12:00:05.000Z')
+    expect(epoch.rows[0]?.reason).toBe('newer')
+  })
 })

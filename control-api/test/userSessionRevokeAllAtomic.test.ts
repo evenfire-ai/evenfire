@@ -42,4 +42,26 @@ describe('revoke-all transaction boundary', () => {
     expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
     expect(mocks.committedEpoch).toBe(false)
   })
+
+  it('captures the revoke-all cutoff after acquiring the user lock', async () => {
+    const cutoffs: Date[] = []
+    const afterLock = new Date('2026-08-27T00:00:01.250Z')
+    const now = vi.fn(() => afterLock)
+    mocks.query.mockReset()
+    mocks.query
+      .mockResolvedValueOnce({ rows: [{ id: 'user-1' }], rowCount: 1 })
+      .mockImplementationOnce(async (_sql, values) => {
+        cutoffs.push(values[1] as Date)
+        return { rows: [], rowCount: 1 }
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    mocks.withTransaction.mockImplementationOnce(async work => work({ query: mocks.query }))
+
+    const { revokeAllUserSessions } = await import('../src/services/auth/userSessionService.js')
+    await expect(revokeAllUserSessions('user-1', 'security_event', undefined, now)).resolves.toBe(0)
+
+    expect(now).toHaveBeenCalledTimes(1)
+    expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
+    expect(cutoffs).toEqual([new Date('2026-08-27T00:00:01.000Z')])
+  })
 })
