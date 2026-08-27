@@ -27,7 +27,11 @@ application guidance that must be combined with this shared document.
 - Keep reusable configuration constants in the application's constants area.
   Local rendered copy used by only one component may remain in that component.
 - Keep each constants file scoped to one module, page, or domain.
-- Prefer project aliases over deep relative imports when an alias exists.
+- Prefer project aliases over deep relative imports when an alias exists. The
+  shared examples configured across all three targets are `@/*`,
+  `@components/*`, `@constants/*`, and `@lib/*`; use narrower app-defined
+  aliases only where that application's TypeScript and bundler/test config
+  define them.
 
 ## Tokens and shared CSS ownership
 
