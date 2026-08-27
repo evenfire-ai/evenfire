@@ -65,7 +65,7 @@ test.describe('optional QA recorder: Control UI team creation', () => {
 
       await continueWizard(page)
       await expect(
-        page.getByText('Select the contexts this team can access.', { exact: true })
+        page.getByText('Choose the agents and connector scopes this team can use.', { exact: true })
       ).toBeVisible({ timeout: 20_000 })
 
       await continueWizard(page)
@@ -93,13 +93,13 @@ test.describe('optional QA recorder: Control UI team creation', () => {
         timeout: 20_000,
       })
 
-      const contextsTab = page.getByRole('tab', { name: 'Contexts', exact: true })
-      await contextsTab.click()
-      await expect(page).toHaveURL(/\/users-and-teams\/teams\/[^/]+\/contexts$/, {
+      const accessTab = page.getByRole('tab', { name: 'Access', exact: true })
+      await accessTab.click()
+      await expect(page).toHaveURL(/\/users-and-teams\/teams\/[^/]+\/access$/, {
         timeout: 20_000,
       })
-      await expect(contextsTab).toHaveAttribute('aria-selected', 'true')
-      await expect(page.getByRole('button', { name: 'Add context', exact: true })).toBeVisible({
+      await expect(accessTab).toHaveAttribute('aria-selected', 'true')
+      await expect(page.getByRole('button', { name: 'Add access', exact: true })).toBeVisible({
         timeout: 20_000,
       })
 

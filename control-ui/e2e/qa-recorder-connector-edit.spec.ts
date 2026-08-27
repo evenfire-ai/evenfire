@@ -1,9 +1,11 @@
 // control-ui/e2e/qa-recorder-connector-edit.spec.ts
 //
-// MUTATING journey: creates a context + stdio discovery connector (reusing the
-// spec-2 creation flow inline), then edits the connector to add external CIDR
-// egress. Guarded by QA_RECORDER_CONFIRM_MUTATIONS; connector then context are
-// deleted via the Control API in a finally.
+// MUTATING journey: stages a context through the Control API, creates a stdio
+// discovery connector through the create-connector wizard (which also
+// provisions the connector's own private access scope), then edits the
+// connector to add external CIDR egress. Guarded by
+// QA_RECORDER_CONFIRM_MUTATIONS; the connector and both contexts are deleted
+// via the Control API in a finally.
 import { type Page, expect, test } from '@playwright/test'
 import {
   CONTROL_API_URL,
@@ -30,35 +32,21 @@ async function fieldSelect(page: Page, fieldLabelText: string, value: string): P
   await field.locator('select').selectOption(value)
 }
 
+// The /contexts UI is gone; stage the context out-of-band through the Control
+// API (same pattern as the rotation test below).
 async function createEmptyContext(page: Page, contextName: string): Promise<void> {
-  await page.getByRole('link', { name: 'Contexts', exact: true }).click()
-  await expect(page).toHaveURL(/\/contexts$/, { timeout: 20_000 })
-  await page.getByRole('button', { name: 'Create context', exact: true }).click()
-  await expect(page).toHaveURL(/\/contexts\/new$/, { timeout: 20_000 })
-  await page.getByPlaceholder('context1').fill(contextName)
-  await page
-    .getByPlaceholder('Human-readable context description')
-    .fill('QA recorder temporary context')
-  await page.getByRole('button', { name: 'Continue', exact: true }).click()
-  await expect(
-    page
-      .getByText('No connectors found.', { exact: true })
-      .or(page.getByPlaceholder('Search connectors...'))
-  ).toBeVisible({ timeout: 20_000 })
-  await page.getByRole('button', { name: 'Create context', exact: true }).click()
-  await expect(page).toHaveURL(new RegExp(`/contexts/${contextName}$`), { timeout: 20_000 })
-  await expect(
-    page.getByText('Review details, manage connectors, agents, teams, and members.', {
-      exact: true,
-    })
-  ).toBeVisible({ timeout: 20_000 })
+  const res = await api(page.request, 'POST', '/api/v1/admin/contexts', {
+    metadata: { name: contextName },
+    spec: {
+      contextId: contextName,
+      description: 'QA recorder temporary context',
+      mcpServers: [],
+    },
+  })
+  expect(res.status, `create context: ${JSON.stringify(res.data)}`).toBeLessThan(300)
 }
 
-async function createDiscoveryConnector(
-  page: Page,
-  connectorName: string,
-  contextName: string
-): Promise<void> {
+async function createDiscoveryConnector(page: Page, connectorName: string): Promise<void> {
   await page.getByRole('link', { name: 'Installed Connectors', exact: true }).click()
   await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
   await page.getByRole('button', { name: 'Create Connector', exact: true }).click()
@@ -72,28 +60,24 @@ async function createDiscoveryConnector(
     .getByPlaceholder('Optional description of this connector')
     .fill('QA recorder discovery-only connector')
 
-  const contextDropdown = page.locator('.cu-selection-dropdown__button')
-  await expect(contextDropdown).toBeEnabled({ timeout: 20_000 })
-  await contextDropdown.click()
-  await expect(page.getByPlaceholder('Search contexts...')).toBeVisible({ timeout: 20_000 })
-  const contextOption = page.getByRole('option', { name: contextName, exact: true })
-  await expect(contextOption).toBeVisible({ timeout: 20_000 })
-  await contextOption.click()
-
-  await page.getByRole('button', { name: 'Continue', exact: true }).click()
-
+  // Runtime settings now live behind the collapsible Advanced options on the
+  // Connector step.
+  await page.getByText('Advanced options', { exact: true }).click()
   await fieldSelect(page, 'Transport Type', 'stdio')
   await expect(page.locator('input[type="number"]')).toHaveCount(0)
   await fieldSelect(page, 'Managed', 'false')
 
   await page.getByRole('button', { name: 'Continue', exact: true }).click()
 
-  await expect(page.getByText('External Egress', { exact: true })).toBeVisible({ timeout: 20_000 })
+  // Access step: the agents multi-select is optional — skip it.
+  await expect(page.getByRole('heading', { name: 'Agent access', exact: true })).toBeVisible({
+    timeout: 20_000,
+  })
   await page.getByRole('button', { name: 'Continue', exact: true }).click()
 
-  await expect(
-    page.getByRole('checkbox', { name: 'Use Kubernetes Secret for credentials', exact: true })
-  ).not.toBeChecked()
+  // Secrets step: explicitly pick the keyless credential mode — the wizard
+  // keeps Create connector disabled until a credential choice is made.
+  await page.getByText('No credentials required', { exact: true }).click()
 
   await page.getByRole('button', { name: 'Create connector', exact: true }).click()
   await expect(page.getByText('Connector created successfully.', { exact: true })).toBeVisible({
@@ -116,37 +100,52 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
     const credentials = adminCredentials()
     const contextName = uniqueE2EName('qa-recorder-context')
     const connectorName = uniqueE2EName('qa-recorder-connector')
+    let connectorContextName = ''
 
     try {
       await loginThroughUi(page, credentials)
 
       await createEmptyContext(page, contextName)
-      await createDiscoveryConnector(page, connectorName, contextName)
+      await createDiscoveryConnector(page, connectorName)
+
+      // The wizard provisions the connector's private access scope out of
+      // band; capture its name so the finally can tear it down too.
+      const createdRes = await api(
+        page.request,
+        'GET',
+        `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorName)}`
+      )
+      expect(createdRes.status, `read connector: ${JSON.stringify(createdRes.data)}`).toBe(200)
+      connectorContextName = String(
+        (createdRes.data.spec as { contextRef?: string } | undefined)?.contextRef || ''
+      )
+      expect(connectorContextName).toMatch(new RegExp(`^${connectorName}-[0-9]{5}$`))
 
       await page.goto(`${CONTROL_UI_URL}/connectors/${encodeURIComponent(connectorName)}/edit`)
       await expect(
         page.getByRole('heading', { name: `Edit Connector: ${connectorName}`, exact: true })
       ).toBeVisible({ timeout: 20_000 })
 
-      // Context is a read-only final tab. It mirrors the selected context's
-      // Users, Teams, and Agents access preview without offering a mutation.
-      await page.getByRole('tab', { name: 'Context', exact: true }).click()
+      // Access is a read-only final tab. It mirrors the agents, teams, and
+      // users that can already reach this connector without offering a
+      // mutation.
+      await page.getByRole('tab', { name: 'Access', exact: true }).click()
       await expect(page).toHaveURL(
-        new RegExp(`/connectors/${encodeURIComponent(connectorName)}/edit/context$`)
+        new RegExp(`/connectors/${encodeURIComponent(connectorName)}/edit/access$`)
       )
-      await expect(page.getByRole('heading', { name: 'Context access', exact: true })).toBeVisible({
+      await expect(page.getByRole('heading', { name: 'Agent access', exact: true })).toBeVisible({
         timeout: 20_000,
       })
-      await expect(page.getByLabel('Connector context').getByText(contextName)).toBeVisible()
-      await expect(page.getByLabel('Context access')).toBeVisible()
+      await expect(page.getByLabel('Agent access')).toBeVisible()
 
       await page.getByRole('tab', { name: 'External Egress', exact: true }).click()
 
-      // Image and Context are rendered as static read-only text (not editable inputs).
+      // Image and access scopes are rendered as static read-only text (not
+      // editable inputs).
       const meta = page.locator('.cu-connector-edit-meta')
       await expect(meta).toBeVisible({ timeout: 20_000 })
       await expect(meta.getByText('qa-recorder/example:dev')).toBeVisible()
-      await expect(meta.getByText(contextName)).toBeVisible()
+      await expect(meta.getByText(connectorContextName)).toBeVisible()
 
       // External Egress: switch to exact-CIDR mode and add one public CIDR + port.
       // 8.8.8.8/32 is a valid public target; the model rejects private/doc ranges.
@@ -174,6 +173,13 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
         'DELETE',
         `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorName)}`
       )
+      if (connectorContextName) {
+        await api(
+          page.request,
+          'DELETE',
+          `/api/v1/admin/contexts/${encodeURIComponent(connectorContextName)}`
+        )
+      }
       await api(page.request, 'DELETE', `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`)
     }
   })

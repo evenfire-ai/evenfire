@@ -17,14 +17,6 @@ export const CREATE_FLOW_LOADING = {
     steps: ['Channel', 'Routing'],
     stepFlowClassName: 'cu-create-step-flow--2',
   },
-  createContext: {
-    iconKey: 'group-work',
-    title: 'Create context',
-    subtitle: 'Define a new context and attach connectors.',
-    backLabel: 'Back to contexts',
-    steps: ['Context', 'Connectors'],
-    stepFlowClassName: 'cu-create-step-flow--2',
-  },
   createControlAdmin: {
     iconKey: 'settings',
     title: 'Invite admin',

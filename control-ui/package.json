@@ -1,6 +1,6 @@
 {
   "name": "clerum-control-ui",
-  "version": "0.1.460",
+  "version": "0.1.461",
   "private": true,
   "scripts": {
     "dev": "NEXT_IGNORE_INCORRECT_LOCKFILE=1 next dev",
@@ -11,7 +11,6 @@
     "qa:recorder:login": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-login.spec.ts",
     "qa:recorder:navigation": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-navigation.spec.ts",
     "qa:recorder:agents": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-agents.spec.ts",
-    "qa:recorder:contexts": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-contexts.spec.ts",
     "qa:recorder:connectors": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-connectors.spec.ts",
     "qa:recorder:external-channels": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-external-channels.spec.ts",
     "qa:recorder:llm-models": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-llm-models.spec.ts",
@@ -20,8 +19,6 @@
     "qa:recorder:traces": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-traces.spec.ts",
     "qa:recorder:settings": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-settings.spec.ts",
     "qa:recorder:marketplace": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-marketplace.spec.ts",
-    "qa:recorder:context-create": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-context-create.spec.ts",
-    "qa:recorder:context-connector": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-context-connector.spec.ts",
     "qa:recorder:connector-edit": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-connector-edit.spec.ts",
     "qa:recorder:llm-model-lifecycle": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-llm-model-lifecycle.spec.ts",
     "qa:recorder:secret-recipe": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-secret-recipe.spec.ts",
@@ -38,7 +35,6 @@
     "qa:recorder:llm-price": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-llm-price.spec.ts",
     "qa:recorder:onboarding-combo": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-onboarding-combo.spec.ts",
     "qa:recorder:cost-governance": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-cost-governance.spec.ts",
-    "qa:recorder:context-connector-budget": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-context-connector-budget.spec.ts",
     "qa:recorder:settings-account": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-settings-account.spec.ts",
     "qa:recorder:settings-password": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-settings-password.spec.ts",
     "qa:recorder:settings-email": "PLAYWRIGHT_BROWSERS_PATH=../.local-notes/qa-recorder/browsers playwright test --config=playwright.qa-recorder.config.ts qa-recorder-settings-email.spec.ts",

@@ -159,11 +159,6 @@ const nextConfig = {
       },
       { source: '/outputs', destination: '/agent-outputs/recipe-artifacts', permanent: true },
       { source: '/outputs/:path*', destination: '/agent-outputs/:path*', permanent: true },
-      {
-        source: '/contexts/:name/shared-files',
-        destination: '/contexts/:name/agent-files',
-        permanent: true,
-      },
       { source: '/secrets', destination: '/secrets/llm', permanent: true },
       { source: '/settings', destination: '/settings/ui', permanent: true },
       { source: '/traces/hosts', destination: '/traces', permanent: true },

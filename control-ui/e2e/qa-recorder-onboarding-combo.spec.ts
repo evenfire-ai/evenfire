@@ -1,7 +1,8 @@
 // control-ui/e2e/qa-recorder-onboarding-combo.spec.ts
 //
 // Mutating QA recorder combo: new-team onboarding (team → member invite →
-// context → grant context to team). Creates and tears down every resource.
+// context staged through the Control API → grant access to the team). Creates
+// and tears down every resource.
 // Requires QA_RECORDER_CONFIRM_MUTATIONS=1 in .env.qa-recorder.
 import { expect, test } from '@playwright/test'
 import {
@@ -95,39 +96,43 @@ test.describe('optional QA recorder: Control UI onboarding combo', () => {
         timeout: 20_000,
       })
       await expect(
-        page.getByText('Members, contexts, and agent access.', { exact: true })
+        page.getByText('Members, connector access, and agents.', { exact: true })
       ).toBeVisible({ timeout: 20_000 })
       await expect(page.getByText(memberEmail, { exact: true })).toBeVisible({ timeout: 15_000 })
 
-      // step 4: create a context (name only).
-      await page.goto(`${CONTROL_UI_URL}/contexts/new`)
-      await expect(page).toHaveURL(/\/contexts\/new$/, { timeout: 20_000 })
-      await page.getByLabel('Context name').fill(contextName)
-      await page.getByRole('button', { name: 'Continue', exact: true }).click()
-      await page.getByRole('button', { name: 'Create context', exact: true }).click()
-      await expect(page).toHaveURL(new RegExp(`/contexts/${contextName}$`), { timeout: 20_000 })
+      // step 4: create a context (name only) through the Control API — the
+      // /contexts UI is gone.
+      const ctxRes = await api(page.request, 'POST', '/api/v1/admin/contexts', {
+        metadata: { name: contextName },
+        spec: {
+          contextId: contextName,
+          description: 'QA recorder combo context',
+          mcpServers: [],
+        },
+      })
+      expect(ctxRes.status, `create context: ${JSON.stringify(ctxRes.data)}`).toBeLessThan(300)
 
-      // step 5: grant the context to the team from the team Contexts tab.
+      // step 5: grant the access scope to the team from the team Access tab.
       await page.goto(
-        `${CONTROL_UI_URL}/users-and-teams/teams/${encodeURIComponent(teamId)}/contexts`
+        `${CONTROL_UI_URL}/users-and-teams/teams/${encodeURIComponent(teamId)}/access`
       )
-      await expect(page).toHaveURL(/\/users-and-teams\/teams\/.+\/contexts$/, {
+      await expect(page).toHaveURL(/\/users-and-teams\/teams\/.+\/access$/, {
         timeout: 20_000,
       })
       await expect(
-        page.getByText('Members, contexts, and agent access.', { exact: true })
+        page.getByText('Members, connector access, and agents.', { exact: true })
       ).toBeVisible({ timeout: 20_000 })
-      await page.getByRole('button', { name: 'Add context', exact: true }).click()
-      await expect(page.locator('#team-context-picker')).toBeVisible({ timeout: 5_000 })
-      await page.locator('#team-context-picker').fill(contextName)
-      const contextOption = page.getByRole('option', { name: contextName, exact: true })
-      await expect(contextOption).toBeVisible({ timeout: 10_000 })
-      await contextOption.click()
+      await page.getByRole('button', { name: 'Add access', exact: true }).click()
+      await expect(page.locator('#team-access-picker')).toBeVisible({ timeout: 5_000 })
+      await page.locator('#team-access-picker').fill(contextName)
+      const accessOption = page.getByRole('option', { name: contextName, exact: true })
+      await expect(accessOption).toBeVisible({ timeout: 10_000 })
+      await accessOption.click()
       await page
         .getByRole('dialog')
-        .getByRole('button', { name: 'Add context', exact: true })
+        .getByRole('button', { name: 'Add access', exact: true })
         .click()
-      await expect(page.getByRole('button', { name: contextName, exact: true })).toBeVisible({
+      await expect(page.getByText('Team access updated.', { exact: true })).toBeVisible({
         timeout: 15_000,
       })
 

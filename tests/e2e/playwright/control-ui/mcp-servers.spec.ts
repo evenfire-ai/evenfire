@@ -26,7 +26,6 @@ test.describe('Control UI — MCP Servers', () => {
     await expect(authedPage.getByRole('button', { name: 'Install from Registry' })).toBeVisible()
     await expect(authedPage.getByRole('button', { name: 'Create MCP Server' })).toBeVisible()
     await expect(authedPage.locator(CUI_DASHBOARD.CREATE_HOST_BUTTON)).toBeHidden()
-    await expect(authedPage.locator(CUI_DASHBOARD.CREATE_CONTEXT_BUTTON)).toBeHidden()
     await expect(
       authedPage
         .locator('tbody tr')
@@ -35,10 +34,9 @@ test.describe('Control UI — MCP Servers', () => {
     ).toBeVisible()
   })
 
-  test('shows at least the chatllm MCP server entries from context1', async ({ authedPage }) => {
-    // context1 should have MCP servers configured via the cluster
+  test('shows at least the chatllm MCP server entries', async ({ authedPage }) => {
     const tableOrEmpty = authedPage.locator('table, p, div').filter({
-      hasText: /context1|chatllm|mongodb|No MCP/i,
+      hasText: /chatllm|mongodb|No MCP/i,
     })
     await expect(tableOrEmpty.first()).toBeVisible({ timeout: 15_000 })
   })
