@@ -148,20 +148,31 @@ Never hardcode `700`, `0.06em`, `11px`, or `var(--font-size-xs)` / `var(--text-d
 
 ## 4. Common Controls — Use Them
 
-Imports come from `@components/Common`. The established form and status
-primitives include:
+Imports come from `@components/Common`. Treat `src/components/Common/index.ts`
+as the supported shared boundary: pages must use exported Common primitives
+instead of inventing local equivalents. The current exported set is:
 
-| Primitive      | Key API                                                          |
-| -------------- | ---------------------------------------------------------------- |
-| `Button`       | `variant`, `color`, `size`, `block`, `loading`, `align`          |
-| `TextInput`    | `dense` + native `<input>` props                                 |
-| `SelectInput`  | `dense` + native `<select>` props (children = `<option>`s)       |
-| `Field`        | `label`, `hint`, `htmlFor`, `labelClassName`, `wrapperClassName` |
-| `Badge`        | `tone: 'neutral' \| 'accent' \| 'success'`                       |
-| `StatusBanner` | `text`, `tone`, `leadingIcon?`                                   |
-| `EmptyState`   | `title`, `body`                                                  |
-| `DetailRow`    | `label`, `value`                                                 |
-| `ToastStack`   | `items: ToastMessage[]`                                          |
+| Primitive          | Key API                                                          |
+| ------------------ | ---------------------------------------------------------------- |
+| `Badge`            | `tone: 'neutral' \| 'accent' \| 'success'`                       |
+| `Button`           | `variant`, `color`, `size`, `block`, `loading`, `align`          |
+| `DataTable`        | native table props, `compact`, `fullBleed`, `frameless`          |
+| `DataTableFilter`  | `options`, `value`, `onChange`, `variant`                        |
+| `DetailRow`        | `label`, `value`                                                 |
+| `DropdownSelect`   | `options`, `value`, `onChange`, `placeholder`                    |
+| `EmptyState`       | `title`, `body`                                                  |
+| `Field`            | `label`, `hint`, `htmlFor`, `labelClassName`, `wrapperClassName` |
+| `IconButton`       | icon button props                                                |
+| `MenuItem`         | menu item props                                                  |
+| `NavItem`          | navigation item props                                            |
+| `Pill`             | pill props                                                       |
+| `ReferenceTag`     | `kind`, `children`, optional button props                        |
+| `SelectInput`      | `dense` + native `<select>` props (children = `<option>`s)       |
+| `SelectableOption` | selectable option props                                          |
+| `StatusBanner`     | `text` or `children`, `tone`, `leadingIcon?`, `compact`          |
+| `TabButton`        | tab button props                                                 |
+| `TextInput`        | `dense` + native `<input>` props                                 |
+| `ToastStack`       | `items: ToastMessage[]`                                          |
 
 Button-, menu-, navigation-, and option-like UI must also reuse `IconButton`,
 `TabButton`, `MenuItem`, `NavItem`, `Pill`, and `SelectableOption` from this
