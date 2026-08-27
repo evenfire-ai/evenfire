@@ -88,6 +88,10 @@ export type NetPolOrphanSweepCapReason = 'absolute' | 'percent'
  * strict `>`: exactly `absoluteCap` candidates still delete. The percent
  * rule is inert on a tiny listed fleet (`percent*listed < 1`) so a single
  * real orphan cannot look like a cache-wipe.
+ *
+ * Runs on every `fullReconcile` (startup, event-driven, and the resync
+ * timer), not only a periodic tick. A legitimate bulk offboarding above
+ * the cap withholds certification until an operator raises the env.
  */
 export function evaluateNetPolOrphanSweepCap(
   orphanCount: number,

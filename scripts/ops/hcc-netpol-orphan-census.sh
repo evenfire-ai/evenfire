@@ -7,7 +7,13 @@
 #
 # CONTEXT_MAPPER_* knobs are read from the live host-context-controller
 # Deployment. Code defaults are never printed as cluster facts: an absent
-# env is UNSET.
+# env is UNSET. `live_cap_would_trip` therefore stays none when the
+# Deployment omitted the cap keys.
+#
+# The running controller still applies compiled defaults in that case
+# (absolute 10, percent 20 — host-context-controller/src/config.ts).
+# `controller_cap_would_trip` answers that question so a reader cannot
+# treat live_cap_would_trip=none as "the sweep will proceed".
 #
 # Double-samples 90s apart. Adjudicates only when the desired Context +
 # McpServer identity set is identical across samples; otherwise
@@ -155,6 +161,22 @@ echo "[census] listed_managed=${LISTED} orphan_count=${ORPHAN_COUNT}"
 echo "[census] orphans (namespace name policy-type):"
 printf "%s" "${SAMPLE2}" | sed -n "/^ORPHANS<<EOF/,/^EOF/{ /^ORPHANS<<EOF/d; /^EOF/d; p; }"
 
+# Controller compiled defaults (config.ts). Used only for
+# controller_cap_would_trip, never as a substitute for live env.
+COMPILED_ABS_DEFAULT=10
+COMPILED_PCT_DEFAULT=20
+
+cap_would_trip() {
+  local orphan_count="$1" listed="$2" abs="$3" pct="$4"
+  if [[ "${orphan_count}" -gt "${abs}" ]]; then
+    printf "absolute"
+  elif [[ "${listed}" -gt 0 && $((listed * pct)) -ge 100 && $((orphan_count * 100)) -gt $((listed * pct)) ]]; then
+    printf "percent"
+  else
+    printf "none"
+  fi
+}
+
 CAP_REASON="none"
 if [[ "${ORPHAN_CAP}" != "UNSET" && "${ORPHAN_COUNT}" -gt "${ORPHAN_CAP}" ]]; then
   CAP_REASON="absolute"
@@ -165,7 +187,19 @@ elif [[ "${ORPHAN_CAP_PCT}" != "UNSET" && "${LISTED}" -gt 0 ]]; then
   fi
 fi
 
+CONTROLLER_ABS="${ORPHAN_CAP}"
+CONTROLLER_PCT="${ORPHAN_CAP_PCT}"
+if [[ "${CONTROLLER_ABS}" == "UNSET" ]]; then
+  CONTROLLER_ABS="${COMPILED_ABS_DEFAULT}"
+fi
+if [[ "${CONTROLLER_PCT}" == "UNSET" ]]; then
+  CONTROLLER_PCT="${COMPILED_PCT_DEFAULT}"
+fi
+CONTROLLER_CAP_REASON="$(cap_would_trip "${ORPHAN_COUNT}" "${LISTED}" "${CONTROLLER_ABS}" "${CONTROLLER_PCT}")"
+
 echo "[census] live_cap_would_trip=${CAP_REASON}"
+echo "[census] compiled_default_absolute=${COMPILED_ABS_DEFAULT} compiled_default_percent=${COMPILED_PCT_DEFAULT}"
+echo "[census] controller_cap_would_trip=${CONTROLLER_CAP_REASON} (live env, else compiled defaults)"
 if [[ "${ORPHAN_COUNT}" -eq 0 ]]; then
   echo "[census] VERDICT=CLEAN"
 else
