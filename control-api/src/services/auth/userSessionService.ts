@@ -388,12 +388,12 @@ export async function revokeAllUserSessions(
   userId: string,
   reason: string,
   db?: SessionDatabase,
-  now = new Date()
+  now: Date | (() => Date) = () => new Date()
 ): Promise<number> {
   const work = async (transaction: SessionDatabase) => {
-    const revokedAt = atSecond(now)
     const user = await transaction.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [userId])
     if ((user.rowCount ?? 0) === 0) return 0
+    const revokedAt = atSecond(resolveClock(now))
 
     await transaction.query(
       `INSERT INTO external_user_session_security_epochs(user_id, valid_after, reason, updated_at)
