@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
+import { ApiException } from '@kubernetes/client-node'
 import type * as k8s from '@kubernetes/client-node'
 import {
   preserveServiceAssignedFields,
   replaceWithConflictRetry,
   serviceMatchesDesired,
 } from '../utils'
+
+function apiException(code: number): ApiException<unknown> {
+  return new ApiException(code, 'test', {}, {})
+}
 
 const desired: k8s.V1Service = {
   apiVersion: 'v1',
@@ -95,9 +100,9 @@ describe('replaceWithConflictRetry order and retry', () => {
   })
 
   it.each([
-    { status: 403, form: 'code', error: { code: 403 } },
+    { status: 403, form: 'ApiException', error: apiException(403) },
     { status: 403, form: 'statusCode', error: { response: { statusCode: 403 } } },
-    { status: 500, form: 'code', error: { code: 500 } },
+    { status: 500, form: 'ApiException', error: apiException(500) },
     { status: 500, form: 'statusCode', error: { response: { statusCode: 500 } } },
   ])('TOCTOU-NP-2: helper read $status ($form) still throws', async ({ error }) => {
     const replace = vi.fn()
@@ -123,7 +128,7 @@ describe('replaceWithConflictRetry order and retry', () => {
   })
 
   it.each([
-    { form: 'code', error: { code: 404 } },
+    { form: 'ApiException', error: apiException(404) },
     { form: 'statusCode', error: { response: { statusCode: 404 } } },
   ])(
     'TOCTOU-NP-3: replace 409 then second read 404 ($form) returns without a third replace',
@@ -177,7 +182,7 @@ describe('replaceWithConflictRetry order and retry', () => {
   })
 
   it.each([
-    { form: 'code', error: { code: 404 } },
+    { form: 'ApiException', error: apiException(404) },
     { form: 'statusCode', error: { response: { statusCode: 404 } } },
   ])('TOCTOU-NP-5: helper replace 404 ($form) still throws', async ({ error }) => {
     const read = vi.fn().mockResolvedValue(existing)
@@ -200,9 +205,9 @@ describe('replaceWithConflictRetry order and retry', () => {
   })
 
   it.each([
-    { status: 403, form: 'code', error: { code: 403 } },
+    { status: 403, form: 'ApiException', error: apiException(403) },
     { status: 403, form: 'statusCode', error: { response: { statusCode: 403 } } },
-    { status: 500, form: 'code', error: { code: 500 } },
+    { status: 500, form: 'ApiException', error: apiException(500) },
     { status: 500, form: 'statusCode', error: { response: { statusCode: 500 } } },
   ])(
     'TOCTOU-NP-6: replace 409 then second read $status ($form) still throws',

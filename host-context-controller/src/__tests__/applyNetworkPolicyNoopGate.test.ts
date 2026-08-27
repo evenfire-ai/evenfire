@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
+import { ApiException } from '@kubernetes/client-node'
 import type * as k8s from '@kubernetes/client-node'
 import { applyNetworkPolicy, networkPolicyMatchesDesired } from '../utils'
 import { asApiserverNetworkPolicy, updatedPolicyLogs } from './asApiserverNetworkPolicy'
+
+function apiException(code: number): ApiException<unknown> {
+  return new ApiException(code, 'test', {}, {})
+}
 
 function desiredPolicy(): k8s.V1NetworkPolicy {
   return {
@@ -99,7 +104,7 @@ describe('applyNetworkPolicy no-op gate', () => {
   })
 
   it.each([
-    { form: 'code', error: { code: 404 } },
+    { form: 'ApiException', error: apiException(404) },
     { form: 'statusCode', error: { response: { statusCode: 404 } } },
   ])('TOCTOU-NP-1: create 409 + read 404 ($form) returns without replace', async ({ error }) => {
     const api = fakeNetworkingApi()
@@ -116,11 +121,11 @@ describe('applyNetworkPolicy no-op gate', () => {
   })
 
   it.each([
-    { status: 403, form: 'code', error: { code: 403 } },
+    { status: 403, form: 'ApiException', error: apiException(403) },
     { status: 403, form: 'statusCode', error: { response: { statusCode: 403 } } },
-    { status: 500, form: 'code', error: { code: 500 } },
+    { status: 500, form: 'ApiException', error: apiException(500) },
     { status: 500, form: 'statusCode', error: { response: { statusCode: 500 } } },
-  ])('TOCTOU-NP-2: create 409 + read $status ($form) still throws', async ({ error }) => {
+  ])('TOCTOU-NP-2-APPLY: create 409 + read $status ($form) still throws', async ({ error }) => {
     const api = fakeNetworkingApi()
     api.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
     api.readNamespacedNetworkPolicy.mockRejectedValue(error)
