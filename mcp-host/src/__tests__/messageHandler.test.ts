@@ -138,7 +138,7 @@ describe('IncomingMessageHandler', () => {
 
     const approval = buildConnectRequiredApproval(
       { id: 'tc_1', name: 'monday__list_boards', arguments: { limit: 5 } },
-      { mcpServerName: 'monday', provider: 'monday' }
+      { mcpServerName: 'monday' }
     )
     deps.agent.emit('tool:approval_needed', {
       data: {
@@ -148,7 +148,6 @@ describe('IncomingMessageHandler', () => {
         notification: 'Connect monday to continue',
         reason: approval.reason,
         mcpServerName: approval.mcpServerName,
-        provider: approval.provider,
       },
     })
 
@@ -157,8 +156,8 @@ describe('IncomingMessageHandler', () => {
     expect(result.approval).toMatchObject({
       reason: 'connect_required',
       mcpServerName: 'monday',
-      provider: 'monday',
     })
+    expect(result.approval).not.toHaveProperty('provider')
   })
 
   it('resolves a generic waiting_approval without connect fields (back-compat, sync path)', async () => {
@@ -299,7 +298,7 @@ describe('IncomingMessageHandler', () => {
 
       const approval = buildConnectRequiredApproval(
         { id: 'tc_1', name: 'monday__list_boards', arguments: { limit: 5 } },
-        { mcpServerName: 'monday', provider: 'monday' }
+        { mcpServerName: 'monday' }
       )
       deps.agent.emit('tool:approval_needed', {
         data: {
@@ -309,7 +308,6 @@ describe('IncomingMessageHandler', () => {
           notification: 'Connect monday to continue',
           reason: approval.reason,
           mcpServerName: approval.mcpServerName,
-          provider: approval.provider,
         },
       })
 
@@ -320,8 +318,8 @@ describe('IncomingMessageHandler', () => {
       expect(stored!.approval).toMatchObject({
         reason: 'connect_required',
         mcpServerName: 'monday',
-        provider: 'monday',
       })
+      expect(stored!.approval).not.toHaveProperty('provider')
     })
 
     it('stores a generic async approval without connect fields (back-compat)', async () => {

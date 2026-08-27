@@ -2,100 +2,80 @@
  * U5 — durable round-trip of a `connect_required` suspension.
  *
  * A reactive OAuth-consent suspension must survive a cold restart WITHOUT
- * degrading into a generic approval. This drives a REAL in-memory SQLite DB
- * through every migration (incl. 013), inserts a connect_required row via the
- * real prepared statement, reads it back via the real select, and reconstructs
- * the PendingApproval — asserting reason/mcpServerName/provider are preserved.
+ * degrading into a generic approval. This drives the REAL producer end to end:
+ * a PendingApproval (built by the real U5 builder) → store.persistSuspend →
+ * the real insert statement → the real select → reconstructPendingApproval,
+ * asserting reason/mcpServerName are preserved.
  *
- * The row shape is `PendingApprovalRow`, the exact interface `persistSuspend`
- * fills (T1: no ad-hoc fixture standing in for another layer — the DB schema and
- * statements under test are the real ones).
+ * T1: the persisted row is NOT hand-written — it is whatever persistSuspend
+ * actually maps from the PendingApproval. A typo in that mapping (e.g. writing a
+ * non-existent column, so mcp_server_name lands NULL) now turns this test red,
+ * where a hand-built PendingApprovalRow would have masked it (R3-M2).
  */
-import { describe, expect, it } from 'vitest'
-import Database from 'better-sqlite3'
-import { migrations } from '../../../../db/migrations'
+import { afterEach, describe, expect, it } from 'vitest'
 import { prepareStatements } from '../../../../db/statements'
 import type { PendingApprovalRow } from '../../../../db/worker/protocol'
+import { buildConnectRequiredApproval } from '../../../extensions/mcpApprovalGateController'
+import type { PendingApproval } from '../../../types'
+import { ConversationManager } from '../../conversation'
 import { reconstructPendingApproval } from '../reconstruct'
+import { type StoreHandle, makeSqliteStore } from './testHelpers'
 
-function freshDb(): Database.Database {
-  const db = new Database(':memory:')
-  for (const migration of migrations) migration.up(db)
-  return db
-}
+const SESSION_KEY = 'user-u5:rpc:agent:default'
 
-function connectRow(): PendingApprovalRow {
-  return {
-    request_id: 'req-connect-1',
-    session_id: 'session-1',
-    task_id: 'task-1',
-    tool_name: 'monday__list_boards',
-    tool_call_id: 'call-1',
-    parameters: '{}',
-    description: 'Connect monday to continue',
-    context_snapshot: '[]',
-    completed_results: null,
-    intent_summary: 'Using monday...',
-    source_message: null,
-    registered_at: 0,
-    expires_at: 9999999999,
-    trace_context: null,
-    reason: 'connect_required',
-    mcp_server_name: 'monday',
-    provider: 'monday',
-  }
+let handle: StoreHandle | undefined
+afterEach(async () => {
+  await handle?.shutdown()
+  handle = undefined
+})
+
+/** Persist a suspension through the REAL producer and read the reconstructed
+ *  PendingApproval back through the REAL select + reconstruct. */
+async function roundTrip(approval: PendingApproval): Promise<PendingApproval> {
+  handle = makeSqliteStore()
+  const manager = new ConversationManager(handle.store)
+  const conv = await manager.getOrCreate(SESSION_KEY)
+  // startTurn registers the session (sessionKeyById) and the active task that
+  // persistSuspend requires.
+  await manager.startTurn(conv, 'do the thing', 'task-1')
+
+  await handle.store.persistSuspend(conv, approval)
+
+  const s = prepareStatements(handle.worker.db)
+  const row = s.selectPendingApprovalBySession.get(conv.id) as PendingApprovalRow
+  return reconstructPendingApproval(row)
 }
 
 describe('U5 — connect_required durable round-trip', () => {
-  it('preserves reason/mcpServerName/provider through insert → select → reconstruct', () => {
-    const db = freshDb()
-    const s = prepareStatements(db)
+  it('preserves reason/mcpServerName from persistSuspend through select → reconstruct', async () => {
+    // Fixture derived from the REAL U5 producer, not hand-authored.
+    const approval = buildConnectRequiredApproval(
+      { id: 'call-1', name: 'monday__list_boards', arguments: { limit: 5 } },
+      { mcpServerName: 'monday' }
+    )
 
-    db.prepare(
-      `INSERT INTO sessions (id, session_key, source, started_at, state, active_task_id)
-       VALUES (?, ?, 'rpc', 0, 'awaiting_approval', ?)`
-    ).run('session-1', 'user:rpc:agent:chat', 'task-1')
-
-    s.insertPendingApproval.run(connectRow())
-
-    const row = s.selectPendingApprovalBySession.get('session-1') as PendingApprovalRow
-    const approval = reconstructPendingApproval(row)
+    const rehydrated = await roundTrip(approval)
 
     // Observable: the rehydrated suspension is a connect_required, not a generic
-    // approval, and it still names the oauth server + provider.
-    expect(approval.reason).toBe('connect_required')
-    expect(approval.mcpServerName).toBe('monday')
-    expect(approval.provider).toBe('monday')
-    expect(approval.tool_name).toBe('monday__list_boards')
-    db.close()
+    // approval, and it still names the oauth server.
+    expect(rehydrated.reason).toBe('connect_required')
+    expect(rehydrated.mcpServerName).toBe('monday')
+    expect(rehydrated.tool_name).toBe('monday__list_boards')
   })
 
-  it('a legacy/approval row rehydrates as a generic approval (reason undefined)', () => {
-    const db = freshDb()
-    const s = prepareStatements(db)
-
-    db.prepare(
-      `INSERT INTO sessions (id, session_key, source, started_at, state, active_task_id)
-       VALUES (?, ?, 'rpc', 0, 'awaiting_approval', ?)`
-    ).run('session-2', 'user:rpc:agent:chat', 'task-2')
-
-    const legacy: PendingApprovalRow = {
-      ...connectRow(),
+  it('a generic HITL approval rehydrates with no reason/mcpServerName', async () => {
+    const approval: PendingApproval = {
       request_id: 'req-approval-1',
-      session_id: 'session-2',
-      task_id: 'task-2',
-      reason: null,
-      mcp_server_name: null,
-      provider: null,
+      tool_name: 'internal__do',
+      parameters: {},
+      description: 'Approve internal__do',
+      tool_call_id: 'call-2',
+      context_snapshot: [],
     }
-    s.insertPendingApproval.run(legacy)
 
-    const row = s.selectPendingApprovalBySession.get('session-2') as PendingApprovalRow
-    const approval = reconstructPendingApproval(row)
+    const rehydrated = await roundTrip(approval)
 
-    expect(approval.reason).toBeUndefined()
-    expect(approval.mcpServerName).toBeUndefined()
-    expect(approval.provider).toBeUndefined()
-    db.close()
+    expect(rehydrated.reason).toBeUndefined()
+    expect(rehydrated.mcpServerName).toBeUndefined()
   })
 })

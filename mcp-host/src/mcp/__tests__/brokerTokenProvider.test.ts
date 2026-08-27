@@ -68,6 +68,38 @@ describe('createBrokerTokenProvider — fail-closed contract', () => {
     expect(f).toHaveBeenCalledTimes(2)
   })
 
+  it('re-consults the broker for a non-expiring (expiresAt:null) token once its max age elapses (R1-M1)', async () => {
+    // control-api emits expiresAt:null for non-expiring upstream tokens (Notion/
+    // ClickUp always). An ACTIVE partition never idle-evicts and such a token
+    // never 401s upstream, so without a hard re-consult cap a grant revoked in
+    // control-api would be honored forever. Assert the cap re-consults the broker
+    // and fails closed once the grant is gone.
+    let clock = 1_000_000
+    let revoked = false
+    const f = stubFetch(() =>
+      revoked
+        ? jsonResponse(404, { error: 'no_grant' })
+        : jsonResponse(200, { token: 'tok', expiresAt: null })
+    )
+    const p = createBrokerTokenProvider(
+      { name: 'gh' },
+      { userId: 'alice' },
+      deps(f, { now: () => clock })
+    )
+    expect(await p.resolve()).toBe('tok')
+    expect(f).toHaveBeenCalledTimes(1)
+    // Still within the max age → cached, no re-consult.
+    clock += 60_000
+    expect(await p.resolve()).toBe('tok')
+    expect(f).toHaveBeenCalledTimes(1)
+    // Past the max age (1h ≫ NULL_EXPIRY_MAX_AGE_MS) → re-consults the broker;
+    // the grant is now revoked → fail-closed undefined, call not forwarded.
+    clock += 3_600_000
+    revoked = true
+    expect(await p.resolve()).toBeUndefined()
+    expect(f).toHaveBeenCalledTimes(2)
+  })
+
   it('refresh() forces a fresh POST even when a valid token is cached', async () => {
     const f = stubFetch(() => jsonResponse(200, { token: 'tok', expiresAt: null }))
     const p = createBrokerTokenProvider({ name: 'gh' }, { userId: 'alice' }, deps(f))
@@ -157,11 +189,16 @@ describe('createBrokerTokenProvider — fail-closed contract', () => {
     await expect(p.resolve()).rejects.toThrow(/abort/i)
   })
 
-  it('grantScope=context subject POSTs contextId', async () => {
+  it('oauth-context subject POSTs no identity — control-api resolves the context server-side', async () => {
+    // The production factory (main.ts createMcpTokenProviderFactory) builds the
+    // oauth-context provider with an EMPTY subject `{}` — control-api keys the
+    // shared grant by server.spec.contextRef (authoritative) and mcp-host
+    // transports no context identity (invariant I1). Assert the shape the factory
+    // actually emits, not a contextId the host never sends (R2-M3).
     const f = stubFetch(() => jsonResponse(200, { token: 'ctx-tok', expiresAt: null }))
-    const p = createBrokerTokenProvider({ name: 'gh' }, { contextId: 'ctx-1' }, deps(f))
+    const p = createBrokerTokenProvider({ name: 'gh' }, {}, deps(f))
     expect(await p.resolve()).toBe('ctx-tok')
-    expect(bodyOf(f)).toEqual({ mcpServerName: 'gh', contextId: 'ctx-1' })
+    expect(bodyOf(f)).toEqual({ mcpServerName: 'gh' })
   })
 })
 

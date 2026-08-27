@@ -50,7 +50,6 @@ export interface PendingTaskEntry {
     // generic approval (back-compat).
     reason?: 'approval_required' | 'connect_required'
     mcpServerName?: string
-    provider?: string
   }
 }
 
@@ -65,19 +64,17 @@ export interface PendingTaskEntry {
 function connectApprovalFields(data: Record<string, unknown>): {
   reason?: 'approval_required' | 'connect_required'
   mcpServerName?: string
-  provider?: string
 } {
   const reason = data.reason as 'approval_required' | 'connect_required' | undefined
   const isConnect = reason === 'connect_required'
   return {
     ...(reason ? { reason } : {}),
-    // mcpServerName/provider ride ONLY connect_required, matching the SSE producer.
+    // mcpServerName rides ONLY connect_required, matching the SSE producer.
     // Runtime typeof guard: never pass a non-string through the blind cast even if
     // an upstream contract ever regressed.
     ...(isConnect && typeof data.mcpServerName === 'string'
       ? { mcpServerName: data.mcpServerName }
       : {}),
-    ...(isConnect && typeof data.provider === 'string' ? { provider: data.provider } : {}),
   }
 }
 

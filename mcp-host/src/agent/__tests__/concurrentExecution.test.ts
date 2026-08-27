@@ -138,10 +138,10 @@ describe('AgentStateMachine -- concurrent execution', () => {
   // same discriminator the SSE `suspended` event does, so the desktop renders
   // "Connect <server>" instead of a generic approval. Fixture built by the REAL
   // producer (buildConnectRequiredApproval), never hand-shaped (T1).
-  it('getPendingApprovals surfaces reason/mcpServerName/provider for a connect_required suspension', async () => {
+  it('getPendingApprovals surfaces reason/mcpServerName for a connect_required suspension', async () => {
     const approval = buildConnectRequiredApproval(
       { id: 'tc_connect', name: 'monday__list_boards', arguments: { limit: 5 } },
-      { mcpServerName: 'monday', provider: 'monday' }
+      { mcpServerName: 'monday' }
     )
     ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       type: 'need_approval',
@@ -156,8 +156,8 @@ describe('AgentStateMachine -- concurrent execution', () => {
     expect(pending[0]).toMatchObject({
       reason: 'connect_required',
       mcpServerName: 'monday',
-      provider: 'monday',
     })
+    expect(pending[0]).not.toHaveProperty('provider')
   })
 
   it('getPendingApprovals leaves a generic approval free of connect fields (back-compat)', async () => {
@@ -186,7 +186,7 @@ describe('AgentStateMachine -- concurrent execution', () => {
   it('emits tool:approval_needed carrying the connect_required discriminator', async () => {
     const approval = buildConnectRequiredApproval(
       { id: 'tc_connect', name: 'monday__list_boards', arguments: { limit: 5 } },
-      { mcpServerName: 'monday', provider: 'monday' }
+      { mcpServerName: 'monday' }
     )
     ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       type: 'need_approval',
@@ -203,8 +203,8 @@ describe('AgentStateMachine -- concurrent execution', () => {
     expect(events[0].data).toMatchObject({
       reason: 'connect_required',
       mcpServerName: 'monday',
-      provider: 'monday',
     })
+    expect(events[0].data).not.toHaveProperty('provider')
   })
 
   it('should resolve approval by requestId and resume execution', async () => {

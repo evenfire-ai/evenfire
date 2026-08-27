@@ -470,3 +470,62 @@ describe('McpServerTable — context membership', () => {
     )
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Row actions kebab
+// ─────────────────────────────────────────────────────────────────────────────
+describe('McpServerTable — row actions kebab', () => {
+  it('exposes Edit and Remove via a single kebab menu per row and routes the click to the matching handler', async () => {
+    const onEdit = vi.fn()
+    const onDelete = vi.fn().mockResolvedValue(undefined)
+    const items = [makeItem({ name: 'airtable-server' })]
+
+    render(<McpServerTable items={items} onEdit={onEdit} onDelete={onDelete} />)
+
+    const trigger = screen.getByRole('button', { name: 'Actions for connector airtable-server' })
+    fireEvent.click(trigger)
+
+    const editItem = await screen.findByRole('menuitem', { name: 'Edit' })
+    const deleteItem = screen.getByRole('menuitem', { name: 'Delete' })
+    expect(deleteItem).toHaveClass('cu-kebab__item--danger')
+
+    fireEvent.click(editItem)
+    expect(onEdit).toHaveBeenCalledWith({ namespace: 'mcp-server', name: 'airtable-server' })
+    expect(onDelete).not.toHaveBeenCalled()
+
+    fireEvent.click(trigger)
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    await waitFor(() =>
+      expect(onDelete).toHaveBeenCalledWith({ namespace: 'mcp-server', name: 'airtable-server' })
+    )
+  })
+
+  it('disables only the Remove item while a delete is in flight and renames it to Deleting…', () => {
+    const onDelete = vi.fn().mockResolvedValue(undefined)
+    const items = [makeItem({ name: 'airtable-server' })]
+    render(
+      <McpServerTable
+        items={items}
+        onEdit={vi.fn()}
+        onDelete={onDelete}
+        deletingKey="mcp-server/airtable-server"
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for connector airtable-server' }))
+
+    const editItem = screen.getByRole('menuitem', { name: 'Edit' })
+    const deletingItem = screen.getByRole('menuitem', { name: 'Deleting…' })
+
+    expect(editItem).not.toBeDisabled()
+    expect(deletingItem).toBeDisabled()
+  })
+
+  it('renders no kebab when neither onEdit nor onDelete is provided', () => {
+    const items = [makeItem({ name: 'airtable-server' })]
+    render(<McpServerTable items={items} />)
+    expect(
+      screen.queryByRole('button', { name: 'Actions for connector airtable-server' })
+    ).not.toBeInTheDocument()
+  })
+})

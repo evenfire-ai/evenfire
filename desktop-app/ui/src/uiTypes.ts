@@ -178,7 +178,6 @@ export interface SuspendedInfo {
    *  is the server to connect. Absent on ordinary approval suspensions. */
   reason?: string
   mcpServerName?: string
-  provider?: string
 }
 
 export interface TaskProgress {

@@ -411,11 +411,13 @@ export function ProgressStepper({
   if (status === 'suspended') {
     const info = progress.suspendedInfo
     // U5: a `connect_required` suspension renders a "Connect <server>" prompt and
-    // a Connect button (opens the provider OAuth flow) instead of Approve/Deny.
+    // a Connect button (opens the provider OAuth flow) — NEVER Approve/Deny.
     // `canConnect` requires BOTH the marker and a usable `onConnect` (which the
-    // caller only wires when `mcpServerName` is present) — a connect_required
-    // without an actionable connect falls back to the generic Approve/Deny prompt
-    // rather than rendering a dead-end suspended block with no action.
+    // caller only wires when `mcpServerName` is present). If a connect_required
+    // ever arrives without an actionable connect (defensive — mcp-host always
+    // emits mcpServerName), it renders an explanatory suspended state with Cancel,
+    // NOT Approve/Deny: approving would resume with no grant → another 401 → a
+    // re-suspension loop (the loop sessionFsm.ts guards against).
     const isConnect = info?.reason === 'connect_required'
     const connectServer = info?.mcpServerName || 'the connector'
     const canConnect = isConnect && !!onConnect
@@ -426,12 +428,14 @@ export function ProgressStepper({
           <span className="stepper-suspended-label">
             {canConnect
               ? `Connect ${connectServer} to continue`
-              : info
-                ? `${formatToolApprovalLabel({
-                    displayName: info.displayName,
-                    toolName: info.toolName,
-                  })} requires approval`
-                : 'Waiting for approval...'}
+              : isConnect
+                ? 'A connector must be reconnected to continue. Cancel and retry if this persists.'
+                : info
+                  ? `${formatToolApprovalLabel({
+                      displayName: info.displayName,
+                      toolName: info.toolName,
+                    })} requires approval`
+                  : 'Waiting for approval...'}
           </span>
           {onCancel && (
             <IconButton
@@ -468,7 +472,7 @@ export function ProgressStepper({
             </Button>
           </div>
         )}
-        {info && !canConnect && (onApprove || onDeny) && (
+        {info && !canConnect && !isConnect && (onApprove || onDeny) && (
           <div className="stepper-approval-actions">
             {onApprove && (
               <Button

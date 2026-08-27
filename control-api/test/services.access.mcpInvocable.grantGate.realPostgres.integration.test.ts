@@ -13,7 +13,7 @@ import { MockGateway } from './mockGateway.js'
 // state built by the REAL producers (`upsertOAuthGrant` / `bootstrapSharedOAuthGrant`)
 // and read by the REAL `oauthGrantExists` inside the resolver. No hand-built
 // oauth_grants rows. Gated on a real Postgres, like the store integration test:
-//   CONTROL_API_REAL_PG_ADMIN_URL=postgres://user:pass@host:5432 npm test -- \
+//   CONTROL_API_REAL_PG_ADMIN_URL=postgres://<user>:<pass>@<host>:5432 npm test -- \
 //     test/services.access.mcpInvocable.grantGate.realPostgres.integration.test.ts
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip

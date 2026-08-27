@@ -58,7 +58,6 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
             // the default HITL gate (reason undefined ⇒ fields omitted).
             ...(approval.reason ? { reason: approval.reason } : {}),
             ...(approval.mcpServerName ? { mcpServerName: approval.mcpServerName } : {}),
-            ...(approval.provider ? { provider: approval.provider } : {}),
           }
         : undefined
     // Lifetime token totals — projected to the wire shape (omitted until the

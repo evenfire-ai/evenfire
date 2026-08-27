@@ -155,7 +155,6 @@ class McpToolAdapter implements Tool {
           ? {
               connect_required: {
                 mcpServerName: result.connectRequired.mcpServerName,
-                provider: result.connectRequired.provider,
               },
             }
           : undefined,

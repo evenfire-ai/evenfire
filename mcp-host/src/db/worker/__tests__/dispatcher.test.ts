@@ -633,7 +633,6 @@ describe('dbWorker dispatcher', () => {
       trace_context: null,
       reason: null,
       mcp_server_name: null,
-      provider: null,
     }
     await dispatch({ kind: 'insert_pending_approval', payload: approvalRow }, deps)
     const rows = (await dispatch({ kind: 'load_all_pending_approvals' }, deps)) as Array<{
@@ -673,7 +672,6 @@ describe('dbWorker dispatcher', () => {
           trace_context: null,
           reason: 'connect_required',
           mcp_server_name: 'monday',
-          provider: 'monday',
         },
       },
       deps
@@ -689,8 +687,8 @@ describe('dbWorker dispatcher', () => {
       tool_name: 'monday__list_boards',
       reason: 'connect_required',
       mcp_server_name: 'monday',
-      provider: 'monday',
     })
+    expect(page.pending_approval).not.toHaveProperty('provider')
 
     // Cold path B — the session-list summary projection (narrow SELECT).
     const summaries = (await dispatch(
@@ -707,8 +705,8 @@ describe('dbWorker dispatcher', () => {
       tool_name: 'monday__list_boards',
       reason: 'connect_required',
       mcp_server_name: 'monday',
-      provider: 'monday',
     })
+    expect(summaries[0].pending_approval).not.toHaveProperty('provider')
   })
 
   it('selects the earliest pending approval consistently for one session', async () => {
@@ -744,7 +742,6 @@ describe('dbWorker dispatcher', () => {
             trace_context: null,
             reason: null,
             mcp_server_name: null,
-            provider: null,
           },
         },
         deps
@@ -799,7 +796,6 @@ describe('dbWorker dispatcher', () => {
             trace_context: null,
             reason: null,
             mcp_server_name: null,
-            provider: null,
           },
         },
         deps
