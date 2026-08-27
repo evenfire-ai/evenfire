@@ -155,6 +155,12 @@ function candidateForRequest(req: AuthedRequest): {
         target: { hostRef: host.authorityHostRef, taskId: requiredString(req.params.taskId) },
       }
     }
+    if (method === 'GET' && path === '/rpc/hosts/:hostRef/sessions/search') {
+      return {
+        operationId: 'session.read',
+        target: { hostRef: host.authorityHostRef },
+      }
+    }
     if (method === 'GET' && path === '/rpc/hosts/:hostRef/sessions') {
       const agent = stringValue(req.query.agent)
       return {
