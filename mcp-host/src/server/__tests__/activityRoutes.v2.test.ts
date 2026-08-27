@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Request, Response } from 'express'
+import { HostActivityHub } from '../../activityHub'
 import { handleActivityRoute, handleActivityStreamRoute } from '../routes'
 import type { HostActivityEvent } from '../types'
 import { makeHandlers } from './testHelpers'
@@ -69,12 +70,21 @@ describe('v2 activity visibility', () => {
   it('ordinary activity exposes only the trusted user and selected path', async () => {
     const userId = '11111111-1111-4111-8111-111111111111'
     const accessPathId = `ap1_${'b'.repeat(43)}`
-    const items = [
-      event('evt_0000000001', userId, accessPathId),
-      event('evt_0000000002', userId, `ap1_${'e'.repeat(43)}`),
-      event('evt_0000000003', '99999999-9999-4999-8999-999999999999', accessPathId),
-      event('evt_0000000004'),
-    ]
+    const hub = new HostActivityHub(20, 4096)
+    for (const authorityV2 of [
+      event('ignored', userId, accessPathId).authorityV2,
+      event('ignored', userId, `ap1_${'e'.repeat(43)}`).authorityV2,
+      event('ignored', '99999999-9999-4999-8999-999999999999', accessPathId).authorityV2,
+      undefined,
+    ]) {
+      hub.publish({
+        hostRef: 'chatllm',
+        type: 'task.started',
+        title: 'started',
+        severity: 'info',
+        authorityV2,
+      })
+    }
     const req = {
       query: {},
       runtimeCaller: {
@@ -88,12 +98,8 @@ describe('v2 activity visibility', () => {
       req,
       captured.res,
       makeHandlers({
-        activitySnapshotHandler: vi.fn().mockResolvedValue({
-          hostRef: 'chatllm',
-          version: '1.0',
-          items,
-          nextCursor: 'evt_0000000004',
-        }),
+        activitySnapshotHandler: async (limit, sinceEventId, visibility) =>
+          hub.snapshot('chatllm', limit, sinceEventId, visibility),
       })
     )
     expect(captured.status()).toBe(200)
@@ -101,6 +107,54 @@ describe('v2 activity visibility', () => {
       'evt_0000000001',
     ])
     expect(captured.body().nextCursor).toBe('evt_0000000001')
+  })
+
+  it('applies selected-path visibility before limiting the snapshot', async () => {
+    const userId = '11111111-1111-4111-8111-111111111111'
+    const accessPathId = `ap1_${'b'.repeat(43)}`
+    const hub = new HostActivityHub(20, 4096)
+    hub.publish({
+      hostRef: 'chatllm',
+      type: 'task.started',
+      title: 'authorized older event',
+      severity: 'info',
+      authorityV2: event('ignored', userId, accessPathId).authorityV2,
+    })
+    hub.publish({
+      hostRef: 'chatllm',
+      type: 'task.started',
+      title: 'newer event on another path',
+      severity: 'info',
+      authorityV2: event('ignored', userId, `ap1_${'e'.repeat(43)}`).authorityV2,
+    })
+    const req = {
+      query: { limit: '1' },
+      runtimeCaller: {
+        caller: 'rpc-proxy',
+        userId,
+        actionContextV2: {
+          operationId: 'host.activity.read',
+          userId,
+          accessPathId,
+          target: { hostRef: 'mcp-host/chatllm', visibility: 'caller_path' },
+        },
+      },
+    } as unknown as Request
+    const captured = responseCapture()
+
+    await handleActivityRoute(
+      req,
+      captured.res,
+      makeHandlers({
+        activitySnapshotHandler: async (limit, sinceEventId, visibility) =>
+          hub.snapshot('chatllm', limit, sinceEventId, visibility),
+      })
+    )
+
+    expect(captured.status()).toBe(200)
+    expect(captured.body().items).toHaveLength(1)
+    expect(captured.body().items[0]).toMatchObject({ title: 'authorized older event' })
+    expect(captured.body().nextCursor).toBe(captured.body().items[0].eventId)
   })
 
   it('denies a caller-requested host-wide view without the exact read-all operation', async () => {

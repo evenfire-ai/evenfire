@@ -215,6 +215,11 @@ export interface HostActivitySnapshotResponse {
   nextCursor: string | null
 }
 
+export type ActivitySnapshotVisibility = Readonly<{
+  userId: string
+  accessPathId: string
+}>
+
 export type MessageHandler = (
   message: IncomingMessage,
   options?: { async?: boolean }
@@ -222,7 +227,8 @@ export type MessageHandler = (
 export type StatusHandler = () => Promise<StatusResponse>
 export type ActivitySnapshotHandler = (
   limit: number,
-  sinceEventId?: string
+  sinceEventId?: string,
+  visibility?: ActivitySnapshotVisibility
 ) => Promise<HostActivitySnapshotResponse>
 export type ActivityStreamHandler = (onEvent: (event: HostActivityEvent) => void) => {
   hostRef: string

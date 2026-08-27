@@ -91,6 +91,7 @@ import { markFileAttachmentsDelivered } from './runtime/fileAttachmentDelivery'
 import { isUndeliveredResult, markResultDelivered } from './runtime/resultDelivery'
 import { dispatchMcpHostRuntime } from './runtimeDispatch'
 import {
+  ActivitySnapshotVisibility,
   HostActivityEvent,
   HostActivitySnapshotResponse,
   IncomingMessage,
@@ -2112,13 +2113,14 @@ function computeDegradedReason(): StatusResponse['degraded'] {
 
 async function getActivitySnapshot(
   limit: number,
-  sinceEventId?: string
+  sinceEventId?: string,
+  visibility?: ActivitySnapshotVisibility
 ): Promise<HostActivitySnapshotResponse> {
   const hostRef = resolveHostRef()
   if (!activityHub) {
     return { hostRef, version: '1.0', items: [], nextCursor: null }
   }
-  return activityHub.snapshot(hostRef, limit, sinceEventId)
+  return activityHub.snapshot(hostRef, limit, sinceEventId, visibility)
 }
 
 function subscribeActivity(onEvent: (event: HostActivityEvent) => void): {

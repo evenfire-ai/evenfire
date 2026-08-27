@@ -442,15 +442,16 @@ export async function handleActivityRoute(
     }
     const sinceEventId =
       typeof req.query.sinceEventId === 'string' ? req.query.sinceEventId : undefined
-    const snapshot = await handlers.activitySnapshotHandler(limit, sinceEventId)
-    if (caller?.actionContextV2?.operationId === 'host.activity.read') {
-      snapshot.items = snapshot.items.filter(
-        event =>
-          event.authorityV2?.userId === caller.actionContextV2?.userId &&
-          event.authorityV2?.accessPathId === caller.actionContextV2?.accessPathId
-      )
-      snapshot.nextCursor = snapshot.items.at(-1)?.eventId ?? null
-    }
+    const snapshot = await handlers.activitySnapshotHandler(
+      limit,
+      sinceEventId,
+      caller?.actionContextV2?.operationId === 'host.activity.read'
+        ? {
+            userId: caller.actionContextV2.userId,
+            accessPathId: caller.actionContextV2.accessPathId,
+          }
+        : undefined
+    )
     json(res, 200, snapshot)
   } catch (error) {
     console.error('[Server] Error getting activity snapshot:', error)
@@ -1299,8 +1300,9 @@ export async function handleSessionsListRoute(
 
 /**
  * T3.1 — GET /v1/runtime/sessions/search. Authenticated full-text search over
- * the JWT-derived user's history. `userSub` comes from the verified token;
- * caller-supplied `?user=` is silently ignored.
+ * the trusted-edge user's history. `userSub` comes from rpc-proxy's validated
+ * action context (or its isolated v1 edge adapter); caller-supplied `?user=`
+ * is silently ignored.
  *
  * Status codes:
  *   - 200: results returned (possibly empty).

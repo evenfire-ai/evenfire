@@ -85,6 +85,7 @@ import { createWorkflowRouter } from './workflow/workflowRouter'
 import { WorkflowService } from './workflow/workflowService'
 
 export type {
+  ActivitySnapshotVisibility,
   HostActivityEvent,
   HostActivitySnapshotResponse,
   IncomingMessage,
