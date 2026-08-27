@@ -50,14 +50,17 @@ function stampPorts(
   driftPort?: number
 ): typeof rules {
   if (!rules) return rules
-  return rules.map((rule, ruleIndex) => ({
-    ...rule,
-    ports: (rule.ports ?? []).map((port, portIndex) => ({
-      ...port,
-      protocol: port.protocol ?? 'TCP',
-      port: ruleIndex === 0 && portIndex === 0 && driftPort !== undefined ? driftPort : port.port,
-    })),
-  }))
+  return rules.map((rule, ruleIndex) => {
+    if (!rule.ports) return { ...rule }
+    return {
+      ...rule,
+      ports: rule.ports.map((port, portIndex) => ({
+        ...port,
+        protocol: port.protocol ?? 'TCP',
+        port: ruleIndex === 0 && portIndex === 0 && driftPort !== undefined ? driftPort : port.port,
+      })),
+    }
+  })
 }
 
 export function asApiserverNetworkPolicy(
@@ -66,7 +69,13 @@ export function asApiserverNetworkPolicy(
 ): k8s.V1NetworkPolicy {
   const recorded = structuredClone(RECORDED_NETWORKPOLICY)
   const hasEgress = (desired.spec?.egress?.length ?? 0) > 0
-  const policyTypes = desired.spec?.policyTypes ?? (hasEgress ? ['Ingress', 'Egress'] : ['Ingress'])
+  const explicitTypes = desired.spec?.policyTypes
+  const policyTypes =
+    explicitTypes && explicitTypes.length > 0
+      ? explicitTypes
+      : hasEgress
+        ? ['Ingress', 'Egress']
+        : ['Ingress']
   return {
     ...recorded,
     metadata: {

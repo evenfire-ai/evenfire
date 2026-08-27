@@ -113,4 +113,68 @@ describe('networkPolicyMatchesDesired', () => {
     }
     expect(networkPolicyMatchesDesired(desired, arrayReordered)).toBe(false)
   })
+
+  it('CMP-NP-7: omitted egress protocol matches apiserver TCP default-fill', () => {
+    const desired: k8s.V1NetworkPolicy = {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: { name: 'np', namespace: 'ns', labels: { app: 'np' } },
+      spec: {
+        podSelector: { matchLabels: { app: 'np' } },
+        egress: [{ ports: [{ port: 443 }] }],
+      },
+    }
+    const existing = asApiserverNetworkPolicy(desired)
+    expect(existing.spec?.egress?.[0]?.ports?.[0]?.protocol).toBe('TCP')
+    expect(desired.spec?.egress?.[0]?.ports?.[0]?.protocol).toBeUndefined()
+    expect(networkPolicyMatchesDesired(desired, existing)).toBe(true)
+  })
+
+  it('CMP-NP-8: omitted policyTypes with egress matches Ingress+Egress default-fill', () => {
+    const desired: k8s.V1NetworkPolicy = {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: { name: 'np', namespace: 'ns', labels: { app: 'np' } },
+      spec: {
+        podSelector: { matchLabels: { app: 'np' } },
+        egress: [{ ports: [{ port: 443 }] }],
+      },
+    }
+    const existing = asApiserverNetworkPolicy(desired)
+    expect(desired.spec?.policyTypes).toBeUndefined()
+    expect(existing.spec?.policyTypes).toEqual(['Ingress', 'Egress'])
+    expect(networkPolicyMatchesDesired(desired, existing)).toBe(true)
+  })
+
+  it('CMP-NP-9: empty policyTypes is treated as omitted apiserver default-fill', () => {
+    const desired = desiredPolicy({
+      spec: {
+        podSelector: { matchLabels: { app: 'np' } },
+        policyTypes: [],
+        ingress: [
+          {
+            _from: [{ podSelector: { matchLabels: { app: 'peer' } } }],
+            ports: [{ port: 8080 }],
+          },
+        ],
+      },
+    })
+    const existing = asApiserverNetworkPolicy(desired)
+    expect(desired.spec?.policyTypes).toEqual([])
+    expect(existing.spec?.policyTypes).toEqual(['Ingress'])
+    expect(networkPolicyMatchesDesired(desired, existing)).toBe(true)
+  })
+
+  it('CMP-NP-10: omitted rule ports stay omitted on the recorded overlay', () => {
+    const desired = desiredPolicy({
+      spec: {
+        podSelector: { matchLabels: { app: 'np' } },
+        ingress: [{ _from: [{ podSelector: { matchLabels: { app: 'peer' } } }] }],
+      },
+    })
+    const existing = asApiserverNetworkPolicy(desired)
+    expect(desired.spec?.ingress?.[0]?.ports).toBeUndefined()
+    expect(existing.spec?.ingress?.[0]?.ports).toBeUndefined()
+    expect(networkPolicyMatchesDesired(desired, existing)).toBe(true)
+  })
 })

@@ -195,15 +195,29 @@ export function serviceMatchesDesired(
   }
 }
 
+function stripServerOwnedMetadata(object: {
+  status?: unknown
+  metadata?: {
+    resourceVersion?: unknown
+    uid?: unknown
+    generation?: unknown
+    creationTimestamp?: unknown
+    managedFields?: unknown
+    selfLink?: unknown
+  }
+}): void {
+  delete object.status
+  delete object.metadata?.resourceVersion
+  delete object.metadata?.uid
+  delete object.metadata?.generation
+  delete object.metadata?.creationTimestamp
+  delete object.metadata?.managedFields
+  delete object.metadata?.selfLink
+}
+
 function normalizeServiceForComparison(service: k8s.V1Service): unknown {
   const normalized = structuredClone(service)
-  delete normalized.status
-  delete normalized.metadata?.resourceVersion
-  delete normalized.metadata?.uid
-  delete normalized.metadata?.generation
-  delete normalized.metadata?.creationTimestamp
-  delete normalized.metadata?.managedFields
-  delete normalized.metadata?.selfLink
+  stripServerOwnedMetadata(normalized)
 
   const spec = normalized.spec
   if (spec) {
@@ -259,25 +273,15 @@ export function networkPolicyMatchesDesired(
 
 function normalizeNetworkPolicyForComparison(policy: k8s.V1NetworkPolicy): unknown {
   const normalized = structuredClone(policy) as k8s.V1NetworkPolicy & { status?: unknown }
-  delete normalized.status
-  delete normalized.metadata?.resourceVersion
-  delete normalized.metadata?.uid
-  delete normalized.metadata?.generation
-  delete normalized.metadata?.creationTimestamp
-  delete normalized.metadata?.managedFields
-  delete normalized.metadata?.selfLink
+  stripServerOwnedMetadata(normalized)
 
   const spec = normalized.spec
   if (spec) {
-    if (!spec.policyTypes) {
+    // Kubernetes SetDefaults_NetworkPolicy fills when PolicyTypes is omitted or empty.
+    if (!spec.policyTypes?.length) {
       spec.policyTypes = (spec.egress?.length ?? 0) > 0 ? ['Ingress', 'Egress'] : ['Ingress']
     }
-    for (const rule of spec.ingress ?? []) {
-      for (const port of rule.ports ?? []) {
-        if (port.protocol === 'TCP') delete port.protocol
-      }
-    }
-    for (const rule of spec.egress ?? []) {
+    for (const rule of [...(spec.ingress ?? []), ...(spec.egress ?? [])]) {
       for (const port of rule.ports ?? []) {
         if (port.protocol === 'TCP') delete port.protocol
       }
