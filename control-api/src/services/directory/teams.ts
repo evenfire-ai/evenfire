@@ -1,5 +1,7 @@
 import { pool, withTransaction } from '../../db.js'
 import type { DbClient } from '../../db.js'
+import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
+import { validateExternalSessionAuthorityContext } from '../auth/userSessionService.js'
 import type { AdminDeleteTeamResult, TeamRole } from './types.js'
 
 export async function listTeams(userId: string, currentTeamId: string) {
@@ -101,8 +103,19 @@ export async function renameTeam(teamId: string, name: string) {
   return (updated.rows[0] as { id: string; name: string } | undefined) || null
 }
 
-export async function renameTeamForUser(userId: string, teamId: string, name: string) {
+export async function renameTeamForUser(
+  userId: string,
+  teamId: string,
+  name: string,
+  authority?: ExternalSessionAuthorityContext
+) {
   return withTransaction(async db => {
+    if (authority) {
+      const session = await validateExternalSessionAuthorityContext(authority, { db })
+      if (session.status !== 'valid' || session.identity.userId !== userId.trim()) {
+        return { error: 'forbidden' as const }
+      }
+    }
     const membership = await db.query(
       `SELECT role
          FROM team_members
