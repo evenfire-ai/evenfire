@@ -85,7 +85,6 @@ export class McpManager {
   private clients: Map<string, McpClient> = new Map()
   // Desired-state projection is per-serverName (identical across partitions).
   private serverInfos: Map<string, McpServerInfo> = new Map()
-  private toolToServerMap: Map<string, string> = new Map()
   // In-flight admissions, keyed by serialized ClientKey.
   private pendingAdmissions: Map<string, PendingAdmission> = new Map()
   // serverName → set of live ClientKeys. Restores serverName-level reasoning
@@ -179,20 +178,11 @@ export class McpManager {
     return staticTokenProvider(eagerToken)
   }
 
-  private clearToolMappings(serverName: string): void {
-    for (const [toolName, server] of this.toolToServerMap.entries()) {
-      if (server === serverName) {
-        this.toolToServerMap.delete(toolName)
-      }
-    }
-  }
-
   private installConnectedClient(
     key: string,
     serverConfig: McpServerInfo,
     client: McpClient
   ): void {
-    this.clearToolMappings(serverConfig.name)
     this.clients.set(key, client)
     this.serverInfos.set(serverConfig.name, serverConfig)
 
@@ -202,11 +192,6 @@ export class McpManager {
       this.byServer.set(serverConfig.name, keys)
     }
     keys.add(key)
-
-    for (const tool of client.availableTools) {
-      const fullToolName = `${serverConfig.name}__${tool.name}`
-      this.toolToServerMap.set(fullToolName, serverConfig.name)
-    }
 
     this.statusTracker.markConnected(serverConfig.name, client.availableTools.length)
   }
@@ -593,7 +578,6 @@ export class McpManager {
       .map(client => this.claimClientCleanup(client))
       .filter((cleanup): cleanup is McpDetachedServerCleanup => cleanup !== undefined)
 
-    this.clearToolMappings(serverName)
     this.byServer.delete(serverName)
     this.serverInfos.delete(serverName)
     this.statusTracker.remove(serverName)
@@ -645,7 +629,6 @@ export class McpManager {
       ]),
     ]
     const cleanups = serverNames.map(name => this.detachServer(name))
-    this.toolToServerMap.clear()
     this.serverInfos.clear()
     this.pendingAdmissions.clear()
     this.byServer.clear()
