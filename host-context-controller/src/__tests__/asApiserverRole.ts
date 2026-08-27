@@ -5,9 +5,9 @@ import type * as k8s from '@kubernetes/client-node'
  * Recorded kube-apiserver GET of a namespaced Role (`kubectl get role -o json`
  * shape), not a field list copied from the comparator. Stamp
  * controller-owned name/labels/rules via `asApiserverRole`. Label keys are
- * inserted in reverse author order so a byte-identical fixture cannot hide a
- * missing canonicalize. Do not reconstruct rules from desired alone when
- * asserting the read carried `rules` — the skip must see them or it fail-opens.
+ * inserted in reverse author order, and each rule is rebuilt in
+ * V1PolicyRule.attributeTypeMap order, so a byte-identical fixture cannot hide
+ * a missing canonicalize. The skip must still see `rules` or it fail-opens.
  */
 export const RECORDED_ROLE: k8s.V1Role = {
   apiVersion: 'rbac.authorization.k8s.io/v1',
@@ -49,6 +49,20 @@ function shuffleLabelKeys(labels: Record<string, string>): Record<string, string
   return shuffled
 }
 
+/**
+ * Rebuild a rule in client-node ObjectSerializer / V1PolicyRule.attributeTypeMap
+ * order so a missing key-canonicalize cannot hide behind a cloned builder object.
+ */
+export function asApiserverPolicyRule(rule: k8s.V1PolicyRule): k8s.V1PolicyRule {
+  const live: Record<string, unknown> = {}
+  if (rule.apiGroups !== undefined) live.apiGroups = rule.apiGroups
+  if (rule.nonResourceURLs !== undefined) live.nonResourceURLs = rule.nonResourceURLs
+  if (rule.resourceNames !== undefined) live.resourceNames = rule.resourceNames
+  if (rule.resources !== undefined) live.resources = rule.resources
+  if (rule.verbs !== undefined) live.verbs = rule.verbs
+  return live as unknown as k8s.V1PolicyRule
+}
+
 export function asApiserverRole(desired: k8s.V1Role): k8s.V1Role {
   const recorded = structuredClone(RECORDED_ROLE)
   const labels = desired.metadata?.labels ?? {}
@@ -66,7 +80,7 @@ export function asApiserverRole(desired: k8s.V1Role): k8s.V1Role {
       ownerReferences: desired.metadata?.ownerReferences,
       selfLink: `/apis/rbac.authorization.k8s.io/v1/namespaces/${desired.metadata?.namespace}/roles/${desired.metadata?.name}`,
     },
-    rules: structuredClone(desired.rules ?? []),
+    rules: (desired.rules ?? []).map(asApiserverPolicyRule),
   }
 }
 

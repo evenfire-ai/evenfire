@@ -4652,9 +4652,12 @@ export class HostReconciler {
  * True when the desired Role matches the live object on the fields HCC authors:
  * `rbacLabels` and `rules` in author order. Server metadata and annotations are
  * ignored — the builder does not write annotations, and comparing them would
- * force a PUT. Label keys are canonicalized; rules, verbs, and resourceNames
- * are not sorted. Missing rules or labels, or any compare failure, returns
- * false (fail-open-to-write, #307).
+ * force a PUT. Label keys are canonicalized. Object keys inside each rule are
+ * also canonicalized: client-node rebuilds V1PolicyRule in attributeTypeMap
+ * order (resourceNames before resources), so a raw JSON.stringify never matches
+ * a live GET (#307). Rule arrays, verbs, and resourceNames stay in author order.
+ * Missing rules or labels, or any compare failure, returns false
+ * (fail-open-to-write).
  */
 function roleMatchesDesired(desired: k8s.V1Role, existing: k8s.V1Role): boolean {
   try {
@@ -4666,7 +4669,10 @@ function roleMatchesDesired(desired: k8s.V1Role, existing: k8s.V1Role): boolean 
     ) {
       return false
     }
-    return JSON.stringify(desired.rules) === JSON.stringify(existing.rules)
+    return (
+      JSON.stringify(canonicalizeRoleValue(desired.rules)) ===
+      JSON.stringify(canonicalizeRoleValue(existing.rules))
+    )
   } catch {
     return false
   }
@@ -4676,6 +4682,18 @@ function canonicalizeLabelKeys(labels: Record<string, string>): Record<string, s
   const canonical: Record<string, string> = {}
   for (const key of Object.keys(labels).sort()) {
     canonical[key] = labels[key]
+  }
+  return canonical
+}
+
+/** Sort object keys recursively. Arrays keep author order. */
+function canonicalizeRoleValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeRoleValue)
+  if (typeof value !== 'object' || value === null) return value
+  const canonical: Record<string, unknown> = {}
+  for (const key of Object.keys(value).sort()) {
+    const entry = (value as Record<string, unknown>)[key]
+    if (entry !== undefined) canonical[key] = canonicalizeRoleValue(entry)
   }
   return canonical
 }
