@@ -88,7 +88,7 @@ function capturingFetch() {
     async (_url: string, init: RequestInit) =>
       ({
         status: 200,
-        json: async () => ({ token: 'downstream-oauth-token', expiresAt: null }),
+        json: async () => ({ token: 'fake-downstream-oauth-token', expiresAt: null }),
         __init: init,
       }) as unknown as Response
   )
@@ -105,7 +105,10 @@ function unauthorizedThenOk() {
   const impl = vi.fn(
     async (_url: string, _init: RequestInit) =>
       (authorized
-        ? { status: 200, json: async () => ({ token: 'downstream-oauth-token', expiresAt: null }) }
+        ? {
+            status: 200,
+            json: async () => ({ token: 'fake-downstream-oauth-token', expiresAt: null }),
+          }
         : { status: 401, json: async () => ({ error: 'unauthorized' }) }) as unknown as Response
   )
   return { impl, unlock: () => (authorized = true) }
@@ -143,7 +146,7 @@ describe('mcp-oauth broker control token source', () => {
       { ...brokerTokenProviderDeps(), fetchImpl: fetchImpl as unknown as typeof fetch }
     )
 
-    await expect(provider.resolve()).resolves.toBe('downstream-oauth-token')
+    await expect(provider.resolve()).resolves.toBe('fake-downstream-oauth-token')
     expect(bearerOf(fetchImpl)).toBe(`Bearer ${boot.rotatedToken}`)
     expect(bearerOf(fetchImpl)).not.toBe(`Bearer ${boot.bootToken}`)
   })
@@ -159,7 +162,7 @@ describe('mcp-oauth broker control token source', () => {
       { ...brokerTokenProviderDeps(), fetchImpl: fetchImpl as unknown as typeof fetch }
     )
 
-    await expect(provider.resolve()).resolves.toBe('downstream-oauth-token')
+    await expect(provider.resolve()).resolves.toBe('fake-downstream-oauth-token')
     expect(bearerOf(fetchImpl)).toBe(`Bearer ${boot.bootToken}`)
   })
 })
@@ -204,7 +207,7 @@ describe('mcp-oauth broker control token recovery on 401', () => {
     expect(impl).toHaveBeenCalledTimes(2)
     expect(bearerOf(impl, 0)).toBe(`Bearer ${boot.bootToken}`)
     expect(bearerOf(impl, 1)).toBe(`Bearer ${freshToken}`)
-    expect(settled).toBe('downstream-oauth-token')
+    expect(settled).toBe('fake-downstream-oauth-token')
   })
 
   it('does not retry when the refresh produced no new control token (no loop)', async () => {

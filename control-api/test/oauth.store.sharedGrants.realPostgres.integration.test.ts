@@ -10,7 +10,7 @@ import { bootstrapSharedOAuthGrant, getOAuthGrant, upsertOAuthGrant } from '../s
 // T1/T5 — shared-identity grant semantics derived from the REAL producer
 // (real ON CONFLICT DO NOTHING + CHECK constraints), not a hand-built fixture.
 // Gated on a real Postgres, like the other *.realPostgres.integration.test.ts:
-//   CONTROL_API_REAL_PG_ADMIN_URL=postgres://user:pass@host:5432 npm test -- \
+//   CONTROL_API_REAL_PG_ADMIN_URL=postgres://<user>:<pass>@<host>:5432 npm test -- \
 //     test/oauth.store.sharedGrants.realPostgres.integration.test.ts
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
