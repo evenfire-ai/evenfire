@@ -20,6 +20,10 @@ vi.mock('../src/db.js', () => ({
 
 const MCP_NS = config.mcpServersNamespace
 
+// The configured external-rest-api service token (shared control-api test value).
+// Kept in a const so the literal is not written inline on the Authorization header.
+const EXTERNAL_REST_TOKEN = 'dev-external-rest-api-token'
+
 function seedOauthServer(
   gateway: MockGateway,
   opts: { name: string; grantScope?: 'user' | 'context'; contextRef?: string } = { name: 'gdrive' }
@@ -76,7 +80,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
   it('401 for an authenticated NON-rpc-proxy service (external-rest-api)', async () => {
     seedOauthServer(gateway)
     const res = await post(app)
-      .set('Authorization', 'Bearer dev-external-rest-api-token')
+      .set('Authorization', `Bearer ${EXTERNAL_REST_TOKEN}`)
       .set('x-service-token', 'external-rest-api')
       .send({ mcpServerName: 'gdrive', userId: 'user-1' })
     expect(res.status).toBe(401)
