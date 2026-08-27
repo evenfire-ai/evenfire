@@ -423,6 +423,7 @@ export function createAdminCodexSubscriptionRouter(
       const connection = await refreshCodexSubscriptionConnection(
         oauthDeps(req, resolveBrowserRedirectUri(req), keyFromReq(req))
       )
+      if (await publishRuntimeAllowlistOrFail(res)) return
       res.status(200).json(connection)
     } catch (err) {
       sendOAuthError(res, err)
@@ -454,6 +455,7 @@ export function createAdminCodexSubscriptionRouter(
         return
       }
       if (synced.outcome !== 'ready') {
+        if (await publishRuntimeAllowlistOrFail(res)) return
         res.status(503).json({
           error: 'catalog_sync_failed',
           outcome: synced.outcome,

@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import { LlmErrorCode } from '../../core/errors'
+import { CodexProxyError } from '../codexLlmProxyClient'
 import {
   CodexSubscriptionProvider,
   isCodexNativeToolName,
   selectCodexAdvertisedTools,
 } from '../codexSubscription'
+import { classifyFailoverClass } from '../failover/classify'
 import { CodexAuthorizeError } from '../providerAttemptAuthorizer'
 import { makeProvider } from '../registry'
 
@@ -242,5 +244,22 @@ describe('CodexSubscriptionProvider', () => {
     expect(classified.code).toBe(LlmErrorCode.AuthenticationFailed)
     expect(classified.providerCode).toBe('insufficient_scope')
     expect(classified.retryable).toBe(false)
+  })
+
+  it('maps transient proxy failures onto failover-eligible classes', () => {
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
+    const unavailable = provider.classifyError(
+      new CodexProxyError('provider_unavailable', 'upstream 5xx')
+    )
+    expect(unavailable.code).toBe(LlmErrorCode.ModelOverloaded)
+    expect(unavailable.retryable).toBe(true)
+    expect(classifyFailoverClass(unavailable.code, unavailable.retryable)).toBe(
+      'provider_unavailable'
+    )
+
+    const limited = provider.classifyError(new CodexProxyError('rate_limited', 'upstream 429'))
+    expect(limited.code).toBe(LlmErrorCode.RateLimited)
+    expect(limited.retryable).toBe(true)
+    expect(classifyFailoverClass(limited.code, limited.retryable)).toBe('rate_limited')
   })
 })

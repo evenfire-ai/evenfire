@@ -142,6 +142,22 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         providerCode: code,
       }
     }
+    if (code === 'rate_limited') {
+      return {
+        code: LlmErrorCode.RateLimited,
+        retryable: true,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+      }
+    }
+    if (code === 'provider_unavailable' || code === 'connection_unavailable') {
+      return {
+        code: LlmErrorCode.ModelOverloaded,
+        retryable: true,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+      }
+    }
     if (code) {
       return {
         code: LlmErrorCode.ApiCallFailed,

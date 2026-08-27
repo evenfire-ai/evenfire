@@ -3,6 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { pool } from '../src/db.js'
 import { createAdminPluginWorkloadSdkRouter } from '../src/routes/admin/pluginWorkloadSdk.js'
+import { isCodexAssignmentAllowed } from '../src/services/codexSubscriptionCatalog.js'
 import * as sdkDb from '../src/services/pluginWorkloadSdkDb.js'
 import { checkAndIncrement } from '../src/services/rateLimiterService.js'
 
@@ -43,6 +44,13 @@ vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
     listInvocations: vi.fn(),
   }
 })
+
+// Codex targets are gated against the per-connection catalog, not the flat
+// llm_allowed_models union. The seam is mocked so tests pin the accept/reject
+// contract without a live codex_subscription_connections table.
+vi.mock('../src/services/codexSubscriptionCatalog.js', () => ({
+  isCodexAssignmentAllowed: vi.fn(),
+}))
 
 const DEFAULT_ADMIN_SUB = '11111111-1111-4111-8111-111111111111'
 
@@ -97,6 +105,8 @@ beforeEach(() => {
   // tests override to simulate a disallowed model.
   vi.mocked(pool.query).mockReset()
   vi.mocked(pool.query).mockResolvedValue({ rows: [{ model: 'glm-4.7' }], rowCount: 1 } as never)
+  vi.mocked(isCodexAssignmentAllowed).mockReset()
+  vi.mocked(isCodexAssignmentAllowed).mockResolvedValue(false)
 })
 
 describe('routes/admin/pluginWorkloadSdk — grants', () => {
@@ -542,6 +552,141 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     expect(res.body.provider).toBe('zai')
     expect(res.body.models).toEqual(['glm-9-not-allowed'])
     expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+  })
+
+  // ── Claim 1b: Codex (oauth-broker) promptBridge targets ─────────────────────
+  describe('codex-subscription promptTargets', () => {
+    const codexGrantBody = {
+      ...validGrantBody,
+      provider: 'codex-subscription',
+      allowedModels: ['gpt-5.3-codex'],
+      promptTargets: [
+        {
+          targetRef: 'codex-primary',
+          provider: 'codex-subscription',
+          model: 'gpt-5.3-codex',
+          credentialSlot: '',
+          connectionRef: 'team-plus',
+        },
+      ],
+      defaultTargetRef: 'codex-primary',
+    }
+
+    it('accepts a Codex target bound to a permitted connection offering the model', async () => {
+      vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g-codex' } as never)
+      vi.mocked(isCodexAssignmentAllowed).mockResolvedValue(true)
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(codexGrantBody)
+      expect(res.status).toBe(200)
+      expect(isCodexAssignmentAllowed).toHaveBeenCalledWith(
+        expect.anything(),
+        'team-plus',
+        'gpt-5.3-codex'
+      )
+      expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider: 'codex-subscription',
+          promptTargets: [
+            {
+              targetRef: 'codex-primary',
+              provider: 'codex-subscription',
+              model: 'gpt-5.3-codex',
+              credentialSlot: '',
+              connectionRef: 'team-plus',
+            },
+          ],
+        }),
+        '11111111-1111-4111-8111-111111111111',
+        expect.anything() // carrier transaction client (R1-H3 fase 2)
+      )
+    })
+
+    it('fails closed when the connection is unknown, revoked, or does not offer the model', async () => {
+      vi.mocked(isCodexAssignmentAllowed).mockResolvedValue(false)
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(codexGrantBody)
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({
+        error: 'codex_connection_not_allowed',
+        connectionRef: 'team-plus',
+        model: 'gpt-5.3-codex',
+      })
+      expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+    })
+
+    it('rejects a Codex target without a connectionRef', async () => {
+      const { connectionRef: _omitted, ...targetWithoutConnection } =
+        codexGrantBody.promptTargets[0]!
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send({ ...codexGrantBody, promptTargets: [targetWithoutConnection] })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toContain('connectionRef')
+      expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+    })
+
+    it('rejects the unassigned sentinel as a Codex connection choice', async () => {
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send({
+          ...codexGrantBody,
+          promptTargets: [{ ...codexGrantBody.promptTargets[0]!, connectionRef: 'unassigned' }],
+        })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toContain('connectionRef')
+      expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+    })
+
+    it('rejects a static credentialSlot on a Codex (oauth-broker) target', async () => {
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send({
+          ...codexGrantBody,
+          promptTargets: [
+            { ...codexGrantBody.promptTargets[0]!, credentialSlot: 'openai-api-key' },
+          ],
+        })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toContain('credentialSlot must be empty')
+      expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+    })
+
+    it('rejects a connectionRef on an API-key (static-credentials) target', async () => {
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send({
+          ...validGrantBody,
+          promptTargets: [{ ...validGrantBody.promptTargets[0]!, connectionRef: 'team-plus' }],
+        })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toContain('only valid for oauth-broker')
+      expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+    })
+
+    it('keeps API-key promptTargets unchanged (no Codex gate, no connectionRef)', async () => {
+      vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g1' } as never)
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(validGrantBody)
+      expect(res.status).toBe(200)
+      expect(isCodexAssignmentAllowed).not.toHaveBeenCalled()
+      expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
+        expect.objectContaining({
+          promptTargets: [
+            {
+              targetRef: 'primary-zai',
+              provider: 'zai',
+              model: 'glm-4.7',
+              credentialSlot: 'zai-api-key',
+            },
+          ],
+        }),
+        '11111111-1111-4111-8111-111111111111',
+        expect.anything() // carrier transaction client (R1-H3 fase 2)
+      )
+    })
   })
 
   // ── Pieza D: no-worsening tolerance for grant `allowed_models` (G3) ─────────

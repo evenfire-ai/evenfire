@@ -3630,7 +3630,12 @@ export type PluginWorkloadSdkPromptTarget = {
   provider: string
   model: string
   // Identity of a provider-owned secret data key; never a secret value.
+  // Empty for oauth-broker (Codex) targets, which have no static Secret key.
   credentialSlot: string
+  // Codex subscription connection key the target executes against. Only set
+  // for oauth-broker providers; the grant must already exist (choose, don't
+  // create) and offer the selected model.
+  connectionRef?: string
 }
 
 export type PluginWorkloadSdkQuotaLimits = {

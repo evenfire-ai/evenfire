@@ -42,6 +42,7 @@ import {
 import { HttpMcpHostClient } from '../workflow/httpMcpHostClient'
 import { JwtTokenFactory } from '../workflow/jwtTokenFactory'
 import { K8sSecretReaderImpl } from '../workflow/k8sSecretReaderImpl'
+import { readRecipeCodexConnectionRef } from '../workflow/llmAllowedModelsSnapshot'
 import { ModelConfigHandler } from '../workflow/modelConfigHandler'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
 import type { EagerSdkBootstrapProof } from '../workflow/pluginWorkloadSdkProvisioner'
@@ -1014,11 +1015,11 @@ export class WorkflowRecipeReconciler {
     return Boolean(parentLabel || ownerRef)
   }
 
-  private async loadCodexParentSpec(
+  private async loadCodexParent(
     recipe: WorkflowRecipeCRD,
     runtimeScopeRecipeName: string
-  ): Promise<WorkflowRecipeSpec | null> {
-    if (runtimeScopeRecipeName === recipe.metadata.name) return null
+  ): Promise<{ spec: WorkflowRecipeSpec | null; annotations?: Record<string, string> }> {
+    if (runtimeScopeRecipeName === recipe.metadata.name) return { spec: null }
     try {
       const live = (await this.customApi.getNamespacedCustomObject({
         group: CRD_GROUP,
@@ -1026,10 +1027,10 @@ export class WorkflowRecipeReconciler {
         namespace: recipe.metadata.namespace,
         plural: WORKFLOWRECIPE_PLURAL,
         name: runtimeScopeRecipeName,
-      })) as { spec?: WorkflowRecipeSpec }
-      return live.spec ?? null
+      })) as { metadata?: { annotations?: Record<string, string> }; spec?: WorkflowRecipeSpec }
+      return { spec: live.spec ?? null, annotations: live.metadata?.annotations }
     } catch {
-      return null
+      return { spec: null }
     }
   }
 
@@ -1039,11 +1040,21 @@ export class WorkflowRecipeReconciler {
   ): Promise<void> {
     const setter = this.workflowReconciler?.setCodexReconcileContext
     if (typeof setter !== 'function') return
+    const parent = await this.loadCodexParent(recipe, runtimeScopeRecipeName)
+    // The Codex grant (connection key) follows the same authority rule as the
+    // Codex spec: the runtime-scope parent's annotation when inherited, the
+    // recipe's own annotation when standalone. Missing/unreadable annotations
+    // resolve to the fail-closed `unassigned` sentinel inside the reader.
+    const grantAnnotations =
+      runtimeScopeRecipeName !== recipe.metadata.name
+        ? parent.annotations
+        : recipe.metadata.annotations
     setter.call(this.workflowReconciler, {
       recipeName: recipe.metadata.name,
       runtimeScopeRecipeName,
       claimedParent: this.claimedCodexParent(recipe),
-      parentSpec: await this.loadCodexParentSpec(recipe, runtimeScopeRecipeName),
+      parentSpec: parent.spec,
+      connectionKey: readRecipeCodexConnectionRef(grantAnnotations),
     })
   }
 

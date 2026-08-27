@@ -5,6 +5,15 @@ import { decryptOAuthSecret, encryptOAuthSecret } from '../oauth/encryption.js'
 export const CODEX_SUBSCRIPTION_CONNECTION_KEY = 'deployment-default' as const
 /** Fail-closed Host sentinel. Not a grant row; never maps to deployment-default. */
 export const CODEX_UNASSIGNED_CONNECTION_KEY = 'unassigned' as const
+/**
+ * WorkflowRecipe metadata annotation naming the Codex grant (connection key)
+ * the recipe executes against. Recipes deliberately have no Host-style
+ * `spec.model.connectionRef` CRD field: grants are created in Secrets and a
+ * recipe only *chooses* an existing grant through this annotation. WRC
+ * (workflow-recipes `llmAllowedModelsSnapshot.ts`) and this service must agree
+ * on the same key.
+ */
+export const CODEX_CONNECTION_REF_ANNOTATION = 'clerum.io/codex-connection-ref' as const
 
 const CONNECTION_KEY_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
 

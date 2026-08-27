@@ -16,7 +16,11 @@ import type { CodexLlmProxyConfig } from './config.js'
 import { ControlApiClient, ControlApiClientError } from './controlApiClient.js'
 import { logger } from './logger.js'
 import { createProxyMetrics } from './metrics.js'
-import { defaultAddressLookup, OriginDeniedError } from './originPolicy.js'
+import {
+  defaultAddressLookup,
+  OriginDeniedError,
+  type OriginPolicyOptions,
+} from './originPolicy.js'
 import { RequestLimitError, streamGate } from './requestLimits.js'
 
 const COMPLETION_KEYS = new Set(['executionTicket', 'requestHash', 'request', 'deadlineMs'])
@@ -61,6 +65,13 @@ function boundedErrorHandler(err: unknown, _req: Request, res: Response, _next: 
 export type ProxyRuntimeDeps = {
   controlApiClient?: ControlApiClient
   fetchFn?: typeof fetch
+  /**
+   * Test seam for the DNS half of the origin policy. Production always uses
+   * `defaultAddressLookup`; hermetic e2e injects a resolver so the frozen
+   * chatgpt.com origin check runs without live DNS. The URL freeze in
+   * `assertAllowedUpstreamUrl` is unaffected by this seam.
+   */
+  lookup?: OriginPolicyOptions['lookup']
 }
 
 export type ProxyServers = {
@@ -85,7 +96,7 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
       serviceToken: config.controlApiServiceToken,
     })
   const fetchFn = deps.fetchFn ?? fetch
-  const lookup = defaultAddressLookup
+  const lookup = deps.lookup ?? defaultAddressLookup
   const runtimeRateLimit = rateLimit({
     windowMs: 60_000,
     limit: 60,

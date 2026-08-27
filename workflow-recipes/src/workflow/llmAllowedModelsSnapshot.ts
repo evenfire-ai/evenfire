@@ -8,7 +8,30 @@ export const CONNECTION_REVISION_ANNOTATION = 'clerum.io/connection-revision'
 export const CODEX_CONNECTION_STATUS_ANNOTATION = 'clerum.io/codex-connection-status'
 export const CODEX_ENABLED_ANNOTATION = 'clerum.io/codex-enabled'
 export const CODEX_CONNECTIONS_ANNOTATION = 'clerum.io/codex-connections'
+/**
+ * WorkflowRecipe metadata annotation naming the Codex grant (connection key)
+ * the recipe executes against. Recipes have no Host `spec.model.connectionRef`
+ * field by design: grants are created in Secrets and a recipe only *chooses*
+ * an existing grant through this annotation. HCC (Hosts), WRC (recipes), the
+ * control-api authorizer, and mcp-host must agree on the same key.
+ */
+export const CODEX_CONNECTION_REF_ANNOTATION = 'clerum.io/codex-connection-ref'
+/** Fail-closed sentinel. Not a grant row; never aliases deployment-default. */
+export const CODEX_UNASSIGNED_CONNECTION_KEY = 'unassigned'
 export const ALLOWLIST_CONFIGMAP_NAMESPACE = process.env.CLERUM_MODEL_CONFIG_NAMESPACE ?? 'mcp-host'
+
+/**
+ * Recipe annotation reader. Empty/missing is `unassigned`, never the reserved
+ * grant: only an explicit annotation may spend a ChatGPT subscription.
+ */
+export function readRecipeCodexConnectionRef(
+  annotations: Record<string, string> | undefined
+): string {
+  const raw = annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
+  const trimmed = typeof raw === 'string' ? raw.trim() : ''
+  if (!trimmed) return CODEX_UNASSIGNED_CONNECTION_KEY
+  return trimmed
+}
 
 export function snapshotFromConfigMapError(error: CodexSnapshotError): CodexCatalogSnapshot {
   return { flagEnabled: false, snapshotError: error }

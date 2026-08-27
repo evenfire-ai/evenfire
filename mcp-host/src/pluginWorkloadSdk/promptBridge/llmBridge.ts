@@ -250,7 +250,13 @@ export class LlmBridge {
   }
 
   private breakerKey(target: PromptBridgeTarget): string {
-    return [target.targetRef, target.provider, target.model, target.credentialSlot].join('\u0000')
+    return [
+      target.targetRef,
+      target.provider,
+      target.model,
+      target.credentialSlot,
+      target.connectionRef ?? '',
+    ].join('\u0000')
   }
 
   private breakerFor(target: PromptBridgeTarget): CircuitBreaker {

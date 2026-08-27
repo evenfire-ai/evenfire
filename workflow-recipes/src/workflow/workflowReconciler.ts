@@ -59,6 +59,7 @@ import { JwtTokenFactory } from './jwtTokenFactory'
 import {
   ALLOWED_MODELS_CONFIGMAP_NAME,
   ALLOWLIST_CONFIGMAP_NAMESPACE,
+  CODEX_UNASSIGNED_CONNECTION_KEY,
   parseAllowedModelsSnapshot,
   snapshotFromConfigMapError,
 } from './llmAllowedModelsSnapshot'
@@ -356,6 +357,13 @@ export type CodexReconcileContext = {
   runtimeScopeRecipeName: string
   claimedParent: boolean
   parentSpec: WorkflowRecipeSpec | null
+  /**
+   * Grant (connection key) the recipe is bound to via the
+   * `clerum.io/codex-connection-ref` annotation on the authoritative recipe
+   * (the runtime-scope parent when inherited). Missing/empty binds the
+   * fail-closed `unassigned` sentinel, never the reserved grant.
+   */
+  connectionKey?: string
 }
 
 function orderedScopesEqual<T extends string>(actual: T[], expected: T[]): boolean {
@@ -878,6 +886,13 @@ export class WorkflowReconciler {
   private readonly log = createLogger('wrc', 'reconciler')
   private readonly pluginWorkloadSdkProvisioner: PluginWorkloadSdkProvisioner
   private codexSnapshot: CodexCatalogSnapshot = { flagEnabled: false }
+  /**
+   * Raw allowlist ConfigMap from the last refresh, kept so each recipe's
+   * projection can re-parse it with that recipe's assigned grant key (HCC
+   * keeps the same shape for Hosts). Undefined while the read is failing —
+   * `codexSnapshot` then carries the fail-closed snapshot error.
+   */
+  private lastCodexConfigMap: k8s.V1ConfigMap | undefined
   private codexContext: CodexReconcileContext | null = null
 
   constructor(private readonly deps: WorkflowReconcilerDeps) {
@@ -943,7 +958,22 @@ export class WorkflowReconciler {
       ownSpec: spec,
       parentSpec: context.parentSpec,
     })
-    return projectRecipeCodexExecution(resolved.spec, this.codexSnapshot, resolved.provenance)
+    return projectRecipeCodexExecution(
+      resolved.spec,
+      this.codexSnapshotFor(context.connectionKey ?? CODEX_UNASSIGNED_CONNECTION_KEY),
+      resolved.provenance
+    )
+  }
+
+  /**
+   * Per-recipe snapshot: re-parse the last allowlist ConfigMap with the
+   * recipe's assigned grant key. A multi-grant map fail-closes for a missing
+   * key (including the `unassigned` sentinel); a legacy flat ConfigMap keeps
+   * the flat catalog. Read failures keep the fail-closed error snapshot.
+   */
+  private codexSnapshotFor(connectionKey: string): CodexCatalogSnapshot {
+    if (!this.lastCodexConfigMap) return this.codexSnapshot
+    return parseAllowedModelsSnapshot(this.lastCodexConfigMap, connectionKey)
   }
 
   private resolveEffectiveControlScopes(
@@ -968,8 +998,10 @@ export class WorkflowReconciler {
         name: ALLOWED_MODELS_CONFIGMAP_NAME,
         namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
       })
+      this.lastCodexConfigMap = cm
       this.codexSnapshot = parseAllowedModelsSnapshot(cm)
     } catch (err) {
+      this.lastCodexConfigMap = undefined
       if (isCodexSnapshotTimeout(err)) {
         this.codexSnapshot = snapshotFromConfigMapError('timeout')
         this.log.warn('Codex allowlist ConfigMap read timed out; failing closed', {

@@ -112,9 +112,10 @@ export interface AllowedModelsConfigMapMaterializer {
 
 /**
  * Push the current Postgres allowlist + per-grant Codex snapshot to the
- * runtime ConfigMap. Catalog sync, revoke, and a successful OAuth persist
- * must call this — mcp-host/HCC never read Postgres, and a cluster in
- * operation cannot wait for the next control-api boot.
+ * runtime ConfigMap. Catalog sync (including recorded non-ready outcomes),
+ * manual refresh, revoke, and a successful OAuth persist must call this —
+ * mcp-host/HCC never read Postgres, and a cluster in operation cannot wait
+ * for the next control-api boot.
  *
  * Missing writer is a no-op so unit tests without a K8s gateway stay local.
  */

@@ -114,11 +114,19 @@ const server = createServer({ cert, key }, async (request, response) => {
         'content-type': 'text/event-stream',
         'cache-control': 'no-cache',
       })
+      // The proxy transport parser (codexTransport.consumeSse) dispatches on
+      // the `type` field INSIDE the data payload, exactly like the live
+      // ChatGPT backend. `event:` lines alone are ignored, so frames without
+      // an embedded type would leave the stream outcome `unknown`.
       response.write(
-        `event: response.output_text.delta\ndata: ${JSON.stringify({ delta: 'hello' })}\n\n`
+        `event: response.output_text.delta\ndata: ${JSON.stringify({
+          type: 'response.output_text.delta',
+          delta: 'hello',
+        })}\n\n`
       )
       response.write(
         `event: response.completed\ndata: ${JSON.stringify({
+          type: 'response.completed',
           id: streamId,
           usage: { input_tokens: 3, output_tokens: 1 },
         })}\n\n`

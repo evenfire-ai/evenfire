@@ -26,6 +26,7 @@ export function verifyPlatformJwt(
       return null
     }
     if (typeof claims.exp !== 'number') return null
+    if (claims.scope !== 'workflow:approval:request') return null
     if (claims.hostRefs.some(ref => String(ref) === '*')) return null
     if (!claims.workflowControlScopes.includes('llm:codex:execute')) return null
     return {

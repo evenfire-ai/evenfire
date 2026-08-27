@@ -40,12 +40,14 @@ function sign(payload: Record<string, unknown>, audience: string): string {
   })
 }
 
-function platformToken(): string {
+function platformToken(overrides: Record<string, unknown> = {}): string {
   return sign(
     {
       sub: 'default/research-host',
       hostRefs: ['research-host'],
       workflowControlScopes: ['llm:codex:execute'],
+      scope: 'workflow:approval:request',
+      ...overrides,
     },
     'workflow-approvals'
   )
@@ -153,6 +155,7 @@ describe('codex-llm-proxy security surface', () => {
         sub: 'default/other-host',
         hostRefs: ['other-host'],
         workflowControlScopes: ['llm:codex:execute'],
+        scope: 'workflow:approval:request',
       },
       'workflow-approvals'
     )
@@ -168,6 +171,42 @@ describe('codex-llm-proxy security surface', () => {
     expect(res.body.error).toBe('host_binding_mismatch')
   })
 
+  it('rejects a refresh JWT that otherwise carries llm:codex:execute', async () => {
+    const { runtimeApp } = createProxyApps(config())
+    const res = await request(runtimeApp)
+      .post('/internal/runtime/v1/codex/completions')
+      .set('Authorization', `Bearer ${platformToken({ scope: 'workflow:approval:refresh' })}`)
+      .send({
+        executionTicket: ticket(),
+        requestHash: 'a'.repeat(64),
+        request: {},
+      })
+    expect(res.status).toBe(401)
+    expect(res.body.error).toBe('Unauthorized')
+  })
+
+  it('rejects a platform JWT that omits the access-token scope', async () => {
+    const { runtimeApp } = createProxyApps(config())
+    const missingScope = sign(
+      {
+        sub: 'default/research-host',
+        hostRefs: ['research-host'],
+        workflowControlScopes: ['llm:codex:execute'],
+      },
+      'workflow-approvals'
+    )
+    const res = await request(runtimeApp)
+      .post('/internal/runtime/v1/codex/completions')
+      .set('Authorization', `Bearer ${missingScope}`)
+      .send({
+        executionTicket: ticket(),
+        requestHash: 'a'.repeat(64),
+        request: {},
+      })
+    expect(res.status).toBe(401)
+    expect(res.body.error).toBe('Unauthorized')
+  })
+
   it('rejects a platform JWT whose hostRefs is a wildcard', async () => {
     const { runtimeApp } = createProxyApps(config())
     const wildcard = sign(
@@ -175,6 +214,7 @@ describe('codex-llm-proxy security surface', () => {
         sub: 'default/research-host',
         hostRefs: ['*'],
         workflowControlScopes: ['llm:codex:execute'],
+        scope: 'workflow:approval:request',
       },
       'workflow-approvals'
     )

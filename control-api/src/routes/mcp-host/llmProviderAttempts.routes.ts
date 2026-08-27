@@ -5,7 +5,7 @@ import type { K8sGateway } from '../../k8s.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
 import { rootLogger } from '../../observability/logger.js'
 import {
-  CODEX_UNASSIGNED_CONNECTION_KEY,
+  CODEX_CONNECTION_REF_ANNOTATION,
   readHostCodexConnectionRef,
 } from '../../services/codexSubscriptionConnection.js'
 import {
@@ -47,7 +47,32 @@ export async function resolveHostAssignedConnectionKey(
   hostRef: string
 ): Promise<string> {
   if (hostRef.includes('/')) {
-    return CODEX_UNASSIGNED_CONNECTION_KEY
+    // Workflow callers attest as `namespace/recipeName`. The grant identity is
+    // the `clerum.io/codex-connection-ref` annotation on that WorkflowRecipe
+    // (WRC stamps the parent's chosen key onto DB-run children). Missing or
+    // empty annotations resolve to the fail-closed `unassigned` sentinel.
+    const [recipeNamespace, recipeName, ...rest] = hostRef.split('/')
+    if (!recipeNamespace || !recipeName || rest.length > 0) {
+      throw new LlmProviderAttemptAuthorizeError(
+        'host_binding_mismatch',
+        'Recipe assignment could not be attested'
+      )
+    }
+    try {
+      const recipe = (await gateway.getResource(
+        'workflowrecipes',
+        recipeName,
+        recipeNamespace
+      )) as { metadata?: { annotations?: Record<string, string> } }
+      return readHostCodexConnectionRef(
+        recipe?.metadata?.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
+      )
+    } catch {
+      throw new LlmProviderAttemptAuthorizeError(
+        'host_binding_mismatch',
+        'Recipe assignment could not be attested'
+      )
+    }
   }
   try {
     const host = (await gateway.getResource('hosts', hostRef, config.hostsNamespace)) as {

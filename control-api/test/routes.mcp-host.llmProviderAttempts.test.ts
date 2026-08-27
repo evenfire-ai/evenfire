@@ -171,14 +171,55 @@ describe('resolveHostAssignedConnectionKey', () => {
     )
   })
 
-  it('aliases a recipe caller to unassigned without a Host GET', async () => {
+  it('attests a recipe caller from the codex-connection-ref annotation', async () => {
     const gateway = {
-      getResource: vi.fn(),
+      getResource: vi.fn().mockResolvedValue({
+        metadata: { annotations: { 'clerum.io/codex-connection-ref': 'team-plus' } },
+      }),
+    }
+    await expect(
+      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/codex-recipe')
+    ).resolves.toBe('team-plus')
+    expect(gateway.getResource).toHaveBeenCalledWith(
+      'workflowrecipes',
+      'codex-recipe',
+      'sandbox-recipes'
+    )
+  })
+
+  it('treats a recipe without the grant annotation as unassigned', async () => {
+    const gateway = {
+      getResource: vi.fn().mockResolvedValue({ metadata: { annotations: {} } }),
     }
     await expect(
       resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/codex-recipe')
     ).resolves.toBe('unassigned')
-    expect(gateway.getResource).not.toHaveBeenCalled()
+
+    gateway.getResource.mockResolvedValueOnce({
+      metadata: { annotations: { 'clerum.io/codex-connection-ref': '   ' } },
+    })
+    await expect(
+      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/blank-annotation')
+    ).resolves.toBe('unassigned')
+
+    gateway.getResource.mockResolvedValueOnce({})
+    await expect(
+      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/no-metadata')
+    ).resolves.toBe('unassigned')
+  })
+
+  it('fails closed when the recipe cannot be attested', async () => {
+    const gateway = {
+      getResource: vi.fn().mockRejectedValue(Object.assign(new Error('nf'), { code: 404 })),
+    }
+    await expect(
+      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/ghost-recipe')
+    ).rejects.toMatchObject({ code: 'host_binding_mismatch' })
+
+    // Malformed multi-segment refs never reach the gateway.
+    await expect(resolveHostAssignedConnectionKey(gateway, 'ns/name/extra')).rejects.toMatchObject({
+      code: 'host_binding_mismatch',
+    })
   })
 
   it('fails closed when the Host cannot be attested', async () => {

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { parseAllowedModelsSnapshot } from './llmAllowedModelsSnapshot'
+import {
+  CODEX_CONNECTION_REF_ANNOTATION,
+  parseAllowedModelsSnapshot,
+  readRecipeCodexConnectionRef,
+} from './llmAllowedModelsSnapshot'
 
 function multiGrantConfigMap() {
   return {
@@ -65,5 +69,25 @@ describe('WRC parseAllowedModelsSnapshot per assigned connection', () => {
     expect(Array.from(snapshot.enabledModels ?? [])).not.toContain(
       'codex-subscription:gpt-5.3-codex'
     )
+  })
+})
+
+describe('readRecipeCodexConnectionRef', () => {
+  it('reads the explicit annotation and trims whitespace', () => {
+    expect(
+      readRecipeCodexConnectionRef({ [CODEX_CONNECTION_REF_ANNOTATION]: ' personal-pro ' })
+    ).toBe('personal-pro')
+  })
+
+  it('resolves missing/empty annotations to the fail-closed unassigned sentinel', () => {
+    expect(readRecipeCodexConnectionRef(undefined)).toBe('unassigned')
+    expect(readRecipeCodexConnectionRef({})).toBe('unassigned')
+    expect(readRecipeCodexConnectionRef({ [CODEX_CONNECTION_REF_ANNOTATION]: '   ' })).toBe(
+      'unassigned'
+    )
+  })
+
+  it('never aliases the reserved deployment-default grant for a missing annotation', () => {
+    expect(readRecipeCodexConnectionRef({})).not.toBe('deployment-default')
   })
 })

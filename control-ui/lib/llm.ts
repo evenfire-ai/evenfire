@@ -19,6 +19,9 @@ export type PromptBridgeTargetPolicyInput = {
   provider: string
   model: string
   credentialSlot: string
+  // Codex subscription connection key for oauth-broker targets. Optional and
+  // pass-through: the ordered policy serializer never invents or drops it.
+  connectionRef?: string
 }
 
 /**

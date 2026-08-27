@@ -371,6 +371,91 @@ describe('admin Codex subscription routes', () => {
     assertNoLeak(res.body)
   })
 
+  it('publishes the runtime ConfigMap after a manual refresh', async () => {
+    const materialize = vi.fn(async () => {})
+    oauth.refresh.mockResolvedValue({
+      connectionKey: 'codex-aaa',
+      status: 'connected',
+      credentialRevision: 4,
+    })
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/refresh'
+    )
+    expect(res.status).toBe(200)
+    expect(res.body.credentialRevision).toBe(4)
+    expect(materialize).toHaveBeenCalledTimes(1)
+    assertNoLeak(res.body)
+  })
+
+  it('returns 503 when refresh cannot publish the runtime ConfigMap', async () => {
+    const materialize = vi.fn(async () => {
+      throw new Error('apiserver down')
+    })
+    oauth.refresh.mockResolvedValue({
+      connectionKey: 'codex-aaa',
+      status: 'connected',
+      credentialRevision: 4,
+    })
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/refresh'
+    )
+    expect(res.status).toBe(503)
+    expect(res.body.error).toBe('configmap_write_failed')
+    expect(materialize).toHaveBeenCalledTimes(1)
+    assertNoLeak(res.body)
+  })
+
+  it('publishes the runtime ConfigMap after a recorded non-ready catalog sync', async () => {
+    const materialize = vi.fn(async () => {})
+    catalog.loadSecrets.mockResolvedValue({ accessToken: 'access-secret' })
+    catalog.sync.mockResolvedValue({
+      outcome: 'auth-rejected',
+      added: 0,
+      refreshed: 0,
+      staled: 0,
+      connection: {
+        connectionKey: 'codex-aaa',
+        status: 'reauth_required',
+        catalogStatus: 'auth-rejected',
+        catalogRevision: 3,
+      },
+    })
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/catalog/sync'
+    )
+    expect(res.status).toBe(503)
+    expect(res.body.error).toBe('catalog_sync_failed')
+    expect(res.body.outcome).toBe('auth-rejected')
+    expect(materialize).toHaveBeenCalledTimes(1)
+    assertNoLeak(res.body)
+  })
+
+  it('returns 503 when a failed catalog sync cannot publish the runtime ConfigMap', async () => {
+    const materialize = vi.fn(async () => {
+      throw new Error('apiserver down')
+    })
+    catalog.loadSecrets.mockResolvedValue({ accessToken: 'access-secret' })
+    catalog.sync.mockResolvedValue({
+      outcome: 'unavailable',
+      added: 0,
+      refreshed: 0,
+      staled: 0,
+      connection: {
+        connectionKey: 'codex-aaa',
+        status: 'connected',
+        catalogStatus: 'unavailable',
+        catalogRevision: 2,
+      },
+    })
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/catalog/sync'
+    )
+    expect(res.status).toBe(503)
+    expect(res.body.error).toBe('configmap_write_failed')
+    expect(materialize).toHaveBeenCalledTimes(1)
+    assertNoLeak(res.body)
+  })
+
   it('publishes the runtime ConfigMap after revoke', async () => {
     const materialize = vi.fn(async () => {})
     oauth.revoke.mockResolvedValue({

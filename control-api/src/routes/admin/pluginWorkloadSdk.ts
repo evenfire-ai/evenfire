@@ -3,6 +3,7 @@ import {
   isCredentialSlotOwnedByProvider,
   isLlmProviderId,
   isRunnableLlmModelId,
+  providerDescriptor,
 } from '@clerum/llm-providers'
 import {
   advisoryLockModelNames,
@@ -12,6 +13,11 @@ import {
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { createPluginWorkloadSdkAdminRateLimit } from '../../middleware/pluginWorkloadSdkRateLimits.js'
+import { isCodexAssignmentAllowed } from '../../services/codexSubscriptionCatalog.js'
+import {
+  assertCodexConnectionKey,
+  isCodexUnassignedConnectionKey,
+} from '../../services/codexSubscriptionConnection.js'
 import { listEnabledModelsWithStaleForProvider } from '../../services/llmAllowedModels.js'
 import {
   MAX_ALLOWLIST_ENTRY_LENGTH,
@@ -202,6 +208,11 @@ function parseModelPolicies(
   return policies
 }
 
+/** Whether a validated provider id resolves credentials through the OAuth broker. */
+function isBrokerBackedProvider(provider: string): boolean {
+  return isLlmProviderId(provider) && providerDescriptor(provider).authMode === 'oauth-broker'
+}
+
 function credentialSlotBelongsToProvider(provider: string, credentialSlot: string): boolean {
   // This shares the exact slot-ownership rule with the runtime broker. A
   // target only carries the key identity; this route never reads the Secret or
@@ -238,6 +249,7 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
     const provider = typeof raw.provider === 'string' ? raw.provider.trim() : ''
     const model = typeof raw.model === 'string' ? raw.model.trim() : ''
     const credentialSlot = typeof raw.credentialSlot === 'string' ? raw.credentialSlot.trim() : ''
+    const connectionRef = typeof raw.connectionRef === 'string' ? raw.connectionRef.trim() : ''
     if (!targetRef || targetRef.length > MAX_ALLOWLIST_ENTRY_LENGTH || targetRef.includes('*')) {
       res
         .status(400)
@@ -254,16 +266,51 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
         .json({ error: `promptTargets[${index}].model must be a non-wildcard model id` })
       return null
     }
-    if (
-      !credentialSlot ||
-      credentialSlot.length > 253 ||
-      !SECRET_KEY_RE.test(credentialSlot) ||
-      !credentialSlotBelongsToProvider(provider, credentialSlot)
-    ) {
-      res.status(400).json({
-        error: `promptTargets[${index}].credentialSlot must be a valid slot owned by provider "${provider}"`,
-      })
-      return null
+    const brokerBacked = providerDescriptor(provider).authMode === 'oauth-broker'
+    if (brokerBacked) {
+      // oauth-broker targets (Codex) carry no static Secret data key: the
+      // credential is brokered per attempt. An empty slot is the only correct
+      // value — a non-empty slot would pretend a ChatGPT refresh token lives
+      // in an API-key slot, which is exactly the shape this gate forbids.
+      if (credentialSlot) {
+        res.status(400).json({
+          error: `promptTargets[${index}].credentialSlot must be empty for oauth-broker provider "${provider}"`,
+        })
+        return null
+      }
+      // The target only CHOOSES an existing Codex grant. Reject the missing /
+      // unassigned / malformed key here; existence, connection status, and
+      // model offer are re-validated against the catalog inside the upsert
+      // transaction (fail closed on every unknown/revoked/not-offered case).
+      try {
+        if (!connectionRef || isCodexUnassignedConnectionKey(connectionRef)) {
+          throw new Error('missing_connection_ref')
+        }
+        assertCodexConnectionKey(connectionRef)
+      } catch {
+        res.status(400).json({
+          error: `promptTargets[${index}].connectionRef must name an existing Codex subscription connection`,
+        })
+        return null
+      }
+    } else {
+      if (connectionRef) {
+        res.status(400).json({
+          error: `promptTargets[${index}].connectionRef is only valid for oauth-broker providers`,
+        })
+        return null
+      }
+      if (
+        !credentialSlot ||
+        credentialSlot.length > 253 ||
+        !SECRET_KEY_RE.test(credentialSlot) ||
+        !credentialSlotBelongsToProvider(provider, credentialSlot)
+      ) {
+        res.status(400).json({
+          error: `promptTargets[${index}].credentialSlot must be a valid slot owned by provider "${provider}"`,
+        })
+        return null
+      }
     }
     const providerModel = `${provider}\u0000${model}`
     if (targetRefs.has(targetRef) || providerModels.has(providerModel)) {
@@ -272,7 +319,13 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
     }
     targetRefs.add(targetRef)
     providerModels.add(providerModel)
-    targets.push({ targetRef, provider, model, credentialSlot })
+    targets.push({
+      targetRef,
+      provider,
+      model,
+      credentialSlot,
+      ...(brokerBacked ? { connectionRef } : {}),
+    })
   }
   return targets
 }
@@ -485,8 +538,31 @@ export function createAdminPluginWorkloadSdkRouter(
           await advisoryLockModelNames(db, allowedModels)
 
           if (capabilityFamily === 'promptBridge') {
+            // Codex (oauth-broker) targets are validated against the chosen
+            // grant's per-connection catalog, not the flat `llm_allowed_models`
+            // union: only a model offered AND enabled (non-stale) on that
+            // exact connected grant may be authorized. Unknown, unassigned,
+            // revoked, and not-offered all fail closed with a stable error.
+            // No Pieza D toleration applies — a Codex grant that lost a model
+            // must be re-pointed explicitly, never silently kept.
+            for (const target of promptTargets) {
+              if (!isBrokerBackedProvider(target.provider)) continue
+              const allowed = await isCodexAssignmentAllowed(
+                db,
+                target.connectionRef ?? '',
+                target.model
+              )
+              if (!allowed) {
+                throw new GrantModelGateError({
+                  error: 'codex_connection_not_allowed',
+                  connectionRef: target.connectionRef ?? '',
+                  model: target.model,
+                })
+              }
+            }
             const modelsByProvider = new Map<string, string[]>()
             for (const target of promptTargets) {
+              if (isBrokerBackedProvider(target.provider)) continue
               modelsByProvider.set(target.provider, [
                 ...(modelsByProvider.get(target.provider) ?? []),
                 target.model,

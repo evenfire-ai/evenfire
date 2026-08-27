@@ -580,6 +580,9 @@ describe('LlmBridge authorized multi-provider fallback', () => {
       provider: 'codex-subscription',
       model: 'gpt-5.1',
       credentialSlot: '',
+      // Claim 1b: the grant identity travels with the target for audit; it must
+      // not trigger any secret redemption or leak into the result payload.
+      connectionRef: 'team-plus',
     }
     const provider = new FakeProvider(async () => ({
       ...OK,
