@@ -220,7 +220,7 @@ test.describe('Control UI — Stateless Agents', () => {
   }) => {
     test.setTimeout(180_000)
     const agentName = `e2e-stateless-create-${Date.now()}`
-    const contextName = `${agentName}-ctx`
+    let contextName = ''
     const secretName = `${agentName}-secret`
     try {
       // PRECONDITION (labeled setup): a managed host secret for the picker.
@@ -247,12 +247,7 @@ test.describe('Control UI — Stateless Agents', () => {
       await expect(statelessRadio).toBeChecked()
       await authedPage.getByRole('button', { name: 'Next', exact: true }).click()
 
-      // Step 1 — create a new context (no MCP servers required)
-      await authedPage.getByRole('radio', { name: /Create new context/ }).check()
-      await authedPage.getByPlaceholder('context-name').fill(contextName)
-      await authedPage.getByRole('button', { name: 'Next', exact: true }).click()
-
-      // Step 2 — keep the default model, reuse the first existing secret
+      // Step 1 — keep the default model, reuse the first existing secret
       await authedPage.getByRole('radio', { name: /Use existing secret/ }).check()
       await authedPage.getByRole('button', { name: /Select secret/ }).click()
       // Deterministic pick: the exact secret this test seeded, never .first()
@@ -261,12 +256,11 @@ test.describe('Control UI — Stateless Agents', () => {
       await seededSecret.click()
       await authedPage.getByRole('button', { name: 'Next', exact: true }).click()
 
-      // Step 3 — access grants are optional
+      // Step 2 — access grants are optional
       await authedPage.getByRole('button', { name: 'Next', exact: true }).click()
 
-      // Step 4 — no channel is needed for this flag-only flow. Channel ingress
-      // behavior is covered by the stateless + CommunicationChannel test below.
-      await authedPage.getByRole('button', { name: /Skip channel setup/ }).click()
+      // Step 3 — no connector is needed for this flag-only flow.
+      await authedPage.getByRole('button', { name: 'Create Agent', exact: true }).click()
       // Completion leaves the create page (canonical routing) — the CR poll
       // below is the business signal; this asserts the UI transition.
       await expect(authedPage).not.toHaveURL(/\/hosts\/new/, { timeout: 30_000 })
@@ -276,10 +270,11 @@ test.describe('Control UI — Stateless Agents', () => {
         host => host.spec?.lifecycle?.stateless === true,
         'spec.lifecycle.stateless=true'
       )
+      contextName = String(created.spec?.contextRef || '')
       expect(created.spec?.lifecycle?.stateless).toBe(true)
     } finally {
       await controlApi.ensureHostDeleted(agentName)
-      await controlApi.ensureContextDeleted(contextName)
+      if (contextName) await controlApi.ensureContextDeleted(contextName)
       await controlApi.ensureSecretDeleted(secretName)
     }
   })

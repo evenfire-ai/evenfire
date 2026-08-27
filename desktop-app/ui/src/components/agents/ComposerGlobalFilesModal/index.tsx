@@ -1,11 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, EmptyState, IconButton, StatusBanner } from '@components/Common'
-import {
-  IconAttachFile,
-  IconChevronRight,
-  IconClose,
-  IconContexts,
-} from '@components/SidebarNav/icons'
+import { GfsFileIcon } from '@components/GfsFileIcon'
+import { IconChevronRight, IconClose, IconContexts } from '@components/SidebarNav/icons'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import type { ComposerGlobalFileReference } from '@/uiTypes'
@@ -168,7 +164,7 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
                       onChange={() => toggleFile(file)}
                     />
                     <span className="composer-global-files-entry-icon" aria-hidden="true">
-                      <IconAttachFile />
+                      <GfsFileIcon name={entry.name} />
                     </span>
                     <span className="composer-global-files-entry-copy">
                       <strong>{entry.name}</strong>

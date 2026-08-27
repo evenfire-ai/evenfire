@@ -4,12 +4,14 @@ import type { RecordWithTtl } from 'node:dns'
 import * as dns from 'node:dns/promises'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { asApiserverNetworkPolicy } from './__tests__/asApiserverNetworkPolicy'
 import { confirmAuthoritativeMcpServerAbsence } from './mcpServerSafety'
 import {
   networkPolicySafetyPassDurationSeconds,
   networkPolicySafetyPassPoliciesTotal,
 } from './metrics'
 import {
+  DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE,
   NetworkPolicyReconciler,
   PUBLIC_EGRESS_EXCEPT_CIDRS,
   sameContextDesiredRevision,
@@ -2042,6 +2044,64 @@ describe('NetworkPolicyReconciler', () => {
         mockApi.createNamespacedNetworkPolicy.mock.calls.length +
         mockApi.replaceNamespacedNetworkPolicy.mock.calls.length
       expect(wrote).toBeGreaterThan(0)
+    })
+
+    it('WRITES through create-409 when renewalDue so the inner no-op gate cannot veto M1', async () => {
+      const server: McpServerCRD = {
+        name: 'renew-409-mcp',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'dev',
+          image: 'renew:latest',
+          transport: { type: 'streamableHttp', url: 'http://renew:3000', port: 3000 },
+          egressBindings: [{ dns: 'api.example.com', port: 443 }],
+        },
+      }
+      await reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      const written = (
+        mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as { body: k8s.V1NetworkPolicy }
+      ).body
+
+      const annotations = { ...(written.metadata?.annotations ?? {}) }
+      const state = JSON.parse(annotations['clerum.io/egress-fqdn-state']) as Array<{
+        expiresAt: number
+      }>
+      for (const e of state) e.expiresAt = Date.now() + 1000
+      annotations['clerum.io/egress-fqdn-state'] = JSON.stringify(state)
+
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValue({
+        items: [
+          {
+            metadata: {
+              name: written.metadata?.name,
+              labels: written.metadata?.labels,
+              annotations,
+            },
+            spec: written.spec,
+          },
+        ],
+      })
+      mockApi.createNamespacedNetworkPolicy.mockRejectedValue(
+        Object.assign(new Error('already exists'), { code: 409 })
+      )
+      mockApi.readNamespacedNetworkPolicy.mockResolvedValue({
+        apiVersion: 'networking.k8s.io/v1',
+        kind: 'NetworkPolicy',
+        metadata: {
+          name: written.metadata?.name,
+          namespace: written.metadata?.namespace,
+          labels: written.metadata?.labels,
+          annotations,
+          resourceVersion: '9',
+        },
+        spec: written.spec,
+      })
+      mockApi.createNamespacedNetworkPolicy.mockClear()
+      mockApi.replaceNamespacedNetworkPolicy.mockClear()
+
+      await reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      expect(mockApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
+      expect(mockApi.replaceNamespacedNetworkPolicy).toHaveBeenCalled()
     })
 
     it('DROPS a blocked/private IP rehydrated from a tampered annotation (issue #299 M3 defense-in-depth)', async () => {
@@ -5559,7 +5619,7 @@ describe('NetworkPolicyReconciler', () => {
           serverInventoryAuthoritative: () => true,
           onAuthoritativeRevocationComplete,
         })
-      ).rejects.toThrow(/Desired NetworkPolicy inventory changed/)
+      ).rejects.toThrow(DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE)
 
       expect(onAuthoritativeRevocationComplete).not.toHaveBeenCalled()
     })
@@ -5616,6 +5676,29 @@ describe('NetworkPolicyReconciler', () => {
         }
       ).reconcileExternalEgressSafety(server, [stalePredecessor], () => true)
     }
+
+    it('BYPASS-NP-1: equivalent HCC-owned recorded policy skips replace', async () => {
+      const binding = server.spec.egressBindings![0]
+      const desired = (
+        reconciler as unknown as {
+          buildExactHostEgressPolicy: (
+            server: McpServerCRD,
+            name: string,
+            binding: { cidr?: string; port?: number; protocol?: string },
+            cidrs: string[]
+          ) => k8s.V1NetworkPolicy
+        }
+      ).buildExactHostEgressPolicy(server, desiredName, binding, ['104.18.0.0/16'])
+      mockApi.createNamespacedNetworkPolicy.mockRejectedValue(
+        Object.assign(new Error('already exists'), { code: 409 })
+      )
+      mockApi.readNamespacedNetworkPolicy.mockResolvedValue(asApiserverNetworkPolicy(desired))
+
+      expect(await reconcileExternalEgressSafety()).toBe(true)
+      expect(mockApi.createNamespacedNetworkPolicy).toHaveBeenCalled()
+      expect(mockApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
+      expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
 
     it('converges an HCC-owned same-name policy instead of aborting the pass', async () => {
       mockApi.createNamespacedNetworkPolicy.mockRejectedValueOnce(

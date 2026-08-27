@@ -83,7 +83,7 @@ describe('ContextTable', () => {
     expect(screen.getByText('business')).toHaveClass('cu-expandable-row__name')
   })
 
-  it('does not open a context from row action buttons', () => {
+  it('does not open a context from the row actions kebab', () => {
     const onView = vi.fn()
     const onEdit = vi.fn()
     const onDelete = vi.fn().mockResolvedValue(undefined)
@@ -100,12 +100,40 @@ describe('ContextTable', () => {
       />
     )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Edit context business' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for context business' }))
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit' }))
     expect(onEdit).toHaveBeenCalledWith({ name: 'business' })
     expect(onView).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Delete context business' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for context business' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
     expect(onDelete).toHaveBeenCalledWith({ name: 'business' })
     expect(onView).not.toHaveBeenCalled()
+  })
+
+  it('disables only the Delete item while deleting and renames it to Deleting…', () => {
+    const onEdit = vi.fn()
+    const onDelete = vi.fn().mockResolvedValue(undefined)
+    render(
+      <ContextTable
+        items={contexts}
+        onView={vi.fn()}
+        onEdit={onEdit}
+        onDelete={onDelete}
+        deletingKey="business"
+        onRefresh={vi.fn()}
+        onCreate={vi.fn()}
+        refreshing={false}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for context business' }))
+
+    const editItem = screen.getByRole('menuitem', { name: 'Edit' })
+    const deletingItem = screen.getByRole('menuitem', { name: 'Deleting…' })
+
+    expect(editItem).not.toBeDisabled()
+    expect(deletingItem).toBeDisabled()
   })
 })

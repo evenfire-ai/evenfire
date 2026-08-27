@@ -243,7 +243,11 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
         properties: {
           drive: { type: 'string', description: 'gfs drive name.' },
           parentResourceId: { type: 'string', description: 'Destination folder resource id.' },
-          name: { type: 'string', description: 'New file name.' },
+          name: {
+            type: 'string',
+            description:
+              'New file name including its file extension, e.g. "report.txt" or "notes.md". Always match the content format.',
+          },
           content: { type: 'string', description: 'Initial file content.' },
         },
       },
