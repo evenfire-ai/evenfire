@@ -17,12 +17,20 @@ export type ReadinessReason =
   | 'safety_pass_uncertified'
   | 'revocation_revision_mismatch'
 
-export function readinessReasonsFromDetail(detail: ReadinessInventoryDetail): ReadinessReason[] {
+/** Watch-freshness reasons shared by the kubelet probe and the 6-clause gate. */
+export function watchFreshnessReasonsFromDetail(
+  detail: ReadinessInventoryDetail
+): ReadinessReason[] {
   const reasons: ReadinessReason[] = []
   if (detail.stopped) reasons.push('controller_stopped')
   if (!detail.mcpServerCacheSynced) reasons.push('mcp_watch_unsynced')
   if (!detail.contextCacheSynced) reasons.push('context_watch_unsynced')
   if (!detail.hostCacheSynced) reasons.push('host_watch_unsynced')
+  return reasons
+}
+
+export function readinessReasonsFromDetail(detail: ReadinessInventoryDetail): ReadinessReason[] {
+  const reasons = watchFreshnessReasonsFromDetail(detail)
   if (!detail.safetyInventoryCertified) reasons.push('safety_pass_uncertified')
   if (!detail.contextRevisionAligned || !detail.serverRevisionAligned) {
     reasons.push('revocation_revision_mismatch')
@@ -46,14 +54,15 @@ export function resolveReadinessDetailFn(
 /**
  * Resolve the readiness-authority gate for the server from the provider.
  *
- * Production (McpServerWatcher present): readiness follows the live inventory
- * certification — /ready is 200 only once stale allows are revoked.
+ * Production (McpServerWatcher present): the per-request data-path gate
+ * follows live inventory certification (6 clauses). Kubelet /ready uses
+ * resolveProbeAuthoritativeFn instead — watch freshness only.
  *
  * Dev (DevMcpServerProvider — no watcher): there is NO NetworkPolicy inventory
  * to certify, so authority is unconditional. The ContextMapperServer default
  * for a missing gate is fail-closed (`() => false`), which is correct for a
- * caller that forgets to wire one — but in dev it would pin /ready (and every
- * data endpoint) at 503 forever. Dev must therefore pass an explicit
+ * caller that forgets to wire one — but in dev it would pin every data
+ * endpoint at 503 forever. Dev must therefore pass an explicit
  * always-authoritative gate; this function is that single, named decision so
  * the affirmative literal never gets copy-pasted into a production path.
  */
@@ -93,12 +102,7 @@ export function resolveHostAuthoritativeFn(
  * endpoints without making kubelet evict the Pod.
  */
 export function isProbeReadinessAuthoritative(detail: ReadinessInventoryDetail): boolean {
-  return (
-    !detail.stopped &&
-    detail.mcpServerCacheSynced &&
-    detail.contextCacheSynced &&
-    detail.hostCacheSynced
-  )
+  return watchFreshnessReasonsFromDetail(detail).length === 0
 }
 
 /**
@@ -110,12 +114,7 @@ export function isProbeReadinessAuthoritative(detail: ReadinessInventoryDetail):
 export function probeReadinessReasonsFromDetail(
   detail: ReadinessInventoryDetail
 ): ReadinessReason[] {
-  const reasons: ReadinessReason[] = []
-  if (detail.stopped) reasons.push('controller_stopped')
-  if (!detail.mcpServerCacheSynced) reasons.push('mcp_watch_unsynced')
-  if (!detail.contextCacheSynced) reasons.push('context_watch_unsynced')
-  if (!detail.hostCacheSynced) reasons.push('host_watch_unsynced')
-  return reasons
+  return watchFreshnessReasonsFromDetail(detail)
 }
 
 /**

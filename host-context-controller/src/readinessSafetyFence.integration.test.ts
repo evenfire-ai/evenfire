@@ -176,7 +176,7 @@ function alignRevocationCounters(watcher: InstanceType<typeof McpServerWatcher>)
   w.networkPolicyRevocationServerRevision = w.mcpServerDesiredRevision
 }
 
-describe('readiness withdrawal on a real lost delete fence', () => {
+describe('lost delete fence: per-request 503 while /ready stays 200', () => {
   let watcher: InstanceType<typeof McpServerWatcher>
   let server: InstanceType<typeof ContextMapperServer>
 
@@ -211,7 +211,7 @@ describe('readiness withdrawal on a real lost delete fence', () => {
     await watcher.stop()
   })
 
-  it('turns /ready from 200 to 503 when the additive phase loses a delete fence, and back on a clean pass', async () => {
+  it('503s the data path when the additive phase loses a delete fence, keeps /ready 200, and reopens the API on a clean pass', async () => {
     const reconciler = (watcher as unknown as { netPolReconciler: any }).netPolReconciler
     alignRevocationCounters(watcher)
 
@@ -225,6 +225,7 @@ describe('readiness withdrawal on a real lost delete fence', () => {
       onAuthoritativeRevocationComplete: () => {},
     })
     alignRevocationCounters(watcher)
+    expect(await apiStatus(server)).toBe(200)
     expect(await readyStatus(server)).toBe(200)
 
     // The stale allow only becomes visible after the authoritative phase has
@@ -270,10 +271,11 @@ describe('readiness withdrawal on a real lost delete fence', () => {
     })
     alignRevocationCounters(watcher)
     expect(reconciler.hasCertifiedSafetyInventory()).toBe(true)
+    expect(await apiStatus(server)).toBe(200)
     expect(await readyStatus(server)).toBe(200)
   })
 
-  it('withholds readiness when the authoritative pass loses a delete fence under a provided safety snapshot', async () => {
+  it('503s the data path when the authoritative pass loses a delete fence under a provided safety snapshot', async () => {
     const reconciler = (watcher as unknown as { netPolReconciler: any }).netPolReconciler
     alignRevocationCounters(watcher)
 
@@ -287,6 +289,7 @@ describe('readiness withdrawal on a real lost delete fence', () => {
       onAuthoritativeRevocationComplete: () => {},
     })
     alignRevocationCounters(watcher)
+    expect(await apiStatus(server)).toBe(200)
     expect(await readyStatus(server)).toBe(200)
 
     // Unlike the additive-phase test above, the stale allow is visible to the
@@ -349,6 +352,7 @@ describe('readiness withdrawal on a real lost delete fence', () => {
     })
     alignRevocationCounters(watcher)
     expect(reconciler.hasCertifiedSafetyInventory()).toBe(true)
+    expect(await apiStatus(server)).toBe(200)
     expect(await readyStatus(server)).toBe(200)
   })
 
@@ -387,6 +391,7 @@ describe('readiness withdrawal on a real lost delete fence', () => {
       onAuthoritativeRevocationComplete: () => {},
     })
     alignRevocationCounters(watcher)
+    expect(await apiStatus(server)).toBe(200)
     expect(await readyStatus(server)).toBe(200)
 
     // The authoritative pass loses its delete fence under the provided
@@ -487,6 +492,7 @@ describe('readiness withdrawal on a real lost delete fence', () => {
       onAuthoritativeRevocationComplete: () => {},
     })
     alignRevocationCounters(watcher)
+    expect(await apiStatus(server)).toBe(200)
     expect(await readyStatus(server)).toBe(200)
 
     // The delta certificate is captured now, while the fence is still certified.

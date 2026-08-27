@@ -8,6 +8,7 @@ import {
   resolveProbeAuthoritativeFn,
   resolveProviderAuthoritativeFn,
   resolveReadinessDetailFn,
+  watchFreshnessReasonsFromDetail,
 } from './readinessGate'
 
 function authoritativeDetail(
@@ -170,6 +171,18 @@ describe('resolveProbeAuthoritativeFn', () => {
     expect(probeFn()).toBe(false)
     detail = { ...detail, hostCacheSynced: true }
     expect(probeFn()).toBe(true)
+  })
+})
+
+describe('watchFreshnessReasonsFromDetail', () => {
+  it('keeps the probe predicate identical to an empty watch-reason list', () => {
+    const uncertified = authoritativeDetail({
+      safetyInventoryCertified: false,
+      contextRevisionAligned: false,
+    })
+    expect(watchFreshnessReasonsFromDetail(uncertified)).toEqual([])
+    expect(isProbeReadinessAuthoritative(uncertified)).toBe(true)
+    expect(probeReadinessReasonsFromDetail(uncertified)).toEqual([])
   })
 })
 

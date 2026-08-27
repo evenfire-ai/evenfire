@@ -1090,4 +1090,56 @@ describe('ContextMapperServer /ready probe cut (A1)', () => {
     inventory = await invoke(server, '/api/v1/mcpservers')
     expect(inventory.statusCode).toBe(200)
   })
+
+  it('A1-T15 logs distinct lanes when the probe is ready and the data path is not', async () => {
+    const infoSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const detailRef = {
+        current: authoritativeDetail({
+          safetyInventoryCertified: false,
+          contextRevisionAligned: false,
+          serverRevisionAligned: false,
+        }),
+      }
+      server = mainLikeServer(detailRef)
+      server.setReady(true)
+
+      expect((await invoke(server, '/ready')).statusCode).toBe(200)
+      expect((await invoke(server, '/health')).statusCode).toBe(200)
+      expect(JSON.parse((await invoke(server, '/health')).body).ready).toBe(false)
+
+      const infoLines = infoSpy.mock.calls.map(call => String(call[0]))
+      const warnLines = warnSpy.mock.calls.map(call => String(call[0]))
+      expect(infoLines.some(line => line.includes('"lane":"probe"'))).toBe(true)
+      expect(warnLines.some(line => line.includes('"lane":"request"'))).toBe(true)
+    } finally {
+      infoSpy.mockRestore()
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('A1-T16 describes /ready as watch-freshness on GET /', async () => {
+    server = mainLikeServer({ current: authoritativeDetail() })
+    const response = await invoke(server, '/')
+    expect(response.statusCode).toBe(200)
+    const body = JSON.parse(response.body) as { endpoints: Record<string, string> }
+    expect(body.endpoints['GET /ready']).toContain('watch inventory is fresh')
+    expect(body.endpoints['GET /ready']).not.toContain('provider inventory is authoritative')
+  })
+
+  it('A1-T17 keeps /health.ready on the 6-clause gate while /ready is 200', async () => {
+    const detailRef = {
+      current: authoritativeDetail({ safetyInventoryCertified: false }),
+    }
+    server = mainLikeServer(detailRef)
+    server.setReady(true)
+
+    const ready = await invoke(server, '/ready')
+    const health = await invoke(server, '/health')
+    expect(ready.statusCode).toBe(200)
+    expect(JSON.parse(ready.body)).toEqual({ status: 'ready', ready: true })
+    expect(health.statusCode).toBe(200)
+    expect(JSON.parse(health.body)).toEqual({ status: 'ok', ready: false })
+  })
 })
