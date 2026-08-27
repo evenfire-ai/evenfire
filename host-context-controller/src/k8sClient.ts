@@ -3096,9 +3096,10 @@ export class McpServerWatcher implements McpServerProvider {
       }
       const serverInventoryComplete = this.mcpServerCacheSynced
       const contextInventoryAuthoritative = () =>
-        this.hasContextInventoryAuthority(contextInventoryGeneration)
+        this.contextCacheSynced && this.contextDesiredRevision === safetyCertificate.contextRevision
       const serverInventoryAuthoritative = () =>
-        this.hasMcpServerInventoryAuthority(serverInventoryGeneration)
+        this.mcpServerCacheSynced &&
+        this.mcpServerDesiredRevision === safetyCertificate.serverRevision
       console.log('[K8s] Running initial NetworkPolicy background reconciliation...')
       await this.netPolReconciler.fullReconcile(initialContexts, initialServers, {
         serverInventoryComplete,
