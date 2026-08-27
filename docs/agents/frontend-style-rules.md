@@ -36,6 +36,12 @@ application guidance that must be combined with this shared document.
 - Prefer existing tokens for spacing, radii, font sizes, shadows, and motion.
   Add a scoped token only when no existing token fits; promote it to the
   application's token file only when it is shared.
+- Use the target application's established typography and font-size scale
+  before adding a new value. Do not introduce a new font-size token outside the
+  application's scale without an explicit design decision. Desktop's exact
+  scale is owned by its renderer standard; Control UI and Profile UI continue
+  to follow the values established in their own global stylesheets until their
+  typography is consolidated.
 - Use the application's spacing scale instead of introducing raw `rem` values.
 - Put token declarations and shared CSS classes/layout in the files below.
   Token files declare values; shared-style files own reusable selectors.
