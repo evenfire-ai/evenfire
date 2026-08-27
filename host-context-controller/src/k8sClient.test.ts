@@ -4292,7 +4292,13 @@ describe('McpServerWatcher startup', () => {
     await pass
 
     expect(warnSpy).toHaveBeenCalledWith(
-      '[K8s] pass ended without certifying: inventory authority lost'
+      '[K8s] pass ended without certifying: inventory authority lost',
+      expect.objectContaining({
+        contextMoved: true,
+        serverMoved: false,
+        contextCacheSynced: true,
+        mcpServerCacheSynced: true,
+      })
     )
     expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(5)
     expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(true)
@@ -4352,7 +4358,13 @@ describe('McpServerWatcher startup', () => {
     await pass
 
     expect(warnSpy).toHaveBeenCalledWith(
-      '[K8s] pass ended without certifying: inventory authority lost'
+      '[K8s] pass ended without certifying: inventory authority lost',
+      expect.objectContaining({
+        contextMoved: false,
+        serverMoved: true,
+        contextCacheSynced: true,
+        mcpServerCacheSynced: true,
+      })
     )
     expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(5)
     expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(true)
@@ -5111,6 +5123,7 @@ describe('McpServerWatcher startup', () => {
 
   it('names the inventory-changed throw aborted-bump', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const watcher = new McpServerWatcher()
     ;(watcher as any).contextCacheSynced = true
     ;(watcher as any).mcpServerCacheSynced = true
@@ -5131,7 +5144,17 @@ describe('McpServerWatcher startup', () => {
       })
     ).toBe(bumpBefore + 1)
     expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(1)
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[K8s] pass ended without certifying: desired inventory changed',
+      expect.objectContaining({
+        contextMoved: false,
+        serverMoved: false,
+        contextCacheSynced: true,
+        mcpServerCacheSynced: true,
+      })
+    )
     errorSpy.mockRestore()
+    warnSpy.mockRestore()
     await watcher.stop()
   })
 
