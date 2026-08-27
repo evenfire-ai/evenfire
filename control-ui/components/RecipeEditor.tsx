@@ -2229,7 +2229,7 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
                     border: '1px solid var(--cu-border)',
                     borderRadius: 6,
                     padding: '8px 10px',
-                    background: 'var(--cu-bg-subtle)',
+                    background: 'var(--cu-surface-hover)',
                     color: 'var(--cu-text-soft)',
                     fontSize: '0.82rem',
                     lineHeight: 1.45,

@@ -17,6 +17,70 @@ These provider-neutral rules apply only to `control-ui/**`. Combine them with
   `Field`, `TextInput`, `SelectInput`, `TextAreaInput`, `CheckboxField`, and
   `FormSection`.
 
+## Typography and tokens
+
+`app/globals.css` declares the full scale. Never write a raw `font-size` in CSS
+or a `fontSize` in TSX; use the token.
+
+| Token                | Size | Use for                             |
+| -------------------- | ---- | ----------------------------------- |
+| `--cu-font-size-2xs` | 11px | uppercase eyebrows, table `th`      |
+| `--cu-font-size-xs`  | 12px | field hints, panel subtitles, chips |
+| `--cu-font-size-sm`  | 13px | tabs, small buttons, dense body     |
+| `--cu-font-size-md`  | 14px | default body text, table cells      |
+| `--cu-font-size-lg`  | 15px | panel header, emphasized row title  |
+| `--cu-font-size-xl`  | 16px | card and section title              |
+| `--cu-font-size-2xl` | 18px | page subhead                        |
+| `--cu-font-size-3xl` | 22px | page hero                           |
+| `--cu-font-size-4xl` | 28px | auth hero only                      |
+
+Weights are `--cu-font-weight-regular` (400), `--cu-font-weight-medium` (500),
+`--cu-font-weight-semibold` (600), and `--cu-font-weight-bold` (700). Line
+heights are `--cu-line-height-tight` (1.2) for headings,
+`--cu-line-height-normal` (1.45) for body and hints, and
+`--cu-line-height-relaxed` (1.5) for the page body default. Monospaced text uses
+`--cu-font-mono`; do not write out a monospace stack by hand.
+
+Do not add a font-size token outside this scale. The scale is intentionally
+narrow, and a value that does not fit is a design decision to raise, not a token
+to add.
+
+**This scale intentionally differs from Desktop's.** `--cu-font-size-md` is
+**14px** here; `--font-size-md` in `desktop-app/ui/src/styles/tokens.css` is
+**13px**. Desktop's scale has no 14px or 16px step, and Control UI relies on
+both. The prefixes differ (`--cu-` versus bare), the values differ, and that is
+deliberate. Do not "align" them without an explicit design decision.
+
+Spacing uses `--cu-space-0` (2px), `--cu-space-05` (4px), then `--cu-space-1`
+through `--cu-space-7` (0.35rem, 8px, 12px, 16px, 20px, 24px, 32px). Radii are
+`--cu-radius-xs` (4px), `--cu-radius-sm` (8px), `--cu-radius` (12px), and
+`--cu-radius-pill`. Transitions use `--cu-motion-fast` or `--cu-motion-base`.
+Prefer an existing token over a raw `rem` or `px` value.
+
+Every `--cu-*` name a rule references must be declared in `app/globals.css`.
+`var(--cu-missing)` with no fallback is invalid at computed-value time, so the
+whole declaration is silently dropped. `var(--cu-missing, something)` does use
+the fallback, but it hides the fact that the token was never defined and locks
+the rule to whatever the fallback happens to be. Declare the token instead of
+leaning on either behaviour.
+
+## Tables and row actions
+
+- Column headers use `--cu-font-size-2xs`, semibold, uppercase, `0.05em`
+  letter-spacing. A sortable header is a button with the same type treatment as
+  a static one; sorting is signalled by the arrow and a hover color, never by a
+  different font size or casing.
+- Right-align numeric columns and set `font-variant-numeric: tabular-nums` so
+  digits line up.
+- Keep the table element and its header row mounted through loading, empty, and
+  error states. Only the body changes. An empty result renders a full-width row,
+  not an unmounted table.
+- Row actions run in a fixed order: utility, then edit, then destructive, then
+  the detail-open chevron. The chevron sits at the right edge and is the only
+  affordance for opening a detail view.
+- `app/cost-and-usage/llm-prices` is the reference implementation for a route
+  table, including state-dependent row affordances.
+
 ## Routing
 
 - Sidebar destinations and shareable tab-like sections use canonical Next App
