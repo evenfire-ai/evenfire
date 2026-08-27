@@ -72,7 +72,7 @@ describe('LlmPolicyEditor (spec §3-R5 / R4.5.6)', () => {
     // Row 1 model + slot come from the spec.
     const model0 = screen.getByLabelText('Model', { selector: '#llm-fallback-0-model' })
     expect((model0 as HTMLSelectElement).value).toBe('claude-haiku-4-5')
-    const slot0 = screen.getByLabelText('Credential slot', { selector: '#llm-fallback-0-slot' })
+    const slot0 = screen.getByLabelText('Credential source', { selector: '#llm-fallback-0-slot' })
     expect((slot0 as HTMLSelectElement).value).toBe('claude-api-key-fb1')
   })
 
@@ -128,7 +128,7 @@ describe('LlmPolicyEditor (spec §3-R5 / R4.5.6)', () => {
         secretKeys={['claude-api-key', 'claude-api-key-fb1', 'openai-api-key']}
       />
     )
-    const slot = screen.getByLabelText('Credential slot', {
+    const slot = screen.getByLabelText('Credential source', {
       selector: '#llm-fallback-0-slot',
     }) as HTMLSelectElement
     // It's a <select>, not a text input — the anti-typo guarantee (R4.5.6).
@@ -154,10 +154,10 @@ describe('LlmPolicyEditor (spec §3-R5 / R4.5.6)', () => {
     // The slot <select> is suppressed — a single dataKey can't express the pair;
     // the backend rejects any credentialSlot on Bedrock (422). A reuse note shows.
     expect(
-      screen.queryByLabelText('Credential slot', { selector: '#llm-fallback-0-slot' })
+      screen.queryByLabelText('Credential source', { selector: '#llm-fallback-0-slot' })
     ).toBeNull()
     expect(
-      screen.getByText(/Amazon Bedrock fallbacks reuse the primary credentials/i)
+      screen.getByText(/Amazon Bedrock fallbacks reuse the primary credential/i)
     ).toBeInTheDocument()
   })
 
@@ -169,10 +169,10 @@ describe('LlmPolicyEditor (spec §3-R5 / R4.5.6)', () => {
       />
     )
     expect(
-      screen.queryByLabelText('Credential slot', { selector: '#llm-fallback-0-slot' })
+      screen.queryByLabelText('Credential source', { selector: '#llm-fallback-0-slot' })
     ).toBeNull()
     expect(
-      screen.getByText(/Google Vertex AI fallbacks reuse the primary credentials/i)
+      screen.getByText(/Google Vertex AI fallbacks reuse the primary credential/i)
     ).toBeInTheDocument()
   })
 
@@ -201,7 +201,7 @@ describe('LlmPolicyEditor (spec §3-R5 / R4.5.6)', () => {
   it('still offers the credentialSlot dropdown for a single-key provider (Anthropic)', () => {
     render(<Harness initial={{ fallbacks: [{ provider: 'claude', model: 'claude-opus-4-8' }] }} />)
     expect(
-      screen.getByLabelText('Credential slot', { selector: '#llm-fallback-0-slot' })
+      screen.getByLabelText('Credential source', { selector: '#llm-fallback-0-slot' })
     ).toBeInTheDocument()
   })
 
@@ -222,7 +222,7 @@ describe('LlmPolicyEditor (spec §3-R5 / R4.5.6)', () => {
       target: { value: 'claude-haiku-4-5' },
     })
     fireEvent.change(
-      screen.getByLabelText('Credential slot', { selector: '#llm-fallback-0-slot' }),
+      screen.getByLabelText('Credential source', { selector: '#llm-fallback-0-slot' }),
       {
         target: { value: 'claude-api-key-fb1' },
       }
