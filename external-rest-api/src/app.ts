@@ -2,6 +2,7 @@ import express, { NextFunction, Request, Response } from 'express'
 import cors from 'cors'
 import { config } from './config.js'
 import {
+  publicCorrelationId,
   sanitizeControlApiPublicError,
   sendPublicApiError,
   sendSanitizedControlApiPublicError,
@@ -103,7 +104,11 @@ export function externalRestPublicErrorHandler(
   res: Response,
   _next: NextFunction
 ): void {
-  const propagatedError = sanitizeControlApiPublicError(err, new Set([429, 503]))
+  const propagatedError = sanitizeControlApiPublicError(
+    err,
+    new Set([429, 503]),
+    publicCorrelationId(req)
+  )
   if (propagatedError) {
     sendSanitizedControlApiPublicError(res, propagatedError)
     return
