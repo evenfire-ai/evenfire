@@ -363,7 +363,14 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
           userId,
         })
         if (!key) {
-          return res.status(400).json({ error: 'server_missing_context' })
+          // Unreachable: `buildMcpServerGrantKey` returns null only when a
+          // context server lacks `contextRef` (already rejected above at the
+          // membership gate) or a user server lacks `userId` (validated
+          // non-empty above). Fail closed defensively rather than delete against
+          // a malformed key — with the generic `invalid_request` (mirrors the
+          // token mint's null-key guard, routes/mcpOauth.ts), since the specific
+          // null cause was already handled.
+          return res.status(400).json({ error: 'invalid_request' })
         }
 
         const deletedRows = await deleteOAuthGrant(
