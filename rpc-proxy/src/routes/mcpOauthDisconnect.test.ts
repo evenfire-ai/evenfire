@@ -171,4 +171,28 @@ describe('DELETE /api/v1/mcp-oauth/:mcpServerName/grant (spec 11 U4 disconnect)'
     expect(res.body.error).toBe('control_api_invalid_response')
     warnSpy.mockRestore()
   })
+
+  it('rewrites an upstream HTML error page to structured JSON, preserving status (R1-L3)', async () => {
+    // An ingress/nginx can interpose a text/html 403 page; the desktop must
+    // never receive reflected HTML.
+    fetchSpy.mockResolvedValue(
+      new Response('<html><body>403 Forbidden</body></html>', {
+        status: 403,
+        headers: { 'content-type': 'text/html' },
+      })
+    )
+    const res = await request(makeApp()).delete(PATH).set('Authorization', 'Bearer t').send({})
+    expect(res.status).toBe(403)
+    expect(res.headers['content-type']).toMatch(/application\/json/)
+    expect(res.body.error).toBe('control_api_error')
+    expect(JSON.stringify(res.body)).not.toContain('<html')
+  })
+
+  it('preserves a structured JSON error body from control-api as JSON (R1-L3)', async () => {
+    fetchSpy.mockResolvedValue(jsonResponse(400, { error: 'not_oauth_server' }))
+    const res = await request(makeApp()).delete(PATH).set('Authorization', 'Bearer t').send({})
+    expect(res.status).toBe(400)
+    expect(res.headers['content-type']).toMatch(/application\/json/)
+    expect(res.body.error).toBe('not_oauth_server')
+  })
 })

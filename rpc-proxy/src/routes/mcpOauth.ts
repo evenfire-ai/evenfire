@@ -215,12 +215,22 @@ export function createMcpOauthRouter(): Router {
         return
       }
 
-      // Forward the upstream JSON error verbatim.
+      // Forward the upstream error, but ALWAYS as application/json with a
+      // structured body, preserving the upstream STATUS. control-api answers
+      // JSON errors, but an intermediary (nginx, an ingress) can interpose an
+      // HTML error page; reflecting its `content-type`/body would hand the
+      // desktop `text/html` it can't parse. Parse the body as JSON when
+      // possible; otherwise synthesize a structured error.
       const upstreamText = await upstream.text().catch(() => '')
+      let parsed: unknown
+      try {
+        parsed = upstreamText ? JSON.parse(upstreamText) : null
+      } catch {
+        parsed = null
+      }
       res
         .status(upstream.status)
-        .type(upstream.headers.get('content-type') ?? 'application/json')
-        .send(upstreamText)
+        .json(parsed && typeof parsed === 'object' ? parsed : { error: 'control_api_error' })
     }
   )
 
