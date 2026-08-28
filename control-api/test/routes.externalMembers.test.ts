@@ -25,8 +25,25 @@ vi.mock('../src/middleware/externalSessionAuth.js', () => ({
     _res: express.Response,
     next: express.NextFunction
   ) => {
-    ;(req as express.Request & { externalAuth?: { userId: string } }).externalAuth = {
+    const externalReq = req as express.Request & {
+      externalAuth?: { userId: string }
+      externalSessionAuthority?: {
+        contract: 'v1'
+        userId: string
+        authGeneration: number
+        issuedAt: number
+        tokenHash: string
+      }
+    }
+    externalReq.externalAuth = {
       userId: 'manager-1',
+    }
+    externalReq.externalSessionAuthority = {
+      contract: 'v1',
+      userId: 'manager-1',
+      authGeneration: 1,
+      issuedAt: 1_787_931_018,
+      tokenHash: 'external-members-test-token',
     }
     next()
   },
@@ -81,7 +98,8 @@ describe('external members routes', () => {
       'manager-1',
       'invitee@example.com',
       [{ teamId: 'team-1', role: 'admin' }],
-      'Full Name'
+      'Full Name',
+      expect.objectContaining({ contract: 'v1', userId: 'manager-1' })
     )
   })
 
@@ -135,7 +153,8 @@ describe('external members routes', () => {
         'manager-1',
         email,
         [{ teamId: 'team-1', role: 'member' }],
-        ''
+        '',
+        expect.objectContaining({ contract: 'v1', userId: 'manager-1' })
       )
     }
   )
@@ -231,11 +250,16 @@ describe('external members routes', () => {
       .send({ reason: 'manager retirement' })
       .expect(200, { ok: true, id: 'target-1' })
 
-    expect(directoryMock.deleteManagedUserForUser).toHaveBeenCalledWith('manager-1', 'target-1', {
-      reason: 'manager retirement',
-      idempotencyKey: 'external-delete-1',
-      requestId: 'request-external-members',
-    })
+    expect(directoryMock.deleteManagedUserForUser).toHaveBeenCalledWith(
+      'manager-1',
+      'target-1',
+      {
+        reason: 'manager retirement',
+        idempotencyKey: 'external-delete-1',
+        requestId: 'request-external-members',
+      },
+      expect.objectContaining({ contract: 'v1', userId: 'manager-1' })
+    )
   })
 
   it.each([

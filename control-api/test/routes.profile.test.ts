@@ -485,7 +485,8 @@ describe('routes/profile', () => {
       'u1',
       'target@example.com',
       [{ teamId: 't1', role: 'admin' }],
-      'target'
+      'target',
+      expect.objectContaining({ contract: 'v1', userId: 'u1' })
     )
   })
 
