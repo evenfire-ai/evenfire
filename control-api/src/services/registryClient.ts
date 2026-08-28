@@ -536,6 +536,7 @@ export async function downloadBundle(name: string, version: string): Promise<Buf
     { timeoutMs: BUNDLE_TIMEOUT_MS }
   )
   if (!res.ok) {
+    await discardResponseBody(res)
     throw new Error(`Registry ${res.status}`)
   }
   const arrayBuffer = await res.arrayBuffer()

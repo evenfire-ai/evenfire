@@ -215,4 +215,37 @@ describeRealPostgres('MCP Secret rollback permits on real PostgreSQL', () => {
     expect(reclaimed).not.toBeNull()
     expect(reclaimed!.claimToken).not.toBe(first!.claimToken)
   })
+
+  it('prevents an old claim from finalizing a reissued permit for a new identity', async () => {
+    const original = { ...basePermit, name: `${basePermit.name}-reissue` }
+    await issueMcpSecretRollbackPermit(original, pool)
+    const oldClaim = await claimMcpSecretRollbackPermit(
+      { sessionJti: original.sessionJti, namespace: original.namespace, name: original.name },
+      pool
+    )
+    expect(oldClaim).not.toBeNull()
+
+    const replacement = { ...original, uid: `${original.uid}-replacement`, resourceVersion: '1' }
+    await issueMcpSecretRollbackPermit(replacement, pool)
+    await finalizeMcpSecretRollbackPermitClaim(
+      {
+        sessionJti: original.sessionJti,
+        namespace: original.namespace,
+        name: original.name,
+        claimToken: oldClaim!.claimToken,
+      },
+      pool
+    )
+
+    await expect(
+      claimMcpSecretRollbackPermit(
+        {
+          sessionJti: replacement.sessionJti,
+          namespace: replacement.namespace,
+          name: replacement.name,
+        },
+        pool
+      )
+    ).resolves.toMatchObject({ uid: replacement.uid, resourceVersion: '1' })
+  })
 })

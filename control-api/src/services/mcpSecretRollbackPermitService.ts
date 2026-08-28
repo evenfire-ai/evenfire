@@ -74,7 +74,9 @@ export async function issueMcpSecretRollbackPermit(
        uid = EXCLUDED.uid,
        resource_version = EXCLUDED.resource_version,
        expires_at = EXCLUDED.expires_at,
-       created_at = statement_timestamp()`,
+       created_at = statement_timestamp(),
+       claim_token = NULL,
+       claim_expires_at = NULL`,
     params
   )
 }

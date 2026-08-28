@@ -49,6 +49,8 @@ describe('mcpSecretRollbackPermitService', () => {
     expect((insert?.[1] as unknown[])[0]).toHaveLength(32)
     const cleanupSql = String(query.mock.calls[0]?.[0])
     expect(cleanupSql).toContain('LIMIT 100')
+    expect(String(insert?.[0])).toContain('claim_token = NULL')
+    expect(String(insert?.[0])).toContain('claim_expires_at = NULL')
     expect(JSON.stringify(query.mock.calls)).not.toContain(permit.sessionJti)
   })
 

@@ -184,7 +184,7 @@ describe('registryClient — mintToken cache behavior', () => {
 
 describe('registryClient — bundle response lifecycle', () => {
   it('cancels a non-OK bundle response body before throwing', async () => {
-    const response = new Response('bundle unavailable', { status: 502 })
+    const response = new Response('bundle missing', { status: 404 })
     const cancel = vi.spyOn(response.body!, 'cancel')
     vi.stubGlobal(
       'fetch',
