@@ -225,11 +225,11 @@ async function resolveInTransaction(input: {
     operationTarget: input.operationTarget,
   })
   const identitySeeds = canonicalAccessPathSeeds(targeted)
+  input.budget.charge({ kind: 'accessPaths', amount: identitySeeds.length })
   const capable = Object.freeze(
     identitySeeds.filter(candidate => candidate.behavior.capabilities.includes(input.capability))
   )
   if (capable.length === 0) return { status: 'denied', code: 'forbidden' }
-  input.budget.charge({ kind: 'accessPaths', amount: capable.length })
 
   const revision = authorizationRevision({
     principalUserId: snapshot.userId,
