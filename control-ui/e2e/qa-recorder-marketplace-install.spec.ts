@@ -199,10 +199,16 @@ test.describe('optional QA recorder: Control UI marketplace install', () => {
       // The fresh install has no agents yet.
       const row = page.getByRole('button', { name: new RegExp(`Expand connector ${serverName}`) })
       await expect(row).toBeVisible({ timeout: 30_000 })
-      await row.click()
-      await expect(
-        page.getByRole('button', { name: new RegExp(`Collapse connector ${serverName}`) })
-      ).toBeVisible({ timeout: 10_000 })
+      // The connectors table auto-refreshes every 10s; a click landing on a
+      // re-rendered (detached) row is a silent no-op — retry until expanded.
+      const collapse = page.getByRole('button', {
+        name: new RegExp(`Collapse connector ${serverName}`),
+      })
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        await row.click()
+        if (await collapse.isVisible({ timeout: 3_000 }).catch(() => false)) break
+      }
+      await expect(collapse).toBeVisible({ timeout: 10_000 })
       const detail = page.locator('.cu-connector-detail')
       await expect(detail).toBeVisible({ timeout: 10_000 })
       await expect(detail.getByText('No agents have access yet.', { exact: true })).toBeVisible()

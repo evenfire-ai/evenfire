@@ -41,6 +41,7 @@ function agenticManifestWithoutOptIn(recipeName: string, contextName: string): s
       metadata: { name: recipeName },
       spec: {
         contextRef: contextName,
+        triggers: { onDemand: true },
         workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
         steps: [
           {
@@ -156,18 +157,17 @@ test.describe('optional QA recorder: Control UI recipe connector-scope copy', ()
 
       const primaryAction = page.locator('.cu-create-actions button')
       await primaryAction.filter({ hasText: 'Review manifest' }).click()
-      await expect(page.getByText(/Manifest review passed/)).toBeVisible()
-      await screenshotAndLog(page, testInfo, 'control-ui-recipe-agentic-manifest-review')
 
-      await primaryAction.filter({ hasText: 'Apply defaults' }).click()
-      await primaryAction.filter({ hasText: 'Continue to access' }).click()
-
-      const banner = page.locator('.cu-recipe-status-panel--error[role="alert"]')
-      await expect(banner).toBeVisible({ timeout: 20_000 })
-      await expect(banner).toContainText('Cannot deploy: policy violation')
-      await expect(banner).toContainText('shared connector scope')
-      await expect(banner).toContainText('WRC will auto-create a private connector scope')
-      await expect(banner).not.toContainText('private Context')
+      // The L1 policy blocks the review itself: the review findings show a
+      // blocking error carrying the connector-scope wording (the deploy-path
+      // "Cannot deploy" banner appears at the Access step, which the pinned
+      // error prevents reaching).
+      await expect(page.getByText(/Manifest review failed/)).toBeVisible({ timeout: 20_000 })
+      const findings = page.getByRole('region', { name: 'Review findings' })
+      await expect(findings).toBeVisible()
+      await expect(findings).toContainText('shared connector scope')
+      await expect(findings).toContainText('WRC will auto-create a private connector scope')
+      await expect(findings).not.toContainText('private Context')
       await screenshotAndLog(page, testInfo, 'control-ui-recipe-agentic-scope-banner')
 
       // (b) Transport workload, no spec.contextRef — the INFO note about the

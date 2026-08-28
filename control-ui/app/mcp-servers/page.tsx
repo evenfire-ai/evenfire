@@ -227,14 +227,32 @@ export default function McpServersPage() {
       const nextAccessByConnectorKey = connectors.reduce<ConnectorAccessSummaryMap>(
         (acc, connector) => {
           const connectorName = resourceName(connector)
-          const bindingRefs = (nextBindings[connectorName] ?? []).map(binding => binding.contextRef)
+          const connectorBindings = nextBindings[connectorName] ?? []
+          const bindingRefs = connectorBindings.map(binding => binding.contextRef)
           if (bindingRefs.length > 0) {
-            acc[connectorKey(connector)] = mergeAccessSummaries(
+            const merged = mergeAccessSummaries(
               bindingRefs.map(
                 contextRef =>
                   accessByContext.get(contextRef) ?? { agents: [], users: [], teams: [] }
               )
             )
+            // The agents group must reflect the bindings (the write model) so
+            // search-by-agent keeps working: accessText in the table's search
+            // haystack reads summary.agents.
+            const bindingAgents = connectorBindings.flatMap(binding => binding.agents)
+            const seenAgentIds = new Set(
+              [...bindingAgents, ...merged.agents].map(principal => principal.id)
+            )
+            const agents = [
+              ...bindingAgents,
+              ...merged.agents.filter(principal => !seenAgentIds.has(principal.id)),
+            ]
+            // Re-dedupe by id preserving first occurrence.
+            const byId = new Map(agents.map(principal => [principal.id, principal]))
+            acc[connectorKey(connector)] = {
+              ...merged,
+              agents: sortAccessPrincipals([...byId.values()]),
+            }
           }
           return acc
         },

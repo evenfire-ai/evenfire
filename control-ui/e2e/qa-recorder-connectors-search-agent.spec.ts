@@ -85,7 +85,7 @@ test.describe('optional QA recorder: Control UI connectors search by agent', () 
       })
       expect(hostRes.status, `create host: ${JSON.stringify(hostRes.data)}`).toBeLessThan(300)
 
-      await page.getByRole('link', { name: 'Installed Connectors', exact: true }).click()
+      await page.goto(`${CONTROL_UI_URL}/connectors`)
       await expect(page).toHaveURL(/\/connectors\/?$/, { timeout: 20_000 })
       await expect(
         page.getByText('Browse connector deployments and agent access.', { exact: true })

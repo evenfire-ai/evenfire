@@ -143,6 +143,32 @@ describe('McpServerTable — search filter by condition text', () => {
     expect(screen.getByText('broken-server')).toBeInTheDocument()
     expect(screen.queryByText('healthy-server')).not.toBeInTheDocument()
   })
+
+  // Regression (caught live by the qa-recorder connectors-search-agent
+  // journey): the page's summary.agents must carry the binding agents so the
+  // search haystack keeps matching agent display names after the Phase-1
+  // agent-access rework.
+  it('keeps a row when searching by an agent display name from the access summary', () => {
+    render(
+      <McpServerTable
+        items={[makeItem({ name: 'airtable-server' })]}
+        accessByConnectorKey={{
+          'mcp-server/airtable-server': {
+            agents: [{ id: 'research-agent', label: 'Research Agent' }],
+            users: [],
+            teams: [],
+          },
+        }}
+      />
+    )
+
+    const search = screen.getByLabelText('Search connectors') as HTMLInputElement
+    fireEvent.change(search, { target: { value: 'Research Agent' } })
+    expect(screen.getByText('airtable-server')).toBeInTheDocument()
+
+    fireEvent.change(search, { target: { value: 'no-such-agent' } })
+    expect(screen.queryByText('airtable-server')).not.toBeInTheDocument()
+  })
 })
 
 describe('McpServerTable — column sorting', () => {

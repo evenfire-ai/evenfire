@@ -91,7 +91,9 @@ test.describe('optional QA recorder: Control UI agent connectors', () => {
       expect(hostRes.status, `create host: ${JSON.stringify(hostRes.data)}`).toBeLessThan(300)
 
       // (a) Agents list row: hover the connectors count to reveal the card.
-      await page.getByRole('link', { name: 'Agents', exact: true }).click()
+      // Login already landed on /agents (pre-seed, empty); a sidebar click on
+      // the active route would not remount or refetch, so navigate fresh.
+      await page.goto(`${CONTROL_UI_URL}/agents`)
       await expect(page.getByRole('columnheader', { name: 'Connectors', exact: true })).toBeVisible(
         { timeout: 20_000 }
       )
@@ -141,7 +143,7 @@ test.describe('optional QA recorder: Control UI agent connectors', () => {
       await dialog.getByRole('option', { name: serverCatalogOnly, exact: true }).click()
       await dialog.getByRole('button', { name: 'Add connector', exact: true }).click()
 
-      await expect(page.getByText('Connectors updated.')).toBeVisible({ timeout: 20_000 })
+      await expect(page.getByText('Connectors updated.').last()).toBeVisible({ timeout: 20_000 })
       await expect(page.getByRole('row', { name: new RegExp(serverCatalogOnly) })).toBeVisible({
         timeout: 20_000,
       })
@@ -156,7 +158,7 @@ test.describe('optional QA recorder: Control UI agent connectors', () => {
       await expect(confirmDialog).toBeVisible({ timeout: 20_000 })
       await confirmDialog.getByRole('button', { name: 'Remove connector' }).click()
 
-      await expect(page.getByText('Connectors updated.')).toBeVisible({ timeout: 20_000 })
+      await expect(page.getByText('Connectors updated.').last()).toBeVisible({ timeout: 20_000 })
       await expect(page.getByRole('row', { name: new RegExp(serverCatalogOnly) })).toHaveCount(0)
 
       // The private context slug never renders on this page either.

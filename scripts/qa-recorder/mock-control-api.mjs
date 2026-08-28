@@ -168,6 +168,9 @@ const server = createServer(async (req, res) => {
   }
 
   const body = method === 'GET' || method === 'DELETE' ? {} : await readBody(req)
+  if (process.env.MOCK_VERBOSE !== '0') {
+    console.log(`[mock-control-api] ${method} ${path}${authed ? '' : ' (unauth)'}`)
+  }
   const seg = path.replace(/^\/+/, '').split('/').filter(Boolean) // api v1 admin ...
   const rest = seg.slice(3).join('/') // after /api/v1/admin
   const M = method

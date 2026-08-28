@@ -97,7 +97,9 @@ async function createConnectorThroughWizard(
   await screenshotAndLog(page, testInfo, `${journey}-wizard-secrets`)
 
   await page.getByRole('button', { name: 'Create connector', exact: true }).click()
-  await expect(page.getByText('Connector created successfully.', { exact: true })).toBeVisible({
+  await expect(
+    page.getByText('Connector created successfully.', { exact: true }).last()
+  ).toBeVisible({
     timeout: 20_000,
   })
   await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
