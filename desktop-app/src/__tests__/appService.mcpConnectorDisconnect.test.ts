@@ -152,6 +152,17 @@ describe('AppService.disconnectMcpServer (spec 11 U4 — destructive revoke)', (
     )
   })
 
+  it('does not promise a bounded revocation latency (R1-M8)', async () => {
+    const svc = makeService()
+    await svc.disconnectMcpServer(SERVER, HOST_REF, CTX, { shared: true })
+
+    const opts = mocks.showMessageBox.mock.calls[0]?.[0] as { detail: string }
+    // SHARED grants are exempt from idle eviction, so "a few minutes" is false;
+    // the copy must state it is sweep-driven and not immediate.
+    expect(opts.detail).not.toMatch(/few minutes/i)
+    expect(opts.detail).toContain('revocation sweep')
+  })
+
   it('non-shared copy scopes to the user only', async () => {
     const svc = makeService()
     await svc.disconnectMcpServer(SERVER, HOST_REF, undefined, { shared: false })
