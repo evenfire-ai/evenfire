@@ -9554,14 +9554,41 @@ textarea.cu-input {
   text-align: right;
 }
 
+/* A sortable header is a header first. It previously carried `cu-link--sm`,
+   which rendered it at 13px sentence-case against the 11px uppercase static
+   `th` beside it, so the interactive columns read as less important than the
+   static ones. Sorting is signalled by the arrow, the colour and the weight. */
 .cu-table__sort-link {
-  color: var(--cu-text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-05);
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--cu-font-size-2xs);
+  font-weight: var(--cu-font-weight-semibold);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: inherit;
   white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--cu-motion-base);
+}
+
+.cu-table__sort-link:hover:not(:disabled) {
+  color: var(--cu-text);
+}
+
+.cu-table__sort-link:focus-visible {
+  outline: 2px solid var(--cu-focus);
+  outline-offset: 2px;
+  border-radius: var(--cu-radius-xs);
 }
 
 .cu-table__sort-link.is-active {
   color: var(--cu-text);
-  font-weight: var(--font-weight-medium, 500);
+  font-weight: var(--cu-font-weight-bold);
 }
 
 .cu-row-actions {
@@ -10401,7 +10428,10 @@ textarea.cu-input {
   position: sticky;
   top: 0;
   height: 100vh;
-  overflow-y: auto;
+  /* The shell itself must not scroll: when it did, expanding a nav group
+     pushed Settings and Log out below the fold instead of keeping them
+     pinned. Only the destination list scrolls. */
+  overflow: hidden;
 }
 
 .cu-sidebar__brand,
@@ -10481,6 +10511,9 @@ textarea.cu-input {
   flex-direction: column;
   gap: 0.35rem;
   margin-bottom: 0.5rem;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .cu-sidebar__item {
@@ -10555,6 +10588,7 @@ textarea.cu-input {
   margin-top: auto;
   display: grid;
   gap: var(--cu-space-1);
+  flex: 0 0 auto;
 }
 
 .cu-sidebar__footer + .cu-sidebar__footer {
@@ -11494,7 +11528,7 @@ textarea.cu-input {
 }
 
 .cu-tb-name {
-  font-weight: var(--font-weight-semibold, 600);
+  font-weight: var(--cu-font-weight-semibold);
 }
 
 .cu-tb-scope {
@@ -11598,7 +11632,7 @@ textarea.cu-input {
 
 .cu-tb-progress__spent--over {
   color: var(--cu-danger);
-  font-weight: var(--font-weight-semibold, 600);
+  font-weight: var(--cu-font-weight-semibold);
 }
 
 .cu-tb-progress__sep {
@@ -11662,7 +11696,7 @@ textarea.cu-input {
 }
 
 .cu-tb-dim__label {
-  font-weight: var(--font-weight-medium, 500);
+  font-weight: var(--cu-font-weight-medium);
   color: var(--cu-text);
 }
 
