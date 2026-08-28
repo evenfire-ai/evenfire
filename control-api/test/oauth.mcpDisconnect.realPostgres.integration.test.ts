@@ -122,23 +122,29 @@ describeRealPostgres('mcp-server grant disconnect composition (real Postgres)', 
     ).toBe(true)
   })
 
-  it('context flavor: deletes the single shared grant for the whole Context', async () => {
+  it('context flavor: deletes ONLY the target Context grant (a sibling shared grant survives)', async () => {
     const resolved = resolvedFor('context', 'ctx-A')
-    // First member bootstraps the shared identity (real producer).
-    const { inserted } = await bootstrapSharedOAuthGrant(db, KEY, {
-      ownerKind: 'mcpserver',
-      recipeNamespace: NS,
-      recipeName: 'teamdrive',
-      contextId: 'ctx-A',
-      oauthClientId: 'google-drive',
-      bootstrappedByUserId: 'user-a',
-      provider: 'google',
-      accessToken: 'shared-at',
-      refreshToken: 'shared-rt',
-    })
-    expect(inserted).toBe(true)
+    // Two DIFFERENT Contexts each bootstrap a shared identity on the SAME server
+    // (real producer). ctx-B is the sibling that must survive — the mirror of
+    // the user-flavor case's user-b, so a shared DELETE that lost its
+    // `context_id` predicate (blast-radius bug) would be caught here.
+    for (const contextId of ['ctx-A', 'ctx-B']) {
+      const { inserted } = await bootstrapSharedOAuthGrant(db, KEY, {
+        ownerKind: 'mcpserver',
+        recipeNamespace: NS,
+        recipeName: 'teamdrive',
+        contextId,
+        oauthClientId: 'google-drive',
+        bootstrappedByUserId: 'user-a',
+        provider: 'google',
+        accessToken: `shared-at-${contextId}`,
+        refreshToken: `shared-rt-${contextId}`,
+      })
+      expect(inserted).toBe(true)
+    }
 
-    // A DIFFERENT member revokes: the key is decoupled from the caller's userId.
+    // A DIFFERENT member revokes ctx-A: the key is decoupled from the caller's
+    // userId but MUST stay scoped to ctx-A's Context.
     const key = buildMcpServerGrantKey(resolved, {
       mcpServersNamespace: NS,
       mcpServerName: 'teamdrive',
@@ -147,6 +153,7 @@ describeRealPostgres('mcp-server grant disconnect composition (real Postgres)', 
     expect(key).not.toBeNull()
     await deleteOAuthGrant(db, key!)
 
+    // ctx-A's shared grant is gone …
     expect(
       await oauthGrantExists(db, {
         grantKind: 'shared',
@@ -157,6 +164,18 @@ describeRealPostgres('mcp-server grant disconnect composition (real Postgres)', 
         oauthClientId: 'google-drive',
       })
     ).toBe(false)
+    // … but the sibling ctx-B shared grant on the SAME server SURVIVES. Drop the
+    // `context_id` predicate from the shared DELETE and this flips to false.
+    expect(
+      await oauthGrantExists(db, {
+        grantKind: 'shared',
+        ownerKind: 'mcpserver',
+        recipeNamespace: NS,
+        recipeName: 'teamdrive',
+        contextId: 'ctx-B',
+        oauthClientId: 'google-drive',
+      })
+    ).toBe(true)
   })
 
   it('context flavor without contextRef: key is null (fail-closed, never a blind delete)', () => {
