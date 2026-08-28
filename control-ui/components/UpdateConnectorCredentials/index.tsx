@@ -57,6 +57,33 @@ export const CLOCK_SKEW_TOLERANCE_MS = 5_000
 // banner at the bottom of the form.
 const VALIDATION_ERROR_ID = 'mcp-cred-validation-error'
 
+// Kubernetes permits Secret keys that overlap Object.prototype, including
+// __proto__, constructor, and toString. Credential drafts and request payloads
+// therefore cannot be ordinary objects: reading an untouched key must mean
+// "absent", never an inherited method or prototype value.
+type CredentialMap = Record<string, string>
+
+function emptyCredentialMap(): CredentialMap {
+  return Object.create(null) as CredentialMap
+}
+
+function ownCredentialValue(credentials: CredentialMap, secretKey: string): string | undefined {
+  return Object.hasOwn(credentials, secretKey) ? credentials[secretKey] : undefined
+}
+
+function withCredentialValue(
+  credentials: CredentialMap,
+  secretKey: string,
+  value: string
+): CredentialMap {
+  const next = emptyCredentialMap()
+  for (const key of Object.keys(credentials)) {
+    next[key] = credentials[key]
+  }
+  next[secretKey] = value
+  return next
+}
+
 /** Stable per-key input id, shared by the label's `htmlFor` and the
  *  post-submit focus lookup. */
 function inputId(secretKey: string): string {
@@ -100,7 +127,7 @@ export function UpdateConnectorCredentials({
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
 
-  const [draft, setDraft] = useState<Record<string, string>>({})
+  const [draft, setDraft] = useState<CredentialMap>(emptyCredentialMap)
   const [validationError, setValidationError] = useState('')
   // The secretKeys the last submit rejected. Drives per-input `aria-invalid` /
   // `aria-describedby`, so the aggregate alert is not the ONLY way to learn
@@ -318,7 +345,7 @@ export function UpdateConnectorCredentials({
   }
 
   function updateField(secretKey: string, value: string) {
-    setDraft(prev => ({ ...prev, [secretKey]: value }))
+    setDraft(prev => withCredentialValue(prev, secretKey, value))
     if (validationError) setValidationError('')
     // The alert the inputs point at is about to disappear, so the association
     // has to go with it — a dangling aria-describedby is worse than none.
@@ -345,10 +372,10 @@ export function UpdateConnectorCredentials({
     event.preventDefault()
     if (phase === 'saving' || phase === 'rotating') return
 
-    const data: Record<string, string> = {}
+    const data = emptyCredentialMap()
     for (const key of envSecret!.keys) {
-      const value = draft[key.secretKey]
-      if (value && value.trim() !== '') data[key.secretKey] = value
+      const value = ownCredentialValue(draft, key.secretKey)
+      if (typeof value === 'string' && value.trim() !== '') data[key.secretKey] = value
     }
     if (mode === 'set') {
       // Every declared key is required. HCC validates each key and answers
@@ -460,7 +487,7 @@ export function UpdateConnectorCredentials({
           throw putError
         }
       }
-      setDraft({})
+      setDraft(emptyCredentialMap())
       setRotationCutoff(cutoff)
       setPhase('rotating')
     } catch (e) {
@@ -563,7 +590,7 @@ export function UpdateConnectorCredentials({
                 type="password"
                 autoComplete="new-password"
                 placeholder={mode === 'set' ? 'Required' : 'Leave blank to keep current value'}
-                value={draft[k.secretKey] || ''}
+                value={ownCredentialValue(draft, k.secretKey) ?? ''}
                 onChange={e => updateField(k.secretKey, e.target.value)}
                 disabled={busy}
                 // Set mode creates the Secret in one shot: HCC answers

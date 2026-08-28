@@ -132,6 +132,27 @@ async function submitSet(keys: Record<string, string>) {
 
 const ALL_KEYS = { 'api-key': 'a-value', 'workspace-id': 'w-value' }
 
+// Kubernetes Secret keys may use every own property name on Object.prototype.
+// Keep this derived rather than hand-picking a few examples: __proto__,
+// constructor, and toString are all valid keys and all must behave like normal
+// user-controlled strings in both create and merge-patch flows.
+const OBJECT_PROTOTYPE_KEYS = Object.getOwnPropertyNames(Object.prototype)
+const PROTOTYPE_KEY_SECRET: EnvSecret = {
+  name: 'prototype-key-credentials',
+  keys: OBJECT_PROTOTYPE_KEYS.map((secretKey, index) => ({
+    secretKey,
+    envVar: `PROTOTYPE_KEY_${index}`,
+  })),
+}
+
+function prototypeKeyValues(prefix: string): Record<string, string> {
+  // Object.fromEntries defines __proto__ as an own data property, unlike an
+  // object literal or assignment to a normal object.
+  return Object.fromEntries(
+    OBJECT_PROTOTYPE_KEYS.map((secretKey, index) => [secretKey, `${prefix}-${index}`])
+  )
+}
+
 /** The shape control-api actually returns for a duplicate create: a bare 500,
  *  NOT a 409 (see spec Non-goals). Mocking 409 here would be a test that can
  *  never fail against the real server. */
@@ -222,6 +243,56 @@ describe('UpdateConnectorCredentials — partial payload', () => {
       'api-key': 'new-key-value',
     })
   })
+})
+
+describe('UpdateConnectorCredentials — Object.prototype credential keys', () => {
+  it('creates every prototype-named key as an own property in set mode', async () => {
+    const values = prototypeKeyValues('set-value')
+    mockCreateMcpSecret.mockResolvedValue({
+      name: PROTOTYPE_KEY_SECRET.name,
+      namespace: 'mcp-server',
+    })
+
+    await renderPanel(PROTOTYPE_KEY_SECRET, 'set')
+
+    // An untouched prototype-named key is absent, not inherited text coerced
+    // into an input. This catches __proto__ before the submit path can hide it.
+    for (const secretKey of OBJECT_PROTOTYPE_KEYS) {
+      expect(screen.getByLabelText(secretKey, { exact: false })).toHaveValue('')
+    }
+
+    await submitSet(values)
+
+    expect(mockCreateMcpSecret).toHaveBeenCalledTimes(1)
+    const payload = mockCreateMcpSecret.mock.calls[0]?.[1]
+    expect(Object.keys(payload ?? {})).toEqual(OBJECT_PROTOTYPE_KEYS)
+    for (const secretKey of OBJECT_PROTOTYPE_KEYS) {
+      expect(Object.hasOwn(payload ?? {}, secretKey)).toBe(true)
+      expect(payload?.[secretKey]).toBe(values[secretKey])
+    }
+  })
+
+  it.each(OBJECT_PROTOTYPE_KEYS)(
+    'sends %s as the sole own-property merge patch in rotate mode',
+    async secretKey => {
+      const value = `rotate-${secretKey}`
+      mockUpdateMcpSecret.mockResolvedValue({
+        name: PROTOTYPE_KEY_SECRET.name,
+        namespace: 'mcp-server',
+        keys: [secretKey],
+        affectedConnectors: [SERVER_NAME],
+      })
+
+      await renderPanel(PROTOTYPE_KEY_SECRET)
+      await submitRotation(Object.fromEntries([[secretKey, value]]))
+
+      expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+      const payload = mockUpdateMcpSecret.mock.calls[0]?.[1]
+      expect(Object.keys(payload ?? {})).toEqual([secretKey])
+      expect(Object.hasOwn(payload ?? {}, secretKey)).toBe(true)
+      expect(payload?.[secretKey]).toBe(value)
+    }
+  )
 })
 
 describe('UpdateConnectorCredentials — client-side validation', () => {
