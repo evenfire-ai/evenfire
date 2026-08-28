@@ -952,6 +952,7 @@ export class HostReconciler {
     // Already exists — replace to pick up rotated secretRef / new resourceNames.
     try {
       const existing = await this.rbacApi.readNamespacedRole({ name, namespace: host.namespace })
+      if (roleMatchesDesired(body, existing)) return
       body.metadata!.resourceVersion = existing.metadata?.resourceVersion
       await this.rbacApi.replaceNamespacedRole({ name, namespace: host.namespace, body })
       console.log(`[HostReconciler] Updated Role "${name}"`)
@@ -4649,6 +4650,56 @@ export class HostReconciler {
     })
     return (response.items || []).filter(item => item.metadata?.labels?.[HOST_LABEL])
   }
+}
+
+/**
+ * True when the desired Role matches the live object on the fields HCC authors:
+ * `rbacLabels` and `rules` in author order. Server metadata and annotations are
+ * ignored — the builder does not write annotations, and comparing them would
+ * force a PUT. Label keys are canonicalized. Object keys inside each rule are
+ * also canonicalized: client-node rebuilds V1PolicyRule in attributeTypeMap
+ * order (resourceNames before resources), so a raw JSON.stringify never matches
+ * a live GET (#307). Rule arrays, verbs, and resourceNames stay in author order.
+ * Missing rules or labels, or any compare failure, returns false
+ * (fail-open-to-write).
+ */
+function roleMatchesDesired(desired: k8s.V1Role, existing: k8s.V1Role): boolean {
+  try {
+    if (!desired.rules || !existing.rules) return false
+    if (!desired.metadata?.labels || !existing.metadata?.labels) return false
+    if (
+      JSON.stringify(canonicalizeLabelKeys(desired.metadata.labels)) !==
+      JSON.stringify(canonicalizeLabelKeys(existing.metadata.labels))
+    ) {
+      return false
+    }
+    return (
+      JSON.stringify(canonicalizeRoleValue(desired.rules)) ===
+      JSON.stringify(canonicalizeRoleValue(existing.rules))
+    )
+  } catch {
+    return false
+  }
+}
+
+function canonicalizeLabelKeys(labels: Record<string, string>): Record<string, string> {
+  const canonical: Record<string, string> = {}
+  for (const key of Object.keys(labels).sort()) {
+    canonical[key] = labels[key]
+  }
+  return canonical
+}
+
+/** Sort object keys recursively. Arrays keep author order. */
+function canonicalizeRoleValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeRoleValue)
+  if (typeof value !== 'object' || value === null) return value
+  const canonical: Record<string, unknown> = {}
+  for (const key of Object.keys(value).sort()) {
+    const entry = (value as Record<string, unknown>)[key]
+    if (entry !== undefined) canonical[key] = canonicalizeRoleValue(entry)
+  }
+  return canonical
 }
 
 /**
