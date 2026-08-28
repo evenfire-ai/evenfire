@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { AuthBrand } from '@components/AuthBrand'
 import { RuntimeConfigDock } from '@components/RuntimeConfigDock'
 import { CompareRunStyles } from './steps/CompareRunStyles'
@@ -21,6 +22,26 @@ interface OnboardingPageProps {
  */
 export function OnboardingPage({ onboarding }: OnboardingPageProps) {
   const { step, canGoBack, answerOrigin, answerRunStyle, goToManual, back } = onboarding
+
+  // Left arrow steps back through the wizard. There is no matching forward:
+  // most steps ask a question, and picking an answer for the user is not
+  // navigation. Typing is left alone — a caret moving inside the address or
+  // email field must keep moving.
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowLeft' || !canGoBack) return
+      const target = event.target as HTMLElement | null
+      const tag = target?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) {
+        return
+      }
+      event.preventDefault()
+      back()
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [canGoBack, back])
 
   return (
     <main className="auth-page">

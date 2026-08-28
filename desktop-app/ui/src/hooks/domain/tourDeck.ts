@@ -4,6 +4,7 @@ export type TourStepId =
   | 'welcome'
   | 'agents'
   | 'approvals'
+  | 'mcpServers'
   | 'scope'
   | 'apps'
   | 'plugins'
@@ -45,11 +46,18 @@ const MIDDLE_STEPS: ReadonlyArray<{ id: TourStepId; eligible: (census: TourCensu
   // Omitted when no agent has connectors: such an agent never asks for approval,
   // so describing approvals would promise a moment that cannot happen here.
   { id: 'approvals', eligible: hasAnyConnector },
-  { id: 'scope', eligible: c => c.contextIds.length > 0 || hasAnyConnector(c) },
-  { id: 'apps', eligible: c => (c.sandboxUiAppCount ?? 0) > 0 },
-  { id: 'plugins', eligible: c => (c.workflowCount ?? 0) > 0 },
-  { id: 'files', eligible: c => (c.gfsRootCount ?? 0) > 0 },
+  // Connectors, the file system and app interfaces all ship with every
+  // deployment, so these are capabilities the user has rather than ones the
+  // census has to discover. An empty file system is an empty inbox, not an
+  // absent feature.
+  { id: 'mcpServers', eligible: () => true },
+  { id: 'files', eligible: () => true },
+  { id: 'apps', eligible: () => true },
+  // Falls to whoever has slots left — in practice a user with no agents, who
+  // has fewer cards competing for the middle.
   { id: 'desktop', eligible: () => true },
+  { id: 'scope', eligible: c => c.contextIds.length > 0 || hasAnyConnector(c) },
+  { id: 'plugins', eligible: c => (c.workflowCount ?? 0) > 0 },
 ]
 
 /**

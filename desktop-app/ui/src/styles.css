@@ -15265,13 +15265,53 @@ pre {
   background: rgba(var(--overlay-rgb), 0.42);
 }
 
+/* One height across every step, so the card holds still as the user advances
+   rather than resizing around each step's copy. Rows are illustration, title,
+   body, position, dots, actions — the body takes the slack and scrolls if a
+   step ever outgrows it, which keeps the actions pinned where they were. */
 .tour-card {
-  width: min(460px, 94vw);
+  position: relative;
+  width: min(560px, 94vw);
+  height: min(460px, 86vh);
   display: grid;
+  /* content, position, dots, actions — the content block takes the slack and
+     centres itself in it, so the card holds one height while short steps stay
+     optically centred instead of top-heavy. */
+  grid-template-rows: 1fr auto auto auto;
   justify-items: center;
   gap: var(--space-3);
   padding: var(--space-5) var(--space-4) var(--space-4);
   text-align: center;
+}
+
+/* Absolutely positioned, so it stays out of the card's row assignment and the
+   grid template keeps describing only the four content rows. */
+.tour-close {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+}
+
+/* IconButton has no global svg rule — each usage paints its own icon, and an
+   unstyled stroke path renders as a zero-area fill, i.e. nothing at all. */
+.tour-close svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tour-content {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .tour-illustration {
@@ -15280,6 +15320,14 @@ pre {
   width: 100%;
   padding: var(--space-2) 0;
   color: var(--accent);
+}
+
+/* Sized to sit in the same optical space as the drawn glyphs, so the first
+   card does not jump when the user advances to the second. */
+.tour-logo {
+  width: 60px;
+  height: 60px;
+  object-fit: contain;
 }
 
 .tour-glyph {
@@ -15301,9 +15349,31 @@ pre {
 
 .tour-body {
   max-width: 46ch;
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-lg);
   line-height: 1.5;
   color: var(--text-muted);
+}
+
+/* Left-aligned inside a centered card: a bulleted list ragged on both edges is
+   harder to scan than the prose around it. */
+.tour-list {
+  display: grid;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  text-align: left;
+}
+
+.tour-list li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1-5);
+}
+
+.tour-list li::before {
+  content: '•';
+  color: var(--accent);
 }
 
 .tour-position {

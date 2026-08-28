@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { Button } from '@components/Common'
+import { Button, IconButton } from '@components/Common'
 import { selectTourSteps } from '@hooks/domain/tourDeck'
 import { getTourStepContent } from './steps'
 import type { TourModalProps } from './types'
@@ -60,6 +60,19 @@ export function TourModal({ census, context, onDismiss }: TourModalProps) {
         onDismiss()
         return
       }
+      // Arrow keys mirror the buttons. The deck is linear, so there is exactly
+      // one forward and one back from any step. The tour has no text fields,
+      // so nothing else wants these keys.
+      if (event.key === 'ArrowRight') {
+        event.preventDefault()
+        next()
+        return
+      }
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault()
+        back()
+        return
+      }
       if (event.key !== 'Tab' || !cardRef.current) return
 
       // Trap focus inside the card.
@@ -80,7 +93,7 @@ export function TourModal({ census, context, onDismiss }: TourModalProps) {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [onDismiss])
+  }, [onDismiss, next, back])
 
   return (
     <div className="tour-backdrop" role="presentation">
@@ -92,13 +105,33 @@ export function TourModal({ census, context, onDismiss }: TourModalProps) {
         aria-describedby={bodyId}
         ref={cardRef}
       >
-        <div className="tour-illustration">{content.illustration}</div>
-        <h2 className="tour-title" id={titleId}>
-          {content.title}
-        </h2>
-        <p className="tour-body" id={bodyId}>
-          {content.body}
-        </p>
+        <IconButton
+          className="tour-close"
+          label="Close tour"
+          onClick={onDismiss}
+          size="sm"
+          variant="ghost"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M18 6 6 18" />
+            <path d="m6 6 12 12" />
+          </svg>
+        </IconButton>
+
+        {/* Illustration, title and body move as one block so they can sit
+            centered in whatever space the fixed-height card leaves, rather
+            than hugging the top with the slack dumped underneath. */}
+        <div className="tour-content">
+          <div className="tour-illustration">{content.illustration}</div>
+          <h2 className="tour-title" id={titleId}>
+            {content.title}
+          </h2>
+          {/* A div, not a p: a step's body may carry a list, and a ul inside a
+              p is invalid markup the browser silently reparents. */}
+          <div className="tour-body" id={bodyId}>
+            {content.body}
+          </div>
+        </div>
 
         {/* Dots are decorative; the position is announced as text. */}
         <p className="tour-position">{`Step ${index + 1} of ${steps.length}`}</p>
@@ -111,9 +144,6 @@ export function TourModal({ census, context, onDismiss }: TourModalProps) {
         <div className="tour-actions">
           <Button color="neutral" disabled={!canGoBack} onClick={back} size="sm" variant="ghost">
             Back
-          </Button>
-          <Button color="neutral" onClick={onDismiss} size="sm" variant="ghost">
-            Skip
           </Button>
           <Button ref={primaryRef} onClick={isLast ? onDismiss : next} size="sm">
             {isLast ? 'Get started' : 'Next'}

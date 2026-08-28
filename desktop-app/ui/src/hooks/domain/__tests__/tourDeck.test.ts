@@ -15,19 +15,26 @@ describe('selectTourSteps', () => {
     expect(steps[steps.length - 1]).toBe('handoff')
   })
 
-  it('gives a user with nothing the three-step tour', () => {
-    // An invited member whose admin has not authorized them: no step may
-    // mention a capability they cannot reach.
-    expect(selectTourSteps(census())).toEqual(['welcome', 'desktop', 'handoff'])
+  it('gives a user with no agents the always-available capabilities', () => {
+    // An invited member whose admin has not authorized them can still add
+    // tools and use the file system; nothing here claims an agent they
+    // cannot reach.
+    expect(selectTourSteps(census())).toEqual([
+      'welcome',
+      'mcpServers',
+      'files',
+      'apps',
+      'desktop',
+      'handoff',
+    ])
   })
 
-  it('gives a seeded install Agents and Scope, but not Approvals or Apps', () => {
+  it('gives a seeded install its agent plus the always-available capabilities', () => {
     const steps = selectTourSteps(census({ agentNames: ['chatllm'], contextIds: ['context1'] }))
 
-    expect(steps).toEqual(['welcome', 'agents', 'scope', 'desktop', 'handoff'])
+    expect(steps).toEqual(['welcome', 'agents', 'mcpServers', 'files', 'apps', 'handoff'])
     // No connectors means the agent never asks for approval.
     expect(steps).not.toContain('approvals')
-    expect(steps).not.toContain('apps')
   })
 
   it('offers Approvals once an agent actually has a connector', () => {
@@ -50,8 +57,8 @@ describe('selectTourSteps', () => {
       })
     )
 
-    // Everything qualifies; Plugins, Files and Desktop lose their slots.
-    expect(steps).toEqual(['welcome', 'agents', 'approvals', 'scope', 'apps', 'handoff'])
+    // Everything qualifies; Desktop, Scope, Apps and Plugins lose their slots.
+    expect(steps).toEqual(['welcome', 'agents', 'approvals', 'mcpServers', 'files', 'handoff'])
     expect(steps).toHaveLength(6)
   })
 
@@ -64,9 +71,7 @@ describe('selectTourSteps', () => {
     )
 
     expect(unresolved).toEqual(resolvedEmpty)
-    expect(unresolved).not.toContain('apps')
     expect(unresolved).not.toContain('plugins')
-    expect(unresolved).not.toContain('files')
   })
 
   it('keeps canonical order regardless of which steps qualify', () => {
@@ -74,8 +79,8 @@ describe('selectTourSteps', () => {
       census({ sandboxUiAppCount: 1, workflowCount: 1, gfsRootCount: 1 })
     )
 
-    // No agents and no contexts, so the eligible middle steps are apps,
-    // plugins, files and desktop — in table order, not census order.
-    expect(steps).toEqual(['welcome', 'apps', 'plugins', 'files', 'desktop', 'handoff'])
+    // No agents and no contexts, so the four always-available cards take the
+    // middle slots — in table order, not census order.
+    expect(steps).toEqual(['welcome', 'mcpServers', 'files', 'apps', 'desktop', 'handoff'])
   })
 })

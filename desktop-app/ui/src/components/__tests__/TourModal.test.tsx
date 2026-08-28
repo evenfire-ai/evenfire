@@ -52,19 +52,42 @@ describe('TourModal', () => {
   it('exposes the step position as text, not only as dots', () => {
     renderTour()
     // Dots are decorative; a screen reader gets the position in words.
-    expect(screen.getByText('Step 1 of 3')).toBeTruthy()
+    expect(screen.getByText('Step 1 of 6')).toBeTruthy()
   })
 
   it('walks forward and back through the deck', async () => {
     const user = userEvent.setup()
     renderTour()
 
-    expect(screen.getByText('Step 1 of 3')).toBeTruthy()
+    expect(screen.getByText('Step 1 of 6')).toBeTruthy()
     await user.click(screen.getByRole('button', { name: 'Next' }))
-    expect(screen.getByText('Step 2 of 3')).toBeTruthy()
+    expect(screen.getByText('Step 2 of 6')).toBeTruthy()
 
     await user.click(screen.getByRole('button', { name: 'Back' }))
-    expect(screen.getByText('Step 1 of 3')).toBeTruthy()
+    expect(screen.getByText('Step 1 of 6')).toBeTruthy()
+  })
+
+  it('walks the deck with the arrow keys', async () => {
+    renderTour()
+
+    expect(screen.getByText('Step 1 of 6')).toBeTruthy()
+
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    expect(screen.getByText('Step 2 of 6')).toBeTruthy()
+
+    fireEvent.keyDown(window, { key: 'ArrowLeft' })
+    expect(screen.getByText('Step 1 of 6')).toBeTruthy()
+  })
+
+  it('does not run past either end of the deck with arrows', () => {
+    renderTour()
+
+    // Back at the first step is a no-op, not an index below zero.
+    fireEvent.keyDown(window, { key: 'ArrowLeft' })
+    expect(screen.getByText('Step 1 of 6')).toBeTruthy()
+
+    for (let i = 0; i < 8; i++) fireEvent.keyDown(window, { key: 'ArrowRight' })
+    expect(screen.getByText('Step 6 of 6')).toBeTruthy()
   })
 
   it('cannot go back from the first step', () => {
@@ -110,19 +133,20 @@ describe('TourModal', () => {
     const onDismiss = vi.fn()
     renderTour({ onDismiss })
 
-    await user.click(screen.getByRole('button', { name: 'Next' }))
-    await user.click(screen.getByRole('button', { name: 'Next' }))
+    for (let i = 0; i < 5; i++) {
+      await user.click(screen.getByRole('button', { name: 'Next' }))
+    }
     await user.click(screen.getByRole('button', { name: 'Get started' }))
 
     expect(onDismiss).toHaveBeenCalledTimes(1)
   })
 
-  it('skips from any step', async () => {
+  it('closes from any step via the corner control', async () => {
     const user = userEvent.setup()
     const onDismiss = vi.fn()
     renderTour({ onDismiss })
 
-    await user.click(screen.getByRole('button', { name: 'Skip' }))
+    await user.click(screen.getByRole('button', { name: 'Close tour' }))
 
     expect(onDismiss).toHaveBeenCalledTimes(1)
   })
@@ -141,13 +165,38 @@ describe('TourModal', () => {
     const user = userEvent.setup()
     renderTour()
 
-    await user.click(screen.getByRole('button', { name: 'Next' }))
-    await user.click(screen.getByRole('button', { name: 'Next' }))
+    for (let i = 0; i < 5; i++) {
+      await user.click(screen.getByRole('button', { name: 'Next' }))
+    }
 
     expect(screen.getByText('You need access to an agent')).toBeTruthy()
-    // The only actions are navigation and closing.
-    const buttons = screen.getAllByRole('button').map(b => b.textContent)
-    expect(buttons).toEqual(['Back', 'Skip', 'Get started'])
+    // The only actions are navigation and closing — nothing that leads
+    // somewhere this user cannot go.
+    const buttons = screen
+      .getAllByRole('button')
+      .map(b => b.getAttribute('aria-label') || b.textContent)
+    expect(buttons).toEqual(['Close tour', 'Back', 'Get started'])
+  })
+
+  it('never says "context" to the user', async () => {
+    const user = userEvent.setup()
+    renderTour({
+      census: { agentNames: ['a'], contextIds: ['c'], mcpServersByAgent: { a: ['github'] } },
+      context: { agentLabels: ['Research bot'] },
+    })
+
+    // "Context" is a term users find confusing; the product speaks about
+    // knowledge and connected systems instead. The predicates still read
+    // contextIds — this is about what the copy says, not what it checks.
+    let copy = document.body.textContent ?? ''
+    for (let i = 0; i < 5; i++) {
+      const nextButton = screen.queryByRole('button', { name: 'Next' })
+      if (!nextButton) break
+      await user.click(nextButton)
+      copy += document.body.textContent ?? ''
+    }
+
+    expect(copy).not.toMatch(/context/i)
   })
 
   it('never names one deployment’s seed or a local address', async () => {
