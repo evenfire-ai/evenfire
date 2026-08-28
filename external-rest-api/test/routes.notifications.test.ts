@@ -157,6 +157,7 @@ describe('routes/notifications', () => {
     const response = await request(makeApp())
       .put('/me/notification-preferences')
       .set('authorization', 'Bearer user-session-token')
+      .set('x-correlation-id', 'notifications_ID-42')
       .send({ preferredMedium: 'telegram' })
       .expect(400)
 
@@ -164,7 +165,7 @@ describe('routes/notifications', () => {
       error: {
         code: 'invalid_request',
         message: 'The request is not valid.',
-        correlationId: expect.any(String),
+        correlationId: 'notifications_ID-42',
         retryable: false,
       },
     })
