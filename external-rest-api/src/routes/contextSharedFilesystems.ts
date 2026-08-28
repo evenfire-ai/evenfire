@@ -2,7 +2,7 @@ import type { NextFunction, Response } from 'express'
 import { Router } from 'express'
 import { config } from '../config.js'
 import { ControlApiError, controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
-import { sanitizeControlApiPublicError } from '../http/publicApiError.js'
+import { publicCorrelationId, sanitizeControlApiPublicError } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 
 /**
@@ -35,7 +35,11 @@ const PASSTHROUGH_HEADERS = [
 ] as const
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
-  const sanitized = sanitizeControlApiPublicError(error, PROPAGATED_STATUSES)
+  const sanitized = sanitizeControlApiPublicError(
+    error,
+    PROPAGATED_STATUSES,
+    publicCorrelationId(res.req)
+  )
   if (sanitized) {
     res.status(sanitized.status).json(sanitized.body)
     return

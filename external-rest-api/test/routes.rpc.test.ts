@@ -41,6 +41,7 @@ describe('routes/rpc /rpc/token', () => {
     const res = await request(buildApp())
       .post('/rpc/token')
       .set('authorization', 'Bearer session-xyz')
+      .set('x-correlation-id', 'rpc_ID-42')
       .send({ scopes: ['desktop:view'], hostRefs: ['pro-agent'] })
 
     expect(res.status).toBe(403)
@@ -48,7 +49,7 @@ describe('routes/rpc /rpc/token', () => {
       error: {
         code: 'forbidden',
         message: 'The requested operation is not allowed.',
-        correlationId: expect.any(String),
+        correlationId: 'rpc_ID-42',
         retryable: false,
       },
     })

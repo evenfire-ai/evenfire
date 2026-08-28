@@ -8,6 +8,7 @@ import { pipeline } from 'node:stream/promises'
 import { config } from '../config.js'
 import { controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
 import {
+  publicCorrelationId,
   sanitizeControlApiPublicError,
   sendSanitizedControlApiPublicError,
 } from '../http/publicApiError.js'
@@ -151,7 +152,7 @@ function forwardControlApiError(error: unknown, res: Response, next: NextFunctio
     (error as { status: number }).status <= 599
       ? new Set([...PROPAGATED, (error as { status: number }).status])
       : PROPAGATED
-  const sanitized = sanitizeControlApiPublicError(error, statuses)
+  const sanitized = sanitizeControlApiPublicError(error, statuses, publicCorrelationId(res.req))
   if (sanitized) {
     sendSanitizedControlApiPublicError(res, sanitized)
     return
