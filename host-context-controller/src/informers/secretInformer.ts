@@ -7,9 +7,9 @@
  * created after the McpServer, or a required key is added later).
  *
  * Disconnect behavior: exponential backoff 1s → 2s → 4s → … capped at 30s.
- * The backoff counter resets on any successful event (not just successful
- * watch start) so a long-lived stream that fails after days still resumes
- * at the lowest delay.
+ * The backoff counter resets on a successfully established watch and on any
+ * subsequent event. A quiet namespace that reconnects cleanly every recycle
+ * must not climb to the 30s cap (#461).
  */
 import * as k8s from '@kubernetes/client-node'
 import {
@@ -147,6 +147,9 @@ export class SecretInformer {
     try {
       this.attempts += 1
       this.abortController = await this.watch.watch(path, {}, watchCallback, doneCallback)
+      // Establishment proves the stream is healthy. Event-only reset left
+      // quiet namespaces (no Secret churn) permanently at the 30s cap.
+      this.attempts = 0
       secretInformerRunning.set(1)
       console.log(`[SecretInformer] watch established for namespace ${this.namespace}`)
       return true
