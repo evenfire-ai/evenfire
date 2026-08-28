@@ -56,6 +56,32 @@ describe('routes/rpc /rpc/token', () => {
     expect(JSON.stringify(res.body)).not.toContain('/internal/control-api')
   })
 
+  it.each(['desktop_requires_team', 'no_permitted_scopes'])(
+    'preserves approved safe RPC denial reason %s',
+    async reason => {
+      rpcServiceMock.issueRpcAccessToken.mockRejectedValue(
+        new ControlApiError('private upstream denial', 403, { error: reason })
+      )
+
+      const res = await request(buildApp())
+        .post('/rpc/token')
+        .set('authorization', 'Bearer session-xyz')
+        .send({ scopes: ['desktop:view'], hostRefs: ['pro-agent'] })
+
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({
+        error: {
+          code: 'forbidden',
+          message: 'The requested operation is not allowed.',
+          correlationId: expect.any(String),
+          retryable: false,
+          details: { reason },
+        },
+      })
+      expect(JSON.stringify(res.body)).not.toContain('private upstream denial')
+    }
+  )
+
   it('returns the issued token on success', async () => {
     rpcServiceMock.issueRpcAccessToken.mockResolvedValue({
       token: 't',
