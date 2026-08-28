@@ -19,7 +19,19 @@ vi.mock('@hooks/domain/useAgentsDataController', () => ({
   useAgentsDataController: () => ({ agentNames: ['agent-x'] }),
 }))
 vi.mock('@hooks/domain/useContextsDataController', () => ({
-  useContextsDataController: () => ({ contextIds: [], loading: false, error: null }),
+  useContextsDataController: () => ({ accessCatalog: null }),
+}))
+vi.mock('@hooks/domain/useTeamsDataController', () => ({
+  useTeamsDataController: () => ({
+    teams: [],
+    currentTeamId: '',
+    teamMembers: [],
+    teamDirectory: {},
+    ensureHydrated: vi.fn(async () => undefined),
+  }),
+}))
+vi.mock('@contexts/AuthContext', () => ({
+  useAuthContext: () => ({ me: null }),
 }))
 vi.mock('@hooks/domain/useMcpServersDataController', () => ({
   useMcpServersDataController: () => ({

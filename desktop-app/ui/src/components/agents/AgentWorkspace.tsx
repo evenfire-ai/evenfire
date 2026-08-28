@@ -1,18 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
+import { useAuthContext } from '@contexts/AuthContext'
 import { useChatListContext } from '@contexts/ChatListContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
-import { DataTable, EmptyState, IconButton, MenuItem, ReferenceTag } from '@components/Common'
+import { DataTable, EmptyState, IconButton, MenuItem } from '@components/Common'
 import { PageBreadcrumb } from '@components/PageBreadcrumb'
 import type { PageBreadcrumbItem } from '@components/PageBreadcrumb/types'
 import { ResourceBreadcrumbSwitcher } from '@components/ResourceBreadcrumbSwitcher'
-import { IconAgents, IconConnectors, IconContexts } from '@components/SidebarNav/icons'
+import { IconAgents } from '@components/SidebarNav/icons'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
+import { useTeamsDataController } from '@hooks/domain/useTeamsDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
+import { deriveScopedMembers } from '@lib/scopedMembers'
+import type { ScopedMemberContextDetails, ScopedMemberTeamRow } from '@lib/scopedMembers.types'
 import type { AgentWorkspaceRoute } from '../../uiTypes'
 import { McpServerHealthTable } from '../McpServerHealthTable'
 import { SharedFilesTab } from '../SharedFilesTab'
@@ -69,15 +73,17 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     handleBackToAgents: onBackToAgents,
     handleOpenAgentWorkspace: onOpenAgentWorkspace,
     handleSelectChatAgent: onSelectChatAgent,
-    handleOpenContextDetails,
   } = useNavigationContext()
   const { agentNames } = useAgentsDataController()
+  const { me } = useAuthContext()
+  const { accessCatalog } = useContextsDataController()
   const {
-    contextIds,
-    contextDisplayById,
-    loading: contextsLoading,
-    error: contextsError,
-  } = useContextsDataController()
+    teams,
+    currentTeamId,
+    teamMembers,
+    teamDirectory,
+    ensureHydrated: ensureTeamsHydrated,
+  } = useTeamsDataController()
   const { agentContextByName, agentDisplayByName, selectedAgentMcpServers } =
     useMcpServersDataController({
       selectedAgent,
@@ -139,16 +145,57 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   const selectedAgentDisplay = selectedAgent
     ? (agentDisplayByName[selectedAgent] ?? selectedAgent)
     : null
-  const visibleContextIds = useMemo(
-    () =>
-      selectedAgentContext
-        ? [
-            selectedAgentContext,
-            ...contextIds.filter(contextId => contextId !== selectedAgentContext),
-          ]
-        : contextIds,
-    [contextIds, selectedAgentContext]
+
+  // Members tab (spec §5.C). The context detail the projection needs is
+  // reachable from the same app-coordinated caches AgentWorkspace already reads:
+  //  - availableToUser/availableToTeam/userId derive from the access catalog
+  //    (useContextsDataController) given the agent's contextRef;
+  //  - the mapped teams and their members come from the team directory
+  //    (useTeamsDataController).
+  // No new fetch/IPC — this is a pure projection over cached data (deriveScopedMembers).
+  const agentContextRef = selectedAgentContext || null
+  const memberContextDetails = useMemo<ScopedMemberContextDetails>(() => {
+    if (!agentContextRef || !accessCatalog) return null
+    return {
+      availableToUser: accessCatalog.userContextIds.includes(agentContextRef),
+      availableToTeam: accessCatalog.teamContextIds.includes(agentContextRef),
+      userId: accessCatalog.userId,
+    }
+  }, [accessCatalog, agentContextRef])
+  const currentTeam = useMemo(
+    () => teams.find(team => team.id === currentTeamId) ?? null,
+    [teams, currentTeamId]
   )
+  const memberTeamRows = useMemo<ScopedMemberTeamRow[]>(() => {
+    if (!agentContextRef) return []
+    const rowsByTeamId = new Map<string, ScopedMemberTeamRow>()
+    // Iterate teams alphabetically by name so members list in a stable,
+    // human-friendly order — parity with the previous ContextDetailsPage panel,
+    // which sorted contextTeamRows by team.name. deriveScopedMembers preserves
+    // insertion order, so the ordering guarantee lives here at the call site.
+    const teamsByName = [...teams].sort((a, b) => a.name.localeCompare(b.name))
+    for (const team of teamsByName) {
+      const entry = teamDirectory[team.id]
+      if (!entry?.contextIds.includes(agentContextRef)) continue
+      rowsByTeamId.set(team.id, { members: entry.members || [] })
+    }
+    if (memberContextDetails?.availableToTeam && currentTeam && !rowsByTeamId.has(currentTeam.id)) {
+      rowsByTeamId.set(currentTeam.id, { members: teamMembers })
+    }
+    return [...rowsByTeamId.values()]
+  }, [
+    agentContextRef,
+    currentTeam,
+    memberContextDetails?.availableToTeam,
+    teamDirectory,
+    teamMembers,
+    teams,
+  ])
+  const scopedMembers = useMemo(
+    () => deriveScopedMembers(memberContextDetails, memberTeamRows, me),
+    [memberContextDetails, memberTeamRows, me]
+  )
+
   const isChatMode = mode === 'chat'
   const isChatScrollNavMode = isChatMode && Boolean(activeChatId)
   const rootBreadcrumbLabel = mode === 'chat' ? 'Chat' : 'Agents'
@@ -163,13 +210,11 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   const routeSubtitle =
     selectedAgentRoute === 'mcp-servers'
       ? 'Connector health and mappings for this agent.'
-      : selectedAgentRoute === 'contexts'
-        ? 'Authorized contexts available to this agent.'
+      : selectedAgentRoute === 'members'
+        ? 'People with access to this agent through its context.'
         : selectedAgentRoute === 'shared-files'
           ? 'Agent files available through this agent.'
-          : selectedAgentRoute === 'activity'
-            ? 'Recent conversations, messages, tool calls, and errors.'
-            : 'Workspace status and queue details for this agent.'
+          : 'Recent conversations, messages, tool calls, and errors.'
 
   const agentOptions = useMemo(
     // id stays the identifier (drives selection/matching); label shows the
@@ -188,9 +233,9 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
 
   // Agent selector dropdown for the greeting title row. Each row has two
   // targets: the agent NAME (click → start/switch a chat with that agent) and
-  // the 3-dots (click → open a sections sub-menu: Details / Connectors /
-  // Contexts / Agent Files / Activity, navigating into that agent's workspace
-  // without switching the chat). This mirrors the chatAgentRouteMenu pattern.
+  // the 3-dots (click → open a sections sub-menu: Connectors / Members /
+  // Agent Files / Activity, navigating into that agent's workspace without
+  // switching the chat). This mirrors the chatAgentRouteMenu pattern.
   const agentSwitcherLabel = (
     <AgentTitleSelector
       ariaLabel={isChatMode ? 'Switch chat agent' : 'Switch agent'}
@@ -290,6 +335,15 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     setChatScrollNavVisible(true)
     setChatAgentRouteMenuOpen(false)
   }, [selectedAgent])
+
+  // The Members tab reads the team directory (see memberTeamRows). It is an
+  // app-coordinated query, so a deep-link straight into the Members tab may
+  // arrive before the post-paint bootstrap hydrated it — ensure it once here.
+  useEffect(() => {
+    if (!isChatMode && selectedAgentRoute === 'members') {
+      void ensureTeamsHydrated()
+    }
+  }, [ensureTeamsHydrated, isChatMode, selectedAgentRoute])
 
   useEffect(() => {
     if (!isChatScrollNavMode) {
@@ -395,51 +449,30 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
             </section>
           )}
 
-          {!isChatMode && selectedAgentRoute === 'contexts' && (
-            <section className="agent-workspace-panel" aria-label="Agent contexts">
+          {!isChatMode && selectedAgentRoute === 'members' && (
+            <section className="agent-workspace-panel" aria-label="Agent members">
               <AgentHero agentName={selectedAgentDisplay} subtitle={routeSubtitle} />
 
-              {contextsLoading && !visibleContextIds.length ? (
-                <EmptyState title="Loading" body="Fetching authorized contexts..." />
-              ) : contextsError && !visibleContextIds.length ? (
-                <div className="composer-error" role="alert">
-                  <p className="error-text">{contextsError}</p>
-                </div>
-              ) : visibleContextIds.length ? (
-                <DataTable className="agent-contexts-data-table">
+              {scopedMembers.length ? (
+                <DataTable className="agent-members-data-table">
                   <thead>
                     <tr>
                       <th className="da-table__col-header" scope="col">
-                        Context
+                        Member
                       </th>
                       <th className="da-table__col-header" scope="col">
-                        Scope
+                        Email
                       </th>
                     </tr>
                   </thead>
                   <tbody>
-                    {visibleContextIds.map(contextId => (
-                      <tr key={contextId}>
+                    {scopedMembers.map(member => (
+                      <tr key={member.id}>
                         <td className="da-table__cell">
-                          <ReferenceTag
-                            kind="context"
-                            onClick={() => handleOpenContextDetails(contextId)}
-                            title={contextId}
-                            aria-label={`Open context ${contextId}`}
-                          >
-                            {/* Visible context name (spec.displayName); fall back
-                                to the id (Decision #6) when no display exists OR
-                                the display is blank/whitespace-only (an out-of-band
-                                write must never render an empty context label). */}
-                            {(contextDisplayById[contextId] ?? '').trim() || contextId}
-                          </ReferenceTag>
+                          <span className="context-members-name">{member.label}</span>
                         </td>
                         <td className="da-table__cell">
-                          <span className="agent-table-muted">
-                            {contextId === selectedAgentContext
-                              ? `Mapped to ${selectedAgent}`
-                              : 'Available'}
-                          </span>
+                          <span className="context-members-email">{member.secondary || '-'}</span>
                         </td>
                       </tr>
                     ))}
@@ -447,8 +480,8 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
                 </DataTable>
               ) : (
                 <EmptyState
-                  title="No contexts"
-                  body="No contexts are currently mapped to this workspace."
+                  title="No members"
+                  body="No members are available for this agent in the current API scope."
                 />
               )}
             </section>
@@ -466,73 +499,6 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
                   body="No context is currently mapped to this agent."
                 />
               )}
-            </section>
-          )}
-
-          {!isChatMode && selectedAgentRoute === 'details' && (
-            <section
-              className="agent-workspace-panel agent-details-panel"
-              aria-label="Agent details"
-            >
-              <AgentHero
-                agentName={selectedAgentDisplay}
-                subtitle="Agent details"
-                subtitleTone="eyebrow"
-              />
-
-              <div className="agent-details-resource-grid">
-                <section className="agent-details-resource" aria-label="Mapped context">
-                  <span className="agent-details-resource-icon" aria-hidden="true">
-                    <IconContexts />
-                  </span>
-                  <div className="agent-details-resource-copy">
-                    <span className="agent-details-resource-label">Context</span>
-                    {selectedAgentContext ? (
-                      <ReferenceTag
-                        kind="context"
-                        onClick={() => onOpenAgentWorkspace(selectedAgent ?? '', 'contexts')}
-                        title={selectedAgentContext}
-                        aria-label={`Open contexts for ${selectedAgent}`}
-                      >
-                        {selectedAgentContext}
-                      </ReferenceTag>
-                    ) : (
-                      <span className="agent-table-muted">No mapped context</span>
-                    )}
-                  </div>
-                </section>
-
-                <section className="agent-details-resource" aria-label="Mapped connectors">
-                  <span className="agent-details-resource-icon" aria-hidden="true">
-                    <IconConnectors />
-                  </span>
-                  <div className="agent-details-resource-copy">
-                    <span className="agent-details-resource-label">
-                      Connectors
-                      {selectedAgentMcpServerNames.length
-                        ? ` · ${selectedAgentMcpServerNames.length}`
-                        : ''}
-                    </span>
-                    {selectedAgentMcpServerNames.length ? (
-                      <span className="reference-tag-list">
-                        {selectedAgentMcpServerNames.slice(0, 6).map(serverName => (
-                          <ReferenceTag
-                            key={`${selectedAgent}:${serverName}`}
-                            kind="connector"
-                            onClick={() => onOpenAgentWorkspace(selectedAgent ?? '', 'mcp-servers')}
-                            title={serverName}
-                            aria-label={`Open connectors for ${selectedAgent}`}
-                          >
-                            {serverName}
-                          </ReferenceTag>
-                        ))}
-                      </span>
-                    ) : (
-                      <span className="agent-table-muted">No mapped connectors</span>
-                    )}
-                  </div>
-                </section>
-              </div>
             </section>
           )}
 

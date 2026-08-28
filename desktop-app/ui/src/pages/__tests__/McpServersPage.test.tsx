@@ -9,7 +9,6 @@ import { McpServersPage } from '../McpServersPage'
 // Capture the navigation handlers the page deep-links through. Hoisted so the
 // vi.mock factory can reference it.
 const navMock = vi.hoisted(() => ({
-  handleOpenContextDetails: vi.fn(),
   handleOpenAgentWorkspace: vi.fn(),
 }))
 vi.mock('../../contexts/NavigationContext', () => ({
@@ -130,7 +129,7 @@ describe('McpServersPage — da-table layout + navigation', () => {
     delete (window as { clerum?: unknown }).clerum
   })
 
-  it('(a) clicking a row deep-links to that context Connectors tab', async () => {
+  it('(a) clicking a row deep-links to the representative agent Connectors tab', async () => {
     installClerum(CONNECTORS)
     const { container } = renderPage(CONNECTORS)
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Connectors' })).toBeTruthy())
@@ -139,7 +138,9 @@ describe('McpServersPage — da-table layout + navigation', () => {
     expect(contextText(mondayRow)).toBe('ctx-team')
     fireEvent.click(mondayRow)
 
-    expect(navMock.handleOpenContextDetails).toHaveBeenCalledWith('ctx-team', 'mcp-servers')
+    // monday is mapped by agent-alpha AND agent-zeta; the representative is the
+    // alphabetical first (agent-alpha) — contexts are 1:1 with agents now.
+    expect(navMock.handleOpenAgentWorkspace).toHaveBeenCalledWith('agent-alpha', 'mcp-servers')
   })
 
   it('(b) mouse OR keyboard on Authorize/Disconnect fires the action WITHOUT navigating', () => {
@@ -155,14 +156,14 @@ describe('McpServersPage — da-table layout + navigation', () => {
     expect(rpc.disconnectMcpServer).toHaveBeenCalledWith('monday', 'agent-alpha', undefined, {
       shared: false,
     })
-    expect(navMock.handleOpenContextDetails).not.toHaveBeenCalled()
+    expect(navMock.handleOpenAgentWorkspace).not.toHaveBeenCalled()
 
     // Keyboard regression: Enter/Space on the button must NOT bubble to the
     // row's clickableRowProps onKeyDown and navigate. (Repro: without the
-    // button's onKeyDown stopPropagation this calls handleOpenContextDetails.)
+    // button's onKeyDown stopPropagation this navigates the row.)
     fireEvent.keyDown(disconnectBtn, { key: 'Enter' })
     fireEvent.keyDown(disconnectBtn, { key: ' ' })
-    expect(navMock.handleOpenContextDetails).not.toHaveBeenCalled()
+    expect(navMock.handleOpenAgentWorkspace).not.toHaveBeenCalled()
 
     // Authorize on the requires_setup clickup row.
     const clickupRow = rowByName(rows, 'clickup')
@@ -172,7 +173,7 @@ describe('McpServersPage — da-table layout + navigation', () => {
       confirmShared: false,
     })
     fireEvent.keyDown(authorizeBtn, { key: 'Enter' })
-    expect(navMock.handleOpenContextDetails).not.toHaveBeenCalled()
+    expect(navMock.handleOpenAgentWorkspace).not.toHaveBeenCalled()
   })
 
   it('(c) mouse OR keyboard on an agent chip opens the agent WITHOUT navigating the row', () => {
@@ -183,14 +184,16 @@ describe('McpServersPage — da-table layout + navigation', () => {
     // monday is listed by agent-alpha AND agent-zeta.
     const chip = within(mondayRow).getByRole('button', { name: 'Open agent agent-zeta' })
     fireEvent.click(chip)
+    // Only the chip's agent opens — the row navigation (representative
+    // agent-alpha) must NOT also fire, so exactly one call, for agent-zeta.
     expect(navMock.handleOpenAgentWorkspace).toHaveBeenCalledWith('agent-zeta', 'mcp-servers')
-    expect(navMock.handleOpenContextDetails).not.toHaveBeenCalled()
+    expect(navMock.handleOpenAgentWorkspace).toHaveBeenCalledTimes(1)
 
     // Keyboard regression: Enter on the chip must not navigate the row. (jsdom
     // doesn't synthesize a click from keydown, so the positive open-agent path
     // is covered by the mouse click above; here we assert the navigation guard.)
     fireEvent.keyDown(chip, { key: 'Enter' })
-    expect(navMock.handleOpenContextDetails).not.toHaveBeenCalled()
+    expect(navMock.handleOpenAgentWorkspace).toHaveBeenCalledTimes(1)
   })
 
   it('(d) a contextless row is not clickable and never navigates', () => {
@@ -202,7 +205,7 @@ describe('McpServersPage — da-table layout + navigation', () => {
     // No button semantics on the row itself (only the inner action button).
     expect(lonerRow.getAttribute('role')).toBeNull()
     fireEvent.click(lonerRow)
-    expect(navMock.handleOpenContextDetails).not.toHaveBeenCalled()
+    expect(navMock.handleOpenAgentWorkspace).not.toHaveBeenCalled()
   })
 
   it('(e) distinguishes the 3 statuses and only authorized/requires_setup are actionable', () => {

@@ -16,14 +16,12 @@ function ConnectorRowView({
   busy,
   onAuthorize,
   onDisconnect,
-  onOpenContext,
   onOpenAgent,
 }: {
   row: ConnectorRow
   busy: boolean
   onAuthorize: (input: ConnectorActionInput) => void
   onDisconnect: (input: ConnectorActionInput) => void
-  onOpenContext: (contextRef: string) => void
   onOpenAgent: (agentName: string) => void
 }) {
   const { connector, contextRef } = row
@@ -37,13 +35,15 @@ function ConnectorRowView({
     connector,
   }
 
-  // The whole row deep-links to the context's Connectors tab — but ONLY when the
-  // connector has a context. Contextless rows stay non-interactive (no target).
+  // The whole row deep-links to the representative agent's Connectors tab — but
+  // ONLY when the connector has a mapped context (contexts are 1:1 with agents,
+  // so this is the "has a real mapping" signal). Contextless rows stay
+  // non-interactive (no target).
   const rowProps = contextRef
     ? {
         className: 'da-table__row--clickable',
-        ...clickableRowProps(() => onOpenContext(contextRef), {
-          ariaLabel: `Open connectors for context ${contextRef}`,
+        ...clickableRowProps(() => onOpenAgent(row.representativeAgent), {
+          ariaLabel: `Open connectors for agent ${row.representativeAgent}`,
         }),
       }
     : {}
@@ -142,7 +142,7 @@ function ConnectorRowView({
 
 export function McpServersPage() {
   const { loading, error, agents, pendingKey, authorize, disconnect } = useConnectorsController()
-  const { handleOpenContextDetails, handleOpenAgentWorkspace } = useNavigationContext()
+  const { handleOpenAgentWorkspace } = useNavigationContext()
 
   const rows = useMemo(() => deriveConnectorRows(agents), [agents])
   const hasRows = rows.length > 0
@@ -201,9 +201,6 @@ export function McpServersPage() {
                     onDisconnect={input => {
                       disconnect(input).catch(() => undefined)
                     }}
-                    onOpenContext={contextRef =>
-                      handleOpenContextDetails(contextRef, 'mcp-servers')
-                    }
                     onOpenAgent={agentName => handleOpenAgentWorkspace(agentName, 'mcp-servers')}
                   />
                 ))}

@@ -149,8 +149,6 @@ describe('Desktop command registry', () => {
   it('keeps every approved contextual palette action unbound', () => {
     for (const id of [
       'navigate.plugins',
-      'navigate.contexts',
-      'navigate.teams',
       'navigate.connectors',
       'navigate.files',
       'sidebar.toggle',
