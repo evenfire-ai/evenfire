@@ -800,7 +800,8 @@ async function deliverAndActivateInvitation(
 async function deliverAndActivateManagedInvitation(
   inserted: InvitationWithTeams,
   commandId: string,
-  managerUserId: string
+  managerUserId: string,
+  authority?: ExternalSessionAuthorityContext
 ) {
   try {
     await registerAndSendInvitation(
@@ -828,6 +829,11 @@ async function deliverAndActivateManagedInvitation(
   }
 
   return withTransaction(async db => {
+    const sourceAuthorityValid = await hasValidManagedMutationAuthority(
+      db,
+      managerUserId,
+      authority
+    )
     const locked = await db.query(
       `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose,
               i.created_at, i.expires_at, i.accepted_at, i.accepted_user_id,
@@ -847,6 +853,14 @@ async function deliverAndActivateManagedInvitation(
     )
     const invitation = (locked.rows[0] as InvitationRow | undefined) || null
     if (!invitation) return { error: 'not_found' as const }
+    if (!sourceAuthorityValid) {
+      await finishInvitationDeliveryCommand(db, commandId, 'cancelled', 'authority_changed')
+      await db.query(
+        `UPDATE invitations SET status = 'revoked' WHERE id = $1 AND status = 'draft'`,
+        [invitation.id]
+      )
+      return { error: 'forbidden' as const }
+    }
     const teams = await loadInvitationTeams(db, invitation.id, invitation)
     if (!(await managerCanControlAllInvitationTeams(db, managerUserId, teams, true))) {
       await finishInvitationDeliveryCommand(db, commandId, 'cancelled', 'authority_changed')
@@ -2039,7 +2053,8 @@ export async function createManagedInvitationForUser(
   const delivered = await deliverAndActivateManagedInvitation(
     authorized.inserted,
     authorized.commandId,
-    managerUserId
+    managerUserId,
+    authority
   )
   if ('error' in delivered) return { error: delivered.error }
   return {
