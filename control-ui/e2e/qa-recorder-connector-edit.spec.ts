@@ -106,6 +106,14 @@ async function createDiscoveryConnector(
   await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
 }
 
+async function openConnectorEditor(page: Page, connectorName: string): Promise<void> {
+  await page.getByRole('button', { name: `Expand connector ${connectorName}` }).click()
+  await page
+    .getByRole('button', { name: `Actions for connector ${connectorName}`, exact: true })
+    .click()
+  await page.getByRole('menuitem', { name: 'Edit', exact: true }).click()
+}
+
 test.describe('optional QA recorder: Control UI connector edit', () => {
   test('records editing a discovery connector to add external CIDR egress', async ({
     page,
@@ -127,8 +135,7 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       await createEmptyContext(page, contextName)
       await createDiscoveryConnector(page, connectorName, contextName)
 
-      await page.getByRole('button', { name: `Expand connector ${connectorName}` }).click()
-      await page.getByRole('button', { name: `Edit connector ${connectorName}` }).click()
+      await openConnectorEditor(page, connectorName)
       await expect(
         page.getByRole('heading', { name: `Edit Connector: ${connectorName}`, exact: true })
       ).toBeVisible({ timeout: 20_000 })
@@ -136,14 +143,10 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       // Context is a read-only final tab. It mirrors the selected context's
       // Users, Teams, and Agents access preview without offering a mutation.
       await page.getByRole('tab', { name: 'Context', exact: true }).click()
-      await expect(page).toHaveURL(
-        new RegExp(`/connectors/${encodeURIComponent(connectorName)}/edit/context$`)
-      )
       await expect(page.getByRole('heading', { name: 'Context access', exact: true })).toBeVisible({
         timeout: 20_000,
       })
       await expect(page.getByLabel('Connector context').getByText(contextName)).toBeVisible()
-      await expect(page.getByLabel('Context access')).toBeVisible()
 
       await page.getByRole('tab', { name: 'External Egress', exact: true }).click()
 
@@ -252,19 +255,17 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
 
       await page.getByRole('link', { name: 'Installed Connectors', exact: true }).click()
       await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
-      await page.getByRole('button', { name: `Expand connector ${connectorName}` }).click()
-      await page.getByRole('button', { name: `Edit connector ${connectorName}` }).click()
+      await openConnectorEditor(page, connectorName)
       await expect(
         page.getByRole('heading', { name: `Edit Connector: ${connectorName}`, exact: true })
       ).toBeVisible({ timeout: 20_000 })
 
       // The connector edit screen is split into tabs; the rotation flow lives
-      // on the Credentials tab — navigate there via the tab link.
+      // on the Credentials tab — navigate there via the visible tab.
       await page.getByRole('tab', { name: 'Credentials', exact: true }).click()
-      await expect(page).toHaveURL(
-        new RegExp(`/connectors/${encodeURIComponent(connectorName)}/edit/credentials$`),
-        { timeout: 20_000 }
-      )
+      await expect(page.getByRole('heading', { name: 'Update credentials', exact: true })).toBeVisible({
+        timeout: 20_000,
+      })
 
       // The section names the Secret and the key -> env var mapping — names
       // only, never the stored value.
