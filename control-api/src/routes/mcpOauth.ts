@@ -185,6 +185,52 @@ export async function resolveBatchGrantExistence(
 ): Promise<GrantExistsResult[]> {
   const log = deps.log ?? rootLogger
   const results: GrantExistsResult[] = []
+
+  // Memoize the CR resolution by `mcpServerName` for the lifetime of THIS batch.
+  // The sweep fans a per-user partition out to one entry per user, so a shared
+  // server with N live users produces N IDENTICAL apiserver reads of the same CR
+  // (mini-spec 13 Should-fix #1). The apiserver read + `resolveServerOAuth`
+  // depend ONLY on the server name (not on userId), so they are resolved once
+  // per distinct name; the grant SELECT still runs per entry (it keys by userId).
+  //
+  // A `null` entry is the memoized fail-open verdict for a server whose CR read
+  // threw (deleted CR / apiserver blip) OR did not resolve as OAuth — both yield
+  // `exists:true` per entry exactly as before, and neither is retried N times.
+  // `.has()` distinguishes "not yet read" from "read → null", so a failed read is
+  // cached, never re-attempted within the batch.
+  const serverOAuthCache = new Map<string, ReturnType<typeof resolveServerOAuth>>()
+  const resolveServerOAuthCached = async (
+    name: string
+  ): Promise<ReturnType<typeof resolveServerOAuth>> => {
+    if (serverOAuthCache.has(name)) return serverOAuthCache.get(name) ?? null
+    let resolved: ReturnType<typeof resolveServerOAuth>
+    try {
+      const server = (await deps.gateway.getResource(
+        'mcpservers',
+        name,
+        deps.mcpServersNamespace
+      )) as McpServerResource
+      resolved = resolveServerOAuth(server)
+      if (!resolved) {
+        // Not an OAuth server / no usable oauth id → ambiguous, fail-open.
+        log.warn(
+          { mcpServerName: name },
+          'grant-existence: server not resolvable as oauth; fail-open'
+        )
+      }
+    } catch (err) {
+      // Server not found (deleted CR) or apiserver blip — transient/ambiguous.
+      // Fail-open: never evict a live partition on a hiccup.
+      log.warn(
+        { err, mcpServerName: name },
+        'grant-existence: server read failed; fail-open (exists:true)'
+      )
+      resolved = null
+    }
+    serverOAuthCache.set(name, resolved)
+    return resolved
+  }
+
   for (const raw of queries) {
     const entry = (raw && typeof raw === 'object' ? raw : {}) as {
       mcpServerName?: unknown
@@ -211,38 +257,34 @@ export async function resolveBatchGrantExistence(
       continue
     }
 
+    // Resolve the server's OAuth spec ONCE per distinct name (memoized above).
+    // A null verdict (read failed OR not an OAuth server) is fail-open per entry.
+    const resolved = await resolveServerOAuthCached(mcpServerName)
+    if (!resolved) {
+      results.push(echo(true))
+      continue
+    }
+    const key = buildMcpServerGrantKey(resolved, {
+      mcpServerName,
+      mcpServersNamespace: deps.mcpServersNamespace,
+      userId,
+    })
+    if (!key) {
+      // Missing the coordinate the flavor needs (no userId for a user server,
+      // no contextRef for a context server) → ambiguous, fail-open. Depends on
+      // the per-entry userId, so it is decided per entry, not memoized.
+      log.warn(
+        { mcpServerName, grantScope: resolved.grantScope },
+        'grant-existence: missing grant coordinate; fail-open'
+      )
+      results.push(echo(true))
+      continue
+    }
     try {
-      const server = (await deps.gateway.getResource(
-        'mcpservers',
-        mcpServerName,
-        deps.mcpServersNamespace
-      )) as McpServerResource
-      const resolved = resolveServerOAuth(server)
-      if (!resolved) {
-        // Not an OAuth server / no usable oauth id → ambiguous, fail-open.
-        log.warn({ mcpServerName }, 'grant-existence: server not resolvable as oauth; fail-open')
-        results.push(echo(true))
-        continue
-      }
-      const key = buildMcpServerGrantKey(resolved, {
-        mcpServerName,
-        mcpServersNamespace: deps.mcpServersNamespace,
-        userId,
-      })
-      if (!key) {
-        // Missing the coordinate the flavor needs (no userId for a user server,
-        // no contextRef for a context server) → ambiguous, fail-open.
-        log.warn(
-          { mcpServerName, grantScope: resolved.grantScope },
-          'grant-existence: missing grant coordinate; fail-open'
-        )
-        results.push(echo(true))
-        continue
-      }
+      // The grant SELECT keys by the per-entry coordinate, so it always runs per
+      // entry. A DB error here is transient/ambiguous → fail-open for THIS entry.
       results.push(echo(await oauthGrantExists(deps.db, key)))
     } catch (err) {
-      // Server not found (deleted CR), apiserver blip, or DB error — all
-      // transient/ambiguous. Fail-open: never evict a live partition on a hiccup.
       log.warn({ err, mcpServerName }, 'grant-existence check failed; fail-open (exists:true)')
       results.push(echo(true))
     }

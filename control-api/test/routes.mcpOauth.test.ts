@@ -521,6 +521,45 @@ describe('routes/mcp-oauth — POST /mcp-oauth/grants/exists (mini-spec 13)', ()
     ])
   })
 
+  // Should-fix #1 (efficiency, mini-spec 13): within ONE batch the CR of a
+  // shared server is read from the apiserver ONCE, not once per entry. N per-user
+  // partitions of the SAME server → a single getResource('mcpservers', 'gdrive'),
+  // yet still N grant SELECTs (one per userId). The per-entry response is
+  // IDENTICAL to the un-deduped semantics — only the apiserver fan-out drops.
+  it('200: dedups the getResource read across N entries of the same server', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    const getResourceSpy = vi.spyOn(gateway, 'getResource')
+    // alice has a grant (first SELECT 1 finds a row); bob and carol do not.
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ exists: 1 }], rowCount: 1 })
+    const res = await post(controlToken(), {
+      queries: [
+        { mcpServerName: 'gdrive', userId: 'alice' },
+        { mcpServerName: 'gdrive', userId: 'bob' },
+        { mcpServerName: 'gdrive', userId: 'carol' },
+      ],
+    })
+    expect(res.status).toBe(200)
+    // Per-entry booleans + order unchanged vs. the one-read-per-entry version.
+    expect(res.body.results).toEqual([
+      { mcpServerName: 'gdrive', userId: 'alice', exists: true },
+      { mcpServerName: 'gdrive', userId: 'bob', exists: false },
+      { mcpServerName: 'gdrive', userId: 'carol', exists: false },
+    ])
+    // The shared server CR is read from the apiserver EXACTLY ONCE for the batch.
+    const gdriveReads = getResourceSpy.mock.calls.filter(
+      ([plural, name]) => plural === 'mcpservers' && name === 'gdrive'
+    )
+    expect(gdriveReads).toHaveLength(1)
+    // Yet every entry still ran its own SELECT 1 (one grant lookup per userId).
+    const grantSelects = mockPoolQuery.mock.calls.filter(
+      ([sql]) => typeof sql === 'string' && sql.includes('FROM oauth_grants')
+    )
+    expect(grantSelects).toHaveLength(3)
+    // …and each SELECT carries its own entry's userId, in order (userId is the
+    // 4th bind param: [ownerKind, ns, name, userId, clientId]).
+    expect(grantSelects.map(call => (call[1] as unknown[])[3])).toEqual(['alice', 'bob', 'carol'])
+  })
+
   // Context flavor: keyed by the server's AUTHORITATIVE spec.contextRef, NEVER
   // the body contextId (no body-trust). The SELECT 1 coordinate proves it; the
   // lying body contextId is only echoed back, never used to key.
