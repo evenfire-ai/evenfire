@@ -1,4 +1,5 @@
 import type { TeamRole } from '../../profileTypes.js'
+import { compareCanonicalUtf8Text } from './canonicalText.js'
 
 export const ACCESS_CAPABILITIES = [
   'user.profile.read',
@@ -61,7 +62,7 @@ export function requireAccessCapability(value: unknown): AccessCapability {
 export function normalizeAccessCapabilities(values: readonly unknown[]): AccessCapability[] {
   const normalized = new Set<AccessCapability>()
   for (const value of values) normalized.add(requireAccessCapability(value))
-  return [...normalized].sort()
+  return [...normalized].sort(compareCanonicalUtf8Text)
 }
 
 export function capabilitiesForTeamRole(role: TeamRole): AccessCapability[] {
