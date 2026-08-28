@@ -1987,25 +1987,42 @@ describe('collectHostReconcileFailures benign supersession (#490)', () => {
     return error
   }
 
-  it('resolves reconcileHosts when every fleet error is a name-equivalent benign supersession', async () => {
+  it.each([
+    'HostInventoryAuthorityUnavailableError',
+    'HostMutationIdentityChangedError',
+    'HostMutationSpecRevisionChangedError',
+    'HostMutationDependencyChangedError',
+  ] as const)(
+    'resolves reconcileHosts when every fleet error is name-equivalent %s',
+    async errorName => {
+      const { reconciler } = createReconciler()
+      const withdrawn = nameEquivalent(
+        errorName,
+        `Host "${errorName}" superseded before Host "alpha-host" reconcile admission`
+      )
+      vi.spyOn(reconciler, 'reconcile').mockRejectedValue(withdrawn)
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const before = await readFleetBenignSupersessions(errorName)
+
+      await expect(reconciler.reconcileHosts([makeHost()])).resolves.toBeUndefined()
+
+      expect(await readFleetBenignSupersessions(errorName)).toBe(before + 1)
+      expect(
+        errorSpy.mock.calls.some(call => String(call[0]).includes('Fleet reconcile failed'))
+      ).toBe(false)
+      errorSpy.mockRestore()
+    }
+  )
+
+  it('still rejects a lookalike error name that is not in the benign set', async () => {
     const { reconciler } = createReconciler()
-    const withdrawn = nameEquivalent(
-      'HostMutationSpecRevisionChangedError',
-      'Host spec generation changed before Host "alpha-host" reconcile admission'
+    vi.spyOn(reconciler, 'reconcile').mockRejectedValue(
+      nameEquivalent('HostMutationSpecRevisionChanged', 'almost the withdrawn name')
     )
-    vi.spyOn(reconciler, 'reconcile').mockRejectedValue(withdrawn)
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const before = await readFleetBenignSupersessions('HostMutationSpecRevisionChangedError')
 
-    await expect(reconciler.reconcileHosts([makeHost()])).resolves.toBeUndefined()
-
-    expect(await readFleetBenignSupersessions('HostMutationSpecRevisionChangedError')).toBe(
-      before + 1
+    await expect(reconciler.reconcileHosts([makeHost()])).rejects.toBeInstanceOf(
+      HostFleetReconcileError
     )
-    expect(
-      errorSpy.mock.calls.some(call => String(call[0]).includes('Fleet reconcile failed'))
-    ).toBe(false)
-    errorSpy.mockRestore()
   })
 
   it('still rejects HostFleetReconcileError for a non-benign fleet error', async () => {
