@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DbClient } from '../src/db.js'
+import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import {
   type AccessPathBehavior,
   type AccessPathSeed,
@@ -374,6 +375,52 @@ describe('live user-access resolution', () => {
       })
     ).resolves.toEqual({ status: 'denied', code: 'unknown_capability' })
     expect(unsupportedDb.query).not.toHaveBeenCalled()
+  })
+
+  it('charges the complete identity seed set before capability selection', async () => {
+    const db = fakeTransaction({
+      memberships: [
+        {
+          teamId,
+          role: 'member',
+          membershipUpdatedAt: '2026-08-10T00:00:00.000Z',
+          teamRevision: '1',
+        },
+      ],
+      hostGrantRows: [
+        {
+          kind: 'direct',
+          grant_id: 'gfs_grants:direct',
+          team_id: null,
+          current_role: null,
+          permissions: ['read', 'write'],
+          drive: '3rd',
+        },
+        {
+          kind: 'team',
+          grant_id: 'gfs_grants:team',
+          team_id: teamId,
+          current_role: 'member',
+          permissions: ['read'],
+          drive: '3rd',
+        },
+      ],
+    })
+    const budget = AccessExecutionBudget.create('action', { limits: { accessPaths: 1 } })
+    try {
+      await expect(
+        resolveLiveAuthorization(gfsRequest({ requiredCapability: 'gfs.write' }), {
+          transaction: db.transaction,
+          budget,
+        })
+      ).resolves.toEqual({
+        status: 'unavailable',
+        dependencyClass: 'capacity',
+        retryable: true,
+      })
+    } finally {
+      budget.close()
+    }
   })
 
   it('revalidates the exact provider incarnation for a selected operational path', async () => {
