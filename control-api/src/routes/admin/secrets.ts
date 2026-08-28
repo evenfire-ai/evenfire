@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { createHash } from 'node:crypto'
 import { PROVIDER_CREDENTIAL_SLOTS } from '@clerum/llm-providers'
 import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '@clerum/workflow-runtime-core'
@@ -7,6 +8,7 @@ import { asyncHandler } from '../../http/asyncHandler.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { isValidDNSSubdomain } from '../../http/rfc1123.js'
 import { K8sGateway, extractHttpStatus } from '../../k8s.js'
+import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../../observability/logger.js'
 import {
@@ -28,7 +30,6 @@ import {
   verifyMcpSecretDeleteProof,
 } from '../../utils/auth/mcpSecretDeleteProof.js'
 import {
-  CONTROL_UI_ADMIN_SESSION_COOKIE,
   clearHttpOnlySessionCookie,
   readCookie,
   setHttpOnlySessionCookie,
@@ -38,13 +39,25 @@ import { isLlmHostSecret } from './llmSecretIdentity.js'
 
 const logger = rootLogger
 
+const mcpSecretDeleteEdgeRateLimit = rateLimit({
+  windowMs: 60_000,
+  limit: 60,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  keyGenerator: req => {
+    const sessionJti = (req as UiAuthedRequest).adminAuth?.jti
+    return sessionJti
+      ? `admin-session:${createHash('sha256').update(sessionJti).digest('hex')}`
+      : ipKeyGenerator(req.ip ?? '127.0.0.1')
+  },
+})
+
 const mcpSecretDeleteRateLimit = rateLimitMiddleware({
   bucketType: 'admin_mcp_secret_delete',
   maxPerMinute: 30,
   getBucketKey: req => {
-    const session = readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)
-    const authorization = req.header('authorization') ?? ''
-    const caller = session || authorization || req.ip || 'unknown-admin'
+    const sessionJti = (req as UiAuthedRequest).adminAuth?.jti
+    const caller = sessionJti || req.ip || 'unknown-admin'
     return `admin-mcp-secret-delete:${createHash('sha256').update(caller).digest('hex')}`
   },
 })
@@ -576,21 +589,19 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
         return
       }
-      const sessionToken = readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)
-      if (sessionToken) {
+      const sessionJti = (req as UiAuthedRequest).adminAuth?.jti
+      if (sessionJti) {
         setHttpOnlySessionCookie(
           req,
           res,
           mcpSecretDeleteProofCookieName(secretReq.name),
-          createMcpSecretDeleteProof(
-            {
-              name: secretReq.name,
-              namespace: targetNs,
-              uid: completeIdentity.uid,
-              resourceVersion: completeIdentity.resourceVersion,
-            },
-            sessionToken
-          ),
+          createMcpSecretDeleteProof({
+            name: secretReq.name,
+            namespace: targetNs,
+            uid: completeIdentity.uid,
+            resourceVersion: completeIdentity.resourceVersion,
+            sessionJti,
+          }),
           MCP_SECRET_DELETE_PROOF_TTL_SECONDS
         )
       }
@@ -796,6 +807,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
   router.delete(
     '/admin/mcp-secrets/:name',
     enforceNamespace(config.mcpServersNamespace),
+    mcpSecretDeleteEdgeRateLimit,
     mcpSecretDeleteRateLimit,
     asyncHandler(async (req, res) => {
       if (isPlatformManagedSecretName(req.params.name)) {
@@ -818,12 +830,14 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
           res.status(428).json({ error: 'secret_identity_precondition_required' })
           return
         }
-        const sessionToken = readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)
+        const sessionJti = (req as UiAuthedRequest).adminAuth?.jti ?? ''
         const proofCookieName = mcpSecretDeleteProofCookieName(name)
         const proofCookie = readCookie(req, proofCookieName)
-        const candidateProof = verifyMcpSecretDeleteProof(proofCookie, sessionToken)
+        const candidateProof = verifyMcpSecretDeleteProof(proofCookie)
         signedCreateProof =
-          candidateProof?.name === name && candidateProof.namespace === config.mcpServersNamespace
+          candidateProof?.name === name &&
+          candidateProof.namespace === config.mcpServersNamespace &&
+          candidateProof.sessionJti === sessionJti
             ? candidateProof
             : null
         if (!signedCreateProof) {

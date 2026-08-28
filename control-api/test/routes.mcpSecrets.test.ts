@@ -7,6 +7,8 @@ import { checkAndIncrement } from '../src/services/rateLimiterService.js'
 import { CONTROL_UI_ADMIN_SESSION_COOKIE } from '../src/utils/auth/sessionCookies.js'
 import { MockGateway } from './mockGateway.js'
 
+const TEST_ADMIN_SESSION_JTI = 'test-admin-session-jti'
+
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: vi.fn(async (_key: string, maxPerMinute: number) => ({
     allowed: true,
@@ -108,6 +110,12 @@ function k8sError(statusCode: number, message: string): Error & { statusCode: nu
 function makeApp(gateway: ReturnType<typeof createGateway>) {
   const app = express()
   app.use(express.json())
+  app.use((req, _res, next) => {
+    ;(req as express.Request & { adminAuth?: { jti: string } }).adminAuth = {
+      jti: TEST_ADMIN_SESSION_JTI,
+    }
+    next()
+  })
   app.use(createAdminSecretsRouter(gateway as never))
   // Error handler so gateway errors return 500 instead of crashing
   app.use(

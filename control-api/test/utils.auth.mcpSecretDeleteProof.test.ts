@@ -6,12 +6,12 @@ import {
   verifyMcpSecretDeleteProof,
 } from '../src/utils/auth/mcpSecretDeleteProof.js'
 
-const adminSession = 'test-admin-session'
 const claims = {
   name: 'linear-credentials',
   namespace: 'mcp-server',
   uid: 'uid-linear-credentials',
   resourceVersion: '1',
+  sessionJti: 'test-admin-session-jti',
 }
 
 describe('MCP Secret delete proof', () => {
@@ -20,17 +20,18 @@ describe('MCP Secret delete proof', () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now)
 
     try {
-      const proof = createMcpSecretDeleteProof(claims, adminSession)
+      const proof = createMcpSecretDeleteProof(claims)
 
-      expect(verifyMcpSecretDeleteProof(proof, adminSession)).toEqual({
+      expect(verifyMcpSecretDeleteProof(proof)).toEqual({
         ...claims,
         exp: Math.floor(now / 1000) + MCP_SECRET_DELETE_PROOF_TTL_SECONDS,
       })
-      expect(Object.keys(verifyMcpSecretDeleteProof(proof, adminSession) ?? {}).sort()).toEqual([
+      expect(Object.keys(verifyMcpSecretDeleteProof(proof) ?? {}).sort()).toEqual([
         'exp',
         'name',
         'namespace',
         'resourceVersion',
+        'sessionJti',
         'uid',
       ])
     } finally {
@@ -38,20 +39,19 @@ describe('MCP Secret delete proof', () => {
     }
   })
 
-  it('rejects a proof when its session binding, signature, or expiry is invalid', () => {
+  it('rejects a proof when its signature or expiry is invalid', () => {
     const now = 1_700_000_000_000
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now)
 
     try {
-      const proof = createMcpSecretDeleteProof(claims, adminSession)
+      const proof = createMcpSecretDeleteProof(claims)
       const tampered = proof.split('.')
       tampered[2] = `${tampered[2]}x`
 
-      expect(verifyMcpSecretDeleteProof(proof, 'different-admin-session')).toBeNull()
-      expect(verifyMcpSecretDeleteProof(tampered.join('.'), adminSession)).toBeNull()
+      expect(verifyMcpSecretDeleteProof(tampered.join('.'))).toBeNull()
 
       nowSpy.mockReturnValue(now + (MCP_SECRET_DELETE_PROOF_TTL_SECONDS + 1) * 1000)
-      expect(verifyMcpSecretDeleteProof(proof, adminSession)).toBeNull()
+      expect(verifyMcpSecretDeleteProof(proof)).toBeNull()
     } finally {
       nowSpy.mockRestore()
     }
