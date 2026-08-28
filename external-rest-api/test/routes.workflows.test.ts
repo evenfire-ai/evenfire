@@ -68,6 +68,21 @@ describe('routes/workflows', () => {
     )
   })
 
+  it('uses the bounded request correlation ID when a route-local upstream error has none', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+    controlApiClientMock.controlApiRequest.mockRejectedValueOnce(
+      new controlApiClientMock.ControlApiError('private', 404, { error: { code: 'not_found' } })
+    )
+
+    const res = await request(makeApp())
+      .get('/api/v1/workflows/sandbox-recipes/recipe-a/runs/run-123/artifacts')
+      .set('authorization', 'Bearer user-session-token')
+      .set('x-correlation-id', 'workflow_ID-42')
+
+    expect(res.status).toBe(404)
+    expect(res.body.error.correlationId).toBe('workflow_ID-42')
+  })
+
   it('proxies run-scoped workflow artifact downloads without using latest-run routes', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     controlApiClientMock.controlApiBinaryRequestWithStatus.mockResolvedValueOnce({
