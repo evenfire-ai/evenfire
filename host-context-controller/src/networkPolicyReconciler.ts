@@ -47,6 +47,7 @@ import {
 } from './types'
 import {
   applyNetworkPolicy,
+  canonicalizeValue,
   getErrorCode,
   networkPolicyMatchesDesired,
   replaceWithConflictRetry,
@@ -121,14 +122,7 @@ export function sameContextDesiredRevision(expected: ContextCRD, current: Contex
 }
 
 function canonicalizeNetworkPolicyValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalizeNetworkPolicyValue)
-  if (value === null || typeof value !== 'object') return value
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
-      .filter(([, entry]) => entry !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => [key, canonicalizeNetworkPolicyValue(entry)])
-  )
+  return canonicalizeValue(value)
 }
 
 function sameNetworkPolicySpec(
@@ -320,9 +314,9 @@ export function isAllowedExternalEgressCidr(cidr: string): boolean {
 }
 
 /**
- * Recursively canonicalize a value: sort every object's keys while preserving
- * array order. Used to compare policy egress without JSON.stringify key-order
- * fragility.
+ * egressSignature walker: deep key-sort, keep undefined-valued keys.
+ * Distinct from `canonicalizeValue` (no-op gates drop undefined). Do not fold
+ * this into the shared helper (#299 / #473).
  */
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize)
