@@ -261,9 +261,17 @@ describe('aggregate access catalog properties', () => {
       .digest('base64url')
     expect(revisionOfValues(values)).toBe(expectedRevision)
 
-    expect(
-      normalizeAccessCapabilities(['user.profile.read', 'team.read']).sort(compareTextOracle)
-    ).toEqual(['team.read', 'user.profile.read'])
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(fc.constantFrom(...capabilities), { maxLength: capabilities.length }),
+        values => {
+          const expected = [...values].sort(compareTextOracle)
+          expect(normalizeAccessCapabilities(values)).toEqual(expected)
+          expect(normalizeAccessCapabilities([...values].reverse())).toEqual(expected)
+        }
+      ),
+      { numRuns: 200 }
+    )
 
     const equivalentPaths: AccessPath[] = [
       {
