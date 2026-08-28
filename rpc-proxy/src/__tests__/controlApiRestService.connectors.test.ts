@@ -40,7 +40,7 @@ describe('fetchUserConnectorsFromControlApi — non-secret projection', () => {
               // Secret / spurious fields the saneador MUST drop:
               auth: { type: 'oauth', accessToken: 'sekret' },
               secretRef: { name: 'gdrive-secret', key: 'client-secret' },
-              token: 'access-tok',
+              token: 'upstream-token-must-not-leak',
               clientSecret: 'cs',
             },
             {
@@ -101,7 +101,14 @@ describe('fetchUserConnectorsFromControlApi — non-secret projection', () => {
 
     // Defense in depth: the serialized output carries none of the secret tokens.
     const serialized = JSON.stringify(result)
-    for (const leak of ['secretRef', 'accessToken', 'access-tok', 'clientSecret', 'cs', 'sekret']) {
+    for (const leak of [
+      'secretRef',
+      'accessToken',
+      'upstream-token-must-not-leak',
+      'clientSecret',
+      'cs',
+      'sekret',
+    ]) {
       expect(serialized).not.toContain(leak)
     }
 
