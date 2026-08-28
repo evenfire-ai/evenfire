@@ -56,7 +56,9 @@ async function readLabeledConvergenceMetric(
     | 'clerum_hcc_initial_convergence_effects_dropped_total'
     | 'clerum_hcc_initial_convergence_pass_results_total'
     | 'clerum_hcc_netpol_resync_ticks_skipped_total'
-    | 'clerum_hcc_netpol_defaults_only_ticks_total',
+    | 'clerum_hcc_netpol_defaults_only_ticks_total'
+    | 'clerum_hcc_host_fleet_lifecycle_catch_total'
+    | 'clerum_hcc_host_fleet_requests_total',
   labels: Record<string, string>
 ): Promise<number> {
   const metric = registry.getSingleMetric(name)
@@ -7341,6 +7343,10 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
     const watcher = newContextAuthoritativeWatcher()
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const lifecycleGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
+    const appliedBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_host_fleet_lifecycle_catch_total',
+      { decision: 'applied' }
+    )
 
     try {
       await (watcher as any).requestHostFleetReconcile(
@@ -7350,6 +7356,11 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       )
 
       expect((watcher as any).ccAppliedLifecycleGeneration).toBe(lifecycleGeneration)
+      expect(
+        await readLabeledConvergenceMetric('clerum_hcc_host_fleet_lifecycle_catch_total', {
+          decision: 'applied',
+        })
+      ).toBe(appliedBefore + 1)
       await vi.advanceTimersByTimeAsync(300000)
       expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
     } finally {
@@ -7374,6 +7385,10 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
     ;(watcher as any).ccCacheSynced = true
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const lifecycleGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
+    const retryBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_host_fleet_lifecycle_catch_total',
+      { decision: 'retry' }
+    )
 
     try {
       await (watcher as any).requestHostFleetReconcile(
@@ -7383,6 +7398,11 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       )
       expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
       expect(mocks.hostReconcileHosts).not.toHaveBeenCalled()
+      expect(
+        await readLabeledConvergenceMetric('clerum_hcc_host_fleet_lifecycle_catch_total', {
+          decision: 'retry',
+        })
+      ).toBe(retryBefore + 1)
 
       await vi.advanceTimersByTimeAsync(5000)
       await vi.waitFor(() => expect(mocks.hostReconcileHosts).toHaveBeenCalledOnce())

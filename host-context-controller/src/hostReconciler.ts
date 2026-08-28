@@ -25,6 +25,7 @@ import { issueMcpHostRuntimeTokens } from './mcpHostRuntimeTokenIssuerClient'
 import {
   hostCleanupDeferredTotal,
   hostDeleteCleanupTotal,
+  hostFleetBenignSupersessionsTotal,
   hostReconcileDurationSeconds,
   hostReconcileInFlight,
   hostReconcileQueueWaitSeconds,
@@ -149,7 +150,7 @@ const BENIGN_SUPERSESSION_ERROR_NAMES: ReadonlySet<string> = new Set([
   'HostMutationDependencyChangedError',
 ])
 
-function isBenignSupersessionError(error: unknown): boolean {
+function isBenignSupersessionError(error: unknown): error is Error {
   return error instanceof Error && BENIGN_SUPERSESSION_ERROR_NAMES.has(error.name)
 }
 
@@ -4314,6 +4315,20 @@ export class HostReconciler {
       try {
         await this.reconcile(host, source)
       } catch (error) {
+        if (isBenignSupersessionError(error)) {
+          // Per-host reconcile() already recorded outcome=superseded and
+          // rethrew. Withdraw from this fleet pass so HostFleetReconcileError,
+          // host_fleet_requests_total{failed}, and the lifecycle retry stay
+          // reserved for genuine host failures. Match by error.name — the
+          // classes are unexported and statelessLifecycleExecutor synthesizes
+          // name-equivalent plain Errors.
+          hostFleetBenignSupersessionsTotal.inc({ error: error.name })
+          hccLogger.warn('Fleet Host reconcile withdrawn as benign supersession', {
+            err: error,
+            errorName: error.name,
+          })
+          return
+        }
         console.error(`[HostReconciler] Fleet reconcile failed for Host "${name}":`, error)
         throw error
       }

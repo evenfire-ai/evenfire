@@ -56,6 +56,7 @@ import {
 } from './mcpServerSafety'
 import {
   hostDeleteCleanupTotal,
+  hostFleetLifecycleCatchTotal,
   hostFleetRequestsTotal,
   hostWatchRecoverySeconds,
   initialConvergenceEffectsDroppedTotal,
@@ -2227,10 +2228,12 @@ export class McpServerWatcher implements McpServerProvider {
       console.error(`[K8s] Host reconciliation after ${reason} failed:`, error)
       if (!this.stopped && ccLifecycleGeneration !== undefined) {
         if (error instanceof HostFleetReconcileError && error.hostFailures.length === 0) {
+          hostFleetLifecycleCatchTotal.inc({ decision: 'applied' })
           this.markCommunicationChannelLifecycleApplied(ccLifecycleGeneration)
         } else {
           // Retry Host convergence without coupling the lifecycle ladder to
           // orphan cleanup. A later periodic full pass retries cleanup work.
+          hostFleetLifecycleCatchTotal.inc({ decision: 'retry' })
           this.scheduleCommunicationChannelFleetRetry({
             ...request,
             mode: error instanceof HostFleetReconcileError ? 'lifecycle' : request.mode,
