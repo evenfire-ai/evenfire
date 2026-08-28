@@ -2,6 +2,17 @@ import type { Request, Response } from 'express'
 import { randomUUID } from 'node:crypto'
 import { ControlApiError } from '../controlApiClient.js'
 
+const SAFE_PUBLIC_CORRELATION_ID = /^[A-Za-z0-9_-]{1,128}$/
+
+export function selectPublicCorrelationId(...candidates: readonly unknown[]): string {
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue
+    const value = candidate.trim()
+    if (SAFE_PUBLIC_CORRELATION_ID.test(value)) return value
+  }
+  return randomUUID()
+}
+
 const PUBLIC_CODE_BY_STATUS: Readonly<Record<number, string>> = {
   400: 'invalid_request',
   401: 'invalid_session',
@@ -172,12 +183,7 @@ export function sanitizeControlApiPublicError(
     rawEnvelope && typeof (rawEnvelope as { correlationId?: unknown }).correlationId === 'string'
       ? String((rawEnvelope as { correlationId: string }).correlationId)
       : ''
-  const safeFallbackCorrelationId = /^[A-Za-z0-9_-]{1,128}$/.test(fallbackCorrelationId)
-    ? fallbackCorrelationId
-    : ''
-  const correlationId = /^[A-Za-z0-9_-]{1,128}$/.test(rawCorrelationId)
-    ? rawCorrelationId
-    : safeFallbackCorrelationId || randomUUID()
+  const correlationId = selectPublicCorrelationId(rawCorrelationId, fallbackCorrelationId)
   const retryable = [408, 425, 429, 502, 503, 504].includes(error.status)
   const rawDetails =
     rawEnvelope && typeof (rawEnvelope as { details?: unknown }).details === 'object'
@@ -254,9 +260,7 @@ export function sendSanitizedControlApiPublicError(
 }
 
 export function publicCorrelationId(req: Request): string {
-  return (
-    String(req.header('x-correlation-id') || '').trim() || Math.random().toString(36).slice(2, 12)
-  )
+  return selectPublicCorrelationId(req.header('x-correlation-id'))
 }
 
 export function sendPublicApiError(
