@@ -37,6 +37,25 @@ describe('browser mutation origin protection', () => {
     expect(JSON.stringify(response.body)).not.toContain('attacker.example')
   })
 
+  it('uses only bounded correlation IDs in browser-mutation denials', async () => {
+    const valid = await request(app())
+      .post('/mutation')
+      .set('cookie', 'profile_session=session')
+      .set('origin', 'https://attacker.example')
+      .set('x-correlation-id', 'browser_ID-42')
+    expect(valid.body.error.correlationId).toBe('browser_ID-42')
+
+    for (const rejected of ['browser/request', 'x'.repeat(129)]) {
+      const response = await request(app())
+        .post('/mutation')
+        .set('cookie', 'profile_session=session')
+        .set('origin', 'https://attacker.example')
+        .set('x-correlation-id', rejected)
+      expect(response.body.error.correlationId).not.toBe(rejected)
+      expect(response.body.error.correlationId).toMatch(/^[A-Za-z0-9_-]{1,128}$/)
+    }
+  })
+
   it('allows native bearer mutations without browser headers', async () => {
     await request(app())
       .post('/mutation')
