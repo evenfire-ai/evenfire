@@ -837,6 +837,23 @@ describe('SecretService — preserved Secret state is constrained before mutatio
     })
   })
 
+  it('preserves the catalog annotation pair during key removal', async () => {
+    const annotations = {
+      'clerum.io/catalog-id': 'registry/example',
+      'clerum.io/catalog-version': '1.2.3',
+    }
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      metadata: { annotations, resourceVersion: '14' },
+      type: 'Opaque',
+    })
+
+    await svc.removeSecretKey({ name: 's', namespace: 'test-ns', key: VALID_KEYS[0] })
+
+    const body = coreApi.patchNamespacedSecret.mock.calls[0][0].body
+    expect(body.data).toEqual({ [VALID_KEYS[0]]: null })
+    expect(body).not.toHaveProperty('metadata.annotations')
+  })
+
   it('rejects update when an omitted type preserves a forbidden existing type', async () => {
     coreApi.readNamespacedSecret.mockResolvedValueOnce({
       metadata: {},

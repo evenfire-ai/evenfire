@@ -296,19 +296,14 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       await expect(page.getByText(/Rotating credentials/)).toBeVisible({ timeout: 20_000 })
 
       // This rotates to a VALID credential, so the connector must come back
-      // healthy: the terminal state is SUCCESS. A bounded "did not finish
-      // within" is tolerated as cluster slowness. But "Rotation failed:" is NOT
-      // an acceptable outcome here — it would mean the UI reported the normal
-      // transitory DeploymentReady=False/WaitingForReplicas as a failure (the
-      // B1 defect). Accepting it (as this spec used to) let the bug pass in
-      // green; asserting its absence makes the test catch a regression.
+      // healthy: the only acceptable terminal state is SUCCESS. A timeout or
+      // failure is diagnostic evidence, not a passing outcome.
       // Must exceed the UI's own POLL_TIMEOUT_MS (180s): the "did not finish
       // within" terminal message is only emitted at 180s, so a 150s assertion
       // timeout would expire in the dead window (150s–180s) and fail spuriously
       // on a slow-but-valid rollout. 185s clears it.
-      await expect(
-        page.getByText(/Credentials rotated\./).or(page.getByText(/did not finish within/))
-      ).toBeVisible({ timeout: 185_000 })
+      await expect(page.getByText(/Credentials rotated\./)).toBeVisible({ timeout: 185_000 })
+      await expect(page.getByText(/did not finish within/)).toHaveCount(0)
       await expect(page.getByText(/Rotation failed:/)).toHaveCount(0)
 
       await screenshotAndLog(page, testInfo, 'control-ui-connector-credential-rotation')

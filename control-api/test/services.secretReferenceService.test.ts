@@ -34,6 +34,11 @@ describe('findSecretReferenceState', () => {
         plural: 'llmhooks',
         resource: { spec: { target: { image: { imagePullSecrets: [referencedName] } } } },
       },
+      {
+        namespace: config.llmHooksNamespace,
+        plural: 'llmhooks',
+        resource: { spec: { target: { remote: { authHeadersSecret: referencedName } } } },
+      },
     ]
 
     for (const { namespace, plural, resource } of cases) {

@@ -13,7 +13,7 @@ type ReferenceScope = {
   secretNamespace: string
 }
 
-const REFERENCE_SCOPES: ReferenceScope[] = [
+export const SECRET_REFERENCE_SCOPES = [
   {
     plural: 'mcpservers',
     resourceNamespace: config.mcpServersNamespace,
@@ -39,20 +39,25 @@ const REFERENCE_SCOPES: ReferenceScope[] = [
     resourceNamespace: config.communicationChannelsNamespace,
     secretNamespace: config.communicationChannelsNamespace,
   },
-]
+] as const satisfies readonly ReferenceScope[]
+
+const REFERENCE_SCOPES: readonly ReferenceScope[] = SECRET_REFERENCE_SCOPES
 
 // Explicitly enumerate every Secret-bearing field in the deployed CRD schemas.
 // A generic "*Ref" fallback would turn unrelated resource references into false
 // dependencies and make compensation behavior implicit. Keep this list aligned
 // with charts/clerum-crds/crds/{mcpserver,llmhook,workflowrecipe,communicationchannel,host}.yaml.
-const REFERENCE_KEYS = new Set([
+export const SECRET_REFERENCE_FIELDS = [
+  'authHeadersSecret',
   'credentialsSecretRef',
   'envSecret',
   'secretRef',
   'imagePullSecrets',
   'clientIdRef',
   'clientSecretRef',
-])
+] as const
+
+const REFERENCE_KEYS: ReadonlySet<string> = new Set(SECRET_REFERENCE_FIELDS)
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null

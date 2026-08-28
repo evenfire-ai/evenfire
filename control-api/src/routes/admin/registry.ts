@@ -931,7 +931,7 @@ async function updateResourceWithConflictRetry(
     } catch (err) {
       if (extractK8sError(err)?.status !== 409) throw err
       lastConflict = err
-      if (attempt < UPDATE_CONFLICT_RETRY_ATTEMPTS) {
+      if (attempt < maxAttempts) {
         await sleep(UPDATE_CONFLICT_RETRY_DELAY_MS * attempt)
       }
     }
