@@ -113,6 +113,18 @@ describe('authorizeLlmProviderAttempt', () => {
       executionTicket: 'ticket.jwt',
       requestHash: hashCodexCompletionRequestV1(REQUEST),
     })
+    expect(current.evaluateBudget).toHaveBeenCalledWith(
+      expect.objectContaining({
+        task_ref: 'invocation-1:1:1',
+        context_ref: null,
+        team_id: null,
+        user_id: null,
+        source_kind: 'channel',
+      }),
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ requiredUnit: 'tokens' })
+    )
     expect(current.insertAttempt).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({

@@ -89,15 +89,14 @@ export async function publishRecipeGrantIdentity(input: {
     [CODEX_CONNECTION_REF_ANNOTATION]: next === CODEX_UNASSIGNED_CONNECTION_KEY ? '' : next,
   }
   const spec = asRecord(current.spec) ?? {}
+  const labels = stringMap(current.metadata?.labels)
   try {
     await input.gateway.updateResource(
       'workflowrecipes',
       input.name,
       {
         metadata: {
-          ...(stringMap(current.metadata?.labels)
-            ? { labels: stringMap(current.metadata?.labels) }
-            : {}),
+          ...(Object.keys(labels).length > 0 ? { labels } : {}),
           annotations: nextAnnotations,
           ...(current.metadata?.resourceVersion
             ? { resourceVersion: current.metadata.resourceVersion }

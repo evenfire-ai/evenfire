@@ -977,9 +977,9 @@ export class WorkflowReconciler {
 
   /**
    * Per-recipe snapshot: re-parse the last allowlist ConfigMap with the
-   * recipe's assigned grant key. A multi-grant map fail-closes for a missing
-   * key (including the `unassigned` sentinel); a legacy flat ConfigMap keeps
-   * the flat catalog. Read failures keep the fail-closed error snapshot.
+   * recipe's assigned grant key. `unassigned` never inherits a mapped or
+   * legacy catalog. A mapped miss fail-closes to an empty Codex snapshot.
+   * Read failures keep the fail-closed error snapshot.
    */
   private codexSnapshotFor(connectionKey: string): CodexCatalogSnapshot {
     return snapshotForAssignedCodexGrant(connectionKey, this.lastCodexConfigMap, this.codexSnapshot)

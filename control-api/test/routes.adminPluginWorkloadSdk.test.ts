@@ -726,7 +726,12 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         .send({ ...codexGrantBody, promptTargets: [targetWithoutConnection] })
       expect(res.status).toBe(200)
       expect(isCodexAssignmentAllowed).not.toHaveBeenCalled()
-      expect(publishRecipeGrantIdentity).not.toHaveBeenCalled()
+      expect(publishRecipeGrantIdentity).toHaveBeenCalledWith({
+        gateway: { getResource, updateResource },
+        namespace: 'sandbox-recipes',
+        name: 'sdk-recipe',
+        next: 'unassigned',
+      })
       expect(sdkDb.upsertGrant).toHaveBeenCalled()
     })
 
@@ -740,6 +745,27 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         })
       expect(res.status).toBe(200)
       expect(isCodexAssignmentAllowed).not.toHaveBeenCalled()
+      expect(publishRecipeGrantIdentity).toHaveBeenCalledWith({
+        gateway: { getResource, updateResource },
+        namespace: 'sandbox-recipes',
+        name: 'sdk-recipe',
+        next: 'unassigned',
+      })
+      expect(sdkDb.upsertGrant).toHaveBeenCalled()
+    })
+
+    it('does not unassign a Codex-agent recipe when upsert stores an unassigned target', async () => {
+      vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g-legacy' } as never)
+      getResource.mockResolvedValue({
+        spec: { agent: { provider: 'codex-subscription', model: 'gpt-5.3-codex' } },
+      })
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send({
+          ...codexGrantBody,
+          promptTargets: [{ ...codexGrantBody.promptTargets[0]!, connectionRef: 'unassigned' }],
+        })
+      expect(res.status).toBe(200)
       expect(publishRecipeGrantIdentity).not.toHaveBeenCalled()
       expect(sdkDb.upsertGrant).toHaveBeenCalled()
     })

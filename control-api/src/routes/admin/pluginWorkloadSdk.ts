@@ -375,6 +375,51 @@ export interface AdminPluginWorkloadSdkRouterDeps {
 
 const log = rootLogger.child({ module: 'admin-plugin-workload-sdk' })
 
+async function publishPromptBridgeGrantIdentity(input: {
+  gateway: Pick<K8sGateway, 'getResource' | 'updateResource'>
+  recipeNamespace: string
+  recipeName: string
+  nextRef: string
+}): Promise<{ error?: { status: number; error: string } }> {
+  let next = input.nextRef
+  if (!next) {
+    let recipeAgent: string | undefined
+    try {
+      const recipe = (await input.gateway.getResource(
+        'workflowrecipes',
+        input.recipeName,
+        input.recipeNamespace
+      )) as { spec?: { agent?: { provider?: string } } }
+      recipeAgent =
+        typeof recipe.spec?.agent?.provider === 'string' ? recipe.spec.agent.provider : undefined
+    } catch (err) {
+      log.error(
+        { err, recipeNamespace: input.recipeNamespace, recipeName: input.recipeName },
+        'failed to read WorkflowRecipe before publishing Codex grant identity'
+      )
+      return { error: { status: 503, error: 'recipe_annotation_publish_failed' } }
+    }
+    if (recipeAgent === 'codex-subscription') {
+      return {}
+    }
+    next = 'unassigned'
+  }
+  try {
+    await publishRecipeGrantIdentity({
+      gateway: input.gateway,
+      namespace: input.recipeNamespace,
+      name: input.recipeName,
+      next,
+    })
+  } catch (err) {
+    if (err instanceof RecipeCodexGrantIdentityError) {
+      return { error: { status: err.status, error: err.error } }
+    }
+    throw err
+  }
+  return {}
+}
+
 export function createAdminPluginWorkloadSdkRouter(
   deps: AdminPluginWorkloadSdkRouterDeps = {}
 ): Router {
@@ -555,20 +600,17 @@ export function createAdminPluginWorkloadSdkRouter(
             target.connectionRef &&
             !isCodexUnassignedConnectionKey(target.connectionRef)
         )?.connectionRef ?? ''
-      if (capabilityFamily === 'promptBridge' && deps.gateway && brokerConnectionRef) {
-        try {
-          await publishRecipeGrantIdentity({
-            gateway: deps.gateway,
-            namespace: recipeNamespace,
-            name: recipeName,
-            next: brokerConnectionRef,
-          })
-        } catch (err) {
-          if (err instanceof RecipeCodexGrantIdentityError) {
-            res.status(err.status).json({ error: err.error })
-            return
-          }
-          throw err
+      const hasBrokerTarget = promptTargets.some(target => isBrokerBackedProvider(target.provider))
+      if (capabilityFamily === 'promptBridge' && deps.gateway && hasBrokerTarget) {
+        const published = await publishPromptBridgeGrantIdentity({
+          gateway: deps.gateway,
+          recipeNamespace,
+          recipeName,
+          nextRef: brokerConnectionRef,
+        })
+        if (published.error) {
+          res.status(published.error.status).json({ error: published.error.error })
+          return
         }
       }
 
@@ -829,41 +871,15 @@ export function createAdminPluginWorkloadSdkRouter(
                 target.connectionRef &&
                 !isCodexUnassignedConnectionKey(target.connectionRef)
             )?.connectionRef ?? ''
-        let recipeAgent: string | undefined
-        try {
-          const recipe = (await deps.gateway.getResource(
-            'workflowrecipes',
-            recipeName,
-            recipeNamespace
-          )) as { spec?: { agent?: { provider?: string } } }
-          recipeAgent =
-            typeof recipe.spec?.agent?.provider === 'string'
-              ? recipe.spec.agent.provider
-              : undefined
-        } catch (err) {
-          log.error(
-            { err, recipeNamespace, recipeName },
-            'failed to read WorkflowRecipe after grant delete'
-          )
-          res.status(503).json({ error: 'recipe_annotation_publish_failed' })
+        const published = await publishPromptBridgeGrantIdentity({
+          gateway: deps.gateway,
+          recipeNamespace,
+          recipeName,
+          nextRef: remainingRef,
+        })
+        if (published.error) {
+          res.status(published.error.status).json({ error: published.error.error })
           return
-        }
-        const shouldUnassign = !remainingRef && recipeAgent !== 'codex-subscription'
-        if (remainingRef || shouldUnassign) {
-          try {
-            await publishRecipeGrantIdentity({
-              gateway: deps.gateway,
-              namespace: recipeNamespace,
-              name: recipeName,
-              next: remainingRef || 'unassigned',
-            })
-          } catch (err) {
-            if (err instanceof RecipeCodexGrantIdentityError) {
-              res.status(err.status).json({ error: err.error })
-              return
-            }
-            throw err
-          }
         }
       }
       res.status(200).json({ deleted: true })

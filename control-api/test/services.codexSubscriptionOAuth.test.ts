@@ -516,18 +516,48 @@ describe('codex subscription OAuth broker', () => {
     expect(repos.updateInPlace).not.toHaveBeenCalled()
   })
 
-  it('fails loud when the refresh lock is held and the stored token is already expired', async () => {
-    repos.loadSecrets.mockResolvedValue({
+  it('fails loud when the refresh lock is held and the stored token stays expired', async () => {
+    vi.useFakeTimers()
+    try {
+      repos.loadSecrets.mockResolvedValue({
+        refreshToken: 'refresh-secret',
+        accessToken: 'stale-access',
+        accessTokenExpiresAt: new Date(Date.now() - 1_000),
+        chatgptAccountId: null,
+        credentialRevision: 3,
+      })
+      repos.acquireLock.mockResolvedValue(false)
+      const pending = expect(ensureFreshCodexAccessToken(deps(vi.fn()))).rejects.toMatchObject({
+        code: 'refresh_in_flight',
+      })
+      await vi.advanceTimersByTimeAsync(30_000)
+      await pending
+      expect(repos.updateInPlace).not.toHaveBeenCalled()
+    } finally {
+      await vi.runOnlyPendingTimersAsync()
+      vi.useRealTimers()
+    }
+  })
+
+  it('waits for a concurrent refresh to publish a usable token instead of failing the losers', async () => {
+    const expired = {
       refreshToken: 'refresh-secret',
       accessToken: 'stale-access',
       accessTokenExpiresAt: new Date(Date.now() - 1_000),
       chatgptAccountId: null,
       credentialRevision: 3,
-    })
+    }
     repos.acquireLock.mockResolvedValue(false)
-    await expect(ensureFreshCodexAccessToken(deps(vi.fn()))).rejects.toMatchObject({
-      code: 'refresh_in_flight',
-    })
+    repos.loadSecrets
+      .mockResolvedValueOnce(expired)
+      .mockResolvedValueOnce(expired)
+      .mockResolvedValueOnce({
+        ...expired,
+        accessToken: 'access-secret',
+        accessTokenExpiresAt: new Date(Date.now() + 3_600_000),
+        chatgptAccountId: 'acct_live_9',
+      })
+    await expect(ensureFreshCodexAccessToken(deps(vi.fn()))).resolves.toBeUndefined()
     expect(repos.updateInPlace).not.toHaveBeenCalled()
   })
 

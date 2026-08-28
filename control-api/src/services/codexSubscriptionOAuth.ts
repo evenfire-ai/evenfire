@@ -44,8 +44,21 @@ const DEVICE_CODE_TIMEOUT_SECONDS = 15 * 60
 
 const TOKEN_TIMEOUT_MS = 15_000
 const REFRESH_LOCK_TTL_MS = 30_000
+const REFRESH_LOCK_POLL_MS = 200
 const BROWSER_STATE_TTL_MS = 10 * 60_000
 const ACCESS_TOKEN_REFRESH_SKEW_MS = 5 * 60_000
+
+function accessTokenIsUsable(secrets: {
+  accessToken?: string | null
+  accessTokenExpiresAt?: Date | null
+}): boolean {
+  if (!secrets.accessToken) return false
+  return secrets.accessTokenExpiresAt == null || secrets.accessTokenExpiresAt.getTime() > Date.now()
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
 
 export type CodexOAuthErrorCode =
   | 'disabled'
@@ -477,29 +490,42 @@ export async function ensureFreshCodexAccessToken(deps: CodexOAuthDeps): Promise
     return
   }
 
-  const lockToken = randomBytes(16).toString('hex')
-  const locked = await acquireCodexSubscriptionRefreshLock(
+  let lockToken = randomBytes(16).toString('hex')
+  let locked = await acquireCodexSubscriptionRefreshLock(
     deps.db,
     lockToken,
     REFRESH_LOCK_TTL_MS,
     key
   )
   if (!locked) {
-    await new Promise(resolve => setTimeout(resolve, 400))
-    const latest = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey, key)
-    if (!latest) {
-      throw new CodexSubscriptionOAuthError('no_grant', 'encrypted refresh token missing')
-    }
-    const waitedAccountId = latest.chatgptAccountId || chatgptAccountIdFromJwt(latest.accessToken)
-    const tokenStillValid =
-      latest.accessTokenExpiresAt == null || latest.accessTokenExpiresAt.getTime() > Date.now()
-    if (latest.accessToken && tokenStillValid) {
-      if (waitedAccountId && !latest.chatgptAccountId) {
-        await persistCodexChatgptAccountId(deps.db, deps.encryptionKey, waitedAccountId, key)
+    // The winner's upstream token exchange takes seconds. A single 400 ms
+    // peek loses every concurrent completion at the hourly expiry boundary.
+    const deadline = Date.now() + REFRESH_LOCK_TTL_MS
+    while (true) {
+      await sleep(REFRESH_LOCK_POLL_MS)
+      const latest = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey, key)
+      if (!latest) {
+        throw new CodexSubscriptionOAuthError('no_grant', 'encrypted refresh token missing')
       }
-      return
+      const waitedAccountId = latest.chatgptAccountId || chatgptAccountIdFromJwt(latest.accessToken)
+      if (accessTokenIsUsable(latest)) {
+        if (waitedAccountId && !latest.chatgptAccountId) {
+          await persistCodexChatgptAccountId(deps.db, deps.encryptionKey, waitedAccountId, key)
+        }
+        return
+      }
+      if (Date.now() >= deadline) {
+        throw new CodexSubscriptionOAuthError('refresh_in_flight', 'another refresh holds the lock')
+      }
+      lockToken = randomBytes(16).toString('hex')
+      locked = await acquireCodexSubscriptionRefreshLock(
+        deps.db,
+        lockToken,
+        REFRESH_LOCK_TTL_MS,
+        key
+      )
+      if (locked) break
     }
-    throw new CodexSubscriptionOAuthError('refresh_in_flight', 'another refresh holds the lock')
   }
   try {
     const latest = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey, key)
