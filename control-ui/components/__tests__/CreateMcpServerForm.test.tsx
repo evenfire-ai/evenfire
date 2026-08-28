@@ -6,13 +6,15 @@ import { CreateMcpServerForm } from '../CreateMcpServerForm'
 import { ToastProvider } from '../Toast'
 
 // vi.mock is hoisted before imports; factory runs lazily so references to `api` are safe.
-vi.mock('../../lib/api', async () => {
+vi.mock('../../lib/api', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../lib/api')>()
   const { buildContextList, buildContextResource } =
     await import('../../test/fixtures/contextResource')
   const context1 = buildContextResource({
     metadata: { name: 'context1', resourceVersion: 'rv-context1' },
   })
   return {
+    ...actual,
     createMcpServer: vi.fn().mockResolvedValue({ metadata: { name: 'test-server' } }),
     createMcpSecret: vi.fn().mockResolvedValue({
       name: 'test-credentials',
@@ -73,6 +75,21 @@ function chooseNoCredentials() {
 
 function chooseNewSecret() {
   fireEvent.click(screen.getByRole('radio', { name: /Create Kubernetes Secret/ }))
+}
+
+function mcpSecretRollbackRepairError(created: Record<string, unknown>) {
+  return Object.assign(
+    new Error('503 Service Unavailable - mcp_secret_rollback_permit_unavailable'),
+    {
+      status: 503,
+      code: 'mcp_secret_rollback_permit_unavailable',
+      body: {
+        error: 'mcp_secret_rollback_permit_unavailable',
+        outcome: 'repair_required',
+        created,
+      },
+    }
+  )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -537,6 +554,73 @@ describe('CreateMcpServerForm — envSecret guardrails', () => {
     await waitFor(() => {
       expect(screen.getByText('Connector create failed')).toBeInTheDocument()
     })
+  })
+
+  it('rolls back a repaired Secret with CAS when createMcpSecret rejects', async () => {
+    ;(api.createMcpSecret as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      mcpSecretRollbackRepairError({
+        name: 'requested-credentials',
+        namespace: 'mcp-server',
+        uid: 'uid-requested-credentials',
+        resourceVersion: '17',
+      })
+    )
+
+    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
+    await fillRequiredBasics()
+    enableEnvSecret('requested-credentials')
+    fireEvent.click(screen.getByRole('button', { name: 'Add Key Mapping' }))
+    fireEvent.change(screen.getByPlaceholderText('api-key'), {
+      target: { value: 'api-key' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('BRAVE_API_KEY'), {
+      target: { value: 'BRAVE_API_KEY' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('sk-...'), {
+      target: { value: 'sk-test-abc' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create connector' }))
+
+    await waitFor(() => {
+      expect(api.deleteMcpSecret).toHaveBeenCalledWith('requested-credentials', {
+        uid: 'uid-requested-credentials',
+        resourceVersion: '17',
+      })
+    })
+    expect(api.createMcpServer).not.toHaveBeenCalled()
+  })
+
+  it('does not use a bodyless rollback when a repair response has incomplete identity', async () => {
+    ;(api.createMcpSecret as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      mcpSecretRollbackRepairError({
+        name: 'repaired-credentials',
+        namespace: 'mcp-server',
+        uid: 'uid-repaired-credentials',
+      })
+    )
+
+    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
+    await fillRequiredBasics()
+    enableEnvSecret('requested-credentials')
+    fireEvent.click(screen.getByRole('button', { name: 'Add Key Mapping' }))
+    fireEvent.change(screen.getByPlaceholderText('api-key'), {
+      target: { value: 'api-key' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('BRAVE_API_KEY'), {
+      target: { value: 'BRAVE_API_KEY' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('sk-...'), {
+      target: { value: 'sk-test-abc' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create connector' }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/mcp_secret_rollback_permit_unavailable/)).toBeInTheDocument()
+    })
+    expect(api.deleteMcpSecret).not.toHaveBeenCalled()
+    expect(api.createMcpServer).not.toHaveBeenCalled()
   })
 
   it('uses the legacy bodyless rollback when the create API omits identity fields', async () => {

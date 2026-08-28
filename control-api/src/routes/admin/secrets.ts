@@ -17,26 +17,39 @@ import {
   type SecretOwnership,
   parseSecretOwnership,
 } from '../../secretOwnership.js'
+import {
+  type McpSecretRollbackPermit,
+  type McpSecretRollbackPermitClaim,
+  type McpSecretRollbackPermitClaimBinding,
+  type McpSecretRollbackPermitLookup,
+  claimMcpSecretRollbackPermit,
+  finalizeMcpSecretRollbackPermitClaim,
+  issueMcpSecretRollbackPermit,
+  releaseMcpSecretRollbackPermitClaim,
+} from '../../services/mcpSecretRollbackPermitService.js'
 import { invalidSecretDataKeyReason } from '../../services/secretKeys.js'
 import { findSecretReferenceState } from '../../services/secretReferenceService.js'
 import { secretIdentityPreconditions } from '../../services/secretRepository.js'
 import { toPublicDeleteSecretSummary, toPublicSecretSummary } from '../../services/secretService.js'
 import { SecretPreconditions, SecretUpsertRequest } from '../../types.js'
-import {
-  MCP_SECRET_DELETE_PROOF_TTL_SECONDS,
-  createMcpSecretDeleteProof,
-  mcpSecretDeleteProofCookieName,
-  verifyMcpSecretDeleteProof,
-} from '../../utils/auth/mcpSecretDeleteProof.js'
-import {
-  clearHttpOnlySessionCookie,
-  readCookie,
-  setHttpOnlySessionCookie,
-} from '../../utils/auth/sessionCookies.js'
 import { listHostSecrets } from './hostSecrets.js'
 import { isLlmHostSecret } from './llmSecretIdentity.js'
 
 const logger = rootLogger
+
+export type McpSecretRollbackPermitStore = {
+  issue(input: McpSecretRollbackPermit): Promise<void>
+  claim(input: McpSecretRollbackPermitLookup): Promise<McpSecretRollbackPermitClaim | null>
+  release(input: McpSecretRollbackPermitClaimBinding): Promise<void>
+  finalize(input: McpSecretRollbackPermitClaimBinding): Promise<void>
+}
+
+const defaultMcpSecretRollbackPermitStore: McpSecretRollbackPermitStore = {
+  issue: issueMcpSecretRollbackPermit,
+  claim: claimMcpSecretRollbackPermit,
+  release: releaseMcpSecretRollbackPermitClaim,
+  finalize: finalizeMcpSecretRollbackPermitClaim,
+}
 
 const mcpSecretDeleteEdgeRateLimit = rateLimit({
   windowMs: 60_000,
@@ -285,7 +298,10 @@ export function validateLlmSecretSlots(body: unknown): string | null {
   return null
 }
 
-export function createAdminSecretsRouter(gateway: K8sGateway): Router {
+export function createAdminSecretsRouter(
+  gateway: K8sGateway,
+  rollbackPermits: McpSecretRollbackPermitStore = defaultMcpSecretRollbackPermitStore
+): Router {
   const router = Router()
 
   router.get(
@@ -588,21 +604,37 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
         return
       }
-      const sessionJti = (req as UiAuthedRequest).adminAuth?.jti
-      if (sessionJti) {
-        setHttpOnlySessionCookie(
-          req,
-          res,
-          mcpSecretDeleteProofCookieName(secretReq.name),
-          createMcpSecretDeleteProof({
+      const rollbackPermit: McpSecretRollbackPermit = {
+        sessionJti: (req as UiAuthedRequest).adminAuth?.jti ?? '',
+        name: secretReq.name,
+        namespace: targetNs,
+        uid: completeIdentity.uid,
+        resourceVersion: completeIdentity.resourceVersion,
+      }
+      try {
+        await rollbackPermits.issue(rollbackPermit)
+      } catch (err) {
+        logger.error(
+          {
+            err,
+            module: 'admin-secrets',
+            event: 'mcp-secret-create-rollback-permit-repair-required',
+            name: secretReq.name,
+            namespace: targetNs,
+          },
+          'MCP Secret create could not persist its rollback permit'
+        )
+        res.status(503).json({
+          error: 'mcp_secret_rollback_permit_unavailable',
+          outcome: 'repair_required',
+          created: {
             name: secretReq.name,
             namespace: targetNs,
             uid: completeIdentity.uid,
             resourceVersion: completeIdentity.resourceVersion,
-            sessionJti,
-          }),
-          MCP_SECRET_DELETE_PROOF_TTL_SECONDS
-        )
+          },
+        })
+        return
       }
       res.status(201).json({
         name: name.trim(),
@@ -816,26 +848,80 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
       const name = req.params.name.trim()
       const requestedPrecondition = requestSecretPreconditions(req.body)
       let deletePrecondition: SecretPreconditions | null = requestedPrecondition
-      let signedCreateProof: { proof: string; sessionJti: string } | null = null
+      let rollbackClaim: McpSecretRollbackPermitClaimBinding | null = null
+      const settleRollbackClaim = async (mode: 'release' | 'finalize'): Promise<void> => {
+        if (!rollbackClaim) return
+        const binding = rollbackClaim
+        rollbackClaim = null
+        try {
+          await rollbackPermits[mode](binding)
+        } catch (err) {
+          logger.warn(
+            {
+              err,
+              module: 'admin-secrets',
+              event: `mcp-secret-delete-rollback-claim-${mode}-failed`,
+              name,
+              namespace: config.mcpServersNamespace,
+            },
+            `MCP Secret rollback claim could not ${mode}`
+          )
+        }
+      }
       if (requestedPrecondition) {
         // Current clients send the identity returned by POST and retain the
         // established compare-and-delete contract.
       } else {
-        // Only the historical empty DELETE body can use the stateless rollback
-        // proof minted during this browser session's successful create. Any
-        // other body must use the normal complete identity contract.
+        // Only the historical empty DELETE body can use the short-lived
+        // server-side permit issued during this admin session's successful
+        // create. Any other body must use the complete identity contract.
         if (!isLegacyMcpSecretDeleteBody(req.body)) {
           res.status(428).json({ error: 'secret_identity_precondition_required' })
           return
         }
         const sessionJti = (req as UiAuthedRequest).adminAuth?.jti ?? ''
-        const proofCookieName = mcpSecretDeleteProofCookieName(name)
-        const proofCookie = readCookie(req, proofCookieName)
-        if (!sessionJti || !proofCookie) {
+        if (!sessionJti) {
           res.status(428).json({ error: 'secret_identity_precondition_required' })
           return
         }
-        signedCreateProof = { proof: proofCookie, sessionJti }
+        try {
+          const claimed = await rollbackPermits.claim({
+            sessionJti,
+            name,
+            namespace: config.mcpServersNamespace,
+          })
+          deletePrecondition = claimed
+            ? { uid: claimed.uid, resourceVersion: claimed.resourceVersion }
+            : null
+          if (claimed) {
+            rollbackClaim = {
+              sessionJti,
+              name,
+              namespace: config.mcpServersNamespace,
+              claimToken: claimed.claimToken,
+            }
+          }
+        } catch (err) {
+          logger.error(
+            {
+              err,
+              module: 'admin-secrets',
+              event: 'mcp-secret-delete-rollback-permit-unavailable',
+              name,
+              namespace: config.mcpServersNamespace,
+            },
+            'MCP Secret delete could not read its rollback permit'
+          )
+          res.status(503).json({
+            error: 'mcp_secret_rollback_permit_unavailable',
+            outcome: 'repair_required',
+          })
+          return
+        }
+        if (!deletePrecondition?.uid || !deletePrecondition.resourceVersion) {
+          res.status(428).json({ error: 'secret_identity_precondition_required' })
+          return
+        }
       }
       let existing: {
         metadata?: { labels?: Record<string, string>; uid?: string; resourceVersion?: string }
@@ -844,37 +930,23 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         existing = (await gateway.getSecret(name, config.mcpServersNamespace)) as typeof existing
       } catch (err) {
         if (extractHttpStatus(err) === 404) {
+          await settleRollbackClaim('finalize')
           res.status(404).json({ error: `Secret "${name}" not found` })
           return
         }
+        await settleRollbackClaim('release')
         throw err
       }
       if (!existing) {
+        await settleRollbackClaim('finalize')
         res.status(404).json({ error: `Secret "${name}" not found` })
         return
       }
       const currentPrecondition = secretIdentityPreconditions(existing)
       if (!currentPrecondition) {
+        await settleRollbackClaim('release')
         res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
         return
-      }
-      if (signedCreateProof) {
-        const proofVerification = verifyMcpSecretDeleteProof(signedCreateProof.proof, {
-          name,
-          namespace: config.mcpServersNamespace,
-          uid: currentPrecondition.uid!,
-          resourceVersion: currentPrecondition.resourceVersion!,
-          sessionJti: signedCreateProof.sessionJti,
-        })
-        if (proofVerification === 'identity-mismatch') {
-          res.status(409).json({ error: 'secret_identity_changed', outcome: 'repair_required' })
-          return
-        }
-        if (proofVerification !== 'valid') {
-          res.status(428).json({ error: 'secret_identity_precondition_required' })
-          return
-        }
-        deletePrecondition = currentPrecondition
       }
       if (!deletePrecondition) {
         res.status(428).json({ error: 'secret_identity_precondition_required' })
@@ -884,10 +956,12 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         currentPrecondition.uid !== deletePrecondition.uid ||
         currentPrecondition.resourceVersion !== deletePrecondition.resourceVersion
       ) {
+        await settleRollbackClaim('finalize')
         res.status(409).json({ error: 'secret_identity_changed', outcome: 'repair_required' })
         return
       }
       if (existing.metadata?.labels?.[RECIPE_SECRET_LABEL_KEY] === RECIPE_SECRET_LABEL_VALUE) {
+        await settleRollbackClaim('release')
         res.status(409).json({
           error: `Secret "${name}" is owned by a WorkflowRecipe; delete it through /admin/recipe-secrets`,
         })
@@ -899,25 +973,27 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         config.mcpServersNamespace
       )
       if (referenceState === 'referenced') {
+        await settleRollbackClaim('release')
         res.status(409).json({ error: 'mcp_secret_in_use', outcome: 'repair_required' })
         return
       }
       if (referenceState === 'unknown') {
+        await settleRollbackClaim('release')
         res
           .status(503)
           .json({ error: 'mcp_secret_reference_check_unavailable', outcome: 'repair_required' })
         return
       }
-      if (signedCreateProof) {
+      if (rollbackClaim) {
         logger.warn(
           {
             module: 'admin-secrets',
-            event: 'mcp-secret-delete-legacy-signed-create-proof',
+            event: 'mcp-secret-delete-legacy-server-side-permit',
             name,
             namespace: config.mcpServersNamespace,
-            preconditionSource: 'signed-create-proof',
+            preconditionSource: 'server-side-permit',
           },
-          'MCP Secret delete used signed create proof'
+          'MCP Secret delete used a server-side rollback permit'
         )
       }
       try {
@@ -926,13 +1002,15 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
           config.mcpServersNamespace,
           deletePrecondition
         )
-        clearHttpOnlySessionCookie(req, res, mcpSecretDeleteProofCookieName(name))
+        await settleRollbackClaim('finalize')
         res.status(200).json(toPublicDeleteSecretSummary(deleted))
       } catch (err) {
         if (extractHttpStatus(err) === 409) {
+          await settleRollbackClaim('finalize')
           res.status(409).json({ error: 'secret_identity_changed', outcome: 'repair_required' })
           return
         }
+        await settleRollbackClaim('release')
         throw err
       }
     })

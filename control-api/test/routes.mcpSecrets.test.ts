@@ -107,16 +107,90 @@ function k8sError(statusCode: number, message: string): Error & { statusCode: nu
   return Object.assign(new Error(message), { statusCode })
 }
 
-function makeApp(gateway: ReturnType<typeof createGateway>) {
+type RollbackPermit = {
+  sessionJti: string
+  name: string
+  namespace: string
+  uid: string
+  resourceVersion: string
+}
+
+function rollbackPermitKey(input: Pick<RollbackPermit, 'sessionJti' | 'name' | 'namespace'>) {
+  return `${input.sessionJti}:${input.namespace}:${input.name}`
+}
+
+function createRollbackPermitStore() {
+  const permits = new Map<
+    string,
+    {
+      uid: string
+      resourceVersion: string
+      expiresAt: number
+      claimToken?: string
+      claimExpiresAt?: number
+    }
+  >()
+  let claimCounter = 0
+  return {
+    issue: vi.fn(async (input: RollbackPermit) => {
+      permits.set(rollbackPermitKey(input), {
+        uid: input.uid,
+        resourceVersion: input.resourceVersion,
+        expiresAt: Date.now() + 120_000,
+      })
+    }),
+    claim: vi.fn(async (input: Pick<RollbackPermit, 'sessionJti' | 'name' | 'namespace'>) => {
+      const permit = permits.get(rollbackPermitKey(input))
+      if (!permit || permit.expiresAt <= Date.now()) return null
+      if (permit.claimToken && (permit.claimExpiresAt ?? 0) > Date.now()) return null
+      claimCounter += 1
+      permit.claimToken = `00000000-0000-4000-8000-${String(claimCounter).padStart(12, '0')}`
+      permit.claimExpiresAt = Math.min(permit.expiresAt, Date.now() + 15_000)
+      return {
+        uid: permit.uid,
+        resourceVersion: permit.resourceVersion,
+        claimToken: permit.claimToken,
+      }
+    }),
+    release: vi.fn(
+      async (
+        input: Pick<RollbackPermit, 'sessionJti' | 'name' | 'namespace'> & {
+          claimToken: string
+        }
+      ) => {
+        const permit = permits.get(rollbackPermitKey(input))
+        if (permit?.claimToken !== input.claimToken) return
+        permit.claimToken = undefined
+        permit.claimExpiresAt = undefined
+      }
+    ),
+    finalize: vi.fn(
+      async (
+        input: Pick<RollbackPermit, 'sessionJti' | 'name' | 'namespace'> & {
+          claimToken: string
+        }
+      ) => {
+        const key = rollbackPermitKey(input)
+        if (permits.get(key)?.claimToken === input.claimToken) permits.delete(key)
+      }
+    ),
+  }
+}
+
+function makeApp(
+  gateway: ReturnType<typeof createGateway>,
+  rollbackPermits = createRollbackPermitStore(),
+  sessionJti = TEST_ADMIN_SESSION_JTI
+) {
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => {
     ;(req as express.Request & { adminAuth?: { jti: string } }).adminAuth = {
-      jti: TEST_ADMIN_SESSION_JTI,
+      jti: sessionJti,
     }
     next()
   })
-  app.use(createAdminSecretsRouter(gateway as never))
+  app.use(createAdminSecretsRouter(gateway as never, rollbackPermits as never))
   // Error handler so gateway errors return 500 instead of crashing
   app.use(
     (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -136,13 +210,6 @@ function createAuthenticatedAgent(app: express.Express) {
     '/'
   )
   return agent
-}
-
-function mcpDeleteProofCookieName(value: unknown): string {
-  const cookies = Array.isArray(value) ? value : typeof value === 'string' ? [value] : []
-  const proofCookie = cookies.find(cookie => cookie.startsWith('mcp_secret_delete_proof_'))
-  if (!proofCookie) throw new Error('Expected MCP Secret delete proof cookie')
-  return proofCookie.slice(0, proofCookie.indexOf('='))
 }
 
 describe('POST /admin/mcp-secrets', () => {
@@ -172,6 +239,66 @@ describe('POST /admin/mcp-secrets', () => {
     expect(arg.namespace).toBe('mcp-server')
     expect(arg.type).toBe('Opaque')
     expect(arg.stringData).toEqual({ DB_PASSWORD: 's3cret' })
+  })
+
+  it('keeps legacy rollback identity server-side without emitting a proof cookie', async () => {
+    const gateway = createGateway()
+    const rollbackPermits = createRollbackPermitStore()
+    const app = makeApp(gateway, rollbackPermits)
+    const agent = createAuthenticatedAgent(app)
+
+    const created = await agent
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+
+    expect(rollbackPermits.issue).toHaveBeenCalledWith({
+      sessionJti: TEST_ADMIN_SESSION_JTI,
+      name: 'linear-credentials',
+      namespace: 'mcp-server',
+      uid: 'uid-linear-credentials',
+      resourceVersion: '1',
+    })
+    expect(created.headers['set-cookie'] ?? []).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/^mcp_secret_delete_proof_/)])
+    )
+
+    await agent.delete('/admin/mcp-secrets/linear-credentials').expect(200)
+
+    expect(rollbackPermits.claim).toHaveBeenCalledWith({
+      sessionJti: TEST_ADMIN_SESSION_JTI,
+      name: 'linear-credentials',
+      namespace: 'mcp-server',
+    })
+    expect(rollbackPermits.finalize).toHaveBeenCalledWith({
+      sessionJti: TEST_ADMIN_SESSION_JTI,
+      name: 'linear-credentials',
+      namespace: 'mcp-server',
+      claimToken: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    })
+  })
+
+  it('fails closed without deleting the created resource when the permit cannot be persisted', async () => {
+    const gateway = createGateway()
+    const rollbackPermits = createRollbackPermitStore()
+    rollbackPermits.issue.mockRejectedValueOnce(new Error('postgres unavailable'))
+
+    const res = await request(makeApp(gateway, rollbackPermits))
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(503)
+
+    expect(res.body).toEqual({
+      error: 'mcp_secret_rollback_permit_unavailable',
+      outcome: 'repair_required',
+      created: {
+        name: 'linear-credentials',
+        namespace: 'mcp-server',
+        uid: 'uid-linear-credentials',
+        resourceVersion: '1',
+      },
+    })
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
   })
 
   it('trims whitespace from name', async () => {
@@ -901,16 +1028,15 @@ describe('DELETE /admin/mcp-secrets/:name (identity and dependency guard)', () =
     expect(gateway.deleteSecret).not.toHaveBeenCalled()
   })
 
-  it('supports an old UI POST plus bodyless DELETE with a signed create proof', async () => {
+  it('supports an old UI POST plus bodyless DELETE with a server-side permit', async () => {
     const gateway = createGateway()
     const app = makeApp(gateway)
     const agent = createAuthenticatedAgent(app)
 
-    const created = await agent
+    await agent
       .post('/admin/mcp-secrets')
       .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
       .expect(201)
-    const proofCookieName = mcpDeleteProofCookieName(created.headers['set-cookie'])
     const warnSpy = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
 
     try {
@@ -930,23 +1056,23 @@ describe('DELETE /admin/mcp-secrets/:name (identity and dependency guard)', () =
       expect(warnSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           module: 'admin-secrets',
-          event: 'mcp-secret-delete-legacy-signed-create-proof',
+          event: 'mcp-secret-delete-legacy-server-side-permit',
           name: 'linear-credentials',
           namespace: 'mcp-server',
-          preconditionSource: 'signed-create-proof',
+          preconditionSource: 'server-side-permit',
         }),
-        'MCP Secret delete used signed create proof'
+        'MCP Secret delete used a server-side rollback permit'
       )
       expect(JSON.stringify(warnSpy.mock.calls)).not.toContain(TEST_CONTROL_UI_SESSION)
-      expect(res.headers['set-cookie']).toEqual(
-        expect.arrayContaining([expect.stringMatching(new RegExp(`^${proofCookieName}=`))])
+      expect(res.headers['set-cookie'] ?? []).not.toEqual(
+        expect.arrayContaining([expect.stringMatching(/^mcp_secret_delete_proof_/)])
       )
     } finally {
       warnSpy.mockRestore()
     }
   })
 
-  it('rejects a bodyless old UI DELETE with no signed create proof', async () => {
+  it('rejects a bodyless old UI DELETE with no server-side rollback permit', async () => {
     const gateway = createGateway()
     const app = makeApp(gateway)
     const agent = createAuthenticatedAgent(app)
@@ -955,6 +1081,41 @@ describe('DELETE /admin/mcp-secrets/:name (identity and dependency guard)', () =
 
     expect(gateway.getSecret).not.toHaveBeenCalled()
     expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when the server-side rollback permit lookup is unavailable', async () => {
+    const gateway = createGateway()
+    const rollbackPermits = createRollbackPermitStore()
+    rollbackPermits.claim.mockRejectedValueOnce(new Error('postgres unavailable'))
+    const agent = createAuthenticatedAgent(makeApp(gateway, rollbackPermits))
+
+    const res = await agent.delete('/admin/mcp-secrets/linear-credentials').expect(503)
+
+    expect(res.body).toEqual({
+      error: 'mcp_secret_rollback_permit_unavailable',
+      outcome: 'repair_required',
+    })
+    expect(gateway.getSecret).not.toHaveBeenCalled()
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('releases a claim after a transient reference-check failure so the old UI can retry', async () => {
+    const gateway = createGateway()
+    const rollbackPermits = createRollbackPermitStore()
+    const agent = createAuthenticatedAgent(makeApp(gateway, rollbackPermits))
+
+    await agent
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+    gateway.listResource.mockRejectedValueOnce(new Error('reference graph unavailable'))
+
+    await agent.delete('/admin/mcp-secrets/linear-credentials').expect(503)
+    expect(rollbackPermits.release).toHaveBeenCalledOnce()
+
+    await agent.delete('/admin/mcp-secrets/linear-credentials').expect(200)
+    expect(rollbackPermits.claim).toHaveBeenCalledTimes(2)
+    expect(rollbackPermits.finalize).toHaveBeenCalledOnce()
   })
 
   it('rejects a stale supplied identity before delete', async () => {
@@ -980,7 +1141,7 @@ describe('DELETE /admin/mcp-secrets/:name (identity and dependency guard)', () =
     expect(gateway.deleteSecret).not.toHaveBeenCalled()
   })
 
-  it('legacy signed proof refuses to delete a Secret referenced by a live connector', async () => {
+  it('server-side rollback permit refuses to delete a Secret referenced by a live connector', async () => {
     const gateway = createGateway()
     gateway.listResource.mockResolvedValueOnce([
       {
@@ -1001,7 +1162,7 @@ describe('DELETE /admin/mcp-secrets/:name (identity and dependency guard)', () =
     expect(gateway.deleteSecret).not.toHaveBeenCalled()
   })
 
-  it('legacy signed proof refuses to delete a WorkflowRecipe-owned Secret', async () => {
+  it('server-side rollback permit refuses to delete a WorkflowRecipe-owned Secret', async () => {
     const gateway = createGateway()
     gateway.getSecret.mockResolvedValueOnce({
       metadata: {
@@ -1095,25 +1256,26 @@ describe('DELETE /admin/mcp-secrets/:name (identity and dependency guard)', () =
     expect(gateway.deleteSecret).not.toHaveBeenCalled()
   })
 
-  it('rejects a tampered signed create proof', async () => {
+  it('rejects a bodyless rollback from a different admin session', async () => {
     const gateway = createGateway()
-    const app = makeApp(gateway)
-    const agent = createAuthenticatedAgent(app)
+    const rollbackPermits = createRollbackPermitStore()
+    const agent = createAuthenticatedAgent(makeApp(gateway, rollbackPermits))
 
-    const created = await agent
+    await agent
       .post('/admin/mcp-secrets')
       .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
       .expect(201)
-    const proofCookieName = mcpDeleteProofCookieName(created.headers['set-cookie'])
-    agent.jar.setCookie(`${proofCookieName}=tampered; Path=/; HttpOnly`, '127.0.0.1', '/')
+    const otherSessionAgent = createAuthenticatedAgent(
+      makeApp(gateway, rollbackPermits, 'other-admin-session-jti')
+    )
 
-    await agent.delete('/admin/mcp-secrets/linear-credentials').expect(428)
+    await otherSessionAgent.delete('/admin/mcp-secrets/linear-credentials').expect(428)
 
-    expect(gateway.getSecret).toHaveBeenCalledOnce()
+    expect(gateway.getSecret).not.toHaveBeenCalled()
     expect(gateway.deleteSecret).not.toHaveBeenCalled()
   })
 
-  it('rejects an expired signed create proof', async () => {
+  it('rejects an expired server-side rollback permit', async () => {
     const gateway = createGateway()
     const app = makeApp(gateway)
     const agent = createAuthenticatedAgent(app)
@@ -1133,7 +1295,7 @@ describe('DELETE /admin/mcp-secrets/:name (identity and dependency guard)', () =
     expect(gateway.deleteSecret).not.toHaveBeenCalled()
   })
 
-  it('does not delete a replacement that wins before the legacy proof read', async () => {
+  it('does not delete a replacement that wins before server-side permit consumption', async () => {
     const gateway = new MockGateway('mcp-server')
     const name = 'linear-credentials'
     const app = makeApp(gateway as never)
@@ -1161,7 +1323,7 @@ describe('DELETE /admin/mcp-secrets/:name (identity and dependency guard)', () =
     })
   })
 
-  it('does not delete a replacement that wins after the legacy proof read', async () => {
+  it('does not delete a replacement that wins after server-side permit consumption', async () => {
     const gateway = new MockGateway('mcp-server')
     const name = 'linear-credentials'
     const app = makeApp(gateway as never)

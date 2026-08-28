@@ -6,6 +6,7 @@ import {
   __resetTokenCacheForTests,
   applyPublishScope,
   createOrgGrant,
+  downloadBundle,
   getCategories,
   invalidateRegistryIdentityCaches,
   mintToken,
@@ -147,6 +148,16 @@ describe('registryClient — mintToken cache behavior', () => {
     expect(err.message).not.toContain('bad creds')
   })
 
+  it('cancels a rejected token response body before throwing', async () => {
+    const response = new Response('bad creds', { status: 401 })
+    const cancel = vi.spyOn(response.body!, 'cancel')
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
+
+    await mintToken(ENV_OVERRIDE).catch(() => undefined)
+
+    expect(cancel).toHaveBeenCalledOnce()
+  })
+
   it('keeps the "credential rejected" label on 403 (forbidden creds)', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('forbidden', { status: 403 }))
     vi.stubGlobal('fetch', fetchMock)
@@ -168,6 +179,25 @@ describe('registryClient — mintToken cache behavior', () => {
       // It must NOT use the credential-rejected wording.
       await expect(mintToken(ENV_OVERRIDE)).rejects.not.toThrow(/credential rejected/)
     }
+  })
+})
+
+describe('registryClient — bundle response lifecycle', () => {
+  it('cancels a non-OK bundle response body before throwing', async () => {
+    const response = new Response('bundle unavailable', { status: 502 })
+    const cancel = vi.spyOn(response.body!, 'cancel')
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(fakeTokenResponse('bundle-token'))
+        .mockResolvedValueOnce(response)
+    )
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    await downloadBundle('@clerum/example', '1.0.0').catch(() => undefined)
+
+    expect(cancel).toHaveBeenCalledOnce()
   })
 })
 

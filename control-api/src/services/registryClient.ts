@@ -162,6 +162,7 @@ async function mintTokenForGeneration(
     signal: AbortSignal.timeout(READ_TIMEOUT_MS),
   })
   if (!res.ok) {
+    await discardResponseBody(res)
     // Distinguish a rejected credential (rotate the secret) from an origin /
     // tunnel outage (page on-call about reachability, do NOT rotate). A 5xx at
     // the token endpoint is the registry origin or its tunnel being down, not a

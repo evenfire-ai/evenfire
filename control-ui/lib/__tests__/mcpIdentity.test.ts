@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createMcpSecret, deleteMcpSecret, formatApiError } from '../api'
+import {
+  createMcpSecret,
+  deleteMcpSecret,
+  formatApiError,
+  getMcpSecretRollbackRepairIdentity,
+} from '../api'
 
 function jsonResponse(body: unknown, status = 200, statusText = 'OK'): Response {
   return {
@@ -95,6 +100,117 @@ describe('MCP identity compatibility', () => {
     await expect(createMcpSecret('partial-object', { fixture: 'fixture' })).rejects.toThrow(
       /incomplete Secret identity/
     )
+  })
+})
+
+describe('MCP Secret rollback repair identity', () => {
+  it('extracts a CAS identity from the exact failed POST repair response', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          error: 'mcp_secret_rollback_permit_unavailable',
+          outcome: 'repair_required',
+          created: {
+            name: 'repaired-credentials',
+            namespace: 'mcp-server',
+            uid: 'uid-repaired-credentials',
+            resourceVersion: '17',
+          },
+        },
+        503,
+        'Service Unavailable'
+      )
+    )
+
+    const failure = await createMcpSecret('repaired-credentials', { fixture: 'fixture' }).catch(
+      error => error
+    )
+
+    expect(getMcpSecretRollbackRepairIdentity(failure, 'repaired-credentials')).toEqual({
+      name: 'repaired-credentials',
+      namespace: 'mcp-server',
+      uid: 'uid-repaired-credentials',
+      resourceVersion: '17',
+    })
+  })
+
+  it.each([
+    [
+      'has a different error code',
+      503,
+      {
+        error: 'mcp_secret_rollback_permit_expired',
+        outcome: 'repair_required',
+        created: {
+          name: 'repaired-credentials',
+          namespace: 'mcp-server',
+          uid: 'uid-repaired-credentials',
+          resourceVersion: '17',
+        },
+      },
+    ],
+    [
+      'is not a 503 response',
+      409,
+      {
+        error: 'mcp_secret_rollback_permit_unavailable',
+        outcome: 'repair_required',
+        created: {
+          name: 'repaired-credentials',
+          namespace: 'mcp-server',
+          uid: 'uid-repaired-credentials',
+          resourceVersion: '17',
+        },
+      },
+    ],
+    [
+      'does not require repair',
+      503,
+      {
+        error: 'mcp_secret_rollback_permit_unavailable',
+        outcome: 'retry_later',
+        created: {
+          name: 'repaired-credentials',
+          namespace: 'mcp-server',
+          uid: 'uid-repaired-credentials',
+          resourceVersion: '17',
+        },
+      },
+    ],
+    [
+      'omits a CAS field from the created Secret',
+      503,
+      {
+        error: 'mcp_secret_rollback_permit_unavailable',
+        outcome: 'repair_required',
+        created: {
+          name: 'repaired-credentials',
+          namespace: 'mcp-server',
+          uid: 'uid-repaired-credentials',
+        },
+      },
+    ],
+    [
+      'names a different Secret',
+      503,
+      {
+        error: 'mcp_secret_rollback_permit_unavailable',
+        outcome: 'repair_required',
+        created: {
+          name: 'other-credentials',
+          namespace: 'mcp-server',
+          uid: 'uid-other-credentials',
+          resourceVersion: '17',
+        },
+      },
+    ],
+  ])('does not extract an identity when the response %s', (_, status, body) => {
+    const error = formatApiError(
+      { status, statusText: status === 503 ? 'Service Unavailable' : 'Conflict' } as Response,
+      JSON.stringify(body)
+    )
+
+    expect(getMcpSecretRollbackRepairIdentity(error, 'repaired-credentials')).toBeNull()
   })
 })
 

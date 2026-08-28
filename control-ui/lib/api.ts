@@ -1499,6 +1499,11 @@ export type McpSecretCreateResult =
       resourceVersion?: undefined
     }
 
+export type McpSecretRollbackRepairIdentity = {
+  name: string
+  namespace: string
+} & SecretIdentity
+
 export async function createMcpSecret(
   name: string,
   data: Record<string, string>
@@ -1658,6 +1663,54 @@ function apiErrorBody(err: unknown): Record<string, unknown> | null {
   if (!(err instanceof Error)) return null
   const body = (err as Error & { body?: unknown }).body
   return body && typeof body === 'object' ? (body as Record<string, unknown>) : null
+}
+
+function readMcpSecretRollbackRepairIdentity(raw: unknown): McpSecretRollbackRepairIdentity | null {
+  if (!raw || typeof raw !== 'object') return null
+  const created = raw as Record<string, unknown>
+  if (
+    typeof created.name !== 'string' ||
+    !created.name.trim() ||
+    typeof created.namespace !== 'string' ||
+    !created.namespace.trim() ||
+    typeof created.uid !== 'string' ||
+    !created.uid.trim() ||
+    typeof created.resourceVersion !== 'string' ||
+    !created.resourceVersion.trim()
+  ) {
+    return null
+  }
+  return {
+    name: created.name,
+    namespace: created.namespace,
+    uid: created.uid,
+    resourceVersion: created.resourceVersion,
+  }
+}
+
+/**
+ * Returns the CAS identity only from the exact MCP Secret repair response.
+ * A rejected create can still have persisted the Secret when the server could
+ * not record its rollback permit; partial or unrelated errors must not unlock
+ * the legacy bodyless-delete compatibility path.
+ */
+export function getMcpSecretRollbackRepairIdentity(
+  err: unknown,
+  expectedName: string
+): McpSecretRollbackRepairIdentity | null {
+  if (!(err instanceof Error) || (err as Error & { status?: unknown }).status !== 503) {
+    return null
+  }
+  const body = apiErrorBody(err)
+  if (
+    !body ||
+    body.error !== 'mcp_secret_rollback_permit_unavailable' ||
+    body.outcome !== 'repair_required'
+  ) {
+    return null
+  }
+  const identity = readMcpSecretRollbackRepairIdentity(body.created)
+  return identity?.name === expectedName ? identity : null
 }
 
 function coerceUnpricedModels(raw: unknown): UnpricedModel[] {

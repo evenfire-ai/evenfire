@@ -17,6 +17,7 @@ import {
   getContextUsers,
   getContexts,
   getHosts,
+  getMcpSecretRollbackRepairIdentity,
   listOrgImages,
   updateContext,
 } from '@/lib/api'
@@ -581,13 +582,27 @@ export function CreateMcpServerForm({
         onCreated()
       }, 600)
     } catch (submitError) {
-      // Rollback only a Secret this submission created. Legacy create APIs did
-      // not return an identity, so this is the one bounded bodyless-delete
-      // compatibility path; existing Secret deletes remain identity-bound.
+      // Roll back only a Secret this submission created. A successful legacy
+      // create may use the bounded bodyless-delete compatibility path. A
+      // rejected create is eligible only when its exact repair response gives
+      // us a complete CAS identity; incomplete repair data never falls back to
+      // a bodyless delete.
       let cleanupError: unknown
-      if (createdSecretName) {
+      let cleanupSecretName = createdSecretName
+      let cleanupSecretIdentity = createdSecretIdentity
+      if (!cleanupSecretName) {
+        const repairIdentity = getMcpSecretRollbackRepairIdentity(submitError, envSecretName.trim())
+        if (repairIdentity) {
+          cleanupSecretName = repairIdentity.name
+          cleanupSecretIdentity = {
+            uid: repairIdentity.uid,
+            resourceVersion: repairIdentity.resourceVersion,
+          }
+        }
+      }
+      if (cleanupSecretName) {
         try {
-          await deleteMcpSecret(createdSecretName, createdSecretIdentity)
+          await deleteMcpSecret(cleanupSecretName, cleanupSecretIdentity)
         } catch (error) {
           cleanupError = error
         }
