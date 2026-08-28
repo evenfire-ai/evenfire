@@ -6,6 +6,10 @@ import { createAdminPluginWorkloadSdkRouter } from '../src/routes/admin/pluginWo
 import { isCodexAssignmentAllowed } from '../src/services/codexSubscriptionCatalog.js'
 import * as sdkDb from '../src/services/pluginWorkloadSdkDb.js'
 import { checkAndIncrement } from '../src/services/rateLimiterService.js'
+import {
+  RecipeCodexGrantIdentityError,
+  publishRecipeGrantIdentity,
+} from '../src/services/recipeCodexGrantIdentity.js'
 
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: vi.fn(),
@@ -52,9 +56,20 @@ vi.mock('../src/services/codexSubscriptionCatalog.js', () => ({
   isCodexAssignmentAllowed: vi.fn(),
 }))
 
+vi.mock('../src/services/recipeCodexGrantIdentity.js', async () => {
+  const actual = await vi.importActual<
+    typeof import('../src/services/recipeCodexGrantIdentity.js')
+  >('../src/services/recipeCodexGrantIdentity.js')
+  return {
+    ...actual,
+    publishRecipeGrantIdentity: vi.fn(),
+  }
+})
+
 const DEFAULT_ADMIN_SUB = '11111111-1111-4111-8111-111111111111'
 
-const patchResourceAnnotations = vi.fn().mockResolvedValue({})
+const getResource = vi.fn().mockResolvedValue({ spec: { pluginWorkloadSdk: {} } })
+const updateResource = vi.fn().mockResolvedValue({})
 
 function buildApp(sub: string | null = DEFAULT_ADMIN_SUB) {
   const app = express()
@@ -63,7 +78,7 @@ function buildApp(sub: string | null = DEFAULT_ADMIN_SUB) {
     ;(req as unknown as { adminAuth: { sub?: string } }).adminAuth = sub === null ? {} : { sub }
     next()
   })
-  app.use(createAdminPluginWorkloadSdkRouter({ gateway: { patchResourceAnnotations } }))
+  app.use(createAdminPluginWorkloadSdkRouter({ gateway: { getResource, updateResource } }))
   return app
 }
 
@@ -110,8 +125,15 @@ beforeEach(() => {
   vi.mocked(pool.query).mockResolvedValue({ rows: [{ model: 'glm-4.7' }], rowCount: 1 } as never)
   vi.mocked(isCodexAssignmentAllowed).mockReset()
   vi.mocked(isCodexAssignmentAllowed).mockResolvedValue(false)
-  patchResourceAnnotations.mockReset()
-  patchResourceAnnotations.mockResolvedValue({})
+  getResource.mockReset()
+  getResource.mockResolvedValue({ spec: { pluginWorkloadSdk: {} } })
+  updateResource.mockReset()
+  updateResource.mockResolvedValue({})
+  vi.mocked(publishRecipeGrantIdentity).mockReset()
+  vi.mocked(publishRecipeGrantIdentity).mockResolvedValue({
+    published: 'team-plus',
+    noop: false,
+  })
 })
 
 describe('routes/admin/pluginWorkloadSdk — grants', () => {
@@ -605,23 +627,58 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         '11111111-1111-4111-8111-111111111111',
         expect.anything() // carrier transaction client (R1-H3 fase 2)
       )
-      expect(patchResourceAnnotations).toHaveBeenCalledWith(
-        'workflowrecipes',
-        'sdk-recipe',
-        { 'clerum.io/codex-connection-ref': 'team-plus' },
-        'sandbox-recipes'
+      expect(publishRecipeGrantIdentity).toHaveBeenCalledWith({
+        gateway: { getResource, updateResource },
+        namespace: 'sandbox-recipes',
+        name: 'sdk-recipe',
+        next: 'team-plus',
+      })
+      expect(publishRecipeGrantIdentity.mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(sdkDb.upsertGrant).mock.invocationCallOrder[0]!
       )
     })
 
-    it('returns 503 when the recipe annotation cannot be stamped after a Codex upsert', async () => {
-      vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g-codex' } as never)
+    it('returns 409 when publish conflicts and does not persist the grant echo', async () => {
       vi.mocked(isCodexAssignmentAllowed).mockResolvedValue(true)
-      patchResourceAnnotations.mockRejectedValueOnce(new Error('apiserver down'))
+      vi.mocked(publishRecipeGrantIdentity).mockRejectedValueOnce(
+        new RecipeCodexGrantIdentityError(
+          409,
+          'conflict',
+          'WorkflowRecipe was modified while publishing the Codex grant'
+        )
+      )
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(codexGrantBody)
+      expect(res.status).toBe(409)
+      expect(res.body.error).toBe('conflict')
+      expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+    })
+
+    it('returns 503 when publish fails before the grant echo is persisted', async () => {
+      vi.mocked(isCodexAssignmentAllowed).mockResolvedValue(true)
+      vi.mocked(publishRecipeGrantIdentity).mockRejectedValueOnce(
+        new RecipeCodexGrantIdentityError(503, 'recipe_annotation_publish_failed', 'apiserver down')
+      )
       const res = await request(buildApp())
         .post('/admin/plugin-workload-sdk/grants')
         .send(codexGrantBody)
       expect(res.status).toBe(503)
-      expect(res.body.error).toBe('recipe_annotation_stamp_failed')
+      expect(res.body.error).toBe('recipe_annotation_publish_failed')
+      expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+    })
+
+    it('does not unassign when persist fails after a successful publish', async () => {
+      vi.mocked(isCodexAssignmentAllowed).mockResolvedValue(true)
+      vi.mocked(sdkDb.upsertGrant).mockRejectedValueOnce(new Error('db down'))
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(codexGrantBody)
+      expect(res.status).toBeGreaterThanOrEqual(500)
+      expect(publishRecipeGrantIdentity).toHaveBeenCalledTimes(1)
+      expect(publishRecipeGrantIdentity).toHaveBeenCalledWith(
+        expect.objectContaining({ next: 'team-plus' })
+      )
     })
 
     it('rejects two Codex targets that name different grants', async () => {
@@ -669,12 +726,7 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         .send({ ...codexGrantBody, promptTargets: [targetWithoutConnection] })
       expect(res.status).toBe(200)
       expect(isCodexAssignmentAllowed).not.toHaveBeenCalled()
-      expect(patchResourceAnnotations).toHaveBeenCalledWith(
-        'workflowrecipes',
-        'sdk-recipe',
-        { 'clerum.io/codex-connection-ref': '' },
-        'sandbox-recipes'
-      )
+      expect(publishRecipeGrantIdentity).not.toHaveBeenCalled()
       expect(sdkDb.upsertGrant).toHaveBeenCalled()
     })
 
@@ -688,12 +740,7 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         })
       expect(res.status).toBe(200)
       expect(isCodexAssignmentAllowed).not.toHaveBeenCalled()
-      expect(patchResourceAnnotations).toHaveBeenCalledWith(
-        'workflowrecipes',
-        'sdk-recipe',
-        { 'clerum.io/codex-connection-ref': '' },
-        'sandbox-recipes'
-      )
+      expect(publishRecipeGrantIdentity).not.toHaveBeenCalled()
       expect(sdkDb.upsertGrant).toHaveBeenCalled()
     })
 
@@ -730,6 +777,7 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         .send(validGrantBody)
       expect(res.status).toBe(200)
       expect(isCodexAssignmentAllowed).not.toHaveBeenCalled()
+      expect(publishRecipeGrantIdentity).not.toHaveBeenCalled()
       expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
         expect.objectContaining({
           promptTargets: [
@@ -1020,12 +1068,24 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
       'sdk-recipe',
       '11111111-1111-4111-8111-111111111111'
     )
-    expect(patchResourceAnnotations).toHaveBeenCalledWith(
-      'workflowrecipes',
-      'sdk-recipe',
-      { 'clerum.io/codex-connection-ref': '' },
-      'sandbox-recipes'
-    )
+    expect(publishRecipeGrantIdentity).toHaveBeenCalledWith({
+      gateway: { getResource, updateResource },
+      namespace: 'sandbox-recipes',
+      name: 'sdk-recipe',
+      next: 'unassigned',
+    })
+  })
+
+  it('does not unassign a Codex-agent recipe when the last SDK Codex grant is deleted', async () => {
+    vi.mocked(sdkDb.deleteGrant).mockResolvedValue(true)
+    getResource.mockResolvedValue({
+      spec: { agent: { provider: 'codex-subscription', model: 'gpt-5.3-codex' } },
+    })
+    const res = await request(buildApp())
+      .delete('/admin/plugin-workload-sdk/grants/g1')
+      .query({ recipeNamespace: 'sandbox-recipes', recipeName: 'sdk-recipe' })
+    expect(res.status).toBe(200)
+    expect(publishRecipeGrantIdentity).not.toHaveBeenCalled()
   })
 })
 

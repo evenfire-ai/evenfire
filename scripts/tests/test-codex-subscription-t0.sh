@@ -158,6 +158,9 @@ run_group "control-api" "control-api" \
   "test/routes.admin.codexSubscription.hostWrite.test.ts" \
   "test/routes.auth.codexSubscriptionCallback.test.ts" \
   "test/routes.mcp-host.llmProviderAttempts.test.ts" \
+  "test/routes.adminRecipes.test.ts" \
+  "test/routes.adminPluginWorkloadSdk.test.ts" \
+  "test/services.recipeCodexGrantIdentity.test.ts" \
   "test/hostSpecValidation.codexSubscription.test.ts" \
   "test/llmProviders.test.ts" \
   "test/services.codexSubscriptionConnection.test.ts" \

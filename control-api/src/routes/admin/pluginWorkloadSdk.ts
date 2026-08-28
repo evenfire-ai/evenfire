@@ -17,7 +17,6 @@ import { createPluginWorkloadSdkAdminRateLimit } from '../../middleware/pluginWo
 import { rootLogger } from '../../observability/logger.js'
 import { isCodexAssignmentAllowed } from '../../services/codexSubscriptionCatalog.js'
 import {
-  CODEX_CONNECTION_REF_ANNOTATION,
   assertCodexConnectionKey,
   isCodexUnassignedConnectionKey,
 } from '../../services/codexSubscriptionConnection.js'
@@ -41,6 +40,10 @@ import {
   listInvocations,
   upsertGrant,
 } from '../../services/pluginWorkloadSdkDb.js'
+import {
+  RecipeCodexGrantIdentityError,
+  publishRecipeGrantIdentity,
+} from '../../services/recipeCodexGrantIdentity.js'
 import { isPlainObject } from '../../utils/isPlainObject.js'
 import {
   type EmitHostSpecIncoherenceTolerated,
@@ -364,11 +367,10 @@ export interface AdminPluginWorkloadSdkRouterDeps {
    */
   emitIncoherenceTolerated?: EmitHostSpecIncoherenceTolerated
   /**
-   * Stamps `clerum.io/codex-connection-ref` on the WorkflowRecipe after a
-   * Codex promptBridge upsert. Authorize attests that annotation, not the
-   * Postgres grant row, so a successful choose must persist it.
+   * Publishes `clerum.io/codex-connection-ref` on the WorkflowRecipe when an
+   * SDK Codex choose changes. Authorize attests that annotation.
    */
-  gateway?: Pick<K8sGateway, 'patchResourceAnnotations'>
+  gateway?: Pick<K8sGateway, 'getResource' | 'updateResource'>
 }
 
 const log = rootLogger.child({ module: 'admin-plugin-workload-sdk' })
@@ -546,6 +548,30 @@ export function createAdminPluginWorkloadSdkRouter(
       // before (serialization only, no accept/reject change): a disabled model
       // reachable solely through `allowed_models` (no promptTarget) is a
       // PRE-EXISTING gap, out of R1-H3 scope.
+      const brokerConnectionRef =
+        promptTargets.find(
+          target =>
+            isBrokerBackedProvider(target.provider) &&
+            target.connectionRef &&
+            !isCodexUnassignedConnectionKey(target.connectionRef)
+        )?.connectionRef ?? ''
+      if (capabilityFamily === 'promptBridge' && deps.gateway && brokerConnectionRef) {
+        try {
+          await publishRecipeGrantIdentity({
+            gateway: deps.gateway,
+            namespace: recipeNamespace,
+            name: recipeName,
+            next: brokerConnectionRef,
+          })
+        } catch (err) {
+          if (err instanceof RecipeCodexGrantIdentityError) {
+            res.status(err.status).json({ error: err.error })
+            return
+          }
+          throw err
+        }
+      }
+
       let grant: Awaited<ReturnType<typeof upsertGrant>>
       try {
         grant = await withTransaction(async db => {
@@ -760,30 +786,6 @@ export function createAdminPluginWorkloadSdkRouter(
       // Grant PERSISTED: NOW emit any Pieza D tolerations (never before the upsert
       // lands, so a failed upsert leaves no audit record — mini-spec 01).
       for (const event of pendingGrantTolerations) emitIncoherenceTolerated(event)
-      const brokerConnectionRef =
-        promptTargets.find(
-          target =>
-            isBrokerBackedProvider(target.provider) &&
-            target.connectionRef &&
-            !isCodexUnassignedConnectionKey(target.connectionRef)
-        )?.connectionRef ?? ''
-      if (capabilityFamily === 'promptBridge' && deps.gateway) {
-        try {
-          await deps.gateway.patchResourceAnnotations(
-            'workflowrecipes',
-            recipeName,
-            { [CODEX_CONNECTION_REF_ANNOTATION]: brokerConnectionRef },
-            recipeNamespace
-          )
-        } catch (err) {
-          log.error(
-            { err, recipeNamespace, recipeName },
-            'failed to stamp Codex connection annotation on WorkflowRecipe'
-          )
-          res.status(503).json({ error: 'recipe_annotation_stamp_failed' })
-          return
-        }
-      }
       // Fase 6: attach any soft-quarantine warnings additively (older clients
       // ignore the field). Absent when there is nothing to warn about.
       res
@@ -827,20 +829,41 @@ export function createAdminPluginWorkloadSdkRouter(
                 target.connectionRef &&
                 !isCodexUnassignedConnectionKey(target.connectionRef)
             )?.connectionRef ?? ''
+        let recipeAgent: string | undefined
         try {
-          await deps.gateway.patchResourceAnnotations(
+          const recipe = (await deps.gateway.getResource(
             'workflowrecipes',
             recipeName,
-            { [CODEX_CONNECTION_REF_ANNOTATION]: remainingRef },
             recipeNamespace
-          )
+          )) as { spec?: { agent?: { provider?: string } } }
+          recipeAgent =
+            typeof recipe.spec?.agent?.provider === 'string'
+              ? recipe.spec.agent.provider
+              : undefined
         } catch (err) {
           log.error(
             { err, recipeNamespace, recipeName },
-            'failed to clear Codex connection annotation after grant delete'
+            'failed to read WorkflowRecipe after grant delete'
           )
-          res.status(503).json({ error: 'recipe_annotation_stamp_failed' })
+          res.status(503).json({ error: 'recipe_annotation_publish_failed' })
           return
+        }
+        const shouldUnassign = !remainingRef && recipeAgent !== 'codex-subscription'
+        if (remainingRef || shouldUnassign) {
+          try {
+            await publishRecipeGrantIdentity({
+              gateway: deps.gateway,
+              namespace: recipeNamespace,
+              name: recipeName,
+              next: remainingRef || 'unassigned',
+            })
+          } catch (err) {
+            if (err instanceof RecipeCodexGrantIdentityError) {
+              res.status(err.status).json({ error: err.error })
+              return
+            }
+            throw err
+          }
         }
       }
       res.status(200).json({ deleted: true })

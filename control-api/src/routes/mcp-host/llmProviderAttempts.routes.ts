@@ -6,14 +6,12 @@ import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
 import { rootLogger } from '../../observability/logger.js'
 import {
   CODEX_CONNECTION_REF_ANNOTATION,
-  CODEX_UNASSIGNED_CONNECTION_KEY,
   readHostCodexConnectionRef,
 } from '../../services/codexSubscriptionConnection.js'
 import {
   LlmProviderAttemptAuthorizeError,
   authorizeLlmProviderAttempt,
 } from '../../services/llmProviderAttemptAuthorizer.js'
-import { listGrants } from '../../services/pluginWorkloadSdkDb.js'
 import { llmProviderAttemptAuthorizeRateLimits } from '../workflows/shared/rateLimit.js'
 
 const log = rootLogger.child({ module: 'mcp-host-llm-provider-attempts' })
@@ -34,11 +32,6 @@ const ERROR_STATUS: Record<string, number> = {
   provider_unavailable: 503,
 }
 
-function recipeHasPluginWorkloadSdk(spec?: Record<string, unknown>): boolean {
-  const sdk = spec?.pluginWorkloadSdk
-  return Boolean(sdk && typeof sdk === 'object' && !Array.isArray(sdk))
-}
-
 function sendAuthorizeError(res: Response, err: unknown): void {
   if (err instanceof LlmProviderAttemptAuthorizeError) {
     const status = ERROR_STATUS[err.code] ?? 400
@@ -51,10 +44,7 @@ function sendAuthorizeError(res: Response, err: unknown): void {
 
 export async function resolveHostAssignedConnectionKey(
   gateway: Pick<K8sGateway, 'getResource'>,
-  hostRef: string,
-  opts?: {
-    listSdkCodexConnectionRefs?: (namespace: string, recipeName: string) => Promise<string[]>
-  }
+  hostRef: string
 ): Promise<string> {
   if (hostRef.includes('/')) {
     // Workflow callers attest as `namespace/recipeName`. The grant identity is
@@ -74,37 +64,9 @@ export async function resolveHostAssignedConnectionKey(
         recipeName,
         recipeNamespace
       )) as { metadata?: { annotations?: Record<string, string> }; spec?: Record<string, unknown> }
-      const annotated = readHostCodexConnectionRef(
+      return readHostCodexConnectionRef(
         recipe?.metadata?.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
       )
-      if (opts?.listSdkCodexConnectionRefs) {
-        const grantRefs = [
-          ...new Set(
-            (await opts.listSdkCodexConnectionRefs(recipeNamespace, recipeName))
-              .map(ref => ref.trim())
-              .filter(Boolean)
-          ),
-        ]
-        // Recipes-only keep the annotation when grantRefs is empty. An SDK
-        // recipe with a leftover named annotation and no grant must not spend.
-        if (
-          recipeHasPluginWorkloadSdk(recipe.spec) &&
-          grantRefs.length === 0 &&
-          annotated !== CODEX_UNASSIGNED_CONNECTION_KEY
-        ) {
-          throw new LlmProviderAttemptAuthorizeError(
-            'host_binding_mismatch',
-            'SDK grant connectionRef does not match the recipe annotation'
-          )
-        }
-        if (grantRefs.length > 1 || (grantRefs.length === 1 && grantRefs[0] !== annotated)) {
-          throw new LlmProviderAttemptAuthorizeError(
-            'host_binding_mismatch',
-            'SDK grant connectionRef does not match the recipe annotation'
-          )
-        }
-      }
-      return annotated
     } catch (err) {
       if (err instanceof LlmProviderAttemptAuthorizeError) throw err
       throw new LlmProviderAttemptAuthorizeError(
@@ -140,17 +102,7 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
       }
       try {
         const result = await authorizeLlmProviderAttempt(claims, req.body, {
-          resolveConnectionKey: hostRef =>
-            resolveHostAssignedConnectionKey(gateway, hostRef, {
-              listSdkCodexConnectionRefs: async (namespace, recipeName) => {
-                const grants = await listGrants({ recipeNamespace: namespace, recipeName })
-                return grants.flatMap(grant =>
-                  grant.promptTargets
-                    .map(target => target.connectionRef)
-                    .filter((ref): ref is string => typeof ref === 'string' && ref.length > 0)
-                )
-              },
-            }),
+          resolveConnectionKey: hostRef => resolveHostAssignedConnectionKey(gateway, hostRef),
         })
         res.status(200).json(result)
       } catch (err) {

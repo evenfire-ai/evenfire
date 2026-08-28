@@ -307,6 +307,27 @@ describe.sequential('routes/admin/recipes', () => {
     })
   })
 
+  it('PUT /admin/recipes/:name — keeps a recipes-only Codex grant when the annotation is omitted', async () => {
+    await api
+      .post('/admin/recipes')
+      .send(codexSubscriptionRecipe('codex-image-bump', 'team-plus'))
+      .expect(201)
+    const res = await api
+      .put('/admin/recipes/codex-image-bump')
+      .send({
+        spec: {
+          agent: { provider: 'codex-subscription', model: 'gpt-5.1' },
+          triggers: { onDemand: { allowedActors: ['user'] } },
+          steps: [{ id: 'draft', instruction: 'Write v2', timeoutSeconds: 600 }],
+        },
+      })
+      .expect(200)
+    expect(res.body.metadata.annotations).toEqual({
+      'clerum.io/codex-connection-ref': 'team-plus',
+    })
+    expect(res.body.spec.steps[0].instruction).toBe('Write v2')
+  })
+
   it('PUT /admin/recipes/:name — keeps an SDK Codex grant and last-applied annotations', async () => {
     await api
       .post('/admin/recipes')

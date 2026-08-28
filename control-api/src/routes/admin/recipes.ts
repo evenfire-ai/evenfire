@@ -1261,8 +1261,12 @@ function readRequestedCodexRecipeGrant(body: RecipeBody): string {
   return readHostCodexConnectionRef(typeof raw === 'string' ? raw : '')
 }
 
-function validateCodexRecipeGrant(body: RecipeBody): ValidationError[] {
+function validateCodexRecipeGrant(
+  body: RecipeBody,
+  opts?: { allowOmittedGrant?: boolean }
+): ValidationError[] {
   if (!recipeUsesCodexBroker(body.spec)) return []
+  if (opts?.allowOmittedGrant && !bodyHasCodexGrantAnnotation(body)) return []
   const key = readRequestedCodexRecipeGrant(body)
   if (isCodexUnassignedConnectionKey(key)) {
     return [
@@ -1287,38 +1291,44 @@ function validateCodexRecipeGrant(body: RecipeBody): ValidationError[] {
   return []
 }
 
+function bodyHasCodexGrantAnnotation(body: RecipeBody): boolean {
+  const annotations = body.metadata?.annotations
+  return Boolean(
+    annotations &&
+    Object.prototype.hasOwnProperty.call(annotations, CODEX_CONNECTION_REF_ANNOTATION)
+  )
+}
+
 function sanitizeRecipeCodexAnnotation(
   body: RecipeBody,
-  currentAnnotations?: Record<string, string>
+  currentAnnotations?: Record<string, string>,
+  currentSpec?: Record<string, unknown>
 ): Record<string, string> {
   const incoming = readRequestedCodexRecipeGrant(body)
   if (recipeUsesCodexBroker(body.spec)) {
+    if (!bodyHasCodexGrantAnnotation(body)) return {}
     return {
       [CODEX_CONNECTION_REF_ANNOTATION]: isCodexUnassignedConnectionKey(incoming) ? '' : incoming,
     }
   }
-  // SDK promptBridge stamps the same annotation regardless of spec.agent.
-  // Do not wipe a live grant when the author edits an unrelated field.
-  if (recipeHasPluginWorkloadSdk(body.spec)) {
-    if (!isCodexUnassignedConnectionKey(incoming)) {
-      return { [CODEX_CONNECTION_REF_ANNOTATION]: incoming }
-    }
-    const current = readHostCodexConnectionRef(
-      typeof currentAnnotations?.[CODEX_CONNECTION_REF_ANNOTATION] === 'string'
-        ? currentAnnotations[CODEX_CONNECTION_REF_ANNOTATION]
-        : ''
-    )
+  const leavingCodex = recipeUsesCodexBroker(currentSpec) && !recipeHasPluginWorkloadSdk(body.spec)
+  if (leavingCodex) {
+    return { [CODEX_CONNECTION_REF_ANNOTATION]: '' }
+  }
+  if (bodyHasCodexGrantAnnotation(body)) {
     return {
-      [CODEX_CONNECTION_REF_ANNOTATION]: isCodexUnassignedConnectionKey(current) ? '' : current,
+      [CODEX_CONNECTION_REF_ANNOTATION]: isCodexUnassignedConnectionKey(incoming) ? '' : incoming,
     }
   }
-  return { [CODEX_CONNECTION_REF_ANNOTATION]: '' }
+  void currentAnnotations
+  return {}
 }
 
 function sanitizeRecipeBody(
   body: RecipeBody,
   currentLabels?: Record<string, string>,
-  currentAnnotations?: Record<string, string>
+  currentAnnotations?: Record<string, string>,
+  currentSpec?: Record<string, unknown>
 ): {
   metadata: { name: string; labels?: Record<string, string>; annotations: Record<string, string> }
   spec: Record<string, unknown>
@@ -1342,7 +1352,7 @@ function sanitizeRecipeBody(
       ...(sanitizedLabels ? { labels: sanitizedLabels } : {}),
       annotations: {
         ...(currentAnnotations ?? {}),
-        ...sanitizeRecipeCodexAnnotation(body, currentAnnotations),
+        ...sanitizeRecipeCodexAnnotation(body, currentAnnotations, currentSpec),
       },
     },
     spec: body.spec as Record<string, unknown>,
@@ -1925,7 +1935,7 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
         res.status(422).json({ errors })
         return
       }
-      const grantErrors = validateCodexRecipeGrant(body)
+      const grantErrors = validateCodexRecipeGrant(body, { allowOmittedGrant: true })
       if (grantErrors.length > 0) {
         res.status(422).json({ errors: grantErrors })
         return
@@ -1978,7 +1988,9 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
             : undefined
         const currentLabels = stringLabels(currentMeta?.labels)
         const currentAnnotations = stringLabels(currentMeta?.annotations)
-        const sanitized = sanitizeRecipeBody(body, currentLabels, currentAnnotations)
+        const currentSpec =
+          isPlainObject(resource) && isPlainObject(resource.spec) ? resource.spec : undefined
+        const sanitized = sanitizeRecipeBody(body, currentLabels, currentAnnotations, currentSpec)
         const updated = await updateRecipeWithConflictRetry(gateway, req.params.name, sanitized, ns)
         res
           .status(200)
