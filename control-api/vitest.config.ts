@@ -13,7 +13,11 @@ export default defineConfig({
     // Deterministic failures must remain visible in ordinary and Real-Postgres
     // lanes. Retrying can also overlap abandoned database work after a timeout.
     retry: 0,
-    testTimeout: 10_000,
+    // A single retry-free pass can spend more than ten seconds inside a
+    // Supertest request while this 5k-test suite is under full worker load.
+    // Give the request its execution budget without rerunning assertions or
+    // hiding deterministic failures behind retry state.
+    testTimeout: 30_000,
     sequence: {
       hooks: 'list',
     },
