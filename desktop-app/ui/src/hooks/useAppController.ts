@@ -26,6 +26,7 @@ import {
   decideApproval as decideApprovalCore,
   resolveConnectResumeTargets,
 } from './domain/approvalDecision'
+import { createMcpOauthResumeBuffer } from './domain/mcpOauthResumeBuffer'
 import { desktopQueryKeys } from './domain/queryKeys'
 import { useActivityController } from './domain/useActivityController'
 import { useAgentChatController } from './domain/useAgentChatController'
@@ -48,6 +49,13 @@ import {
   createResetWorkflowSelection,
 } from './domain/useWorkflowController.types'
 import { scheduleAfterFirstPaint } from './scheduleAfterFirstPaint'
+
+// U5 cold-start buffer: how long an OAuth completion whose sessions are not yet
+// seeded is retried against later snapshots before it is discarded. Long enough
+// to cover the async/auth-gated session load after `rendererReady`, short enough
+// that a stale grant can never drive a much-later resume. RPC token TTL is 300s;
+// this stays well under it.
+const MCP_OAUTH_RESUME_BUFFER_TTL_MS = 45_000
 
 const DENY_REASON_BY_SOURCE: Record<ApprovalDecisionTarget['source'], string> = {
   desktop_notification: 'Denied from desktop notification',
@@ -206,6 +214,15 @@ export function useAppController() {
     (target: ApprovalDecisionTarget) => decideApprovalRef.current(target),
     []
   )
+  // U5/R3-M1: buffers OAuth completions that arrive before their sessions are
+  // seeded (cold start), retried on later FSM snapshots. Lazy-init the ref (the
+  // factory must not re-run every render — same pattern as the FSM store).
+  const mcpOauthResumeBufferRef = useRef<ReturnType<
+    typeof createMcpOauthResumeBuffer<ApprovalDecisionTarget>
+  > | null>(null)
+  if (!mcpOauthResumeBufferRef.current) {
+    mcpOauthResumeBufferRef.current = createMcpOauthResumeBuffer<ApprovalDecisionTarget>()
+  }
   const openAgentConversationFromNotification = useCallback(
     (target: AgentConversationNotificationTarget) =>
       openAgentConversationFromNotificationRef.current(target),
@@ -320,15 +337,52 @@ export function useAppController() {
   // on that server, since a per-user grant is global to the user) and needs no
   // ephemeral client_id→server map. Each match resumes through the SAME central
   // decider (`decideApproval` approve → the approval RPC re-executes the tool).
-  // Subscribed once; `chat.sessionFsmStore` and `decideApprovalRef` are read live.
+  //
+  // R3-M1 (cold start): a completion can arrive BEFORE the FSM snapshot is seeded
+  // (sessions load async/auth-gated after `rendererReady`), so `resolve…` returns
+  // `[]` even though the grant exists and a conversation is suspended. Dropping it
+  // there loses the auto-resume. Instead, an empty resolve buffers the completion
+  // (bounded TTL) and the store `subscribe` re-evaluates it on EVERY snapshot
+  // change until its deadline. The buffered entry is kept — not dropped on the
+  // first match — because the real seam (`seedSessionSnapshots`) dispatches one
+  // session per snapshot, so siblings on the SAME server surface across separate
+  // notifications; keeping the entry alive lets every one of them resume within
+  // the window (the per-user grant is global to the user). A resumed conversation
+  // leaves `awaiting_approval`, so it stops resolving as a target — each sibling
+  // fires once, and any redundant re-fire is a guarded no-op (decideApproval step
+  // 1 + mcp-host per-`requestId` idempotency). A completion that resolves targets
+  // on arrival (the normal path) fires immediately and never enters the buffer.
+  // Subscribed once; `chat.sessionFsmStore`, `decideApprovalRef` and the buffer
+  // ref are read live.
   useEffect(() => {
+    const store = chat.sessionFsmStore
+    const buffer = mcpOauthResumeBufferRef.current!
+    const fire = (targets: ApprovalDecisionTarget[]) => {
+      for (const target of targets) void decideApprovalRef.current(target)
+    }
+
     const unsub = window.clerum.rpc.onMcpOauthCompleted?.(({ mcpServerName }) => {
-      const targets = resolveConnectResumeTargets(chat.sessionFsmStore.getSnapshot(), mcpServerName)
-      for (const target of targets) {
-        void decideApprovalRef.current(target)
+      const targets = resolveConnectResumeTargets(store.getSnapshot(), mcpServerName)
+      if (targets.length > 0) {
+        fire(targets)
+        return
       }
+      // Cold start: grant exists but sessions aren't seeded yet — retry on a
+      // later snapshot rather than dropping the resume.
+      buffer.add(mcpServerName, Date.now() + MCP_OAUTH_RESUME_BUFFER_TTL_MS)
     })
-    return () => unsub?.()
+
+    const unsubStore = store.subscribe(() => {
+      if (buffer.size() === 0) return
+      fire(
+        buffer.drain(Date.now(), server => resolveConnectResumeTargets(store.getSnapshot(), server))
+      )
+    })
+
+    return () => {
+      unsub?.()
+      unsubStore()
+    }
   }, [chat.sessionFsmStore])
 
   // ─── MCP Server ───

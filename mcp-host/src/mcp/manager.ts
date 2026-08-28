@@ -74,6 +74,35 @@ export function serverNameFromClientKey(key: string): string {
   return (JSON.parse(key) as [string, string, string?])[1]
 }
 
+/**
+ * Recover the principal from a serialized ClientKey — inverse of the
+ * discriminator `serializeClientKey` writes (`'u'` → user, else SHARED). Used by
+ * the grant-sweep to tell a per-user partition from the token-less SHARED
+ * representative of an oauth-user server.
+ */
+export function principalFromClientKey(key: string): McpPrincipal {
+  const parsed = JSON.parse(key) as ['s' | 'u', string, string?]
+  return parsed[0] === 'u' && typeof parsed[2] === 'string'
+    ? userPrincipal(parsed[2])
+    : SHARED_PRINCIPAL
+}
+
+/** The OAuth flavor of a live partition the hot-revocation sweep re-validates. */
+export type OAuthPartitionFlavor = 'oauth-user' | 'oauth-context'
+
+/**
+ * A live OAuth partition exposed to the hot-revocation grant-sweep (mini-spec
+ * 13 §4.1). `key` is the serialized ClientKey the sweep hands back to
+ * `evictRevokedPartitions`; the coordinates address the grant in control-api
+ * (`userId` present only for `oauth-user`).
+ */
+export interface LiveOAuthPartition {
+  flavor: OAuthPartitionFlavor
+  serverName: string
+  userId?: string
+  key: string
+}
+
 /** Factory that builds a per-connection token provider for an oauth server. */
 export type McpTokenProviderFactory = (
   server: McpServerInfo,
@@ -85,7 +114,6 @@ export class McpManager {
   private clients: Map<string, McpClient> = new Map()
   // Desired-state projection is per-serverName (identical across partitions).
   private serverInfos: Map<string, McpServerInfo> = new Map()
-  private toolToServerMap: Map<string, string> = new Map()
   // In-flight admissions, keyed by serialized ClientKey.
   private pendingAdmissions: Map<string, PendingAdmission> = new Map()
   // serverName → set of live ClientKeys. Restores serverName-level reasoning
@@ -155,6 +183,29 @@ export class McpManager {
     return undefined
   }
 
+  /**
+   * The representative to probe on behalf of the PLATFORM (background
+   * heartbeat) — the SHARED partition ONLY, with NO per-user fallback.
+   *
+   * A platform probe (`probeTools`) makes a REAL network call. It must never be
+   * charged to a user's OAuth token/quota, so it may only ride the SHARED
+   * connection:
+   *   - static / oauth-context / the token-less oauth-user SHARED representative
+   *     all live under the SHARED key, so they are still probed here.
+   *   - the sole case skipped is the pathological "SHARED down + a per-user
+   *     partition alive" — there `representativeClient` would fall back to a
+   *     per-user client and spend that user's identity on a platform probe.
+   *     Such a server simply goes un-refreshed this round (status left stale)
+   *     rather than being probed with a user's token.
+   *
+   * Catalog reads (`getAllTools` / `describeCapabilities`) intentionally KEEP
+   * the per-user fallback: they read `client.availableTools` from cache — no
+   * network, no token spent — so falling back keeps the catalog populated.
+   */
+  private probeRepresentativeClient(serverName: string): McpClient | undefined {
+    return this.clients.get(this.sharedKey(serverName))
+  }
+
   private buildTokenProvider(
     serverConfig: McpServerInfo,
     principal: McpPrincipal,
@@ -179,20 +230,12 @@ export class McpManager {
     return staticTokenProvider(eagerToken)
   }
 
-  private clearToolMappings(serverName: string): void {
-    for (const [toolName, server] of this.toolToServerMap.entries()) {
-      if (server === serverName) {
-        this.toolToServerMap.delete(toolName)
-      }
-    }
-  }
-
   private installConnectedClient(
     key: string,
     serverConfig: McpServerInfo,
-    client: McpClient
+    client: McpClient,
+    ownsServerStatus: boolean
   ): void {
-    this.clearToolMappings(serverConfig.name)
     this.clients.set(key, client)
     this.serverInfos.set(serverConfig.name, serverConfig)
 
@@ -203,12 +246,14 @@ export class McpManager {
     }
     keys.add(key)
 
-    for (const tool of client.availableTools) {
-      const fullToolName = `${serverConfig.name}__${tool.name}`
-      this.toolToServerMap.set(fullToolName, serverConfig.name)
+    // Only the SHARED/eager owner writes the per-serverName status (symmetric
+    // with the gated markConnecting / recordAdmissionFailure in
+    // connectAndInstall). A per-user admission must NOT flip the representative's
+    // status to `connected` with its own partition's toolCount — a caller reading
+    // the per-serverName status would then see a down representative as connected.
+    if (ownsServerStatus) {
+      this.statusTracker.markConnected(serverConfig.name, client.availableTools.length)
     }
-
-    this.statusTracker.markConnected(serverConfig.name, client.availableTools.length)
   }
 
   private claimClientCleanup(client: McpClient): McpDetachedServerCleanup | undefined {
@@ -353,9 +398,13 @@ export class McpManager {
         return 'stale'
       }
       this.pendingAdmissions.delete(key)
-      this.installConnectedClient(key, serverConfig, client)
+      this.installConnectedClient(key, serverConfig, client, ownsServerStatus)
       control.onCommit?.()
-      console.log(`[McpManager] Installed client: ${key}`)
+      console.log(
+        `[McpManager] Installed client for server "${serverConfig.name}" (${
+          ownsServerStatus ? 'shared' : 'per-user'
+        } partition)`
+      )
       return 'applied'
     } catch (error) {
       if (!isCurrent() || this.pendingAdmissions.get(key)?.attempt !== attempt) {
@@ -364,7 +413,12 @@ export class McpManager {
         return 'stale'
       }
       this.pendingAdmissions.delete(key)
-      console.error(`[McpManager] Failed to install client ${key}:`, error)
+      console.error(
+        `[McpManager] Failed to install client for server "${serverConfig.name}" (${
+          ownsServerStatus ? 'shared' : 'per-user'
+        } partition):`,
+        error
+      )
       // Only the SHARED/eager path owns the per-serverName status transition. A
       // per-user admission failure must leave the representative's status intact.
       if (ownsServerStatus) this.recordAdmissionFailure(serverConfig, error)
@@ -421,7 +475,8 @@ export class McpManager {
 
     // Commit is synchronous: readers see either the complete previous
     // revision or the complete connected candidate, never a missing server.
-    this.installConnectedClient(key, serverConfig, candidate)
+    // replaceServer is always the SHARED/eager coordinator path → owns status.
+    this.installConnectedClient(key, serverConfig, candidate, true)
     control.onCommit?.()
 
     // The desired config changed for the whole server → per-user partitions are
@@ -526,10 +581,9 @@ export class McpManager {
   evictIdleUserPartitions(maxIdleMs: number, maxUserPartitions?: number): number {
     const now = Date.now()
     let evicted = 0
-    const inFlight = (key: string): boolean => (this.partitionInFlight.get(key)?.size ?? 0) > 0
     // TTL pass — never evict a partition with a live tool call.
     for (const [key, lastUsed] of [...this.partitionLastUsed]) {
-      if (inFlight(key)) continue
+      if (this.partitionHasInFlightCall(key)) continue
       if (now - lastUsed >= maxIdleMs) {
         this.evictPartition(key)
         evicted += 1
@@ -538,7 +592,7 @@ export class McpManager {
     // LRU-cap pass — same in-flight exemption; only idle partitions are candidates.
     if (maxUserPartitions !== undefined && this.partitionLastUsed.size > maxUserPartitions) {
       const ordered = [...this.partitionLastUsed.entries()]
-        .filter(([key]) => !inFlight(key))
+        .filter(([key]) => !this.partitionHasInFlightCall(key))
         .sort((a, b) => a[1] - b[1])
       const overflow = this.partitionLastUsed.size - maxUserPartitions
       for (let i = 0; i < overflow && i < ordered.length; i++) {
@@ -547,6 +601,70 @@ export class McpManager {
       }
     }
     return evicted
+  }
+
+  /**
+   * List the live OAuth partitions whose grant the hot-revocation sweep must
+   * re-validate against control-api (mini-spec 13 §4.1). Read-only and additive
+   * — no live state is mutated. By flavor:
+   *   - `oauth-user`: every per-user partition (the token-less SHARED
+   *     representative carries no grant, so it is deliberately skipped).
+   *   - `oauth-context`: the single SHARED partition, which itself holds the
+   *     context grant (control-api keys it by the server's contextRef).
+   * `static`/`none` servers contribute nothing.
+   */
+  listLiveOAuthPartitions(): LiveOAuthPartition[] {
+    const partitions: LiveOAuthPartition[] = []
+    for (const [serverName, keys] of this.byServer) {
+      const authKind = this.serverInfos.get(serverName)?.authKind
+      if (authKind === 'oauth-user') {
+        for (const key of keys) {
+          const principal = principalFromClientKey(key)
+          if (principal.kind === 'user') {
+            partitions.push({ flavor: 'oauth-user', serverName, userId: principal.userId, key })
+          }
+        }
+      } else if (authKind === 'oauth-context') {
+        const key = this.sharedKey(serverName)
+        if (this.clients.has(key)) {
+          partitions.push({ flavor: 'oauth-context', serverName, key })
+        }
+      }
+    }
+    return partitions
+  }
+
+  /**
+   * Evict the OAuth partitions whose grant control-api reports absent (the
+   * hot-revocation grant-sweep, mini-spec 13 §4.2). The caller supplies only the
+   * keys of `exists:false` partitions; this reuses `evictPartition` under the
+   * SAME in-flight exemption as `evictIdleUserPartitions` — a partition with a
+   * live tool call is SKIPPED this tick and re-evaluated on the next sweep
+   * (~30s) once `partitionInFlight` drains, never queued for deferred eviction.
+   * Idempotent: a key with no live partition is a no-op and is not counted.
+   * Returns the count evicted.
+   */
+  evictRevokedPartitions(keys: Iterable<string>): number {
+    let evicted = 0
+    for (const key of keys) {
+      // Respect in-flight, via the SAME predicate the idle sweep uses: the
+      // active call started authorized moments ago.
+      if (this.partitionHasInFlightCall(key)) continue
+      // Idempotent: nothing live under this key (already evicted / re-keyed).
+      if (!this.clients.has(key)) continue
+      this.evictPartition(key)
+      evicted += 1
+    }
+    return evicted
+  }
+
+  /**
+   * The in-flight exemption predicate shared by every eviction sweep (idle +
+   * grant-revocation): a partition with ≥1 live tool-call token is NEVER evicted.
+   * Single-sourced so the two sweeps can never drift on this invariant (D4).
+   */
+  private partitionHasInFlightCall(key: string): boolean {
+    return (this.partitionInFlight.get(key)?.size ?? 0) > 0
   }
 
   private releaseInFlight(key: string, token: symbol): void {
@@ -593,7 +711,6 @@ export class McpManager {
       .map(client => this.claimClientCleanup(client))
       .filter((cleanup): cleanup is McpDetachedServerCleanup => cleanup !== undefined)
 
-    this.clearToolMappings(serverName)
     this.byServer.delete(serverName)
     this.serverInfos.delete(serverName)
     this.statusTracker.remove(serverName)
@@ -645,7 +762,6 @@ export class McpManager {
       ]),
     ]
     const cleanups = serverNames.map(name => this.detachServer(name))
-    this.toolToServerMap.clear()
     this.serverInfos.clear()
     this.pendingAdmissions.clear()
     this.byServer.clear()
@@ -762,6 +878,16 @@ export class McpManager {
     // Only the per-user oauth sabor gets per-user partitions. oauth-context and
     // static both resolve on the SHARED representative (the else branch below).
     const isOauthUser = info?.authKind === 'oauth-user'
+    // oauth-context serves over the SHARED partition, but that partition IS
+    // grant-sweep-evictable (listLiveOAuthPartitions exposes it). So it must also
+    // pin an in-flight token for the call's duration, or the grant-sweep could
+    // close the connection mid-call (respect-in-flight, spec §5). It does NOT
+    // pin partitionLastUsed — that map drives the idle sweep, which must never
+    // idle-evict a snapshot-driven oauth-context SHARED partition.
+    const isOauthContext = info?.authKind === 'oauth-context'
+    // Partitions the eviction sweeps can reclaim → the ones that must register
+    // an in-flight claim while a call is running.
+    const pinsInFlight = isOauthUser || isOauthContext
 
     let key: string
     if (isOauthUser) {
@@ -784,6 +910,31 @@ export class McpManager {
         }
       }
       key = this.userKey(serverName, userId)
+      // Fail-closed: replicate the eager addServer admission gates
+      // (enabled → authoritative → ready, manager.ts:276-305) before opening a
+      // per-user connection with the caller's OAuth token. serverInfos retains
+      // disabled/not-ready/non-authoritative servers (each skip branch there
+      // does serverInfos.set before returning), so without this gate a lazy
+      // per-user admission would connect and execute against a server the
+      // operator disabled or that is not ready. A non-admissible server is
+      // operator intent (disabled) or transient/unauthoritative infra
+      // (not_ready) — NOT an auth failure, so surface it distinctly from the
+      // "Authentication required" cases above.
+      if (!info?.enabled) {
+        return {
+          toolName: fullToolName,
+          result: { error: `MCP server disabled: ${serverName}` },
+          isError: true,
+        }
+      }
+      if (info.status?.authoritative === false || !info.status?.ready) {
+        const detail = info.status?.message ? ` (${info.status.message})` : ''
+        return {
+          toolName: fullToolName,
+          result: { error: `MCP server not ready: ${serverName}${detail}` },
+          isError: true,
+        }
+      }
       try {
         await this.ensureClient(serverName, userId)
       } catch (error) {
@@ -813,8 +964,15 @@ export class McpManager {
     if (isOauthUser) {
       // Stamp usage only once the partition is confirmed live (a 'stale'
       // admission installs no client) so no phantom entry counts toward the cap.
+      // oauth-user ONLY: partitionLastUsed feeds the idle sweep (LRU + TTL) whose
+      // subjects are the per-user partitions; the oauth-context SHARED partition
+      // is deliberately absent from it (never idle-evicted).
       this.partitionLastUsed.set(key, Date.now())
-      // Pin the partition against idle eviction for the duration of this call.
+    }
+    if (pinsInFlight) {
+      // Pin the partition against BOTH eviction sweeps (idle + grant-revocation)
+      // for the duration of this call — same register-on-enter / clear-in-finally
+      // pattern for oauth-user per-user and oauth-context SHARED alike.
       let set = this.partitionInFlight.get(key)
       if (!set) {
         set = new Set()
@@ -873,7 +1031,7 @@ export class McpManager {
         isError: true,
       }
     } finally {
-      if (isOauthUser) this.releaseInFlight(key, callToken)
+      if (pinsInFlight) this.releaseInFlight(key, callToken)
     }
   }
 
@@ -881,7 +1039,9 @@ export class McpManager {
    * Probe every connected server's tool list and update the status tracker.
    * Called by the background heartbeat to keep `observedAt` fresh and to
    * classify refresh failures (spec §4.5 — stay connected, attach reason).
-   * Probes the representative connection per serverName.
+   * Probes the SHARED representative per serverName (probeRepresentativeClient):
+   * a platform probe is a real network call and must never spend a user's OAuth
+   * token, so a server whose only live client is per-user is skipped this round.
    *
    * Probes a stable client snapshot. State is written only after every probe
    * settles; an aborted round never mutates the last known server status.
@@ -892,7 +1052,7 @@ export class McpManager {
     // probes each server once via its representative; iterating raw clients would
     // double-count those partitions in the summary tally.
     const entries = [...this.byServer.keys()]
-      .map(name => [name, this.representativeClient(name)] as const)
+      .map(name => [name, this.probeRepresentativeClient(name)] as const)
       .filter((entry): entry is readonly [string, McpClient] => entry[1] !== undefined)
     if (options.signal?.aborted) {
       return {
@@ -932,7 +1092,7 @@ export class McpManager {
     // inflate `failed` and flip the run's outcome on the series #148 watches.
     const committed = results.filter(
       ({ name, client, result }) =>
-        this.representativeClient(name) === client && !(!result.ok && result.stale)
+        this.probeRepresentativeClient(name) === client && !(!result.ok && result.stale)
     )
     const succeeded = committed.filter(({ result }) => result.ok).length
     const summary: McpStatusRefreshSummary = {

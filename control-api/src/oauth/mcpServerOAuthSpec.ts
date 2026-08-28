@@ -3,12 +3,15 @@
  *
  * The grant-scope / oauthClientId / contextRef derivation is a security-relevant
  * rule (it decides WHICH grant coordinate governs a server). It is consumed by
- * two seams that must never drift apart (D4):
+ * three seams that must never drift apart (D4):
  *   - the token broker (`routes/mcpOauth.ts`) — the LLM/tool-call rail;
- *   - the rpc-proxy grant-presence gate (`services/access/mcpInvocable.ts`).
- * Both read the SAME fields the SAME way, so the rule lives here once.
+ *   - the rpc-proxy grant-presence gate (`services/access/mcpInvocable.ts`);
+ *   - the grant-existence sweep (`routes/mcpOauth.ts`, mini-spec 13) — the
+ *     hot-revocation poll.
+ * All read the SAME fields the SAME way and derive the SAME `oauth_grants` key
+ * (`buildMcpServerGrantKey`), so the rule lives here once.
  */
-import type { GetOAuthGrantInput } from './store.js'
+import type { OAuthGrantKey } from './store.js'
 
 export interface McpServerOAuthDecl {
   id?: unknown
@@ -57,53 +60,60 @@ export function resolveServerOAuth(server: McpServerOAuthSpecInput): ResolvedSer
   return { oauthClientId: oauth.id, grantScope, contextRef }
 }
 
+/** The coordinates the caller supplies to derive an mcp-server grant key. */
+export interface McpServerGrantKeyCoords {
+  /** McpServer name — reinterpreted as the grant owner's `recipeName`. */
+  mcpServerName: string
+  /** The mcp-servers namespace — the grant owner's `recipeNamespace`. */
+  mcpServersNamespace: string
+  /**
+   * End-user identity, for `grantScope='user'` servers only. IGNORED for
+   * `context` servers, which key by the server's AUTHORITATIVE `contextRef`
+   * (server-side), never by any caller-supplied context value.
+   */
+  userId?: string
+}
+
 /**
- * Build the `oauth_grants` key for an OAuth mcp-server, BY FLAVOR — the single
- * construction shared by every seam that touches a server's grant row (D4/F2):
- *   - the rpc-proxy grant-presence gate (`computeGrantPresence`) — read;
- *   - the end-user disconnect endpoint (`internal/oauth.ts`) — delete.
- * Keeping the key derivation here (next to `resolveServerOAuth`) means the two
- * never drift, and a `grantScope` we don't recognize fails closed in ONE place.
+ * Derive the `oauth_grants` key for an OAuth McpServer by flavor — the SINGLE
+ * key derivation shared by the token mint, the rpc-proxy grant-presence gate,
+ * the grant-existence sweep, and the end-user disconnect endpoint
+ * (`internal/oauth.ts`) — delete (D4: one authority, no drift). Returns null when
+ * the coordinate the flavor needs is absent, so every caller decides fail-open
+ * vs fail-closed for itself:
+ *   - `user`    → needs a non-empty `userId`; null otherwise.
+ *   - `context` → keys by the server's AUTHORITATIVE `contextRef` (server-side,
+ *                 NEVER a body value); null when the server carries none.
  *
- * - `user`    → per-user key `(mcpserver, ns, server, userId, oauthClientId)`.
- * - `context` → shared key `(mcpserver, ns, server, contextRef, oauthClientId)`,
- *   `user_id NULL`; the `contextId` is the server's AUTHORITATIVE `spec.contextRef`
- *   (resolved server-side), NEVER a caller-supplied value.
- *
- * Returns null (fail-closed) when the key cannot be built:
- *   - a `context`-scope server without a `contextRef`, or
- *   - an unrecognized `grantScope`.
- * A null return must be treated as "cannot act on this grant" — never as a
- * broad/blind delete.
+ * It intentionally does NOT read the token or touch the DB — it only maps a
+ * resolved OAuth declaration + coordinates to a key.
  */
 export function buildMcpServerGrantKey(
-  resolved: Pick<ResolvedServerOAuth, 'grantScope' | 'oauthClientId' | 'contextRef'>,
-  coords: { namespace: string; serverName: string; userId: string }
-): GetOAuthGrantInput | null {
-  if (resolved.grantScope === 'user') {
-    return {
-      grantKind: 'user',
-      ownerKind: 'mcpserver',
-      recipeNamespace: coords.namespace,
-      recipeName: coords.serverName,
-      userId: coords.userId,
-      oauthClientId: resolved.oauthClientId,
-    }
-  }
+  resolved: ResolvedServerOAuth,
+  coords: McpServerGrantKeyCoords
+): OAuthGrantKey | null {
   if (resolved.grantScope === 'context') {
-    // fail-closed: a context-identity server MUST carry its authoritative Context.
+    // Shared identity is keyed by the server's authoritative Context, decoupled
+    // from any caller-supplied userId/contextId (no body-trust).
     if (!resolved.contextRef) return null
     return {
       grantKind: 'shared',
       ownerKind: 'mcpserver',
-      recipeNamespace: coords.namespace,
-      recipeName: coords.serverName,
+      recipeNamespace: coords.mcpServersNamespace,
+      recipeName: coords.mcpServerName,
       contextId: resolved.contextRef,
       oauthClientId: resolved.oauthClientId,
     }
   }
-  // Unknown grantScope → fail-closed.
-  return null
+  if (typeof coords.userId !== 'string' || coords.userId.length === 0) return null
+  return {
+    grantKind: 'user',
+    ownerKind: 'mcpserver',
+    recipeNamespace: coords.mcpServersNamespace,
+    recipeName: coords.mcpServerName,
+    userId: coords.userId,
+    oauthClientId: resolved.oauthClientId,
+  }
 }
 
 /**
