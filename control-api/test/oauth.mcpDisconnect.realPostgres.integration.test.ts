@@ -20,7 +20,7 @@ import {
 // DELETE /internal/mcp-oauth/grant endpoint composes; the endpoint's authz gates
 // are covered by the route test (routes.internal.mcpOauthDisconnect.test.ts).
 // Gated on a real Postgres, like the U1 connectors integration test:
-//   CONTROL_API_REAL_PG_ADMIN_URL=postgres://user:pass@host:5432 npm test -- \
+//   CONTROL_API_REAL_PG_ADMIN_URL=postgres://<user>:<pass>@<host>:5432 npm test -- \
 //     test/oauth.mcpDisconnect.realPostgres.integration.test.ts
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
