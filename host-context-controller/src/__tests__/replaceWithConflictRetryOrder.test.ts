@@ -347,4 +347,103 @@ describe('replaceWithConflictRetry order and retry', () => {
     expect(replace).not.toHaveBeenCalled()
     expect(await readWritesTotal('Service')).toBe(before)
   })
+
+  it('WRITE-3: 409 then successful replace increments once, not per attempt', async () => {
+    const firstRead: k8s.V1Service = {
+      ...existing,
+      metadata: { ...existing.metadata, resourceVersion: '9' },
+    }
+    const secondRead: k8s.V1Service = {
+      ...existing,
+      metadata: { ...existing.metadata, resourceVersion: '10' },
+    }
+    const read = vi.fn().mockResolvedValueOnce(firstRead).mockResolvedValueOnce(secondRead)
+    const replace = vi.fn().mockRejectedValueOnce({ code: 409 }).mockResolvedValueOnce({})
+    const before = await readWritesTotal('Service')
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    await replaceWithConflictRetry({
+      description: 'Service "svc"',
+      logPrefix: '[Test]',
+      body: desired,
+      mergeExisting: preserveServiceAssignedFields,
+      isUpToDate: () => false,
+      read,
+      replace,
+    })
+
+    expect(replace).toHaveBeenCalledTimes(2)
+    expect(await readWritesTotal('Service')).toBe(before + 1)
+    log.mockRestore()
+  })
+
+  it('WRITE-4: successful replace without kind increments {kind=unknown}', async () => {
+    const body = { metadata: { name: 'svc', namespace: 'ns' } }
+    const live = { metadata: { name: 'svc', namespace: 'ns', resourceVersion: '9' } }
+    const before = await readWritesTotal('unknown')
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    await replaceWithConflictRetry({
+      description: 'object "svc"',
+      logPrefix: '[Test]',
+      body,
+      isUpToDate: () => false,
+      read: async () => live,
+      replace: async () => ({}),
+    })
+
+    expect(await readWritesTotal('unknown')).toBe(before + 1)
+    log.mockRestore()
+  })
+
+  it('WRITE-5: 409 then isUpToDate skip does not increment', async () => {
+    const drifted: k8s.V1Service = {
+      ...existing,
+      metadata: { ...existing.metadata, resourceVersion: '9' },
+      spec: {
+        ...existing.spec,
+        ports: [{ name: 'http', port: 9090, protocol: 'TCP' }],
+      },
+    }
+    const converged: k8s.V1Service = {
+      ...existing,
+      metadata: { ...existing.metadata, resourceVersion: '10' },
+    }
+    const read = vi.fn().mockResolvedValueOnce(drifted).mockResolvedValueOnce(converged)
+    const replace = vi.fn().mockRejectedValueOnce({ code: 409 })
+    const before = await readWritesTotal('Service')
+
+    await replaceWithConflictRetry({
+      description: 'Service "svc"',
+      logPrefix: '[Test]',
+      body: desired,
+      mergeExisting: preserveServiceAssignedFields,
+      isUpToDate: serviceMatchesDesired,
+      read,
+      replace,
+    })
+
+    expect(replace).toHaveBeenCalledOnce()
+    expect(await readWritesTotal('Service')).toBe(before)
+  })
+
+  it('WRITE-6: failed replace does not increment', async () => {
+    const replace = vi.fn().mockRejectedValue(apiException(404))
+    const before = await readWritesTotal('Service')
+
+    await expect(
+      replaceWithConflictRetry({
+        description: 'Service "svc"',
+        logPrefix: '[Test]',
+        body: desired,
+        mergeExisting: preserveServiceAssignedFields,
+        isUpToDate: () => false,
+        read: async () => existing,
+        replace,
+      })
+    ).rejects.toBeInstanceOf(ApiException)
+
+    expect(replace).toHaveBeenCalledOnce()
+    expect(await readWritesTotal('Service')).toBe(before)
+  })
 })
