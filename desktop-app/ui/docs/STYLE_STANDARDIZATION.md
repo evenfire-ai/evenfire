@@ -1,6 +1,6 @@
 # Style Standardization — desktop-app/ui
 
-This document is the authoritative reference for **how a page is built in desktop-app/ui** after the layout/token consolidation refactor. It complements the cross-app rules in [`../../../docs/agents/frontend-style-rules.md`](../../../docs/agents/frontend-style-rules.md) — read that first; this doc adds desktop-app-specific patterns.
+This document is the authoritative reference for **how a page is built in desktop-app/ui** after the layout/token consolidation refactor. It complements the cross-app rules in [`../../../docs/agents/frontend-style-rules.md`](../../../docs/agents/frontend-style-rules.md). Read the shared and renderer application rules selected by the provider adapter first; this document owns Desktop-specific visual and layout patterns.
 
 When in doubt, mimic an existing post-refactor page (`ContextsPage`, `WorkflowsPage`, `TeamsPage`, `McpServersPage`) before inventing.
 
@@ -92,7 +92,7 @@ Available modifiers:
 - Rows — `--compact` (denser row height), `--clickable` (cursor + hover state, required when the row is a `<button>`), `--selected` (highlighted state).
 - Column headers and cells — `--center`, `--right` (alignment).
 
-Column widths are set via the CSS variable `--da-grid-cols` inline. **This is the only acceptable inline-style use in pages.** Two rules apply:
+Column widths are set via the CSS variable `--da-grid-cols` inline. **This is the only acceptable static inline-style use in pages.** Genuinely runtime-computed values follow the documented checker escape-hatch process in §7. Two rules apply:
 
 1. If the column template is shared across two or more pages, define it as a named constant in `src/lib/gridTemplates.ts` and import it. Existing constants: `SCOPED_RESOURCE_4COL`, `MEMBERS_3COL`.
 2. If the template is unique to one page, leave it as a literal inline next to the JSX it describes — colocation beats premature extraction.
@@ -148,25 +148,33 @@ Never hardcode `700`, `0.06em`, `11px`, or `var(--font-size-xs)` / `var(--text-d
 
 ## 4. Common Controls — Use Them
 
-Imports come from `@components/Common`. The exported set is fixed:
+Imports come from `@components/Common`. Treat `src/components/Common/index.ts`
+as the supported shared boundary: pages must use exported Common primitives
+instead of inventing local equivalents. The current exported set is:
 
-| Primitive      | Key API                                                          |
-| -------------- | ---------------------------------------------------------------- |
-| `Button`       | `variant`, `color`, `size`, `block`, `loading`, `align`          |
-| `TextInput`    | `dense` + native `<input>` props                                 |
-| `SelectInput`  | `dense` + native `<select>` props (children = `<option>`s)       |
-| `Field`        | `label`, `hint`, `htmlFor`, `labelClassName`, `wrapperClassName` |
-| `Badge`        | `tone: 'neutral' \| 'accent' \| 'success'`                       |
-| `StatusBanner` | `text`, `tone`, `leadingIcon?`                                   |
-| `EmptyState`   | `title`, `body`                                                  |
-| `DetailRow`    | `label`, `value`                                                 |
-| `ToastStack`   | `items: ToastMessage[]`                                          |
+| Primitive          | Key API                                                          |
+| ------------------ | ---------------------------------------------------------------- |
+| `Badge`            | `tone: 'neutral' \| 'accent' \| 'success'`                       |
+| `Button`           | `variant`, `color`, `size`, `block`, `loading`, `align`          |
+| `DataTable`        | native table props, `compact`, `fullBleed`, `frameless`          |
+| `DataTableFilter`  | `options`, `value`, `onChange`, `variant`                        |
+| `DetailRow`        | `label`, `value`                                                 |
+| `DropdownSelect`   | `options`, `value`, `onChange`, `placeholder`                    |
+| `EmptyState`       | `title`, `body`                                                  |
+| `Field`            | `label`, `hint`, `htmlFor`, `labelClassName`, `wrapperClassName` |
+| `IconButton`       | icon button props                                                |
+| `MenuItem`         | menu item props                                                  |
+| `NavItem`          | navigation item props                                            |
+| `Pill`             | pill props                                                       |
+| `ReferenceTag`     | `kind`, `children`, optional button props                        |
+| `SelectInput`      | `dense` + native `<select>` props (children = `<option>`s)       |
+| `SelectableOption` | selectable option props                                          |
+| `StatusBanner`     | `text` or `children`, `tone`, `leadingIcon?`, `compact`          |
+| `TabButton`        | tab button props                                                 |
+| `TextInput`        | `dense` + native `<input>` props                                 |
+| `ToastStack`       | `items: ToastMessage[]`                                          |
 
 Do not recreate equivalents inline. If a real new common control is needed, add it under `src/components/Common/<Component>/index.tsx` with colocated `types.ts`, then re-export it from `src/components/Common/index.ts` — not as a one-off in a page file.
-
-### Feedback Placement
-
-Use the app toast stack for success feedback after a completed user action, such as saving settings, triggering workflows, or approving requests. Do not render inline green success banners inside page cards or forms for transient confirmations. Inline `StatusBanner` is reserved for persistent page state, warnings, errors, and informational messages that must remain visible while the user decides what to do next.
 
 ## 5. Where pages live
 
@@ -178,9 +186,37 @@ When adding a new page, prefer flat `<Name>Page.tsx` unless the page already nee
 
 ## 6. CSS — what to extend, what to leave alone
 
+- Shared primitive-style classes use the `da-` prefix. The page shell and tabs
+  intentionally use the unprefixed semantic names `page`, `page-card`, and
+  `page-tabs`; do not rename them to add a prefix.
 - All shared layout/component classes live in `src/styles.css`. Add new shared rules at the end of the relevant section.
 - Tokens live in `src/styles/tokens.css`. Reach for an existing token first; promote a new value only when it is used in three or more places.
+- Do not hardcode colors or tokenized spacing, radii, shadows, motion,
+  typography, z-index, or table/grid surface values. Consume the variables from
+  `src/styles/tokens.css`.
 - Three legacy component-level stylesheets exist and **must not be extended**: `src/components/ChatListPanel.css`, `src/components/ProgressStepper.css`, `src/components/ArtifactsBadge.css`. They predate the refactor. When a feature touches one of these surfaces, migrate the rules into `styles.css` (boy-scout) — don't add new rules to the legacy file.
+
+### Typography scale
+
+`src/styles/tokens.css` is authoritative for these values:
+
+| Token             | Value  | Use                            |
+| ----------------- | ------ | ------------------------------ |
+| `--font-size-2xs` | `10px` | timestamps and micro labels    |
+| `--font-size-xs`  | `11px` | column headers and metadata    |
+| `--font-size-sm`  | `12px` | secondary body and hints       |
+| `--font-size-md`  | `13px` | default body and table cells   |
+| `--font-size-lg`  | `15px` | emphasized body and row titles |
+| `--font-size-xl`  | `18px` | card and section titles        |
+| `--font-size-2xl` | `22px` | page subheads                  |
+| `--font-size-3xl` | `28px` | page heroes                    |
+| `--font-size-4xl` | `36px` | auth hero only                 |
+
+Font weights are `--font-weight-regular`, `--font-weight-medium`,
+`--font-weight-semibold`, and `--font-weight-bold`. Line heights are
+`--line-height-tight` for headings and `--line-height-normal` for body and
+hints. Do not add another font-size token without an explicit design decision;
+use the existing t-shirt scale directly.
 
 ## 7. Enforcement
 
@@ -199,6 +235,8 @@ What it catches today (errors block the commit):
 - `da-no-hex-in-css` — hex literal in any CSS file outside `tokens.css` and the 3 legacy files.
 - `da-no-raw-font-size` — `font-size: 13px` / `1rem` outside `tokens.css`. Use one of `var(--font-size-{2xs|xs|sm|md|lg|xl|2xl|3xl|4xl})`.
 - `da-no-new-component-css` — new `.css` files under `src/` other than the 5 allowlisted ones.
+- `da-no-hover-motion` — non-`none` `transform` or `filter` declarations in
+  Desktop `:hover` blocks. Use background, border, text color, or shadow.
 
 Plus two warn-level checks (listed but don't block):
 
@@ -236,6 +274,9 @@ To extend rules or add coverage to control-ui / profile-ui, edit
 and the full rule set is ~200 lines of readable JS — see
 `scripts/style-rules/README.md`.
 
+Keep this document synchronized with the checker. Do not add an enforcement
+rule without documenting its behavior and scope here.
+
 ## 8. Anti-patterns to avoid
 
 - New CSS files at component level (`.module.css` or sibling `.css` to a `.tsx`). The three legacy ones are the exception, not a precedent.
@@ -243,5 +284,7 @@ and the full rule set is ~200 lines of readable JS — see
 - Adding a new tab class family per domain. Use `.page-tabs` / `.page-tab.active`.
 - Adding a parallel grid/table class family. Extend `.da-grid` modifiers.
 - Hex colors literal in TS/TSX. The one acceptable case is user-controlled dynamic state (e.g. annotation color picker initial value).
-- Inline styles other than `--da-grid-cols`. If you find yourself reaching for one, the right move is usually a class on the global stylesheet or a new token.
+- Static inline styles other than `--da-grid-cols`. Genuinely runtime-computed
+  values must use the documented §7 escape-hatch process; other styling belongs
+  in `src/styles.css` or `src/styles/tokens.css`.
 - **Removing a table's own frame via contextual overrides.** Never write `.some-context .da-grid { border: none; background: transparent }` — every table always owns its own frame regardless of what surrounds it. See §3 "Table frame ownership".

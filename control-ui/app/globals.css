@@ -61,9 +61,65 @@
   --cu-create-panel-padding-x: 1.15rem;
   --cu-create-action-min-width: 8.5rem;
   --cu-create-flow-min-height: calc(100vh - 7rem);
-  --cu-create-flow-card-min-height: calc(100vh - 2rem);
   --cu-toast-top-offset: calc(var(--cu-space-5) * 3.5);
   --cu-expandable-body-bg: #000000;
+
+  /* ---- Typography ---------------------------------------------------- */
+  /* Derived from control-ui's own de-facto usage, so adopting the scale is
+     a near-zero visual diff. Deliberately NOT the desktop scale:
+     --cu-font-size-md is 14px here, --font-size-md is 13px in
+     desktop-app/ui/src/styles/tokens.css. Different prefixes, different
+     values, intentional. See docs/agents/control-ui-rules.md. */
+  --cu-font-size-2xs: 0.6875rem; /* 11px  uppercase eyebrows, table th   */
+  --cu-font-size-xs: 0.75rem; /* 12px  hints, subtitles, chips        */
+  --cu-font-size-sm: 0.8125rem; /* 13px  tabs, sm buttons, dense body   */
+  --cu-font-size-md: 0.875rem; /* 14px  DEFAULT body, table cells      */
+  --cu-font-size-lg: 0.9375rem; /* 15px  panel header, row title        */
+  --cu-font-size-xl: 1rem; /* 16px  card / section title           */
+  --cu-font-size-2xl: 1.125rem; /* 18px  page subhead                   */
+  --cu-font-size-3xl: 1.375rem; /* 22px  page hero                      */
+  --cu-font-size-4xl: 1.75rem; /* 28px  auth hero only                 */
+
+  --cu-font-weight-regular: 400;
+  --cu-font-weight-medium: 500;
+  --cu-font-weight-semibold: 600;
+  --cu-font-weight-bold: 700;
+
+  --cu-line-height-tight: 1.2; /* headings           */
+  --cu-line-height-normal: 1.45; /* body, hints        */
+  --cu-line-height-relaxed: 1.5; /* body.cu-body today */
+
+  --cu-font-mono:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+    monospace;
+
+  /* ---- Spacing ------------------------------------------------------- */
+  /* --cu-space-1..5 above are unchanged; these fill the ends of the scale
+     so the raw-rem tail has somewhere to land. */
+  --cu-space-0: 0.125rem; /*  2px */
+  --cu-space-05: 0.25rem; /*  4px */
+  --cu-space-6: 1.5rem; /* 24px */
+  --cu-space-7: 2rem; /* 32px */
+
+  /* ---- Radius -------------------------------------------------------- */
+  --cu-radius-xs: 4px; /* names the 4px literals and calc(-2px) hacks; --cu-radius-pill already exists above */
+
+  /* ---- Motion -------------------------------------------------------- */
+  --cu-motion-fast: 0.12s;
+  --cu-motion-base: var(--cu-control-transition);
+
+  /* ---- Semantic aliases ---------------------------------------------- */
+  /* These names were already referenced across the codebase but never
+     declared. Undeclared custom properties make the whole declaration
+     invalid at computed-value time, so each of these was silently dropping
+     a rule. The -rgb inputs are redefined per theme, so a single
+     declaration here resolves correctly in both. */
+  --cu-focus: rgba(var(--cu-focus-rgb), 0.8);
+  --cu-error: var(--cu-danger);
+  --cu-warn-text: var(--cu-warning);
+  --cu-warn-border: rgba(var(--cu-warning-rgb), 0.4);
+  --cu-ok-text: var(--cu-success);
+  --cu-ok-border: rgba(var(--cu-success-rgb), 0.4);
 }
 
 :root[data-theme='light'] {
@@ -6333,7 +6389,7 @@ textarea.cu-input {
   padding: 0.75rem 0.85rem;
   border: 1px solid var(--cu-border);
   border-radius: var(--cu-radius-sm);
-  background: var(--cu-bg-panel);
+  background: var(--cu-bg-elevated);
 }
 
 .cu-agent-radio--card:has(input:checked) {
@@ -7235,98 +7291,6 @@ textarea.cu-input {
   accent-color: var(--cu-accent);
 }
 
-.cu-team-member-role-menu {
-  position: relative;
-  width: min(9rem, 100%);
-  justify-self: end;
-  align-self: center;
-}
-
-.cu-team-member-role-menu__button {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--cu-space-2);
-  width: 100%;
-  min-height: 2.25rem;
-  padding: 0.45rem 0.65rem;
-  color: var(--cu-text);
-  border: 1px solid var(--cu-border);
-  border-radius: var(--cu-radius-sm);
-  background: var(--cu-bg-elevated);
-  font: inherit;
-  font-size: 0.875rem;
-  line-height: 1.2;
-  cursor: pointer;
-  transition:
-    border-color var(--cu-control-transition),
-    background var(--cu-control-transition),
-    box-shadow var(--cu-control-transition);
-}
-
-.cu-team-member-role-menu__button:hover,
-.cu-team-member-role-menu__button[aria-expanded='true'] {
-  border-color: var(--cu-accent);
-  background: var(--cu-surface);
-}
-
-.cu-team-member-role-menu__button:focus-visible {
-  outline: 2px solid rgba(var(--cu-focus-rgb), 0.8);
-  outline-offset: 2px;
-}
-
-.cu-team-member-role-menu__button:disabled {
-  cursor: not-allowed;
-  opacity: 0.62;
-}
-
-.cu-team-member-role-menu__chevron {
-  width: 0.45rem;
-  height: 0.45rem;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  color: var(--cu-text-soft);
-  transform: translateY(-0.12rem) rotate(45deg);
-  flex-shrink: 0;
-}
-
-.cu-team-member-role-menu__list {
-  position: fixed;
-  z-index: 45;
-  top: var(--cu-role-menu-top);
-  left: var(--cu-role-menu-left);
-  display: grid;
-  gap: 0.15rem;
-  width: max(var(--cu-role-menu-width), 9rem);
-  padding: 0.25rem;
-  border: 1px solid var(--cu-border);
-  border-radius: var(--cu-radius-sm);
-  background: var(--cu-bg-elevated);
-  box-shadow: var(--cu-shadow);
-}
-
-.cu-team-member-role-menu__option {
-  width: 100%;
-  padding: 0.45rem 0.55rem;
-  color: var(--cu-text-muted);
-  border: 0;
-  border-radius: calc(var(--cu-radius-sm) - 2px);
-  background: transparent;
-  font: inherit;
-  font-size: 0.875rem;
-  line-height: 1.2;
-  text-align: left;
-  cursor: pointer;
-}
-
-.cu-team-member-role-menu__option:hover,
-.cu-team-member-role-menu__option:focus-visible,
-.cu-team-member-role-menu__option[data-selected='true'] {
-  color: var(--cu-text);
-  background: rgba(var(--cu-accent-rgb), 0.16);
-  outline: none;
-}
-
 .cu-agent-warning-title {
   display: inline-flex;
   align-items: center;
@@ -7443,11 +7407,6 @@ textarea.cu-input {
 
   .cu-team-member-picker__option {
     grid-template-columns: 1fr;
-  }
-
-  .cu-team-member-role-menu {
-    width: 100%;
-    justify-self: stretch;
   }
 }
 
@@ -8222,7 +8181,7 @@ textarea.cu-input {
   padding: 0.65rem 0.75rem;
   border: 1px dashed var(--cu-border-subtle);
   border-radius: var(--cu-radius-sm);
-  background: var(--cu-bg-panel);
+  background: var(--cu-bg-elevated);
 }
 
 .cu-llm-credential-stored__state {
@@ -8259,7 +8218,7 @@ textarea.cu-input {
   padding: 1rem;
   border: 1px solid var(--cu-border-subtle);
   border-radius: 8px;
-  background: var(--cu-bg-panel);
+  background: var(--cu-bg-elevated);
 }
 
 .cu-agent-credential-set__head {
@@ -8507,7 +8466,7 @@ textarea.cu-input {
   overflow: hidden;
   border: 1px solid var(--cu-border-subtle);
   border-radius: 0.35rem;
-  background: var(--cu-bg-panel);
+  background: var(--cu-bg-elevated);
   color: var(--cu-text-muted);
   font-size: 0.6875rem;
   font-weight: 700;
@@ -8949,7 +8908,7 @@ textarea.cu-input {
 .cu-markdown-editor .w-md-editor-toolbar li > button:hover,
 .cu-markdown-editor .w-md-editor-toolbar li > button:focus {
   color: var(--cu-text);
-  background: var(--cu-bg-muted);
+  background: var(--cu-surface-hover);
 }
 
 .cu-markdown-editor .w-md-editor-text,
@@ -9794,7 +9753,7 @@ textarea.cu-input {
 .cu-code-block {
   margin: 0;
   padding: 0.6rem 0.75rem;
-  background: var(--cu-surface-alt, var(--cu-surface));
+  background: var(--cu-surface);
   border: 1px solid var(--cu-border);
   border-radius: var(--cu-radius-sm, var(--cu-radius));
   font-family: var(--cu-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
