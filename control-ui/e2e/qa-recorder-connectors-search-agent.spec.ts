@@ -81,7 +81,6 @@ test.describe('optional QA recorder: Control UI connectors search by agent', () 
           contextRef: contextName,
           secretRef: '',
           channels: [],
-          model: { provider: 'openai', name: 'gpt-5.4-mini' },
         },
       })
       expect(hostRes.status, `create host: ${JSON.stringify(hostRes.data)}`).toBeLessThan(300)
@@ -92,7 +91,7 @@ test.describe('optional QA recorder: Control UI connectors search by agent', () 
         page.getByText('Browse connector deployments and agent access.', { exact: true })
       ).toBeVisible({ timeout: 20_000 })
 
-      const row = page.getByRole('row', { name: new RegExp(serverName) })
+      const row = page.getByRole('button', { name: new RegExp(`Expand connector ${serverName}`) })
       await expect(row).toBeVisible({ timeout: 20_000 })
 
       // Typing the agent display name keeps the row: access principals are

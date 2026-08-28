@@ -41,7 +41,6 @@ test.describe('Control UI — Team create wizard', () => {
         contextRef: CONTEXT_ID,
         secretRef: '',
         channels: [],
-        model: { provider: 'openai', name: 'gpt-5.4-mini' },
       },
     })
   })
@@ -105,9 +104,8 @@ test.describe('Control UI — Team create wizard', () => {
     expect(contextIds ?? []).toContain(CONTEXT_ID)
 
     await authedPage.goto(`/users-and-teams/teams/${encodeURIComponent(teamId)}/access`)
-    const row = authedPage
-      .getByRole('row')
-      .filter({ has: authedPage.getByRole('cell', { name: HOST_DISPLAY_NAME, exact: true }) })
+    // Access rows are role="listitem" divs (.cu-access-row), not table rows.
+    const row = authedPage.getByRole('listitem').filter({ hasText: HOST_DISPLAY_NAME })
     await expect(row).toBeVisible({ timeout: 15_000 })
     await expect(row).not.toContainText(CONTEXT_ID)
   })

@@ -55,7 +55,11 @@ test.describe('Control UI — Contexts removal', () => {
       await controlApi.ensureContextDeleted(ctxName)
       await controlApi.createContext({
         metadata: { name: ctxName },
-        spec: { contextId: ctxName, description: 'contexts.spec.ts redirect fixture' },
+        spec: {
+          contextId: ctxName,
+          description: 'contexts.spec.ts redirect fixture',
+          mcpServers: [],
+        },
       })
       await controlApi.ensureHostDeleted(hostName)
       await controlApi.createHost({
@@ -65,7 +69,6 @@ test.describe('Control UI — Contexts removal', () => {
           contextRef: ctxName,
           secretRef: '',
           channels: [],
-          model: { provider: 'openai', name: 'gpt-5.4-mini' },
         },
       })
 

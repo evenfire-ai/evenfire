@@ -59,7 +59,6 @@ test.describe('Control UI — Agent detail connectors tab', () => {
           contextRef: contextName,
           secretRef: '',
           channels: [],
-          model: { provider: 'openai', name: 'gpt-5.4-mini' },
         },
       })
 

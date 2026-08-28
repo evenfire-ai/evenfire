@@ -60,7 +60,6 @@ test.describe('Control UI — Agents list connectors hover card', () => {
           contextRef: contextName,
           secretRef: '',
           channels: [],
-          model: { provider: 'openai', name: 'gpt-5.4-mini' },
         },
       })
 

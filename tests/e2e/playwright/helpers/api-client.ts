@@ -71,7 +71,7 @@ export const controlApi = {
   },
 
   async getUsers(query = ''): Promise<{ items: AdminUser[] }> {
-    const qs = query ? `?query=${encodeURIComponent(query)}` : ''
+    const qs = query ? `?q=${encodeURIComponent(query)}` : ''
     return apiFetch<{ items: AdminUser[] }>('GET', `/api/v1/admin/users${qs}`)
   },
 

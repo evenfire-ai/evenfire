@@ -78,7 +78,6 @@ test.describe('optional QA recorder: Control UI marketplace install', () => {
           contextRef: contextName,
           secretRef: '',
           channels: [],
-          model: { provider: 'openai', name: 'gpt-5.4-mini' },
         },
       })
       expect(hostRes.status, `create host: ${JSON.stringify(hostRes.data)}`).toBeLessThan(300)
@@ -198,10 +197,12 @@ test.describe('optional QA recorder: Control UI marketplace install', () => {
       await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
 
       // The fresh install has no agents yet.
-      const row = page.getByRole('row', { name: new RegExp(serverName) })
+      const row = page.getByRole('button', { name: new RegExp(`Expand connector ${serverName}`) })
       await expect(row).toBeVisible({ timeout: 30_000 })
       await row.click()
-      await expect(row).toHaveAttribute('aria-expanded', 'true', { timeout: 10_000 })
+      await expect(
+        page.getByRole('button', { name: new RegExp(`Collapse connector ${serverName}`) })
+      ).toBeVisible({ timeout: 10_000 })
       const detail = page.locator('.cu-connector-detail')
       await expect(detail).toBeVisible({ timeout: 10_000 })
       await expect(detail.getByText('No agents have access yet.', { exact: true })).toBeVisible()

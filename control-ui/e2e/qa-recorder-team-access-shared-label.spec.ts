@@ -1,14 +1,14 @@
-// control-ui/e2e/qa-recorder-team-access.spec.ts
+// control-ui/e2e/qa-recorder-team-access-shared-label.spec.ts
 //
 // Optional QA recorder journey (MUTATING). Requires QA_RECORDER_CONFIRM_MUTATIONS=1.
-// Creates a team through the Control API, seeds a host-backed access scope,
-// grants it via PUT /teams/<id>/contexts, then records the team detail Access
-// tab: subtitle "Members, connector access, and agents.", intro "Agents and
-// connector scopes this team may access.", the agent-display-name row (never
-// the raw contextId), the 'Add access' modal assertions, removal with the
-// "Team access updated." toast, and the legacy /contexts → /access redirect.
-// The team, host, and context are deleted via the Control API in the finally
-// (hosts before contexts).
+// Creates a team through the Control API, seeds ONE host-backed access scope
+// shared by TWO hosts, and grants it via PUT /teams/<id>/contexts. The team
+// detail Access tab must render that shared scope as a SINGLE row labelled
+// with both agent display names joined by ", " (lib/accessScopeLabels joins
+// the sorted owner names), never two rows and never the raw contextId.
+// Removal confirms with the joined label in the dialog text and toasts
+// "Team access updated.". The team, hosts, and context are deleted via the
+// Control API in the finally (hosts before the context).
 //
 // Contract: docs/testing/optional-playwright-qa-recorder.md ("Extending the
 // recorder").
@@ -25,31 +25,36 @@ import {
   uniqueE2EName,
 } from './qa-recorder-helpers'
 
-test.describe('optional QA recorder: Control UI team Access tab', () => {
-  test('records granting, reviewing, and removing team access plus the legacy redirect', async ({
+test.describe('optional QA recorder: Control UI team Access shared-scope label', () => {
+  test('records the joined shared-scope label on the team Access tab and its removal', async ({
     page,
   }, testInfo) => {
     requireRecorderConfirm(
       'QA_RECORDER_CONFIRM_MUTATIONS',
-      'This journey creates and deletes a team, a host, and a context.'
+      'This journey creates and deletes a team, two hosts, and a context.'
     )
     assertAllowedTarget('CONTROL_UI_URL', CONTROL_UI_URL)
     assertAllowedTarget('CONTROL_API_URL', CONTROL_API_URL)
 
     const credentials = adminCredentials()
-    const journey = 'control-ui-team-access'
-    const teamName = uniqueE2EName('qa-recorder-team-access')
-    const contextName = uniqueE2EName('qa-recorder-team-ctx')
-    const contextId = uniqueE2EName('qa-recorder-team-scope')
-    const hostName = uniqueE2EName('qa-recorder-team-host')
-    const hostDisplayName = uniqueE2EName('qa-recorder-team-agent')
+    const journey = 'control-ui-team-access-shared'
+    const teamName = uniqueE2EName('qa-recorder-team-shared')
+    const contextName = uniqueE2EName('qa-recorder-tas-ctx')
+    const contextId = uniqueE2EName('qa-recorder-tas-scope')
+    const hostNameA = uniqueE2EName('qa-recorder-tas-host-a')
+    const hostNameB = uniqueE2EName('qa-recorder-tas-host-b')
+    const hostDisplayA = uniqueE2EName('qa-recorder-tas-agent-a')
+    const hostDisplayB = uniqueE2EName('qa-recorder-tas-agent-b')
+    // accessScopeLabels joins the sorted owner names with ", " — the "a"
+    // agent sorts before the "b" agent, so the joined label is deterministic.
+    const joinedLabel = `${hostDisplayA}, ${hostDisplayB}`
     let teamId = ''
 
     try {
       await loginThroughUi(page, credentials)
 
-      // Stage the team and its host-backed access scope out-of-band; the
-      // behavior under test is the Access tab round-trip.
+      // Stage the team and its shared scope out-of-band; the behavior under
+      // test is the Access tab presentation and removal round-trip.
       const teamRes = await api<{ id?: string }>(page.request, 'POST', '/api/v1/admin/teams', {
         name: teamName,
       })
@@ -60,22 +65,27 @@ test.describe('optional QA recorder: Control UI team Access tab', () => {
         metadata: { name: contextName },
         spec: {
           contextId,
-          description: 'QA recorder team access scope',
+          description: 'QA recorder team shared access scope',
           mcpServers: [],
         },
       })
       expect(ctxRes.status, `create context: ${JSON.stringify(ctxRes.data)}`).toBeLessThan(300)
 
-      const hostRes = await api(page.request, 'POST', '/api/v1/admin/hosts', {
-        metadata: { name: hostName },
-        spec: {
-          host: hostDisplayName,
-          contextRef: contextId,
-          secretRef: '',
-          channels: [],
-        },
-      })
-      expect(hostRes.status, `create host: ${JSON.stringify(hostRes.data)}`).toBeLessThan(300)
+      for (const [hostName, hostDisplay] of [
+        [hostNameA, hostDisplayA],
+        [hostNameB, hostDisplayB],
+      ] as const) {
+        const hostRes = await api(page.request, 'POST', '/api/v1/admin/hosts', {
+          metadata: { name: hostName },
+          spec: {
+            host: hostDisplay,
+            contextRef: contextId,
+            secretRef: '',
+            channels: [],
+          },
+        })
+        expect(hostRes.status, `create host: ${JSON.stringify(hostRes.data)}`).toBeLessThan(300)
+      }
 
       const grantRes = await api(
         page.request,
@@ -101,10 +111,6 @@ test.describe('optional QA recorder: Control UI team Access tab', () => {
       await expect(page).toHaveURL(/\/users-and-teams\/teams\/[^/]+\/members$/, {
         timeout: 20_000,
       })
-      if (!teamId) {
-        const match = page.url().match(/\/users-and-teams\/teams\/([^/]+)\//)
-        teamId = decodeURIComponent(match?.[1] || '')
-      }
 
       const accessTab = page.getByRole('tab', { name: 'Access', exact: true })
       await accessTab.click()
@@ -112,52 +118,36 @@ test.describe('optional QA recorder: Control UI team Access tab', () => {
         timeout: 20_000,
       })
 
-      // Exact subtitle and intro; the row shows the host display name, never
-      // the raw wire contextId. Access rows are role="listitem" divs
-      // (.cu-access-row), not table rows.
-      await expect(
-        page.getByText('Members, connector access, and agents.', { exact: true })
-      ).toBeVisible({ timeout: 20_000 })
+      // The shared scope renders as ONE row with the joined "A, B" label —
+      // never the raw wire contextId, never one row per host.
       await expect(
         page.getByText('Agents and connector scopes this team may access.', { exact: true })
-      ).toBeVisible()
-      const row = page.getByRole('listitem').filter({ hasText: hostDisplayName })
+      ).toBeVisible({ timeout: 20_000 })
+      const row = page.getByRole('listitem').filter({ hasText: joinedLabel })
       await expect(row).toBeVisible({ timeout: 20_000 })
       await expect(row).not.toContainText(contextId)
+      await expect(page.getByRole('listitem').getByText(hostDisplayA, { exact: true })).toHaveCount(
+        0
+      )
+      await expect(page.getByRole('listitem').getByText(hostDisplayB, { exact: true })).toHaveCount(
+        0
+      )
       await screenshotAndLog(page, testInfo, `${journey}-granted`)
 
-      // 'Add access' picker modal assertions, then cancel.
-      await page.getByRole('button', { name: 'Add access', exact: true }).click()
-      const dialog = page.getByRole('dialog', { name: 'Add access' })
-      await expect(dialog).toBeVisible()
-      await expect(dialog.getByLabel('Access')).toBeVisible()
-      await expect(dialog.getByRole('button', { name: 'Add access', exact: true })).toBeVisible()
-      await screenshotAndLog(page, testInfo, `${journey}-add-modal`)
-      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
-      await expect(dialog).toHaveCount(0)
-
-      // Remove the row: confirm dialog → toast → row gone.
+      // Remove the row: confirm dialog names the joined label → toast → row gone.
       await row.getByLabel('Remove access').click()
       const confirmDialog = page.getByRole('alertdialog', { name: 'Remove Access' })
       await expect(confirmDialog).toBeVisible()
+      await expect(confirmDialog).toContainText(joinedLabel)
+      await expect(confirmDialog).not.toContainText(contextId)
+      await screenshotAndLog(page, testInfo, `${journey}-remove-confirm`)
       await confirmDialog.getByRole('button', { name: 'Remove access', exact: true }).click()
       await expect(
         page.getByRole('status').filter({ hasText: 'Team access updated.' })
       ).toBeVisible({ timeout: 20_000 })
-      // The mapping moves to the "Removed access" tombstone (deleted history),
-      // so the actionable row disappears but a read-only row may remain.
       await expect(row.getByLabel('Remove access')).toHaveCount(0)
       await expect(page.getByText('No access assigned yet.', { exact: true })).toBeVisible()
       await screenshotAndLog(page, testInfo, `${journey}-removed`)
-
-      // Legacy /contexts deep link redirects to /access.
-      await page.goto(
-        `${CONTROL_UI_URL}/users-and-teams/teams/${encodeURIComponent(teamId)}/contexts`
-      )
-      await expect(page).toHaveURL(/\/users-and-teams\/teams\/[^/]+\/access$/, {
-        timeout: 20_000,
-      })
-      await screenshotAndLog(page, testInfo, `${journey}-legacy-redirect`)
     } finally {
       try {
         const request = page.request
@@ -178,7 +168,8 @@ test.describe('optional QA recorder: Control UI team Access tab', () => {
       } catch {
         // Best-effort cleanup; the disposable environment tolerates leftovers.
       }
-      await api(page.request, 'DELETE', `/api/v1/admin/hosts/${encodeURIComponent(hostName)}`)
+      await api(page.request, 'DELETE', `/api/v1/admin/hosts/${encodeURIComponent(hostNameA)}`)
+      await api(page.request, 'DELETE', `/api/v1/admin/hosts/${encodeURIComponent(hostNameB)}`)
       await api(page.request, 'DELETE', `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`)
     }
   })

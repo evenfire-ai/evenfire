@@ -36,7 +36,6 @@ test.describe('Control UI — Team Access tab', () => {
         contextRef: CONTEXT_ID,
         secretRef: '',
         channels: [],
-        model: { provider: 'openai', name: 'gpt-5.4-mini' },
       },
     })
     await controlApi.updateTeamContexts(teamId, [CONTEXT_ID])
@@ -57,9 +56,8 @@ test.describe('Control UI — Team Access tab', () => {
       authedPage.getByText('Agents and connector scopes this team may access.')
     ).toBeVisible()
 
-    const row = authedPage
-      .getByRole('row')
-      .filter({ has: authedPage.getByRole('cell', { name: HOST_DISPLAY_NAME, exact: true }) })
+    // Access rows are role="listitem" divs (.cu-access-row), not table rows.
+    const row = authedPage.getByRole('listitem').filter({ hasText: HOST_DISPLAY_NAME })
     await expect(row).toHaveCount(1)
     await expect(row).not.toContainText(CONTEXT_ID)
   })
@@ -84,9 +82,7 @@ test.describe('Control UI — Team Access tab', () => {
     authedPage,
   }) => {
     await authedPage.goto(`/users-and-teams/teams/${encodeURIComponent(teamId)}/access`)
-    const row = authedPage
-      .getByRole('row')
-      .filter({ has: authedPage.getByRole('cell', { name: HOST_DISPLAY_NAME, exact: true }) })
+    const row = authedPage.getByRole('listitem').filter({ hasText: HOST_DISPLAY_NAME })
     await expect(row).toBeVisible({ timeout: 15_000 })
 
     await row.getByLabel('Remove access').click()

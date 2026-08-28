@@ -40,7 +40,6 @@ test.describe('Control UI — Member Access tab', () => {
         contextRef: CONTEXT_ID,
         secretRef: '',
         channels: [],
-        model: { provider: 'openai', name: 'gpt-5.4-mini' },
       },
     })
     await controlApi.updateUserContexts(userId, [...originalContextIds, CONTEXT_ID])

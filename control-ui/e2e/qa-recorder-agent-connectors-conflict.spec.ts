@@ -96,7 +96,6 @@ test.describe('optional QA recorder: Control UI agent connectors conflict', () =
           contextRef: contextName,
           secretRef: '',
           channels: [],
-          model: { provider: 'openai', name: 'gpt-5.4-mini' },
         },
       })
       expect(hostRes.status, `create host: ${JSON.stringify(hostRes.data)}`).toBeLessThan(300)

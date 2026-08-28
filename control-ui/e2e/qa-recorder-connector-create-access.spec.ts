@@ -36,7 +36,9 @@ async function continueWizard(page: Page): Promise<void> {
 async function openCreateConnectorWizard(page: Page): Promise<void> {
   await page.getByRole('link', { name: 'Installed Connectors', exact: true }).click()
   await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
-  await page.getByRole('button', { name: 'Create Connector', exact: true }).click()
+  // Creation lives behind the "Connector actions" kebab (lowercase c menuitem).
+  await page.getByRole('button', { name: 'Connector actions' }).click()
+  await page.getByRole('menuitem', { name: 'Create connector', exact: true }).click()
   await expect(page).toHaveURL(/\/connectors\/new$/, { timeout: 20_000 })
 }
 
@@ -102,10 +104,12 @@ async function createConnectorThroughWizard(
 }
 
 async function expandConnector(page: Page, connectorName: string) {
-  const row = page.getByRole('row', { name: new RegExp(connectorName) })
+  const row = page.getByRole('button', { name: new RegExp(`Expand connector ${connectorName}`) })
   await expect(row).toBeVisible({ timeout: 20_000 })
   await row.click()
-  await expect(row).toHaveAttribute('aria-expanded', 'true', { timeout: 10_000 })
+  await expect(
+    page.getByRole('button', { name: new RegExp(`Collapse connector ${connectorName}`) })
+  ).toBeVisible({ timeout: 10_000 })
   const detail = page.locator('.cu-connector-detail')
   await expect(detail).toBeVisible({ timeout: 10_000 })
   return detail
@@ -153,7 +157,6 @@ test.describe('optional QA recorder: Control UI connector create Access step', (
           contextRef: contextName,
           secretRef: '',
           channels: [],
-          model: { provider: 'openai', name: 'gpt-5.4-mini' },
         },
       })
       expect(hostRes.status, `create host: ${JSON.stringify(hostRes.data)}`).toBeLessThan(300)

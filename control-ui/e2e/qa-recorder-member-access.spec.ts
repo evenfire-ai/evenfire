@@ -64,7 +64,9 @@ test.describe('optional QA recorder: Control UI member Access tab', () => {
       await teamsTab.click()
       await expect(page).toHaveURL(/\/users-and-teams\/teams$/, { timeout: 20_000 })
       await expect(
-        page.locator('table', { hasText: 'Team name' }).getByRole('button', { name: 'Access' })
+        page
+          .locator('table', { hasText: 'Team name' })
+          .getByRole('button', { name: 'Sort by access' })
       ).toBeVisible({ timeout: 20_000 })
       await expect(page.getByRole('columnheader', { name: 'Contexts' })).toHaveCount(0)
       await screenshotAndLog(page, testInfo, `${journey}-teams-table`)
@@ -133,7 +135,6 @@ test.describe('optional QA recorder: Control UI member Access tab', () => {
           contextRef: contextId,
           secretRef: '',
           channels: [],
-          model: { provider: 'openai', name: 'gpt-5.4-mini' },
         },
       })
       expect(hostRes.status, `create host: ${JSON.stringify(hostRes.data)}`).toBeLessThan(300)
@@ -178,7 +179,7 @@ test.describe('optional QA recorder: Control UI member Access tab', () => {
       await expect(page.getByRole('status').filter({ hasText: 'Access updated.' })).toBeVisible({
         timeout: 20_000,
       })
-      await expect(row).toHaveCount(0)
+      await expect(row.getByLabel('Remove access')).toHaveCount(0)
       await screenshotAndLog(page, testInfo, `${journey}-removed`)
     } finally {
       if (userId && originalContextIds !== null) {

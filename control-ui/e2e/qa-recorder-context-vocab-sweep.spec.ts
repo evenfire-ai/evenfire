@@ -10,10 +10,12 @@
 //
 // Approach (one rule): every swept route renders through DashboardLayout's
 // <main>, so each page is asserted on its main-content text (body as
-// fallback). The single exception is /plugins, whose table rows show
-// user-authored recipe names we do not control — for that page only, the
-// assertion is scoped to product-owned static chrome (sidebar, panel
-// subtitles, headings), which cannot be polluted by data-derived names.
+// fallback). The exceptions are routes whose tables show data-derived text we
+// do not control — /plugins (user-authored recipe names), /connectors, and
+// /marketplace/connectors (deployed connector and marketplace package
+// names/descriptions). For those routes only, the assertion is scoped to
+// product-owned static chrome (sidebar, panel subtitles, headings), which
+// cannot be polluted by data-derived names.
 //
 // Lines containing "context window" (legitimate LLM copy) are allowed.
 import { type Page, expect, test } from '@playwright/test'
@@ -39,7 +41,7 @@ const SWEPT_ROUTES = {
   plugins: '/plugins',
 } as const
 
-// Product-owned chrome for the /plugins exception (see header comment).
+// Product-owned chrome for the static-chrome exceptions (see header comment).
 const STATIC_CHROME_SELECTOR = '.cu-sidebar, .cu-table-panel__subtitle, h1, h2, h3'
 
 function offendingLines(text: string): string[] {
@@ -56,6 +58,16 @@ async function mainText(page: Page): Promise<string> {
   return page.locator('body').innerText()
 }
 
+async function chromeText(page: Page): Promise<string> {
+  const chrome = page.locator(STATIC_CHROME_SELECTOR)
+  const count = await chrome.count()
+  const texts: string[] = []
+  for (let i = 0; i < count; i += 1) {
+    texts.push(await chrome.nth(i).innerText())
+  }
+  return texts.join('\n')
+}
+
 function screenshotName(route: string): string {
   return `control-ui-context-vocab-sweep${route.replace(/\//g, '-')}`
 }
@@ -70,10 +82,10 @@ test.describe('optional QA recorder: Control UI context vocabulary sweep', () =>
 
     const mainNav = page.getByRole('navigation', { name: 'Main sections' })
 
-    async function recordAndSweep(route: string): Promise<void> {
+    async function recordAndSweep(route: string, chromeOnly = false): Promise<void> {
       await expect(page.locator('main').first()).toBeVisible({ timeout: 20_000 })
       await screenshotAndLog(page, testInfo, screenshotName(route))
-      const text = await mainText(page)
+      const text = chromeOnly ? await chromeText(page) : await mainText(page)
       const offending = offendingLines(text)
       expect(
         offending,
@@ -89,13 +101,14 @@ test.describe('optional QA recorder: Control UI context vocabulary sweep', () =>
     ).toBeVisible({ timeout: 20_000 })
     await recordAndSweep(SWEPT_ROUTES.agents)
 
-    // /connectors
+    // /connectors — rows show data-derived connector names/descriptions, so
+    // the sweep is scoped to product-owned static chrome.
     await mainNav.getByRole('link', { name: 'Installed Connectors', exact: true }).click()
     await expect(page).toHaveURL(/\/connectors\/?$/, { timeout: 20_000 })
     await expect(
       page.getByText('Browse connector deployments and agent access.', { exact: true })
     ).toBeVisible({ timeout: 20_000 })
-    await recordAndSweep(SWEPT_ROUTES.connectors)
+    await recordAndSweep(SWEPT_ROUTES.connectors, true)
 
     // /users-and-teams/users
     await mainNav.getByRole('link', { name: 'Users & Teams', exact: true }).click()
@@ -115,13 +128,14 @@ test.describe('optional QA recorder: Control UI context vocabulary sweep', () =>
     await expect(page).toHaveURL(/\/users-and-teams\/teams$/, { timeout: 20_000 })
     await recordAndSweep(SWEPT_ROUTES.teams)
 
-    // /marketplace/connectors
+    // /marketplace/connectors — package cards show marketplace-authored
+    // names/descriptions, so the sweep is scoped to static chrome too.
     await mainNav.getByRole('link', { name: 'Marketplace', exact: true }).click()
     await expect(page).toHaveURL(/\/marketplace\/connectors$/, { timeout: 20_000 })
     await expect(
       page.getByText('Discover and install connectors from the Marketplace.')
     ).toBeVisible({ timeout: 20_000 })
-    await recordAndSweep(SWEPT_ROUTES.marketplace)
+    await recordAndSweep(SWEPT_ROUTES.marketplace, true)
 
     // /agent-files — hidden from the sidebar (the Files group's children do
     // not include it), so reach it the way a bookmarked link would.
@@ -153,14 +167,7 @@ test.describe('optional QA recorder: Control UI context vocabulary sweep', () =>
     await expect(page.locator('.cu-panel-title').first()).toBeVisible({ timeout: 20_000 })
     await screenshotAndLog(page, testInfo, screenshotName(SWEPT_ROUTES.plugins))
 
-    const chrome = page.locator(STATIC_CHROME_SELECTOR)
-    const count = await chrome.count()
-    const texts: string[] = []
-    for (let i = 0; i < count; i += 1) {
-      texts.push(await chrome.nth(i).innerText())
-    }
-
-    const chromeOffending = offendingLines(texts.join('\n'))
+    const chromeOffending = offendingLines(await chromeText(page))
     expect(
       chromeOffending,
       `"${SWEPT_ROUTES.plugins}" chrome must not use context vocabulary; offending lines: ${chromeOffending.join(' | ')}`

@@ -145,7 +145,6 @@ test.describe('Control UI — Connector create Access step', () => {
         contextRef: contextName,
         secretRef: '',
         channels: [],
-        model: { provider: 'openai', name: 'gpt-5.4-mini' },
       },
     })
   })

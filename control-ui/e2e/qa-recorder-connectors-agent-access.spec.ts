@@ -51,7 +51,6 @@ test.describe('optional QA recorder: Control UI connectors agent access', () => 
           contextRef,
           secretRef: '',
           channels: [],
-          model: { provider: 'openai', name: 'gpt-5.4-mini' },
         },
       })
       expect(res.status, `create host: ${JSON.stringify(res.data)}`).toBeLessThan(300)
@@ -113,10 +112,13 @@ test.describe('optional QA recorder: Control UI connectors agent access', () => 
       ).toBeVisible({ timeout: 20_000 })
 
       const expandConnector = async () => {
-        const row = page.getByRole('row', { name: new RegExp(serverName) })
+        const row = page.getByRole('button', { name: new RegExp(`Expand connector ${serverName}`) })
         await expect(row).toBeVisible({ timeout: 20_000 })
         await row.click()
-        await expect(row).toHaveAttribute('aria-expanded', 'true', { timeout: 20_000 })
+        const collapse = page.getByRole('button', {
+          name: new RegExp(`Collapse connector ${serverName}`),
+        })
+        await expect(collapse).toBeVisible({ timeout: 20_000 })
         const detail = page.locator('.cu-connector-detail')
         await expect(detail).toBeVisible({ timeout: 20_000 })
         return detail

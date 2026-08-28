@@ -56,7 +56,6 @@ test.describe('Control UI — Connector edit Access tab', () => {
           contextRef: contextName,
           secretRef: '',
           channels: [],
-          model: { provider: 'openai', name: 'gpt-5.4-mini' },
         },
       })
 

@@ -6,8 +6,10 @@
  *
  * Approach (chosen deliberately, one rule): every swept route renders through
  * DashboardLayout's <main>, so each page is asserted on its main-content text
- * (body as fallback). The single exception is /plugins, whose table rows show
- * user-authored recipe names we do not control — for that page only, the
+ * (body as fallback). The exceptions are routes whose tables show
+ * data-derived names we do not control — /plugins (user-authored recipe
+ * names), /connectors, and /marketplace/connectors (deployed connector and
+ * marketplace package names/descriptions). For those routes only, the
  * assertion is scoped to product-owned static chrome (sidebar, panel titles,
  * subtitles, headings), which cannot be polluted by data-derived names.
  *
@@ -28,7 +30,14 @@ const SWEPT_ROUTES = [
   '/cost-and-usage/token-budgets',
 ] as const
 
-// Product-owned chrome for the /plugins exception (see header comment).
+// Routes whose table rows show data-derived text (see header comment): the
+// sweep is scoped to product-owned static chrome instead of the full main.
+const STATIC_CHROME_ROUTES: ReadonlySet<string> = new Set([
+  '/connectors',
+  '/marketplace/connectors',
+])
+
+// Product-owned chrome for the static-chrome exception (see header comment).
 const STATIC_CHROME_SELECTOR = '.cu-sidebar, .cu-panel-title, .cu-table-panel__subtitle, h1, h2, h3'
 
 function offendingLines(text: string): string[] {
@@ -45,12 +54,26 @@ async function mainText(page: Page): Promise<string> {
   return page.locator('body').innerText()
 }
 
+async function chromeText(page: Page): Promise<string> {
+  const chrome = page.locator(STATIC_CHROME_SELECTOR)
+  const count = await chrome.count()
+  const texts: string[] = []
+  for (let i = 0; i < count; i++) {
+    texts.push(await chrome.nth(i).innerText())
+  }
+  return texts.join('\n')
+}
+
 for (const route of SWEPT_ROUTES) {
   test(`"${route}" shows no context vocabulary`, async ({ authedPage }) => {
     await authedPage.goto(route)
     await expect(authedPage.locator('main').first()).toBeVisible({ timeout: 15_000 })
 
-    const text = await mainText(authedPage)
+    const isChromeRoute = STATIC_CHROME_ROUTES.has(route)
+    if (isChromeRoute) {
+      await expect(authedPage.locator('.cu-panel-title').first()).toBeVisible({ timeout: 15_000 })
+    }
+    const text = isChromeRoute ? await chromeText(authedPage) : await mainText(authedPage)
     const offending = offendingLines(text)
     expect(
       offending,
@@ -64,14 +87,7 @@ test('"/plugins" static chrome shows no context vocabulary', async ({ authedPage
   await expect(authedPage.locator('main').first()).toBeVisible({ timeout: 15_000 })
   await expect(authedPage.locator('.cu-panel-title').first()).toBeVisible({ timeout: 15_000 })
 
-  const chrome = authedPage.locator(STATIC_CHROME_SELECTOR)
-  const count = await chrome.count()
-  const texts: string[] = []
-  for (let i = 0; i < count; i++) {
-    texts.push(await chrome.nth(i).innerText())
-  }
-
-  const offending = offendingLines(texts.join('\n'))
+  const offending = offendingLines(await chromeText(authedPage))
   expect(
     offending,
     `"/plugins" chrome must not use context vocabulary; offending lines: ${offending.join(' | ')}`

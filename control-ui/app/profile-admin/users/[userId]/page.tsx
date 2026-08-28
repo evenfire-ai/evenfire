@@ -135,6 +135,16 @@ export default function UserDetailsPage() {
   const [roleEditDraft, setRoleEditDraft] = useState<TeamRole>('member')
 
   const existingTeamIds = useMemo(() => new Set(userTeams.map(team => team.id)), [userTeams])
+  // Label resolution must be declared before its first consumer
+  // (`availableContextOptions` below) — accessing it earlier throws a TDZ
+  // ReferenceError that takes the whole member page down.
+  const accessLabeler = useMemo(
+    () => accessScopeLabeler(contextResources, hosts || []),
+    [contextResources, hosts]
+  )
+  function accessLabelFor(contextId: string): { label: string; resolved: boolean } {
+    return accessLabeler(contextId)
+  }
   const hostNameOptions = useMemo(
     () =>
       Array.from(
@@ -216,17 +226,6 @@ export default function UserDetailsPage() {
     spec?: { contextId?: string }
   }) {
     return String(item.spec?.contextId || item.metadata?.name || '').trim()
-  }
-
-  // Rows are context IDs on the wire, but the user sees what that access
-  // means: the owning agent(s) for private scopes, the stored display name
-  // for anything else, and the raw id as a last-resort muted fallback.
-  const accessLabeler = useMemo(
-    () => accessScopeLabeler(contextResources, hosts || []),
-    [contextResources, hosts]
-  )
-  function accessLabelFor(contextId: string): { label: string; resolved: boolean } {
-    return accessLabeler(contextId)
   }
 
   async function loadData() {
