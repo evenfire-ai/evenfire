@@ -4662,7 +4662,10 @@ export class HostReconciler {
  * (Kyverno/Gatekeeper add-labels, ArgoCD instance, cost tags) must not force a
  * PUT that strips them and re-enters the write loop. A missing or changed
  * authored key still fail-opens to write, so a later third `rbacLabels` key
- * still lands. `isHccOwnedHostResource` keys on the same two labels today.
+ * still lands. A key HCC stops authoring is treated as extra-live and will
+ * not PUT until some other authored field drifts; the previous exact-map
+ * compare used to retract it. `isHccOwnedHostResource` keys on the same two
+ * labels today.
  *
  * Object keys inside each rule are canonicalized: client-node rebuilds
  * V1PolicyRule in attributeTypeMap order (resourceNames before resources), so a
