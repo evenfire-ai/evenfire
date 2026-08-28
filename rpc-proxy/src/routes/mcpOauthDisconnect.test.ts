@@ -161,4 +161,14 @@ describe('DELETE /api/v1/mcp-oauth/:mcpServerName/grant (spec 11 U4 disconnect)'
     expect(res.body.error).toBe('control_api_timeout')
     warnSpy.mockRestore()
   })
+
+  it('coerces an unexpected 2xx (e.g. 200) from control-api to 502 (R1-L2)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // The internal contract is 204-on-success; a 200 is off-contract.
+    fetchSpy.mockResolvedValue(jsonResponse(200, { ok: true }))
+    const res = await request(makeApp()).delete(PATH).set('Authorization', 'Bearer t').send({})
+    expect(res.status).toBe(502)
+    expect(res.body.error).toBe('control_api_invalid_response')
+    warnSpy.mockRestore()
+  })
 })

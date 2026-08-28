@@ -200,9 +200,18 @@ export function createMcpOauthRouter(): Router {
         return
       }
 
-      // Success: control-api answers 204 (no body). Forward it verbatim.
+      // Success is EXACTLY 204 (no body) per the internal contract. Any OTHER
+      // 2xx is an unexpected shape from control-api — coerce it to 502 rather
+      // than forwarding an ambiguous "success" the desktop can't interpret.
+      if (upstream.status === 204) {
+        res.status(204).end()
+        return
+      }
       if (upstream.ok) {
-        res.status(upstream.status).end()
+        console.warn(
+          `[RPC_PROXY] control-api disconnect unexpected 2xx status=${upstream.status} server=${mcpServerName}`
+        )
+        res.status(502).json({ error: 'control_api_invalid_response' })
         return
       }
 
