@@ -92,6 +92,11 @@ import {
 } from './mcp/authorityLifecycle'
 import type { HandleMcpAuthorityPollFailureOptions } from './mcp/authorityLifecycle'
 import { type BrokerTokenProviderDeps, createBrokerTokenProvider } from './mcp/brokerTokenProvider'
+import {
+  buildGrantExistenceQueries,
+  checkGrantExistence,
+  selectRevokedPartitionKeys,
+} from './mcp/grantExistenceClient'
 import { McpStatusHeartbeat } from './mcp/statusHeartbeat'
 import { startMcpInitializationInBackground } from './mcpBackgroundInit'
 import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
@@ -1203,6 +1208,55 @@ export function stopContextMapperPolling(): void {
   contextMapperPollRunner = null
 }
 
+// Guards against a slow grant-existence batch overlapping the next tick: a
+// sweep in flight makes the following tick a no-op rather than stacking a
+// second concurrent batch (the tick cadence < the fetch timeout in the worst
+// case).
+let grantRevocationSweepInFlight = false
+
+/**
+ * Hot-revocation grant-sweep (mini-spec 13 §4.1/§4.2). On the eviction timer's
+ * cadence, ask control-api whether the manager's live OAuth partitions still
+ * have a grant, and evict the ones that no longer do. control-api is the sole
+ * authority (D4): mcp-host asks, never recomputes "connected".
+ *
+ * Fail-OPEN on any transient error (unconfigured gateway/token, 5xx/timeout/403,
+ * network): `checkGrantExistence` throws, we conserve EVERY partition, and the
+ * 15-min idle-evict remains the backstop. Only a definitive `exists:false`
+ * evicts. In-flight is respected inside `evictRevokedPartitions` exactly as in
+ * the idle sweep — a partition with a live tool call is skipped this tick and
+ * re-evaluated next tick, never queued for deferred eviction.
+ */
+async function runGrantRevocationSweep(manager: McpManager): Promise<void> {
+  if (grantRevocationSweepInFlight) return
+  const partitions = manager.listLiveOAuthPartitions()
+  if (partitions.length === 0) return
+  grantRevocationSweepInFlight = true
+  try {
+    const results = await checkGrantExistence(
+      brokerTokenProviderDeps(),
+      buildGrantExistenceQueries(partitions)
+    )
+    // A lifecycle swap (context change / revocation) may have replaced the
+    // manager while the batch was in flight; the successor sweeps its own
+    // partitions next tick. Never mutate a superseded manager.
+    if (mcpManager !== manager) return
+    const evicted = manager.evictRevokedPartitions(selectRevokedPartitionKeys(partitions, results))
+    if (evicted > 0) {
+      console.log(`[Main] Grant-sweep evicted ${evicted} revoked oauth MCP partition(s)`)
+    }
+  } catch (err: unknown) {
+    // Fail-OPEN: a control-api/gateway blip must not tear down live sessions.
+    // The thrown error never carries a token (see grantExistenceClient).
+    console.warn(
+      '[Main] MCP grant-revocation sweep failed; conserving partitions (fail-open):',
+      err instanceof Error ? err.message : String(err)
+    )
+  } finally {
+    grantRevocationSweepInFlight = false
+  }
+}
+
 /**
  * Start periodic MCP status heartbeat. Keeps `observedAt` fresh on every
  * connected server and classifies tools/list failures without interrupting
@@ -1239,6 +1293,10 @@ function startMcpStatusHeartbeat(): void {
     } catch (err: unknown) {
       console.error('[Main] MCP per-user partition eviction failed:', err)
     }
+    // Then the hot-revocation grant-sweep (mini-spec 13): ask control-api whether
+    // the live OAuth partitions still have a grant and evict the revoked ones.
+    // Async + self-guarded; fails open on any error (see runGrantRevocationSweep).
+    void runGrantRevocationSweep(mcpManager)
   }, interval)
 }
 

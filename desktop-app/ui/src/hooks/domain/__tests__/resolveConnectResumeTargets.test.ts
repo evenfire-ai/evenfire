@@ -72,6 +72,36 @@ describe('resolveConnectResumeTargets — U5 deep-link correlation (T5, concurre
     expect(resolveConnectResumeTargets(store.getSnapshot(), 'monday')).toEqual([])
   })
 
+  // M8: pin the `reason !== 'connect_required'` guard. This is the ONLY thing
+  // keeping the unsigned deep-link (R4-M7) from driving an Approve on a suspension
+  // that is not an OAuth connect. The two cases below carry a MATCHING
+  // mcpServerName, so the mcpServerName guard alone does NOT exclude them — only
+  // the reason guard does. Deleting `approval.reason !== 'connect_required'` makes
+  // both return a resume target → these go red (the mutant dies).
+  it('M8: does NOT resume an approval_required suspension even when mcpServerName matches', () => {
+    const store = createSessionFsmStore()
+    // A generic tool approval that (defensively) still carries an mcpServerName.
+    suspend(store, 'agentA', 'chatA1', 'taskA', {
+      requestId: 'reqA',
+      displayName: 'monday tool',
+      reason: 'approval_required',
+      mcpServerName: 'monday',
+    })
+
+    expect(resolveConnectResumeTargets(store.getSnapshot(), 'monday')).toEqual([])
+  })
+
+  it('M8: does NOT resume a reasonless suspension even when mcpServerName matches', () => {
+    const store = createSessionFsmStore()
+    suspend(store, 'agentA', 'chatA1', 'taskA', {
+      requestId: 'reqA',
+      displayName: 'monday tool',
+      mcpServerName: 'monday',
+    })
+
+    expect(resolveConnectResumeTargets(store.getSnapshot(), 'monday')).toEqual([])
+  })
+
   it('an empty / whitespace mcpServerName correlates to nothing (fail-closed)', () => {
     const store = createSessionFsmStore()
     suspend(store, 'agentA', 'chatA1', 'taskA', connectApproval('reqA', 'monday'))

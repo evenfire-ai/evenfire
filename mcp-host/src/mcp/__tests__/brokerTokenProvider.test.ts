@@ -111,16 +111,38 @@ describe('createBrokerTokenProvider — fail-closed contract', () => {
     expect(f).toHaveBeenCalledTimes(2)
   })
 
-  it('404 no_grant → resolves undefined (fail-closed, call not forwarded)', async () => {
-    const f = stubFetch(() => jsonResponse(404, { error: 'no_grant' }))
-    const p = createBrokerTokenProvider({ name: 'gh' }, { userId: 'alice' }, deps(f))
-    expect(await p.resolve()).toBeUndefined()
+  it('404 no_grant → resolves undefined (fail-closed, call not forwarded, no warn)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const f = stubFetch(() => jsonResponse(404, { error: 'no_grant' }))
+      const p = createBrokerTokenProvider({ name: 'gh' }, { userId: 'alice' }, deps(f))
+      expect(await p.resolve()).toBeUndefined()
+      // Normal revocation is silent — no observability noise.
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
   })
 
-  it('403 insufficient_scope → resolves undefined (fail-closed)', async () => {
-    const f = stubFetch(() => jsonResponse(403, { error: 'insufficient_scope' }))
-    const p = createBrokerTokenProvider({ name: 'gh' }, { userId: 'alice' }, deps(f))
-    expect(await p.resolve()).toBeUndefined()
+  it('403 → resolves undefined (fail-closed) AND warns with status + serverName (R4-M6)', async () => {
+    // 403 is a platform/permission defect (control-api rejected the principal),
+    // NOT a normal revocation like 404. It must fail closed like 404 but emit a
+    // warn so it is distinguishable in logs — the user sees "Connect" and
+    // reconnecting never fixes it, so a silent 403 leaves no trace.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const f = stubFetch(() => jsonResponse(403, { error: 'insufficient_scope' }))
+      const p = createBrokerTokenProvider({ name: 'gh' }, { userId: 'alice' }, deps(f))
+      expect(await p.resolve()).toBeUndefined()
+      expect(warn).toHaveBeenCalledTimes(1)
+      const msg = warn.mock.calls[0][0] as string
+      expect(msg).toContain('403')
+      expect(msg).toContain('gh')
+      // Never leak the subject or any token material into the log.
+      expect(msg).not.toContain('alice')
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('500 → throws (never forwards a stale/empty token)', async () => {
@@ -144,6 +166,41 @@ describe('createBrokerTokenProvider — fail-closed contract', () => {
     const f = stubFetch(() => jsonResponse(200, { token: '', expiresAt: null }))
     const p = createBrokerTokenProvider({ name: 'gh' }, { userId: 'alice' }, deps(f))
     await expect(p.resolve()).rejects.toThrow(/malformed/)
+  })
+
+  it('200 with a present-but-malformed expiresAt string → throws (fail-closed) and caches nothing (R4-L2)', async () => {
+    // A non-expiring token is expiresAt:null/absent. A PRESENT string that
+    // Date.parse cannot read is a defect, not a non-expiring token: collapsing it
+    // to null would reuse it under the NULL_EXPIRY_MAX_AGE_MS cap. It must fail
+    // closed (throw), and leave no cache — a second resolve() must re-consult the
+    // broker, never silently serve a stored token.
+    const f = stubFetch(() => jsonResponse(200, { token: 'tok', expiresAt: 'not-a-date' }))
+    const p = createBrokerTokenProvider({ name: 'gh' }, { userId: 'alice' }, deps(f))
+    await expect(p.resolve()).rejects.toThrow(/expiresAt/)
+    // No stale cache: the retry re-POSTs (still malformed → still throws), never a
+    // silent token from a cached entry.
+    await expect(p.resolve()).rejects.toThrow(/expiresAt/)
+    expect(f).toHaveBeenCalledTimes(2)
+  })
+
+  it('200 with a present non-string expiresAt (number) → throws (fail-closed)', async () => {
+    // Any present-but-non-string expiresAt is malformed too — only absent/null is
+    // the legitimate non-expiring shape.
+    const f = stubFetch(() => jsonResponse(200, { token: 'tok', expiresAt: 1_700_000_000_000 }))
+    const p = createBrokerTokenProvider({ name: 'gh' }, { userId: 'alice' }, deps(f))
+    await expect(p.resolve()).rejects.toThrow(/expiresAt/)
+  })
+
+  it('200 with expiresAt:null → non-expiring, returns the token (the malformed frontier)', async () => {
+    // Fixes the boundary against the malformed case above: explicit null is the
+    // valid non-expiring contract (control-api emits it for Notion/ClickUp) and
+    // still returns a cacheable token.
+    const f = stubFetch(() => jsonResponse(200, { token: 'tok', expiresAt: null }))
+    const p = createBrokerTokenProvider({ name: 'gh' }, { userId: 'alice' }, deps(f))
+    expect(await p.resolve()).toBe('tok')
+    // Cached as non-expiring — a second resolve serves from cache (no re-POST).
+    expect(await p.resolve()).toBe('tok')
+    expect(f).toHaveBeenCalledTimes(1)
   })
 
   it('missing gateway URL → undefined, no fetch', async () => {
