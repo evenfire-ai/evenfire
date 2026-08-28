@@ -224,8 +224,9 @@ async function resolveInTransaction(input: {
     capability: input.capability,
     operationTarget: input.operationTarget,
   })
-  const capable = canonicalAccessPathSeeds(
-    targeted.filter(candidate => candidate.behavior.capabilities.includes(input.capability))
+  const identitySeeds = canonicalAccessPathSeeds(targeted)
+  const capable = Object.freeze(
+    identitySeeds.filter(candidate => candidate.behavior.capabilities.includes(input.capability))
   )
   if (capable.length === 0) return { status: 'denied', code: 'forbidden' }
   input.budget.charge({ kind: 'accessPaths', amount: capable.length })
@@ -244,7 +245,7 @@ async function resolveInTransaction(input: {
       graph?.status === 'current'
         ? graph.relationshipsRevision
         : databaseRelationshipsRevision(authority.relationships),
-    candidates: capable,
+    candidates: identitySeeds,
   })
   const paths = Object.freeze(
     capable.map(seed =>

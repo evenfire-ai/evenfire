@@ -16,6 +16,15 @@ import {
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 
+vi.mock('../src/services/access/operationTarget.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/services/access/operationTarget.js')>()
+  return {
+    ...actual,
+    validateOperationTarget: (input: Parameters<typeof actual.validateOperationTarget>[0]) =>
+      input.capability === 'gfs.write' ? null : actual.validateOperationTarget(input),
+  }
+})
+
 const environmentId = canonicalEnvironmentId()
 const userId = '10000000-0000-4000-8000-000000000001'
 const teamId = '20000000-0000-4000-8000-000000000002'
@@ -304,6 +313,67 @@ describe('live user-access resolution', () => {
         selectedPath: expect.objectContaining({ kind: 'team', teamId }),
       })
     )
+  })
+
+  it('preserves a path identity when capability selection filters a sibling path', async () => {
+    const options = {
+      memberships: [
+        {
+          teamId,
+          role: 'member',
+          membershipUpdatedAt: '2026-08-10T00:00:00.000Z',
+          teamRevision: '1',
+        },
+      ],
+      hostGrantRows: [
+        {
+          kind: 'direct',
+          grant_id: 'gfs_grants:direct',
+          team_id: null,
+          current_role: null,
+          permissions: ['read', 'write'],
+          drive: '3rd',
+        },
+        {
+          kind: 'team',
+          grant_id: 'gfs_grants:team',
+          team_id: teamId,
+          current_role: 'member',
+          permissions: ['read'],
+          drive: '3rd',
+        },
+      ],
+    }
+    const catalogEquivalent = await resolveLiveAuthorization(gfsRequest(), {
+      transaction: fakeTransaction(options).transaction,
+    })
+    expect(catalogEquivalent.status).toBe('access_path_required')
+    if (catalogEquivalent.status !== 'access_path_required') return
+    const directPath = catalogEquivalent.safePathDescriptors.find(path => path.kind === 'direct')
+    expect(directPath).toBeDefined()
+
+    const write = await resolveLiveAuthorization(
+      gfsRequest({
+        requiredCapability: 'gfs.write',
+        requestedAccessPathId: directPath!.id,
+      }),
+      { transaction: fakeTransaction(options).transaction }
+    )
+
+    expect(write).toEqual(
+      expect.objectContaining({
+        status: 'allowed',
+        selectedPath: expect.objectContaining({ id: directPath!.id, kind: 'direct' }),
+      })
+    )
+
+    const unsupportedDb = fakeTransaction(options)
+    await expect(
+      resolveLiveAuthorization(gfsRequest({ requiredCapability: 'gfs.future.unsupported' }), {
+        transaction: unsupportedDb.transaction,
+      })
+    ).resolves.toEqual({ status: 'denied', code: 'unknown_capability' })
+    expect(unsupportedDb.query).not.toHaveBeenCalled()
   })
 
   it('revalidates the exact provider incarnation for a selected operational path', async () => {
