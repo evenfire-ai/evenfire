@@ -11,14 +11,21 @@ import type { PageBreadcrumbItem } from '@components/PageBreadcrumb/types'
 import { ResourceBreadcrumbSwitcher } from '@components/ResourceBreadcrumbSwitcher'
 import { IconAgents } from '@components/SidebarNav/icons'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
+import {
+  type ConnectorActionInput,
+  isActionableConnector,
+  useConnectorsController,
+} from '@hooks/domain/useConnectorsController'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useTeamsDataController } from '@hooks/domain/useTeamsDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
+import { deriveConnectorRows } from '@lib/connectorRows'
 import { deriveScopedMembers } from '@lib/scopedMembers'
 import type { ScopedMemberContextDetails, ScopedMemberTeamRow } from '@lib/scopedMembers.types'
 import type { AgentWorkspaceRoute } from '../../uiTypes'
 import { McpServerHealthTable } from '../McpServerHealthTable'
+import type { McpServerConnectorAction } from '../McpServerHealthTable.types'
 import { SharedFilesTab } from '../SharedFilesTab'
 import { ActivityDashboard } from './ActivityDashboard'
 import { AgentTitleSelector } from './AgentTitleSelector'
@@ -92,6 +99,16 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   const activeSessionState = activeChatId ? sessionStateByChatId[activeChatId] : undefined
   const { hostRuntimeStatus } = useMcpRuntimeContext()
   const { scrollChatToBottom } = useAgentChatActionsContext()
+  // Connectors action controller (spec §5.E). Its own observer over the shared,
+  // app-coordinated `connectors` query cache — same pattern McpServersPage uses.
+  // `pendingKey`/`authorize`/`disconnect` MUST come from this same instance so
+  // the busy spinner and the action stay paired.
+  const {
+    agents: connectorAgents,
+    pendingKey: connectorPendingKey,
+    authorize: authorizeConnector,
+    disconnect: disconnectConnector,
+  } = useConnectorsController()
 
   const [chatScrollNavVisible, setChatScrollNavVisible] = useState(true)
   const [scrollToBottomChatId, setScrollToBottomChatId] = useState<string | null>(null)
@@ -135,6 +152,43 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   const selectedAgentMcpServerNames = selectedAgent
     ? selectedAgentMcpServers.map(server => server.name)
     : []
+
+  // OAuth Authorize/Disconnect actions for THIS agent's connectors, keyed by
+  // mcp-server name so the health table can join them onto its rows. Reuse the
+  // shared `deriveConnectorRows` fold (one row per (connector, agent), canonical
+  // status stamped) filtered to `selectedAgent`, keeping only actionable
+  // (oauth-governed) connectors — a `no_oauth` row is Secret-managed and has no
+  // button. Busy is anchored to the GRANT (`pendingKey === grantKey`) so a shared
+  // grant shows every sibling busy, exactly like McpServersPage.
+  //
+  // Join invariant: the button surfaces on the health table's rows, which are the
+  // agent's MAPPED mcp-servers (`selectedAgentMcpServers`). Mapping is independent
+  // of authorization, so a mapped-but-unauthorized oauth server (`requires_setup`)
+  // still has a health row and therefore an Authorize button — the case this fix
+  // restores. A connector that `listConnectors` reports but the catalog does not
+  // map to this agent is intentionally NOT this agent's connector and shows no row
+  // here. The only gap is transient: while the catalog is mid-hydration
+  // (`selectedAgentMcpServerMappingAvailable` false) there are no rows and thus no
+  // buttons, which self-heals once the post-auth bootstrap populates the catalog.
+  const connectorActionsByName = useMemo(() => {
+    if (!selectedAgent) return undefined
+    const map = new Map<string, McpServerConnectorAction>()
+    for (const row of deriveConnectorRows(connectorAgents)) {
+      if (row.agentName !== selectedAgent) continue
+      if (!isActionableConnector(row.connector)) continue
+      const actionInput: ConnectorActionInput = {
+        agentName: row.agentName,
+        contextRef: row.contextRef,
+        connector: row.connector,
+      }
+      map.set(row.connector.name, {
+        actionInput,
+        authorized: row.connector.status === 'authorized',
+        busy: connectorPendingKey === row.grantKey,
+      })
+    }
+    return map
+  }, [connectorAgents, selectedAgent, connectorPendingKey])
   const selectedAgentContext = selectedAgent
     ? String(agentContextByName[selectedAgent] || '').trim()
     : ''
@@ -445,6 +499,13 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
                 status={hostRuntimeStatus}
                 now={mcpHealthNow}
                 alwaysExpanded
+                connectorActions={connectorActionsByName}
+                onAuthorize={input => {
+                  authorizeConnector(input).catch(() => undefined)
+                }}
+                onDisconnect={input => {
+                  disconnectConnector(input).catch(() => undefined)
+                }}
               />
             </section>
           )}

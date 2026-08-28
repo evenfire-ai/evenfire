@@ -73,6 +73,23 @@ vi.mock('@contexts/AgentChatActionsContext', () => ({
 
 vi.mock('@hooks/useClickOutside', () => ({ useClickOutside: vi.fn() }))
 
+// AgentWorkspace now mounts useConnectorsController (Connectors tab OAuth
+// actions). Its useQuery needs a QueryClientProvider these render() calls don't
+// set up; stub the hook while keeping the real pure helpers (isActionableConnector).
+vi.mock('@hooks/domain/useConnectorsController', async importActual => ({
+  ...(await importActual<typeof import('@hooks/domain/useConnectorsController')>()),
+  useConnectorsController: () => ({
+    loading: false,
+    error: null,
+    agents: [],
+    pendingKey: null,
+    refresh: vi.fn(),
+    reset: vi.fn(),
+    authorize: vi.fn(async () => undefined),
+    disconnect: vi.fn(async () => undefined),
+  }),
+}))
+
 // Chat-mode children pull in a web of chat/composer contexts that are irrelevant
 // to the title-selector label under test; stub them so the selector renders in
 // isolation.

@@ -43,6 +43,22 @@ vi.mock('@hooks/domain/useMcpServersDataController', () => ({
     selectedAgentMcpServers: [],
   }),
 }))
+// AgentWorkspace now mounts useConnectorsController (Connectors tab OAuth
+// actions). Its useQuery needs a QueryClientProvider this test does not set up;
+// stub the hook while keeping the real pure helpers (isActionableConnector).
+vi.mock('@hooks/domain/useConnectorsController', async importActual => ({
+  ...(await importActual<typeof import('@hooks/domain/useConnectorsController')>()),
+  useConnectorsController: () => ({
+    loading: false,
+    error: null,
+    agents: [],
+    pendingKey: null,
+    refresh: vi.fn(),
+    reset: vi.fn(),
+    authorize: vi.fn(async () => undefined),
+    disconnect: vi.fn(async () => undefined),
+  }),
+}))
 vi.mock('../ComposerPanel', () => ({ ComposerPanel: () => null }))
 vi.mock('../ContextWindowIndicator', () => ({ ContextWindowIndicator: () => null }))
 vi.mock('../InFlightAssistantPlaceholder', () => ({ InFlightAssistantPlaceholder: () => null }))
