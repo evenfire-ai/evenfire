@@ -155,6 +155,19 @@ export const netPolResyncTicksSkippedTotal = counter({
   labelNames: ['reason'] as const,
 })
 
+export const netPolDefaultsOnlyTicksTotal = counter({
+  name: 'clerum_hcc_netpol_defaults_only_ticks_total',
+  help: 'NetworkPolicy defaults-only ticks by named result (success/error).',
+  labelNames: ['result'] as const,
+})
+
+export const netPolDefaultsOnlyTickDurationSeconds = histogram({
+  name: 'clerum_hcc_netpol_defaults_only_tick_duration_seconds',
+  help: 'Seconds spent in a NetworkPolicy defaults-only tick, labeled by named result.',
+  labelNames: ['result'] as const,
+  buckets: NETWORKPOLICY_PASS_DURATION_BUCKETS,
+})
+
 export const contextReconciliationsTotal = counter({
   name: 'clerum_hcc_context_reconciliations_total',
   help: 'Total Context CRD reconciliations',

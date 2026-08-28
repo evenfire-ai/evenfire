@@ -55,7 +55,8 @@ async function readLabeledConvergenceMetric(
     | 'clerum_hcc_initial_convergence_swallowed_total'
     | 'clerum_hcc_initial_convergence_effects_dropped_total'
     | 'clerum_hcc_initial_convergence_pass_results_total'
-    | 'clerum_hcc_netpol_resync_ticks_skipped_total',
+    | 'clerum_hcc_netpol_resync_ticks_skipped_total'
+    | 'clerum_hcc_netpol_defaults_only_ticks_total',
   labels: Record<string, string>
 ): Promise<number> {
   const metric = registry.getSingleMetric(name)
@@ -11532,9 +11533,18 @@ describe('McpServerWatcher NetworkPolicy defaults-only tick (#488)', () => {
       )
     ).toBe(true)
 
+    const successBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_netpol_defaults_only_ticks_total',
+      { result: 'success' }
+    )
     await vi.advanceTimersByTimeAsync(60_000)
     expect(mocks.ensureDefaultPolicies).toHaveBeenCalledTimes(2)
     expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_netpol_defaults_only_ticks_total', {
+        result: 'success',
+      })
+    ).toBe(successBefore + 1)
     logSpy.mockRestore()
     await watcher.stop()
   })
@@ -11640,6 +11650,11 @@ describe('McpServerWatcher NetworkPolicy defaults-only tick (#488)', () => {
     ).toBe(true)
     expect((watcher as any).netPolDefaultsOnlyRun).toBeNull()
     expect(
+      await readLabeledConvergenceMetric('clerum_hcc_netpol_defaults_only_ticks_total', {
+        result: 'error',
+      })
+    ).toBeGreaterThan(0)
+    expect(
       await readLabeledConvergenceMetric('clerum_hcc_netpol_resync_ticks_skipped_total', {
         reason: 'defaults-only-in-flight',
       })
@@ -11723,7 +11738,31 @@ describe('McpServerWatcher NetworkPolicy defaults-only tick (#488)', () => {
 
     await watcher.stop()
     expect((watcher as any).netPolDefaultsResyncTimer).toBeNull()
+    expect((watcher as any).netPolDefaultsOnlyRun).toBeNull()
     await vi.advanceTimersByTimeAsync(60_000)
     expect(mocks.ensureDefaultPolicies).toHaveBeenCalledTimes(defaultsAfterStart)
+  })
+
+  it('stop() drops the in-flight lock so the next tick does not join a stale run', async () => {
+    vi.useFakeTimers()
+    mockConfig.netPolDefaultsResyncIntervalSec = 60
+    const watcher = await startWatcherForDefaultsOnlyTick()
+    const held = deferred()
+    mocks.ensureDefaultPolicies.mockImplementation(() => held.promise)
+    void (watcher as any).runNetworkPolicyDefaultsOnly()
+    await flushMicrotasks()
+    expect((watcher as any).netPolDefaultsOnlyRun).not.toBeNull()
+    const callsWhileHeld = mocks.ensureDefaultPolicies.mock.calls.length
+
+    await watcher.stop()
+    expect((watcher as any).netPolDefaultsOnlyRun).toBeNull()
+
+    mocks.ensureDefaultPolicies.mockResolvedValue(undefined)
+    await (watcher as any).runNetworkPolicyDefaultsOnly()
+    expect(mocks.ensureDefaultPolicies).toHaveBeenCalledTimes(callsWhileHeld + 1)
+    expect((watcher as any).netPolDefaultsOnlyRun).toBeNull()
+
+    held.resolve()
+    await flushMicrotasks()
   })
 })

@@ -64,6 +64,8 @@ import {
   initialConvergencePassResultsTotal,
   initialConvergenceRetriesTotal,
   initialConvergenceSwallowedTotal,
+  netPolDefaultsOnlyTickDurationSeconds,
+  netPolDefaultsOnlyTicksTotal,
   netPolResyncTicksSkippedTotal,
 } from './metrics'
 import {
@@ -3090,6 +3092,8 @@ export class McpServerWatcher implements McpServerProvider {
    * Overlapping defaults-only ticks serialize: a second tick increments
    * `netPolResyncTicksSkippedTotal{reason="defaults-only-in-flight"}` and
    * joins the in-flight run. Never increment `pass-in-flight` from here.
+   * Each executed tick records `netPolDefaultsOnlyTicksTotal` and
+   * `netPolDefaultsOnlyTickDurationSeconds` with result success|error.
    */
   private runNetworkPolicyDefaultsOnly(): Promise<void> {
     if (this.netPolDefaultsOnlyRun) {
@@ -3097,10 +3101,17 @@ export class McpServerWatcher implements McpServerProvider {
       return this.netPolDefaultsOnlyRun
     }
     const run = (async () => {
+      const startedAtMs = Date.now()
+      let result: 'success' | 'error' = 'success'
       try {
         await this.netPolReconciler.ensureDefaultPolicies()
       } catch (error) {
+        result = 'error'
         console.error('[K8s] NetworkPolicy defaults-only tick failed:', error)
+      } finally {
+        const seconds = Math.max(0, (Date.now() - startedAtMs) / 1000)
+        netPolDefaultsOnlyTicksTotal.inc({ result })
+        netPolDefaultsOnlyTickDurationSeconds.observe({ result }, seconds)
       }
     })()
     this.netPolDefaultsOnlyRun = run
@@ -4647,6 +4658,7 @@ export class McpServerWatcher implements McpServerProvider {
       clearInterval(this.netPolDefaultsResyncTimer)
       this.netPolDefaultsResyncTimer = null
     }
+    this.netPolDefaultsOnlyRun = null
     this.netPolConvergenceEnsureDefaults = false
     for (const timer of this.initialConvergenceRetryTimers.values()) {
       clearTimeout(timer)
