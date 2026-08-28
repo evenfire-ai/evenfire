@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import { createHash } from 'crypto'
+import { makeStubKc } from '../../test/__fixtures__/testMocks'
 import { config as hccConfig } from '../config'
 import { HostReconciler, type ResolvedSfsMount } from '../hostReconciler'
 import { issueMcpHostRuntimeTokens } from '../mcpHostRuntimeTokenIssuerClient'
@@ -38,21 +39,6 @@ vi.mock('../gfsHostBinding', () => ({
       subject: `host:1st:${namespace}/${name}`,
     })),
 }))
-
-// Stand-in KubeConfig that returns a stub for every makeApiClient — buildDeployment
-// is a pure function that doesn't touch the API but the constructor still resolves
-// these.
-function makeStubKc(): k8s.KubeConfig {
-  const stub = new Proxy(
-    {},
-    {
-      get: () => vi.fn(),
-    }
-  )
-  return {
-    makeApiClient: () => stub,
-  } as unknown as k8s.KubeConfig
-}
 
 function makeHost(): HostCRD {
   return {
