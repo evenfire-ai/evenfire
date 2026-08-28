@@ -8181,7 +8181,7 @@ textarea.cu-input {
   padding: 0.65rem 0.75rem;
   border: 1px dashed var(--cu-border-subtle);
   border-radius: var(--cu-radius-sm);
-  background: var(--cu-bg-panel);
+  background: var(--cu-bg-elevated);
 }
 
 .cu-llm-credential-stored__state {
@@ -8218,7 +8218,7 @@ textarea.cu-input {
   padding: 1rem;
   border: 1px solid var(--cu-border-subtle);
   border-radius: 8px;
-  background: var(--cu-bg-panel);
+  background: var(--cu-bg-elevated);
 }
 
 .cu-agent-credential-set__head {
