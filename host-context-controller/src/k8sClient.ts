@@ -64,6 +64,7 @@ import {
   initialConvergencePassResultsTotal,
   initialConvergenceRetriesTotal,
   initialConvergenceSwallowedTotal,
+  netPolResyncTicksSkippedTotal,
 } from './metrics'
 import {
   DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE,
@@ -889,6 +890,14 @@ export class McpServerWatcher implements McpServerProvider {
   // GlobalFileSystem stuck at Initializing converges to Ready (and seeds its
   // root directories) once the writer is up. Disabled when interval <= 0 (tests).
   private gfsResyncTimer: ReturnType<typeof setInterval> | null = null
+  // Periodic NetworkPolicy resync (#478): re-enters the coordinated
+  // single-flight pass. Disabled by default (interval <= 0); startup still
+  // runs one convergence. Never call netPolReconciler.fullReconcile from here.
+  private netPolResyncTimer: ReturnType<typeof setInterval> | null = null
+  // Set by a timer tick so the next coordinated NetworkPolicy pass re-applies
+  // L0/L1 defaults (class D). Startup and event-driven entry leave this false
+  // — start() already ran ensureDefaultPolicies as a bootstrap barrier.
+  private netPolConvergenceEnsureDefaults = false
 
   constructor() {
     if (!kc) {
@@ -2845,6 +2854,27 @@ export class McpServerWatcher implements McpServerProvider {
       )
     }
 
+    // Interval > 0 is an ops enable, not a merge default. Issue #478: with
+    // this skip-if-in-flight guard the chosen enable is 1500s. Without it the
+    // floor would be 3600s. 300s is not a valid enable while passes last
+    // minutes (treadmill ⇔ pass duration ≥ period). Event-driven coalescing
+    // is unchanged; only this timer trigger is filtered.
+    const netPolResyncSec = config.netPolResyncIntervalSec
+    if (netPolResyncSec > 0) {
+      this.netPolResyncTimer = setInterval(() => {
+        if (this.initialConvergenceRuns.has('NetworkPolicy')) {
+          netPolResyncTicksSkippedTotal.inc({ reason: 'pass-in-flight' })
+          return
+        }
+        void this.runInitialNetworkPolicyConvergence({ ensureDefaults: true })
+      }, netPolResyncSec * 1000)
+      console.log(`[K8s] NetworkPolicy periodic resync enabled (every ${netPolResyncSec}s)`)
+    } else {
+      console.warn(
+        '[K8s] NetworkPolicy periodic resync disabled; dropped watch events will not self-heal stale NetworkPolicy allows through controller-driven convergence until another Context or McpServer event triggers reconciliation.'
+      )
+    }
+
     const externalEgressResyncSec = config.externalEgressResyncIntervalSec
     // #205 delegates external-egress periodic resync to the convergence
     // coordinator. Its runResyncCore drives reconcileExternalEgress, so the
@@ -3017,7 +3047,12 @@ export class McpServerWatcher implements McpServerProvider {
     }
   }
 
-  private runInitialNetworkPolicyConvergence(): Promise<void> {
+  private runInitialNetworkPolicyConvergence(options?: {
+    ensureDefaults?: boolean
+  }): Promise<void> {
+    if (options?.ensureDefaults) {
+      this.netPolConvergenceEnsureDefaults = true
+    }
     return this.runInitialConvergence('NetworkPolicy')
   }
 
@@ -3080,6 +3115,9 @@ export class McpServerWatcher implements McpServerProvider {
       initialConvergenceSwallowedTotal.inc({ lane: 'NetworkPolicy', sink: 'unsynced' })
       observeInitialNetworkPolicyPass(startedAtMs, 'deferred-unsynced')
       this.scheduleInitialConvergenceRetry('NetworkPolicy')
+      // A timer tick may have requested defaults. This path never reached
+      // fullReconcile, so drop the flag: event/retry entry stays false.
+      this.netPolConvergenceEnsureDefaults = false
       return
     }
     let authoritativeRevocationCompleted = false
@@ -3104,9 +3142,11 @@ export class McpServerWatcher implements McpServerProvider {
         this.mcpServerCacheSynced &&
         this.mcpServerDesiredRevision === capturedSafetyCertificate.serverRevision
       console.log('[K8s] Running initial NetworkPolicy background reconciliation...')
+      const ensureDefaults = this.netPolConvergenceEnsureDefaults
+      this.netPolConvergenceEnsureDefaults = false
       await this.netPolReconciler.fullReconcile(initialContexts, initialServers, {
         serverInventoryComplete,
-        ensureDefaults: false,
+        ensureDefaults,
         contextInventoryAuthoritative,
         serverInventoryAuthoritative,
         runContextEffect: (contextId, work) =>
@@ -4543,6 +4583,11 @@ export class McpServerWatcher implements McpServerProvider {
       clearInterval(this.gfsResyncTimer)
       this.gfsResyncTimer = null
     }
+    if (this.netPolResyncTimer) {
+      clearInterval(this.netPolResyncTimer)
+      this.netPolResyncTimer = null
+    }
+    this.netPolConvergenceEnsureDefaults = false
     for (const timer of this.initialConvergenceRetryTimers.values()) {
       clearTimeout(timer)
     }
