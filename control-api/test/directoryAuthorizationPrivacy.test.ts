@@ -120,7 +120,7 @@ describe('directory privacy and atomic authorization', () => {
           rowCount: 1,
         }
       }
-      if (sql.includes('SELECT team_id, role')) {
+      if (sql.includes('SELECT tm.team_id, tm.role')) {
         return { rows: [{ team_id: TEAM_A, role: 'admin' }], rowCount: 1 }
       }
       throw new Error(`unexpected query: ${sql.slice(0, 40)}`)

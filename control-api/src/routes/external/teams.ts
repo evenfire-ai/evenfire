@@ -258,7 +258,8 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
           (req as ExternalAuthedRequest).externalAuth!.userId,
           email,
           [{ teamId: req.params.teamId, role }],
-          name || fallbackName
+          name || fallbackName,
+          (req as ExternalAuthedRequest).externalSessionAuthority
         )
         if ('error' in result) {
           return res.status(result.error === 'forbidden' ? 403 : 400).json({ error: result.error })
