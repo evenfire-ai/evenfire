@@ -4,13 +4,16 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import request from 'supertest'
 import { type DbClient, initDb } from '../src/db.js'
+import { createExternalMembersRouter } from '../src/routes/external/members.js'
 import { createExternalTeamsRouter } from '../src/routes/external/teams.js'
 import { issueExternalUserSession } from '../src/services/auth/externalSessionIssuance.js'
+import { createManagedInvitationForUser } from '../src/services/directory/index.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
 const producerDatabase = vi.hoisted(() => ({ pool: undefined as Pool | undefined }))
 const rateLimit = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
+const invitationDelivery = vi.hoisted(() => ({ registerAndSendInvitation: vi.fn() }))
 const runtimePolicy = vi.hoisted(() => ({
   policyVersion: '1',
   policyRevision: 'r9-final-team-authority',
@@ -54,12 +57,15 @@ vi.mock('../src/db.js', async importOriginal => {
   return { ...actual, pool, withTransaction }
 })
 vi.mock('../src/services/rateLimiterService.js', () => rateLimit)
+vi.mock('../src/services/invitationFlowRegistrationService.js', () => invitationDelivery)
 vi.mock('../src/services/access/userAccessRuntimePolicy.js', () => ({
   resolveEffectiveUserAccessPolicy: vi.fn().mockResolvedValue(runtimePolicy),
 }))
 
 type AdminMutation = Readonly<{
   name: string
+  expectedStatus?: number
+  prepare?: () => Promise<void>
   invoke: (server: express.Express) => request.Test
   assertMutation: () => Promise<void>
   assertNoMutation: () => Promise<void>
@@ -164,11 +170,14 @@ describeRealPostgres('external team mutations final source authority on real Pos
   let targetUserId: string
   let teamId: string
   let token: string
+  let invitationId: string
+  let invitationEmail: string
 
   function app() {
     const server = express()
     server.use(express.json())
     server.use(createExternalTeamsRouter({} as never))
+    server.use(createExternalMembersRouter())
     return server
   }
 
@@ -176,6 +185,8 @@ describeRealPostgres('external team mutations final source authority on real Pos
     adminUserId = randomUUID()
     targetUserId = randomUUID()
     teamId = randomUUID()
+    invitationId = ''
+    invitationEmail = `${label}-invitee-${randomUUID()}@example.test`
     await databasePool.query(
       `INSERT INTO users(id, email, name, lifecycle_state, lifecycle_version)
        VALUES ($1, $2, 'Admin', 'active', 1),
@@ -207,6 +218,17 @@ describeRealPostgres('external team mutations final source authority on real Pos
       { policy: runtimePolicy }
     )
     token = issued.token
+  }
+
+  async function prepareInvitation() {
+    const result = await createManagedInvitationForUser(
+      adminUserId,
+      invitationEmail,
+      [{ teamId, role: 'member' }],
+      'Invitee'
+    )
+    if ('error' in result) throw new Error(`invitation preparation failed: ${result.error}`)
+    invitationId = String(result.invitation.id)
   }
 
   function mutations(): readonly AdminMutation[] {
@@ -270,6 +292,99 @@ describeRealPostgres('external team mutations final source authority on real Pos
           expect(result.rows[0]?.status).toBe('active')
         },
       },
+      {
+        name: 'managed invitation creation',
+        expectedStatus: 201,
+        invoke: server =>
+          request(server)
+            .post('/external/members/invitations')
+            .send({
+              email: invitationEmail,
+              name: 'Invitee',
+              teams: [{ teamId, role: 'member' }],
+            }),
+        assertMutation: async () => {
+          const result = await databasePool.query<{ status: string }>(
+            `SELECT status FROM invitations WHERE email = $1`,
+            [invitationEmail]
+          )
+          expect(result.rows[0]?.status).toBe('pending')
+        },
+        assertNoMutation: async () => {
+          const result = await databasePool.query(`SELECT 1 FROM invitations WHERE email = $1`, [
+            invitationEmail,
+          ])
+          expect(result.rowCount).toBe(0)
+        },
+      },
+      {
+        name: 'managed invitation resend',
+        prepare: prepareInvitation,
+        invoke: server =>
+          request(server).post(`/external/members/invitations/${invitationId}/resend`),
+        assertMutation: async () => {
+          const result = await databasePool.query(
+            `SELECT 1
+               FROM invitation_delivery_commands
+              WHERE invitation_id = $1
+                AND delivery_kind = 'resend'
+                AND status = 'delivered'`,
+            [invitationId]
+          )
+          expect(result.rowCount).toBe(1)
+        },
+        assertNoMutation: async () => {
+          const result = await databasePool.query(
+            `SELECT 1
+               FROM invitation_delivery_commands
+              WHERE invitation_id = $1
+                AND delivery_kind = 'resend'`,
+            [invitationId]
+          )
+          expect(result.rowCount).toBe(0)
+        },
+      },
+      {
+        name: 'managed invitation revoke',
+        prepare: prepareInvitation,
+        invoke: server => request(server).delete(`/external/members/invitations/${invitationId}`),
+        assertMutation: async () => {
+          const result = await databasePool.query<{ status: string }>(
+            `SELECT status FROM invitations WHERE id = $1`,
+            [invitationId]
+          )
+          expect(result.rows[0]?.status).toBe('revoked')
+        },
+        assertNoMutation: async () => {
+          const result = await databasePool.query<{ status: string }>(
+            `SELECT status FROM invitations WHERE id = $1`,
+            [invitationId]
+          )
+          expect(result.rows[0]?.status).toBe('pending')
+        },
+      },
+      {
+        name: 'managed user retirement',
+        invoke: server =>
+          request(server)
+            .delete(`/external/members/${targetUserId}`)
+            .set('Idempotency-Key', `retire-${targetUserId}`)
+            .send({ reason: 'managed retirement test' }),
+        assertMutation: async () => {
+          const result = await databasePool.query<{ lifecycle_state: string }>(
+            `SELECT lifecycle_state FROM users WHERE id = $1`,
+            [targetUserId]
+          )
+          expect(result.rowCount === 0 || result.rows[0]?.lifecycle_state === 'retired').toBe(true)
+        },
+        assertNoMutation: async () => {
+          const result = await databasePool.query<{ lifecycle_state: string }>(
+            `SELECT lifecycle_state FROM users WHERE id = $1`,
+            [targetUserId]
+          )
+          expect(result.rows[0]?.lifecycle_state).toBe('active')
+        },
+      },
     ]
   }
 
@@ -302,6 +417,8 @@ describeRealPostgres('external team mutations final source authority on real Pos
   })
 
   beforeEach(() => {
+    invitationDelivery.registerAndSendInvitation.mockReset()
+    invitationDelivery.registerAndSendInvitation.mockResolvedValue(undefined)
     rateLimit.checkAndIncrement.mockResolvedValue({
       allowed: true,
       count: 1,
@@ -314,8 +431,9 @@ describeRealPostgres('external team mutations final source authority on real Pos
   for (const mutation of mutations()) {
     it(`allows ${mutation.name} before later retirement or revoke-all`, async () => {
       await resetPrincipal(`wins-${mutation.name.replaceAll(' ', '-')}`)
+      await mutation.prepare?.()
       const response = await mutation.invoke(app()).set('x-user-session-token', token)
-      expect(response.status).toBe(200)
+      expect(response.status).toBe(mutation.expectedStatus ?? 200)
       await mutation.assertMutation()
       await retireAdmin(databasePool, adminUserId, retirementActorId)
       await databasePool.query(
@@ -329,6 +447,7 @@ describeRealPostgres('external team mutations final source authority on real Pos
 
     it(`denies ${mutation.name} when retirement wins after admission`, async () => {
       await resetPrincipal(`retire-${mutation.name.replaceAll(' ', '-')}`)
+      await mutation.prepare?.()
       const gate = await databasePool.connect()
       try {
         await gate.query('BEGIN')
@@ -352,6 +471,7 @@ describeRealPostgres('external team mutations final source authority on real Pos
 
     it(`denies ${mutation.name} when source-session invalidation wins after admission`, async () => {
       await resetPrincipal(`revoke-${mutation.name.replaceAll(' ', '-')}`)
+      await mutation.prepare?.()
       const gate = await databasePool.connect()
       try {
         await gate.query('BEGIN')
