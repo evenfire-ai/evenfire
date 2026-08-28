@@ -178,6 +178,12 @@ export interface Config {
   // Set via CONTEXT_MAPPER_NETPOL_RESYNC_SEC.
   netPolResyncIntervalSec: number
 
+  // Periodic L0/L1 defaults-only interval (seconds). Re-applies
+  // ensureDefaultPolicies without entering a fleet fullReconcile. Default 0
+  // disables the interval. Non-canonical values fail loud at load. Set via
+  // CONTEXT_MAPPER_NETPOL_DEFAULTS_RESYNC_SEC.
+  netPolDefaultsResyncIntervalSec: number
+
   // Absolute orphan-delete cap for a NetworkPolicy fullReconcile sweep.
   // Candidates strictly above this count refuse deletes and increment the
   // cap metric; the pass still certifies. 0 refuses every orphan delete.
@@ -785,6 +791,13 @@ export const config: Config = {
   // converges once; the interval is opt-in so a bad cache cannot periodically
   // sweep. Unset or 0 → no interval.
   netPolResyncIntervalSec: requireCanonicalNonNegativeEnvInt('CONTEXT_MAPPER_NETPOL_RESYNC_SEC', 0),
+  // Periodic L0/L1 defaults-only tick (#488). Default 0 (disabled): start()
+  // still applies defaults once as a bootstrap barrier. The interval is
+  // opt-in and is not shipped in deploy/base. Unset or 0 → no interval.
+  netPolDefaultsResyncIntervalSec: requireCanonicalNonNegativeEnvInt(
+    'CONTEXT_MAPPER_NETPOL_DEFAULTS_RESYNC_SEC',
+    0
+  ),
   // Mass-delete guard for the namespace-wide orphan sweep. Thresholds are
   // strict `>`: exactly N candidates still delete; N+1 refuses deletes and
   // still certifies.

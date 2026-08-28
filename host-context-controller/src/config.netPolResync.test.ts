@@ -4,6 +4,7 @@ const originalEnv = process.env
 
 const KNOBS = [
   'CONTEXT_MAPPER_NETPOL_RESYNC_SEC',
+  'CONTEXT_MAPPER_NETPOL_DEFAULTS_RESYNC_SEC',
   'CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP',
   'CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT',
 ] as const
@@ -25,6 +26,7 @@ describe('NetworkPolicy resync and orphan-sweep config (#478)', () => {
   it('defaults resync to 0 and caps to 10/20 when unset', async () => {
     const { config } = await loadConfig({})
     expect(config.netPolResyncIntervalSec).toBe(0)
+    expect(config.netPolDefaultsResyncIntervalSec).toBe(0)
     expect(config.netPolOrphanDeleteCap).toBe(10)
     expect(config.netPolOrphanDeleteCapPercent).toBe(20)
   })
@@ -85,6 +87,29 @@ describe('NetworkPolicy resync and orphan-sweep config (#478)', () => {
     async raw => {
       await expect(loadConfig({ CONTEXT_MAPPER_NETPOL_RESYNC_SEC: raw })).rejects.toThrow(
         /CONTEXT_MAPPER_NETPOL_RESYNC_SEC/
+      )
+    }
+  )
+})
+
+describe('NetworkPolicy defaults-only resync config (#488)', () => {
+  it('keeps the defaults-only interval disabled when unset or 0', async () => {
+    const unset = await loadConfig({})
+    expect(unset.config.netPolDefaultsResyncIntervalSec).toBe(0)
+    const zero = await loadConfig({ CONTEXT_MAPPER_NETPOL_DEFAULTS_RESYNC_SEC: '0' })
+    expect(zero.config.netPolDefaultsResyncIntervalSec).toBe(0)
+  })
+
+  it('accepts an explicit defaults-only interval', async () => {
+    const { config } = await loadConfig({ CONTEXT_MAPPER_NETPOL_DEFAULTS_RESYNC_SEC: '120' })
+    expect(config.netPolDefaultsResyncIntervalSec).toBe(120)
+  })
+
+  it.each(['25m', '1e3', '-5', '0.5', '2e1', 'abc'] as const)(
+    'fails loud when the defaults-only interval is non-canonical (%s)',
+    async raw => {
+      await expect(loadConfig({ CONTEXT_MAPPER_NETPOL_DEFAULTS_RESYNC_SEC: raw })).rejects.toThrow(
+        /CONTEXT_MAPPER_NETPOL_DEFAULTS_RESYNC_SEC/
       )
     }
   )
