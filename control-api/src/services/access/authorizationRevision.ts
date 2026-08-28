@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { TeamRole } from '../../profileTypes.js'
 import type { AccessPathSeed } from './accessPath.js'
+import { compareCanonicalUtf8Text } from './canonicalText.js'
 import { type CanonicalResourceIdentity, resourceIdentityKey } from './resourceIdentity.js'
 
 export type AuthorizationMembershipRevision = Readonly<{
@@ -43,7 +44,7 @@ export function canonicalAccessPathSeeds<T extends AccessPathSeed>(candidates: r
     )
   }
   return [...values.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => compareCanonicalUtf8Text(left, right))
     .map(([, value]) => value)
 }
 
@@ -67,7 +68,7 @@ export function authorizationRevision(input: AuthorizationRevisionInput): string
         sessionRevision: input.sessionRevision,
         userRevision: input.userRevision,
         memberships: [...input.memberships].sort((left, right) =>
-          left.teamId.localeCompare(right.teamId)
+          compareCanonicalUtf8Text(left.teamId, right.teamId)
         ),
         resource: resourceIdentityKey(input.resource),
         resourceRevision: input.resourceRevision,
@@ -94,7 +95,7 @@ export function canonicalAuthorizationRelationships(
     )
   }
   return [...values.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => compareCanonicalUtf8Text(left, right))
     .map(([, value]) => value)
 }
 
@@ -109,13 +110,13 @@ function canonicalValue(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value)
   if (Array.isArray(value)) return `[${value.map(canonicalValue).join(',')}]`
   return `{${Object.entries(value as Record<string, unknown>)
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => compareCanonicalUtf8Text(left, right))
     .map(([key, item]) => `${JSON.stringify(key)}:${canonicalValue(item)}`)
     .join(',')}}`
 }
 
 export function revisionOfValues(values: readonly unknown[]): string {
   return createHash('sha256')
-    .update(`[${values.map(canonicalValue).sort().join(',')}]`)
+    .update(`[${values.map(canonicalValue).sort(compareCanonicalUtf8Text).join(',')}]`)
     .digest('base64url')
 }

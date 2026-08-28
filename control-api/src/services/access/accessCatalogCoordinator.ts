@@ -17,7 +17,7 @@ import {
 } from './accessCatalogMerge.js'
 import { withAccessDatabaseTransaction } from './accessDatabaseQuery.js'
 import { AccessExecutionBudget, type AccessExecutionLimits } from './accessExecutionBudget.js'
-import { buildAccessPath, canonicalAccessPathTuple } from './accessPath.js'
+import { buildAccessPath, compareCanonicalAccessPaths } from './accessPath.js'
 import {
   authorizationRevision,
   canonicalAccessPathSeeds,
@@ -177,9 +177,7 @@ function catalogItem(
         authorizationRevision: revision,
       })
     )
-    .sort((left, right) =>
-      canonicalAccessPathTuple(left).localeCompare(canonicalAccessPathTuple(right))
-    )
+    .sort(compareCanonicalAccessPaths)
   const publicPaths: PublicCatalogAccessPath[] = paths.map(path =>
     Object.freeze({
       accessPathId: path.id,

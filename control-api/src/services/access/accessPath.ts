@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { config } from '../../config.js'
 import type { TeamRole } from '../../profileTypes.js'
+import { compareCanonicalUtf8Text } from './canonicalText.js'
 import { type AccessCapability, normalizeAccessCapabilities } from './capabilityRegistry.js'
 import { type CanonicalResourceIdentity, resourceIdentityKey } from './resourceIdentity.js'
 
@@ -128,13 +129,18 @@ export function canonicalAccessPathTuple(
   ])
 }
 
+export function compareCanonicalAccessPaths(
+  left: Pick<AccessPath, 'kind' | 'teamId' | 'grantId'>,
+  right: Pick<AccessPath, 'kind' | 'teamId' | 'grantId'>
+): number {
+  return compareCanonicalUtf8Text(canonicalAccessPathTuple(left), canonicalAccessPathTuple(right))
+}
+
 export function selectEquivalentAccessPath(paths: readonly AccessPath[]): AccessPath | null {
   if (paths.length === 0) return null
   if (paths.length === 1) return paths[0]
   if (!paths.every(path => accessPathsAreEquivalent(paths[0], path))) return null
-  return [...paths].sort((left, right) =>
-    canonicalAccessPathTuple(left).localeCompare(canonicalAccessPathTuple(right))
-  )[0]
+  return [...paths].sort(compareCanonicalAccessPaths)[0]
 }
 
 export function accessPathHandleEquals(left: string, right: string): boolean {
