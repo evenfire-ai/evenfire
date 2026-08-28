@@ -97,6 +97,7 @@ describe('public access-contract forwarding', () => {
     const response = await request(app())
       .get('/me/access/capabilities')
       .set('authorization', 'Bearer session-token')
+      .set('x-correlation-id', 'request-fallback')
     expect(response.status).toBe(503)
     expect(response.body).toEqual({
       error: {
