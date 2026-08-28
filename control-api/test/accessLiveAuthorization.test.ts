@@ -22,7 +22,9 @@ vi.mock('../src/services/access/operationTarget.js', async importOriginal => {
   return {
     ...actual,
     validateOperationTarget: (input: Parameters<typeof actual.validateOperationTarget>[0]) =>
-      input.capability === 'gfs.write' ? null : actual.validateOperationTarget(input),
+      input.capability === 'gfs.write' || input.capability === 'gfs.delete'
+        ? null
+        : actual.validateOperationTarget(input),
   }
 })
 
@@ -351,7 +353,9 @@ describe('live user-access resolution', () => {
     expect(catalogEquivalent.status).toBe('access_path_required')
     if (catalogEquivalent.status !== 'access_path_required') return
     const directPath = catalogEquivalent.safePathDescriptors.find(path => path.kind === 'direct')
+    const teamPath = catalogEquivalent.safePathDescriptors.find(path => path.kind === 'team')
     expect(directPath).toBeDefined()
+    expect(teamPath).toBeDefined()
 
     const write = await resolveLiveAuthorization(
       gfsRequest({
@@ -367,6 +371,26 @@ describe('live user-access resolution', () => {
         selectedPath: expect.objectContaining({ id: directPath!.id, kind: 'direct' }),
       })
     )
+
+    await expect(
+      resolveLiveAuthorization(
+        gfsRequest({
+          requiredCapability: 'gfs.write',
+          requestedAccessPathId: teamPath!.id,
+        }),
+        { transaction: fakeTransaction(options).transaction }
+      )
+    ).resolves.toEqual(
+      expect.objectContaining({ status: 'access_path_stale', code: 'access_path_stale' })
+    )
+
+    const unheldDb = fakeTransaction(options)
+    await expect(
+      resolveLiveAuthorization(gfsRequest({ requiredCapability: 'gfs.delete' }), {
+        transaction: unheldDb.transaction,
+      })
+    ).resolves.toEqual({ status: 'denied', code: 'forbidden' })
+    expect(unheldDb.query).toHaveBeenCalled()
 
     const unsupportedDb = fakeTransaction(options)
     await expect(

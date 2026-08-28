@@ -31,7 +31,9 @@ vi.mock('../src/services/access/operationTarget.js', async importOriginal => {
   return {
     ...actual,
     validateOperationTarget: (input: Parameters<typeof actual.validateOperationTarget>[0]) =>
-      input.capability === 'gfs.write' ? null : actual.validateOperationTarget(input),
+      input.capability === 'gfs.write' || input.capability === 'gfs.delete'
+        ? null
+        : actual.validateOperationTarget(input),
   }
 })
 
@@ -448,7 +450,11 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     const directWritePath = item.accessPaths.find(
       path => path.kind === 'direct' && path.capabilities.includes('gfs.write')
     )
+    const teamReadPath = item.accessPaths.find(
+      path => path.kind === 'team' && path.capabilities.includes('gfs.read')
+    )
     expect(directWritePath).toBeDefined()
+    expect(teamReadPath).toBeDefined()
 
     const resolved = await resolveLiveAuthorization(
       {
@@ -466,6 +472,31 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
         selectedPath: expect.objectContaining({ id: directWritePath!.accessPathId }),
       })
     )
+
+    await expect(
+      resolveLiveAuthorization(
+        {
+          session,
+          requiredCapability: 'gfs.write',
+          resource: canonicalResourceIdentity(item.resource),
+          requestedAccessPathId: teamReadPath!.accessPathId,
+        },
+        { transaction: transaction(databasePool), gateway }
+      )
+    ).resolves.toEqual(
+      expect.objectContaining({ status: 'access_path_stale', code: 'access_path_stale' })
+    )
+
+    await expect(
+      resolveLiveAuthorization(
+        {
+          session,
+          requiredCapability: 'gfs.delete',
+          resource: canonicalResourceIdentity(item.resource),
+        },
+        { transaction: transaction(databasePool), gateway }
+      )
+    ).resolves.toEqual({ status: 'denied', code: 'forbidden' })
   })
 
   it('enforces the operator-configured Team-GFS admission through the production budget contract', async () => {
