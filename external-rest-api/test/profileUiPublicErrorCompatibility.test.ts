@@ -150,4 +150,66 @@ describe('Profile UI public error compatibility', () => {
     })
     expect(JSON.stringify(relayed.body)).not.toMatch(/private_database_failure|private topology/)
   })
+
+  it('keeps a valid upstream correlation ahead of the request fallback', async () => {
+    producer.respondWith({
+      status: 503,
+      body: {
+        error: {
+          code: 'authority_unavailable',
+          message: 'private upstream message',
+          correlationId: 'upstream-correlation-456',
+        },
+      },
+    })
+    const relayed = await request(createRelayApp())
+      .post('/relay')
+      .set('x-correlation-id', requestCorrelationId)
+
+    expect(relayed.body.error.correlationId).toBe('upstream-correlation-456')
+    expect(JSON.stringify(relayed.body)).not.toContain('private upstream message')
+  })
+
+  it('uses the valid request fallback when the upstream correlation is unsafe', async () => {
+    producer.respondWith({
+      status: 503,
+      body: {
+        error: {
+          code: 'authority_unavailable',
+          correlationId: 'unsafe/upstream-correlation',
+        },
+      },
+    })
+    const relayed = await request(createRelayApp())
+      .post('/relay')
+      .set('x-correlation-id', requestCorrelationId)
+
+    expect(relayed.body.error.correlationId).toBe(requestCorrelationId)
+    expect(JSON.stringify(relayed.body)).not.toContain('unsafe/upstream-correlation')
+  })
+
+  it('replaces an oversized request correlation with a bounded generated identifier', async () => {
+    const oversizedCorrelationId = 'x'.repeat(129)
+    producer.respondWith({ status: 503, body: { error: 'member_registration_unavailable' } })
+    const relayed = await request(createRelayApp())
+      .post('/relay')
+      .set('x-correlation-id', oversizedCorrelationId)
+
+    expect(relayed.body.error.correlationId).toMatch(/^[A-Za-z0-9_-]{1,128}$/)
+    expect(relayed.body.error.correlationId).not.toBe(oversizedCorrelationId)
+  })
+
+  it('preserves the request correlation for the propagated 429 sibling', async () => {
+    producer.respondWith({ status: 429, body: { error: { code: 'rate_limited' } } })
+    const relayed = await request(createRelayApp())
+      .post('/relay')
+      .set('x-correlation-id', requestCorrelationId)
+
+    expect(relayed.status).toBe(429)
+    expect(relayed.body.error).toMatchObject({
+      code: 'rate_limited',
+      correlationId: requestCorrelationId,
+      retryable: true,
+    })
+  })
 })
