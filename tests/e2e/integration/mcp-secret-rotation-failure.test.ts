@@ -47,7 +47,7 @@ import {
   requireControlApiUp,
   secretYaml,
   waitForRolloutCondition,
-} from './mcpCredentialRotation.helpers.js'
+} from './mcpRotation.helpers.js'
 
 const RUN_ID = randomSuffix()
 const SERVER_NAME = `e2e-rot-fail-${RUN_ID}`

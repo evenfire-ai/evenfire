@@ -94,7 +94,7 @@ prepare_t1_docker() {
     "$T1_DOCKER_EXEC_TIMEOUT_SECONDS" 300 || return $?
   docker_cli_env_validate_seconds T1_DOCKER_REMOVE_TIMEOUT_SECONDS \
     "$T1_DOCKER_REMOVE_TIMEOUT_SECONDS" 300 || return $?
-  docker_cli_env_prepare false || return $?
+  docker_cli_env_prepare probe || return $?
   T1_DOCKER_ENV_PREPARED=true
 }
 
@@ -229,7 +229,7 @@ secret_field() {
   local key="$1" encoded
   encoded="$(t2_kc -n "$PG_NAMESPACE" get secret "$PG_SECRET" -o "jsonpath={.data.$key}" 2>/dev/null || true)"
   if [ -z "$encoded" ]; then
-    T1_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T1_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     die_t1 SECRET_MISSING "required Secret key is missing: $PG_NAMESPACE/$PG_SECRET.$key"
   fi
   printf '%s' "$encoded" | python3 -c 'import base64,sys; print(base64.b64decode(sys.stdin.buffer.read(), validate=True).decode(), end="")'
@@ -320,18 +320,23 @@ start_isolated_postgres() {
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE \
       'isolated T1 Docker runtime could not be prepared safely'
   fi
-  ISOLATED_PORT="$(choose_local_port)"
   ISOLATED_CONTAINER="evenfire-t1-isolated-pg-$$"
   if ! docker_cli_run_public t1-postgres-run "$T1_DOCKER_RUN_TIMEOUT_SECONDS" \
     docker run -d --rm --name "$ISOLATED_CONTAINER" \
     -e POSTGRES_USER=postgres \
     -e POSTGRES_DB=postgres \
     -e POSTGRES_HOST_AUTH_METHOD=trust \
-    -p "127.0.0.1:${ISOLATED_PORT}:5432" \
+    -p "127.0.0.1::5432" \
     "$T1_ISOLATED_PG_IMAGE" >/dev/null; then
     ISOLATED_CONTAINER=""
     T1_NEXT_COMMAND='repair Docker image postgres:16-alpine, then re-run T1'
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'isolated T1 PostgreSQL container failed to start'
+  fi
+  ISOLATED_PORT="$(docker_cli_run_public t1-postgres-port "$MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS" \
+    docker port "$ISOLATED_CONTAINER" 5432/tcp 2>/dev/null | sed -n 's/.*://p' | head -n 1 || true)"
+  if [[ ! "$ISOLATED_PORT" =~ ^[0-9]+$ ]]; then
+    T1_NEXT_COMMAND='inspect Docker port publishing for the isolated T1 PostgreSQL, then re-run T1'
+    die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'isolated T1 PostgreSQL host port was not published'
   fi
   if ! wait_for_tcp "$ISOLATED_PORT"; then
     T1_NEXT_COMMAND='repair Docker networking for the isolated T1 PostgreSQL, then re-run T1'
@@ -388,6 +393,10 @@ run_suite() {
   if [ -z "$admin_url" ]; then
     T1_NEXT_COMMAND='repair the T1 PostgreSQL DSN route, then re-run T1'
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE "Real PostgreSQL $lane DSN is empty for $package"
+  fi
+  if [ ! -x "$PROJECT_DIR/$package/node_modules/.bin/vitest" ]; then
+    T1_NEXT_COMMAND="run npm ci in $package with lifecycle scripts enabled, then re-run T1"
+    die_t1 LOCAL_DEPENDENCY_MISSING "Vitest is not installed for $package"
   fi
 
   log_file="$T1_TMP_DIR/$(printf '%s' "$package-$lane" | tr / _).log"
@@ -507,10 +516,10 @@ main() {
   t2_profile_status
   t2_profile_context_identity_check
   if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
-    T1_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T1_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'the selected profile is not bootstrapped'
   fi
-  T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2-preflight"
+  T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2-preflight"
   t2_marker_check
   if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'the selected profile has no validated exact-head marker'
@@ -518,7 +527,7 @@ main() {
   t2_process_check
   t2_evidence_init
   if ! t2_kc -n "$PG_NAMESPACE" rollout status deployment/control-postgres --timeout="${T1_TIMEOUT}s" >/dev/null 2>&1; then
-    T1_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T1_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     die_t1 POSTGRES_NOT_READY 'control-postgres did not become Ready'
   fi
 
@@ -527,7 +536,7 @@ main() {
   PG_PASSWORD="$(secret_field POSTGRES_PASSWORD)"
   PG_DATABASE="$(secret_field POSTGRES_DB)"
   if [ -z "$PG_USER" ] || [ -z "$PG_PASSWORD" ] || [ -z "$PG_DATABASE" ]; then
-    T1_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T1_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE 'control-postgres Secret is incomplete'
   fi
   T1_REDACT_PASSWORD="$PG_PASSWORD"

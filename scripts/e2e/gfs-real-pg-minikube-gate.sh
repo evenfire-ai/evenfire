@@ -320,7 +320,7 @@ prepare_gfs_docker() {
     "${GFS_DOCKER_EXEC_TIMEOUT_SECONDS}" 300 || return $?
   docker_cli_env_validate_seconds GFS_DOCKER_REMOVE_TIMEOUT_SECONDS \
     "${GFS_DOCKER_REMOVE_TIMEOUT_SECONDS}" 300 || return $?
-  docker_cli_env_prepare false || return $?
+  docker_cli_env_prepare probe || return $?
   GFS_DOCKER_ENV_PREPARED=true
 }
 cleanup_gfs_docker_env() {
@@ -332,7 +332,7 @@ cleanup_gfs_docker_env() {
   return 1
 }
 cleanup() {
-  local status=$?
+  local status="${1:-$?}"
   trap - EXIT
   trap '' INT TERM
   if ! stop_profile_postgres_forward; then status=1; fi
@@ -340,10 +340,21 @@ cleanup() {
   if ! cleanup_gfs_docker_env; then status=1; fi
   if [ "${GFS_RESTORE_REQUIRED}" = true ] && ! restore_gfs_runtime_credentials; then status=1; fi
   if ! rm -rf "${TMP_DIR}"; then status=1; fi
-  if ! t2_lock_release "${status}"; then status=1; fi
+  t2_lock_release 0 || status=1
   exit "${status}"
 }
+handle_gfs_gate_signal() {
+  local signal="$1" status
+  case "$signal" in
+    INT) status=130 ;;
+    TERM) status=143 ;;
+    *) status=1 ;;
+  esac
+  cleanup "$status"
+}
 trap cleanup EXIT
+trap 'handle_gfs_gate_signal INT' INT
+trap 'handle_gfs_gate_signal TERM' TERM
 
 choose_local_port() {
   python3 - <<'PY'
@@ -362,7 +373,6 @@ fi
 verify_branch_gate
 verify_profile_postgres
 
-ISOLATED_PORT="$(choose_local_port)"
 ISOLATED_CONTAINER="evenfire-gfs-t1-pg-$$"
 prepare_gfs_docker || die 'isolated GFS Docker runtime could not be prepared safely'
 docker_cli_run_public gfs-t1-postgres-run "${GFS_DOCKER_RUN_TIMEOUT_SECONDS}" \
@@ -370,8 +380,12 @@ docker_cli_run_public gfs-t1-postgres-run "${GFS_DOCKER_RUN_TIMEOUT_SECONDS}" \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_DB=postgres \
   -e POSTGRES_HOST_AUTH_METHOD=trust \
-  -p "127.0.0.1:${ISOLATED_PORT}:5432" \
+  -p "127.0.0.1::5432" \
   "${ISOLATED_PG_IMAGE}" >/dev/null || die 'isolated GFS PostgreSQL container failed to start'
+ISOLATED_PORT="$(docker_cli_run_public gfs-t1-postgres-port \
+  "${MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS}" \
+  docker port "${ISOLATED_CONTAINER}" 5432/tcp 2>/dev/null | sed -n 's/.*://p' | head -n 1 || true)"
+[[ "${ISOLATED_PORT}" =~ ^[0-9]+$ ]] || die 'isolated GFS PostgreSQL host port was not published'
 wait_for_tcp "${ISOLATED_PORT}" || die 'isolated GFS PostgreSQL did not become reachable'
 deadline=$((SECONDS + TIMEOUT))
 while (( SECONDS < deadline )); do

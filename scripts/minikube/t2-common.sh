@@ -428,6 +428,24 @@ t2_profile_status() {
   T2_PROFILE_HEALTHY=true
 }
 
+t2_missing_profile_context_check() {
+  local context_inventory context_status=0
+  [ "$T2_PROFILE_STATUS" = missing ] || return 0
+  context_inventory="$(kubectl --context="$T2_CONTEXT" config get-contexts -o name 2>&1)" || context_status=$?
+  if [ "$context_status" -ne 0 ]; then
+    T2_NEXT_COMMAND='repair the local kubeconfig before bootstrapping this branch-owned profile'
+    t2_fail PROFILE_UNHEALTHY \
+      "unable to inspect kubeconfig for the missing profile context (kubectl status $context_status)"
+    return 1
+  fi
+  if printf '%s\n' "$context_inventory" | awk -v target="$T2_CONTEXT" '$0 == target { found=1 } END { exit(found ? 0 : 1) }'; then
+    T2_NEXT_COMMAND='resolve ownership of the stale kubeconfig context before bootstrapping; do not overwrite it'
+    t2_fail PROFILE_OWNERSHIP_MISMATCH \
+      "Minikube profile is missing but a same-name Kubernetes context still exists: $T2_CONTEXT"
+    return 1
+  fi
+}
+
 t2_marker_check() {
   local marker_probe marker_status=0
   # `--ignore-not-found` makes an absent marker an explicit empty-object
@@ -471,7 +489,7 @@ print("\t".join([
 PY
   )"; then
     case "$marker_values" in
-      *ownership*) T2_NEXT_COMMAND='run pre-gate-sync for this worktree/profile, then retry'; t2_fail PROFILE_OWNERSHIP_MISMATCH 'pre-gate marker belongs to another worktree' ;;
+      *ownership*) T2_NEXT_COMMAND='resolve the branch-owned profile and context through the primary checkout .local-notes/minikube-profiles/branch.mk helper, then rerun minikube-t2-preflight'; t2_fail PROFILE_OWNERSHIP_MISMATCH 'pre-gate marker belongs to another worktree' ;;
       *head*)
         # Standalone preflight is fail-loud. The orchestrator planner
         # (T2_PLAN_MODE=true) must keep going so it can select targeted-sync
@@ -481,10 +499,10 @@ PY
           T2_PLAN_REASON='pre-gate marker does not match current HEAD'
           return 0
         fi
-        T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
+        T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
         t2_fail HEAD_MARKER_MISMATCH 'pre-gate marker does not match current HEAD'
         ;;
-      *) T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"; t2_fail BOOTSTRAP_REQUIRED 'pre-gate marker is incomplete' ;;
+      *) T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"; t2_fail BOOTSTRAP_REQUIRED 'pre-gate marker is incomplete' ;;
     esac
   fi
   T2_MARKER_MATCHES_HEAD=true
@@ -499,7 +517,7 @@ t2_image_check() {
       T2_PLAN_REASON='image manifest is absent'
       return 0
     fi
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail IMAGE_MANIFEST_MISMATCH "image manifest is missing: $T2_IMAGE_MANIFEST"
   fi
   local manifest_values
@@ -536,14 +554,14 @@ PY
       T2_PLAN_REASON='image manifest is invalid or has no source/tag; bootstrap will replace it'
       return 0
     fi
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail IMAGE_MANIFEST_MISMATCH 'image manifest is invalid or incomplete for its image source'
   fi
   local manifest_source manifest_tag manifest_generated
   IFS=$'\t' read -r manifest_source manifest_tag manifest_generated <<< "$manifest_values"
   if { [ -n "$T2_IMAGE_SOURCE" ] && [ "$manifest_source" != "$T2_IMAGE_SOURCE" ]; } ||
      { [ -n "$T2_IMAGE_TAG" ] && [ "$manifest_tag" != "$T2_IMAGE_TAG" ]; }; then
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail IMAGE_MANIFEST_MISMATCH 'image manifest does not match the deployed marker'
   fi
   T2_IMAGE_SOURCE="$manifest_source"
@@ -572,7 +590,7 @@ t2_resource_checks() {
         T2_PLAN_REASON="namespace $namespace is not present"
         continue
       fi
-      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
       t2_fail PROFILE_UNHEALTHY "required namespace is missing: $namespace"
     fi
   done
@@ -584,7 +602,7 @@ t2_resource_checks() {
         T2_PLAN_REASON="service $item is not present"
         continue
       fi
-      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
       t2_fail PROFILE_UNHEALTHY "required Service is missing: $item"
     fi
   done
@@ -596,7 +614,7 @@ t2_resource_checks() {
         T2_PLAN_REASON="Secret $item is not present"
         continue
       fi
-      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
       t2_fail SECRET_MISSING "required Secret is missing: $namespace/$name"
     fi
   done
@@ -608,7 +626,7 @@ t2_resource_checks() {
         T2_PLAN_REASON="ConfigMap $item is not present"
         continue
       fi
-      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
       t2_fail CONFIGMAP_MISSING "required ConfigMap is missing: $namespace/$name"
     fi
   done
@@ -624,7 +642,7 @@ t2_postgres_check() {
       T2_PLAN_REASON="PVC $T2_REQUIRED_PVC is not present"
       return 0
     fi
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail POSTGRES_NOT_READY "required PVC is missing: $T2_REQUIRED_PVC"
   fi
   phase="$(python3 - "$pvc_json" <<'PY'
@@ -639,30 +657,38 @@ PY
       T2_PLAN_REASON="PVC $T2_REQUIRED_PVC is not Bound"
       return 0
     fi
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail POSTGRES_NOT_READY "PostgreSQL PVC is not Bound: $T2_REQUIRED_PVC ($phase)"
   fi
   if ! t2_kc -n "$namespace" get service control-postgres >/dev/null 2>&1; then
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail POSTGRES_NOT_READY 'control-postgres Service is missing'
   fi
   if ! t2_kc -n "$namespace" rollout status deployment/control-postgres --timeout="${T2_TIMEOUT_SECONDS}s" >/dev/null 2>&1; then
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail POSTGRES_NOT_READY "control-postgres did not become Ready within $T2_TIMEOUT_SECONDS seconds"
   fi
 }
 
 t2_deployment_check() {
-  local deployment_json unready
-  deployment_json="$(t2_kc get deployments -A -o json 2>/dev/null || true)"
+  local deployment_json unready deployment_status=0
+  T2_UNREADY_DEPLOYMENTS=""
+  deployment_json="$(t2_kc get deployments -A -o json 2>/dev/null)" || deployment_status=$?
+  if [ "$deployment_status" -ne 0 ]; then
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
+    t2_fail PROFILE_UNHEALTHY \
+      "deployment readiness inventory query failed with exit $deployment_status"
+    return 1
+  fi
   if [ -z "$deployment_json" ]; then
     if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
       T2_PLAN_STATE=full-bootstrap
       T2_PLAN_REASON='deployment readiness inventory is unavailable'
       return 0
     fi
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail PROFILE_UNHEALTHY 'deployment readiness inventory is unavailable'
+    return 1
   fi
   if ! unready="$(python3 - "$deployment_json" "$T2_REQUIRED_DEPLOYMENTS" "$T2_REQUIRED_DEPLOYMENTS_INCLUDE_ADDITIONAL" 2>/dev/null <<'PY'
 import json
@@ -738,10 +764,12 @@ PY
       T2_PLAN_REASON='deployment readiness inventory is invalid'
       return 0
     fi
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail PROFILE_UNHEALTHY 'deployment readiness inventory is invalid'
+    return 1
   fi
   if [ -n "$unready" ]; then
+    T2_UNREADY_DEPLOYMENTS="$unready"
     if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
       T2_PLAN_STATE=full-bootstrap
       T2_PLAN_REASON="one or more deployments are not Ready: $unready"
@@ -757,9 +785,42 @@ PY
       T2_UNREADY_DEPLOYMENTS="$unready"
       return 0
     fi
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail PROFILE_UNHEALTHY "one or more deployments are not Ready: $unready"
+    return 1
   fi
+}
+
+t2_wait_for_deployments() {
+  local deadline remaining original_runtime_timeout sleep_seconds
+  deadline=$((SECONDS + T2_TIMEOUT_SECONDS))
+  original_runtime_timeout="$T2_RUNTIME_TIMEOUT_SECONDS"
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    remaining=$((deadline - SECONDS))
+    if [ "$T2_RUNTIME_TIMEOUT_SECONDS" -gt "$remaining" ]; then
+      T2_RUNTIME_TIMEOUT_SECONDS="$remaining"
+    fi
+    if t2_deployment_check >/dev/null 2>&1; then
+      T2_RUNTIME_TIMEOUT_SECONDS="$original_runtime_timeout"
+      T2_ERROR_CODE=""
+      return 0
+    fi
+    T2_RUNTIME_TIMEOUT_SECONDS="$original_runtime_timeout"
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || break
+    sleep_seconds=2
+    if [ "$remaining" -lt "$sleep_seconds" ]; then
+      sleep_seconds="$remaining"
+    fi
+    sleep "$sleep_seconds"
+  done
+
+  T2_RUNTIME_TIMEOUT_SECONDS="$original_runtime_timeout"
+  T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
+  t2_fail PROFILE_UNHEALTHY \
+    "deployments did not converge within $T2_TIMEOUT_SECONDS seconds: ${T2_UNREADY_DEPLOYMENTS:-deployment readiness inventory is unavailable}"
+  return 1
 }
 
 t2_port_forward_targets_context() {
@@ -815,6 +876,28 @@ t2_pid_file_matches_process() {
   pf_owner_record_process_matches "$pid_file" "$T2_PROFILE" "$T2_CONTEXT" \
     "$T2_PROJECT_DIR" "$PF_OWNER_RECORD_NAMESPACE" "$PF_OWNER_RECORD_SERVICE" \
     "$PF_OWNER_RECORD_LOCAL_PORT" "$PF_OWNER_RECORD_REMOTE_PORT"
+}
+
+t2_cluster_state_checks() {
+  # A missing or stopped branch-owned profile is already a complete planner
+  # verdict. There is no Kubernetes context to interrogate yet, and attempting
+  # marker/resource reads here turns a valid full-bootstrap into a false
+  # PROFILE_UNHEALTHY failure before the orchestrator can create the profile.
+  if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
+    return 0
+  fi
+  t2_profile_context_identity_check
+  t2_marker_check
+  # A healthy but uninitialized profile can have a working API without the
+  # exact-head marker. That is still a bootstrap verdict; do not reinterpret
+  # partially created resources as a runtime health failure.
+  if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
+    return 0
+  fi
+  t2_image_check
+  t2_resource_checks
+  t2_postgres_check
+  t2_deployment_check
 }
 
 t2_process_check() {
@@ -1150,6 +1233,7 @@ t2_prior_targeted_health_pending() {
     EXPECTED_GATE_ID="$T2_GATE_ID" python3 - <<'PY'
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 root = Path(os.environ["CERTIFICATION_ROOT"])
@@ -1162,22 +1246,68 @@ expected = {
     "context": os.environ["EXPECTED_CONTEXT"],
     "gateId": os.environ["EXPECTED_GATE_ID"],
 }
-candidates = []
+events = []
+unorderable_open = False
+
+
+def parse_timestamp(value):
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
 for candidate in root.glob("*/evidence.json"):
     try:
         data = json.loads(candidate.read_text())
-        stamp = candidate.stat().st_mtime_ns
     except (OSError, ValueError):
         continue
     if data.get("certificationVersion") != 1 or data.get("evidenceKind") != "certification":
         continue
-    if all(data.get(key, "") == value for key, value in expected.items()):
-        candidates.append((stamp, str(candidate), data))
-if not candidates:
-    print("false")
+    if not all(data.get(key, "") == value for key, value in expected.items()):
+        continue
+
+    phases = data.get("phases", [])
+    if not isinstance(phases, list):
+        phases = []
+    for index, phase in enumerate(phases):
+        if not isinstance(phase, dict):
+            continue
+        stamp = parse_timestamp(phase.get("timestamp"))
+        is_health_pass = phase.get("name") == "Health" and phase.get("status") == "PASS"
+        if not is_health_pass:
+            continue
+        if stamp is None:
+            continue
+        events.append((stamp, 0, str(candidate), index, "close"))
+
+    if data.get("targetedHealthPending") is True:
+        # The top-level bit is the structured fail-closed state snapshot. Its
+        # write happened with the final appended phase, so that phase
+        # timestamps the outstanding obligation without trusting mutable
+        # filesystem mtimes.
+        final_stamp = None
+        if phases and isinstance(phases[-1], dict):
+            final_stamp = parse_timestamp(phases[-1].get("timestamp"))
+        if final_stamp is None:
+            unorderable_open = True
+        else:
+            # At an identical timestamp, the open has higher priority than a
+            # close so an ambiguous ordering remains fail-closed.
+            events.append((final_stamp, 1, str(candidate), len(phases), "open"))
+
+if unorderable_open:
+    print("true")
 else:
-    _, _, latest = max(candidates)
-    print("true" if latest.get("targetedHealthPending") is True else "false")
+    pending = False
+    for _, _, _, _, kind in sorted(events):
+        pending = kind == "open"
+    print("true" if pending else "false")
 PY
   )" || return 1
   printf '%s' "$pending"

@@ -38,7 +38,7 @@ import {
   secretYaml,
   waitForRolloutCondition,
   withServicePortForward,
-} from './mcpCredentialRotation.helpers.js'
+} from './mcpRotation.helpers.js'
 
 const REMOTE_ECHO_URL = process.env.TEST_REMOTE_ECHO_URL ?? 'https://httpbin.org/headers'
 const REMOTE_ECHO_PATH = new URL(REMOTE_ECHO_URL).pathname

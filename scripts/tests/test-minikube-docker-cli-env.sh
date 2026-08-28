@@ -274,7 +274,7 @@ assert_endpoint_resolution_and_context_precedence() {
       set -euo pipefail
       source "$1"
       trap docker_cli_env_cleanup EXIT
-      docker_cli_env_prepare false
+      docker_cli_env_prepare probe
     ' _ "$ROOT/scripts/minikube/docker-cli-env.sh" >"$reject_output" 2>&1 || status=$?
   if [[ "$status" -ne 0 ]] \
     && grep -Fq 'DOCKER_ENDPOINT_UNSAFE' "$reject_output" \
@@ -293,7 +293,7 @@ assert_endpoint_resolution_and_context_precedence() {
       set -euo pipefail
       source "$1"
       trap docker_cli_env_cleanup EXIT
-      docker_cli_env_prepare false
+      docker_cli_env_prepare probe
       [[ "$DOCKER_HOST" == tcp://127.0.0.1:2376 ]]
       [[ "${DOCKER_CONTEXT+x}" != x ]]
       [[ "$DOCKER_TLS" == 1 && "$DOCKER_TLS_VERIFY" == 0 ]]
@@ -323,7 +323,7 @@ assert_endpoint_resolution_and_context_precedence() {
       set -euo pipefail
       source "$1"
       trap docker_cli_env_cleanup EXIT
-      docker_cli_env_prepare false
+      docker_cli_env_prepare probe
     ' _ "$ROOT/scripts/minikube/docker-cli-env.sh" >"$mismatch_output" 2>&1 || status=$?
   if [[ "$status" -ne 0 ]] && grep -Fq 'DOCKER_ENDPOINT_MISMATCH' "$mismatch_output"; then
     pass "the isolated config verifies the effective pinned endpoint"
@@ -340,7 +340,7 @@ assert_config_only_rootless_context() {
     unset DOCKER_HOST DOCKER_CONTEXT DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH
     source "$1"
     trap docker_cli_env_cleanup EXIT
-    docker_cli_env_prepare false
+    docker_cli_env_prepare probe
     [[ "$DOCKER_HOST" == unix:///run/user/1000/docker.sock ]]
     [[ "${DOCKER_CONTEXT+x}" != x && "${DOCKER_TLS+x}" != x ]]
     docker_cli_run_public rootless-info 2 docker info >/dev/null
@@ -371,7 +371,7 @@ assert_all_original_docker_env_is_restored() {
       set -euo pipefail
       source "$1"
       trap docker_cli_env_cleanup EXIT
-      docker_cli_env_prepare false
+      docker_cli_env_prepare probe
       task_config="$DOCKER_CLI_TASK_CONFIG"
       export DOCKER_CONFIG=/changed DOCKER_AUTH_CONFIG=changed DOCKER_CONTEXT=changed
       export DOCKER_HOST=unix:///changed.sock DOCKER_TLS=changed DOCKER_TLS_VERIFY=changed

@@ -39,24 +39,22 @@ main() {
   t2_profile_status
   if [ "$T2_BOOTSTRAP_REQUIRED" != true ]; then
     t2_context_check
+  else
+    t2_missing_profile_context_check
   fi
   t2_mutation_lock
   t2_evidence_init
 
-  # Profile status is read before any resource check. A missing/stopped profile
-  # is a plan for bootstrap, never a reason to invoke pre-gate-sync.
-  t2_profile_context_identity_check
-  t2_marker_check
-  t2_image_check
-  t2_resource_checks
-  t2_postgres_check
-  t2_deployment_check
+  # Profile status is read before any cluster check. A missing/stopped profile
+  # is a complete bootstrap plan; only healthy profiles have a context whose
+  # identity, marker, resources, PostgreSQL, and deployments can be inspected.
+  t2_cluster_state_checks
   t2_process_check
   t2_classify_transition
   t2_write_plan "$T2_PLAN_FILE"
 
   if [ "$T2_PLAN_STATE" = full-bootstrap ] && [ "$T2_PLAN_MODE" != true ]; then
-    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE IMAGE_SOURCE=local make minikube-setup"
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2"
     t2_fail BOOTSTRAP_REQUIRED "$T2_PLAN_REASON"
     return 1
   fi

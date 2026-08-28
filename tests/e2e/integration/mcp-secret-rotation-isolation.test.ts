@@ -39,7 +39,7 @@ import {
   secretDataHash,
   secretYaml,
   waitForRolloutCondition,
-} from './mcpCredentialRotation.helpers.js'
+} from './mcpRotation.helpers.js'
 
 const RUN_ID = randomSuffix()
 const SERVER_A = `e2e-rot-iso-a-${RUN_ID}`

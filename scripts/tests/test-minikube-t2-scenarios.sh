@@ -7,12 +7,21 @@ set +u
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 COMMON="$ROOT/scripts/minikube/t2-common.sh"
+PREFLIGHT="$ROOT/scripts/minikube/t2-preflight.sh"
 TMP_ROOT="$TMPDIR"
 if [ -z "$TMP_ROOT" ]; then TMP_ROOT=/tmp; fi
 set -u
 
 tmp="$(mktemp -d "$TMP_ROOT/evenfire-t2-scenarios.XXXXXX")"
-cleanup() { rm -rf "$tmp"; }
+cleanup() {
+  local status=$?
+  if [[ -n "${MINIKUBE_TEST_HOST_ROOT:-}" ]] && ! minikube_test_assert_host_unchanged; then
+    status=1
+  fi
+  rm -rf "$tmp"
+  trap - EXIT
+  exit "$status"
+}
 trap cleanup EXIT
 
 fail() {
@@ -34,18 +43,11 @@ expect_code() {
 
 "$ROOT/scripts/tests/test-minikube-profile-owner.sh"
 
-repo="$tmp/evenfire"
-mkdir -p "$repo"
-repo="$(cd "$repo" && pwd -P)"
-git init -q -b dev "$repo"
-git -C "$repo" config user.email test@example.invalid
-git -C "$repo" config user.name scenario-test
-git -C "$repo" remote add origin https://github.com/evenfire-ai/evenfire.git
-printf 'base\n' >"$repo/README.md"
-git -C "$repo" add README.md
-git -C "$repo" commit -q -m base
+# shellcheck source=scripts/tests/lib/minikube-fixture-repo.sh
+source "$ROOT/scripts/tests/lib/minikube-fixture-repo.sh"
+minikube_test_fixture_repo_init "$ROOT" "$tmp/fixture"
+repo="$MINIKUBE_TEST_PROJECT_DIR"
 base_sha="$(git -C "$repo" rev-parse HEAD)"
-git -C "$repo" update-ref refs/remotes/origin/dev "$base_sha"
 git -C "$repo" switch -q -c feat/scenario
 mkdir -p "$repo/control-api"
 printf 'service\n' >"$repo/control-api/source.ts"
@@ -167,6 +169,18 @@ expect_code DEVELOPMENT_SCOPE_REQUIRED wrong-profile-identity wrong-profile-iden
 missing_profile_state="$(env "${repo_env[@]}" bash -c 'source "$1"; t2_mk(){ printf "%s" "Profile not found"; }; t2_profile_status; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON")"
 [ "$missing_profile_state" = full-bootstrap ] || fail "missing profile selected $missing_profile_state instead of full-bootstrap"
 
+bootstrap_cluster_sentinel="$tmp/bootstrap-cluster-read"
+bootstrap_cluster_state="$(env "${repo_env[@]}" BOOTSTRAP_CLUSTER_SENTINEL="$bootstrap_cluster_sentinel" \
+  bash -c 'source "$1"; t2_mk(){ printf "%s" "Profile not found"; }; t2_kc(){ : >"$BOOTSTRAP_CLUSTER_SENTINEL"; return 99; }; t2_profile_status; t2_cluster_state_checks; t2_classify_transition; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON")"
+[ "$bootstrap_cluster_state" = full-bootstrap ] || fail "missing profile cluster checks selected $bootstrap_cluster_state instead of full-bootstrap"
+[ ! -e "$bootstrap_cluster_sentinel" ] || fail "missing profile attempted a Kubernetes API read before bootstrap"
+
+missing_marker_cluster_sentinel="$tmp/missing-marker-cluster-read"
+missing_marker_cluster_state="$(env "${repo_env[@]}" MISSING_MARKER_CLUSTER_SENTINEL="$missing_marker_cluster_sentinel" \
+  bash -c 'source "$1"; T2_BOOTSTRAP_REQUIRED=false; t2_profile_context_identity_check(){ :; }; t2_marker_check(){ T2_BOOTSTRAP_REQUIRED=true; T2_PLAN_STATE=full-bootstrap; T2_PLAN_REASON="pre-gate marker is missing"; }; t2_image_check(){ : >"$MISSING_MARKER_CLUSTER_SENTINEL"; return 99; }; t2_cluster_state_checks; t2_classify_transition; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON")"
+[ "$missing_marker_cluster_state" = full-bootstrap ] || fail "missing marker selected $missing_marker_cluster_state instead of full-bootstrap"
+[ ! -e "$missing_marker_cluster_sentinel" ] || fail "missing marker continued into image or resource checks"
+
 expect_code PROFILE_UNHEALTHY status-probe-timeout status-probe-timeout \
   env "${repo_env[@]}" bash -c 'source "$1"; t2_mk(){ return 124; }; t2_profile_status' bash "$COMMON"
 
@@ -205,6 +219,226 @@ BRANCH=feat/scenario
 EOF
 env "${repo_env[@]}" T2_PROFILE_ENV="$v2_profile_env" \
   bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
+
+# `minikube-t2` is a reserved pre-gate transition. The standalone script must
+# stop at its early guard, while the private child must still prove the exact
+# inherited lease before reaching any post-lease work.
+canonical_guard_out="$tmp/canonical-guard.out"
+set +e
+PRE_GATE_SYNC_CONFIG_ONLY=true \
+  bash "$ROOT/scripts/minikube/pre-gate-sync.sh" --gate minikube-t2 \
+  >"$canonical_guard_out" 2>&1
+canonical_guard_rc=$?
+set -e
+[[ "$canonical_guard_rc" -ne 0 ]] || fail 'standalone pre-gate accepted the reserved minikube-t2 transition'
+grep -Fq 'T2_CANONICAL_ENTRYPOINT_REQUIRED' "$canonical_guard_out" \
+  || fail 'standalone pre-gate did not report T2_CANONICAL_ENTRYPOINT_REQUIRED'
+
+canonical_lock_root="$tmp/canonical-locks"
+canonical_lock_dir="$canonical_lock_root/$profile.lock"
+mkdir -p "$canonical_lock_dir"
+canonical_lease=fixture-lease
+canonical_lock_key="$(printf '%s\0%s\0%s\0%s\0%s' \
+  "$repo" feat/scenario "$feature_sha" "$profile" "$profile" | shasum | awk '{print $1}')"
+canonical_process_start="$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^ *//' || true)"
+[[ -n "$canonical_process_start" ]] || canonical_process_start=unavailable
+canonical_owner_lease_key=TO""KEN
+{
+  printf 'REPOSITORY=%s\nBRANCH=feat/scenario\nHEAD=%s\n' "$repo" "$feature_sha"
+  printf 'PROFILE=%s\nCONTEXT=%s\nWORKTREE_ID=%s\nLOCK_KEY=%s\n' \
+    "$profile" "$profile" "$worktree_id" "$canonical_lock_key"
+  printf '%s=%s\nPID=%s\nPROCESS_START=%s\n' \
+    "$canonical_owner_lease_key" "$canonical_lease" "$$" "$canonical_process_start"
+} >"$canonical_lock_dir/owner.env"
+canonical_lease_env_name=T2_LOCK_""TOKEN
+canonical_valid_sentinel="$tmp/canonical-valid-lease"
+env "${repo_env[@]}" T2_WORKTREE_ID="$worktree_id" \
+  FIXTURE_BRANCH=feat/scenario FIXTURE_HEAD="$feature_sha" \
+  FIXTURE_WORKTREE_ID="$worktree_id" \
+  T2_LOCK_ROOT="$canonical_lock_root" T2_SKIP_LOCK=true \
+  "$canonical_lease_env_name=$canonical_lease" \
+  POST_LEASE_SENTINEL="$canonical_valid_sentinel" \
+  bash -c 'set -euo pipefail; source "$1"; T2_BRANCH="$FIXTURE_BRANCH"; T2_HEAD="$FIXTURE_HEAD"; T2_WORKTREE_ID="$FIXTURE_WORKTREE_ID"; t2_mutation_lock; : >"$POST_LEASE_SENTINEL"' \
+  bash "$COMMON"
+[[ -e "$canonical_valid_sentinel" ]] \
+  || fail 'matching inherited lease did not reach the post-lease scenario sentinel'
+
+canonical_wrong_sentinel="$tmp/canonical-wrong-lease"
+canonical_wrong_out="$tmp/canonical-wrong-lease.out"
+set +e
+env "${repo_env[@]}" T2_WORKTREE_ID="$worktree_id" \
+  FIXTURE_BRANCH=feat/scenario FIXTURE_HEAD="$feature_sha" \
+  FIXTURE_WORKTREE_ID="$worktree_id" \
+  T2_LOCK_ROOT="$canonical_lock_root" T2_SKIP_LOCK=true \
+  "$canonical_lease_env_name=wrong-lease" \
+  POST_LEASE_SENTINEL="$canonical_wrong_sentinel" \
+  bash -c 'set -euo pipefail; source "$1"; T2_BRANCH="$FIXTURE_BRANCH"; T2_HEAD="$FIXTURE_HEAD"; T2_WORKTREE_ID="$FIXTURE_WORKTREE_ID"; t2_mutation_lock; : >"$POST_LEASE_SENTINEL"' \
+  bash "$COMMON" >"$canonical_wrong_out" 2>&1
+canonical_wrong_rc=$?
+set -e
+[[ "$canonical_wrong_rc" -ne 0 ]] || fail 'mismatched inherited lease crossed the mutation boundary'
+grep -Fq 'PROFILE_LOCK_REQUIRED' "$canonical_wrong_out" \
+  || fail 'mismatched inherited lease did not report PROFILE_LOCK_REQUIRED'
+[[ ! -e "$canonical_wrong_sentinel" ]] \
+  || fail 'mismatched inherited lease reached post-lease scenario work'
+
+bootstrap_bin="$tmp/bootstrap-bin"
+bootstrap_resource_sentinel="$tmp/bootstrap-resource-read"
+mkdir -p "$bootstrap_bin"
+cat >"$bootstrap_bin/minikube" <<'EOF'
+#!/usr/bin/env bash
+case "${FAKE_BOOTSTRAP_PROFILE_STATUS:-missing}:$*" in
+  missing:*status*)
+    printf '* Profile "%s" not found.\n' "${FAKE_BOOTSTRAP_PROFILE:?}" >&2
+    exit 85
+    ;;
+  stopped:*status*)
+    printf 'host: Stopped\nkubelet: Stopped\napiserver: Stopped\n'
+    exit 7
+    ;;
+  healthy:*status*)
+    printf 'host: Running\nkubelet: Running\napiserver: Running\n'
+    exit 0
+    ;;
+  healthy:*" ip")
+    printf '127.0.0.1\n'
+    exit 0
+    ;;
+esac
+printf 'unexpected minikube invocation: %s\n' "$*" >&2
+exit 98
+EOF
+cat >"$bootstrap_bin/kubectl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"config get-contexts -o name"* ]]; then
+  if [ "${FAKE_BOOTSTRAP_CONTEXT_EXISTS:-false}" = true ]; then
+    printf '%s\n' "${FAKE_BOOTSTRAP_PROFILE:?}"
+  fi
+  exit 0
+fi
+if [[ "$*" == *"config view"* ]]; then
+  printf 'https://127.0.0.1:6443\n'
+  exit 0
+fi
+if [[ "$*" == *"get nodes -o json"* ]]; then
+  printf '{"items":[{"metadata":{"labels":{"minikube.k8s.io/name":"%s"}},"status":{"addresses":[{"type":"InternalIP","address":"127.0.0.1"}]}}]}\n' \
+    "${FAKE_BOOTSTRAP_PROFILE:?}"
+  exit 0
+fi
+if [[ "$*" == *"get configmap"* ]]; then
+  printf '{}\n'
+  exit 0
+fi
+: >"${BOOTSTRAP_RESOURCE_SENTINEL:?}"
+printf 'unexpected Kubernetes API read during missing-profile bootstrap: %s\n' "$*" >&2
+exit 99
+EOF
+chmod +x "$bootstrap_bin/minikube" "$bootstrap_bin/kubectl"
+
+bootstrap_plan="$tmp/bootstrap-plan.json"
+bootstrap_out="$tmp/bootstrap-plan.out"
+rm -f "$bootstrap_resource_sentinel"
+set +e
+env "${repo_env[@]}" T2_PROFILE_ENV="$v2_profile_env" \
+  PATH="$bootstrap_bin:$PATH" FAKE_BOOTSTRAP_PROFILE="$profile" \
+  BOOTSTRAP_RESOURCE_SENTINEL="$bootstrap_resource_sentinel" \
+  T2_PLAN_MODE=true T2_PLAN_FILE="$bootstrap_plan" \
+  T2_LOCK_ROOT="$tmp/bootstrap-locks" T2_EVIDENCE_ROOT="$tmp/bootstrap-evidence" \
+  bash "$PREFLIGHT" >"$bootstrap_out" 2>&1
+bootstrap_rc=$?
+set -e
+[ "$bootstrap_rc" -eq 0 ] || fail "missing profile planner failed instead of selecting full-bootstrap: $(sed -n '1,20p' "$bootstrap_out")"
+bootstrap_summary="$(python3 - "$bootstrap_plan" <<'PY'
+import json
+import sys
+data = json.load(open(sys.argv[1]))
+print("|".join([str(data.get("state", "")), str(data.get("profileStatus", "")), str(data.get("profileHealthy", ""))]))
+PY
+)"
+[ "$bootstrap_summary" = 'full-bootstrap|missing|false' ] || fail "missing profile planner wrote unexpected plan: $bootstrap_summary"
+grep -Fq 'transition=full-bootstrap' "$bootstrap_out" || fail 'missing profile planner did not report full-bootstrap'
+[ ! -e "$bootstrap_resource_sentinel" ] || fail 'missing profile planner attempted a Kubernetes API read'
+
+bootstrap_cert_plan="$tmp/bootstrap-cert-plan.json"
+bootstrap_cert_out="$tmp/bootstrap-cert.out"
+rm -f "$bootstrap_resource_sentinel"
+set +e
+env "${repo_env[@]}" T2_PROFILE_ENV="$v2_profile_env" \
+  PATH="$bootstrap_bin:$PATH" FAKE_BOOTSTRAP_PROFILE="$profile" \
+  BOOTSTRAP_RESOURCE_SENTINEL="$bootstrap_resource_sentinel" \
+  T2_PLAN_MODE=false T2_PLAN_FILE="$bootstrap_cert_plan" \
+  T2_LOCK_ROOT="$tmp/bootstrap-cert-locks" T2_EVIDENCE_ROOT="$tmp/bootstrap-cert-evidence" \
+  bash "$PREFLIGHT" >"$bootstrap_cert_out" 2>&1
+bootstrap_cert_rc=$?
+set -e
+[ "$bootstrap_cert_rc" -ne 0 ] || fail 'standalone preflight certified a missing profile'
+grep -Fq 'BOOTSTRAP_REQUIRED' "$bootstrap_cert_out" || fail 'standalone missing-profile preflight did not report BOOTSTRAP_REQUIRED'
+[ -f "$bootstrap_cert_plan" ] || fail 'standalone missing-profile preflight did not write its plan before failing'
+[ ! -e "$bootstrap_resource_sentinel" ] || fail 'standalone missing-profile preflight attempted a Kubernetes API read'
+
+bootstrap_stopped_plan="$tmp/bootstrap-stopped-plan.json"
+bootstrap_stopped_out="$tmp/bootstrap-stopped.out"
+rm -f "$bootstrap_resource_sentinel"
+set +e
+env "${repo_env[@]}" T2_PROFILE_ENV="$v2_profile_env" \
+  PATH="$bootstrap_bin:$PATH" FAKE_BOOTSTRAP_PROFILE="$profile" \
+  FAKE_BOOTSTRAP_PROFILE_STATUS=stopped \
+  BOOTSTRAP_RESOURCE_SENTINEL="$bootstrap_resource_sentinel" \
+  T2_PLAN_MODE=true T2_PLAN_FILE="$bootstrap_stopped_plan" \
+  T2_LOCK_ROOT="$tmp/bootstrap-stopped-locks" T2_EVIDENCE_ROOT="$tmp/bootstrap-stopped-evidence" \
+  bash "$PREFLIGHT" >"$bootstrap_stopped_out" 2>&1
+bootstrap_stopped_rc=$?
+set -e
+[ "$bootstrap_stopped_rc" -eq 0 ] || fail "stopped profile planner failed instead of selecting full-bootstrap: $(sed -n '1,20p' "$bootstrap_stopped_out")"
+bootstrap_stopped_summary="$(python3 - "$bootstrap_stopped_plan" <<'PY'
+import json
+import sys
+data = json.load(open(sys.argv[1]))
+print("|".join([str(data.get("state", "")), str(data.get("profileStatus", ""))]))
+PY
+)"
+[ "$bootstrap_stopped_summary" = 'full-bootstrap|stopped' ] || fail "stopped profile planner wrote unexpected plan: $bootstrap_stopped_summary"
+[ ! -e "$bootstrap_resource_sentinel" ] || fail 'stopped profile planner attempted a Kubernetes API read'
+
+bootstrap_marker_plan="$tmp/bootstrap-marker-plan.json"
+bootstrap_marker_out="$tmp/bootstrap-marker.out"
+rm -f "$bootstrap_resource_sentinel"
+set +e
+env "${repo_env[@]}" T2_PROFILE_ENV="$v2_profile_env" \
+  PATH="$bootstrap_bin:$PATH" FAKE_BOOTSTRAP_PROFILE="$profile" \
+  FAKE_BOOTSTRAP_PROFILE_STATUS=healthy FAKE_BOOTSTRAP_CONTEXT_EXISTS=true \
+  BOOTSTRAP_RESOURCE_SENTINEL="$bootstrap_resource_sentinel" \
+  T2_PLAN_MODE=true T2_PLAN_FILE="$bootstrap_marker_plan" \
+  T2_LOCK_ROOT="$tmp/bootstrap-marker-locks" T2_EVIDENCE_ROOT="$tmp/bootstrap-marker-evidence" \
+  bash "$PREFLIGHT" >"$bootstrap_marker_out" 2>&1
+bootstrap_marker_rc=$?
+set -e
+[ "$bootstrap_marker_rc" -eq 0 ] || fail "missing marker planner failed instead of selecting full-bootstrap: $(sed -n '1,20p' "$bootstrap_marker_out")"
+bootstrap_marker_summary="$(python3 - "$bootstrap_marker_plan" <<'PY'
+import json
+import sys
+data = json.load(open(sys.argv[1]))
+print("|".join([str(data.get("state", "")), str(data.get("profileStatus", ""))]))
+PY
+)"
+[ "$bootstrap_marker_summary" = 'full-bootstrap|healthy' ] || fail "missing marker planner wrote unexpected plan: $bootstrap_marker_summary"
+[ ! -e "$bootstrap_resource_sentinel" ] || fail 'missing marker planner continued into resource checks'
+
+bootstrap_ambiguous_out="$tmp/bootstrap-ambiguous.out"
+rm -f "$bootstrap_resource_sentinel"
+set +e
+env "${repo_env[@]}" T2_PROFILE_ENV="$v2_profile_env" \
+  PATH="$bootstrap_bin:$PATH" FAKE_BOOTSTRAP_PROFILE="$profile" \
+  FAKE_BOOTSTRAP_CONTEXT_EXISTS=true \
+  BOOTSTRAP_RESOURCE_SENTINEL="$bootstrap_resource_sentinel" \
+  T2_PLAN_MODE=true T2_PLAN_FILE="$tmp/bootstrap-ambiguous-plan.json" \
+  T2_LOCK_ROOT="$tmp/bootstrap-ambiguous-locks" T2_EVIDENCE_ROOT="$tmp/bootstrap-ambiguous-evidence" \
+  bash "$PREFLIGHT" >"$bootstrap_ambiguous_out" 2>&1
+bootstrap_ambiguous_rc=$?
+set -e
+[ "$bootstrap_ambiguous_rc" -ne 0 ] || fail 'missing profile accepted an ambiguous same-name kubeconfig context'
+grep -Fq 'PROFILE_OWNERSHIP_MISMATCH' "$bootstrap_ambiguous_out" || fail 'ambiguous same-name context did not fail closed on ownership'
+[ ! -e "$bootstrap_resource_sentinel" ] || fail 'ambiguous missing profile attempted a Kubernetes API read'
 
 bad_v2_owner_env="$tmp/bad-v2-owner.env"
 sed 's/^OWNER_ID=.*/OWNER_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
@@ -369,6 +603,27 @@ esac
 ready_json='{"items":[{"metadata":{"namespace":"gfs","name":"gfsc-reader","generation":7},"spec":{"replicas":1},"status":{"observedGeneration":7,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}}]}'
 env "${repo_env[@]}" READY_JSON="$ready_json" \
   bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$READY_JSON"; }; t2_deployment_check' bash "$COMMON"
+
+# Full setup restarts additional deployments after waiting for the core set.
+# The strict handoff must tolerate that finite rollout window while preserving
+# the exact final readiness contract. This models the observed mcp-proxy state:
+# ready=available=desired, but unavailableReplicas remains 1 for one snapshot.
+wait_attempts="$(env "${repo_env[@]}" \
+  bash -c 'source "$1"; T2_TIMEOUT_SECONDS=5; T2_RUNTIME_TIMEOUT_SECONDS=5; attempts=0; t2_deployment_check(){ attempts=$((attempts + 1)); if [ "$attempts" -eq 1 ]; then T2_UNREADY_DEPLOYMENTS="mcp-server/mcp-proxy ready=1/1 updated=1 observed=2/2 unavailable=1"; return 1; fi; return 0; }; sleep(){ :; }; t2_wait_for_deployments; printf "%s" "$attempts"' bash "$COMMON")"
+[ "$wait_attempts" = 2 ] || fail "bounded deployment convergence did not retry exactly once: $wait_attempts"
+
+ready_wait_attempts="$(env "${repo_env[@]}" \
+  bash -c 'source "$1"; T2_TIMEOUT_SECONDS=5; T2_RUNTIME_TIMEOUT_SECONDS=5; attempts=0; t2_deployment_check(){ attempts=$((attempts + 1)); return 0; }; sleep(){ return 99; }; t2_wait_for_deployments; printf "%s" "$attempts"' bash "$COMMON")"
+[ "$ready_wait_attempts" = 1 ] || fail "already-ready deployment convergence used $ready_wait_attempts reads instead of one"
+
+wait_timeout_log="$tmp/deployment-wait-timeout"
+if env "${repo_env[@]}" \
+  bash -c 'source "$1"; T2_TIMEOUT_SECONDS=2; T2_RUNTIME_TIMEOUT_SECONDS=2; t2_deployment_check(){ T2_UNREADY_DEPLOYMENTS="mcp-server/mcp-proxy unavailable=1"; return 1; }; sleep(){ SECONDS=$((SECONDS + $1)); }; t2_wait_for_deployments' bash "$COMMON" \
+    >"$wait_timeout_log" 2>&1; then
+  fail 'bounded deployment convergence accepted a permanently unready deployment'
+fi
+grep -Fq 'PROFILE_UNHEALTHY: deployments did not converge within 2 seconds: mcp-server/mcp-proxy unavailable=1' "$wait_timeout_log" ||
+  fail 'bounded deployment convergence timeout omitted the final unready deployment'
 # Each required deployment must use its own metadata generation. Keep an
 # unrelated item last so a stale loop variable cannot make healthy resources
 # appear unready.
@@ -381,6 +636,9 @@ empty_inventory_json='{"items":[]}'
 expect_code PROFILE_UNHEALTHY default-empty-inventory default-empty-inventory \
   env "${repo_env[@]}" T2_REQUIRED_DEPLOYMENTS= EMPTY_INVENTORY_JSON="$empty_inventory_json" \
   bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$EMPTY_INVENTORY_JSON"; }; t2_deployment_check' bash "$COMMON"
+conditional_empty="$(env "${repo_env[@]}" T2_REQUIRED_DEPLOYMENTS= EMPTY_INVENTORY_JSON="$empty_inventory_json" \
+  bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$EMPTY_INVENTORY_JSON"; }; if t2_deployment_check >/dev/null 2>&1; then printf PASS; else printf FAIL; fi' bash "$COMMON")"
+[ "$conditional_empty" = FAIL ] || fail 'empty deployment inventory passed when checked from a conditional caller'
 
 # A missing core Deployment is reported even when the other core Deployments
 # are healthy; the inventory cannot silently shrink the required contract.
@@ -432,6 +690,25 @@ if grep -Fq 'Traceback' "$tmp/invalid-deployment-inventory"; then
 fi
 grep -Fq 'next:' "$tmp/invalid-deployment-inventory" ||
   fail 'invalid deployment inventory omitted the stable next-step guidance'
+conditional_invalid="$(env "${repo_env[@]}" INVALID_INVENTORY='{not-json' \
+  bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$INVALID_INVENTORY"; }; if t2_deployment_check >/dev/null 2>&1; then printf PASS; else printf FAIL; fi' bash "$COMMON")"
+[ "$conditional_invalid" = FAIL ] || fail 'invalid deployment inventory passed when checked from a conditional caller'
+
+# A bounded kubectl read may emit a complete-looking JSON document before its
+# deadline runner exits non-zero. The status is authoritative: neither the
+# direct check nor the handoff waiter may certify that partial stdout.
+conditional_timed_out="$(env "${repo_env[@]}" T2_REQUIRED_DEPLOYMENTS=gfs/gfsc-reader READY_JSON="$ready_json" \
+  bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$READY_JSON"; return 124; }; if t2_deployment_check >/dev/null 2>&1; then printf PASS; else printf FAIL; fi' bash "$COMMON")"
+[ "$conditional_timed_out" = FAIL ] || fail 'timed-out deployment inventory passed because its partial stdout looked Ready'
+
+timed_out_wait_log="$tmp/deployment-wait-query-timeout"
+if env "${repo_env[@]}" T2_REQUIRED_DEPLOYMENTS=gfs/gfsc-reader READY_JSON="$ready_json" \
+  bash -c 'source "$1"; T2_TIMEOUT_SECONDS=2; T2_RUNTIME_TIMEOUT_SECONDS=2; t2_kc(){ printf "%s" "$READY_JSON"; return 124; }; sleep(){ SECONDS=$((SECONDS + $1)); }; t2_wait_for_deployments' bash "$COMMON" \
+    >"$timed_out_wait_log" 2>&1; then
+  fail 'handoff waiter accepted a timed-out deployment inventory query'
+fi
+grep -Fq 'PROFILE_UNHEALTHY' "$timed_out_wait_log" ||
+  fail 'handoff waiter timeout omitted the fail-loud deployment diagnosis'
 expect_code PROFILE_UNHEALTHY malformed-deployment-inventory malformed-deployment-inventory \
   env "${repo_env[@]}" INVALID_INVENTORY='{"items":[{"spec":{"replicas":"not-an-integer"}}]}' \
   bash -c 'source "$1"; T2_PLAN_MODE=false; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$INVALID_INVENTORY"; }; t2_deployment_check' bash "$COMMON"

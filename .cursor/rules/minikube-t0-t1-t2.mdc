@@ -29,6 +29,11 @@ repository — never mix its PRs or clusters into this lane.
   `T0=`/`T1=`/`T2=` statuses.
 - `T2_PREFLIGHT_PASS` from the standalone planner is NOT T2.
 - `make minikube-pre-gate-sync` is NOT T2.
+- `GATE=minikube-t2` is reserved for the internal delegation from the canonical
+  T2 orchestrator. Standalone Make/direct-script calls fail with
+  `T2_CANONICAL_ENTRYPOINT_REQUIRED` before repository, image, lease, or
+  cluster inspection. Use `make minikube-t2` (or the preconditioned
+  `make minikube-t2-runtime`) instead.
 - Product E2E scripts (e.g. `scripts/e2e/e2e-hcc-rollout-readiness.sh`), CI,
   unit suites, and Playwright are separate lanes; none stands in for T2.
 - Health/Playwright are opt-in via `T2_HEALTHCHECK_COMMAND` /

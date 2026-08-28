@@ -178,7 +178,7 @@ assert_minikube_upgrade_classifier() {
   done
   if [[ "$path" == *"scripts/minikube/full-setup.sh" ]]; then
     local readiness_probe writer_flag partial_flag fence_call policy_apply migration roles recovery_overlay restore_api post_ready post_reconcile restore_writers
-    readiness_probe="$(grep -n 'if control_api_is_ready' <<<"$block" | head -1 | cut -d: -f1)"
+    readiness_probe="$(grep -n 'control_api_is_ready; then' <<<"$block" | awk -F: -v start="${classifier_start}" '$1 >= start { print $1; exit }')"
     if [[ -n "$readiness_probe" ]]; then
       readiness_probe=$((block_start + readiness_probe - 1))
     fi
@@ -189,11 +189,11 @@ assert_minikube_upgrade_classifier() {
     partial_flag="$(grep -n 'PARTIAL_BOOTSTRAP_RECOVERY=true' <<<"${block}" | awk -F: -v start="${classifier_start}" '$1 >= start { print $1; exit }')"
     fence_call="$(grep -nE '^[[:space:]]+fence_partial_bootstrap_writers$' <<<"${block}" | awk -F: -v start="${classifier_start}" '$1 >= start { print $1; exit }')"
     policy_apply="$(grep -nE '^[[:space:]]+apply_refreshed_k8s_api_network_policies$' <<<"${block}" | awk -F: -v start="${classifier_start}" '$1 >= start { print $1; exit }')"
-    migration="$(grep -n 'run-control-api-db-migration.sh' "$path" | head -1 | cut -d: -f1)"
-    roles="$(grep -n 'provision-control-api-runtime-roles.sh' "$path" | head -1 | cut -d: -f1)"
-    restore_api="$(grep -nE '^[[:space:]]+restore_partial_control_api$' "$path" | tail -1 | cut -d: -f1)"
+    migration="$(grep -n 'bash .*run-control-api-db-migration.sh' "$path" | tail -1 | cut -d: -f1)"
+    roles="$(grep -n 'bash .*provision-control-api-runtime-roles.sh' "$path" | tail -1 | cut -d: -f1)"
+    restore_api="$(grep -nE '^[[:space:]]+(if ! )?restore_partial_control_api(; then)?$' "$path" | tail -1 | cut -d: -f1)"
     recovery_overlay="$(grep -nE '^[[:space:]]+apply_fenced_recovery_overlay$' "$path" | tail -1 | cut -d: -f1)"
-    post_ready="$(grep -n 'rollout status deployment/control-api.*timeout=180s' "$path" | tail -1 | cut -d: -f1)"
+    post_ready="$(grep -nE '^[[:space:]]+if ! control_api_is_ready; then$' "$path" | tail -1 | cut -d: -f1)"
     post_reconcile="$(grep -nE '^[[:space:]]+reconcile_existing_gfs_credentials$' "$path" | tail -1 | cut -d: -f1)"
     restore_writers="$(grep -nE '^[[:space:]]+restore_partial_non_api_writers$' "$path" | tail -1 | cut -d: -f1)"
     for line_name in writer_flag partial_flag fence_call policy_apply; do

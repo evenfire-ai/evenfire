@@ -10,6 +10,11 @@ development-only, runs against the branch-owned Minikube profile, and produces
 a T2 verdict solely through the final exact-head preflight inside the
 orchestrator (`T2_PLAN_MODE=false`, plan state `already-synced`).
 
+The public Make orchestrator is mandatory. `make minikube-pre-gate-sync` is
+for named non-T2 gates only; its `GATE=minikube-t2` form is a private
+orchestrator delegation and is rejected standalone before repository, image,
+lease, or cluster inspection. Never use it to bootstrap, close, or certify T2.
+
 Anti-patterns and failure codes: see `reference.md` in this skill directory.
 Deep contract: `docs/testing/minikube-t2-runbook.md`.
 

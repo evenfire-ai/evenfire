@@ -95,9 +95,10 @@ STUB
 printf '%s\n' "$*" >>"${TEST_LOG_FILE:?}"
 case "${1:-}" in
   context)
+    effective_host="${DOCKER_HOST:-unix:///tmp/evenfire-docker.sock}"
     case "$*" in
-      *SkipTLSVerify*) printf 'unix:///tmp/evenfire-docker.sock\tfalse\t{}\n' ;;
-      *) printf 'unix:///tmp/evenfire-docker.sock\n' ;;
+      *SkipTLSVerify*) printf '%s\tfalse\t{}\n' "$effective_host" ;;
+      *) printf '%s\n' "$effective_host" ;;
     esac
     ;;
   inspect) echo "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" ;;

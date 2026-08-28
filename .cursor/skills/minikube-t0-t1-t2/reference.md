@@ -9,6 +9,10 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
 - **Do not treat `T2_PREFLIGHT_PASS` as T2.** The standalone planner is not a
   lane. Only `MINIKUBE_T2_PASS` from `make minikube-t2` /
   `make minikube-t2-runtime` is a T2 verdict.
+- **Do not invoke `GATE=minikube-t2` through pre-gate directly.** That gate
+  name is reserved for the internal `t2.sh` delegation with the inherited
+  lease. A standalone call fails with `T2_CANONICAL_ENTRYPOINT_REQUIRED`
+  before repository, image, lease, or cluster inspection.
 - **Do not call `scripts/e2e/e2e-hcc-rollout-readiness.sh` "T2".** It is a
   product E2E lane (e.g. issue #391 readiness), a separate evidence lane.
 - **Do not re-run full `make minikube-t2` to "close T2"** when T0 and T1 are
@@ -69,6 +73,7 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
 | `UNSUPPORTED_T1_CONCURRENCY` | A caller attempted more than one T1 worker. | Remove the override or set `VITEST_MAX_WORKERS=1`; T1 role/fixture mutation is serial by contract. |
 | `PROFILE_OWNERSHIP_MISMATCH` | Profile metadata, context, worktree, or branch does not match this lane. | Resolve through the canonical helper. Never adopt, kill, or mutate a foreign/ambiguous profile. |
 | `PROFILE_LOCK_REQUIRED` | A mutating child did not inherit the exact parent lease. | Invoke the public Make target/orchestrator; do not fabricate or bypass its lock token. |
+| `T2_CANONICAL_ENTRYPOINT_REQUIRED` | The reserved `minikube-t2` pre-gate was invoked outside the canonical orchestrator. | Run `MINIKUBE_PROFILE=<owned> CONTROL_API_REAL_PG_CONTEXT=<owned> make minikube-t2`; use `minikube-t2-runtime` only when its exact-head T0/T1 preconditions already hold. |
 | `DOCKER_ENDPOINT_REQUIRED` / `DOCKER_ENDPOINT_UNSAFE` / `DOCKER_ENDPOINT_MISMATCH` | Docker did not resolve exactly one approved local endpoint, or isolation selected a different endpoint. | Select a local Docker Desktop/rootless context or set an explicit local `DOCKER_HOST`; do not weaken the endpoint check. |
 | `DOCKER_CONFIG_REQUIRED` / `REGISTRY_AUTH_REQUIRED` | A Docker operation lacks its empty task-local config, or a private pull lacks an explicit readable auth config. | Use the canonical Make/orchestrator path; for a genuinely private source, pass only the intended config directory through `MINIKUBE_DOCKER_AUTH_CONFIG`. |
 | `MINIKUBE_PULL_CONFIG_INVALID` | Published-image pull parallelism, retry count, or retry delay is outside its finite range. | Correct the override (`parallelism 1-64`, retries 1-10, delay 0-300 seconds); never disable the bound. |

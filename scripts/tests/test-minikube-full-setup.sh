@@ -457,6 +457,21 @@ assert_setup_runtime_operations_are_bounded() {
   fi
 }
 
+assert_partial_core_readiness_is_fail_loud() {
+  local setup="scripts/minikube/full-setup.sh" partial_line failure_line failure_block
+  partial_line="$(grep -nF 'Setup partially complete. Some services need attention.' "$setup" | tail -1 | cut -d: -f1)"
+  failure_line="$(grep -nF 'Minikube setup failed: one or more core services are not ready' "$setup" | tail -1 | cut -d: -f1)"
+  failure_block="$(sed -n '/^if \[ "$all_ready" != true \]; then$/,/^fi$/p' "$setup")"
+  if [ -n "$partial_line" ] && [ -n "$failure_line" ] && \
+     [ "$failure_line" -gt "$partial_line" ] && \
+     [ "$(grep -Fc 'if [ "$all_ready" != true ]; then' "$setup")" -eq 1 ] && \
+     grep -Fq 'exit 1' <<<"$failure_block"; then
+    pass "full-setup reports partial readiness and returns a failing status"
+  else
+    fail "full-setup can still return success after a core deployment is unready"
+  fi
+}
+
 # full-setup.sh is a 1284-line orchestrator that needs a real cluster to run,
 # so these cases read its resolved configuration rather than executing it: they
 # source the top of the script with a guard variable set, which stops it before
@@ -486,6 +501,24 @@ full_setup_resolves() {
   env "$@" PATH="$FULL_SETUP_STUB_DIR:$PATH" MINIKUBE_FULL_SETUP_CONFIG_ONLY=true \
     bash -c 'source "$0" >/dev/null 2>&1; printf "%s" "${'"$var"'}"' \
     "$REPO_ROOT/scripts/minikube/full-setup.sh"
+}
+
+assert_t2_handoff_rejects_skip_build() {
+  local output status=0 handoff_root="$FULL_SETUP_STUB_DIR/skip-build-handoff"
+  output="$(
+    PATH="$FULL_SETUP_STUB_DIR:$PATH" MINIKUBE_FULL_SETUP_CONFIG_ONLY=true \
+      T2_SETUP_HANDOFF_REQUIRED=true T2_SKIP_LOCK=true T2_RUN_ID=fixture-run \
+      T2_SETUP_HANDOFF_TRANSITION=full-reconcile IMAGE_SOURCE=local \
+      T2_SETUP_HANDOFF_ROOT="$handoff_root" \
+      bash "$REPO_ROOT/scripts/minikube/full-setup.sh" --skip-build 2>&1
+  )" || status=$?
+  if [[ "$status" -ne 0 ]] &&
+    grep -Fq 'T2 setup handoff requires same-run image acquisition; --skip-build is forbidden' <<<"$output" &&
+    [[ ! -e "$handoff_root" ]]; then
+    pass "T2 setup handoff rejects --skip-build before any cluster operation"
+  else
+    fail "T2 setup handoff accepted --skip-build or failed without the explicit acquisition error"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1524,6 +1557,8 @@ assert_reset_db_flag_backcompat
 assert_skip_build_staleness_find_is_sigpipe_guarded
 assert_pipefail_head_guard_prevents_abort
 assert_setup_runtime_operations_are_bounded
+assert_partial_core_readiness_is_fail_loud
+assert_t2_handoff_rejects_skip_build
 assert_ghcr_is_the_default_image_source
 assert_image_source_local_is_honoured
 assert_bootstrap_seed_deferral_is_opt_in
