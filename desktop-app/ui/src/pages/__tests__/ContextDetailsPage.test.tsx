@@ -214,6 +214,7 @@ const makeConnectorsValue = (
 ): ReturnType<typeof useConnectorsController> => ({
   loading: false,
   error: null,
+  actionError: null,
   agents: [],
   pendingKey: null,
   refresh: vi.fn(),
