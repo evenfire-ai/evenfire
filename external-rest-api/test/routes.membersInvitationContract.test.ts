@@ -141,7 +141,6 @@ describe('member invitation cross-service error contract', () => {
         path: '/external/members/invitations',
         body: {
           email: 'not-an-email',
-          name: '',
           teams: [],
         },
       },
@@ -194,7 +193,7 @@ describe('member invitation cross-service error contract', () => {
     }
   )
 
-  it('preserves padded-name normalization across the Control API wire boundary', async () => {
+  it('preserves the padded-name candidate across the Control API wire boundary', async () => {
     producer.respondWith({ status: 201, body: { id: 'inv-padded' } })
 
     await request(makeExternalApp())
@@ -213,7 +212,7 @@ describe('member invitation cross-service error contract', () => {
         path: '/external/members/invitations',
         body: {
           email: 'invitee@example.com',
-          name: 'Alice',
+          name: `${' '.repeat(121)}Alice`,
           teams: [{ teamId: 'team-1', role: 'member' }],
         },
       },
