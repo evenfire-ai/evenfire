@@ -863,6 +863,25 @@ describe('DELETE /admin/mcp-secrets/:name (identity and dependency guard)', () =
     expect(gateway.deleteSecret).not.toHaveBeenCalled()
   })
 
+  it('refuses to delete a Secret used as a live connector image pull Secret', async () => {
+    const gateway = createGateway()
+    gateway.listResource.mockResolvedValueOnce([
+      {
+        metadata: { name: 'linear', namespace: 'mcp-server' },
+        spec: { imagePullSecrets: [{ name: 'linear-credentials' }] },
+      },
+    ])
+    const app = makeApp(gateway)
+
+    const res = await request(app)
+      .delete('/admin/mcp-secrets/linear-credentials')
+      .send({ uid: 'uid-linear-credentials', resourceVersion: '1' })
+      .expect(409)
+
+    expect(res.body).toMatchObject({ error: 'mcp_secret_in_use', outcome: 'repair_required' })
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
   it('fails closed when the dependency graph cannot be read', async () => {
     const gateway = createGateway()
     gateway.listResource.mockRejectedValueOnce(new Error('connector list unavailable'))

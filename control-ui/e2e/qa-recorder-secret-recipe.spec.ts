@@ -4,6 +4,7 @@
 // shared recipe secret (dummy values) through the Control UI. Run with
 // QA_RECORDER_CONFIRM_MUTATIONS=1.
 import { expect, test } from '@playwright/test'
+import { requireSecretIdentity, type SecretIdentity } from '../test-utils/secretIdentity'
 import {
   CONTROL_API_URL,
   CONTROL_UI_URL,
@@ -29,11 +30,17 @@ test.describe('optional QA recorder: Control UI recipe secret lifecycle', () => 
 
     const credentials = adminCredentials()
     const secretName = uniqueE2EName('qa-recorder-recipe-secret')
+    let secretIdentity: SecretIdentity | null = null
+    let deletedThroughUi = false
 
     try {
       await loginThroughUi(page, credentials)
 
-      await page.goto(`${CONTROL_UI_URL}/secrets/new?scope=recipe`)
+      await page.getByRole('link', { name: 'Secrets', exact: true }).click()
+      await expect(page).toHaveURL(/\/secrets$/, { timeout: 20_000 })
+      await page.getByRole('tab', { name: 'Recipe', exact: true }).click()
+      await expect(page).toHaveURL(/\/secrets\/recipe$/, { timeout: 20_000 })
+      await page.getByRole('button', { name: 'Add recipe secret', exact: true }).click()
       await expect(
         page.getByRole('heading', { name: 'Create recipe secret', exact: true })
       ).toBeVisible({ timeout: 20_000 })
@@ -53,16 +60,30 @@ test.describe('optional QA recorder: Control UI recipe secret lifecycle', () => 
       await page.getByRole('button', { name: 'Continue', exact: true }).click()
 
       await expect(page.getByPlaceholder('API_KEY')).toBeVisible({ timeout: 20_000 })
-      await page.getByRole('button', { name: 'Add key', exact: true }).click()
-      await page.getByPlaceholder('API_KEY').last().fill('API_KEY')
-      await page.getByPlaceholder('secret value').last().fill('qa-recorder-dummy')
+      await page.getByPlaceholder('API_KEY').fill('API_KEY')
+      await page.getByPlaceholder('secret value').fill('qa-recorder-dummy')
+      const createSecretResponse = page.waitForResponse(
+        response => {
+          const request = response.request()
+          if (!response.url().includes('/admin/recipe-secrets') || request.method() !== 'POST') {
+            return false
+          }
+          const body = request.postDataJSON() as { name?: string } | null
+          return body?.name === secretName
+        },
+        { timeout: 30_000 }
+      )
       await page.getByRole('button', { name: 'Create secret', exact: true }).click()
+
+      const created = await createSecretResponse
+      expect(created.status()).toBe(201)
+      secretIdentity = requireSecretIdentity(await created.json(), 'Create recipe Secret')
 
       await expect(page.getByText(`Secret ${secretName} created.`, { exact: true })).toBeVisible({
         timeout: 20_000,
       })
 
-      await page.goto(`${CONTROL_UI_URL}/secrets/recipe`)
+      await expect(page).toHaveURL(/\/secrets\/recipe$/, { timeout: 20_000 })
       const deleteButton = page.getByRole('button', {
         name: `Delete recipe secret ${secretName}`,
         exact: true,
@@ -78,17 +99,18 @@ test.describe('optional QA recorder: Control UI recipe secret lifecycle', () => 
       await confirmDialog.getByRole('button', { name: 'Delete', exact: true }).click()
 
       await expect(page.getByText(secretName, { exact: true })).toHaveCount(0, { timeout: 20_000 })
+      deletedThroughUi = true
 
       await screenshotAndLog(page, testInfo, 'control-ui-secret-recipe')
     } finally {
-      try {
-        await api(
+      if (secretIdentity && !deletedThroughUi) {
+        const deleted = await api(
           page.request,
           'DELETE',
-          `/api/v1/admin/recipe-secrets/${encodeURIComponent(secretName)}?targetNamespace=${encodeURIComponent(RECIPE_NAMESPACE)}`
+          `/api/v1/admin/recipe-secrets/${encodeURIComponent(secretName)}?targetNamespace=${encodeURIComponent(RECIPE_NAMESPACE)}`,
+          secretIdentity
         )
-      } catch {
-        // Best-effort: ignore cleanup failures.
+        expect(deleted.status, 'cleanup recipe Secret').toBe(200)
       }
     }
   })

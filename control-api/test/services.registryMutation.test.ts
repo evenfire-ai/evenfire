@@ -6,8 +6,6 @@ import {
   type RegistryResourceSnapshot,
   classifyCreatedRegistryMutationReadback,
   classifyRegistryMutationReadback,
-  classifySecretMutationReadback,
-  registrySecretDataDigest,
   registrySpecDigest,
 } from '../src/services/registryMutation.js'
 
@@ -52,7 +50,7 @@ describe('registry mutation readback classifier', () => {
     )
   })
 
-  it('classifies a stable unchanged prior object as not committed', () => {
+  it('keeps a stable unchanged prior object ambiguous until the caller fences it', () => {
     expect(
       classifyRegistryMutationReadback({
         before,
@@ -60,7 +58,7 @@ describe('registry mutation readback classifier', () => {
         current: current({}),
         operationId,
       })
-    ).toBe('not-committed')
+    ).toBe('ambiguous')
   })
 
   it('requires the current operation identity, desired digest, labels and an advanced RV', () => {
@@ -141,99 +139,6 @@ describe('registry mutation readback classifier', () => {
         desired,
         current: current({ metadata, spec: overrides.spec }),
         operationId,
-      })
-    ).toBe('ambiguous')
-  })
-})
-
-describe('credential mutation readback classifier', () => {
-  const beforeSecret = {
-    metadata: {
-      uid: 'uid-credential-a',
-      resourceVersion: '7',
-      annotations: { 'clerum.io/registry-operation-id': 'previous-operation' },
-    },
-  }
-
-  it('classifies a matching readback as a desired candidate, never as a commit receipt', () => {
-    expect(
-      classifySecretMutationReadback({
-        before: beforeSecret,
-        current: {
-          metadata: {
-            uid: beforeSecret.metadata.uid,
-            resourceVersion: '8',
-            annotations: { 'clerum.io/registry-operation-id': operationId },
-          },
-        },
-        operationId,
-        operationAnnotationKey: 'clerum.io/registry-operation-id',
-        expectedDataDigest: registrySecretDataDigest(undefined),
-      })
-    ).toBe('desired')
-  })
-
-  it('keeps a same-UID metadata race ambiguous even when data and marker match', () => {
-    const expectedAnnotations = {
-      'clerum.io/registry-operation-id': operationId,
-    }
-    expect(
-      classifySecretMutationReadback({
-        before: beforeSecret,
-        current: {
-          metadata: {
-            uid: beforeSecret.metadata.uid,
-            resourceVersion: '8',
-            annotations: { ...expectedAnnotations, 'concurrent.example/trace': 'writer-b' },
-          },
-          stringData: { field: 'expected' },
-        },
-        operationId,
-        operationAnnotationKey: 'clerum.io/registry-operation-id',
-        expectedDataDigest: registrySecretDataDigest(undefined, { field: 'expected' }),
-        expectedMetadata: { annotations: expectedAnnotations },
-      })
-    ).toBe('ambiguous')
-  })
-
-  it('keeps a delete-and-recreated object ambiguous even when it copies the operation marker', () => {
-    expect(
-      classifySecretMutationReadback({
-        before: beforeSecret,
-        current: {
-          metadata: {
-            uid: 'uid-credential-replacement',
-            resourceVersion: '1',
-            annotations: { 'clerum.io/registry-operation-id': operationId },
-          },
-        },
-        operationId,
-        operationAnnotationKey: 'clerum.io/registry-operation-id',
-      })
-    ).toBe('ambiguous')
-  })
-
-  it('does not turn an absent marker or a missing read into no-commit', () => {
-    expect(
-      classifySecretMutationReadback({
-        before: beforeSecret,
-        current: {
-          metadata: {
-            uid: beforeSecret.metadata.uid,
-            resourceVersion: '8',
-            annotations: { 'clerum.io/registry-operation-id': 'other-operation' },
-          },
-        },
-        operationId,
-        operationAnnotationKey: 'clerum.io/registry-operation-id',
-      })
-    ).toBe('ambiguous')
-    expect(
-      classifySecretMutationReadback({
-        before: undefined,
-        current: null,
-        operationId,
-        operationAnnotationKey: 'clerum.io/registry-operation-id',
       })
     ).toBe('ambiguous')
   })

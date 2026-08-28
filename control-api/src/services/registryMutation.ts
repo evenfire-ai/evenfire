@@ -4,17 +4,6 @@ export const REGISTRY_OPERATION_ID_ANNOTATION = 'clerum.io/registry-operation-id
 export const REGISTRY_SPEC_DIGEST_ANNOTATION = 'clerum.io/registry-spec-sha256'
 
 export type RegistryMutationOutcome = 'committed' | 'not-committed' | 'ambiguous'
-export type SecretMutationReadbackClassification = 'desired' | 'prior' | 'ambiguous'
-export type SecretMutationSnapshot = {
-  metadata?: {
-    uid?: string
-    resourceVersion?: string
-    labels?: Record<string, string>
-    annotations?: Record<string, string>
-  }
-  data?: Record<string, string>
-  stringData?: Record<string, string>
-}
 
 export type RegistryResourceSnapshot = {
   metadata?: {
@@ -57,77 +46,6 @@ export function canonicalRegistryJson(value: unknown): string {
 
 export function registrySpecDigest(spec: Record<string, unknown>): string {
   return createHash('sha256').update(canonicalRegistryJson(spec)).digest('hex')
-}
-
-export function registrySecretDataDigest(
-  data: Record<string, string> | undefined,
-  plaintext: Record<string, string> | undefined = undefined
-): string {
-  const effectiveData = { ...(data ?? {}) }
-  for (const [key, value] of Object.entries(plaintext ?? {})) {
-    effectiveData[key] = Buffer.from(value, 'utf8').toString('base64')
-  }
-  return registrySpecDigest(effectiveData)
-}
-
-/**
- * Classify a Secret readback after the client lost the response. A matching
- * operation marker and payload are only candidates: a GET cannot prove that
- * its resourceVersion belongs to this write. Callers must keep the result
- * non-terminal unless they obtain a direct write response or a later CAS
- * receipt of their own.
- */
-export function classifySecretMutationReadback(input: {
-  before?: SecretMutationSnapshot
-  current: SecretMutationSnapshot | null
-  operationId: string
-  operationAnnotationKey: string
-  expectedDataDigest?: string
-  expectedMetadata?: {
-    labels?: Record<string, string>
-    annotations?: Record<string, string>
-  }
-}): SecretMutationReadbackClassification {
-  const currentMetadata = input.current?.metadata
-  if (
-    !currentMetadata ||
-    typeof currentMetadata.uid !== 'string' ||
-    typeof currentMetadata.resourceVersion !== 'string'
-  ) {
-    return 'ambiguous'
-  }
-  const beforeMetadata = input.before?.metadata
-  if (beforeMetadata && currentMetadata.uid !== beforeMetadata.uid) {
-    return 'ambiguous'
-  }
-  const currentOperationId = currentMetadata.annotations?.[input.operationAnnotationKey]
-  if (currentOperationId === input.operationId) {
-    if (beforeMetadata && currentMetadata.resourceVersion === beforeMetadata.resourceVersion) {
-      return 'ambiguous'
-    }
-    if (
-      !input.expectedDataDigest ||
-      registrySecretDataDigest(input.current?.data, input.current?.stringData) !==
-        input.expectedDataDigest
-    ) {
-      return 'ambiguous'
-    }
-    if (
-      input.expectedMetadata &&
-      (!metadataMapsEqual(currentMetadata.labels, input.expectedMetadata.labels) ||
-        !metadataMapsEqual(currentMetadata.annotations, input.expectedMetadata.annotations))
-    ) {
-      // A same-UID write may carry our data marker while another writer has
-      // changed metadata. Treat that state as ambiguous: a later full restore
-      // would otherwise erase the concurrent metadata under the same identity.
-      return 'ambiguous'
-    }
-    return 'desired'
-  }
-  if (beforeMetadata && currentMetadata.resourceVersion === beforeMetadata.resourceVersion) {
-    return 'prior'
-  }
-  return 'ambiguous'
 }
 
 /**
@@ -208,22 +126,8 @@ export function classifyRegistryMutationReadback(input: {
     return 'committed'
   }
 
-  // A stable readback of the exact prior object proves that this mutation did
-  // not reach the apiserver: identity, version, spec digest, and all metadata
-  // maps are still byte-for-byte the prior state, and this operation's marker
-  // is absent. Callers only use this result after bounded repeated reads; a
-  // single stale read is not promoted to this state by the route.
-  if (
-    sameUid &&
-    currentMeta.resourceVersion === beforeMeta.resourceVersion &&
-    currentOperationId !== input.operationId &&
-    currentSpecDigest === registrySpecDigest(input.before.spec ?? {}) &&
-    metadataMapsEqual(currentMeta.labels, beforeMeta.labels) &&
-    metadataMapsEqual(currentMeta.annotations, beforeMeta.annotations)
-  ) {
-    return 'not-committed'
-  }
-
+  // A readback alone cannot prove that a failed write is no longer in flight.
+  // Only the caller's successful identity fence may produce `not-committed`.
   return 'ambiguous'
 }
 
@@ -256,13 +160,4 @@ export function classifyRegistryAssociationReadback(input: {
     return 'not-committed'
   }
   return 'ambiguous'
-}
-
-function metadataMapsEqual(
-  left: Record<string, string> | undefined,
-  right: Record<string, string> | undefined
-): boolean {
-  const leftEntries = Object.entries(left ?? {}).sort(([a], [b]) => a.localeCompare(b))
-  const rightEntries = Object.entries(right ?? {}).sort(([a], [b]) => a.localeCompare(b))
-  return JSON.stringify(leftEntries) === JSON.stringify(rightEntries)
 }
