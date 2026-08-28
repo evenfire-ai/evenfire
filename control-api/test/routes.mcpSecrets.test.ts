@@ -3,8 +3,20 @@ import express from 'express'
 import request from 'supertest'
 import { rootLogger } from '../src/observability/logger.js'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
+import { checkAndIncrement } from '../src/services/rateLimiterService.js'
 import { CONTROL_UI_ADMIN_SESSION_COOKIE } from '../src/utils/auth/sessionCookies.js'
 import { MockGateway } from './mockGateway.js'
+
+vi.mock('../src/services/rateLimiterService.js', () => ({
+  checkAndIncrement: vi.fn(async (_key: string, maxPerMinute: number) => ({
+    allowed: true,
+    remaining: maxPerMinute - 1,
+    resetMs: Date.now() + 60_000,
+    windowStartMs: Date.now(),
+    count: 1,
+    backendAvailable: true,
+  })),
+}))
 
 /** The write shape the admin routes hand to the gateway. */
 type SecretWrite = {
@@ -850,6 +862,26 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
 })
 
 describe('DELETE /admin/mcp-secrets/:name (identity and dependency guard)', () => {
+  it('rate-limits delete attempts before reading or mutating a Secret', async () => {
+    vi.mocked(checkAndIncrement).mockResolvedValueOnce({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 31,
+      backendAvailable: true,
+    })
+    const gateway = createGateway()
+
+    await request(makeApp(gateway))
+      .delete('/admin/mcp-secrets/linear-credentials')
+      .send({ uid: 'uid-linear-credentials', resourceVersion: '1' })
+      .expect(429)
+
+    expect(gateway.getSecret).not.toHaveBeenCalled()
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
   it('requires both server-issued identity values when a client supplies either one', async () => {
     const gateway = createGateway()
     const app = makeApp(gateway)

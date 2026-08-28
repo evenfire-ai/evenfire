@@ -690,7 +690,6 @@ export class MockGateway {
       throw err
     }
     this.assertPrecondition(req.name, existing, precondition)
-    const effectiveAnnotations = resolveSecretAnnotationsForReplace(existing.annotations, undefined)
     assertMutablePreservedSecretType(existing.type ?? 'Opaque')
     const updated = {
       ...existing,

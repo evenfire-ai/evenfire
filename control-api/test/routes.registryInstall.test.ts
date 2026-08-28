@@ -587,7 +587,7 @@ describe('POST /admin/registry/install', () => {
     vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
     vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
     vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
-    const { app, gw } = makeInstallApp()
+    const { app } = makeInstallApp()
 
     const res = await request(app)
       .post('/admin/registry/install')
@@ -1215,7 +1215,6 @@ describe('POST /admin/registry/install', () => {
     const deleteSecretSpy = vi.spyOn(gw, 'deleteSecret')
     const deleteResourceSpy = vi.spyOn(gw, 'deleteResource')
     const getResourceSpy = vi.spyOn(gw, 'getResource')
-    const getSecretSpy = vi.spyOn(gw, 'getSecret')
     const updateResourceSpy = vi.spyOn(gw, 'updateResource')
 
     let contextWriteFailed = false

@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { createHash } from 'node:crypto'
 import { PROVIDER_CREDENTIAL_SLOTS } from '@clerum/llm-providers'
 import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '@clerum/workflow-runtime-core'
 import { config } from '../../config.js'
@@ -6,6 +7,7 @@ import { asyncHandler } from '../../http/asyncHandler.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { isValidDNSSubdomain } from '../../http/rfc1123.js'
 import { K8sGateway, extractHttpStatus } from '../../k8s.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../../observability/logger.js'
 import {
   OWNER_RECIPE_LABEL_KEY,
@@ -35,6 +37,17 @@ import { listHostSecrets } from './hostSecrets.js'
 import { isLlmHostSecret } from './llmSecretIdentity.js'
 
 const logger = rootLogger
+
+const mcpSecretDeleteRateLimit = rateLimitMiddleware({
+  bucketType: 'admin_mcp_secret_delete',
+  maxPerMinute: 30,
+  getBucketKey: req => {
+    const session = readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)
+    const authorization = req.header('authorization') ?? ''
+    const caller = session || authorization || req.ip || 'unknown-admin'
+    return `admin-mcp-secret-delete:${createHash('sha256').update(caller).digest('hex')}`
+  },
+})
 
 // The bedrock credential-slot keys and the vertex service-account key, derived
 // from the shared provider package (never hardcoded here) so the write-side
@@ -83,14 +96,6 @@ function requestSecretPreconditions(raw: unknown): SecretPreconditions | null {
   if (typeof body.uid !== 'string' || !body.uid.trim()) return null
   if (typeof body.resourceVersion !== 'string' || !body.resourceVersion.trim()) return null
   return { uid: body.uid, resourceVersion: body.resourceVersion }
-}
-
-function hasRequestedSecretIdentity(raw: unknown): boolean {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
-  return (
-    Object.prototype.hasOwnProperty.call(raw, 'uid') ||
-    Object.prototype.hasOwnProperty.call(raw, 'resourceVersion')
-  )
 }
 
 function isLegacyMcpSecretDeleteBody(raw: unknown): boolean {
@@ -791,6 +796,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
   router.delete(
     '/admin/mcp-secrets/:name',
     enforceNamespace(config.mcpServersNamespace),
+    mcpSecretDeleteRateLimit,
     asyncHandler(async (req, res) => {
       if (isPlatformManagedSecretName(req.params.name)) {
         res.status(400).json({ error: PLATFORM_MANAGED_SECRET_ERROR })
@@ -798,10 +804,6 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
       }
       const name = req.params.name.trim()
       const requestedPrecondition = requestSecretPreconditions(req.body)
-      if (hasRequestedSecretIdentity(req.body) && !requestedPrecondition) {
-        res.status(428).json({ error: 'secret_identity_precondition_required' })
-        return
-      }
       let deletePrecondition: SecretPreconditions
       let signedCreateProof: McpSecretDeleteProofClaims | null = null
       if (requestedPrecondition) {
@@ -819,8 +821,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         const sessionToken = readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)
         const proofCookieName = mcpSecretDeleteProofCookieName(name)
         const proofCookie = readCookie(req, proofCookieName)
-        const candidateProof =
-          sessionToken && proofCookie ? verifyMcpSecretDeleteProof(proofCookie, sessionToken) : null
+        const candidateProof = verifyMcpSecretDeleteProof(proofCookie, sessionToken)
         signedCreateProof =
           candidateProof?.name === name && candidateProof.namespace === config.mcpServersNamespace
             ? candidateProof

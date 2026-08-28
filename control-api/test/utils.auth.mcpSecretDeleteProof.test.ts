@@ -44,10 +44,11 @@ describe('MCP Secret delete proof', () => {
 
     try {
       const proof = createMcpSecretDeleteProof(claims, adminSession)
-      const [payload, signature] = proof.split('.')
+      const tampered = proof.split('.')
+      tampered[2] = `${tampered[2]}x`
 
       expect(verifyMcpSecretDeleteProof(proof, 'different-admin-session')).toBeNull()
-      expect(verifyMcpSecretDeleteProof(`${payload}.${signature}x`, adminSession)).toBeNull()
+      expect(verifyMcpSecretDeleteProof(tampered.join('.'), adminSession)).toBeNull()
 
       nowSpy.mockReturnValue(now + (MCP_SECRET_DELETE_PROOF_TTL_SECONDS + 1) * 1000)
       expect(verifyMcpSecretDeleteProof(proof, adminSession)).toBeNull()

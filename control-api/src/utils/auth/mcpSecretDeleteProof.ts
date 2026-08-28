@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 
 export const MCP_SECRET_DELETE_PROOF_TTL_SECONDS = 120
 
@@ -15,27 +15,25 @@ export type McpSecretDeleteProofClaims = McpSecretDeleteProofInput & {
 
 const CLAIM_KEYS = ['name', 'namespace', 'uid', 'resourceVersion', 'exp'] as const
 const COOKIE_NAME_PREFIX = 'mcp_secret_delete_proof_'
+const PROOF_VERSION = 'v1'
+const PROOF_ALGORITHM = 'aes-256-gcm'
+const PROOF_IV_BYTES = 12
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
 }
 
-function encodeClaims(claims: McpSecretDeleteProofClaims): string {
-  return Buffer.from(JSON.stringify(claims), 'utf8').toString('base64url')
+function proofKey(sessionKey: string): Buffer {
+  return createHash('sha256')
+    .update('evenfire:mcp-secret-delete-proof:v1\0', 'utf8')
+    .update(sessionKey, 'utf8')
+    .digest()
 }
 
-function sign(encodedClaims: string, sessionKey: string): Buffer {
-  return createHmac('sha256', sessionKey).update(encodedClaims, 'utf8').digest()
-}
-
-function parseClaims(encodedClaims: string): McpSecretDeleteProofClaims | null {
-  if (!/^[A-Za-z0-9_-]+$/.test(encodedClaims)) return null
-
+function parseClaims(plaintext: Buffer): McpSecretDeleteProofClaims | null {
   let raw: unknown
   try {
-    const decoded = Buffer.from(encodedClaims, 'base64url')
-    if (decoded.toString('base64url') !== encodedClaims) return null
-    raw = JSON.parse(decoded.toString('utf8'))
+    raw = JSON.parse(plaintext.toString('utf8'))
   } catch {
     return null
   }
@@ -64,6 +62,16 @@ function parseClaims(encodedClaims: string): McpSecretDeleteProofClaims | null {
   }
 }
 
+function decodeCanonicalBase64Url(value: string): Buffer | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null
+  try {
+    const decoded = Buffer.from(value, 'base64url')
+    return decoded.toString('base64url') === value ? decoded : null
+  } catch {
+    return null
+  }
+}
+
 export function mcpSecretDeleteProofCookieName(name: string): string {
   return `${COOKIE_NAME_PREFIX}${Buffer.from(name, 'utf8').toString('base64url')}`
 }
@@ -81,8 +89,16 @@ export function createMcpSecretDeleteProof(
     resourceVersion: input.resourceVersion,
     exp: Math.floor(Date.now() / 1000) + MCP_SECRET_DELETE_PROOF_TTL_SECONDS,
   }
-  const encodedClaims = encodeClaims(claims)
-  return `${encodedClaims}.${sign(encodedClaims, sessionKey).toString('base64url')}`
+  const iv = randomBytes(PROOF_IV_BYTES)
+  const cipher = createCipheriv(PROOF_ALGORITHM, proofKey(sessionKey), iv)
+  cipher.setAAD(Buffer.from(PROOF_VERSION, 'utf8'))
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(claims), 'utf8'), cipher.final()])
+  return [
+    PROOF_VERSION,
+    iv.toString('base64url'),
+    ciphertext.toString('base64url'),
+    cipher.getAuthTag().toString('base64url'),
+  ].join('.')
 }
 
 export function verifyMcpSecretDeleteProof(
@@ -91,34 +107,22 @@ export function verifyMcpSecretDeleteProof(
 ): McpSecretDeleteProofClaims | null {
   if (!proof || !sessionKey) return null
 
-  const [encodedClaims, encodedSignature, ...rest] = proof.split('.')
-  if (
-    !encodedClaims ||
-    !encodedSignature ||
-    rest.length > 0 ||
-    !/^[A-Za-z0-9_-]+$/.test(encodedSignature)
-  ) {
-    return null
-  }
+  const [version, encodedIv, encodedCiphertext, encodedAuthTag, ...rest] = proof.split('.')
+  if (version !== PROOF_VERSION || rest.length > 0) return null
+  const iv = decodeCanonicalBase64Url(encodedIv)
+  const ciphertext = decodeCanonicalBase64Url(encodedCiphertext)
+  const authTag = decodeCanonicalBase64Url(encodedAuthTag)
+  if (!iv || iv.length !== PROOF_IV_BYTES || !ciphertext || !authTag) return null
 
-  const claims = parseClaims(encodedClaims)
-  if (!claims) return null
-
-  let suppliedSignature: Buffer
+  let claims: McpSecretDeleteProofClaims | null
   try {
-    suppliedSignature = Buffer.from(encodedSignature, 'base64url')
+    const decipher = createDecipheriv(PROOF_ALGORITHM, proofKey(sessionKey), iv)
+    decipher.setAAD(Buffer.from(PROOF_VERSION, 'utf8'))
+    decipher.setAuthTag(authTag)
+    claims = parseClaims(Buffer.concat([decipher.update(ciphertext), decipher.final()]))
   } catch {
     return null
   }
-  const expectedSignature = sign(encodedClaims, sessionKey)
-  if (
-    suppliedSignature.length !== expectedSignature.length ||
-    suppliedSignature.toString('base64url') !== encodedSignature ||
-    !timingSafeEqual(suppliedSignature, expectedSignature)
-  ) {
-    return null
-  }
-
-  if (claims.exp <= Math.floor(Date.now() / 1000)) return null
+  if (!claims || claims.exp <= Math.floor(Date.now() / 1000)) return null
   return claims
 }
