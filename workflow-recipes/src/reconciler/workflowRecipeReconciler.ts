@@ -1045,12 +1045,16 @@ export class WorkflowRecipeReconciler {
     // Codex spec: the runtime-scope parent's annotation when inherited, the
     // recipe's own annotation when standalone. Missing/unreadable annotations
     // resolve to the fail-closed `unassigned` sentinel inside the reader.
+    const recipeUid = recipe.metadata.uid?.trim()
+    // No Kubernetes uid yet → skip bind. Miss stays fail-closed `unassigned`;
+    // never key the Map by recipe name.
+    if (!recipeUid) return
     const grantAnnotations =
       runtimeScopeRecipeName !== recipe.metadata.name
         ? parent.annotations
         : recipe.metadata.annotations
     setter.call(this.workflowReconciler, {
-      recipeUid: recipe.metadata.uid,
+      recipeUid,
       recipeName: recipe.metadata.name,
       runtimeScopeRecipeName,
       claimedParent: this.claimedCodexParent(recipe),
