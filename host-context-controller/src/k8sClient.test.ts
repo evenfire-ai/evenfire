@@ -11521,14 +11521,21 @@ describe('McpServerWatcher NetworkPolicy defaults-only tick (#488)', () => {
   it('interval > 0: tick calls ensureDefaultPolicies and never starts a fleet pass', async () => {
     vi.useFakeTimers()
     mockConfig.netPolDefaultsResyncIntervalSec = 60
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     const watcher = await startWatcherForDefaultsOnlyTick()
     expect(mocks.ensureDefaultPolicies).toHaveBeenCalledTimes(1)
     expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
     expect((watcher as any).netPolDefaultsResyncTimer).not.toBeNull()
+    expect(
+      logSpy.mock.calls.some(call =>
+        String(call[0]).includes('NetworkPolicy defaults-only resync enabled')
+      )
+    ).toBe(true)
 
     await vi.advanceTimersByTimeAsync(60_000)
     expect(mocks.ensureDefaultPolicies).toHaveBeenCalledTimes(2)
     expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
+    logSpy.mockRestore()
     await watcher.stop()
   })
 
@@ -11598,6 +11605,82 @@ describe('McpServerWatcher NetworkPolicy defaults-only tick (#488)', () => {
         reason: 'defaults-only-in-flight',
       })
     ).toBe(skippedBefore + 1)
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_netpol_resync_ticks_skipped_total', {
+        reason: 'pass-in-flight',
+      })
+    ).toBe(passSkippedBefore)
+
+    held.resolve()
+    await flushMicrotasks()
+    await watcher.stop()
+  })
+
+  it('a defaults-only tick that throws logs the error, releases the in-flight lock, and the next tick re-applies L0/L1', async () => {
+    vi.useFakeTimers()
+    mockConfig.netPolDefaultsResyncIntervalSec = 60
+    const watcher = await startWatcherForDefaultsOnlyTick()
+    mocks.ensureDefaultPolicies.mockRejectedValueOnce(new Error('boom'))
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const defaultsSkippedBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_netpol_resync_ticks_skipped_total',
+      { reason: 'defaults-only-in-flight' }
+    )
+    const passSkippedBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_netpol_resync_ticks_skipped_total',
+      { reason: 'pass-in-flight' }
+    )
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    await flushMicrotasks()
+    expect(
+      errorSpy.mock.calls.some(call =>
+        String(call[0]).includes('NetworkPolicy defaults-only tick failed')
+      )
+    ).toBe(true)
+    expect((watcher as any).netPolDefaultsOnlyRun).toBeNull()
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_netpol_resync_ticks_skipped_total', {
+        reason: 'defaults-only-in-flight',
+      })
+    ).toBe(defaultsSkippedBefore)
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_netpol_resync_ticks_skipped_total', {
+        reason: 'pass-in-flight',
+      })
+    ).toBe(passSkippedBefore)
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    await flushMicrotasks()
+    expect(mocks.ensureDefaultPolicies).toHaveBeenCalledTimes(3)
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
+    errorSpy.mockRestore()
+    await watcher.stop()
+  })
+
+  it('a held defaults-only run does not skip or starve the full-pass timer tick', async () => {
+    vi.useFakeTimers()
+    mockConfig.netPolResyncIntervalSec = 300
+    mockConfig.netPolDefaultsResyncIntervalSec = 60
+    const watcher = await startWatcherForDefaultsOnlyTick()
+    await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1))
+    expect((watcher as any).initialConvergenceRuns.has('NetworkPolicy')).toBe(false)
+    const held = deferred()
+    mocks.ensureDefaultPolicies.mockImplementation(() => held.promise)
+    void (watcher as any).runNetworkPolicyDefaultsOnly()
+    const passSkippedBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_netpol_resync_ticks_skipped_total',
+      { reason: 'pass-in-flight' }
+    )
+
+    await vi.advanceTimersByTimeAsync(300_000)
+    await flushMicrotasks()
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(2)
+    expect(mocks.netPolFullReconcile).toHaveBeenLastCalledWith(
+      expect.any(Array),
+      expect.any(Array),
+      expect.objectContaining({ ensureDefaults: true })
+    )
     expect(
       await readLabeledConvergenceMetric('clerum_hcc_netpol_resync_ticks_skipped_total', {
         reason: 'pass-in-flight',
