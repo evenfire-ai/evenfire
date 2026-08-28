@@ -171,6 +171,26 @@ export interface Config {
   // event drops on long K8s watch disconnects. 0 disables.
   hostResyncIntervalSec: number
 
+  // Periodic NetworkPolicy convergence interval (seconds). Re-enters the
+  // coordinated single-flight pass (not a naked fullReconcile) so a dropped
+  // watch cannot leave stale allows. Default 0 disables the interval; startup
+  // still runs one convergence pass. Non-canonical values fail loud at load.
+  // Set via CONTEXT_MAPPER_NETPOL_RESYNC_SEC.
+  netPolResyncIntervalSec: number
+
+  // Absolute orphan-delete cap for a NetworkPolicy fullReconcile sweep.
+  // Candidates strictly above this count refuse deletes and increment the
+  // cap metric; the pass still certifies. 0 refuses every orphan delete.
+  // Negative values fail loud at load. Set via
+  // CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP.
+  netPolOrphanDeleteCap: number
+
+  // Percent orphan-delete cap against the listed managed fleet. Candidates
+  // strictly above this fraction are refused. Inert on a tiny inventory
+  // where percent*fleet < 1. Values above 100 never fire. Set via
+  // CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT.
+  netPolOrphanDeleteCapPercent: number
+
   // Per-request deadline for finite Kubernetes calls on the serialized Host
   // convergence path. Watches keep their independent long-lived lifecycle.
   hostK8sRequestTimeoutMs: number
@@ -262,6 +282,28 @@ function getEnvInt(key: string, defaultValue: number): number {
   if (!value) return defaultValue
   const parsed = parseInt(value, 10)
   return isNaN(parsed) ? defaultValue : parsed
+}
+
+/** Reject negative orphan-delete caps. 0 is a valid never-delete kill-switch. */
+function requireNonNegativeEnvInt(key: string, value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${key} must be a non-negative integer, got '${process.env[key] ?? ''}'`)
+  }
+  return value
+}
+
+/**
+ * Unsigned base-10 integer, including 0. Rejects the parseInt coercions
+ * (`2e1`→2, `10.9`→10, `12abc`→12) that getEnvInt would swallow.
+ */
+function requireCanonicalNonNegativeEnvInt(key: string, defaultValue: number): number {
+  const raw = process.env[key]
+  if (raw === undefined || raw === '') return defaultValue
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`${key} must be an unsigned base-10 integer, got '${raw}'`)
+  }
+  const parsed = Number(raw)
+  return requireNonNegativeEnvInt(key, parsed)
 }
 
 export function parseExternalEgressDnsTimeoutMs(raw: string | undefined): number {
@@ -738,6 +780,22 @@ export const config: Config = {
   // Periodic Host resync (default 5 min). 0 disables watches-only self-heal
   // for runtime-auth degraded mcp-host pods; use only for diagnostic runs.
   hostResyncIntervalSec: getEnvInt('CONTEXT_MAPPER_HOST_RESYNC_SEC', 300),
+
+  // Periodic NetworkPolicy resync. Default 0 (disabled): startup still
+  // converges once; the interval is opt-in so a bad cache cannot periodically
+  // sweep. Unset or 0 → no interval.
+  netPolResyncIntervalSec: requireCanonicalNonNegativeEnvInt('CONTEXT_MAPPER_NETPOL_RESYNC_SEC', 0),
+  // Mass-delete guard for the namespace-wide orphan sweep. Thresholds are
+  // strict `>`: exactly N candidates still delete; N+1 refuses deletes and
+  // still certifies.
+  netPolOrphanDeleteCap: requireCanonicalNonNegativeEnvInt(
+    'CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP',
+    10
+  ),
+  netPolOrphanDeleteCapPercent: requireCanonicalNonNegativeEnvInt(
+    'CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT',
+    20
+  ),
 
   // Every finite Kubernetes request that can hold Host convergence gets its
   // own deadline. Watch streams are intentionally excluded.

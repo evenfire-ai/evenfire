@@ -1331,7 +1331,7 @@ export function GfsBrowser(): React.JSX.Element {
           fileSummary={
             uploadCandidate ? `${formatBytes(uploadCandidate.size)} selected` : undefined
           }
-          guidance="The writer advertises the Upload v2 file limit (up to the 1 GiB protocol maximum); each request is streamed in 8 MiB parts (16 MiB hard maximum)."
+          guidance="Before upload starts, the 1 GiB Upload v2 protocol ceiling is the local safety bound. When upload begins, the writer resolves and enforces the actual product file limit. Each request is streamed in 8 MiB parts (16 MiB hard maximum)."
           progress={
             uploadSnapshot
               ? {

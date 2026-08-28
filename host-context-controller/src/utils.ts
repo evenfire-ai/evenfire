@@ -56,7 +56,13 @@ export async function replaceWithConflictRetry<
     maxAttempts = 3,
   } = opts
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const existing = await read()
+    let existing: T
+    try {
+      existing = await read()
+    } catch (err) {
+      if (getErrorCode(err) === 404) return
+      throw err
+    }
     validateExisting?.(existing)
     const desired = resolveBody ? await resolveBody() : body
     const base: T = {
