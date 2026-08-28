@@ -506,6 +506,31 @@ describe('ContextDetailsPage — Connectors tab actions', () => {
     )
   })
 
+  it('(d) mapped-agent chip uses the display name in text, title AND aria-label (R1-M12)', () => {
+    const { container } = renderWithContexts(
+      {},
+      {
+        // Seed a host→display mapping for the mapped agent.
+        accessCatalog: { ...ACCESS_CATALOG, agentDisplayByName: { alpha: 'Alpha Bot' } },
+        mcpServers: { selectedContextMcpServerDetails: CONTEXT_SERVERS },
+        connectors: { agents: CONNECTOR_AGENTS },
+      }
+    )
+    openConnectorsTab()
+
+    // Screen readers must announce the same name the chip shows — not the raw id.
+    const chip = within(connectorRow(container, 'monday')).getByRole('button', {
+      name: 'Open connectors for agent Alpha Bot',
+    })
+    expect(chip.getAttribute('title')).toBe('Alpha Bot')
+    expect(chip.textContent).toContain('Alpha Bot')
+    expect(
+      within(connectorRow(container, 'monday')).queryByRole('button', {
+        name: 'Open connectors for agent alpha',
+      })
+    ).toBeNull()
+  })
+
   it('(d) the status pill reflects each connector state', () => {
     const { container } = renderWithContexts(
       {},

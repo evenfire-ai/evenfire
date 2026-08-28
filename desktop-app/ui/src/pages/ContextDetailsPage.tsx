@@ -630,15 +630,18 @@ export function ContextDetailsPage() {
                                   key={`${server.name}:${agentName}`}
                                   kind="agent"
                                   onClick={() => handleOpenAgentWorkspace(agentName, 'mcp-servers')}
-                                  title={agentName}
-                                  aria-label={`Open connectors for agent ${agentName}`}
+                                  title={agentDisplayByName[agentName] ?? agentName}
+                                  aria-label={`Open connectors for agent ${
+                                    agentDisplayByName[agentName] ?? agentName
+                                  }`}
                                 >
                                   {/* Visible agent name (spec.host). mappedAgents
                                       can include cross-team agents (from scoped
                                       context detail sources) absent from the
                                       catalog map, so fall back to the identifier
                                       for those — not the Decision #6 `|| name`
-                                      guard. */}
+                                      guard. Title + aria-label track the visible
+                                      text so a screen reader announces the same. */}
                                   {agentDisplayByName[agentName] ?? agentName}
                                 </ReferenceTag>
                               ))}
