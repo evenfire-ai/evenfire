@@ -127,4 +127,17 @@ describe('fetchUserConnectorsFromControlApi — non-secret projection', () => {
       /connectors lookup failed \(502\)/
     )
   })
+
+  it('bounds the control-api call with an abort signal (SM3 — no unbounded socket)', async () => {
+    // Without a signal, a hung control-api pins the proxy socket indefinitely.
+    // The wiring must pass an AbortSignal (AbortSignal.timeout) so a stalled
+    // upstream surfaces as a 504 instead of hanging.
+    const fetchMock = vi.fn((..._args: Parameters<typeof fetch>) =>
+      Promise.resolve(jsonResponse({ userId: 'local-user', agents: [] }))
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    await fetchUserConnectorsFromControlApi('local-user', 'rpc-tok')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.signal).toBeInstanceOf(AbortSignal)
+  })
 })

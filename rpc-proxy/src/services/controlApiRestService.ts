@@ -26,6 +26,15 @@ function controlApiBaseUrl(): string {
   return config.controlApiBaseUrl.replace(/\/+$/, '')
 }
 
+// Shared upstream deadline for every control-api call in this file. Without it a
+// hung control-api pins the proxy socket indefinitely (the sibling host rail in
+// mcpHostRestService.ts already bounds its fetches at the same budget).
+// AbortSignal.timeout throws a TimeoutError, which the app error handler maps to
+// a 504 via isUpstreamTimeoutError — never a silent 500 or an unbounded wait.
+function upstreamAbortSignal(): AbortSignal {
+  return AbortSignal.timeout(config.upstreamTimeoutMs)
+}
+
 export type DirectRunBindingRequest = {
   runId: string
   sessionId: string
@@ -48,6 +57,7 @@ export async function fetchUserAllowedServersFromControlApi(
     {
       method: 'GET',
       headers: controlApiHeaders(rpcAccessToken),
+      signal: upstreamAbortSignal(),
     }
   )
 
@@ -156,6 +166,7 @@ export async function fetchUserConnectorsFromControlApi(
     {
       method: 'GET',
       headers: controlApiHeaders(rpcAccessToken),
+      signal: upstreamAbortSignal(),
     }
   )
 
@@ -192,6 +203,7 @@ export async function fetchHostConnectionFromControlApi(
         ...(directRunBinding ? { 'content-type': 'application/json' } : {}),
       },
       ...(directRunBinding ? { body: JSON.stringify(directRunBinding) } : {}),
+      signal: upstreamAbortSignal(),
     }
   )
 
@@ -267,6 +279,7 @@ export async function requestHostWakeFromControlApi(
     {
       method: 'POST',
       headers: controlApiHeaders(rpcAccessToken),
+      signal: upstreamAbortSignal(),
     }
   )
 
