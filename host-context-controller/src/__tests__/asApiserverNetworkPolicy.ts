@@ -1,5 +1,6 @@
 import { vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
+import { updatedLogs } from '../../test/__fixtures__/updatedLogs'
 
 /**
  * Recorded kube-apiserver GET of a NetworkPolicy after client-node decode
@@ -121,7 +122,5 @@ export function asApiserverNetworkPolicy(
 }
 
 export function updatedPolicyLogs(log: ReturnType<typeof vi.spyOn>, needle: string): string[] {
-  return log.mock.calls
-    .map((call: unknown[]) => String(call[0]))
-    .filter((line: string) => line.includes('Updated') && line.includes(needle))
+  return updatedLogs(log, 'Updated', needle)
 }
