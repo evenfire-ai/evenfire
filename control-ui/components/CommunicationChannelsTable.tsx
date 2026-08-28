@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import {
   COMMUNICATION_CHANNEL_PROVIDERS,
   type CommunicationChannelProvider,
@@ -9,6 +9,7 @@ import {
 import type { CommunicationChannelItem } from '@lib/communicationChannels'
 import { apiSend } from '../lib/api'
 import { useConfirmDialog } from './ConfirmDialog'
+import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconBroadcast } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
@@ -16,7 +17,7 @@ import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
 import { useToast } from './Toast'
-import { IconCopy, IconPencil, IconRefresh, IconX } from './icons'
+import { IconRefresh } from './icons'
 
 function summary(item: CommunicationChannelItem): string {
   const spec = item.spec || {}
@@ -256,34 +257,39 @@ export function CommunicationChannelsTable({
                         <td>
                           <span className="cu-table__cell-muted">{spec.hostRef || '-'}</span>
                         </td>
-                        <td>{providerTypes.map(communicationChannelProviderLabel).join(', ') || '-'}</td>
+                        <td>
+                          {providerTypes.map(communicationChannelProviderLabel).join(', ') || '-'}
+                        </td>
                         <td>
                           <div className="cu-table-actions">
-                            <CopyChannelMenu
-                              item={item}
-                              onCopyChannel={onCopyChannel}
-                              disabled={!onCopyChannel}
+                            <RowActionsMenu
+                              ariaLabel={`Actions for channel ${name}`}
+                              horizontalTrigger
+                              actions={[
+                                ...(onEditChannel
+                                  ? [
+                                      {
+                                        key: 'edit',
+                                        label: 'Edit',
+                                        onClick: () => onEditChannel(name),
+                                      },
+                                    ]
+                                  : []),
+                                ...copyTargetsForChannel(item).map(provider => ({
+                                  key: `copy-${provider}`,
+                                  label: `Copy config into ${communicationChannelProviderLabel(provider)}`,
+                                  onClick: () => onCopyChannel?.(name, provider),
+                                  disabled: !onCopyChannel,
+                                })),
+                                {
+                                  key: 'delete',
+                                  label: deletingKey === key ? 'Deleting…' : 'Delete',
+                                  danger: true,
+                                  disabled: deletingKey === key,
+                                  onClick: () => void deleteRow(item),
+                                },
+                              ]}
                             />
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--toolbar"
-                              onClick={() => onEditChannel?.(name)}
-                              disabled={!onEditChannel}
-                              aria-label={`Edit channel ${name}`}
-                            >
-                              <IconPencil width={17} height={17} />
-                            </button>
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                              onClick={() => void deleteRow(item)}
-                              disabled={deletingKey === key}
-                              aria-label={
-                                deletingKey === key ? 'Deleting…' : `Delete channel ${name}`
-                              }
-                            >
-                              <IconX width={17} height={17} />
-                            </button>
                           </div>
                         </td>
                       </tr>
@@ -297,76 +303,5 @@ export function CommunicationChannelsTable({
       </div>
       {confirmDialog}
     </>
-  )
-}
-
-function CopyChannelMenu({
-  disabled,
-  item,
-  onCopyChannel,
-}: {
-  disabled?: boolean
-  item: CommunicationChannelItem
-  onCopyChannel?: (name: string, provider: CommunicationChannelProvider) => void
-}) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-  const name = item.metadata?.name || ''
-  const copyTargets = copyTargetsForChannel(item)
-
-  useEffect(() => {
-    if (!open) return
-    function handleDocClick(event: MouseEvent) {
-      if (!ref.current?.contains(event.target as Node)) setOpen(false)
-    }
-    function handleEsc(event: KeyboardEvent) {
-      if (event.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', handleDocClick)
-    document.addEventListener('keydown', handleEsc)
-    return () => {
-      document.removeEventListener('mousedown', handleDocClick)
-      document.removeEventListener('keydown', handleEsc)
-    }
-  }, [open])
-
-  return (
-    <div ref={ref} className="cu-kebab">
-      <button
-        type="button"
-        className="cu-btn cu-btn--icon cu-btn--toolbar cu-kebab__trigger"
-        onClick={() => setOpen(value => !value)}
-        disabled={disabled || !name}
-        aria-label={`Copy channel ${name} config`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-      >
-        <IconCopy width={17} height={17} />
-      </button>
-      {open ? (
-        <div role="menu" className="cu-kebab__menu cu-kebab__menu--nowrap">
-          {copyTargets.length === 0 ? (
-            <button type="button" role="menuitem" className="cu-kebab__item" disabled>
-              No provider targets
-            </button>
-          ) : (
-            copyTargets.map(provider => (
-              <button
-                key={provider}
-                type="button"
-                role="menuitem"
-                className="cu-kebab__item"
-                onClick={() => {
-                  setOpen(false)
-                  onCopyChannel?.(name, provider)
-                }}
-              >
-                Copy config into {communicationChannelProviderLabel(provider)}
-              </button>
-            ))
-          )}
-        </div>
-      ) : null}
-    </div>
   )
 }

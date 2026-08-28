@@ -1,0 +1,336 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: llmhooks.clerum.io
+  labels:
+    app.kubernetes.io/name: llmhook
+    app.kubernetes.io/part-of: clerum
+spec:
+  group: clerum.io
+  names:
+    kind: LlmHook
+    listKind: LlmHookList
+    plural: llmhooks
+    singular: llmhook
+    shortNames:
+      - llmhook
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          description: >-
+            LlmHook defines an installed guardrail hook that mcp-host calls over the
+            /v1 protocol (guardrails spec §8). host-context-controller reconciles
+            image-target hooks into a Deployment+Service+NetworkPolicy in the
+            llm-hooks namespace (digest-dedup: hooks sharing an image digest are
+            co-located on one pod and routed by spec.path); service and remote
+            targets deploy no workload. mcp-host only READS these CRs and never
+            writes them; the status subresource is written solely by the controller.
+          properties:
+            spec:
+              type: object
+              required:
+                - target
+                - lifecyclePoints
+              properties:
+                target:
+                  type: object
+                  description: Exactly one of image, service, or remote.
+                  oneOf:
+                    - required: [image]
+                    - required: [service]
+                    - required: [remote]
+                  properties:
+                    image:
+                      type: object
+                      description: >-
+                        In-cluster image hook. host-context-controller deploys (or
+                        reuses, via digest-dedup) a Deployment+Service+NetworkPolicy
+                        in the llm-hooks namespace.
+                      required:
+                        - ref
+                        - port
+                      properties:
+                        ref:
+                          type: string
+                          description: >-
+                            Container image reference. Validated against the image
+                            allowlist and digest-pinned at install time (§8.5), same
+                            posture as McpServer images.
+                        port:
+                          type: integer
+                          minimum: 1
+                          maximum: 65535
+                          description: Port the hook HTTP server listens on.
+                        imagePullSecrets:
+                          type: array
+                          description: Names of image pull secrets in the llm-hooks namespace.
+                          items:
+                            type: string
+                        envSecret:
+                          type: string
+                          description: >-
+                            Name of the hook's OWN credential Secret, resolved in the
+                            llm-hooks namespace. It can never reference the mcp-host
+                            LLM key or any Host secret (namespace isolation, §12.1).
+                        egressBindings:
+                          type: array
+                          description: >-
+                            External egress this hook pod is permitted. NOTE: this is
+                            looser than McpServer.egressBindings (no SSRF/private-range
+                            CEL hardening yet) — tracked as a follow-up (§8.2/§8.4).
+                          items:
+                            type: object
+                            properties:
+                              toFQDN:
+                                type: string
+                                description: Destination FQDN to allow egress to.
+                              cidr:
+                                type: string
+                                description: Destination CIDR to allow egress to.
+                              ports:
+                                type: array
+                                items:
+                                  type: integer
+                        security:
+                          type: object
+                          description: Security context overrides for the hook pod.
+                          properties:
+                            addCapabilities:
+                              type: array
+                              default: []
+                              description: >-
+                                Linux capabilities to add, subset of the
+                                workflow-recipe capability allowlist; enforced at
+                                admission (this enum) and at reconcile.
+                              items:
+                                type: string
+                                enum:
+                                  - CHOWN
+                                  - FOWNER
+                                  - DAC_OVERRIDE
+                                  - NET_BIND_SERVICE
+                    service:
+                      type: object
+                      description: An existing in-cluster Service. Nothing is deployed.
+                      required:
+                        - name
+                        - namespace
+                        - port
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        port:
+                          type: integer
+                          minimum: 1
+                          maximum: 65535
+                    remote:
+                      type: object
+                      description: >-
+                        External HTTPS endpoint mcp-host dials directly (SSRF-validated
+                        at dial, §8.3). No proxy pod is deployed.
+                      required:
+                        - baseUrl
+                      properties:
+                        baseUrl:
+                          type: string
+                          pattern: '^https://'
+                          description: External endpoint base URL (must be HTTPS).
+                        authHeadersSecret:
+                          type: string
+                          description: Name of a Secret providing auth headers for the remote endpoint.
+                path:
+                  type: string
+                  default: '/'
+                  description: >-
+                    API path on the endpoint; calls go to {endpoint}{path}/v1/{point}.
+                    Image hooks co-located by digest-dedup MUST each use a distinct
+                    path (unique per pod, §8.2).
+                lifecyclePoints:
+                  type: array
+                  minItems: 1
+                  maxItems: 6
+                  description: >-
+                    Lifecycle points this hook subscribes to. The first four are the
+                    LLM lane (§8.1); preToolUse/postToolUse are the tool lane (§6.2)
+                    and are accepted here because Host.spec.guardrails.hooks already
+                    keys on them and mcp-host already maps them
+                    (guardrailHookResolver PHASE_TO_POINT). Omitting them made an
+                    installed tool-lane hook unrepresentable: the apiserver rejected
+                    the CR the install saga tried to create.
+                  items:
+                    type: string
+                    enum:
+                      - preCall
+                      - moderate
+                      - postCallSuccess
+                      - onError
+                      - preToolUse
+                      - postToolUse
+                contentAccess:
+                  type: string
+                  enum:
+                    - metadata
+                    - content
+                  description: >-
+                    Content projection this hook receives (§8.4/§8.7). `content` =
+                    the projected non-system messages/response bodies; `metadata` =
+                    model+params+usage only, no bodies. moderate/postCallSuccess/
+                    onError are inherently content-bearing; only a preCall-only hook
+                    may be `metadata` (the CEL rule below rejects the rest, and
+                    install-hook rejects them again with content_access_conflict).
+                    OMITTING THIS FIELD MEANS `content`, not `metadata`: absent is
+                    read as content-bearing by both the install-time gate and the
+                    runtime projection, deliberately, so an unstated projection can
+                    never under-declare what a third-party hook sees. A hook that
+                    must not receive bodies has to say `metadata` explicitly. Two
+                    consequences of the default: a preCall hook that omits this
+                    receives every non-system message, and — because the content/
+                    egress gate keys on the same value — it is admissible with
+                    `egressBindings` or a `remote` target ONLY at trust_level high
+                    (otherwise install fails with content_egress_requires_high_trust).
+                order:
+                  type: integer
+                  default: 100
+                  description: Execution order within a lifecycle phase (lower runs first).
+                failMode:
+                  type: string
+                  enum:
+                    - open
+                    - closed
+                  default: closed
+                  description: >-
+                    Fail posture when the hook is unavailable (§8.6). A
+                    deny-authoritative hook (may_deny) MUST fail closed (CEL below).
+                timeoutMs:
+                  type: integer
+                  default: 5000
+                  minimum: 1
+                onUnavailable:
+                  type: object
+                  description: Circuit-breaker behavior when the hook repeatedly fails.
+                  properties:
+                    mode:
+                      type: string
+                      enum:
+                        - strict
+                        - breaker
+                      default: strict
+                    failureThreshold:
+                      type: integer
+                      default: 5
+                      minimum: 1
+                    cooldownMs:
+                      type: integer
+                      default: 30000
+                      minimum: 0
+                capabilities:
+                  type: array
+                  description: >-
+                    Admin-granted capabilities (§4.3). Enforced to be within
+                    Host.spec.guardrails.capabilityCeiling (§5) and re-checked on
+                    every hook response (§8.1).
+                  items:
+                    type: string
+                    enum:
+                      - may_deny
+                      - may_rewrite
+                      - may_substitute_result
+                      - may_add_context
+                config:
+                  type: object
+                  description: Opaque hook settings — never a trust input (§8.4).
+                  x-kubernetes-preserve-unknown-fields: true
+              x-kubernetes-validations:
+                - rule: "!has(self.target.remote) || self.target.remote.baseUrl.startsWith('https://')"
+                  message: "remote.baseUrl must be https://"
+                - rule: "!(has(self.capabilities) && self.capabilities.exists(c, c == 'may_deny')) || self.failMode == 'closed'"
+                  message: "a deny-authoritative hook (may_deny) must fail closed"
+                # contentAccess: metadata is contradictory for an inherently content-bearing
+                # point. An absent field passes (absent is read as `content`), so this is
+                # non-breaking for existing CRs; it only rejects an explicit metadata on
+                # a content-bearing point.
+                #
+                # The tool-lane points are listed because the tool lane has no metadata
+                # projection at all: preToolUse receives {tool, arguments} and postToolUse
+                # receives the tool result, and remoteToolHook never consults
+                # contentAccess. Declaring `metadata` there would describe a projection
+                # that does not exist.
+                - rule: "!has(self.contentAccess) || self.contentAccess == 'content' || !self.lifecyclePoints.exists(p, p == 'moderate' || p == 'postCallSuccess' || p == 'onError' || p == 'preToolUse' || p == 'postToolUse')"
+                  message: "contentAccess: metadata is not allowed for a hook using moderate/postCallSuccess/onError/preToolUse/postToolUse (those points are inherently content-bearing)"
+            status:
+              type: object
+              description: >-
+                Reconciliation state, written solely by host-context-controller. The
+                mcp-host runtime cannot write it (status subresource).
+              properties:
+                observedDigest:
+                  type: string
+                  description: >-
+                    Image digest actually running. mcp-host binds
+                    Host.spec.guardrails.hooks[].digest against this at load and
+                    fails closed / skips-with-alert on mismatch (§8.2).
+                readyReplicas:
+                  type: integer
+                  description: Ready replicas of the reconciled hook Deployment (image target only).
+                lastReconciled:
+                  type: string
+                  format: date-time
+                  description: Timestamp of the last successful reconcile.
+                conditions:
+                  type: array
+                  description: Standard K8s conditions reflecting reconciliation state (e.g. Deployed, Ready).
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                        description: Condition type (e.g. Ready, Deployed).
+                      status:
+                        type: string
+                        enum:
+                          - 'True'
+                          - 'False'
+                          - 'Unknown'
+                      reason:
+                        type: string
+                        description: Machine-readable reason.
+                      message:
+                        type: string
+                        description: Human-readable explanation.
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                        description: LlmHook metadata.generation observed when writing this condition.
+      additionalPrinterColumns:
+        - name: Path
+          type: string
+          jsonPath: .spec.path
+        - name: Order
+          type: integer
+          jsonPath: .spec.order
+        - name: FailMode
+          type: string
+          jsonPath: .spec.failMode
+        - name: Digest
+          type: string
+          jsonPath: .status.observedDigest
+        - name: Ready
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].status
+      subresources:
+        status: {}

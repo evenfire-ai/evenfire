@@ -117,10 +117,22 @@ const nextConfig = {
       // parent so bookmarks, shared links, and the approval-tools E2E
       // (which navigates to /hosts/<name>/approvals) still reach the
       // section they used to.
-      { source: '/agents/:name/member-access', destination: '/agents/:name/access', permanent: true },
+      {
+        source: '/agents/:name/member-access',
+        destination: '/agents/:name/access',
+        permanent: true,
+      },
       { source: '/agents/:name/team-access', destination: '/agents/:name/access', permanent: true },
       { source: '/agents/:name/approvals', destination: '/agents/:name/advanced', permanent: true },
       { source: '/agents/:name/env-vars', destination: '/agents/:name/advanced', permanent: true },
+      // The agent-scoped Contexts tab was renamed to Connectors. Keep old
+      // bookmarks and shared links working before the /agents -> /hosts
+      // rewrite reaches the physical tab route.
+      {
+        source: '/agents/:name/contexts',
+        destination: '/agents/:name/connectors',
+        permanent: true,
+      },
       { source: '/marketplace', destination: '/marketplace/connectors', permanent: true },
       { source: '/cost-and-usage', destination: '/cost-and-usage/usage', permanent: true },
       {

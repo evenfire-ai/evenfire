@@ -3,6 +3,11 @@
 # Candidate connection material is accepted only on stdin.
 # Snapshot globals are consumed by the provisioning script that sources this file.
 # shellcheck disable=SC2034
+GFS_ROLLOUT_PROOF_KIND=""
+GFS_ROLLOUT_PROOF_RESOURCE_VERSION=""
+GFS_ROLLOUT_PROOF_TEMPLATE_REVISION=""
+GFS_ROLLOUT_PROOF_POD_COUNT=""
+GFS_ROLLOUT_PROOF_AT=""
 
 gfs_secret_state() {
   kc -n "$GFS_NS" get secret "$1" -o 'jsonpath={.metadata.annotations.clerum\.io/gfs-dsn-state}'
@@ -189,12 +194,37 @@ print(json.dumps([
 
 mark_secret_rollout_ready() {
   local secret="$1" expected_rotated_at="$2" expected_state="$3"
+  local proof_kind proof_resource_version proof_template_revision proof_pod_count proof_at
+  proof_kind="$GFS_ROLLOUT_PROOF_KIND"
+  proof_resource_version="$GFS_ROLLOUT_PROOF_RESOURCE_VERSION"
+  proof_template_revision="$GFS_ROLLOUT_PROOF_TEMPLATE_REVISION"
+  proof_pod_count="$GFS_ROLLOUT_PROOF_POD_COUNT"
+  proof_at="$GFS_ROLLOUT_PROOF_AT"
   python3 -c 'import json, sys
-state, stamp = sys.argv[1:]
-print(json.dumps([
+state, stamp, proof_kind, proof_resource_version, proof_template_revision, proof_pod_count, proof_at = sys.argv[1:]
+ops = [
   {"op": "test", "path": "/metadata/annotations/clerum.io~1gfs-dsn-state", "value": state},
   {"op": "test", "path": "/metadata/annotations/clerum.io~1gfs-dsn-rotated-at", "value": stamp},
   {"op": "replace", "path": "/metadata/annotations/clerum.io~1gfs-dsn-state", "value": "ready"},
-]))' "$expected_state" "$expected_rotated_at" \
+]
+if proof_kind:
+    if proof_resource_version:
+        ops.insert(2, {"op": "test", "path": "/metadata/resourceVersion", "value": proof_resource_version})
+    values = {
+        "clerum.io/gfs-dsn-proof-kind": proof_kind,
+        "clerum.io/gfs-dsn-proof-resource-version": proof_resource_version,
+        "clerum.io/gfs-dsn-proof-template-revision": proof_template_revision,
+        "clerum.io/gfs-dsn-proof-pod-count": proof_pod_count,
+        "clerum.io/gfs-dsn-proof-at": proof_at,
+    }
+    for key, value in values.items():
+        ops.append({"op": "add", "path": "/metadata/annotations/" + key.replace("/", "~1"), "value": value})
+print(json.dumps(ops))' "$expected_state" "$expected_rotated_at" \
+    "$proof_kind" "$proof_resource_version" "$proof_template_revision" "$proof_pod_count" "$proof_at" \
     | kc -n "$GFS_NS" patch secret "$secret" --type=json --patch-file=/dev/stdin >/dev/null
+  GFS_ROLLOUT_PROOF_KIND=""
+  GFS_ROLLOUT_PROOF_RESOURCE_VERSION=""
+  GFS_ROLLOUT_PROOF_TEMPLATE_REVISION=""
+  GFS_ROLLOUT_PROOF_POD_COUNT=""
+  GFS_ROLLOUT_PROOF_AT=""
 }
