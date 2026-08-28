@@ -271,17 +271,20 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
   //
   // Authorization BY FLAVOR (spec §2.3, mini-spec 05 §7):
   //   - `user`    → the caller may only delete their OWN grant — the key is
-  //     built on the forwarded `userId`, so a cross-user delete is structurally
-  //     impossible.
+  //     built on the forwarded `userId`. For an END-USER a cross-user delete is
+  //     structurally impossible, because rpc-proxy derives `userId` from the
+  //     session `auth.sub` and never from the body; control-api trusts that on
+  //     the service-token seam (it does not re-verify the identity itself).
   //   - `context` → any MEMBER of the server's Context may revoke the single
   //     shared grant → blast-radius: the WHOLE Context is disconnected.
   //
-  // The Context-membership gate runs for EVERY grantScope, using the SAME
-  // primitive as the authorize-URL mint and the callback bootstrap
-  // (`getUserContexts` → user_contexts), so membership authz lives in ONE place
-  // (D4). Fail-closed: a server with no usable OAuth id, no `contextRef`, or a
-  // caller who is not a Context member is rejected — the grant is NEVER deleted
-  // blindly.
+  // The Context-membership gate runs for EVERY grantScope. It SHARES its
+  // data-reader (`getUserContexts` → user_contexts) with the authorize-URL mint
+  // and the callback bootstrap (D4 for the membership LOOKUP); the membership
+  // RULE itself is written inline at each of those sites (here, the mint, and
+  // partially in callback.ts), not factored into one function. Fail-closed: a
+  // server with no usable OAuth id, no `contextRef`, or a caller who is not a
+  // Context member is rejected — the grant is NEVER deleted blindly.
   //
   // Idempotent: deleting a grant that does not exist returns 204 (matching the
   // sandbox-ui grant delete below). We deliberately do NOT surface "no grant
@@ -324,9 +327,11 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
 
         const authType = server?.spec?.auth?.type
         // `resolveServerOAuth` (not …Subject): revoke only needs the grant
-        // coordinate, not the client-secret refs — a server whose Secret rotated
-        // away must still be disconnectable. Gate on `auth.type==='oauth'` to
-        // stay aligned with the U1 classifier / grant-presence gate.
+        // coordinate (oauthClientId + grantScope + contextRef), not the
+        // client-secret refs — `resolveServerOAuth` never reads the Secret, so
+        // there is no reason to require the fuller subject here. Gate on
+        // `auth.type==='oauth'` to stay aligned with the U1 classifier /
+        // grant-presence gate.
         const resolved = authType === 'oauth' ? resolveServerOAuth(server) : null
         if (!resolved) {
           return res.status(400).json({ error: 'not_oauth_server' })
