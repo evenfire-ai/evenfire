@@ -151,8 +151,21 @@ export const netPolOrphanSweepCappedTotal = counter({
 
 export const netPolResyncTicksSkippedTotal = counter({
   name: 'clerum_hcc_netpol_resync_ticks_skipped_total',
-  help: 'Periodic NetworkPolicy resync ticks skipped because a convergence pass was already in flight.',
+  help: 'Periodic NetworkPolicy resync ticks skipped because a full pass (`pass-in-flight`) or a defaults-only tick (`defaults-only-in-flight`) was already in flight.',
   labelNames: ['reason'] as const,
+})
+
+export const netPolDefaultsOnlyTicksTotal = counter({
+  name: 'clerum_hcc_netpol_defaults_only_ticks_total',
+  help: 'NetworkPolicy defaults-only ticks by named result (success/error).',
+  labelNames: ['result'] as const,
+})
+
+export const netPolDefaultsOnlyTickDurationSeconds = histogram({
+  name: 'clerum_hcc_netpol_defaults_only_tick_duration_seconds',
+  help: 'Seconds spent in a NetworkPolicy defaults-only tick, labeled by named result.',
+  labelNames: ['result'] as const,
+  buckets: NETWORKPOLICY_PASS_DURATION_BUCKETS,
 })
 
 export const contextReconciliationsTotal = counter({
