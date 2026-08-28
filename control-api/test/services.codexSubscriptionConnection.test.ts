@@ -8,6 +8,7 @@ import {
   generateCodexConnectionKey,
   getSafeCodexSubscriptionConnection,
   insertInitialCodexSubscriptionConnection,
+  listLiveCodexSubscriptionConnections,
   normalizeCodexConnectionKey,
   readHostCodexConnectionRef,
   rotateCodexSubscriptionCredentials,
@@ -83,6 +84,14 @@ describe('codex subscription connection repository', () => {
     await expect(getSafeCodexSubscriptionConnection({ query }, 'team-plus')).resolves.toBeNull()
     expect(String(query.mock.calls[0]?.[0])).toContain('revoked_at IS NULL')
     expect(String(query.mock.calls[0]?.[0])).toContain('connection_key = $1')
+  })
+
+  it('lists only live connection rows for the ConfigMap cache', async () => {
+    query.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    await listLiveCodexSubscriptionConnections({ query })
+    const sql = String(query.mock.calls[0]?.[0])
+    expect(sql).toContain('revoked_at IS NULL')
+    expect(sql).not.toContain('connection_key = $1')
   })
 
   it('inserts encrypted credentials and never binds plaintext tokens', async () => {

@@ -25,7 +25,7 @@ import { pool } from '../db.js'
 import { listEnabledCodexModelsGroupedByConnection } from './codexSubscriptionCatalog.js'
 import {
   type CodexSubscriptionSafeConnection,
-  listSafeCodexSubscriptionConnections,
+  listLiveCodexSubscriptionConnections,
 } from './codexSubscriptionConnection.js'
 import { type AllowedModelEntry, listEnabledGroupedByProvider } from './llmAllowedModels.js'
 
@@ -168,7 +168,7 @@ export class LlmAllowedModelsConfigMapWriter implements AllowedModelsConfigMapMa
   async materialize(db: DbClient = pool): Promise<void> {
     const grouped = await listEnabledGroupedByProvider(db)
     const { data, contentHash } = buildConfigMapData(grouped)
-    const connections = await listSafeCodexSubscriptionConnections(db)
+    const connections = await listLiveCodexSubscriptionConnections(db)
     const modelsByKey = await listEnabledCodexModelsGroupedByConnection(db)
     const defaultConnection =
       connections.find(row => row.connectionKey === 'deployment-default') ?? null

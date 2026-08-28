@@ -161,6 +161,7 @@ run_group "control-api" "control-api" \
   "test/hostSpecValidation.codexSubscription.test.ts" \
   "test/llmProviders.test.ts" \
   "test/services.codexSubscriptionConnection.test.ts" \
+  "test/services.llmAllowedModelsConfigMap.test.ts" \
   "test/services.codexSubscriptionOAuth.test.ts" \
   "test/services.codexSubscriptionCatalog.test.ts" \
   "test/services.llmProviderAttemptAuthorizer.test.ts" \

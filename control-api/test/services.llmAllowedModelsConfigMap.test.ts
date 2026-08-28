@@ -4,6 +4,7 @@ import type { CodexSubscriptionSafeConnection } from '../src/services/codexSubsc
 import {
   ALLOWED_MODELS_CONFIGMAP_NAME,
   CATALOG_REVISION_ANNOTATION,
+  CODEX_CONNECTIONS_ANNOTATION,
   CODEX_CONNECTION_STATUS_ANNOTATION,
   CODEX_ENABLED_ANNOTATION,
   CONNECTION_REVISION_ANNOTATION,
@@ -22,7 +23,11 @@ function fakeDb(
   return {
     query: vi.fn().mockImplementation((sql: string) => {
       if (String(sql).includes('codex_subscription_connections')) {
-        return Promise.resolve({ rows: connectionRows, rowCount: connectionRows.length })
+        const liveOnly = String(sql).includes('revoked_at IS NULL')
+        const selected = liveOnly
+          ? connectionRows.filter(row => row.revoked_at == null)
+          : connectionRows
+        return Promise.resolve({ rows: selected, rowCount: selected.length })
       }
       return Promise.resolve({ rows, rowCount: rows.length })
     }),
@@ -163,6 +168,45 @@ describe('LlmAllowedModelsConfigMapWriter', () => {
     expect(arg.body.metadata.annotations[CATALOG_REVISION_ANNOTATION]).toBe('7')
     expect(arg.body.metadata.annotations[CONNECTION_REVISION_ANNOTATION]).toBe('4')
     expect(JSON.stringify(arg.body.data)).not.toMatch(/catalogRevision|credentialRevision|status/)
+  })
+
+  it('indexes the live deployment-default row after 0105 reuse, not the tombstone', async () => {
+    const coreApi = {
+      createNamespacedConfigMap: vi.fn().mockResolvedValue({}),
+      readNamespacedConfigMap: vi.fn(),
+      replaceNamespacedConfigMap: vi.fn(),
+    }
+    const tombstone = {
+      ...connectedRow(),
+      id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      status: 'revoked',
+      credential_revision: 1,
+      catalog_revision: 1,
+      revoked_at: new Date('2026-08-21T00:00:00Z'),
+    }
+    const live = {
+      ...connectedRow(),
+      id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      credential_revision: 8,
+      catalog_revision: 9,
+      revoked_at: null,
+    }
+    const writer = new LlmAllowedModelsConfigMapWriter(coreApi, 'mcp-host')
+    const db = fakeDb(rows, [tombstone, live])
+    await writer.materialize(db)
+    const connectionSql = (db.query as ReturnType<typeof vi.fn>).mock.calls
+      .map(call => String(call[0]))
+      .find(sql => sql.includes('codex_subscription_connections'))
+    expect(connectionSql).toContain('revoked_at IS NULL')
+    const arg = coreApi.createNamespacedConfigMap.mock.calls.at(-1)?.[0]
+    expect(arg.body.metadata.annotations[CODEX_CONNECTION_STATUS_ANNOTATION]).toBe('connected')
+    expect(arg.body.metadata.annotations[CATALOG_REVISION_ANNOTATION]).toBe('9')
+    expect(arg.body.metadata.annotations[CONNECTION_REVISION_ANNOTATION]).toBe('8')
+    const map = JSON.parse(arg.body.metadata.annotations[CODEX_CONNECTIONS_ANNOTATION] as string)
+    expect(Object.keys(map)).toEqual(['deployment-default'])
+    expect(map['deployment-default'].catalogRevision).toBe(9)
+    expect(map['deployment-default'].connectionRevision).toBe(8)
+    expect(map['deployment-default'].status).toBe('connected')
   })
 
   it('falls back to read + replace on a 409 conflict', async () => {

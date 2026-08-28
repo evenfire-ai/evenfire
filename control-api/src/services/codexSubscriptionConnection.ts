@@ -313,6 +313,19 @@ export async function listSafeCodexSubscriptionConnections(
   return (result.rows as SafeConnectionRow[]).map(toSafeConnection)
 }
 
+/** Live grants only. ConfigMap / choose / spend. Hub audit still uses listSafe. */
+export async function listLiveCodexSubscriptionConnections(
+  db: DbClient
+): Promise<CodexSubscriptionSafeConnection[]> {
+  const result = await db.query(
+    `SELECT ${SAFE_CONNECTION_COLUMNS}
+       FROM codex_subscription_connections
+      WHERE revoked_at IS NULL
+      ORDER BY created_at ASC, connection_key ASC`
+  )
+  return (result.rows as SafeConnectionRow[]).map(toSafeConnection)
+}
+
 export async function createNamedCodexSubscriptionConnection(
   db: DbClient,
   input: { connectionKey: string; displayName: string; createdBy?: string | null }
