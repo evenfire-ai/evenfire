@@ -675,20 +675,46 @@ export class HostReconciler {
    * scope change mid-reconcile.
    */
   private async frontsOAuthServer(host: HostCRD): Promise<boolean> {
-    try {
-      return await this.hostFrontsOAuthServerFn(host)
-    } catch (err) {
-      log.warn(
-        'failed to resolve whether Host fronts an oauth mcp-server; failing closed (no oauth:user-token scope)',
-        {
-          host: host.name,
-          namespace: host.namespace,
-          contextRef: host.spec.contextRef,
-          err: err instanceof Error ? err.message : String(err),
+    // Bounded retry that absorbs a TRANSIENT apiserver blip without touching the
+    // authoritative-`false` path. Contract of the underlying resolver: a real
+    // scope change (the server genuinely stopped fronting an oauth mcp-server)
+    // RETURNS `false` without throwing; only a transient read failure (apiserver
+    // blip) THROWS. So we retry ONLY on throw — any RETURNED value (true or
+    // false) is authoritative and is returned immediately, so a healthy call
+    // resolves on the first attempt with zero added overhead and an authoritative
+    // `false` is never re-tried. Before this retry, a transient throw collapsed
+    // to `false` exactly like an authoritative `false`, dropping the
+    // oauth:user-token scope → runtime-token re-mint + Deployment rollout, then a
+    // flip back on recovery → churn, once per OAuth Host per reconcile.
+    const MAX_ATTEMPTS = 3
+    const BACKOFF_BASE_MS = 50
+    let lastErr: unknown
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        return await this.hostFrontsOAuthServerFn(host)
+      } catch (err) {
+        lastErr = err
+        if (attempt < MAX_ATTEMPTS) {
+          // Small linear backoff (50ms, 100ms) to let a transient blip clear.
+          await new Promise(resolve => setTimeout(resolve, BACKOFF_BASE_MS * attempt))
         }
-      )
-      return false
+      }
     }
+    // All attempts threw. Residual honesty: a SUSTAINED apiserver outage (every
+    // attempt throws) still fails CLOSED here and can flip the scope off. That is
+    // correct — a sustained outage is a genuine "scope unknown" situation, not a
+    // blip — the retry only smooths over transient blips, never a real outage.
+    log.warn(
+      'failed to resolve whether Host fronts an oauth mcp-server after retries; failing closed (no oauth:user-token scope)',
+      {
+        host: host.name,
+        namespace: host.namespace,
+        contextRef: host.spec.contextRef,
+        attempts: MAX_ATTEMPTS,
+        err: lastErr instanceof Error ? lastErr.message : String(lastErr),
+      }
+    )
+    return false
   }
 
   /**
