@@ -52,6 +52,7 @@ function shuffleLabelKeys(labels: Record<string, string>): Record<string, string
 /**
  * Rebuild a rule in client-node ObjectSerializer / V1PolicyRule.attributeTypeMap
  * order so a missing key-canonicalize cannot hide behind a cloned builder object.
+ * FIXTURE-ROLE-1 pins this order against the live client-node class.
  */
 export function asApiserverPolicyRule(rule: k8s.V1PolicyRule): k8s.V1PolicyRule {
   const live: Record<string, unknown> = {}
