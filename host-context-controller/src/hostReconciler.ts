@@ -56,6 +56,7 @@ import {
 import {
   applyNetworkPolicy,
   canonicalStringify,
+  canonicalizeValue,
   getErrorCode,
   preserveDeploymentAnnotations,
   preserveServiceAssignedFields,
@@ -952,6 +953,7 @@ export class HostReconciler {
     // Already exists — replace to pick up rotated secretRef / new resourceNames.
     try {
       const existing = await this.rbacApi.readNamespacedRole({ name, namespace: host.namespace })
+      if (roleMatchesDesired(body, existing)) return
       body.metadata!.resourceVersion = existing.metadata?.resourceVersion
       await this.rbacApi.replaceNamespacedRole({ name, namespace: host.namespace, body })
       console.log(`[HostReconciler] Updated Role "${name}"`)
@@ -2287,6 +2289,10 @@ export class HostReconciler {
         )
         return
       }
+      // The outer read above treats 404 as a transient throw so this Host
+      // reconcile requeues and recreates. The helper read below is the #472
+      // contract: 404 means gone, return, and the next Host reconcile
+      // recreates. Same object, two 404 policies — accepted, not a bug.
       try {
         await replaceWithConflictRetry({
           description: `channel-reader Deployment "${name}"`,
@@ -4648,6 +4654,48 @@ export class HostReconciler {
 }
 
 /**
+ * True when the desired Role matches the live object on the fields HCC authors:
+ * `rbacLabels` and `rules`. Server metadata and annotations are ignored — the
+ * builder does not write annotations, and comparing them would force a PUT.
+ *
+ * Label comparison is a subset of the keys HCC authors. Extra live labels
+ * (Kyverno/Gatekeeper add-labels, ArgoCD instance, cost tags) must not force a
+ * PUT that strips them and re-enters the write loop. A missing or changed
+ * authored key still fail-opens to write, so a later third `rbacLabels` key
+ * still lands. A key HCC stops authoring is treated as extra-live and will
+ * not PUT until some other authored field drifts; the previous exact-map
+ * compare used to retract it. `isHccOwnedHostResource` keys on the same two
+ * labels today.
+ *
+ * Object keys inside each rule are canonicalized: client-node rebuilds
+ * V1PolicyRule in attributeTypeMap order (resourceNames before resources), so a
+ * raw JSON.stringify never matches a live GET (#307). Rule arrays, verbs, and
+ * resourceNames stay in author order. Missing rules or labels, or any compare
+ * failure, returns false (fail-open-to-write).
+ */
+function roleMatchesDesired(desired: k8s.V1Role, existing: k8s.V1Role): boolean {
+  try {
+    if (!desired.rules || !existing.rules) return false
+    const desiredLabels = desired.metadata?.labels
+    const existingLabels = existing.metadata?.labels
+    if (!desiredLabels || !existingLabels) return false
+    const authored: Record<string, string> = {}
+    const liveAuthored: Record<string, string> = {}
+    for (const key of Object.keys(desiredLabels)) {
+      if (existingLabels[key] === undefined) return false
+      authored[key] = desiredLabels[key]
+      liveAuthored[key] = existingLabels[key]
+    }
+    return (
+      JSON.stringify(canonicalizeValue({ labels: authored, rules: desired.rules })) ===
+      JSON.stringify(canonicalizeValue({ labels: liveAuthored, rules: existing.rules }))
+    )
+  } catch {
+    return false
+  }
+}
+
+/**
  * Kubernetes persists server metadata and defaulted Deployment/PodSpec fields
  * that HCC does not author. Remove only those known fields before comparing
  * the objects; every HCC-authored field stays exact so an intentional removal
@@ -4782,7 +4830,7 @@ function normalizeDeploymentForComparison(deployment: k8s.V1Deployment): unknown
     }
   }
 
-  return normalizeDeploymentValue(normalized)
+  return canonicalizeValue(normalized)
 }
 
 function normalizeContainerDefaults(container: k8s.V1Container): void {
@@ -4813,20 +4861,4 @@ function normalizeVolumeDefaults(volume: k8s.V1Volume): void {
   if (volume.persistentVolumeClaim?.readOnly === false) {
     delete volume.persistentVolumeClaim.readOnly
   }
-}
-
-function normalizeDeploymentValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalizeDeploymentValue)
-  if (!isDeploymentObject(value)) return value
-
-  const normalized: Record<string, unknown> = {}
-  for (const key of Object.keys(value).sort()) {
-    const entry = value[key]
-    if (entry !== undefined) normalized[key] = normalizeDeploymentValue(entry)
-  }
-  return normalized
-}
-
-function isDeploymentObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
