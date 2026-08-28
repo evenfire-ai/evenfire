@@ -7,6 +7,7 @@ import { type DbClient, initDb } from '../src/db.js'
 import { createExternalMembersRouter } from '../src/routes/external/members.js'
 import { createExternalTeamsRouter } from '../src/routes/external/teams.js'
 import { issueExternalUserSession } from '../src/services/auth/externalSessionIssuance.js'
+import { revokeAllUserSessions } from '../src/services/auth/userSessionService.js'
 import {
   acceptInvitationForEmail,
   createManagedInvitationForUser,
@@ -488,13 +489,7 @@ describeRealPostgres('external team mutations final source authority on real Pos
     )
     expect(draft.rows[0]?.status).toBe('draft')
 
-    await databasePool.query(
-      `INSERT INTO external_user_session_security_epochs(user_id, valid_after, reason)
-       VALUES ($1, NOW() + INTERVAL '1 second', 'test')
-       ON CONFLICT (user_id) DO UPDATE
-         SET valid_after = EXCLUDED.valid_after, reason = EXCLUDED.reason`,
-      [adminUserId]
-    )
+    await revokeAllUserSessions(adminUserId, 'test')
     releaseDelivery()
 
     const response = await pending
