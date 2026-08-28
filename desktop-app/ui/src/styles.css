@@ -3567,7 +3567,7 @@ h3 {
 
 /* Interactive hover/focus mirrors the ghost trigger's affordance — background,
  * border, text-color and shadow only, never transform/scale/filter (control
- * rules, desktop-app/ui/CLAUDE.md). */
+ * rules, docs/agents/frontend-style-rules.md). */
 .composer-actions-right .model-selector-chip.ui-pill--interactive:hover,
 .composer-actions-right .model-selector-chip.ui-pill--interactive:focus-visible {
   background: var(--surface-hover);
