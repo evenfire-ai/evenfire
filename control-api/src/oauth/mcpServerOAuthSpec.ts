@@ -3,11 +3,15 @@
  *
  * The grant-scope / oauthClientId / contextRef derivation is a security-relevant
  * rule (it decides WHICH grant coordinate governs a server). It is consumed by
- * two seams that must never drift apart (D4):
+ * three seams that must never drift apart (D4):
  *   - the token broker (`routes/mcpOauth.ts`) — the LLM/tool-call rail;
- *   - the rpc-proxy grant-presence gate (`services/access/mcpInvocable.ts`).
- * Both read the SAME fields the SAME way, so the rule lives here once.
+ *   - the rpc-proxy grant-presence gate (`services/access/mcpInvocable.ts`);
+ *   - the grant-existence sweep (`routes/mcpOauth.ts`, mini-spec 13) — the
+ *     hot-revocation poll.
+ * All read the SAME fields the SAME way and derive the SAME `oauth_grants` key
+ * (`buildMcpServerGrantKey`), so the rule lives here once.
  */
+import type { OAuthGrantKey } from './store.js'
 
 export interface McpServerOAuthDecl {
   id?: unknown
@@ -54,6 +58,61 @@ export function resolveServerOAuth(server: McpServerOAuthSpecInput): ResolvedSer
       ? server.spec.contextRef
       : undefined
   return { oauthClientId: oauth.id, grantScope, contextRef }
+}
+
+/** The coordinates the caller supplies to derive an mcp-server grant key. */
+export interface McpServerGrantKeyCoords {
+  /** McpServer name — reinterpreted as the grant owner's `recipeName`. */
+  mcpServerName: string
+  /** The mcp-servers namespace — the grant owner's `recipeNamespace`. */
+  mcpServersNamespace: string
+  /**
+   * End-user identity, for `grantScope='user'` servers only. IGNORED for
+   * `context` servers, which key by the server's AUTHORITATIVE `contextRef`
+   * (server-side), never by any caller-supplied context value.
+   */
+  userId?: string
+}
+
+/**
+ * Derive the `oauth_grants` key for an OAuth McpServer by flavor — the SINGLE
+ * key derivation shared by the token mint, the rpc-proxy grant-presence gate,
+ * and the grant-existence sweep (D4: one authority, no drift). Returns null when
+ * the coordinate the flavor needs is absent, so every caller decides fail-open
+ * vs fail-closed for itself:
+ *   - `user`    → needs a non-empty `userId`; null otherwise.
+ *   - `context` → keys by the server's AUTHORITATIVE `contextRef` (server-side,
+ *                 NEVER a body value); null when the server carries none.
+ *
+ * It intentionally does NOT read the token or touch the DB — it only maps a
+ * resolved OAuth declaration + coordinates to a key.
+ */
+export function buildMcpServerGrantKey(
+  resolved: ResolvedServerOAuth,
+  coords: McpServerGrantKeyCoords
+): OAuthGrantKey | null {
+  if (resolved.grantScope === 'context') {
+    // Shared identity is keyed by the server's authoritative Context, decoupled
+    // from any caller-supplied userId/contextId (no body-trust).
+    if (!resolved.contextRef) return null
+    return {
+      grantKind: 'shared',
+      ownerKind: 'mcpserver',
+      recipeNamespace: coords.mcpServersNamespace,
+      recipeName: coords.mcpServerName,
+      contextId: resolved.contextRef,
+      oauthClientId: resolved.oauthClientId,
+    }
+  }
+  if (typeof coords.userId !== 'string' || coords.userId.length === 0) return null
+  return {
+    grantKind: 'user',
+    ownerKind: 'mcpserver',
+    recipeNamespace: coords.mcpServersNamespace,
+    recipeName: coords.mcpServerName,
+    userId: coords.userId,
+    oauthClientId: resolved.oauthClientId,
+  }
 }
 
 /**

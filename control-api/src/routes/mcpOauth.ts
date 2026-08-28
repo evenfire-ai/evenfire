@@ -1,6 +1,7 @@
 import { type NextFunction, type Request, type Response, Router } from 'express'
 import { config } from '../config.js'
 import { pool } from '../db.js'
+import type { DbClient } from '../db.js'
 import { K8sGateway } from '../k8s.js'
 import { rateLimitMiddleware } from '../middleware/rateLimitMiddleware.js'
 import {
@@ -12,9 +13,14 @@ import {
 } from '../oauth/callback.js'
 import { deriveOAuthEncryptionKey } from '../oauth/encryption.js'
 import { integrationNotConfigured, isSecretNotFound } from '../oauth/integrationNotConfigured.js'
-import { type McpServerOAuthDecl, resolveServerOAuth } from '../oauth/mcpServerOAuthSpec.js'
-import type { OAuthGrantKey } from '../oauth/store.js'
+import {
+  type McpServerOAuthDecl,
+  buildMcpServerGrantKey,
+  resolveServerOAuth,
+} from '../oauth/mcpServerOAuthSpec.js'
+import { type OAuthGrantKey, oauthGrantExists } from '../oauth/store.js'
 import { getAccessToken } from '../oauth/tokenHelper.js'
+import { type Logger, rootLogger } from '../observability/logger.js'
 import { K8sNotFoundError } from '../services/resourceService.js'
 import {
   type McpHostControlClaims,
@@ -110,6 +116,138 @@ function normalizeMcpServerOwnerDecl(server: McpServerResource): RecipeWithOAuth
 const K8S_NAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/
 function isValidK8sName(name: string): boolean {
   return name.length > 0 && name.length <= 253 && K8S_NAME_RE.test(name)
+}
+
+// Upper bound on the grant-existence batch. mcp-host caps its per-user OAuth
+// partitions at OAUTH_USER_PARTITION_MAX=500, so one sweep never legitimately
+// exceeds that; 1000 is generous headroom that still rejects an abusive payload.
+const MAX_EXISTS_BATCH = 1000
+
+/** One entry of a `POST /mcp-oauth/grants/exists` request. */
+export interface GrantExistsQuery {
+  mcpServerName: string
+  /** End-user identity, for `grantScope='user'` servers. */
+  userId?: string
+  /**
+   * Accepted for API fidelity but NEVER used to key a lookup — `context`
+   * servers key by the server's authoritative `contextRef` (server-side). A
+   * lying value therefore cannot change the answer (no body-trust).
+   */
+  contextId?: string
+}
+
+/**
+ * One entry of the response. It ECHOES the query's coordinates so the consumer
+ * (the mcp-host sweep) correlates by the tuple `(mcpServerName, userId)` /
+ * `(mcpServerName, contextId)` rather than by array position — two per-user
+ * partitions of the SAME server (different `userId`) must stay distinguishable.
+ * `userId`/`contextId` are echoed exactly as the caller sent them: values the
+ * caller itself supplied, so echoing them leaks nothing (confirmed in review).
+ * Never a token, never the server's authoritative contextRef, never a key.
+ */
+export interface GrantExistsResult {
+  mcpServerName: string
+  userId?: string
+  contextId?: string
+  exists: boolean
+}
+
+export interface GrantExistenceDeps {
+  db: DbClient
+  gateway: K8sGateway
+  mcpServersNamespace: string
+  log?: Logger
+}
+
+/**
+ * Batch grant-existence resolver for the hot-revocation poll-sweep (mini-spec
+ * 13 §4.1). For each query it resolves the server's OAuth spec, derives the
+ * grant key with the SAME `buildMcpServerGrantKey` the mint uses (D4), and
+ * reports `oauthGrantExists` — a pure `SELECT 1`, never the token, never any
+ * secret.
+ *
+ * Contract: STRICT 1:1 with the input — exactly one result per input entry, in
+ * order, each echoing that entry's coordinates. Entries are per-entry untrusted
+ * (`unknown`): a malformed one is NOT dropped (that would break positional and
+ * tuple correlation) but yields a fail-open placeholder in its own slot.
+ *
+ * Fail-OPEN per query (§4.2 "fail-open transitorio"): ANY problem — malformed
+ * entry, server not found (deleted CR), not an OAuth server, a missing grant
+ * coordinate for the flavor, an apiserver blip, or a DB error — yields
+ * `exists: true` for THAT entry, so a transient hiccup never provokes an
+ * eviction. `exists: false` is returned ONLY when `oauthGrantExists` says so
+ * definitively. For `context` servers the key is the server's authoritative
+ * `contextRef` (server-side), never the body `contextId`.
+ */
+export async function resolveBatchGrantExistence(
+  deps: GrantExistenceDeps,
+  queries: readonly unknown[]
+): Promise<GrantExistsResult[]> {
+  const log = deps.log ?? rootLogger
+  const results: GrantExistsResult[] = []
+  for (const raw of queries) {
+    const entry = (raw && typeof raw === 'object' ? raw : {}) as {
+      mcpServerName?: unknown
+      userId?: unknown
+      contextId?: unknown
+    }
+    // Echo the caller-supplied coordinates exactly as they arrived (a non-string
+    // `mcpServerName` cannot address a server, so it echoes as ''). One `echo()`
+    // per iteration guarantees `results.length === queries.length`.
+    const mcpServerName = typeof entry.mcpServerName === 'string' ? entry.mcpServerName : ''
+    const userId = typeof entry.userId === 'string' ? entry.userId : undefined
+    const contextId = typeof entry.contextId === 'string' ? entry.contextId : undefined
+    const echo = (exists: boolean): GrantExistsResult => {
+      const r: GrantExistsResult = { mcpServerName, exists }
+      if (userId !== undefined) r.userId = userId
+      if (contextId !== undefined) r.contextId = contextId
+      return r
+    }
+
+    // Malformed name → cannot address a server; fail-open placeholder in slot.
+    if (!mcpServerName || !isValidK8sName(mcpServerName)) {
+      log.warn({ mcpServerName }, 'grant-existence: malformed query entry; fail-open (exists:true)')
+      results.push(echo(true))
+      continue
+    }
+
+    try {
+      const server = (await deps.gateway.getResource(
+        'mcpservers',
+        mcpServerName,
+        deps.mcpServersNamespace
+      )) as McpServerResource
+      const resolved = resolveServerOAuth(server)
+      if (!resolved) {
+        // Not an OAuth server / no usable oauth id → ambiguous, fail-open.
+        log.warn({ mcpServerName }, 'grant-existence: server not resolvable as oauth; fail-open')
+        results.push(echo(true))
+        continue
+      }
+      const key = buildMcpServerGrantKey(resolved, {
+        mcpServerName,
+        mcpServersNamespace: deps.mcpServersNamespace,
+        userId,
+      })
+      if (!key) {
+        // Missing the coordinate the flavor needs (no userId for a user server,
+        // no contextRef for a context server) → ambiguous, fail-open.
+        log.warn(
+          { mcpServerName, grantScope: resolved.grantScope },
+          'grant-existence: missing grant coordinate; fail-open'
+        )
+        results.push(echo(true))
+        continue
+      }
+      results.push(echo(await oauthGrantExists(deps.db, key)))
+    } catch (err) {
+      // Server not found (deleted CR), apiserver blip, or DB error — all
+      // transient/ambiguous. Fail-open: never evict a live partition on a hiccup.
+      log.warn({ err, mcpServerName }, 'grant-existence check failed; fail-open (exists:true)')
+      results.push(echo(true))
+    }
+  }
+  return results
 }
 
 export function createMcpOauthRouter(gateway: K8sGateway): Router {
@@ -241,43 +379,41 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
           return res.status(400).json({ error: 'not_oauth_server' })
         }
 
-        // Bifurcate by grantScope read from the server.
-        let key: OAuthGrantKey
+        // Bifurcate by grantScope read from the server. The KEY comes from the
+        // shared derivation (`buildMcpServerGrantKey`, D4) so the mint, the
+        // rpc-proxy grant-presence gate and the grant-existence sweep never
+        // drift. The mint keeps its own request-validation guards, which map to
+        // specific error codes the shared builder's null return cannot express.
+        let userForKey: string | undefined
         if (resolved.grantScope === 'context') {
           // AUTHORITATIVE Context = server.spec.contextRef, NEVER the body.
           // Trusting a body contextId would let a caller with the scope request
           // {server, contextId: <someone else's Context>} and receive that
           // Context's shared token (cross-context token theft). The body value,
           // if present, is only cross-checked against the authoritative one.
-          const authoritativeContextId = resolved.contextRef
-          if (!authoritativeContextId) {
+          if (!resolved.contextRef) {
             // A context-identity server MUST carry contextRef (CRD-required).
             // Fail closed if it somehow doesn't.
             return res.status(400).json({ error: 'server_missing_context' })
           }
-          if (typeof contextId === 'string' && contextId !== authoritativeContextId) {
+          if (typeof contextId === 'string' && contextId !== resolved.contextRef) {
             return res.status(400).json({ error: 'context_mismatch' })
-          }
-          key = {
-            grantKind: 'shared',
-            ownerKind: 'mcpserver',
-            recipeNamespace: config.mcpServersNamespace,
-            recipeName: mcpServerName,
-            contextId: authoritativeContextId,
-            oauthClientId: resolved.oauthClientId,
           }
         } else {
           if (typeof userId !== 'string' || userId.length === 0) {
             return res.status(400).json({ error: 'invalid_request' })
           }
-          key = {
-            grantKind: 'user',
-            ownerKind: 'mcpserver',
-            recipeNamespace: config.mcpServersNamespace,
-            recipeName: mcpServerName,
-            userId,
-            oauthClientId: resolved.oauthClientId,
-          }
+          userForKey = userId
+        }
+        const key: OAuthGrantKey | null = buildMcpServerGrantKey(resolved, {
+          mcpServerName,
+          mcpServersNamespace: config.mcpServersNamespace,
+          userId: userForKey,
+        })
+        if (!key) {
+          // Unreachable: the guards above already rejected the null cases. Fail
+          // closed defensively rather than mint against a malformed key.
+          return res.status(400).json({ error: 'invalid_request' })
         }
 
         // Interactive live-session path — a human session is present, so
@@ -337,6 +473,62 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
               .status(502)
               .json({ error: 'refresh_failed', status: result.status, detail: result.detail })
         }
+      } catch (err) {
+        next(err)
+      }
+    }
+  )
+
+  // Batch grant-existence sweep (mini-spec 13 §4.1 / §4.3). mcp-host asks, in the
+  // cadence of the poll it already runs, whether its live per-user OAuth
+  // partitions still have a grant, and evicts the ones that do not. MIRROR of
+  // `user-token` in the FULL gate + key derivation, but batch + read-only: same
+  // kill-switch, same `requireControlCaller`, the SAME `mcp_oauth_broker` rate
+  // limiter keyed by caller, and the SAME `oauth:user-token` scope (no new scope
+  // — that would force re-issuing control JWTs, §5). Each result echoes its
+  // query's coordinates so the consumer correlates by tuple, not position;
+  // returns ONLY `{ mcpServerName, userId?, contextId?, exists }` — never a
+  // token, the authoritative contextRef, or a key.
+  router.post(
+    '/mcp-oauth/grants/exists',
+    requireBrokerEnabled,
+    requireControlCaller,
+    rateLimitMiddleware({
+      bucketType: 'mcp_oauth_broker',
+      maxPerMinute: config.oauthBrokerRlPerMin,
+      getBucketKey: req => {
+        const claims = req.res?.locals?.mcpHostControl as McpHostControlClaims | undefined
+        return claims ? `mcp-oauth:${claims.sub}` : 'mcp-oauth:unknown'
+      },
+    }),
+    async (req, res, next) => {
+      const claims = res.locals.mcpHostControl as McpHostControlClaims | undefined
+      if (!claims || !claims.scopes.includes('oauth:user-token')) {
+        return res.status(403).json({ error: 'insufficient_scope' })
+      }
+
+      const body = (req.body ?? {}) as { queries?: unknown }
+      if (!Array.isArray(body.queries)) {
+        return res.status(400).json({ error: 'invalid_request' })
+      }
+      if (body.queries.length > MAX_EXISTS_BATCH) {
+        return res.status(400).json({ error: 'batch_too_large' })
+      }
+
+      try {
+        // Per-entry untrusted, but 1:1 with the input: the resolver validates
+        // each entry, never drops one, and emits a fail-open placeholder in the
+        // slot of any malformed/unresolvable entry.
+        const results = await resolveBatchGrantExistence(
+          {
+            db: { query: (text, values) => pool.query(text, values) },
+            gateway,
+            mcpServersNamespace: config.mcpServersNamespace,
+            log: req.log ?? rootLogger,
+          },
+          body.queries
+        )
+        return res.status(200).json({ results })
       } catch (err) {
         next(err)
       }

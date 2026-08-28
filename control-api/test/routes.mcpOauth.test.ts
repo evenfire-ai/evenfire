@@ -3,6 +3,7 @@ import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
 import { deriveOAuthEncryptionKey, encryptOAuthSecret } from '../src/oauth/encryption.js'
+import { checkAndIncrement } from '../src/services/rateLimiterService.js'
 import { issueMcpHostControlJwt } from '../src/utils/auth/mcpHostJwtToken.js'
 import { MockGateway } from './mockGateway.js'
 
@@ -384,5 +385,214 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
       expect(res.body.token).toBe('GDRIVE-ACCESS')
       expect(res.body.expiresAt).toBe(future.toISOString())
     })
+  })
+})
+
+// Hot-revocation poll-sweep endpoint (mini-spec 13 §4.1). Gate + validation +
+// fail-open behaviors are asserted here at the HTTP layer; the AUTHORITATIVE
+// T1 derivation of `exists` from the real store producers lives in
+// routes.mcpOauth.grantsExists.realPostgres.integration.test.ts.
+describe('routes/mcp-oauth — POST /mcp-oauth/grants/exists (mini-spec 13)', () => {
+  let gateway: MockGateway
+  let app: ReturnType<typeof createApp>
+  const originalBrokerEnabled = config.mcpOauthBrokerEnabled
+
+  beforeEach(() => {
+    gateway = new MockGateway(MCP_NS)
+    app = createApp(gateway as never)
+    mockPoolQuery.mockReset()
+    // Default: SELECT 1 finds no row → oauthGrantExists = false (no grant).
+    mockPoolQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    config.mcpOauthBrokerEnabled = true
+  })
+
+  afterEach(() => {
+    config.mcpOauthBrokerEnabled = originalBrokerEnabled
+  })
+
+  const post = (token: string | null, body: unknown) => {
+    const req = request(app).post('/api/v1/mcp-oauth/grants/exists')
+    if (token) req.set('Authorization', `Bearer ${token}`)
+    return req.send(body as object)
+  }
+
+  it('401 without a control JWT (same gate as user-token)', async () => {
+    const res = await post(null, { queries: [{ mcpServerName: 'gdrive', userId: 'u1' }] })
+    expect(res.status).toBe(401)
+  })
+
+  // Case (d): the SAME scope as user-token (oauth:user-token) — no new scope.
+  it('403 insufficient_scope with a valid control JWT that lacks oauth:user-token', async () => {
+    const res = await post(controlToken([]), {
+      queries: [{ mcpServerName: 'gdrive', userId: 'u1' }],
+    })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('insufficient_scope')
+  })
+
+  it('400 invalid_request when queries is not an array', async () => {
+    const res = await post(controlToken(), { queries: 'nope' })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('invalid_request')
+  })
+
+  it('400 batch_too_large when queries exceeds the cap', async () => {
+    const queries = Array.from({ length: 1001 }, (_, i) => ({
+      mcpServerName: `srv-${i}`,
+      userId: 'u1',
+    }))
+    const res = await post(controlToken(), { queries })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('batch_too_large')
+  })
+
+  // Fail-open (§4.2): an unknown server (getResource 404) and a non-oauth server
+  // are ambiguous/transient — never a spurious `exists:false` that would evict.
+  it('200: unknown and non-oauth servers fail OPEN (exists:true), keyed by name', async () => {
+    void gateway.createResource(
+      'mcpservers',
+      { metadata: { name: 'plain' }, spec: { auth: { type: 'none' } } },
+      MCP_NS
+    )
+    const res = await post(controlToken(), {
+      queries: [
+        { mcpServerName: 'ghost', userId: 'u1' },
+        { mcpServerName: 'plain', userId: 'u1' },
+      ],
+    })
+    expect(res.status).toBe(200)
+    // Each result echoes the query's coordinates (correlation by tuple).
+    expect(res.body.results).toEqual([
+      { mcpServerName: 'ghost', userId: 'u1', exists: true },
+      { mcpServerName: 'plain', userId: 'u1', exists: true },
+    ])
+    // Fail-open cases never touch the grants table.
+    const grantQuery = mockPoolQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('FROM oauth_grants')
+    )
+    expect(grantQuery).toBeUndefined()
+  })
+
+  // A definitive `exists:false` only when oauthGrantExists says so (SELECT 1
+  // returns 0 rows), and the lookup is keyed by (mcpserver owner, userId).
+  it('200: a per-user server with no grant reports exists:false (definitive), keyed by userId', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    const res = await post(controlToken(), {
+      queries: [{ mcpServerName: 'gdrive', userId: 'nobody' }],
+    })
+    expect(res.status).toBe(200)
+    expect(res.body.results).toEqual([{ mcpServerName: 'gdrive', userId: 'nobody', exists: false }])
+    const grantQuery = mockPoolQuery.mock.calls.find(
+      ([sql]) =>
+        typeof sql === 'string' &&
+        sql.includes('FROM oauth_grants') &&
+        sql.includes("grant_kind = 'user'")
+    )
+    expect(grantQuery?.[1]).toEqual(['mcpserver', MCP_NS, 'gdrive', 'nobody', 'google-drive'])
+  })
+
+  it('200: reports exists:true when the SELECT 1 finds a row', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ exists: 1 }], rowCount: 1 })
+    const res = await post(controlToken(), {
+      queries: [{ mcpServerName: 'gdrive', userId: 'u1' }],
+    })
+    expect(res.status).toBe(200)
+    expect(res.body.results).toEqual([{ mcpServerName: 'gdrive', userId: 'u1', exists: true }])
+  })
+
+  // FIX A core: two per-user partitions of the SAME server (different userId)
+  // must be distinguishable in ONE batch response — correlation by (server,
+  // userId) tuple, not by array position. alice has a grant, bob does not.
+  it('200: distinguishes two userIds on the same server within one batch', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    // First SELECT 1 (alice) finds a row; the default empty result covers bob.
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ exists: 1 }], rowCount: 1 })
+    const res = await post(controlToken(), {
+      queries: [
+        { mcpServerName: 'gdrive', userId: 'alice' },
+        { mcpServerName: 'gdrive', userId: 'bob' },
+      ],
+    })
+    expect(res.status).toBe(200)
+    expect(res.body.results).toEqual([
+      { mcpServerName: 'gdrive', userId: 'alice', exists: true },
+      { mcpServerName: 'gdrive', userId: 'bob', exists: false },
+    ])
+  })
+
+  // Context flavor: keyed by the server's AUTHORITATIVE spec.contextRef, NEVER
+  // the body contextId (no body-trust). The SELECT 1 coordinate proves it; the
+  // lying body contextId is only echoed back, never used to key.
+  it('200: context server keys the lookup by spec.contextRef, ignoring a lying body contextId', async () => {
+    seedOauthServer(gateway, { name: 'team', grantScope: 'context', contextRef: 'ctx-real' })
+    const res = await post(controlToken(), {
+      queries: [{ mcpServerName: 'team', userId: 'u1', contextId: 'ctx-foreign' }],
+    })
+    expect(res.status).toBe(200)
+    expect(res.body.results).toEqual([
+      { mcpServerName: 'team', userId: 'u1', contextId: 'ctx-foreign', exists: false },
+    ])
+    const grantQuery = mockPoolQuery.mock.calls.find(
+      ([sql]) =>
+        typeof sql === 'string' &&
+        sql.includes('FROM oauth_grants') &&
+        sql.includes("grant_kind = 'shared'")
+    )
+    // contextId coordinate is the authoritative ctx-real, NOT the body ctx-foreign.
+    expect(grantQuery?.[1]).toEqual(['mcpserver', MCP_NS, 'team', 'ctx-real', 'google-drive'])
+  })
+
+  // FIX A: a malformed entry must NOT be dropped (that breaks positional/tuple
+  // correlation) — it yields a fail-open placeholder in its OWN slot, echoing
+  // whatever coordinates it carried. results stays 1:1 with queries.
+  it('200: keeps results 1:1 with queries, fail-open placeholder for malformed entries', async () => {
+    const queries = [
+      { mcpServerName: 'Foo/Bar', userId: 'u1' }, // invalid k8s name → placeholder, name echoed as-is
+      { mcpServerName: 'ghost', userId: 'u2' }, // unknown server → fail-open true
+      { userId: 'u3' }, // no mcpServerName → placeholder, name echoes ''
+    ]
+    const res = await post(controlToken(), { queries })
+    expect(res.status).toBe(200)
+    expect(res.body.results).toHaveLength(queries.length)
+    expect(res.body.results).toEqual([
+      { mcpServerName: 'Foo/Bar', userId: 'u1', exists: true },
+      { mcpServerName: 'ghost', userId: 'u2', exists: true },
+      { mcpServerName: '', userId: 'u3', exists: true },
+    ])
+  })
+
+  // FIX B: the endpoint mirrors user-token's rate limiter (same mcp_oauth_broker
+  // bucket, keyed by caller). When the bucket is exhausted the middleware short-
+  // circuits with 429 BEFORE the handler runs (no grant lookup).
+  it('429 Too Many Requests when the shared broker rate limit is exceeded', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    vi.mocked(checkAndIncrement).mockResolvedValueOnce({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 61,
+    })
+    const res = await post(controlToken(), {
+      queries: [{ mcpServerName: 'gdrive', userId: 'u1' }],
+    })
+    expect(res.status).toBe(429)
+    expect(res.body.error).toBe('Too Many Requests')
+    // Denied before the handler — no grants lookup ran.
+    const grantQuery = mockPoolQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('FROM oauth_grants')
+    )
+    expect(grantQuery).toBeUndefined()
+  })
+
+  // Kill-switch parity with user-token: OFF (default) → the endpoint looks absent.
+  it('404 not_found when the broker kill-switch is OFF', async () => {
+    config.mcpOauthBrokerEnabled = false
+    const res = await post(controlToken(), {
+      queries: [{ mcpServerName: 'gdrive', userId: 'u1' }],
+    })
+    expect(res.status).toBe(404)
+    expect(res.body.error).toBe('not_found')
   })
 })
