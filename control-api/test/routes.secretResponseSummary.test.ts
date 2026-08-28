@@ -4,6 +4,12 @@ import request from 'supertest'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
 
 function appFor(gateway: Record<string, unknown>) {
+  // A replace checks for Host references before mutating the resource. The
+  // response-boundary fixture models the no-reference case explicitly.
+  if (typeof gateway.listResource !== 'function') {
+    gateway.listResource = async () => []
+  }
+
   const app = express()
   app.use(express.json())
   app.use(createAdminSecretsRouter(gateway as never))
