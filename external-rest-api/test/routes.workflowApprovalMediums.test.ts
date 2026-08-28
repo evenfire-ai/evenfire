@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { ControlApiError } from '../src/controlApiClient.js'
 import { createWorkflowApprovalMediumsRouter } from '../src/routes/workflowApprovalMediums.js'
 
 const serviceMock = vi.hoisted(() => ({
@@ -281,5 +282,20 @@ describe('routes/workflowApprovalMediums', () => {
 
     expect(res.body.items).toHaveLength(1)
     expect(serviceMock.listApprovalChannelTargets).toHaveBeenCalledWith('session-token')
+  })
+
+  it('uses the request correlation when a sanitized upstream error has none', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce({ userId: 'user-1', exp: 9999999999 })
+    serviceMock.listWorkflowApprovalMediums.mockRejectedValueOnce(
+      new ControlApiError('private upstream detail', 403, { error: { code: 'forbidden' } })
+    )
+
+    const response = await request(makeApp())
+      .get('/workflow-approval-mediums')
+      .set('authorization', 'Bearer session-token')
+      .set('x-correlation-id', 'approval_mediums_ID-42')
+      .expect(403)
+
+    expect(response.body.error.correlationId).toBe('approval_mediums_ID-42')
   })
 })

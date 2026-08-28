@@ -179,13 +179,14 @@ describe('routes/userApprovalDecisions', () => {
     const response = await request(app)
       .get('/workflow-approvals')
       .set('authorization', 'Bearer good-token')
+      .set('x-correlation-id', 'approval_decisions_ID-42')
       .expect(410)
 
     expect(response.body).toEqual({
       error: {
         code: 'gone',
         message: 'The resource is no longer available.',
-        correlationId: expect.any(String),
+        correlationId: 'approval_decisions_ID-42',
         retryable: false,
       },
     })
