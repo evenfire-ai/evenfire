@@ -165,19 +165,36 @@ describe('Host ensureHostRole no-op gate', () => {
     }
   })
 
-  it('NOOP-ROLE-5: reordered live verbs still replaces once', async () => {
+  it('NOOP-ROLE-5: reordered live verbs replace once then converge', async () => {
     rbacApi.createNamespacedRole.mockRejectedValue({ code: 409 })
     let existing: k8s.V1Role | undefined
+    let readPass = 0
     rbacApi.readNamespacedRole.mockImplementation(() => {
-      const live = structuredClone(desiredFromCreate(rbacApi))
-      secretGetRule(live).verbs = ['watch', 'get', 'list']
-      existing = asApiserverRole(live)
+      readPass += 1
+      if (readPass === 1) {
+        const live = structuredClone(desiredFromCreate(rbacApi))
+        secretGetRule(live).verbs = ['watch', 'get', 'list']
+        existing = asApiserverRole(live)
+        return Promise.resolve(existing)
+      }
+      const written = rbacApi.replaceNamespacedRole.mock.calls[0]?.[0].body as
+        | k8s.V1Role
+        | undefined
+      if (!written) throw new Error('NOOP-ROLE-5: second read expected a written Role body')
+      existing = asApiserverRole(structuredClone(written))
       return Promise.resolve(existing)
     })
     const log = vi.spyOn(console, 'log')
     try {
       await (reconciler as any).ensureHostRole(host)
       expect(secretGetRule(existing!).verbs).toEqual(['watch', 'get', 'list'])
+      expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
+      expect(updatedRoleLogs(log, '"host-chatllm-config-reader"')).toEqual([
+        '[HostReconciler] Updated Role "host-chatllm-config-reader"',
+      ])
+
+      await (reconciler as any).ensureHostRole(host)
+      expect(secretGetRule(existing!).verbs).toEqual(['get', 'watch', 'list'])
       expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
       expect(updatedRoleLogs(log, '"host-chatllm-config-reader"')).toEqual([
         '[HostReconciler] Updated Role "host-chatllm-config-reader"',
