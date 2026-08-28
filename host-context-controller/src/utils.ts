@@ -236,23 +236,7 @@ function normalizeServiceForComparison(service: k8s.V1Service): unknown {
     }
   }
 
-  return normalizeServiceValue(normalized)
-}
-
-function normalizeServiceValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalizeServiceValue)
-  if (!isServiceObject(value)) return value
-
-  const normalized: Record<string, unknown> = {}
-  for (const key of Object.keys(value).sort()) {
-    const entry = value[key]
-    if (entry !== undefined) normalized[key] = normalizeServiceValue(entry)
-  }
-  return normalized
-}
-
-function isServiceObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+  return canonicalizeValue(normalized)
 }
 
 /**
@@ -296,7 +280,7 @@ function normalizeNetworkPolicyForComparison(policy: k8s.V1NetworkPolicy): unkno
     }
   }
 
-  return normalizeServiceValue(normalized)
+  return canonicalizeValue(normalized)
 }
 
 /** Create-or-replace a NetworkPolicy (409 catch → conflict-retry replace). */
@@ -329,6 +313,27 @@ export async function applyNetworkPolicy(
     validateExisting,
     isUpToDate: networkPolicyMatchesDesired,
   })
+}
+
+/**
+ * Recursive key-sort used by the no-op gates (Role, Service, Deployment,
+ * NetworkPolicy apply). Arrays keep author order. Undefined-valued keys are
+ * dropped. A second copy of this walk is a #307-class drift: the skip would
+ * silently stop matching.
+ *
+ * Distinct from `canonicalStringify` (top-level Secret key list) and from the
+ * egressSignature walker in networkPolicyReconciler, which keeps undefined
+ * keys. Do not unify those (#473 / #299).
+ */
+export function canonicalizeValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeValue)
+  if (typeof value !== 'object' || value === null) return value
+  const canonical: Record<string, unknown> = {}
+  for (const key of Object.keys(value).sort()) {
+    const entry = (value as Record<string, unknown>)[key]
+    if (entry !== undefined) canonical[key] = canonicalizeValue(entry)
+  }
+  return canonical
 }
 
 /**

@@ -12,7 +12,7 @@ import {
   getRegistryCatalog,
 } from '../../lib/api'
 import { useConfirmDialog } from '../ConfirmDialog'
-import { type RowAction, RowActionsMenu } from '../RowActionsMenu'
+import { type RowActionMenuItem, RowActionsMenu } from '../RowActionsMenu'
 import { SectionLoadingSkeleton } from '../SectionLoadingSkeleton'
 import { TableHeaderRow } from '../TableHeaderRow'
 import type { TableHeaderColumn } from '../TableHeaderRow/types'
@@ -278,7 +278,7 @@ export function OwnedEntries({
                       const isGranting = grantTarget?.entryName === e.name
                       const expanded = expandedNames.has(e.name)
                       const hasPrevious = versions.length > 1
-                      const rowActions: RowAction[] = [
+                      const rowActions: RowActionMenuItem[] = [
                         {
                           key: 'edit',
                           label: 'Edit',

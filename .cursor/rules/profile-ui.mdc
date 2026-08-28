@@ -1,0 +1,9 @@
+---
+description: Profile UI application-specific coding rules
+globs:
+  - profile-ui/**
+alwaysApply: false
+---
+
+Read and apply the canonical Profile UI rules in
+@docs/agents/profile-ui-rules.md for every matching path.
