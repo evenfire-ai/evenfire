@@ -112,8 +112,8 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
   const router = Router()
   router.post(
     '/mcp-host/llm/provider-attempts/authorize',
-    ...llmProviderAttemptAuthorizeRateLimits(),
     requireMcpHostJwt,
+    ...llmProviderAttemptAuthorizeRateLimits(),
     asyncHandler(async (req: Request, res: Response) => {
       const claims = req.mcpHostJwt
       if (!claims) {

@@ -10,6 +10,7 @@ import {
   applyCodexChatgptAccountIdSchema,
   applyCodexGrantDefaultModelSchema,
   applyCodexMultiConnectionSchema,
+  applyCodexReusableConnectionKeySchema,
   applyCodexSubscriptionConnectionSchema,
 } from './services/codexSubscriptionConnection.js'
 import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
@@ -5980,6 +5981,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0104_codex_grant_default_model',
     apply: applyCodexGrantDefaultModelSchema,
+  },
+  {
+    version: '0105_codex_reusable_connection_key',
+    apply: applyCodexReusableConnectionKeySchema,
   },
 ]
 

@@ -36,4 +36,12 @@ describe('chatgptUpstreamHeaders', () => {
     const token = jwtWithPayload({ auth: { chatgpt_account_id: 'acct_nested' } })
     expect(chatgptAccountIdFromAccessToken(token)).toBe('acct_nested')
   })
+
+  it('keeps a redeemed chatgpt-account-id instead of overwriting it with the JWT claim', () => {
+    const token = jwtWithPayload({
+      'https://api.openai.com/auth': { chatgpt_account_id: 'acct_from_jwt' },
+    })
+    const headers = chatgptUpstreamHeaders(token, { 'chatgpt-account-id': 'acct_redeemed' })
+    expect(headers['chatgpt-account-id']).toBe('acct_redeemed')
+  })
 })

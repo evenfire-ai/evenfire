@@ -265,6 +265,14 @@ export async function applyCodexGrantDefaultModelSchema(db: DbClient): Promise<v
   `)
 }
 
+/** Drop the table-wide UNIQUE so a revoked key can be reused. The partial active index stays. */
+export async function applyCodexReusableConnectionKeySchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE codex_subscription_connections
+      DROP CONSTRAINT IF EXISTS codex_subscription_connections_connection_key_unique
+  `)
+}
+
 export async function getSafeCodexSubscriptionConnection(
   db: DbClient,
   connectionKey: string = CODEX_SUBSCRIPTION_CONNECTION_KEY

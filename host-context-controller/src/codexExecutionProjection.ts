@@ -169,7 +169,6 @@ function freezeProjection(
   const driftHashInput = JSON.stringify({
     eligibleTargets: input.eligibleTargets,
     derivedScopes: input.derivedScopes,
-    connectionRevision: input.connectionRevision,
     eligibility: input.eligibility,
   })
   return Object.freeze({ ...input, driftHashInput })

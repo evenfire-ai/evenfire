@@ -602,12 +602,20 @@ export class WorkflowService {
     if (!req.provider) {
       return { configured: false, message: 'provider is required' }
     }
-    if (!req.apiKey) {
-      return { configured: false, message: 'apiKey is required' }
-    }
 
     if (!isLlmProvider(req.provider)) {
       return { configured: false, message: `Unknown provider: ${req.provider}` }
+    }
+
+    // oauth-broker (Codex) binds provider/model only. Control API remains the
+    // OAuth custodian; a keyless configure must still swap the in-memory
+    // provider so the next step does not inherit the previous credential.
+    const brokerBacked = descriptorFor(req.provider).authMode === 'oauth-broker'
+    if (!brokerBacked && !req.apiKey) {
+      return { configured: false, message: 'apiKey is required' }
+    }
+    if (brokerBacked && !req.model?.trim()) {
+      return { configured: false, message: 'model is required' }
     }
 
     // SOUL override
@@ -620,6 +628,7 @@ export class WorkflowService {
     }
 
     const model = req.model ?? 'default'
+    const apiKey = brokerBacked ? '' : (req.apiKey ?? '')
     const llmSecretName = WorkflowService.normalizeLlmSecretName(req.llmSecretName)
     if (req.llmSecretName !== undefined && llmSecretName === null) {
       return { configured: false, message: 'llmSecretName must be a valid Kubernetes Secret name' }
@@ -631,14 +640,14 @@ export class WorkflowService {
     if (
       this.currentProviderName === req.provider &&
       this.currentModel === model &&
-      this.currentApiKey === req.apiKey &&
+      this.currentApiKey === apiKey &&
       this.configured
     ) {
       this.currentLlmSecretName = llmSecretName
       return { configured: true, provider: req.provider, model }
     }
 
-    const provider = this.llmFactory(req.provider, model, req.apiKey)
+    const provider = this.llmFactory(req.provider, model, apiKey)
     if (!provider) {
       return { configured: false, message: `Failed to create provider: ${req.provider}` }
     }
@@ -652,10 +661,10 @@ export class WorkflowService {
     this.currentProvider = effectiveProvider
     this.currentProviderName = req.provider
     this.currentModel = model
-    this.currentApiKey = req.apiKey
+    this.currentApiKey = apiKey
     this.currentLlmSecretName = llmSecretName
     this.configured = true
-    this.notifyLlmConfigured(req.provider, model, req.apiKey)
+    this.notifyLlmConfigured(req.provider, model, apiKey)
 
     return { configured: true, provider: req.provider, model }
   }

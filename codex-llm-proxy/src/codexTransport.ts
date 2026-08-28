@@ -89,8 +89,6 @@ export async function streamCodexCompletion(
   if (request.model !== input.ticket.model) {
     throw new CodexTransportError('model_not_allowed', 'request model does not match the ticket')
   }
-  const deadlineMs = assertBoundedDeadline(input.deadlineMs ?? request.deadlineMs, input.maxDeadlineMs ?? 300_000)
-
   const redeemed = await input.redeem({
     executionTicket: input.executionTicket,
     requestHash: input.requestHash,
@@ -102,6 +100,10 @@ export async function streamCodexCompletion(
     await finalizeQuietly(input, redeemed, 'error')
     throw new CodexTransportError('model_not_allowed', 'served model does not match the request')
   }
+  const deadlineMs = Math.min(
+    assertBoundedDeadline(input.deadlineMs ?? request.deadlineMs, input.maxDeadlineMs ?? 300_000),
+    redeemed.transport.maxStreamDurationMs
+  )
 
   const accessToken = redeemed.accessToken
   let outcome: StreamCodexCompletionResult['outcome'] = 'unknown'
@@ -317,33 +319,28 @@ async function consumeSse(
     while (!signal.aborted) {
       const { done, value } = await reader.read()
       if (done) break
-      buffer += decoder.decode(value, { stream: true })
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n').replace(/\r/g, '\n')
       if (buffer.length > maxSseBufferBytes) {
         throw new CodexTransportError('sse_buffer_exceeded', 'upstream SSE buffer exceeded')
       }
       const parts = buffer.split('\n\n')
       buffer = parts.pop() ?? ''
       for (const part of parts) {
-        const dataLine = part
-          .split('\n')
-          .map(line => line.trim())
-          .find(line => line.startsWith('data:'))
-        if (!dataLine) continue
-        const payload = dataLine.slice(5).trim()
-        if (!payload || payload === '[DONE]') continue
-        let parsed: unknown
-        try {
-          parsed = JSON.parse(payload)
-        } catch {
-          continue
-        }
-        const mapped = mapUpstreamEvent(parsed, pending)
+        const mapped = ingestSseBlock(part, pending)
         if (mapped.frame) onFrame?.(mapped.frame)
         if (mapped.usage) usage = mapped.usage
         if (mapped.completed) completed = true
         if (mapped.failed) failed = true
       }
       if (signal.aborted) break
+    }
+    buffer += decoder.decode().replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    if (buffer.trim()) {
+      const mapped = ingestSseBlock(buffer, pending)
+      if (mapped.frame) onFrame?.(mapped.frame)
+      if (mapped.usage) usage = mapped.usage
+      if (mapped.completed) completed = true
+      if (mapped.failed) failed = true
     }
   } finally {
     reader.releaseLock()
@@ -360,6 +357,24 @@ async function consumeSse(
   }
   if (completed) return { outcome: 'success', usage }
   return { outcome: 'unknown', usage }
+}
+
+function ingestSseBlock(
+  part: string,
+  pending: Map<string, PendingToolCall>
+): ReturnType<typeof mapUpstreamEvent> {
+  const dataLine = part
+    .split('\n')
+    .map(line => line.trim())
+    .find(line => line.startsWith('data:'))
+  if (!dataLine) return {}
+  const payload = dataLine.slice(5).trim()
+  if (!payload || payload === '[DONE]') return {}
+  try {
+    return mapUpstreamEvent(JSON.parse(payload), pending)
+  } catch {
+    return {}
+  }
 }
 
 type PendingToolCall = {

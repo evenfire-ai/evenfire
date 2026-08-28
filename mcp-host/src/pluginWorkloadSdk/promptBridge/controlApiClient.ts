@@ -377,6 +377,7 @@ export class PluginWorkloadSdkControlApiClient {
             Authorization: `Bearer ${this.opts.getAccessToken()}`,
           },
           body: JSON.stringify(body),
+          signal: AbortSignal.timeout(15_000),
         })
       } catch (err) {
         // Network failure — retryable.

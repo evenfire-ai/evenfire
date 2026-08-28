@@ -503,11 +503,24 @@ describe('codex subscription OAuth broker', () => {
     expect(repos.releaseLock).toHaveBeenCalled()
   })
 
-  it('fails loud when the refresh lock is held and the token stays stale', async () => {
+  it('serves a still-valid token when the refresh lock is held by another worker', async () => {
     repos.loadSecrets.mockResolvedValue({
       refreshToken: 'refresh-secret',
       accessToken: 'stale-access',
       accessTokenExpiresAt: new Date(Date.now() + 30_000),
+      chatgptAccountId: null,
+      credentialRevision: 3,
+    })
+    repos.acquireLock.mockResolvedValue(false)
+    await expect(ensureFreshCodexAccessToken(deps(vi.fn()))).resolves.toBeUndefined()
+    expect(repos.updateInPlace).not.toHaveBeenCalled()
+  })
+
+  it('fails loud when the refresh lock is held and the stored token is already expired', async () => {
+    repos.loadSecrets.mockResolvedValue({
+      refreshToken: 'refresh-secret',
+      accessToken: 'stale-access',
+      accessTokenExpiresAt: new Date(Date.now() - 1_000),
       chatgptAccountId: null,
       credentialRevision: 3,
     })

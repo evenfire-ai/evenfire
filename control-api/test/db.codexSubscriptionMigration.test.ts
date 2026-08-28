@@ -62,6 +62,13 @@ describe('00a0/00a1 Codex subscription persistence', () => {
       dbSource.indexOf("version: '0104_codex_grant_default_model'")
     )
     expect(connectionSource).toContain('ADD COLUMN IF NOT EXISTS default_model')
+    expect(dbSource).toContain("version: '0105_codex_reusable_connection_key'")
+    expect(dbSource.indexOf("version: '0104_codex_grant_default_model'")).toBeLessThan(
+      dbSource.indexOf("version: '0105_codex_reusable_connection_key'")
+    )
+    expect(connectionSource).toContain(
+      'DROP CONSTRAINT IF EXISTS codex_subscription_connections_connection_key_unique'
+    )
   })
 
   it('creates a single active deployment-default connection with ciphertext and revisions', () => {

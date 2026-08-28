@@ -15,7 +15,13 @@ export type CodexProvenance = 'authoritative' | 'uncertain'
 
 export type CodexCatalogSnapshot = {
   flagEnabled: boolean
-  connectionStatus?: 'connected' | 'disconnected' | 'reauth-required' | 'unavailable' | null
+  connectionStatus?:
+    | 'connected'
+    | 'disconnected'
+    | 'reauth-required'
+    | 'unavailable'
+    | 'revoked'
+    | null
   catalogContentHash?: string | null
   catalogRevision?: number | null
   connectionRevision?: number | null
@@ -205,7 +211,6 @@ function freezeProjection(
   const driftHashInput = JSON.stringify({
     eligibleTargets: input.eligibleTargets,
     derivedScopes: input.derivedScopes,
-    connectionRevision: input.connectionRevision,
     eligibility: input.eligibility,
   })
   return Object.freeze({ ...input, driftHashInput })

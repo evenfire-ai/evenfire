@@ -103,6 +103,7 @@ export class ControlApiClient {
         'x-service-token': this.config.serviceName,
       },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(15_000),
     })
     const raw = await response.text()
     let parsed: unknown = null

@@ -1251,6 +1251,11 @@ function recipeUsesCodexBroker(spec?: Record<string, unknown>): boolean {
   return (agent as { provider?: unknown }).provider === 'codex-subscription'
 }
 
+function recipeHasPluginWorkloadSdk(spec?: Record<string, unknown>): boolean {
+  const sdk = spec?.pluginWorkloadSdk
+  return Boolean(sdk && typeof sdk === 'object' && !Array.isArray(sdk))
+}
+
 function readRequestedCodexRecipeGrant(body: RecipeBody): string {
   const raw = body.metadata?.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
   return readHostCodexConnectionRef(typeof raw === 'string' ? raw : '')
@@ -1282,21 +1287,38 @@ function validateCodexRecipeGrant(body: RecipeBody): ValidationError[] {
   return []
 }
 
-function sanitizeRecipeCodexAnnotation(body: RecipeBody): Record<string, string> {
-  if (!recipeUsesCodexBroker(body.spec)) {
-    // Explicit empty value so mergeAnnotationsForReplace does not keep a
-    // leftover clerum.io/codex-connection-ref from a previous Codex write.
-    return { [CODEX_CONNECTION_REF_ANNOTATION]: '' }
+function sanitizeRecipeCodexAnnotation(
+  body: RecipeBody,
+  currentAnnotations?: Record<string, string>
+): Record<string, string> {
+  const incoming = readRequestedCodexRecipeGrant(body)
+  if (recipeUsesCodexBroker(body.spec)) {
+    return {
+      [CODEX_CONNECTION_REF_ANNOTATION]: isCodexUnassignedConnectionKey(incoming) ? '' : incoming,
+    }
   }
-  const key = readRequestedCodexRecipeGrant(body)
-  return {
-    [CODEX_CONNECTION_REF_ANNOTATION]: isCodexUnassignedConnectionKey(key) ? '' : key,
+  // SDK promptBridge stamps the same annotation regardless of spec.agent.
+  // Do not wipe a live grant when the author edits an unrelated field.
+  if (recipeHasPluginWorkloadSdk(body.spec)) {
+    if (!isCodexUnassignedConnectionKey(incoming)) {
+      return { [CODEX_CONNECTION_REF_ANNOTATION]: incoming }
+    }
+    const current = readHostCodexConnectionRef(
+      typeof currentAnnotations?.[CODEX_CONNECTION_REF_ANNOTATION] === 'string'
+        ? currentAnnotations[CODEX_CONNECTION_REF_ANNOTATION]
+        : ''
+    )
+    return {
+      [CODEX_CONNECTION_REF_ANNOTATION]: isCodexUnassignedConnectionKey(current) ? '' : current,
+    }
   }
+  return { [CODEX_CONNECTION_REF_ANNOTATION]: '' }
 }
 
 function sanitizeRecipeBody(
   body: RecipeBody,
-  currentLabels?: Record<string, string>
+  currentLabels?: Record<string, string>,
+  currentAnnotations?: Record<string, string>
 ): {
   metadata: { name: string; labels?: Record<string, string>; annotations: Record<string, string> }
   spec: Record<string, unknown>
@@ -1318,7 +1340,10 @@ function sanitizeRecipeBody(
     metadata: {
       name: metadata.name as string,
       ...(sanitizedLabels ? { labels: sanitizedLabels } : {}),
-      annotations: sanitizeRecipeCodexAnnotation(body),
+      annotations: {
+        ...(currentAnnotations ?? {}),
+        ...sanitizeRecipeCodexAnnotation(body, currentAnnotations),
+      },
     },
     spec: body.spec as Record<string, unknown>,
   }
@@ -1947,10 +1972,13 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
             return
           }
         }
-        const currentLabels = isPlainObject(resource)
-          ? stringLabels(isPlainObject(resource.metadata) ? resource.metadata.labels : undefined)
-          : undefined
-        const sanitized = sanitizeRecipeBody(body, currentLabels)
+        const currentMeta =
+          isPlainObject(resource) && isPlainObject(resource.metadata)
+            ? resource.metadata
+            : undefined
+        const currentLabels = stringLabels(currentMeta?.labels)
+        const currentAnnotations = stringLabels(currentMeta?.annotations)
+        const sanitized = sanitizeRecipeBody(body, currentLabels, currentAnnotations)
         const updated = await updateRecipeWithConflictRetry(gateway, req.params.name, sanitized, ns)
         res
           .status(200)

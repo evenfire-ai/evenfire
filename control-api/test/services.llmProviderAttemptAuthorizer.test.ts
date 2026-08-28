@@ -216,6 +216,23 @@ describe('authorizeLlmProviderAttempt', () => {
     })
   })
 
+  it('reuses an active presented reservation instead of reserving again', async () => {
+    await authorizeLlmProviderAttempt(
+      claims(),
+      body({ budgetReservationId: 'res-already-held' }),
+      current
+    )
+    expect(current.evaluateBudget).not.toHaveBeenCalled()
+    expect(current.getActiveReservation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ reservationId: 'res-already-held', hostRef: 'research-host' })
+    )
+    expect(current.insertAttempt).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ budgetReservationId: 'res-already-held' })
+    )
+  })
+
   it('rejects an expired presented reservation as budget_denied', async () => {
     vi.mocked(current.getActiveReservation).mockResolvedValueOnce(null)
     await expect(

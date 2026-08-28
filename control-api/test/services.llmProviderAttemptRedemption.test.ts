@@ -118,6 +118,32 @@ describe('redeemLlmProviderAttempt', () => {
     expect(JSON.stringify(result)).not.toMatch(/encrypted|Authorization/i)
   })
 
+  it('prefers the stored ChatGPT account id over a conflicting access-token claim', async () => {
+    const accessJwt = `hdr.${Buffer.from(
+      JSON.stringify({
+        'https://api.openai.com/auth': { chatgpt_account_id: 'acct_from_jwt' },
+      })
+    ).toString('base64url')}.sig`
+    const result = await redeemLlmProviderAttempt(
+      { executionTicket: 'ticket', requestHash: CLAIMS.requestHash },
+      {
+        enabled: true,
+        db: { query: vi.fn() },
+        getConnectionById: vi.fn(),
+        withTransaction: async work => work({ query: vi.fn() } as never),
+        loadSecrets: async () => ({
+          refreshToken: 'refresh-secret',
+          accessToken: accessJwt,
+          accessTokenExpiresAt: new Date(Date.now() + 120_000),
+          chatgptAccountId: 'acct_stored',
+          credentialRevision: 3,
+        }),
+        encryptionKey: Buffer.alloc(32),
+      }
+    )
+    expect(result.chatgptAccountId).toBe('acct_stored')
+  })
+
   it('rejects a replayed ticket before returning any token', async () => {
     vi.mocked(store.lockLlmProviderAttemptTicket).mockResolvedValueOnce({
       jti: CLAIMS.jti,

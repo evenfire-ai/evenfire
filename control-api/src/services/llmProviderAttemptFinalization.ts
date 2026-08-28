@@ -2,6 +2,7 @@ import { parseCodexAttemptReceiptV1 } from '@clerum/llm-provider-attempt-contrac
 import { config } from '../config.js'
 import { withTransaction } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
+import { releaseReservation } from './budgets/reservations.js'
 import { hashCodexAttemptReceipt } from './llmProviderAttemptReceipt.js'
 import { opaqueAttemptReceipt } from './llmProviderAttemptRedemption.js'
 import {
@@ -101,6 +102,12 @@ export async function finalizeLlmProviderAttempt(
       throw new LlmProviderAttemptFinalizeError(
         'conflict',
         'provider attempt already has a different terminal outcome'
+      )
+    }
+    if (attempt.budgetReservationId && attempt.budgetReservationId !== 'unbudgeted') {
+      await releaseReservation(
+        { reservationId: attempt.budgetReservationId, hostRef: attempt.hostRef },
+        tx
       )
     }
     log.info(

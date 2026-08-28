@@ -103,6 +103,29 @@ describe('projectCodexExecution', () => {
     expect(first.catalogContentHash).not.toBe(second.catalogContentHash)
   })
 
+  it('keeps the runtime drift hash stable when only connectionRevision changes', () => {
+    const spec = { model: { provider: 'codex-subscription', name: 'gpt-5.3-codex' } }
+    const first = projectCodexExecution(spec, {
+      flagEnabled: true,
+      connectionStatus: 'connected',
+      catalogContentHash: 'aaa',
+      catalogRevision: 1,
+      connectionRevision: 4,
+      enabledModels: ['codex-subscription:gpt-5.3-codex'],
+      staleModels: [],
+    })
+    const second = projectCodexExecution(spec, {
+      flagEnabled: true,
+      connectionStatus: 'connected',
+      catalogContentHash: 'aaa',
+      catalogRevision: 1,
+      connectionRevision: 12,
+      enabledModels: ['codex-subscription:gpt-5.3-codex'],
+      staleModels: [],
+    })
+    expect(first.driftHashInput).toBe(second.driftHashInput)
+  })
+
   it('treats a missing Host connectionRef as unassigned, not the reserved grant', () => {
     expect(assignedHostCodexConnectionRef(undefined)).toBe(CODEX_UNASSIGNED_CONNECTION_KEY)
     expect(assignedHostCodexConnectionRef('')).toBe(CODEX_UNASSIGNED_CONNECTION_KEY)

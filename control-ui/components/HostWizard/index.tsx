@@ -25,6 +25,7 @@ import {
   listCodexConnectionModels,
   listCodexSubscriptionConnections,
 } from '@/lib/codexSubscription'
+import { isDisabledCapabilityError } from '@/lib/codexSubscriptionFeature'
 import { useLlmAllowedModels } from '@/lib/hooks/useLlmAllowedModels'
 import { getAgentNameError } from '@/lib/k8sValidation'
 import {
@@ -400,7 +401,9 @@ export function HostWizard({
       .catch(err => {
         if (!cancelled) {
           setCodexConnections([])
-          setError(err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions')
+          if (!isDisabledCapabilityError(err)) {
+            setError(err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions')
+          }
         }
       })
     return () => {

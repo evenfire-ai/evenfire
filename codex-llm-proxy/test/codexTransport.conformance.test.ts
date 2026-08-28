@@ -109,6 +109,66 @@ describe('streamCodexCompletion', () => {
     expect(String(fetchFn.mock.calls[0]?.[1]?.body)).toContain('"store":false')
   })
 
+  it('flushes a completed event that arrives without a trailing blank line', async () => {
+    const fetchFn = vi.fn(async () =>
+      sseResponse([
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
+      ])
+    )
+    const result = await streamCodexCompletion({
+      executionTicket: 'ticket-1',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-residual',
+        hostRef: 'research-host',
+        model: 'gpt-5.1',
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-1',
+      },
+      redeem: async () => redeemSuccess(),
+      finalize: vi.fn(async () => ({
+        providerAttemptId: 'att-1',
+        outcome: 'success' as const,
+        duplicate: false,
+      })),
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    expect(result.outcome).toBe('success')
+    expect(result.usage).toEqual({ inputTokens: 1, outputTokens: 1 })
+  })
+
+  it('parses CRLF-delimited SSE frames', async () => {
+    const fetchFn = vi.fn(async () =>
+      sseResponse([
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":4,"output_tokens":5}}}\r\n\r\n',
+      ])
+    )
+    const result = await streamCodexCompletion({
+      executionTicket: 'ticket-1',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-crlf',
+        hostRef: 'research-host',
+        model: 'gpt-5.1',
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-1',
+      },
+      redeem: async () => redeemSuccess(),
+      finalize: vi.fn(async () => ({
+        providerAttemptId: 'att-1',
+        outcome: 'success' as const,
+        duplicate: false,
+      })),
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    expect(result.outcome).toBe('success')
+    expect(result.usage).toEqual({ inputTokens: 4, outputTokens: 5 })
+  })
+
   it('uses the redeemed ChatGPT account id when the access token is opaque', async () => {
     const fetchFn = vi.fn(async () =>
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
@@ -135,6 +195,37 @@ describe('streamCodexCompletion', () => {
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
     })
     expect(fetchFn.mock.calls[0]?.[1]?.headers?.['chatgpt-account-id']).toBe('acct_from_id_token')
+  })
+
+  it('keeps the redeemed ChatGPT account id when the access token JWT names another account', async () => {
+    const fetchFn = vi.fn(async () =>
+      sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
+    )
+    await streamCodexCompletion({
+      executionTicket: 'ticket-1',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-1',
+        hostRef: 'research-host',
+        model: 'gpt-5.1',
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-1',
+      },
+      redeem: async () =>
+        redeemSuccess({
+          accessToken: accessTokenFor('other-account'),
+          chatgptAccountId: 'acct_stored',
+        }),
+      finalize: vi.fn(async () => ({
+        providerAttemptId: 'att-1',
+        outcome: 'success',
+        duplicate: false,
+      })),
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    expect(fetchFn.mock.calls[0]?.[1]?.headers?.['chatgpt-account-id']).toBe('acct_stored')
   })
 
   it('refuses to fetch completions when the access token has no ChatGPT account id', async () => {

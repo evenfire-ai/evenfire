@@ -455,7 +455,7 @@ export class ModelConfigHandler {
           wrcConfigureToken,
           configureBody
         )
-        if (result.status >= 400) {
+        if (mcpHostConfigureRejected(result)) {
           return {
             status: 502,
             body: { error: 'mcp_host configure failed', mcpHostStatus: result.status },
@@ -530,7 +530,7 @@ export class ModelConfigHandler {
 
     try {
       const result = await this.mcpHost.configure(mcpHostEndpoint, wrcConfigureToken, configureBody)
-      if (result.status >= 400) {
+      if (mcpHostConfigureRejected(result)) {
         return {
           status: 502,
           body: { error: 'mcp_host configure failed', mcpHostStatus: result.status },
@@ -674,6 +674,14 @@ export class ModelConfigHandler {
     }
     return resolved
   }
+}
+
+/** mcp-host /configure answers HTTP 200 even when configured:false. */
+function mcpHostConfigureRejected(result: {
+  status: number
+  body?: Record<string, unknown>
+}): boolean {
+  return result.status >= 400 || result.body?.configured === false
 }
 
 function isBootstrapIdentityProof(body: Record<string, unknown>): boolean {

@@ -348,7 +348,26 @@ describe('workflowRouter — JWT auth middleware', () => {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({}),
       })
-      expect([200, 400]).toContain(res.status)
+      expect(res.status).toBe(200)
+    } finally {
+      server.close()
+    }
+  })
+
+  it('POST /configure maps configured:false to HTTP 400', async () => {
+    const token = await signWorkflowToken({ sub: 'wrc', scopes: ['configure'] })
+    const { baseUrl, server } = await createTestApp(publicKeyPem, true, {
+      configure: vi.fn().mockReturnValue({ configured: false, message: 'apiKey is required' }),
+    })
+    try {
+      const res = await fetch(`${baseUrl}/api/v1/workflow/configure`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ provider: 'openai' }),
+      })
+      expect(res.status).toBe(400)
+      const body = (await res.json()) as { configured: boolean }
+      expect(body.configured).toBe(false)
     } finally {
       server.close()
     }

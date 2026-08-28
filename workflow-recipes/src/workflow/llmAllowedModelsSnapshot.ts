@@ -155,3 +155,24 @@ export function parseAllowedModelsSnapshot(
     staleModels,
   }
 }
+
+/**
+ * Per-recipe snapshot. `unassigned` never inherits a legacy flat catalog —
+ * that would let a recipe without a grant spend the cluster default.
+ */
+export function snapshotForAssignedCodexGrant(
+  connectionKey: string,
+  lastConfigMap: V1ConfigMap | undefined | null,
+  fallback: CodexCatalogSnapshot
+): CodexCatalogSnapshot {
+  if (connectionKey === CODEX_UNASSIGNED_CONNECTION_KEY) {
+    return {
+      flagEnabled: fallback.flagEnabled,
+      connectionStatus: 'disconnected',
+      enabledModels: [],
+      staleModels: [],
+    }
+  }
+  if (!lastConfigMap) return fallback
+  return parseAllowedModelsSnapshot(lastConfigMap, connectionKey)
+}

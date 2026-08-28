@@ -51,7 +51,11 @@ function compareModel(a: LlmAllowedModel, b: LlmAllowedModel): number {
 
 const ALL_PROVIDERS = '__all__'
 
-type DisplayModel = LlmAllowedModel & { credentialLabel: string }
+type DisplayModel = LlmAllowedModel & {
+  credentialLabel: string
+  apiKeyRow?: LlmAllowedModel
+  subscriptionRow?: LlmAllowedModel
+}
 
 function collapseFamilyRows(family: string, models: LlmAllowedModel[]): DisplayModel[] {
   if (family !== 'openai') {
@@ -70,7 +74,12 @@ function collapseFamilyRows(family: string, models: LlmAllowedModel[]): DisplayM
     const parts: string[] = []
     if (apiKey) parts.push('API key')
     if (subscription) parts.push('Subscription')
-    return { ...primary, credentialLabel: parts.join(' · ') }
+    return {
+      ...primary,
+      credentialLabel: parts.join(' · '),
+      apiKeyRow: apiKey,
+      subscriptionRow: subscription,
+    }
   })
 }
 
@@ -453,20 +462,55 @@ export function LlmModelTable({
                             <RowActionsMenu
                               ariaLabel={`Actions for model ${model.provider}/${model.model}`}
                               horizontalTrigger
-                              actions={[
-                                {
-                                  key: 'edit',
-                                  label: 'Edit',
-                                  onClick: () => onEdit(model.id),
-                                },
-                                {
-                                  key: 'delete',
-                                  label: deletingId === model.id ? 'Deleting…' : 'Delete',
-                                  danger: true,
-                                  disabled: deletingId === model.id,
-                                  onClick: () => void onDelete(model),
-                                },
-                              ]}
+                              actions={
+                                model.apiKeyRow && model.subscriptionRow
+                                  ? [
+                                      {
+                                        key: 'edit-api-key',
+                                        label: 'Edit API key',
+                                        onClick: () => onEdit(model.apiKeyRow!.id),
+                                      },
+                                      {
+                                        key: 'edit-subscription',
+                                        label: 'Edit subscription',
+                                        onClick: () => onEdit(model.subscriptionRow!.id),
+                                      },
+                                      {
+                                        key: 'delete-api-key',
+                                        label:
+                                          deletingId === model.apiKeyRow.id
+                                            ? 'Deleting…'
+                                            : 'Delete API key',
+                                        danger: true,
+                                        disabled: deletingId === model.apiKeyRow.id,
+                                        onClick: () => void onDelete(model.apiKeyRow!),
+                                      },
+                                      {
+                                        key: 'delete-subscription',
+                                        label:
+                                          deletingId === model.subscriptionRow.id
+                                            ? 'Deleting…'
+                                            : 'Delete subscription',
+                                        danger: true,
+                                        disabled: deletingId === model.subscriptionRow.id,
+                                        onClick: () => void onDelete(model.subscriptionRow!),
+                                      },
+                                    ]
+                                  : [
+                                      {
+                                        key: 'edit',
+                                        label: 'Edit',
+                                        onClick: () => onEdit(model.id),
+                                      },
+                                      {
+                                        key: 'delete',
+                                        label: deletingId === model.id ? 'Deleting…' : 'Delete',
+                                        danger: true,
+                                        disabled: deletingId === model.id,
+                                        onClick: () => void onDelete(model),
+                                      },
+                                    ]
+                              }
                             />
                           </td>
                         </tr>

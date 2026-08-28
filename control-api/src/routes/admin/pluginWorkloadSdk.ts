@@ -760,10 +760,14 @@ export function createAdminPluginWorkloadSdkRouter(
       // Grant PERSISTED: NOW emit any Pieza D tolerations (never before the upsert
       // lands, so a failed upsert leaves no audit record — mini-spec 01).
       for (const event of pendingGrantTolerations) emitIncoherenceTolerated(event)
-      const brokerConnectionRef = promptTargets.find(target =>
-        isBrokerBackedProvider(target.provider)
-      )?.connectionRef
-      if (capabilityFamily === 'promptBridge' && brokerConnectionRef && deps.gateway) {
+      const brokerConnectionRef =
+        promptTargets.find(
+          target =>
+            isBrokerBackedProvider(target.provider) &&
+            target.connectionRef &&
+            !isCodexUnassignedConnectionKey(target.connectionRef)
+        )?.connectionRef ?? ''
+      if (capabilityFamily === 'promptBridge' && deps.gateway) {
         try {
           await deps.gateway.patchResourceAnnotations(
             'workflowrecipes',
@@ -811,6 +815,33 @@ export function createAdminPluginWorkloadSdkRouter(
       if (!deleted) {
         res.status(404).json({ error: 'grant not found' })
         return
+      }
+      if (deps.gateway) {
+        const remaining = await listGrants({ recipeNamespace, recipeName })
+        const remainingRef =
+          remaining
+            .flatMap(grant => grant.promptTargets)
+            .find(
+              target =>
+                isBrokerBackedProvider(target.provider) &&
+                target.connectionRef &&
+                !isCodexUnassignedConnectionKey(target.connectionRef)
+            )?.connectionRef ?? ''
+        try {
+          await deps.gateway.patchResourceAnnotations(
+            'workflowrecipes',
+            recipeName,
+            { [CODEX_CONNECTION_REF_ANNOTATION]: remainingRef },
+            recipeNamespace
+          )
+        } catch (err) {
+          log.error(
+            { err, recipeNamespace, recipeName },
+            'failed to clear Codex connection annotation after grant delete'
+          )
+          res.status(503).json({ error: 'recipe_annotation_stamp_failed' })
+          return
+        }
       }
       res.status(200).json({ deleted: true })
     })

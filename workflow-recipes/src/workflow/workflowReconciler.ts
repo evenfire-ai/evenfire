@@ -61,6 +61,7 @@ import {
   ALLOWLIST_CONFIGMAP_NAMESPACE,
   CODEX_UNASSIGNED_CONNECTION_KEY,
   parseAllowedModelsSnapshot,
+  snapshotForAssignedCodexGrant,
   snapshotFromConfigMapError,
 } from './llmAllowedModelsSnapshot'
 import {
@@ -893,7 +894,7 @@ export class WorkflowReconciler {
    * `codexSnapshot` then carries the fail-closed snapshot error.
    */
   private lastCodexConfigMap: k8s.V1ConfigMap | undefined
-  private codexContext: CodexReconcileContext | null = null
+  private readonly codexContexts = new Map<string, CodexReconcileContext>()
 
   constructor(private readonly deps: WorkflowReconcilerDeps) {
     this.pluginWorkloadSdkProvisioner = new PluginWorkloadSdkProvisioner({
@@ -927,16 +928,16 @@ export class WorkflowReconciler {
   }
 
   setCodexReconcileContext(context: CodexReconcileContext | null): void {
-    this.codexContext = context
+    if (!context) return
+    this.codexContexts.set(context.recipeName, context)
   }
 
   private resolveCodexContext(
     recipeName: string,
     runtimeScopeRecipeName: string
   ): CodexReconcileContext {
-    if (this.codexContext?.recipeName === recipeName) {
-      return { ...this.codexContext, runtimeScopeRecipeName }
-    }
+    const stored = this.codexContexts.get(recipeName)
+    if (stored) return stored
     return {
       recipeName,
       runtimeScopeRecipeName,
@@ -972,8 +973,7 @@ export class WorkflowReconciler {
    * the flat catalog. Read failures keep the fail-closed error snapshot.
    */
   private codexSnapshotFor(connectionKey: string): CodexCatalogSnapshot {
-    if (!this.lastCodexConfigMap) return this.codexSnapshot
-    return parseAllowedModelsSnapshot(this.lastCodexConfigMap, connectionKey)
+    return snapshotForAssignedCodexGrant(connectionKey, this.lastCodexConfigMap, this.codexSnapshot)
   }
 
   private resolveEffectiveControlScopes(
@@ -2825,7 +2825,7 @@ export class WorkflowReconciler {
     const codexProjection = this.projectCodex(
       spec,
       recipeName,
-      this.codexContext?.runtimeScopeRecipeName ?? recipeName
+      this.resolveCodexContext(recipeName, recipeName).runtimeScopeRecipeName
     )
     const npConfig: NetworkPolicyConfig = {
       recipeName,
@@ -2947,7 +2947,7 @@ export class WorkflowReconciler {
     const codexProjection = this.projectCodex(
       spec,
       recipeName,
-      this.codexContext?.runtimeScopeRecipeName ?? recipeName
+      this.resolveCodexContext(recipeName, recipeName).runtimeScopeRecipeName
     )
     if (!policyNames.has(codexProxyPolicyName) && codexProjection.eligibility !== 'uncertain') {
       await this.safeDelete(() =>

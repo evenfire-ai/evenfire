@@ -307,6 +307,49 @@ describe.sequential('routes/admin/recipes', () => {
     })
   })
 
+  it('PUT /admin/recipes/:name — keeps an SDK Codex grant and last-applied annotations', async () => {
+    await api
+      .post('/admin/recipes')
+      .send({
+        metadata: { name: 'sdk-python' },
+        spec: {
+          pluginWorkloadSdk: { promptBridge: { allowedModels: ['gpt-5.3-codex'] } },
+          workloads: [{ id: 'svc', type: 'deployment', image: 'my-image:latest' }],
+        },
+      })
+      .expect(201)
+    await gateway.updateResource(
+      'workflowrecipes',
+      'sdk-python',
+      {
+        metadata: {
+          annotations: {
+            'clerum.io/codex-connection-ref': 'team-plus',
+            'kubectl.kubernetes.io/last-applied-configuration': '{"kind":"WorkflowRecipe"}',
+          },
+        },
+        spec: {
+          pluginWorkloadSdk: { promptBridge: { allowedModels: ['gpt-5.3-codex'] } },
+          workloads: [{ id: 'svc', type: 'deployment', image: 'my-image:latest' }],
+        },
+      },
+      SANDBOX_NS
+    )
+    const res = await api
+      .put('/admin/recipes/sdk-python')
+      .send({
+        spec: {
+          pluginWorkloadSdk: { promptBridge: { allowedModels: ['gpt-5.3-codex'] } },
+          workloads: [{ id: 'svc', type: 'deployment', image: 'my-image:v2' }],
+        },
+      })
+      .expect(200)
+    expect(res.body.metadata.annotations).toMatchObject({
+      'clerum.io/codex-connection-ref': 'team-plus',
+      'kubectl.kubernetes.io/last-applied-configuration': '{"kind":"WorkflowRecipe"}',
+    })
+  })
+
   it('POST /admin/recipes — accepts declared cluster-local sibling egressBindings', async () => {
     const res = await api
       .post('/admin/recipes')

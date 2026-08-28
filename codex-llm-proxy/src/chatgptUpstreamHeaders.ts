@@ -46,6 +46,6 @@ export function chatgptUpstreamHeaders(
     ...extra,
   }
   const accountId = chatgptAccountIdFromAccessToken(accessToken)
-  if (accountId) headers['chatgpt-account-id'] = accountId
+  if (accountId) headers['chatgpt-account-id'] ??= accountId
   return headers
 }

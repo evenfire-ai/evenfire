@@ -273,8 +273,8 @@ spec:
                     provider/model bootstrap binding for a stepless
                     spec.pluginWorkloadSdk.promptBridge runtime.
                   x-kubernetes-validations:
-                    - rule: "!has(self.provider) || self.provider == 'codex-subscription' || has(self.secretRef)"
-                      message: spec.agent.secretRef is required for static-credentials providers
+                    - rule: "!has(self.provider) || self.provider != 'codex-subscription' || !has(self.secretRef)"
+                      message: spec.agent.secretRef is not allowed for oauth-broker providers
                   properties:
                     model:
                       type: string

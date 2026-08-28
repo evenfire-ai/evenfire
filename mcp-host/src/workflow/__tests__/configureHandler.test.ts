@@ -115,6 +115,22 @@ describe('POST /configure — provider hot-swap', () => {
     const result = svc.configure({ provider: 'openai', model: 'gpt-4' } as ConfigureRequest)
     expect(result.configured).toBe(false)
   })
+
+  it('swaps onto codex-subscription without an apiKey so the next step cannot inherit the prior key', () => {
+    const factory = vi.fn(mockLlmFactory())
+    const svc = new WorkflowService('test', { llmFactory: factory })
+    svc.configure({ provider: 'openai', model: 'gpt-4', apiKey: 'sk-123' })
+    const result = svc.configure({
+      provider: 'codex-subscription',
+      model: 'gpt-5.3-codex',
+    } as ConfigureRequest)
+    expect(result).toEqual({
+      configured: true,
+      provider: 'codex-subscription',
+      model: 'gpt-5.3-codex',
+    })
+    expect(factory).toHaveBeenLastCalledWith('codex-subscription', 'gpt-5.3-codex', '')
+  })
 })
 
 describe('POST /configure — SOUL override', () => {

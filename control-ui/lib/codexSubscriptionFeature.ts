@@ -7,7 +7,7 @@ export type CodexSubscriptionCapability = {
 
 const DISABLED_CAPABILITY: CodexSubscriptionCapability = { enabled: false }
 
-function isDisabledCapabilityError(error: unknown): boolean {
+export function isDisabledCapabilityError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
   const status = (error as { status?: unknown }).status
   const code = (error as { code?: unknown }).code

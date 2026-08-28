@@ -314,6 +314,7 @@ export async function authorizeLlmProviderAttempt(
 
     const presentedReservationId =
       typeof body.budgetReservationId === 'string' ? body.budgetReservationId.trim() : ''
+    let budgetReservationId = presentedReservationId || 'unbudgeted'
     if (presentedReservationId) {
       const active = await resolvedDeps.getActiveReservation(db, {
         reservationId: presentedReservationId,
@@ -325,37 +326,36 @@ export async function authorizeLlmProviderAttempt(
           'budget reservation is missing or expired'
         )
       }
-    }
-
-    const budget = await resolvedDeps.evaluateBudget(
-      {
-        host_ref: caller.hostRef,
-        context_ref: null,
-        team_id: null,
-        user_id: null,
-        provider: PROVIDER,
-        model: request.model,
-        llm_secret_name: null,
-        source_kind: caller.callerKind === 'recipe' ? 'workflow' : 'channel',
-        recipe_name: caller.recipeName,
-        cron_job_id: null,
-        task_ref: invocationId,
-      },
-      db,
-      { connect: async () => tx as never },
-      { requiredUnit: 'tokens', transactionClient: tx }
-    )
-    if (!budget.allowed) {
-      throw new LlmProviderAttemptAuthorizeError(
-        'budget_denied',
-        budget.reason === 'cost_unit_rejected'
-          ? 'Codex attempts reject cost-unit budgets'
-          : 'token budget denied this attempt'
+    } else {
+      const budget = await resolvedDeps.evaluateBudget(
+        {
+          host_ref: caller.hostRef,
+          context_ref: null,
+          team_id: null,
+          user_id:
+            typeof body.userId === 'string' && body.userId.trim() ? body.userId.trim() : claims.sub,
+          provider: PROVIDER,
+          model: request.model,
+          llm_secret_name: null,
+          source_kind: caller.callerKind === 'recipe' ? 'workflow' : 'channel',
+          recipe_name: caller.recipeName,
+          cron_job_id: null,
+          task_ref: `${invocationId}:${attemptGeneration}:${providerAttemptIndex}`,
+        },
+        db,
+        { connect: async () => tx as never },
+        { requiredUnit: 'tokens', transactionClient: tx }
       )
+      if (!budget.allowed) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'budget_denied',
+          budget.reason === 'cost_unit_rejected'
+            ? 'Codex attempts reject cost-unit budgets'
+            : 'token budget denied this attempt'
+        )
+      }
+      budgetReservationId = budget.reservationIds?.[0] ?? 'unbudgeted'
     }
-
-    const budgetReservationId =
-      budget.reservationIds?.[0] ?? (presentedReservationId || 'unbudgeted')
 
     try {
       const attempt = await resolvedDeps.insertAttempt(db, {

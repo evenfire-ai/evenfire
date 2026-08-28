@@ -75,7 +75,7 @@ describe('projectCodexExecution (WRC)', () => {
     }
   })
 
-  it('does not roll the drift hash on catalog refresh; credential revision still drifts', () => {
+  it('does not roll the drift hash on catalog or credential-revision refresh', () => {
     const eligible = fixture.cases.find(testCase => testCase.id === 'flag-on-connected-ready')
     expect(eligible).toBeDefined()
     const baseline = projectCodexExecution(eligible!.spec, eligible!.snapshot)
@@ -90,7 +90,7 @@ describe('projectCodexExecution (WRC)', () => {
     })
     expect(catalogOnly.derivedScopes).toEqual(baseline.derivedScopes)
     expect(catalogOnly.driftHashInput).toBe(baseline.driftHashInput)
-    expect(credentialChanged.driftHashInput).not.toBe(baseline.driftHashInput)
+    expect(credentialChanged.driftHashInput).toBe(baseline.driftHashInput)
   })
 
   it('treats a malformed empty broker model as ineligible', () => {

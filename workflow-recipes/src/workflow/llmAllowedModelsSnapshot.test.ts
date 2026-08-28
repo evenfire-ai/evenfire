@@ -3,6 +3,7 @@ import {
   CODEX_CONNECTION_REF_ANNOTATION,
   parseAllowedModelsSnapshot,
   readRecipeCodexConnectionRef,
+  snapshotForAssignedCodexGrant,
 } from './llmAllowedModelsSnapshot'
 
 function multiGrantConfigMap() {
@@ -89,5 +90,26 @@ describe('readRecipeCodexConnectionRef', () => {
 
   it('never aliases the reserved deployment-default grant for a missing annotation', () => {
     expect(readRecipeCodexConnectionRef({})).not.toBe('deployment-default')
+  })
+})
+
+describe('snapshotForAssignedCodexGrant', () => {
+  it('does not project a legacy flat catalog onto an unassigned recipe', () => {
+    const legacy = {
+      metadata: {
+        annotations: {
+          'clerum.io/codex-enabled': 'true',
+          'clerum.io/codex-connection-status': 'connected',
+        },
+      },
+      data: {
+        'codex-subscription': JSON.stringify([{ model: 'gpt-5.3-codex', stale: false }]),
+      },
+    }
+    const fallback = parseAllowedModelsSnapshot(legacy, 'deployment-default')
+    expect(Array.from(fallback.enabledModels ?? [])).toContain('codex-subscription:gpt-5.3-codex')
+    const snapshot = snapshotForAssignedCodexGrant('unassigned', legacy, fallback)
+    expect(snapshot.connectionStatus).toBe('disconnected')
+    expect(Array.from(snapshot.enabledModels ?? [])).toEqual([])
   })
 })

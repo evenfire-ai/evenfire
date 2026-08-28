@@ -35,6 +35,7 @@ import {
   listCodexConnectionModels,
   listCodexSubscriptionConnections,
 } from '../../../lib/codexSubscription'
+import { isDisabledCapabilityError } from '../../../lib/codexSubscriptionFeature'
 import { buildContextUpdatePayload, contextMutationError } from '../../../lib/contextMutation'
 import { useLlmAllowedModels } from '../../../lib/hooks/useLlmAllowedModels'
 import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '../../../lib/hostWorkflowControl'
@@ -55,6 +56,7 @@ import {
   normalizeLlmPolicy,
   normalizeProvider,
   offeredCodexModelNames,
+  providerRequiresLlmSecret,
   resolveCodexGrantModel,
   resolveDefaultModel,
   validateLlmPolicy,
@@ -355,7 +357,9 @@ export default function HostDetailsPage() {
       .catch(err => {
         if (!cancelled) {
           setCodexConnections([])
-          setError(err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions')
+          if (!isDisabledCapabilityError(err)) {
+            setError(err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions')
+          }
         }
       })
     return () => {
@@ -708,8 +712,16 @@ export default function HostDetailsPage() {
     }
     return options
   }, [availableLlmSecrets, codexConnections, connectionRefDraft, currentSecretKeys, secretRefDraft])
+  const apiKeySecretOptions = useMemo(
+    () => llmSecretOptions.filter(option => option.group !== 'ChatGPT subscriptions'),
+    [llmSecretOptions]
+  )
 
   const chainRequiresSecret = llmChainRequiresSecret(providerDraft, llmPolicyDraft?.fallbacks)
+  const showFallbackSecretField = providerDraft === 'codex-subscription' && chainRequiresSecret
+  const fallbackSecretLabels = (llmPolicyDraft?.fallbacks ?? [])
+    .filter(entry => providerRequiresLlmSecret(entry.provider))
+    .map(entry => getProviderLabel(entry.provider))
   const isCodexAssignment = providerDraft === 'codex-subscription'
   const isCodexUnassigned =
     isCodexAssignment &&
@@ -723,7 +735,14 @@ export default function HostDetailsPage() {
     chainRequiresSecret &&
     secretRefDraft.trim().length > 0 &&
     currentSecretKeys.length > 0 &&
-    !isProviderUsable(providerDraft, key => currentSecretKeys.includes(key))
+    (showFallbackSecretField
+      ? !(llmPolicyDraft?.fallbacks ?? []).some(entry =>
+          isProviderUsable(entry.provider as LlmProvider, key => currentSecretKeys.includes(key))
+        )
+      : !isProviderUsable(providerDraft, key => currentSecretKeys.includes(key)))
+  const secretMismatchLabel = showFallbackSecretField
+    ? fallbackSecretLabels[0] || 'fallback'
+    : getProviderLabel(providerDraft)
 
   const connectorOptions = useMemo(
     () =>
@@ -815,7 +834,9 @@ export default function HostDetailsPage() {
       return
     }
     if (parsed.kind === 'subscription') {
-      setSecretRefDraft('')
+      if (!llmChainRequiresSecret('codex-subscription', llmPolicyDraft?.fallbacks)) {
+        setSecretRefDraft('')
+      }
       setConnectionRefDraft(parsed.connectionKey)
       setProviderDraft('codex-subscription')
       setModelNameDraft('')
@@ -878,14 +899,20 @@ export default function HostDetailsPage() {
       setError('Select an LLM secret for the static-credentials provider in this chain.')
       return false
     }
+    const secretUsableFor =
+      providerDraft === 'codex-subscription'
+        ? (llmPolicyDraft?.fallbacks ?? []).find(entry =>
+            isProviderUsable(entry.provider as LlmProvider, key => currentSecretKeys.includes(key))
+          )
+        : isProviderUsable(providerDraft, key => currentSecretKeys.includes(key))
     if (
       chainRequiresSecret &&
       secretRefDraft.trim() &&
       currentSecretKeys.length > 0 &&
-      !isProviderUsable(providerDraft, key => currentSecretKeys.includes(key))
+      !secretUsableFor
     ) {
       setError(
-        `The linked LLM Secret does not contain a usable ${getProviderLabel(providerDraft)} credential. Update the linked credentials or choose another secret.`
+        `The linked LLM Secret does not contain a usable ${secretMismatchLabel} credential. Update the linked credentials or choose another secret.`
       )
       return false
     }
@@ -1149,7 +1176,11 @@ export default function HostDetailsPage() {
                 <div className="cu-llm-secret-control">
                   <LlmSecretSelect
                     id="model-secret"
-                    value={credentialSelectValue(secretRefDraft, connectionRefDraft)}
+                    value={
+                      showFallbackSecretField
+                        ? credentialSelectValue('', connectionRefDraft)
+                        : credentialSelectValue(secretRefDraft, connectionRefDraft)
+                    }
                     ariaLabel={credentialFieldLabel}
                     onChange={handleCredentialChange}
                     options={llmSecretOptions}
@@ -1158,37 +1189,80 @@ export default function HostDetailsPage() {
                         ? isCodexUnassigned
                           ? 'No credential assigned'
                           : assignedCodexLabel
-                        : llmSecretOptions.filter(
-                              option => !option.group || option.group === 'API keys'
-                            ).length === 0
+                        : apiKeySecretOptions.length === 0
                           ? 'No LLM Secret available'
                           : 'Select an LLM Secret...'
                     }
                     disabled={busy || !editingModel}
                   />
-                  <button
-                    type="button"
-                    className="cu-btn cu-btn--icon cu-btn--toolbar"
-                    onClick={() => setLlmSecretModalOpen(true)}
-                    disabled={busy || !secretRefDraft.trim()}
-                    aria-label="Edit LLM Secret credentials"
-                    title="Edit LLM Secret credentials"
-                  >
-                    <IconPencil width={16} height={16} />
-                  </button>
+                  {showFallbackSecretField ? null : (
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--icon cu-btn--toolbar"
+                      onClick={() => setLlmSecretModalOpen(true)}
+                      disabled={busy || !secretRefDraft.trim()}
+                      aria-label="Edit LLM Secret credentials"
+                      title="Edit LLM Secret credentials"
+                    >
+                      <IconPencil width={16} height={16} />
+                    </button>
+                  )}
                 </div>
                 <span className="cu-field__hint">
-                  Choose an API-key secret or a ChatGPT subscription. Agents only choose; Secrets
-                  creates grants.
+                  {showFallbackSecretField
+                    ? 'Choose the ChatGPT subscription this agent spends. Agents only choose; Secrets creates grants.'
+                    : 'Choose an API-key secret or a ChatGPT subscription. Agents only choose; Secrets creates grants.'}
                 </span>
-                {linkedSecretProviderMismatch ? (
-                  <div className="cu-banner cu-banner--warning">
-                    The linked secret does not contain a usable {getProviderLabel(providerDraft)}{' '}
-                    credential. Choose another secret or edit its credentials before saving model
-                    configuration.
-                  </div>
-                ) : null}
               </div>
+              {showFallbackSecretField ? (
+                <div className="cu-field">
+                  <label htmlFor="model-fallback-secret">LLM Secret</label>
+                  <div className="cu-llm-secret-control">
+                    <LlmSecretSelect
+                      id="model-fallback-secret"
+                      value={secretRefDraft}
+                      ariaLabel="LLM Secret"
+                      onChange={value => {
+                        const parsed = parseCredentialSelect(value)
+                        setSecretRefDraft(parsed.kind === 'secret' ? parsed.name : '')
+                      }}
+                      options={apiKeySecretOptions}
+                      placeholder={
+                        apiKeySecretOptions.length === 0
+                          ? 'No LLM Secret available'
+                          : 'Select an LLM Secret...'
+                      }
+                      disabled={busy || !editingModel}
+                    />
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--icon cu-btn--toolbar"
+                      onClick={() => setLlmSecretModalOpen(true)}
+                      disabled={busy || !secretRefDraft.trim()}
+                      aria-label="Edit LLM Secret credentials"
+                      title="Edit LLM Secret credentials"
+                    >
+                      <IconPencil width={16} height={16} />
+                    </button>
+                  </div>
+                  <span className="cu-field__hint">
+                    Needed for the {fallbackSecretLabels.join(', ') || 'static'} fallback
+                    {fallbackSecretLabels.length === 1 ? '' : 's'} in this chain.
+                  </span>
+                  {linkedSecretProviderMismatch ? (
+                    <div className="cu-banner cu-banner--warning">
+                      The linked secret does not contain a usable {secretMismatchLabel} credential.
+                      Choose another secret or edit its credentials before saving model
+                      configuration.
+                    </div>
+                  ) : null}
+                </div>
+              ) : linkedSecretProviderMismatch ? (
+                <div className="cu-banner cu-banner--warning">
+                  The linked secret does not contain a usable {secretMismatchLabel} credential.
+                  Choose another secret or edit its credentials before saving model configuration.
+                </div>
+              ) : null}
               {editingModel ? (
                 <>
                   <LlmProviderConfig

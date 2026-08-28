@@ -167,6 +167,15 @@ export function adminCodexWriteRateLimits() {
   return [adminCodexWriteEdgeRateLimit(), adminCodexWriteRateLimit()] as const
 }
 
+function codexOAuthCallbackBucketKey(req: Request): string {
+  const state = typeof req.query.state === 'string' ? req.query.state.trim() : ''
+  if (state) {
+    const hash = createHash('sha256').update(state).digest('hex').slice(0, 32)
+    return `codex_oauth_callback:state:${hash}`
+  }
+  return `codex_oauth_callback:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
+}
+
 export function codexOAuthCallbackRateLimits() {
   return [
     rateLimit({
@@ -174,15 +183,13 @@ export function codexOAuthCallbackRateLimits() {
       limit: CODEX_OAUTH_CALLBACK_PER_MINUTE,
       standardHeaders: 'draft-7',
       legacyHeaders: false,
-      keyGenerator: (req: Request) =>
-        `codex_oauth_callback:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`,
+      keyGenerator: codexOAuthCallbackBucketKey,
       handler: workflowGrantEdgeRateLimitHandler,
     }),
     rateLimitMiddleware({
       bucketType: 'codex_oauth_callback',
       maxPerMinute: CODEX_OAUTH_CALLBACK_PER_MINUTE,
-      getBucketKey: (req: Request) =>
-        `codex_oauth_callback:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`,
+      getBucketKey: codexOAuthCallbackBucketKey,
     }),
   ] as const
 }

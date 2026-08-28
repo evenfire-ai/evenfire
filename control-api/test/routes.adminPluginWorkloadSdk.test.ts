@@ -87,6 +87,7 @@ const validGrantBody = {
 
 beforeEach(() => {
   vi.mocked(sdkDb.listGrants).mockReset()
+  vi.mocked(sdkDb.listGrants).mockResolvedValue([])
   vi.mocked(sdkDb.upsertGrant).mockReset()
   vi.mocked(sdkDb.deleteGrant).mockReset()
   vi.mocked(sdkDb.getQuotaCounters).mockReset()
@@ -668,7 +669,12 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         .send({ ...codexGrantBody, promptTargets: [targetWithoutConnection] })
       expect(res.status).toBe(200)
       expect(isCodexAssignmentAllowed).not.toHaveBeenCalled()
-      expect(patchResourceAnnotations).not.toHaveBeenCalled()
+      expect(patchResourceAnnotations).toHaveBeenCalledWith(
+        'workflowrecipes',
+        'sdk-recipe',
+        { 'clerum.io/codex-connection-ref': '' },
+        'sandbox-recipes'
+      )
       expect(sdkDb.upsertGrant).toHaveBeenCalled()
     })
 
@@ -682,7 +688,12 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         })
       expect(res.status).toBe(200)
       expect(isCodexAssignmentAllowed).not.toHaveBeenCalled()
-      expect(patchResourceAnnotations).not.toHaveBeenCalled()
+      expect(patchResourceAnnotations).toHaveBeenCalledWith(
+        'workflowrecipes',
+        'sdk-recipe',
+        { 'clerum.io/codex-connection-ref': '' },
+        'sandbox-recipes'
+      )
       expect(sdkDb.upsertGrant).toHaveBeenCalled()
     })
 
@@ -1008,6 +1019,12 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
       'sandbox-recipes',
       'sdk-recipe',
       '11111111-1111-4111-8111-111111111111'
+    )
+    expect(patchResourceAnnotations).toHaveBeenCalledWith(
+      'workflowrecipes',
+      'sdk-recipe',
+      { 'clerum.io/codex-connection-ref': '' },
+      'sandbox-recipes'
     )
   })
 })

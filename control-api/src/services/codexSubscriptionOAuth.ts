@@ -491,11 +491,10 @@ export async function ensureFreshCodexAccessToken(deps: CodexOAuthDeps): Promise
       throw new CodexSubscriptionOAuthError('no_grant', 'encrypted refresh token missing')
     }
     const waitedAccountId = latest.chatgptAccountId || chatgptAccountIdFromJwt(latest.accessToken)
-    const stillExpiring =
-      latest.accessTokenExpiresAt != null &&
-      latest.accessTokenExpiresAt.getTime() - Date.now() < ACCESS_TOKEN_REFRESH_SKEW_MS
-    if (latest.accessToken && !stillExpiring && waitedAccountId) {
-      if (!latest.chatgptAccountId) {
+    const tokenStillValid =
+      latest.accessTokenExpiresAt == null || latest.accessTokenExpiresAt.getTime() > Date.now()
+    if (latest.accessToken && tokenStillValid) {
+      if (waitedAccountId && !latest.chatgptAccountId) {
         await persistCodexChatgptAccountId(deps.db, deps.encryptionKey, waitedAccountId, key)
       }
       return

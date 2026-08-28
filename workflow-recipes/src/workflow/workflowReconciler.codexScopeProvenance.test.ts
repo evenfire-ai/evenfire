@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { WorkflowRecipeSpec } from '../types'
 import { issueMcpHostRuntimeTokens } from './mcpHostRuntimeTokenIssuerClient'
-import { WorkflowReconciler, type WorkflowReconcilerDeps } from './workflowReconciler'
+import {
+  type CodexReconcileContext,
+  WorkflowReconciler,
+  type WorkflowReconcilerDeps,
+} from './workflowReconciler'
 
 const crashRecoveryMocks = vi.hoisted(() => ({
   deletePodIfExists: vi.fn().mockResolvedValue(undefined),
@@ -71,6 +75,21 @@ function makeCodexSpec(overrides?: Partial<WorkflowRecipeSpec>): WorkflowRecipeS
     steps: [{ id: 'brief', instruction: 'write the brief' }],
     ...overrides,
   }
+}
+
+function bindNamedGrant(
+  reconciler: WorkflowReconciler,
+  recipeName = 'codex-recipe',
+  extras: Partial<CodexReconcileContext> = {}
+) {
+  reconciler.setCodexReconcileContext({
+    recipeName,
+    runtimeScopeRecipeName: extras.runtimeScopeRecipeName ?? recipeName,
+    claimedParent: extras.claimedParent ?? false,
+    parentSpec: extras.parentSpec ?? null,
+    connectionKey: extras.connectionKey ?? 'team-plus',
+    ...extras,
+  })
 }
 
 function issuedScopes(): string[] {
@@ -207,6 +226,7 @@ describe('WorkflowReconciler Codex scope provenance', () => {
 
   it('issues derived Codex scope and proxy egress from the same reconcile projection', async () => {
     const { reconciler, networkingApi } = createHarness()
+    bindNamedGrant(reconciler)
 
     await reconcileRecipe(reconciler, makeCodexSpec())
 
@@ -224,6 +244,16 @@ describe('WorkflowReconciler Codex scope provenance', () => {
     expect(policy?.spec?.egress?.[0]?.ports).toEqual([{ port: 8080, protocol: 'TCP' }])
   })
 
+  it('does not mint Codex scope from a live catalog when the recipe grant is unassigned', async () => {
+    const { reconciler, networkingApi } = createHarness()
+
+    await reconcileRecipe(reconciler, makeCodexSpec())
+
+    expect(issueMcpHostRuntimeTokens).toHaveBeenCalled()
+    expect(issuedScopes()).not.toContain('llm:codex:execute')
+    expect(proxyPolicyBodies(networkingApi)).toEqual([])
+  })
+
   it('does not mint Codex from deriveWorkflowControlScopes when the target is static', async () => {
     const { reconciler, networkingApi } = createHarness()
 
@@ -239,6 +269,7 @@ describe('WorkflowReconciler Codex scope provenance', () => {
 
   it('reissues the token and withdraws egress when the target becomes static', async () => {
     const { reconciler, coreApi, networkingApi } = createHarness()
+    bindNamedGrant(reconciler)
     await reconcileRecipe(reconciler, makeCodexSpec())
     expect(issuedScopes()).toContain('llm:codex:execute')
 
@@ -288,6 +319,7 @@ describe('WorkflowReconciler Codex scope provenance', () => {
 
   it('withdraws scope and egress when the catalog marks the Codex model stale', async () => {
     const { reconciler, coreApi, networkingApi } = createHarness()
+    bindNamedGrant(reconciler)
     await reconcileRecipe(reconciler, makeCodexSpec())
     expect(issuedScopes()).toContain('llm:codex:execute')
 
@@ -305,8 +337,7 @@ describe('WorkflowReconciler Codex scope provenance', () => {
 
   it('inherits the parent target and ignores a static child body', async () => {
     const { reconciler, networkingApi } = createHarness()
-    reconciler.setCodexReconcileContext({
-      recipeName: 'child-run',
+    bindNamedGrant(reconciler, 'child-run', {
       runtimeScopeRecipeName: 'parent-recipe',
       claimedParent: true,
       parentSpec: makeCodexSpec(),
@@ -328,8 +359,7 @@ describe('WorkflowReconciler Codex scope provenance', () => {
 
   it('does not mint Codex when a claimed parent fails provenance', async () => {
     const { reconciler, networkingApi } = createHarness()
-    reconciler.setCodexReconcileContext({
-      recipeName: 'child-run',
+    bindNamedGrant(reconciler, 'child-run', {
       runtimeScopeRecipeName: 'child-run',
       claimedParent: true,
       parentSpec: makeCodexSpec(),
@@ -347,6 +377,7 @@ describe('WorkflowReconciler Codex scope provenance', () => {
 
   it('does not mint Codex scope or egress when the allowlist ConfigMap is forbidden', async () => {
     const { reconciler, coreApi, networkingApi } = createHarness()
+    bindNamedGrant(reconciler)
     coreApi.readNamespacedConfigMap.mockRejectedValue(
       Object.assign(new Error('forbidden'), { code: 403 })
     )
@@ -364,6 +395,7 @@ describe('WorkflowReconciler Codex scope provenance', () => {
 
   it('does not mint Codex scope or egress when the allowlist ConfigMap times out', async () => {
     const { reconciler, coreApi, networkingApi } = createHarness()
+    bindNamedGrant(reconciler)
     coreApi.readNamespacedConfigMap.mockRejectedValue(
       Object.assign(new Error('Kubernetes request timed out'), { code: 'ETIMEDOUT' })
     )
