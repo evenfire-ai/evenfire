@@ -18,7 +18,11 @@ import {
 import { withAccessDatabaseTransaction } from './accessDatabaseQuery.js'
 import { AccessExecutionBudget, type AccessExecutionLimits } from './accessExecutionBudget.js'
 import { buildAccessPath, canonicalAccessPathTuple } from './accessPath.js'
-import { authorizationRevision, revisionOfValues } from './authorizationRevision.js'
+import {
+  authorizationRevision,
+  canonicalAccessPathSeeds,
+  revisionOfValues,
+} from './authorizationRevision.js'
 import { normalizeAccessCapabilities } from './capabilityRegistry.js'
 import {
   CatalogAuthorityError,
@@ -151,6 +155,7 @@ function catalogItem(
   context: CatalogRequestContext,
   hydrated: HydratedCatalogResource
 ): AccessCatalogItem {
+  const identitySeeds = canonicalAccessPathSeeds(hydrated.accessPaths)
   const revision = authorizationRevision({
     principalUserId: context.principal.userId,
     sessionContract: context.principal.sessionContract,
@@ -161,9 +166,9 @@ function catalogItem(
     resourceRevision: hydrated.authorizationResourceRevision,
     sourceStateRevision: hydrated.authorizationSourceRevision,
     relationshipsRevision: hydrated.authorizationRelationshipsRevision,
-    candidates: hydrated.accessPaths,
+    candidates: identitySeeds,
   })
-  const paths = hydrated.accessPaths
+  const paths = identitySeeds
     .map(seed =>
       buildAccessPath({
         principalUserId: context.principal.userId,
