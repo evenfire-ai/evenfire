@@ -1,0 +1,697 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import express from 'express'
+import request from 'supertest'
+import {
+  adminOutputsReadRateLimits,
+  adminWorkflowRateLimitCredential,
+  adminWorkflowTriggerRateLimit,
+  mcpHostWorkflowTriggerRateLimit,
+  mcpHostWorkflowTriggerRateLimitCredential,
+  shouldSkipWorkflowGrantEdgeRateLimit,
+  verifiedAdminRateLimitSubject,
+  workflowAdminReadRateLimits,
+  workflowGrantEdgeRateLimitKey,
+  workflowGrantReadRateLimit,
+  workflowGrantReadRateLimits,
+  workflowGrantWriteRateLimits,
+  workflowTriggerRateLimit,
+  workflowTriggerRateLimitCredential,
+} from '../src/routes/workflows/shared/rateLimit.js'
+
+const mockCheckAndIncrement = vi.hoisted(() => vi.fn())
+const mockVerifyAdminToken = vi.hoisted(() => vi.fn())
+const mockVerifyExternalSessionToken = vi.hoisted(() => vi.fn())
+
+vi.mock('../src/services/rateLimiterService.js', () => ({
+  checkAndIncrement: (...args: unknown[]) => mockCheckAndIncrement(...args),
+}))
+vi.mock('../src/observability/metrics.js', () => ({
+  rateLimitHitsTotal: { inc: vi.fn() },
+}))
+vi.mock('../src/utils/auth/adminAuthToken.js', () => ({
+  verifyAdminToken: (token: string) => mockVerifyAdminToken(token),
+}))
+vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
+  verifyExternalSessionToken: (token: string) => mockVerifyExternalSessionToken(token),
+}))
+
+function signedClaims(sub: string) {
+  return {
+    sub,
+    typ: 'user' as const,
+    role: 'admin' as const,
+    jti: 'jti',
+    exp: 1,
+    sessionVersion: 0,
+  }
+}
+
+function pgAllows() {
+  mockCheckAndIncrement.mockResolvedValue({
+    allowed: true,
+    remaining: 59,
+    resetMs: Date.now() + 60_000,
+    windowStartMs: Date.now(),
+    count: 1,
+  })
+}
+
+describe('routes/workflows/shared/rateLimit', () => {
+  beforeEach(() => {
+    mockVerifyAdminToken.mockImplementation((token: string) =>
+      token.startsWith('signed-') ? signedClaims(token.slice('signed-'.length)) : null
+    )
+    mockVerifyExternalSessionToken.mockImplementation((token: string) => {
+      if (token === 'user-session-a' || token === 'user-session-a-rotated') {
+        return { userId: 'user-a' }
+      }
+      if (token === 'user-session-b') {
+        return { userId: 'user-b' }
+      }
+      return null
+    })
+  })
+
+  it('adminWorkflowRateLimitCredential accepts HttpOnly admin session cookies', () => {
+    const req = {
+      header(name: string) {
+        if (name.toLowerCase() === 'cookie') {
+          return 'control_ui_admin_session=admin-cookie-token'
+        }
+        return undefined
+      },
+    } as express.Request
+
+    expect(adminWorkflowRateLimitCredential(req)).toBe('admin-cookie-token')
+  })
+
+  it('rate-limit factories pair an edge backstop with the PG limiter', () => {
+    expect(workflowGrantReadRateLimits()).toHaveLength(2)
+    expect(workflowGrantWriteRateLimits()).toHaveLength(2)
+    expect(workflowAdminReadRateLimits()).toHaveLength(2)
+    expect(adminOutputsReadRateLimits()).toHaveLength(2)
+  })
+
+  it('shouldSkipWorkflowGrantEdgeRateLimit skips anonymous callers', () => {
+    const req = { header: () => undefined, ip: '203.0.113.10' } as express.Request
+    expect(shouldSkipWorkflowGrantEdgeRateLimit(req)).toBe(true)
+  })
+
+  it('verifiedAdminRateLimitSubject ignores unverified cookies and bearers', () => {
+    expect(verifiedAdminRateLimitSubject('forged-cookie')).toBeNull()
+    expect(verifiedAdminRateLimitSubject('signed-admin-a')).toBe('admin-a')
+  })
+
+  it('workflowGrantEdgeRateLimitKey isolates verified admin subjects on the same IP', () => {
+    const reqA = {
+      ip: '203.0.113.10',
+      header: (name: string) =>
+        name.toLowerCase() === 'cookie' ? 'control_ui_admin_session=signed-admin-a' : undefined,
+    } as express.Request
+    const reqB = {
+      ip: '203.0.113.10',
+      header: (name: string) =>
+        name.toLowerCase() === 'cookie' ? 'control_ui_admin_session=signed-admin-b' : undefined,
+    } as express.Request
+
+    expect(workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', reqA)).not.toBe(
+      workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', reqB)
+    )
+  })
+
+  it('keeps rotated signed sessions in separate pre-auth buckets', () => {
+    mockVerifyAdminToken.mockImplementation((value: string) =>
+      value.startsWith('signed-') ? signedClaims('same-admin') : null
+    )
+    const reqA = {
+      ip: '203.0.113.10',
+      header: (name: string) =>
+        name.toLowerCase() === 'cookie' ? 'control_ui_admin_session=signed-admin-a' : undefined,
+    } as express.Request
+    const reqB = {
+      ip: '203.0.113.10',
+      header: (name: string) =>
+        name.toLowerCase() === 'cookie' ? 'control_ui_admin_session=signed-admin-b' : undefined,
+    } as express.Request
+
+    expect(workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', reqA)).not.toBe(
+      workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', reqB)
+    )
+  })
+
+  it('workflowGrantEdgeRateLimitKey aggregates unverified cookies on the same IP', () => {
+    const reqA = {
+      ip: '203.0.113.10',
+      header: (name: string) =>
+        name.toLowerCase() === 'cookie' ? 'control_ui_admin_session=cookie-a' : undefined,
+    } as express.Request
+    const reqB = {
+      ip: '203.0.113.10',
+      header: (name: string) =>
+        name.toLowerCase() === 'cookie' ? 'control_ui_admin_session=cookie-b' : undefined,
+    } as express.Request
+
+    expect(workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', reqA)).toBe(
+      workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', reqB)
+    )
+  })
+
+  it('workflowGrantEdgeRateLimitKey buckets distinct bogus bearer tokens from the same IP', () => {
+    const reqA = {
+      ip: '203.0.113.10',
+      header: () => 'Bearer token-a',
+    } as express.Request
+    const reqB = {
+      ip: '203.0.113.10',
+      header: () => 'Bearer token-b',
+    } as express.Request
+
+    expect(workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', reqA)).toBe(
+      workflowGrantEdgeRateLimitKey('workflow_grants_read_edge', reqB)
+    )
+  })
+
+  it.each([
+    {
+      label: 'workflowGrantWriteRateLimits',
+      method: 'put' as const,
+      limit: 20,
+      cookie: 'write-edge-cookie',
+      mount: (app: express.Express) => {
+        app.put('/probe', ...workflowGrantWriteRateLimits(), (_req, res) => {
+          res.status(200).json({ ok: true })
+        })
+      },
+    },
+    {
+      label: 'workflowGrantReadRateLimits',
+      method: 'get' as const,
+      limit: 60,
+      cookie: 'grant-read-edge-cookie',
+      mount: (app: express.Express) => {
+        app.get('/probe', ...workflowGrantReadRateLimits(), (_req, res) => {
+          res.status(200).json({ ok: true })
+        })
+      },
+    },
+    {
+      label: 'workflowAdminReadRateLimits',
+      method: 'get' as const,
+      limit: 60,
+      cookie: 'admin-read-edge-cookie',
+      mount: (app: express.Express) => {
+        app.get('/probe', ...workflowAdminReadRateLimits(), (_req, res) => {
+          res.status(200).json({ ok: true })
+        })
+      },
+    },
+    {
+      label: 'adminOutputsReadRateLimits',
+      method: 'get' as const,
+      limit: 30,
+      cookie: 'outputs-read-edge-cookie',
+      mount: (app: express.Express) => {
+        app.get('/probe', ...adminOutputsReadRateLimits(), (_req, res) => {
+          res.status(200).json({ ok: true })
+        })
+      },
+    },
+  ])(
+    '$label returns 429 from the real edge factory after the quota',
+    async ({ method, limit, cookie, mount }) => {
+      mockCheckAndIncrement.mockReset()
+
+      const app = express()
+      mount(app)
+
+      for (let i = 0; i < limit; i++) {
+        pgAllows()
+        await request(app)
+          [method]('/probe')
+          .set('Cookie', `control_ui_admin_session=${cookie}`)
+          .expect(200)
+      }
+
+      pgAllows()
+      const res = await request(app)
+        [method]('/probe')
+        .set('Cookie', `control_ui_admin_session=${cookie}`)
+        .expect(429)
+
+      expect(res.body).toMatchObject({
+        error: 'Too Many Requests',
+        retryAfterSeconds: expect.any(Number),
+      })
+      expect(res.headers['retry-after']).toBeDefined()
+    }
+  )
+
+  it('workflowGrantWriteRateLimits does not edge-limit anonymous callers', async () => {
+    mockCheckAndIncrement.mockReset()
+
+    const app = express()
+    app.put('/grants', ...workflowGrantWriteRateLimits(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    for (let i = 0; i < 25; i++) {
+      await request(app).put('/grants').expect(200)
+    }
+  })
+
+  it('workflowGrantWriteRateLimits aggregates unverified cookie rotation on the same IP', async () => {
+    mockCheckAndIncrement.mockReset()
+
+    const app = express()
+    app.put('/grants', ...workflowGrantWriteRateLimits(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    for (let i = 0; i < 20; i++) {
+      pgAllows()
+      await request(app)
+        .put('/grants')
+        .set('Cookie', `control_ui_admin_session=forged-${i}`)
+        .expect(200)
+    }
+
+    pgAllows()
+    const res = await request(app)
+      .put('/grants')
+      .set('Cookie', 'control_ui_admin_session=forged-final')
+      .expect(429)
+
+    expect(res.body).toMatchObject({
+      error: 'Too Many Requests',
+      retryAfterSeconds: expect.any(Number),
+    })
+  })
+
+  it('workflowGrantReadRateLimit reuses one IP PG bucket for rotated unverified cookies', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 59,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.get('/grants', workflowGrantReadRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .get('/grants')
+      .set('Cookie', 'control_ui_admin_session=forged-cookie-a')
+      .expect(200)
+    await request(app)
+      .get('/grants')
+      .set('Cookie', 'control_ui_admin_session=forged-cookie-b')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_grants_read:ip:/)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toBe(mockCheckAndIncrement.mock.calls[1]?.[0])
+  })
+
+  it('workflowTriggerRateLimit reuses one IP PG bucket for rotated unverified cookies', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const { workflowTriggerRateLimit } = await import('../src/routes/workflows/shared/rateLimit.js')
+    const app = express()
+    app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .post('/trigger')
+      .set('Cookie', 'control_ui_admin_session=forged-cookie-a')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Cookie', 'control_ui_admin_session=forged-cookie-b')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toBe(mockCheckAndIncrement.mock.calls[1]?.[0])
+  })
+
+  it('workflowTriggerRateLimit meters cookie-only admin workflow triggers', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const { workflowTriggerRateLimit } = await import('../src/routes/workflows/shared/rateLimit.js')
+    const app = express()
+    app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .post('/trigger')
+      .set('Cookie', 'control_ui_admin_session=signed-admin-cookie')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledOnce()
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+  })
+
+  it('adminWorkflowTriggerRateLimit isolates rotated signed sessions', async () => {
+    mockVerifyAdminToken.mockImplementation((value: string) =>
+      value.startsWith('signed-') ? signedClaims('same-admin') : null
+    )
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.post('/trigger', adminWorkflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .post('/trigger')
+      .set('Cookie', 'control_ui_admin_session=signed-admin-a')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Cookie', 'control_ui_admin_session=signed-admin-b')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).not.toBe(
+      mockCheckAndIncrement.mock.calls[1]?.[0]
+    )
+  })
+
+  it('workflowGrantReadRateLimit meters cookie-only admin workflow callers', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 59,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.get('/grants', workflowGrantReadRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .get('/grants')
+      .set('Cookie', 'control_ui_admin_session=signed-admin-cookie')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledOnce()
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_grants_read:[0-9a-f]{32}$/)
+  })
+
+  it('workflowTriggerRateLimitCredential prefers verified userId over service bearer', () => {
+    const req = {
+      header(name: string) {
+        if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
+        if (name.toLowerCase() === 'x-user-session-token') return 'user-session-a'
+        return undefined
+      },
+    } as express.Request
+
+    expect(workflowTriggerRateLimitCredential(req)).toBe('user:user-a')
+  })
+
+  it('workflowTriggerRateLimitCredential reuses one userId across rotated session tokens', () => {
+    const reqFor = (token: string) =>
+      ({
+        header(name: string) {
+          if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
+          if (name.toLowerCase() === 'x-user-session-token') return token
+          return undefined
+        },
+      }) as express.Request
+
+    expect(workflowTriggerRateLimitCredential(reqFor('user-session-a'))).toBe('user:user-a')
+    expect(workflowTriggerRateLimitCredential(reqFor('user-session-a-rotated'))).toBe('user:user-a')
+  })
+
+  it('workflowTriggerRateLimitCredential keys unverified user tokens to IP, not the bearer', () => {
+    const req = {
+      ip: '203.0.113.10',
+      header(name: string) {
+        if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
+        if (name.toLowerCase() === 'x-user-session-token') return 'forged-session'
+        return undefined
+      },
+    } as express.Request
+
+    expect(workflowTriggerRateLimitCredential(req)).toMatch(/^ip:/)
+    expect(workflowTriggerRateLimitCredential(req)).not.toBe('service-token')
+  })
+
+  it('workflowTriggerRateLimitCredential keys a real signed session and rejects a forged one', async () => {
+    const actual = await vi.importActual<
+      typeof import('../src/utils/auth/externalSessionAuthToken.js')
+    >('../src/utils/auth/externalSessionAuthToken.js')
+    mockVerifyExternalSessionToken.mockImplementation(token =>
+      actual.verifyExternalSessionToken(token)
+    )
+
+    const signed = actual.signExternalSessionToken({
+      userId: 'user-signed-1',
+      email: 'signed@example.com',
+      teamId: 'team-1',
+      role: 'member',
+      authGeneration: 1,
+    })
+    const reqFor = (token: string) =>
+      ({
+        ip: '203.0.113.10',
+        header(name: string) {
+          if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
+          if (name.toLowerCase() === 'x-user-session-token') return token
+          return undefined
+        },
+      }) as express.Request
+
+    expect(workflowTriggerRateLimitCredential(reqFor(signed))).toBe('user:user-signed-1')
+    expect(workflowTriggerRateLimitCredential(reqFor('forged-not-a-jwt'))).toMatch(/^ip:/)
+    expect(workflowTriggerRateLimitCredential(reqFor('forged-not-a-jwt'))).not.toBe('service-token')
+  })
+
+  it('workflowTriggerRateLimitCredential ignores whitespace user tokens and falls back to bearer', () => {
+    const req = {
+      header(name: string) {
+        if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
+        if (name.toLowerCase() === 'x-user-session-token') return '   '
+        return undefined
+      },
+    } as express.Request
+
+    expect(workflowTriggerRateLimitCredential(req)).toBe('service-token')
+  })
+
+  it('workflowTriggerRateLimitCredential uses bearer when no user token is present', () => {
+    const req = {
+      header(name: string) {
+        if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
+        return undefined
+      },
+    } as express.Request
+
+    expect(workflowTriggerRateLimitCredential(req)).toBe('service-token')
+  })
+
+  it('mcpHostWorkflowTriggerRateLimitCredential ignores an injected user session header', () => {
+    const req = {
+      header(name: string) {
+        if (name.toLowerCase() === 'authorization') return 'Bearer mcp-host-control-token'
+        if (name.toLowerCase() === 'x-user-session-token') return 'user-session-a'
+        return undefined
+      },
+    } as express.Request
+
+    expect(mcpHostWorkflowTriggerRateLimitCredential(req)).toBe('mcp-host-control-token')
+  })
+
+  it('workflowTriggerRateLimit keys independent buckets for two users behind the same service bearer', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer service-token')
+      .set('x-user-session-token', 'user-session-a')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer service-token')
+      .set('x-user-session-token', 'user-session-b')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer service-token')
+      .set('x-user-session-token', 'user-session-a')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(3)
+    const [keyA, keyB, keyAAgain] = mockCheckAndIncrement.mock.calls.map(call => call[0])
+    expect(keyA).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+    expect(keyB).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+    expect(keyA).not.toBe(keyB)
+    expect(keyAAgain).toBe(keyA)
+  })
+
+  it('workflowTriggerRateLimit reuses one bucket for two tokens of the same verified user', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer service-token')
+      .set('x-user-session-token', 'user-session-a')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer service-token')
+      .set('x-user-session-token', 'user-session-a-rotated')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toBe(mockCheckAndIncrement.mock.calls[1]?.[0])
+  })
+
+  it('workflowTriggerRateLimit reuses one IP bucket for rotated unverified user tokens', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer service-token')
+      .set('x-user-session-token', 'forged-session-a')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer service-token')
+      .set('x-user-session-token', 'forged-session-b')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toBe(mockCheckAndIncrement.mock.calls[1]?.[0])
+  })
+
+  it('mcpHostWorkflowTriggerRateLimit stays on the bearer when a user session is injected', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.post('/trigger', mcpHostWorkflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer mcp-host-control-token')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer mcp-host-control-token')
+      .set('x-user-session-token', 'user-session-a')
+      .expect(200)
+    await request(app)
+      .post('/trigger')
+      .set('Authorization', 'Bearer mcp-host-control-token')
+      .set('x-user-session-token', 'forged-session')
+      .expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(3)
+    const [bearerOnly, injectedVerified, injectedForged] = mockCheckAndIncrement.mock.calls.map(
+      call => call[0]
+    )
+    expect(bearerOnly).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+    expect(injectedVerified).toBe(bearerOnly)
+    expect(injectedForged).toBe(bearerOnly)
+  })
+
+  it('workflowTriggerRateLimit falls back to the service bearer without a user token', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app).post('/trigger').set('Authorization', 'Bearer service-token').expect(200)
+    await request(app).post('/trigger').set('Authorization', 'Bearer service-token').expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toBe(mockCheckAndIncrement.mock.calls[1]?.[0])
+  })
+})

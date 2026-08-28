@@ -14,6 +14,7 @@ import {
   IconRobot,
   IconRunReplay,
   IconSettings,
+  IconShield,
   IconStore,
   IconTokenBudgets,
   IconTraceDashboard,
@@ -27,11 +28,16 @@ import type { SidebarItem, SidebarTab } from './types'
 export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
   hosts: { label: 'Agents', href: CONTROL_ROUTES.agents.root, icon: <IconRobot /> },
   'mcp-servers': {
-    label: 'Installed connectors',
+    label: 'Installed Connectors',
     href: CONTROL_ROUTES.connectors.root,
     icon: <IconCable />,
   },
   contexts: { label: 'Contexts', href: CONTROL_ROUTES.contexts.root, icon: <IconGroupWork /> },
+  guardrails: {
+    label: 'Installed Guardrails',
+    href: CONTROL_ROUTES.guardrails.root,
+    icon: <IconShield />,
+  },
   cost: {
     label: 'Cost & Usage',
     href: CONTROL_ROUTES.costAndUsage.root,
@@ -88,7 +94,7 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
     icon: <IconStore />,
   },
   'workflow-recipes': {
-    label: 'Installed plugins',
+    label: 'Installed Plugins',
     href: CONTROL_ROUTES.plugins.root,
     icon: <IconWorkflow />,
   },
@@ -136,6 +142,7 @@ export const SIDEBAR_TAB_ORDER: SidebarTab[] = [
   'registry-catalog',
   'mcp-servers',
   'workflow-recipes',
+  'guardrails',
   'directories',
   'communication-channels',
   'llm-models',

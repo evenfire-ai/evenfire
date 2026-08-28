@@ -102,6 +102,7 @@ import {
   PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
   PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
   PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE,
+  type PluginWorkloadSdkStatusProjection,
   buildPluginWorkloadSdkStatus,
   validatePluginWorkloadSdkSpec,
 } from './pluginWorkloadSdkValidator'
@@ -564,6 +565,17 @@ export interface ReconcileResult {
   /** Cleanup completed successfully while the SDK feature flag was off. */
   pluginWorkloadSdkTeardownConfirmed?: boolean
   pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
+  /**
+   * SDK capability projection (conditions + `status.pluginWorkloadSdk` value)
+   * derived once per reconcile from this result. Populated by the watcher after
+   * `reconcile()` returns (see `projectPluginWorkloadSdk`) so BOTH
+   * `shouldPatchRecipeStatus` (to detect a computed awaiting_policy↔validated
+   * transition that no other diff would surface — issue #375) and `patchStatus`
+   * (to avoid recomputing it) consume the same object. Left undefined on paths
+   * that do not run the SDK lane (e.g. workload-status-only refresh), where the
+   * SDK comparison is intentionally skipped.
+   */
+  pluginWorkloadSdkProjection?: PluginWorkloadSdkStatusProjection
   workflowPhase?: import('../workflow/types').WorkflowPhase
   clearWorkflowExecution?: boolean
   /** When true, the caller should NOT patch the CRD status — the phase hasn't changed. */
@@ -1344,6 +1356,19 @@ export class WorkflowRecipeReconciler {
   // ─── Main Pipeline ────────────────────────────────────────────────
 
   async reconcile(recipe: WorkflowRecipeCRD): Promise<ReconcileResult> {
+    // issue #375: compute the Plugin Workload SDK capability projection ONCE per
+    // reconcile and attach it to the result. shouldPatchRecipeStatus reads it to
+    // publish a computed awaiting_policy↔validated transition that no
+    // phase/message/workload diff would otherwise surface; patchStatus reuses
+    // the same object instead of rebuilding it. Paths that bypass this method
+    // (e.g. observeCurrentWorkloadStatus) leave the projection undefined, which
+    // both consumers treat as "no SDK opinion this pass".
+    const result = await this.reconcileInternal(recipe)
+    result.pluginWorkloadSdkProjection = this.projectPluginWorkloadSdk(recipe, result)
+    return result
+  }
+
+  private async reconcileInternal(recipe: WorkflowRecipeCRD): Promise<ReconcileResult> {
     const name = recipe.metadata.name
     const ns = recipe.metadata.namespace
     const currentPhase = recipe.status?.phase ?? 'candidate'
@@ -1548,13 +1573,17 @@ export class WorkflowRecipeReconciler {
       }
 
       if (currentPhase === 'active' && awaitsTriggeredRun && !wfExecPhase) {
-        // Plugin Workload SDK promptBridge recipes keep an eager mcp-host whose
-        // provider must be (re-)configured once it becomes Ready and after any
-        // pod restart. Fall through to the inner reconcile so ensureEagerSdkMcpHost
-        // retries the /configure; the short-circuit below would freeze it
-        // provider_unavailable forever. clientNotifications-only needs no provider,
-        // so it keeps the cheap short-circuit.
-        if (!recipe.spec.pluginWorkloadSdk?.promptBridge) {
+        // Plugin Workload SDK recipes (BOTH families) keep an eager mcp-host and
+        // must fall through to the inner reconcile: promptBridge so
+        // ensureEagerSdkMcpHost retries the /configure (the short-circuit below
+        // would freeze it provider_unavailable forever), and clientNotifications-
+        // only so the reconcile re-gathers the bootstrap proof and recomputes the
+        // capability projection (issue #375 jozer BLOCKER: short-circuiting here
+        // returned skipStatusPatch:true, so a computed awaiting_policy→validated
+        // transition was never published for that family). The Step 8 ownership
+        // gate inside the inner reconcile covers Secret-ownership revocation on
+        // the fall-through path, exactly as it already did for promptBridge.
+        if (!recipe.spec.pluginWorkloadSdk) {
           if (coordinatorGfsPolicyCanOpen) {
             await this.ensureCoordinatorGfsNetworkPolicyIfEnabled(recipe)
           }
@@ -1680,11 +1709,24 @@ export class WorkflowRecipeReconciler {
         // operator re-labels the Secret.
         const activeOwnership = await this.revokeOrRequeueSteadyWorkflow(recipe, 'active')
         if (activeOwnership) return activeOwnership
-        return {
-          phase: 'active' as RecipePhase,
-          message: wfExecPhase ? `Workflow ${wfExecPhase}` : 'Workflow completed',
-          workloadStatuses: [],
-          skipStatusPatch: true,
+        // issue #375 (jozer BLOCKER): Plugin Workload SDK recipes fall through to
+        // the inner reconcile (mirroring the awaiting-trigger carve-out above) so
+        // the bootstrap proof is re-gathered and a computed capability transition
+        // (e.g. awaiting_policy→validated) is actually published — this
+        // short-circuit's skipStatusPatch:true suppressed it unconditionally.
+        // The gfs/credentials/ownership enforcement above has already run.
+        // EXCEPTION: while a workflow execution is in progress the short-circuit
+        // is kept even for SDK recipes — this branch exists to protect the
+        // coordinator's 409-free windows, and the capability publication is
+        // level-triggered (requeue + watchdog) so it lands on the next
+        // non-running pass.
+        if (!recipe.spec.pluginWorkloadSdk || wfInProgress) {
+          return {
+            phase: 'active' as RecipePhase,
+            message: wfExecPhase ? `Workflow ${wfExecPhase}` : 'Workflow completed',
+            workloadStatuses: [],
+            skipStatusPatch: true,
+          }
         }
       }
 
@@ -2438,10 +2480,17 @@ export class WorkflowRecipeReconciler {
         }
       }
 
-      // Step 9a: MCP delegation — finalize (Context patch + remove pre-deploy annotation)
+      // Step 9a: MCP delegation — finalize (Context patch + ensure McpServer CRDs).
       // McpServer CRDs were already created in Step 7b (pre-deploy handshake).
       // This step patches the Context allowlist and ensures McpServer CRDs are up-to-date.
       // Same namespace invariant as Step 7b: MCP children live in mcp-server.
+      //
+      // NOTE: `pre-deploy` is deliberately NOT removed here. `buildMcpServerManifest`
+      // omits it, but the replace merge in `ensureMcpServer` carries the live object's
+      // `pre-deploy: "true"` over, so it persists — by design. HCC's network-ready
+      // re-ack guard keys off `pre-deploy === "true"`, so stripping it would break the
+      // stdio readiness handshake. The spec-hash gate excludes `pre-deploy` from the
+      // hash (see HASH_EXCLUDED_ANNOTATIONS) so 7b and 9a converge to a no-op write.
       if (hasTransportWorkloads) {
         if (!(await this.recipeStillActive(recipe))) {
           return this.staleRecipeResult(recipe, 'MCP delegation finalization')
@@ -6358,6 +6407,44 @@ export class WorkflowRecipeReconciler {
   // ─── Status Patch ─────────────────────────────────────────────────
 
   /** Persist reconcile result to the CRD status subresource. */
+  /**
+   * Build the Plugin Workload SDK status projection (owned conditions +
+   * `status.pluginWorkloadSdk` value) from a reconcile result. Extracted so it
+   * can be computed ONCE per reconcile by the watcher (issue #375): the watcher
+   * attaches it to `result.pluginWorkloadSdkProjection` after `reconcile()`
+   * returns, `shouldPatchRecipeStatus` reads it to detect an
+   * awaiting_policy↔validated transition that no other diff would surface, and
+   * `patchStatus` reuses it instead of recomputing. `providerUnavailable` is
+   * derived here (not inferred from phase/message) so the SDK-only provider
+   * health bit stays explicit.
+   */
+  projectPluginWorkloadSdk(
+    recipe: WorkflowRecipeCRD,
+    result: ReconcileResult,
+    now: string = new Date().toISOString()
+  ): PluginWorkloadSdkStatusProjection {
+    return buildPluginWorkloadSdkStatus({
+      spec: recipe.spec,
+      existingConditions: recipe.status?.conditions,
+      phase: result.phase,
+      featureFlagEnabled: this.config.pluginWorkloadSdkEnabled,
+      providerUnavailable:
+        result.pluginWorkloadSdkProviderUnavailable === true ||
+        (result.workflowConditions ?? []).some(
+          condition =>
+            condition.type === PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE &&
+            condition.status === 'True'
+        ),
+      teardownConfirmed: result.pluginWorkloadSdkTeardownConfirmed === true,
+      policyPending: result.pluginWorkloadSdkPolicyPending === true,
+      bootstrapProof: result.pluginWorkloadSdkBootstrapProof,
+      now,
+      // issue #375 (R1): carry forward the stable validatedAt marker across
+      // steady-state throttle patches instead of resetting it to `now`.
+      existingCapability: recipe.status?.pluginWorkloadSdk,
+    })
+  }
+
   async patchStatus(recipe: WorkflowRecipeCRD, result: ReconcileResult): Promise<void> {
     const workloads = result.workloadStatuses.map(ws => {
       const def = (recipe.spec.workloads ?? []).find(w => w.id === ws.id)
@@ -6454,27 +6541,16 @@ export class WorkflowRecipeReconciler {
         recipe.status?.conditions,
       result.workloadConditions
     )
-    // Plugin Workload SDK conditions are derived here so every status patch
-    // carries a consistent projection of spec.pluginWorkloadSdk + feature flag,
-    // while the SDK-only provider health bit is propagated explicitly through
-    // ReconcileResult rather than inferred from a free-form phase/message.
-    const pluginSdkProjection = buildPluginWorkloadSdkStatus({
-      spec: recipe.spec,
-      existingConditions: recipe.status?.conditions,
-      phase: result.phase,
-      featureFlagEnabled: this.config.pluginWorkloadSdkEnabled,
-      providerUnavailable:
-        result.pluginWorkloadSdkProviderUnavailable === true ||
-        (result.workflowConditions ?? []).some(
-          condition =>
-            condition.type === PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE &&
-            condition.status === 'True'
-        ),
-      teardownConfirmed: result.pluginWorkloadSdkTeardownConfirmed === true,
-      policyPending: result.pluginWorkloadSdkPolicyPending === true,
-      bootstrapProof: result.pluginWorkloadSdkBootstrapProof,
-      now,
-    })
+    // Plugin Workload SDK conditions are derived so every status patch carries a
+    // consistent projection of spec.pluginWorkloadSdk + feature flag, while the
+    // SDK-only provider health bit is propagated explicitly through
+    // ReconcileResult rather than inferred from a free-form phase/message. Reuse
+    // the projection the watcher already computed for the patch decision
+    // (issue #375) so the exact object that drove shouldPatchRecipeStatus is
+    // what gets written; recompute only on paths that never attached one (e.g.
+    // observeCurrentWorkloadStatus).
+    const pluginSdkProjection =
+      result.pluginWorkloadSdkProjection ?? this.projectPluginWorkloadSdk(recipe, result, now)
     const pluginSdkMergedConditions = mergePluginWorkloadSdkConditions(
       workloadReconcileMergedConditions ??
         secretOwnershipMergedConditions ??

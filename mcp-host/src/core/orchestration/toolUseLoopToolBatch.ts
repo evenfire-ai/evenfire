@@ -1,8 +1,41 @@
+import { randomUUID } from 'crypto'
 import { extractToolIntent, getDisplayName } from '../../progress/intentExtraction.js'
+import {
+  type ToolIdentity,
+  recordAndCheck,
+  recordDecision,
+  resolveToolIdentityFromRegistry,
+} from '../guardrails'
 import type { ChatMessage, PendingApproval, TokenUsage, ToolCall, ToolResult } from '../types'
 import type { LoopConfig } from './loopConfig'
 import { executeSingleTool, reportToolComplete, reportToolStart } from './toolUseLoopSingleTool'
 import { isWorkflowTriggerNotFoundToolResult } from './toolUseLoopWorkflowTriggerFallbacks'
+
+/**
+ * Build a guardrail-originated approval suspension (spec §6.3), shaped like the
+ * existing approval gate so the batch loop's suspend path handles it unchanged.
+ */
+function buildGuardrailSuspension(
+  call: ToolCall,
+  config: LoopConfig,
+  reasonCode: string
+): { type: 'suspend'; approval: PendingApproval } {
+  const descriptor = config.toolRegistry.get(call.name)?.traceDescriptor?.(call.arguments) ?? {
+    kind: 'internal_tool' as const,
+    sourceRef: 'mcp-host',
+  }
+  const approval: PendingApproval = {
+    request_id: randomUUID(),
+    tool_name: call.name,
+    tool_kind: descriptor.kind,
+    tool_source_ref: descriptor.sourceRef,
+    parameters: call.arguments,
+    description: `Guardrail requires approval (${reasonCode})`,
+    tool_call_id: '', // filled below from call.id
+    context_snapshot: [],
+  }
+  return { type: 'suspend', approval }
+}
 
 /** The 3 dynamic-tool-loading bridge tools. They are native and must never be
  * the TARGET of `clerum__tool_call` (LOCKED #11 — no recursion). */
@@ -204,7 +237,113 @@ export async function executeToolCalls(
       continue
     }
 
-    const gate = loopController.beforeTool(call.name, call.arguments)
+    // Guardrail gate (spec §6) — behind config.guardrails; absent = today.
+    let gate: 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval }
+    // Resolved once when the guardrail runs; reused for PostToolUse redaction below.
+    let toolIdentity: ToolIdentity | undefined
+    if (config.guardrails) {
+      const identity = resolveToolIdentityFromRegistry(
+        call.name,
+        config.toolRegistry,
+        call.arguments
+      )
+      toolIdentity = identity
+
+      // Doom-loop guard (spec §6.4): deny 3 consecutive identical (tool, input)
+      // calls within a task. Best-effort runaway/cost guard, not a security
+      // control (alternation evades it, §12.4/N12). Cross-turn state lives on the
+      // conversation (ephemeral; resets on resume).
+      const dlKey = `${identity.provenance}:${identity.server ?? ''}:${identity.name}:${JSON.stringify(call.arguments)}`
+      const dl = recordAndCheck(config.conversation.guardrail_doom_loop ?? { count: 0 }, dlKey)
+      config.conversation.guardrail_doom_loop = dl.state
+      if (dl.tripped) {
+        recordDecision('tool', 'deny', 'current', 'denied', 'repeated_identical_call')
+        events.emit({
+          type: 'guardrail:decision',
+          data: {
+            toolName: call.name,
+            decision: 'deny',
+            reasonCode: 'repeated_identical_call',
+            source: 'current',
+            iteration,
+          },
+          timestamp: new Date(),
+        })
+        toolResults.push({
+          tool_call_id: call.id,
+          name: call.name,
+          content: 'Blocked: repeated identical tool call (doom-loop guard).',
+          is_error: true,
+        })
+        continue
+      }
+
+      const gd = await config.guardrails.decide(identity, call.arguments)
+      events.emit({
+        type: 'guardrail:decision',
+        data: {
+          toolName: call.name,
+          decision: gd.decision,
+          reasonCode: gd.reasonCode,
+          source: gd.source,
+          iteration,
+        },
+        timestamp: new Date(),
+      })
+
+      const mode = config.executionMode ?? 'interactive'
+
+      if (gd.decision === 'deny') {
+        recordDecision('tool', 'deny', gd.source, 'denied', gd.reasonCode, mode)
+        toolResults.push({
+          tool_call_id: call.id,
+          name: call.name,
+          content: `Blocked by guardrail policy (${gd.reasonCode}).`,
+          is_error: true,
+        })
+        continue
+      }
+
+      // Apply any honored rewrite (Phase 1 rules never rewrite; forward-compatible).
+      if (gd.effectiveInput !== call.arguments) {
+        call = { ...call, arguments: gd.effectiveInput }
+      }
+
+      if (gd.decision === 'ask') {
+        // Resume-safe one-shot: an exact approve-once grant satisfies the ask
+        // (spec §6.3). Broad `auto_approved_tools` do NOT — an explicit guardrail
+        // ask needs an exact approval, so we only consume the pending_approval.
+        const pending = config.conversation.pending_approval
+        if (pending && pending.tool_name === call.name) {
+          config.conversation.pending_approval = undefined
+          recordDecision('tool', 'ask', gd.source, 'executed', gd.reasonCode, mode)
+          gate = 'proceed'
+        } else if (mode === 'unattended') {
+          // §6.3: an `ask` with no human to answer it fails safe to deny.
+          recordDecision('tool', 'deny', gd.source, 'denied', 'approval_unavailable', mode)
+          toolResults.push({
+            tool_call_id: call.id,
+            name: call.name,
+            content:
+              'Blocked: approval required but no approver is available in an autonomous run.',
+            is_error: true,
+          })
+          continue
+        } else {
+          recordDecision('tool', 'ask', gd.source, 'ask', gd.reasonCode, mode)
+          gate = buildGuardrailSuspension(call, config, gd.reasonCode)
+        }
+      } else {
+        // allow / no_decision → the existing approval path. Phase 1: guardrail
+        // `allow` does NOT bypass existing approvals (separating containment from
+        // approval is deferred — the safe direction).
+        recordDecision('tool', gd.decision, gd.source, 'executed', gd.reasonCode, mode)
+        gate = loopController.beforeTool(call.name, call.arguments)
+      }
+    } else {
+      gate = loopController.beforeTool(call.name, call.arguments)
+    }
+
     if (gate === 'skip') {
       toolResults.push({
         tool_call_id: call.id,
@@ -252,7 +391,20 @@ export async function executeToolCalls(
     }
 
     const progressStart = reportToolStart(config, call, iteration, i, calls.length, llmTextContent)
-    const toolResult = await executeSingleTool(call, config, iteration)
+    let toolResult = await executeSingleTool(call, config, iteration)
+
+    // PostToolUse redaction (spec §6.2 / §10 #3): installed `post_tool_use` hooks
+    // may redact the model-visible result `content` (never `is_error`). Only the
+    // LLM-message `content` is touched — `rawContent` (UI preview) is left intact.
+    if (config.guardrails?.transformResult && toolIdentity) {
+      const view = await config.guardrails.transformResult(toolIdentity, call.arguments, {
+        content: toolResult.content,
+        isError: toolResult.is_error,
+      })
+      if (view.content !== toolResult.content) {
+        toolResult = { ...toolResult, content: view.content }
+      }
+    }
     toolResults.push(toolResult)
 
     if (config.abortSignal?.aborted) {

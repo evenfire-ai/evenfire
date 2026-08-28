@@ -24,7 +24,7 @@ import { formatTeamRole } from '../lib/teamRoles'
 import { ControlAdminsPanel } from './ControlAdminsPanel'
 import type { ProfileAdminHomeProps, ProfileAdminTab } from './ProfileAdminHome.types'
 import { SectionSearchInput } from './SectionSearchInput'
-import { IconSettings, IconUsers } from './Sidebar/icons'
+import { IconShield, IconUsers } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
 import { TabBar } from './TabBar'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -772,7 +772,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                                   <div className="cu-row-actions cu-row-actions--wrap">
                                     <button
                                       type="button"
-                                      className="cu-btn cu-btn--secondary cu-btn--sm"
+                                      className="cu-btn cu-btn--sm"
                                       onClick={() => void resendPendingInvitation(invitation)}
                                       disabled={
                                         (busy && !loaded) || resendingInvitationId === invitation.id
@@ -837,7 +837,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                             <th className="cu-table__col-count">
                               <button
                                 type="button"
-                                className="cu-link cu-link--sm cu-table__sort-link"
+                                className="cu-table__sort-link"
                                 onClick={() =>
                                   setMemberTeamsSortDir(prev => (prev === 'asc' ? 'desc' : 'asc'))
                                 }
@@ -902,7 +902,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                                   {user.passwordPendingFromAcceptedInvitation ? (
                                     <button
                                       type="button"
-                                      className="cu-btn cu-btn--secondary cu-btn--sm cu-nowrap"
+                                      className="cu-btn cu-btn--sm cu-nowrap"
                                       onClick={event => {
                                         event.stopPropagation()
                                         void resendPasswordSetupInvitation(user)
@@ -927,18 +927,15 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                                     }}
                                     onKeyDown={event => event.stopPropagation()}
                                     disabled={busy && !loaded}
-                                    aria-label={
-                                      user.controlAdminId
-                                        ? `Open admin for member ${user.name || user.email}`
-                                        : `Create admin for member ${user.name || user.email}`
-                                    }
-                                    title={
-                                      user.controlAdminId
-                                        ? 'Open matching admin'
-                                        : 'Create admin from member'
-                                    }
+                                    aria-label={`${
+                                      user.controlAdminId ? 'View admin' : 'Create admin'
+                                    } for member ${user.name || user.email}`}
+                                    title={user.controlAdminId ? 'View admin' : 'Create admin'}
                                   >
-                                    <IconSettings />
+                                    <IconShield
+                                      createBadge={!user.controlAdminId}
+                                      relationshipRole="admin"
+                                    />
                                   </button>
                                   <button
                                     type="button"

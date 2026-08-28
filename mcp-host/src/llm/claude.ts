@@ -53,21 +53,81 @@ export class ClaudeProvider implements SingleTurnProvider {
   }
 
   classifyError(err: unknown): ClassifiedError {
+    // Anthropic surfaces a modeled `error.type` that is more precise than the
+    // HTTP status (a live model can still 404 with `not_found_error`). Classify
+    // by type FIRST; the set is open by contract, so unmatched types fall
+    // through to the status-based classifier below. (spec 02 §3.1)
+    //
+    // Nesting note: on `Anthropic.APIError`, `.error` is the FULL response
+    // envelope `{ type:'error', error:{ type, message } }`, so the modeled type
+    // lives at `.error.error.type` (`.error.type` is the constant 'error'). Read
+    // the inner level first, with the outer level as a defensive fallback for
+    // any non-enveloped shape.
+    const anthropicErr = err as {
+      status?: unknown
+      message?: string
+      error?: { type?: string; message?: string; error?: { type?: string; message?: string } }
+    }
+    const bodyType = anthropicErr?.error?.error?.type ?? anthropicErr?.error?.type
+    const httpStatus = typeof anthropicErr?.status === 'number' ? anthropicErr.status : undefined
+    const rawMsg =
+      anthropicErr?.error?.error?.message ??
+      anthropicErr?.error?.message ??
+      anthropicErr?.message ??
+      'Unknown Claude error'
+    if (bodyType) {
+      const byType = ((): ClassifiedError | null => {
+        switch (bodyType) {
+          case 'not_found_error':
+            // Retired or inaccessible model — ambiguous by design; non-retryable
+            // and NOT a failover trigger.
+            return { code: LlmErrorCode.ModelNotAvailable, retryable: false, message: rawMsg }
+          case 'overloaded_error':
+            return { code: LlmErrorCode.ModelOverloaded, retryable: true, message: rawMsg }
+          case 'billing_error':
+            // Genuine billing / credit exhaustion — Anthropic's dedicated quota
+            // channel (like body `insufficient_quota`). Stays on InsufficientQuota.
+            return { code: LlmErrorCode.InsufficientQuota, retryable: false, message: rawMsg }
+          case 'permission_error':
+            // A 403: account access / IAM permission — an identity/authorization
+            // failure, not billing. Classify as AuthenticationFailed so it lands
+            // on the `auth` failover class uniformly with the other arms (R1-M1).
+            return { code: LlmErrorCode.AuthenticationFailed, retryable: false, message: rawMsg }
+          default:
+            return null
+        }
+      })()
+      if (byType) return { ...byType, httpStatus, providerCode: bodyType }
+    }
+
     const httpClassification = classifyByHttpStatus(err)
     if (httpClassification) {
+      // The shared classifier recovers providerCode from the OUTER envelope,
+      // where Anthropic's modeled type is the constant 'error'. When the SDK gave
+      // us the inner modeled type, prefer it so an unmapped Anthropic error (e.g.
+      // invalid_request_error / authentication_error) surfaces its real code
+      // instead of 'error' (R1-L1). No-op on non-enveloped shapes, where bodyType
+      // already equals the shared classifier's providerCode.
+      const classified =
+        bodyType && httpClassification.providerCode !== bodyType
+          ? { ...httpClassification, providerCode: bodyType }
+          : httpClassification
       // Anthropic quirk: insufficient credit is reported as HTTP 400
       // (not 402), detectable only by message substring.
       if (
-        httpClassification.code === LlmErrorCode.ApiCallFailed &&
-        /credit balance is too low/i.test(httpClassification.message)
+        classified.code === LlmErrorCode.ApiCallFailed &&
+        /credit balance is too low/i.test(classified.message)
       ) {
         return {
-          ...httpClassification,
+          ...classified,
           code: LlmErrorCode.InsufficientQuota,
           retryable: false,
+          // Prefer the inner-level message: on a real Anthropic envelope the
+          // shared classifier only sees the outer `${status} {json}` string.
+          message: rawMsg,
         }
       }
-      return httpClassification
+      return classified
     }
     return classifyUnknown(err)
   }

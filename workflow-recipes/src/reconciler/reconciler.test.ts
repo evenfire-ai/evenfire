@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '@clerum/workflow-runtime-core'
 import { loadConfig } from '../config'
+import { shouldPatchRecipeStatus } from '../k8sClient'
 import { CronJobDef, WorkflowRecipeCRD, WorkflowRecipeGfsIntentSpec, WorkloadDef } from '../types'
 import { INHERITED_PARENT_RESOURCES_ANNOTATION } from '../workflow/childRecipeFactory'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
@@ -9958,6 +9959,381 @@ describe('WorkflowRecipeReconciler', () => {
       expect(inboundStatus.workflowExecution).toBeUndefined()
       // Did NOT re-latch the terminal failure.
       expect(result.phase).not.toBe('failed')
+    })
+  })
+
+  // ── issue #375 BLOCKER (jozer-rami review): clientNotifications-only workflow-
+  // lane SDK recipes must FALL THROUGH the two active-phase short-circuits (the
+  // awaiting-trigger one and the steady-active one) the same way promptBridge
+  // does, so the inner reconcile gathers the bootstrap proof and the capability
+  // projects `validated` with NO skipStatusPatch. Before the fix both
+  // short-circuits returned skipStatusPatch:true, shouldPatchRecipeStatus bailed
+  // at its first line, and the awaiting_policy→validated transition was never
+  // published — the original #375 symptom, unchanged, for that family.
+  describe('issue #375 BLOCKER — clientNotifications-only workflow-lane fall-through', () => {
+    const CN_MESSAGE = 'Workflow trigger infrastructure registered'
+
+    function clientNotificationsOnlyRecipe(labels?: Record<string, string>): WorkflowRecipeCRD {
+      return makeRecipe({
+        metadata: {
+          name: 'test-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-123',
+          ...(labels ? { labels } : {}),
+        },
+        spec: {
+          steps: [{ id: 'step-1', run: snippetRun() }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+          pluginWorkloadSdk: {
+            clientNotifications: { allowedEventTypes: ['workflow.completed'] },
+            allowedCallers: ['app'],
+          },
+        },
+        status: {
+          phase: 'active',
+          message: CN_MESSAGE,
+          pluginWorkloadSdk: {
+            state: 'awaiting_policy',
+            promptBridge: false,
+            clientNotifications: true,
+            message: 'Plugin Workload SDK clientNotifications is awaiting an operator grant',
+            verifiedAt: new Date(Date.now() - 10_000).toISOString(),
+          } as never,
+        },
+      })
+    }
+
+    function stubWorkflowReconciler() {
+      const workflowReconcile = vi.fn().mockResolvedValue({
+        phase: 'active',
+        message: CN_MESSAGE,
+        pluginWorkloadSdkBootstrapProof: {
+          ready: true,
+          contractVersion: 2,
+          podUid: 'sdk-pod-uid',
+          policyReady: true,
+          clientNotificationsPolicyReady: true,
+          verifiedAt: new Date().toISOString(),
+        },
+      })
+      const reconcilePluginWorkloadSdkOnly = vi.fn()
+      ;(
+        reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }
+      ).config.pluginWorkloadSdkEnabled = true
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: {
+            reconcile: typeof workflowReconcile
+            reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+            validateWorkflowSpec: () => undefined
+          }
+        }
+      ).workflowReconciler = {
+        reconcile: workflowReconcile,
+        reconcilePluginWorkloadSdkOnly,
+        validateWorkflowSpec: () => undefined,
+      }
+      return { workflowReconcile, reconcilePluginWorkloadSdkOnly }
+    }
+
+    it('awaiting-trigger lane: recomputes and publishes awaiting_policy→validated (no skipStatusPatch)', async () => {
+      // Phase active + mcpHost required (flag ON) + no run label + no
+      // workflowExecution ⇒ the awaiting-trigger short-circuit. Pre-fix this
+      // returned skipStatusPatch:true without ever calling the inner reconcile.
+      const { workflowReconcile, reconcilePluginWorkloadSdkOnly } = stubWorkflowReconciler()
+      const recipe = clientNotificationsOnlyRecipe()
+
+      const result = await reconciler.reconcile(recipe)
+
+      // Fall-through proof: the inner reconcile actually ran (steps present ⇒
+      // the stepless SDK-only adapter must NOT be used).
+      expect(workflowReconcile).toHaveBeenCalledTimes(1)
+      expect(reconcilePluginWorkloadSdkOnly).not.toHaveBeenCalled()
+      // The reconcile pass has an SDK opinion and does not suppress the patch.
+      expect(result.skipStatusPatch).toBeFalsy()
+      expect(result.pluginWorkloadSdkProjection?.capability?.state).toBe('validated')
+      // The full chain the incident depends on: the watcher would publish it.
+      expect(shouldPatchRecipeStatus(recipe, result)).toBe(true)
+    })
+
+    it('steady-active lane (run-labelled): recomputes and publishes awaiting_policy→validated (no skipStatusPatch)', async () => {
+      // Phase active + run-id label ⇒ awaitsTriggeredRun=false ⇒ the steady-
+      // active short-circuit, which pre-fix returned skipStatusPatch:true
+      // unconditionally (no family carve-out at all).
+      const { workflowReconcile, reconcilePluginWorkloadSdkOnly } = stubWorkflowReconciler()
+      const recipe = clientNotificationsOnlyRecipe({ 'clerum.io/workflow-run-id': 'run-e2e-1' })
+
+      const result = await reconciler.reconcile(recipe)
+
+      expect(workflowReconcile).toHaveBeenCalledTimes(1)
+      expect(reconcilePluginWorkloadSdkOnly).not.toHaveBeenCalled()
+      expect(result.skipStatusPatch).toBeFalsy()
+      expect(result.pluginWorkloadSdkProjection?.capability?.state).toBe('validated')
+      expect(shouldPatchRecipeStatus(recipe, result)).toBe(true)
+    })
+
+    it('steady-active lane (run-labelled): promptBridge recipes ALSO fall through (no family re-carve)', async () => {
+      // Side effect of the carve-out being family-agnostic: a promptBridge SDK
+      // recipe in phase active, run-labelled (awaitsTriggeredRun false), with NO
+      // in-progress execution, falls through the steady-active short-circuit
+      // too — intended, bounded by the verifiedAt throttle. This pin turns RED
+      // if the condition is ever re-carved by family (e.g.
+      // `!recipe.spec.pluginWorkloadSdk?.clientNotifications`) or reverted to
+      // the unconditional skipStatusPatch:true return.
+      const { workflowReconcile, reconcilePluginWorkloadSdkOnly } = stubWorkflowReconciler()
+      const recipe = makeRecipe({
+        metadata: {
+          name: 'test-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-123',
+          labels: { 'clerum.io/workflow-run-id': 'run-e2e-4' },
+        },
+        spec: {
+          steps: [{ id: 'step-1', run: snippetRun() }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+          pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+        },
+        status: {
+          phase: 'active',
+          message: CN_MESSAGE,
+          pluginWorkloadSdk: {
+            state: 'awaiting_policy',
+            promptBridge: true,
+            clientNotifications: false,
+            message: 'Plugin Workload SDK promptBridge is awaiting an operator grant',
+            verifiedAt: new Date(Date.now() - 10_000).toISOString(),
+          } as never,
+        },
+      })
+
+      const result = await reconciler.reconcile(recipe)
+
+      expect(workflowReconcile).toHaveBeenCalledTimes(1)
+      expect(reconcilePluginWorkloadSdkOnly).not.toHaveBeenCalled()
+      expect(result.skipStatusPatch).toBeFalsy()
+      expect(result.pluginWorkloadSdkProjection?.capability?.state).toBe('validated')
+      expect(shouldPatchRecipeStatus(recipe, result)).toBe(true)
+    })
+
+    it('steady-active lane with an IN-PROGRESS execution: SDK recipes still short-circuit (409-window protection)', async () => {
+      // The carve-out is bounded: while a workflow execution is in progress the
+      // steady-active short-circuit is KEPT even for SDK recipes — that branch
+      // protects the coordinator's 409-free windows, and the capability
+      // publication is level-triggered so it lands on the next non-running
+      // pass. Removing the `|| wfInProgress` term from the carve-out condition
+      // turns this RED: the running recipe would fall through to the inner
+      // reconcile and drop skipStatusPatch.
+      const { workflowReconcile, reconcilePluginWorkloadSdkOnly } = stubWorkflowReconciler()
+      const recipe = clientNotificationsOnlyRecipe({ 'clerum.io/workflow-run-id': 'run-e2e-3' })
+      recipe.status = {
+        ...recipe.status,
+        phase: 'active',
+        workflowExecution: { phase: 'running' },
+      } as typeof recipe.status
+
+      const result = await reconciler.reconcile(recipe)
+
+      expect(result.skipStatusPatch).toBe(true)
+      expect(workflowReconcile).not.toHaveBeenCalled()
+      expect(reconcilePluginWorkloadSdkOnly).not.toHaveBeenCalled()
+    })
+
+    it('non-SDK workflow recipes keep both steady-state short-circuits (no regression)', async () => {
+      // The carve-out is SDK-scoped: a plain workflow recipe in the same two
+      // shapes must still short-circuit with skipStatusPatch:true and must NOT
+      // reach the inner reconcile on every steady tick.
+      const { workflowReconcile } = stubWorkflowReconciler()
+      const awaitingTrigger = makeRecipe({
+        spec: {
+          steps: [{ id: 'step-1', instruction: 'run' }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+        },
+        status: { phase: 'active', message: CN_MESSAGE },
+      })
+      const awaitingResult = await reconciler.reconcile(awaitingTrigger)
+      expect(awaitingResult.skipStatusPatch).toBe(true)
+      expect(workflowReconcile).not.toHaveBeenCalled()
+
+      const runLabelled = makeRecipe({
+        metadata: {
+          name: 'test-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-123',
+          labels: { 'clerum.io/workflow-run-id': 'run-e2e-2' },
+        },
+        spec: {
+          steps: [{ id: 'step-1', run: snippetRun() }],
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+        },
+        status: { phase: 'active', message: CN_MESSAGE },
+      })
+      const steadyResult = await reconciler.reconcile(runLabelled)
+      expect(steadyResult.skipStatusPatch).toBe(true)
+      expect(workflowReconcile).not.toHaveBeenCalled()
+    })
+  })
+
+  // ── issue #375 M1 (jozer review): the projection WIRING is pinned against the
+  // real pipeline, not hand-built ReconcileResults. Each test goes RED if its
+  // wiring line is neutered:
+  //   - reconcile() must ATTACH result.pluginWorkloadSdkProjection (the single
+  //     line the whole P1 fix hangs on),
+  //   - projectPluginWorkloadSdk must pass the persisted capability through as
+  //     existingCapability (the R1 validatedAt carry-forward),
+  //   - patchStatus must REUSE the attached projection instead of recomputing.
+  describe('issue #375 M1 — projection wiring through the real pipeline', () => {
+    it('reconcile() attaches a populated pluginWorkloadSdkProjection to every result', async () => {
+      // Non-SDK recipe: the projection must still be attached (capability null =
+      // "clear the field"), proving production populates it on EVERY reconcile.
+      const result = await reconciler.reconcile(makeRecipe())
+      expect(result.pluginWorkloadSdkProjection).toBeDefined()
+      expect(result.pluginWorkloadSdkProjection?.capability).toBeNull()
+    })
+
+    it('reconcile() projects the SDK-only lane bootstrap proof into a validated capability', async () => {
+      const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
+        phase: 'active',
+        message: 'Plugin Workload SDK mcp-host registered',
+        pluginWorkloadSdkBootstrapProof: {
+          ready: true,
+          contractVersion: 2,
+          podUid: 'sdk-pod-uid',
+          provider: 'zai',
+          model: 'glm-4.7',
+          policyReady: true,
+          verifiedAt: '2026-08-04T00:00:00.000Z',
+        },
+      })
+      ;(
+        reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }
+      ).config.pluginWorkloadSdkEnabled = true
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: {
+            reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+          }
+        }
+      ).workflowReconciler = { reconcilePluginWorkloadSdkOnly }
+
+      const result = await reconciler.reconcile(
+        makeRecipe({
+          spec: {
+            agent: { provider: 'zai', model: 'glm-4.7' },
+            workloads: [
+              { id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 },
+            ],
+            pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+          },
+        })
+      )
+
+      // The REAL pipeline attached the projection and it carries the computed
+      // capability — no test-side hand-building involved.
+      expect(result.pluginWorkloadSdkProjection?.capability?.state).toBe('validated')
+      expect(result.pluginWorkloadSdkProjection?.capability?.bootstrapPodUid).toBe('sdk-pod-uid')
+    })
+
+    it('carries forward the persisted validatedAt on a steady validated capability (R1 wiring)', async () => {
+      const FIRST_VALIDATED_AT = '2026-08-01T00:00:00.000Z'
+      const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
+        phase: 'active',
+        message: 'Plugin Workload SDK mcp-host registered',
+        pluginWorkloadSdkBootstrapProof: {
+          ready: true,
+          contractVersion: 2,
+          podUid: 'sdk-pod-uid',
+          provider: 'zai',
+          model: 'glm-4.7',
+          policyReady: true,
+          verifiedAt: new Date().toISOString(),
+        },
+      })
+      ;(
+        reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }
+      ).config.pluginWorkloadSdkEnabled = true
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: {
+            reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+          }
+        }
+      ).workflowReconciler = { reconcilePluginWorkloadSdkOnly }
+
+      const result = await reconciler.reconcile(
+        makeRecipe({
+          spec: {
+            agent: { provider: 'zai', model: 'glm-4.7' },
+            workloads: [
+              { id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 },
+            ],
+            pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+          },
+          status: {
+            phase: 'active',
+            pluginWorkloadSdk: {
+              state: 'validated',
+              promptBridge: true,
+              clientNotifications: false,
+              validatedAt: FIRST_VALIDATED_AT,
+              verifiedAt: new Date(Date.now() - 60_000).toISOString(),
+            } as never,
+          },
+        })
+      )
+
+      // existingCapability wiring (workflowRecipeReconciler.ts): the stable
+      // validatedAt marker must be CARRIED FORWARD, not re-stamped to `now`.
+      expect(result.pluginWorkloadSdkProjection?.capability?.state).toBe('validated')
+      expect(result.pluginWorkloadSdkProjection?.capability?.validatedAt).toBe(FIRST_VALIDATED_AT)
+    })
+
+    it('patchStatus REUSES the attached projection instead of recomputing it', async () => {
+      // The attached projection is deliberately DISTINCT from anything
+      // patchStatus could recompute from this recipe/result (no bootstrap proof
+      // ⇒ a recompute projects degraded/BootstrapNotReady). If patchStatus
+      // recomputes instead of reusing, the marker never reaches the patch body.
+      const recipe = makeRecipe({
+        spec: {
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+          pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+        },
+        status: { phase: 'active' },
+      })
+      ;(
+        reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }
+      ).config.pluginWorkloadSdkEnabled = true
+
+      const attachedCapability = {
+        state: 'validated' as const,
+        promptBridge: true,
+        clientNotifications: false,
+        message: 'REUSED-PROJECTION-MARKER',
+        bootstrapPodUid: 'marker-pod',
+        verifiedAt: new Date().toISOString(),
+      }
+      await reconciler.patchStatus(recipe, {
+        phase: 'active',
+        message: 'All workloads deployed',
+        workloadStatuses: [],
+        pluginWorkloadSdkProjection: {
+          conditions: [
+            {
+              type: 'PluginWorkloadSdkCapability',
+              status: 'True',
+              reason: 'Validated',
+              message: 'REUSED-PROJECTION-MARKER',
+              lastTransitionTime: new Date().toISOString(),
+            },
+          ],
+          capability: attachedCapability as never,
+        },
+      })
+
+      const patchCall = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.at(-1)?.[0] as {
+        body: { status: { pluginWorkloadSdk?: { message?: string; bootstrapPodUid?: string } } }
+      }
+      expect(patchCall.body.status.pluginWorkloadSdk?.message).toBe('REUSED-PROJECTION-MARKER')
+      expect(patchCall.body.status.pluginWorkloadSdk?.bootstrapPodUid).toBe('marker-pod')
     })
   })
 

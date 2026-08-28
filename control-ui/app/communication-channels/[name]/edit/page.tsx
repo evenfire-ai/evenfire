@@ -15,6 +15,7 @@ import { DashboardLayout } from '@components/DashboardLayout'
 import { SegmentedControl } from '@components/SegmentedControl'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { IconBroadcast } from '@components/Sidebar/icons'
+import { TeamsSetupPrerequisites } from '@components/TeamsSetupPrerequisites'
 import { useToast } from '@components/Toast'
 import { IconCopy } from '@components/icons'
 import { Button } from '@components/ui'
@@ -646,7 +647,7 @@ export default function EditCommunicationChannelPage() {
                         </div>
                         <button
                           type="button"
-                          className="cu-btn cu-btn--secondary"
+                          className="cu-btn"
                           onClick={copySlackRequestUrl}
                           disabled={!slackRequestUrl || saving}
                         >
@@ -703,6 +704,8 @@ export default function EditCommunicationChannelPage() {
                   </>
                 ) : (
                   <>
+                    <TeamsSetupPrerequisites />
+
                     <div className="cu-banner cu-banner--info">
                       Store the CLIENT_SECRET value here, not the Microsoft secret ID. CLIENT_ID and
                       TENANT_ID identify the Microsoft Teams bot that receives messages for this
@@ -781,7 +784,7 @@ export default function EditCommunicationChannelPage() {
                         </div>
                         <button
                           type="button"
-                          className="cu-btn cu-btn--secondary"
+                          className="cu-btn"
                           onClick={copyTeamsRequestUrl}
                           disabled={!teamsRequestUrl || saving}
                         >

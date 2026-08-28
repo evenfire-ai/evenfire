@@ -201,15 +201,23 @@ export function createMockCustomApi(): MockCustomApi {
     patchNamespacedCustomObject: vi.fn().mockResolvedValue({}),
     patchNamespacedCustomObjectStatus: vi.fn().mockResolvedValue({}),
     createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
-    getNamespacedCustomObject: vi.fn().mockResolvedValue({
-      metadata: { name: 'stateless-host', namespace: 'mcp-host' },
-      spec: {
-        host: 'stateless-host',
-        contextRef: 'context-a',
-        secretRef: 'host-secret',
-        lifecycle: { stateless: true },
-      },
-      status: { lifecycle: { state: 'suspended', wakeHandledGeneration: 0 } },
+    getNamespacedCustomObject: vi.fn(({ name }: { name?: string } = {}) => {
+      const hostName = name ?? 'stateless-host'
+      return Promise.resolve({
+        metadata: {
+          name: hostName,
+          namespace: 'mcp-host',
+          uid: `${hostName}-uid`,
+          resourceVersion: '42',
+        },
+        spec: {
+          host: hostName,
+          contextRef: 'context-a',
+          secretRef: 'host-secret',
+          lifecycle: { stateless: true },
+        },
+        status: { lifecycle: { state: 'suspended', wakeHandledGeneration: 0 } },
+      })
     }),
     getNamespacedCustomObjectStatus: vi.fn().mockResolvedValue({ status: { conditions: [] } }),
     replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
@@ -220,9 +228,18 @@ export function createMockCustomApi(): MockCustomApi {
 export function createMockNetworkingApi(): MockNetworkingApi {
   return {
     createNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
+    // name + uid + resourceVersion because that is what a real apiserver read
+    // returns, and the NetworkPolicy safety mutations (safetyPolicyIdentity)
+    // refuse to act on a partial identity — a delete keyed on name alone could
+    // hit a policy recreated between the read and the write.
     readNamespacedNetworkPolicy: vi.fn(({ name }: { name?: string } = {}) =>
       Promise.resolve({
-        metadata: { resourceVersion: '1', labels: hccOwnedLabels(name) },
+        metadata: {
+          name,
+          uid: `uid-${name ?? 'unnamed'}`,
+          resourceVersion: '1',
+          labels: hccOwnedLabels(name),
+        },
       } as MockK8sResource)
     ),
     replaceNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
@@ -272,4 +289,10 @@ export function asNetworkingApi(mock: MockNetworkingApi): k8s.NetworkingV1Api {
 
 export function asRbacApi(mock: MockRbacApi): k8s.RbacAuthorizationV1Api {
   return mock as unknown as k8s.RbacAuthorizationV1Api
+}
+
+/** Constructor-only KubeConfig: every makeApiClient returns an empty stub. */
+export function makeStubKc(): k8s.KubeConfig {
+  const stub = new Proxy({}, { get: () => vi.fn() })
+  return { makeApiClient: () => stub } as unknown as k8s.KubeConfig
 }

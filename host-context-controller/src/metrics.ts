@@ -49,6 +49,14 @@ function gauge(options: {
  */
 const RECONCILE_LATENCY_BUCKETS = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 15, 45, 120] as const
 
+/**
+ * Pass-duration buckets. Shared admission histograms top at 120s; GKE watch
+ * recycle and the #462 duration criterion need an explicit 300s cut plus tails.
+ */
+export const NETWORKPOLICY_PASS_DURATION_BUCKETS = [
+  1, 5, 15, 60, 120, 300, 600, 1200, 1800, 3600,
+] as const
+
 /** Idempotent Histogram helper mirroring counter()/gauge(). */
 function histogram(options: {
   name: string
@@ -77,6 +85,87 @@ export const networkPoliciesTotal = gauge({
   name: 'clerum_hcc_networkpolicies_total',
   help: 'Total number of NetworkPolicies managed by HCC',
   labelNames: ['layer'] as const,
+})
+
+export const initialConvergenceRetriesTotal = counter({
+  name: 'clerum_hcc_initial_convergence_retries_total',
+  help: 'Initial background convergence retries scheduled after a failed fleet pass.',
+  labelNames: ['lane'] as const,
+})
+
+export const initialConvergenceLastSuccessTimestampSeconds = gauge({
+  name: 'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+  help: 'Unix timestamp of the last successful initial background convergence pass.',
+  labelNames: ['lane'] as const,
+})
+
+export const initialConvergenceSwallowedTotal = counter({
+  name: 'clerum_hcc_initial_convergence_swallowed_total',
+  help: 'Initial background convergence requests that returned without certifying.',
+  labelNames: ['lane', 'sink'] as const,
+})
+
+export const initialConvergenceEffectsDroppedTotal = counter({
+  name: 'clerum_hcc_initial_convergence_effects_dropped_total',
+  help: 'Positive NetworkPolicy effects dropped because the pass inventory lease was retired.',
+  labelNames: ['lane', 'kind'] as const,
+})
+
+export const initialConvergencePassResultsTotal = counter({
+  name: 'clerum_hcc_initial_convergence_pass_results_total',
+  help: 'Named outcomes of initial background convergence passes.',
+  labelNames: ['lane', 'result'] as const,
+})
+
+export const initialConvergencePassDurationSeconds = histogram({
+  name: 'clerum_hcc_initial_convergence_pass_duration_seconds',
+  help: 'Seconds spent in an initial background convergence pass, labeled by named result.',
+  labelNames: ['lane', 'result'] as const,
+  buckets: NETWORKPOLICY_PASS_DURATION_BUCKETS,
+})
+
+export const networkPolicySafetyPassDurationSeconds = histogram({
+  name: 'clerum_hcc_networkpolicy_safety_pass_duration_seconds',
+  help: 'Seconds until an authoritative NetworkPolicy safety pass has revoked stale allows.',
+  labelNames: ['outcome'] as const,
+  buckets: NETWORKPOLICY_PASS_DURATION_BUCKETS,
+})
+
+export const networkPolicySafetyPassPoliciesTotal = counter({
+  name: 'clerum_hcc_networkpolicy_safety_pass_policies_total',
+  help: 'NetworkPolicies listed and revoked by authoritative HCC safety passes.',
+  labelNames: ['operation'] as const,
+})
+
+export const netPolOrphansDeletedTotal = counter({
+  name: 'clerum_hcc_netpol_orphans_deleted_total',
+  help: 'Orphan NetworkPolicies deleted by an HCC fullReconcile sweep.',
+  labelNames: ['lane'] as const,
+})
+
+export const netPolOrphanSweepCappedTotal = counter({
+  name: 'clerum_hcc_netpol_orphan_sweep_capped_total',
+  help: 'NetworkPolicy orphan sweeps that refused deletes because the candidate count exceeded the absolute or percent cap. The pass still certifies.',
+  labelNames: ['reason'] as const,
+})
+
+export const netPolResyncTicksSkippedTotal = counter({
+  name: 'clerum_hcc_netpol_resync_ticks_skipped_total',
+  help: 'Periodic NetworkPolicy resync ticks skipped because a full pass (`pass-in-flight`) or a defaults-only tick (`defaults-only-in-flight`) was already in flight.',
+  labelNames: ['reason'] as const,
+})
+
+export const netPolDefaultsOnlyTicksTotal = counter({
+  name: 'clerum_hcc_netpol_defaults_only_ticks_total',
+  help: 'NetworkPolicy defaults-only ticks by named result (success/error).',
+  labelNames: ['result'] as const,
+})
+
+export const netPolDefaultsOnlyTickDurationSeconds = histogram({
+  name: 'clerum_hcc_netpol_defaults_only_tick_duration_seconds',
+  help: 'Seconds spent in a NetworkPolicy defaults-only tick, labeled by named result.',
+  labelNames: ['result'] as const,
+  buckets: NETWORKPOLICY_PASS_DURATION_BUCKETS,
 })
 
 export const contextReconciliationsTotal = counter({
@@ -149,6 +238,14 @@ export const administrativeOutcomeReporterTotal = counter({
   labelNames: ['result'] as const,
 })
 
+// Low-cardinality Host-scoped MCP API decisions. Resource names, JWT IDs,
+// Contexts, and Secret selectors must never become metric labels.
+export const mcpHostApiRequestsTotal = counter({
+  name: 'clerum_hcc_mcp_host_api_requests_total',
+  help: 'Host-scoped MCP API requests by route class, outcome, and bounded reason.',
+  labelNames: ['action', 'outcome', 'reason'] as const,
+})
+
 // ── Host reconciliation scheduler telemetry (issue #791 follow-up) ──
 // Low-cardinality labels only — never host names, users, teams, or session IDs.
 
@@ -211,4 +308,14 @@ export const externalEgressProviderDriftTotal = counter({
   name: 'clerum_hcc_external_egress_provider_drift_total',
   help: 'Resolved IPs outside declared provider ranges (issue #299 drift canary).',
   labelNames: ['server', 'dns'] as const,
+})
+
+// External-egress DNS retry saturation (#205 audit R3-M4 / R2-L1). A binding
+// whose DNS never resolves is retried forever at the capped (maximum) backoff;
+// without this signal the still-denied binding converges nowhere yet stays
+// invisible. Tracks the COUNT of servers pinned at the cap — never a per-server
+// label — so cardinality stays flat regardless of fleet size.
+export const externalEgressRetriesAtCap = gauge({
+  name: 'clerum_hcc_external_egress_retries_at_cap',
+  help: 'McpServers whose external-egress DNS retry is pinned at the capped (maximum) backoff, i.e. repeatedly failing to converge.',
 })

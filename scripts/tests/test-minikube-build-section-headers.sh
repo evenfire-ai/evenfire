@@ -61,6 +61,15 @@ STUB
 #!/usr/bin/env bash
 printf 'docker %s\n' "$*" >>"${TEST_LOG_FILE:?}"
 case "${1:-}" in
+  context)
+    if [[ "${2:-}" == inspect ]]; then
+      if [[ "$*" == *SkipTLSVerify* ]]; then
+        printf 'unix:///tmp/evenfire-docker.sock\tfalse\t{}\n'
+      else
+        printf 'unix:///tmp/evenfire-docker.sock\n'
+      fi
+    fi
+    ;;
   inspect) echo "sha256:deadbeef0000cafedeadbeef0000cafedeadbeef" ;;
   # Empty: the host daemon holds no public image yet, so the public-image loop
   # takes its `docker pull` branch instead of "already present -- skipping".
@@ -72,6 +81,19 @@ STUB
   chmod +x "$d/bin/minikube" "$d/bin/kubectl" "$d/bin/docker"
 }
 
+# The real builder now refuses every Docker/Minikube mutation without the
+# inherited branch-profile lease. This fixture is intentionally not a live
+# worktree or cluster, so it models only the child boundary; the real lease
+# implementation is covered by test-minikube-build-images-hardening.sh.
+write_fixture_mutation_lock_stub() {
+  local d=$1
+  cat > "$d/repo/scripts/minikube/require-t2-mutation-lock.sh" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+  chmod +x "$d/repo/scripts/minikube/require-t2-mutation-lock.sh"
+}
+
 # An isolated PROJECT_DIR that is a copy of the real repo's deploy/ + scripts/,
 # so the script under test is the real one and reads the real manifest.
 prepare_repo() {
@@ -81,6 +103,7 @@ prepare_repo() {
   cp -R "$REPO_ROOT/deploy" "$d/repo/deploy"
   cp -R "$REPO_ROOT/scripts" "$d/repo/scripts"
   rm -rf "$d/repo/deploy/minikube"
+  write_fixture_mutation_lock_stub "$d"
   # An empty daemon inventory. Every base/public image then takes the "pull it"
   # branch, which is the slower path through the script and therefore the one
   # most likely to print something unexpected.
@@ -98,6 +121,9 @@ run_build() {
   RUN_OUT="$(PATH="$d/bin:$PATH" \
     TEST_LOG_FILE="$d/ops.log" \
     TEST_PRESENT_JSON="$d/present.json" \
+    T2_PROJECT_DIR="$d/repo" T2_PROFILE=clerum-test T2_CONTEXT=clerum-test \
+    MINIKUBE_PROFILE=clerum-test CONTROL_API_REAL_PG_CONTEXT=clerum-test \
+    DOCKER_HOST=unix:///tmp/evenfire-docker.sock \
     bash "$d/repo/scripts/minikube/build-images.sh" "$@" 2>&1)"
   RUN_RC=$?
 }

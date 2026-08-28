@@ -2,6 +2,7 @@
  * Shared types for the MCP Host.
  */
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
+import type { GuardrailsConfig } from './core/guardrails/config'
 import type { LlmProvider } from './llm/registryCore'
 
 /**
@@ -72,6 +73,13 @@ export interface HostSpec {
    * CR like `spec.model`; hot-reloads with the rest of the spec.
    */
   allowedModels?: HostAllowedModel[]
+  /**
+   * Guardrails — the admin-authored `Host.spec.guardrails` block (spec §5).
+   * mcp-host CONSUMES it; the CRD schema is owned by the CRD chart. Absent/empty
+   * = no guardrails = byte-identical to today (no-config compatibility, spec §5).
+   * Phase 1: only `rules` + `limits` are interpreted.
+   */
+  guardrails?: GuardrailsConfig
 }
 
 /**
@@ -131,6 +139,7 @@ export type ApiKeys = Partial<Record<LlmProvider, ProviderCredentials>>
 export interface McpServerTransport {
   type: 'sse' | 'streamableHttp' | 'stdio'
   url?: string
+  port?: number
 }
 
 /**
@@ -167,9 +176,22 @@ export interface McpServerStatus {
 export interface McpServerInfo {
   name: string
   description?: string
-  contextRef: string
+  /**
+   * Present only for development/legacy in-process configuration. The HCC v2
+   * Host inventory deliberately omits Context identity: HCC derives it from
+   * the authenticated Host JWT and never returns it to the caller.
+   */
+  contextRef?: string
   transport: McpServerTransport
+  /** Legacy development shape. HCC v2 returns only authRequired. */
   auth?: McpServerAuth
+  /** Whether the scoped HCC credential route must return a bearer. */
+  authRequired?: boolean
+  /**
+   * Opaque HCC authority revision. It changes when the authorized server,
+   * auth selector, or referenced Secret identity/resourceVersion changes.
+   */
+  credentialRevision?: string
   enabled: boolean
   status: McpServerStatus
 }

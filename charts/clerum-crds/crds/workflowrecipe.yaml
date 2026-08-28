@@ -284,7 +284,7 @@ spec:
                       # transport is mono-credential and cannot deliver Bedrock's key
                       # pair nor azure's required non-secret AZURE_OPENAI_ENDPOINT —
                       # fail at admission, not mid-workflow (see workflowService).
-                      enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita]
+                      enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax]
                       description: LLM provider.
                     secretRef:
                       type: object
@@ -558,7 +558,7 @@ spec:
                             # bedrock AND azure intentionally absent (mono-credential
                             # WRC transport; see the comment on the first llm provider
                             # enum above).
-                            enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita]
+                            enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax]
                           soul:
                             type: string
                             description: Per-step SOUL content override.

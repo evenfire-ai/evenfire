@@ -59,10 +59,16 @@ describe('LlmPriceTable', () => {
     const onDelete = vi.fn().mockResolvedValue(undefined)
     renderTable({ onEdit, onDelete })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Edit price claude/claude-sonnet-4-6' }))
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for price claude/claude-sonnet-4-6' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit' }))
     expect(onEdit).toHaveBeenCalledWith('price-1')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Delete price claude/claude-sonnet-4-6' }))
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for price claude/claude-sonnet-4-6' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
     expect(onDelete).toHaveBeenCalledWith(prices[0])
   })
 
@@ -88,7 +94,8 @@ describe('LlmPriceTable', () => {
       '/cost-and-usage/llm-prices/new?provider=openai&model=gpt-5'
     )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add price for OpenAI/gpt-5' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for price OpenAI/gpt-5' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Add price' }))
     expect(onAddMissingPrice).toHaveBeenCalledWith({ provider: 'openai', model: 'gpt-5' })
   })
 

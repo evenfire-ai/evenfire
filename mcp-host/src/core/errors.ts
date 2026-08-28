@@ -39,7 +39,15 @@ export class LlmError extends AgentError {
     code: LlmErrorCode,
     /** True when the caller may safely retry the entire request after a delay. */
     public readonly retryable: boolean,
-    cause?: Error
+    cause?: Error,
+    /**
+     * Additive diagnostics (spec 02, Pieza A). The provider HTTP status and the
+     * provider-native error code/type that produced `code`, threaded from
+     * `ClassifiedError` down to `TaskError`. Optional so existing call sites
+     * (positional, all args before these) remain unchanged.
+     */
+    public readonly httpStatus?: number,
+    public readonly providerCode?: string
   ) {
     super(message, code, cause)
     this.name = 'LlmError'

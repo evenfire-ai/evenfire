@@ -40,7 +40,9 @@
 > **This quick start runs the whole platform on a local [minikube](https://minikube.sigs.k8s.io/) cluster** — the fastest way to try Evenfire on your workstation. 
 
 Stand up every service on minikube with one command, including a seeded agent
-named `chatllm`:
+named `chatllm`. On a fresh minimal install, setup consumes the first-run
+admin bootstrap before any login, creates the matching Desktop identity, and
+records the governed `initial_setup` GFS operator link atomically:
 
 ```bash
 git clone https://github.com/evenfire-ai/evenfire.git && cd evenfire
@@ -49,6 +51,11 @@ cp .env.example .env
 MINIKUBE_IMAGE_TAG=latest make minikube-setup   # see the note below on this override
 make minikube-status                            # wait for every deployment READY
 ```
+
+The seeded `admin@evenfire.local` Desktop account is therefore the initial GFS
+operator. Re-running setup is idempotent: it may log in to verify the existing
+active link, but it never recreates a revoked link or silently creates a second
+ordinary member. If the link is missing, setup stops with an actionable error.
 
 Then run the UIs from your workstation and say hello to the `chatllm` agent:
 
@@ -168,6 +175,7 @@ environment variable; setup infers the matching provider).
 | Moonshot (Kimi)  | `moonshot`       | OpenAI-compatible |
 | Nebius           | `nebius`         | OpenAI-compatible |
 | Novita AI        | `novita`         | OpenAI-compatible |
+| MiniMax          | `minimax`        | OpenAI-compatible |
 | Azure OpenAI     | `azure`          | Light driver      |
 
 Most providers are OpenAI-compatible and plug in as config with no custom code;

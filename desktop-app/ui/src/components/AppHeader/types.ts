@@ -1,4 +1,6 @@
 export type AppHeaderProps = {
+  searchFocusRequestId?: number
+  notificationOpenRequestId?: number
   notificationTrayMode?: 'overlay' | 'drawer'
   notificationTrayReady?: boolean
   onNotificationTrayOpenChange?: (open: boolean) => void
@@ -30,4 +32,19 @@ export type SearchTeamResult = {
   id: string
   name: string
   memberCount: number
+}
+
+export type SearchPluginResult = {
+  key: string
+  name: string
+  namespace: string
+  status: string | null
+}
+
+export type SearchAppResult = {
+  key: string
+  appRef: string
+  label: string
+  description: string | null
+  ready: boolean
 }

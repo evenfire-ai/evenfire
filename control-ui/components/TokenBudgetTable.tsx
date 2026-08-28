@@ -9,6 +9,7 @@ import {
   formatBudgetScope,
   periodLabel,
 } from '@lib/budgets'
+import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconBudget } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
@@ -16,7 +17,7 @@ import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
 import type { TokenBudgetTableProps } from './TokenBudgetTable.types'
-import { IconPencil, IconRefresh, IconX } from './icons'
+import { IconRefresh } from './icons'
 
 const BUDGET_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name', minWidth: '9rem' },
@@ -251,23 +252,24 @@ function BudgetRow({
         </button>
       </td>
       <td className="cu-tb-actions">
-        <button
-          type="button"
-          className="cu-btn cu-btn--icon cu-btn--toolbar"
-          onClick={() => onEdit(budget.id)}
-          aria-label={`Edit budget ${budget.name}`}
-        >
-          <IconPencil width={16} height={16} />
-        </button>
-        <button
-          type="button"
-          className="cu-btn cu-btn--icon cu-btn--danger-icon"
-          onClick={() => void onDelete(budget)}
-          disabled={deleting}
-          aria-label={deleting ? 'Deleting budget…' : `Delete budget ${budget.name}`}
-        >
-          <IconX width={16} height={16} />
-        </button>
+        <RowActionsMenu
+          ariaLabel={`Actions for budget ${budget.name}`}
+          horizontalTrigger
+          actions={[
+            {
+              key: 'edit',
+              label: 'Edit',
+              onClick: () => onEdit(budget.id),
+            },
+            {
+              key: 'delete',
+              label: deleting ? 'Deleting…' : 'Delete',
+              danger: true,
+              disabled: deleting,
+              onClick: () => void onDelete(budget),
+            },
+          ]}
+        />
       </td>
     </tr>
   )

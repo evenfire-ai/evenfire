@@ -10,6 +10,7 @@ import { CreatePageHeader } from '@components/CreatePageHeader'
 import { CreateStepFlow } from '@components/CreateStepFlow'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { EgressEditor } from '@components/EgressEditor'
+import { HookInstallForm } from '@components/HookInstallForm'
 import { RegistryInstallForm } from '@components/RegistryInstallForm'
 import { IconStore } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
@@ -128,7 +129,7 @@ export function providerForModel(model: string, catalog: LlmAllowedModel[]): str
 
 // Distinct providers the operator has enabled, for the override dropdown. Keeps
 // the picker honest — only providers with configured credentials are offered,
-// instead of a static enum of all 21.
+// instead of a static enum of all 22.
 export function enabledProviders(catalog: LlmAllowedModel[]): string[] {
   const seen = new Set<string>()
   for (const row of catalog) {
@@ -611,7 +612,12 @@ function RegistryInstallPageContent() {
   }, [entryName, entryVersion])
 
   const isPrivate = entry?.visibility === 'private'
-  const kindLabel = entry?.entry_type === 'recipe' ? 'plugin' : 'connector'
+  const kindLabel =
+    entry?.entry_type === 'recipe'
+      ? 'plugin'
+      : entry?.entry_type === 'llm-hook'
+        ? 'guardrail hook'
+        : 'connector'
   // Scoped names are stored as `@org/name`; surface the org for a private entry.
   const orgScope = entry ? (entry.name.match(/^(@[^/]+)\//)?.[1] ?? null) : null
   const headerTitle = isPrivate ? `Install a private ${kindLabel}` : 'Install from Marketplace'
@@ -652,6 +658,12 @@ function RegistryInstallPageContent() {
                     CONTROL_ROUTES.plugins.detail(DEFAULT_WORKFLOW_RECIPE_NAMESPACE, recipeName)
                   )
                 }
+              />
+            ) : entry?.entry_type === 'llm-hook' ? (
+              <HookInstallForm
+                entry={entry}
+                onCancel={() => router.push(CONTROL_ROUTES.marketplace.root)}
+                onInstalled={() => router.push(CONTROL_ROUTES.guardrails.root)}
               />
             ) : entry ? (
               <RegistryInstallForm

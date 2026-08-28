@@ -36,6 +36,10 @@ export async function replaceWithConflictRetry<
    * when a meaningful change is still required.
    */
   isUpToDate?: (body: T, existing: T) => boolean
+  /** Reject an object whose identity or ownership is unsafe to replace. */
+  validateExisting?: (existing: T) => void
+  /** Rechecked immediately before every Kubernetes write attempt. */
+  mutationAllowed?: () => boolean
   maxAttempts?: number
 }): Promise<void> {
   const {
@@ -47,10 +51,19 @@ export async function replaceWithConflictRetry<
     replace,
     mergeExisting,
     isUpToDate,
+    validateExisting,
+    mutationAllowed,
     maxAttempts = 3,
   } = opts
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const existing = await read()
+    let existing: T
+    try {
+      existing = await read()
+    } catch (err) {
+      if (getErrorCode(err) === 404) return
+      throw err
+    }
+    validateExisting?.(existing)
     const desired = resolveBody ? await resolveBody() : body
     const base: T = {
       ...desired,
@@ -58,6 +71,7 @@ export async function replaceWithConflictRetry<
     }
     const next = mergeExisting ? mergeExisting(base, existing) : base
     if (isUpToDate?.(next, existing)) return
+    if (mutationAllowed && !mutationAllowed()) return
     try {
       await replace(next)
       const suffix = attempt > 1 ? ` (after ${attempt} attempts)` : ''
@@ -165,14 +179,121 @@ export function preserveServiceAssignedFields<
   }
 }
 
+/**
+ * True when the merged desired Service is equivalent to the live object, so a
+ * replace would be a no-op. Canonicalize first: the apiserver default-fills
+ * type/sessionAffinity/internalTrafficPolicy/protocol and omitted targetPort,
+ * and key order is not stable (#307). Arrays stay in author order (#214).
+ * Doubt or a malformed object returns false (fail-open-to-write).
+ */
+export function serviceMatchesDesired(
+  desired: k8s.V1Service | undefined,
+  existing: k8s.V1Service | undefined
+): boolean {
+  try {
+    if (!desired?.spec || !existing?.spec) return false
+    return (
+      JSON.stringify(normalizeServiceForComparison(desired)) ===
+      JSON.stringify(normalizeServiceForComparison(existing))
+    )
+  } catch {
+    return false
+  }
+}
+
+function stripServerOwnedMetadata(object: {
+  status?: unknown
+  metadata?: {
+    resourceVersion?: unknown
+    uid?: unknown
+    generation?: unknown
+    creationTimestamp?: unknown
+    managedFields?: unknown
+    selfLink?: unknown
+  }
+}): void {
+  delete object.status
+  delete object.metadata?.resourceVersion
+  delete object.metadata?.uid
+  delete object.metadata?.generation
+  delete object.metadata?.creationTimestamp
+  delete object.metadata?.managedFields
+  delete object.metadata?.selfLink
+}
+
+function normalizeServiceForComparison(service: k8s.V1Service): unknown {
+  const normalized = structuredClone(service)
+  stripServerOwnedMetadata(normalized)
+
+  const spec = normalized.spec
+  if (spec) {
+    if (spec.type === 'ClusterIP') delete spec.type
+    if (spec.sessionAffinity === 'None') delete spec.sessionAffinity
+    if (spec.internalTrafficPolicy === 'Cluster') delete spec.internalTrafficPolicy
+    for (const port of spec.ports ?? []) {
+      if (port.protocol === 'TCP') delete port.protocol
+      if (port.targetPort === undefined) port.targetPort = port.port
+    }
+  }
+
+  return canonicalizeValue(normalized)
+}
+
+/**
+ * True when the desired NetworkPolicy is equivalent to the live object, so a
+ * replace would be a no-op. Canonicalize first: the apiserver default-fills
+ * policyTypes and ports[].protocol=TCP, and key order is not stable (#307).
+ * Arrays stay in author order (#214). Doubt or a malformed object returns
+ * false (fail-open-to-write). Distinct from `sameNetworkPolicySpec` (spec-only
+ * safety-inventory filter, no default-fill) and `egressSignature` (#299
+ * no-churn fingerprint). Do not unify those predicates here (#473).
+ */
+export function networkPolicyMatchesDesired(
+  desired: k8s.V1NetworkPolicy | undefined,
+  existing: k8s.V1NetworkPolicy | undefined
+): boolean {
+  try {
+    if (!desired?.spec || !existing?.spec) return false
+    return (
+      JSON.stringify(normalizeNetworkPolicyForComparison(desired)) ===
+      JSON.stringify(normalizeNetworkPolicyForComparison(existing))
+    )
+  } catch {
+    return false
+  }
+}
+
+function normalizeNetworkPolicyForComparison(policy: k8s.V1NetworkPolicy): unknown {
+  const normalized = structuredClone(policy) as k8s.V1NetworkPolicy & { status?: unknown }
+  stripServerOwnedMetadata(normalized)
+
+  const spec = normalized.spec
+  if (spec) {
+    // Kubernetes SetDefaults_NetworkPolicy fills when PolicyTypes is omitted or empty.
+    if (!spec.policyTypes?.length) {
+      spec.policyTypes = (spec.egress?.length ?? 0) > 0 ? ['Ingress', 'Egress'] : ['Ingress']
+    }
+    for (const rule of [...(spec.ingress ?? []), ...(spec.egress ?? [])]) {
+      for (const port of rule.ports ?? []) {
+        if (port.protocol === 'TCP') delete port.protocol
+      }
+    }
+  }
+
+  return canonicalizeValue(normalized)
+}
+
 /** Create-or-replace a NetworkPolicy (409 catch → conflict-retry replace). */
 export async function applyNetworkPolicy(
   api: k8s.NetworkingV1Api,
   name: string,
   namespace: string,
   policy: k8s.V1NetworkPolicy,
-  logPrefix = '[NetPol]'
+  logPrefix = '[NetPol]',
+  mutationAllowed?: () => boolean,
+  validateExisting?: (existing: k8s.V1NetworkPolicy) => void
 ): Promise<void> {
+  if (mutationAllowed && !mutationAllowed()) return
   try {
     await api.createNamespacedNetworkPolicy({ namespace, body: policy })
     console.log(`${logPrefix} Created policy "${name}" in ${namespace}`)
@@ -188,7 +309,31 @@ export async function applyNetworkPolicy(
     body: policy,
     read: () => api.readNamespacedNetworkPolicy({ name, namespace }),
     replace: body => api.replaceNamespacedNetworkPolicy({ name, namespace, body }),
+    mutationAllowed,
+    validateExisting,
+    isUpToDate: networkPolicyMatchesDesired,
   })
+}
+
+/**
+ * Recursive key-sort used by the no-op gates (Role, Service, Deployment,
+ * NetworkPolicy apply). Arrays keep author order. Undefined-valued keys are
+ * dropped. A second copy of this walk is a #307-class drift: the skip would
+ * silently stop matching.
+ *
+ * Distinct from `canonicalStringify` (top-level Secret key list) and from the
+ * egressSignature walker in networkPolicyReconciler, which keeps undefined
+ * keys. Do not unify those (#473 / #299).
+ */
+export function canonicalizeValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeValue)
+  if (typeof value !== 'object' || value === null) return value
+  const canonical: Record<string, unknown> = {}
+  for (const key of Object.keys(value).sort()) {
+    const entry = (value as Record<string, unknown>)[key]
+    if (entry !== undefined) canonical[key] = canonicalizeValue(entry)
+  }
+  return canonical
 }
 
 /**

@@ -40,6 +40,8 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "${PROJECT_DIR}/scripts/e2e/load-dotenv.sh"
 # shellcheck source=scripts/e2e/admin-credentials.sh
 source "${PROJECT_DIR}/scripts/e2e/admin-credentials.sh"
+# shellcheck source=scripts/e2e/minimal-bootstrap-contract.sh
+source "${PROJECT_DIR}/scripts/e2e/minimal-bootstrap-contract.sh"
 
 # ── Color helpers ──────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -337,6 +339,39 @@ export ADMIN_PASSWORD
 
 PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 KC="kubectl --context=${PROFILE}"
+# Full setup is a mutating profile transition as well. It acquires the same
+# branch-owned lease used by T2 when run standalone, or validates the inherited
+# lease when called by the T2 orchestrator. This is initialized before the
+# config-only seam but acquired only after the profile is started and reachable.
+T2_PROJECT_DIR="${T2_PROJECT_DIR:-${PROJECT_DIR}}"
+T2_PROFILE="${T2_PROFILE:-${PROFILE}}"
+T2_CONTEXT="${T2_CONTEXT:-${PROFILE}}"
+T2_GATE_ID="${T2_GATE_ID:-minikube-setup}"
+T2_SKIP_LOCK="${T2_SKIP_LOCK:-false}"
+T2_SETUP_HANDOFF_REQUIRED="${T2_SETUP_HANDOFF_REQUIRED:-false}"
+T2_SETUP_HANDOFF_TRANSITION="${T2_SETUP_HANDOFF_TRANSITION:-}"
+T2_SETUP_HANDOFF_ROOT="${T2_SETUP_HANDOFF_ROOT:-${PROJECT_DIR}/.local-notes/infra/t2-setup-handoffs}"
+T2_SETUP_HANDOFF_TTL_SECONDS="${T2_SETUP_HANDOFF_TTL_SECONDS:-300}"
+# shellcheck source=scripts/minikube/t2-common.sh
+source "${SCRIPT_DIR}/t2-common.sh"
+case "${T2_SETUP_HANDOFF_REQUIRED}" in
+  true|false) ;;
+  *) err "T2_SETUP_HANDOFF_REQUIRED must be true or false"; exit 1 ;;
+esac
+if [ "${T2_SETUP_HANDOFF_REQUIRED}" = true ]; then
+  if [ "${T2_SKIP_LOCK}" != true ] || [ -z "${T2_RUN_ID}" ]; then
+    err "T2 setup handoff requires the live inherited T2 lease and run identity"
+    exit 1
+  fi
+  case "${T2_SETUP_HANDOFF_TRANSITION}" in
+    full-bootstrap|full-reconcile) ;;
+    *) err "T2 setup handoff requires a full-bootstrap or full-reconcile transition"; exit 1 ;;
+  esac
+  if [ "${IMAGE_SOURCE}" != local ]; then
+    err "T2 setup handoff requires IMAGE_SOURCE=local"
+    exit 1
+  fi
+fi
 TOTAL_STEPS=12
 # MINIKUBE_IMAGE_TAG overrides the committed pin AT RENDER TIME ONLY.
 #
@@ -455,9 +490,102 @@ if [ "${MINIKUBE_FULL_SETUP_CONFIG_ONLY:-false}" = "true" ]; then
 fi
 
 MINIKUBE_START_SCRIPT="${MINIKUBE_START_SCRIPT:-${SCRIPT_DIR}/start.sh}"
+MINIKUBE_SETUP_DEADLINE_RUNNER="${MINIKUBE_SETUP_DEADLINE_RUNNER:-${SCRIPT_DIR}/run-with-deadline.mjs}"
+MINIKUBE_SETUP_STATUS_TIMEOUT_SECONDS="${MINIKUBE_SETUP_STATUS_TIMEOUT_SECONDS:-60}"
+MINIKUBE_SETUP_START_TIMEOUT_SECONDS="${MINIKUBE_SETUP_START_TIMEOUT_SECONDS:-900}"
+MINIKUBE_SETUP_VALIDATE_TIMEOUT_SECONDS="${MINIKUBE_SETUP_VALIDATE_TIMEOUT_SECONDS:-300}"
+MINIKUBE_SETUP_DELETE_TIMEOUT_SECONDS="${MINIKUBE_SETUP_DELETE_TIMEOUT_SECONDS:-300}"
+MINIKUBE_SETUP_DOCKER_TIMEOUT_SECONDS="${MINIKUBE_SETUP_DOCKER_TIMEOUT_SECONDS:-30}"
+
+validate_setup_deadline() {
+  local name="$1" value="$2" maximum="$3"
+  if ! [[ "${value}" =~ ^[1-9][0-9]*$ ]] || (( 10#${value} > maximum )); then
+    err "${name} must be an integer from 1 to ${maximum}"
+    return 1
+  fi
+}
+
+validate_setup_deadline MINIKUBE_SETUP_STATUS_TIMEOUT_SECONDS "${MINIKUBE_SETUP_STATUS_TIMEOUT_SECONDS}" 300
+validate_setup_deadline MINIKUBE_SETUP_START_TIMEOUT_SECONDS "${MINIKUBE_SETUP_START_TIMEOUT_SECONDS}" 1800
+validate_setup_deadline MINIKUBE_SETUP_VALIDATE_TIMEOUT_SECONDS "${MINIKUBE_SETUP_VALIDATE_TIMEOUT_SECONDS}" 900
+validate_setup_deadline MINIKUBE_SETUP_DELETE_TIMEOUT_SECONDS "${MINIKUBE_SETUP_DELETE_TIMEOUT_SECONDS}" 900
+validate_setup_deadline MINIKUBE_SETUP_DOCKER_TIMEOUT_SECONDS "${MINIKUBE_SETUP_DOCKER_TIMEOUT_SECONDS}" 300
+[[ -f "${MINIKUBE_SETUP_DEADLINE_RUNNER}" ]] || {
+  err "bounded runtime helper is missing: ${MINIKUBE_SETUP_DEADLINE_RUNNER}"
+  exit 1
+}
+
+# Acquire the branch-owned mutation lease before the first profile status probe.
+# A standalone full setup may classify a partial profile as destructive and
+# delete it, so ownership and serialization must be established before any
+# status/start/delete operation can touch Minikube.
+SETUP_LOCK_CLEANUP_DONE=false
+K8S_API_POLICY_TMP_DIR=""
+cleanup_setup_lock() {
+  local status="${1:-$?}" cleanup_status=0
+  if [ "$SETUP_LOCK_CLEANUP_DONE" = true ]; then
+    return "$status"
+  fi
+  SETUP_LOCK_CLEANUP_DONE=true
+  trap - EXIT
+  trap '' INT TERM
+  if [ -n "${K8S_API_POLICY_TMP_DIR:-}" ] && [ -d "${K8S_API_POLICY_TMP_DIR}" ]; then
+    rm -rf -- "${K8S_API_POLICY_TMP_DIR}" || cleanup_status=1
+  fi
+  t2_lock_release "$status" || cleanup_status=$?
+  if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+    status="$cleanup_status"
+  fi
+  return "$status"
+}
+handle_setup_signal() {
+  local signal="$1" status
+  case "$signal" in
+    INT) status=130 ;;
+    TERM) status=143 ;;
+    *) status=1 ;;
+  esac
+  cleanup_setup_lock "$status" || status=$?
+  exit "$status"
+}
+handle_setup_exit() {
+  local status=$?
+  cleanup_setup_lock "$status" || status=$?
+  exit "$status"
+}
+trap handle_setup_exit EXIT
+trap 'handle_setup_signal INT' INT
+trap 'handle_setup_signal TERM' TERM
+t2_require_commands
+t2_repo_metadata
+t2_profile_scope
+t2_mutation_lock
+export T2_PROJECT_DIR T2_PROFILE T2_CONTEXT T2_PROFILE_ROOT T2_PROFILE_ENV T2_PORTS_ENV T2_SKIP_LOCK T2_LOCK_TOKEN
+
+run_setup_with_deadline() {
+  local label="$1" timeout_seconds="$2"
+  shift 2
+  node "${MINIKUBE_SETUP_DEADLINE_RUNNER}" \
+    --timeout-seconds "${timeout_seconds}" \
+    --heartbeat-seconds "${MINIKUBE_DOCKER_HEARTBEAT_SECONDS:-20}" \
+    --kill-grace-seconds "${MINIKUBE_DOCKER_KILL_GRACE_SECONDS:-5}" \
+    --label "${label}" -- "$@"
+}
 
 minikube_status_snapshot() {
-  minikube -p "$PROFILE" status 2>/dev/null || true
+  local output status=0
+  output="$(run_setup_with_deadline minikube-setup-status \
+    "${MINIKUBE_SETUP_STATUS_TIMEOUT_SECONDS}" \
+    minikube -p "$PROFILE" status)" || status=$?
+  # `minikube status` legitimately returns a small non-zero code for an absent
+  # or partially started profile while still printing the state we classify
+  # below. Runner timeout/signal/spawn failures are operational failures and
+  # must not be reinterpreted as permission to start or recreate a profile.
+  if (( status >= 124 )); then
+    err "Minikube status probe failed before profile state could be classified (status ${status})"
+    return "$status"
+  fi
+  printf '%s' "$output"
 }
 
 minikube_status_is_healthy() {
@@ -483,7 +611,12 @@ recreate_broken_minikube_profile() {
     exit 1
   fi
   warn "Minikube profile '${PROFILE}' is partially started (host up, control plane down). Recreating it from scratch..."
-  minikube delete -p "$PROFILE" >/dev/null 2>&1 || true
+  if ! run_setup_with_deadline minikube-setup-delete \
+    "${MINIKUBE_SETUP_DELETE_TIMEOUT_SECONDS}" \
+    minikube delete -p "$PROFILE" >/dev/null; then
+    err "Failed to delete explicitly confirmed broken profile '${PROFILE}' within the deadline"
+    exit 1
+  fi
   ok "Removed broken '${PROFILE}' profile"
 }
 
@@ -494,7 +627,9 @@ start_minikube_cluster() {
   MINIKUBE_PROFILE="${PROFILE}" \
     MINIKUBE_MULTI_NODE="${MINIKUBE_MULTI_NODE:-false}" \
     MINIKUBE_NODES="${MINIKUBE_NODES:-}" \
-    "${MINIKUBE_START_SCRIPT}"
+    run_setup_with_deadline minikube-setup-start \
+      "${MINIKUBE_SETUP_START_TIMEOUT_SECONDS}" \
+      "${MINIKUBE_START_SCRIPT}"
   ok "Minikube cluster '${PROFILE}' started"
 }
 
@@ -503,12 +638,18 @@ validate_minikube_cluster() {
   MINIKUBE_PROFILE="${PROFILE}" \
     MINIKUBE_MULTI_NODE="${MINIKUBE_MULTI_NODE:-false}" \
     MINIKUBE_NODES="${MINIKUBE_NODES:-}" \
-    "${MINIKUBE_START_SCRIPT}" --validate-only
+    run_setup_with_deadline minikube-setup-validate \
+      "${MINIKUBE_SETUP_VALIDATE_TIMEOUT_SECONDS}" \
+      "${MINIKUBE_START_SCRIPT}" --validate-only
   ok "Minikube cluster '${PROFILE}' validated"
 }
 
 maybe_exit_after_cluster_step() {
   if [ "${MINIKUBE_SETUP_EXIT_AFTER_CLUSTER:-false}" = "true" ]; then
+    if [ "${T2_SETUP_HANDOFF_REQUIRED}" = true ]; then
+      err "T2 strict setup cannot stop after cluster verification"
+      return 1
+    fi
     log "MINIKUBE_SETUP_EXIT_AFTER_CLUSTER=true — stopping after cluster verification"
     exit 0
   fi
@@ -536,13 +677,82 @@ ensure_control_postgres_ready() {
   return 1
 }
 
+# A previous full-setup may have been interrupted after it fenced one or more
+# database writers. Read and validate that durable journal before the first
+# namespace/CRD/Secret mutation. If the journal is in an active recovery phase,
+# close all four writers again before the later recovery code resumes. The
+# journal is deliberately not advanced here: if this guard is interrupted, the
+# old phase remains conservative and the next run repeats the fence.
+guard_interrupted_writer_deployment() {
+  local deployment="$1" selector="$2" desired pods
+  $KC -n control-plane scale "deployment/${deployment}" --replicas=0 >/dev/null || return 1
+  desired="$($KC -n control-plane get "deployment/${deployment}" \
+    -o 'jsonpath={.spec.replicas}')" || return 1
+  [ "$desired" = 0 ] || { err "${deployment} did not converge to zero desired replicas before setup mutation"; return 1; }
+  pods="$($KC -n control-plane get pods -l "$selector" -o name)" || return 1
+  [ -z "$pods" ] || $KC -n control-plane wait --for=delete pod \
+    -l "$selector" --timeout=180s >/dev/null || return 1
+  pods="$($KC -n control-plane get pods -l "$selector" -o name)" || return 1
+  [ -z "$pods" ] || { err "${deployment} pods remain after the pre-mutation fence"; return 1; }
+}
+
+guard_interrupted_writer_recovery() {
+  local state_helper="${SCRIPT_DIR}/writer-recovery-state.py"
+  local state_file="${PROJECT_DIR}/.local-notes/infra/runs/writer-recovery/${PROFILE}.json"
+  local state_output state_status=0 phase hcc_replicas workflow_replicas trace_replicas control_api_replicas state_head
+
+  [[ -f "${state_file}" ]] || return 0
+  [[ -f "${state_helper}" ]] || {
+    err "Durable writer-recovery state exists but its validator is missing; refusing profile mutation"
+    return 1
+  }
+  state_output="$(python3 "${state_helper}" read \
+    --path "${state_file}" \
+    --profile "${PROFILE}" \
+    --context "${T2_CONTEXT}" \
+    --worktree "${PROJECT_DIR}" \
+    --branch "${T2_BRANCH}" \
+    --head "${T2_HEAD}" \
+    --include-head)" || state_status=$?
+  if [ "${state_status}" -ne 0 ]; then
+    err "Unable to validate durable writer-recovery state before cluster mutation (status ${state_status})"
+    return 1
+  fi
+  [[ "${state_output}" == NONE ]] && return 0
+
+  IFS='|' read -r phase hcc_replicas workflow_replicas trace_replicas \
+    control_api_replicas state_head <<<"${state_output}"
+  [[ "${phase}" == planned ]] && return 0
+  [[ "${phase}" =~ ^(hcc-fencing|hcc-fenced|workflow-fencing|workflow-fenced|trace-fencing|trace-fenced|api-fencing|api-fenced|policy-ready|roles-ready|api-restoring|api-restored|overlay-applying|overlay-applied)$ ]] || {
+    err "Durable writer-recovery state has an unsupported phase before cluster mutation: ${phase}"
+    return 1
+  }
+  [[ "${hcc_replicas}" =~ ^[0-9]+$ ]] &&
+    [[ "${workflow_replicas}" =~ ^[0-9]+$ ]] &&
+    [[ "${trace_replicas}" =~ ^[0-9]+$ ]] &&
+    [[ "${control_api_replicas}" =~ ^[1-9][0-9]*$ ]] || {
+      err "Durable writer-recovery state has invalid replica counts; refusing profile mutation"
+      return 1
+    }
+
+  log "Resuming interrupted writer recovery from phase ${phase} (recorded HEAD ${state_head}) — fencing all writers before setup mutations"
+  guard_interrupted_writer_deployment host-context-controller 'app=host-context-controller' || return 1
+  guard_interrupted_writer_deployment workflow-recipes 'app=workflow-recipes' || return 1
+  guard_interrupted_writer_deployment trace-maintenance-worker 'app=trace-maintenance-worker' || return 1
+  guard_interrupted_writer_deployment control-api 'app=control-api,!clerum.io/component' || return 1
+}
+
 # ======================================================================
 # Step 1: Preconditions
 # ======================================================================
 step_header 1 $TOTAL_STEPS "Preconditions"
 
-# Check Docker is running
-if ! docker info &>/dev/null; then
+# Check Docker through the same isolated, bounded local-endpoint contract used
+# by T1 and image builds. This avoids paying setup cost after an ambient Docker
+# context or credential helper has stalled.
+if ! MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS="${MINIKUBE_SETUP_DOCKER_TIMEOUT_SECONDS}" \
+  MINIKUBE_DOCKER_START_PROBE_TIMEOUT_SECONDS="${MINIKUBE_SETUP_DOCKER_TIMEOUT_SECONDS}" \
+  bash "${SCRIPT_DIR}/docker-cli-env.sh" --check-info >/dev/null; then
   err "Docker is not running. Please start Docker Desktop first."
   exit 1
 fi
@@ -649,6 +859,18 @@ if ! $KC cluster-info &>/dev/null; then
 fi
 ok "Cluster '${PROFILE}' is reachable"
 maybe_exit_after_cluster_step
+
+# Validate the explicit context and exact Minikube profile identity before an
+# interrupted-recovery journal is allowed to scale any writer. Reachability
+# alone is not authority: a kubeconfig can name another local cluster.
+t2_profile_status
+t2_context_check
+t2_profile_context_identity_check
+
+# This is intentionally after the profile becomes reachable but before the
+# first setup apply. A stopped profile may be started safely; an active journal
+# must be fenced before any workload/configuration mutation.
+guard_interrupted_writer_recovery || exit 1
 
 # ======================================================================
 # Step 3: Namespaces + CRDs
@@ -960,21 +1182,591 @@ ok "Minikube K8s API CIDRs refreshed"
 # Upgrade path: stage the additive reader credential before the full overlay
 # changes HCC. Fresh bootstrap has no ready control-api yet and remains
 # fail-closed until the post-migration branch immediately below.
+#
+# A partially bootstrapped REUSE_DB profile is a distinct state from both a
+# fresh bootstrap and a healthy upgrade: an existing GFS writer proves that the
+# profile already owns a serving plane, while an unready control-api can mean
+# that the runtime-role Secret is still waiting for the migration below. Do not
+# cut HCC over in that state, but do not deadlock recovery on the same readiness
+# condition either. Fence the control-plane writers before migrations/roles,
+# then complete the full overlay and GFS credential reconciliation only after
+# runtime-role readiness has been proved.
+WRITER_RECOVERY=false
+PARTIAL_BOOTSTRAP_RECOVERY=false
+PARTIAL_CONTROL_API_REPLICAS=""
+PARTIAL_WORKFLOW_REPLICAS=""
+PARTIAL_HCC_REPLICAS=""
+PARTIAL_TRACE_REPLICAS=""
+PARTIAL_CONTROL_API_FENCED=false
+PARTIAL_WORKFLOW_FENCED=false
+PARTIAL_HCC_FENCED=false
+PARTIAL_TRACE_FENCED=false
+WRITER_RECOVERY_STATE_HELPER="${SCRIPT_DIR}/writer-recovery-state.py"
+WRITER_RECOVERY_STATE_ROOT="${PROJECT_DIR}/.local-notes/infra/runs/writer-recovery"
+WRITER_RECOVERY_STATE_FILE="${WRITER_RECOVERY_STATE_ROOT}/${PROFILE}.json"
+WRITER_RECOVERY_STATE_LOADED=false
+WRITER_RECOVERY_STATE_PHASE=""
+WRITER_RECOVERY_STATE_HEAD=""
+WRITER_RECOVERY_FENCE_PENDING=false
+WRITER_RECOVERY_MIGRATIONS_COMPLETE=false
+K8S_API_EGRESS_POLICY_FILE=""
+K8S_API_EGRESS_POLICY_DRIFT=false
+RECOVERY_OVERLAY_FILE=""
+
+writer_recovery_state_cli() {
+  local command="$1"
+  shift
+  python3 "$WRITER_RECOVERY_STATE_HELPER" "$command" \
+    --path "$WRITER_RECOVERY_STATE_FILE" \
+    --profile "$PROFILE" \
+    --context "$T2_CONTEXT" \
+    --worktree "$PROJECT_DIR" \
+    --branch "$T2_BRANCH" \
+    --head "$T2_HEAD" "$@"
+}
+
+writer_recovery_state_write() {
+  local phase="$1"
+  writer_recovery_state_cli write \
+    --phase "$phase" \
+    --hcc "$PARTIAL_HCC_REPLICAS" \
+    --workflow "$PARTIAL_WORKFLOW_REPLICAS" \
+    --trace "$PARTIAL_TRACE_REPLICAS" \
+    --control-api "$PARTIAL_CONTROL_API_REPLICAS"
+}
+
+writer_recovery_state_phase() {
+  writer_recovery_state_write "$1"
+  WRITER_RECOVERY_STATE_LOADED=true
+  WRITER_RECOVERY_STATE_PHASE="$1"
+}
+
+writer_recovery_state_clear() {
+  writer_recovery_state_cli clear
+  WRITER_RECOVERY_STATE_LOADED=false
+  WRITER_RECOVERY_STATE_PHASE=""
+  WRITER_RECOVERY_FENCE_PENDING=false
+}
+
+writer_recovery_state_load() {
+  local state_output state_status=0
+  state_output="$(writer_recovery_state_cli read --include-head)" || state_status=$?
+  if [ "$state_status" -ne 0 ]; then
+    err "Unable to validate the durable writer-recovery state; refusing profile mutation"
+    return 1
+  fi
+  if [ "$state_output" = NONE ]; then
+    return 0
+  fi
+  IFS='|' read -r WRITER_RECOVERY_STATE_PHASE PARTIAL_HCC_REPLICAS \
+    PARTIAL_WORKFLOW_REPLICAS PARTIAL_TRACE_REPLICAS \
+    PARTIAL_CONTROL_API_REPLICAS WRITER_RECOVERY_STATE_HEAD <<<"$state_output"
+  [ -n "$WRITER_RECOVERY_STATE_PHASE" ] &&
+    [[ "$PARTIAL_HCC_REPLICAS" =~ ^[0-9]+$ ]] &&
+    [[ "$PARTIAL_WORKFLOW_REPLICAS" =~ ^[0-9]+$ ]] &&
+    [[ "$PARTIAL_TRACE_REPLICAS" =~ ^[0-9]+$ ]] &&
+    [[ "$PARTIAL_CONTROL_API_REPLICAS" =~ ^[1-9][0-9]*$ ]] || {
+      err "Durable writer-recovery state is incomplete; refusing profile mutation"
+      return 1
+    }
+  WRITER_RECOVERY_STATE_LOADED=true
+  case "$WRITER_RECOVERY_STATE_PHASE" in
+    planned)
+      # No scale has been authorized yet. Re-run classification with the
+      # recorded original replica counts and either clear or resume it.
+      ;;
+    hcc-fencing|hcc-fenced)
+      WRITER_RECOVERY=true
+      PARTIAL_BOOTSTRAP_RECOVERY=true
+      PARTIAL_HCC_FENCED=true
+      WRITER_RECOVERY_FENCE_PENDING=true
+      ;;
+    workflow-fencing|workflow-fenced)
+      WRITER_RECOVERY=true
+      PARTIAL_BOOTSTRAP_RECOVERY=true
+      PARTIAL_HCC_FENCED=true
+      PARTIAL_WORKFLOW_FENCED=true
+      WRITER_RECOVERY_FENCE_PENDING=true
+      ;;
+    trace-fencing|trace-fenced)
+      WRITER_RECOVERY=true
+      PARTIAL_BOOTSTRAP_RECOVERY=true
+      PARTIAL_HCC_FENCED=true
+      PARTIAL_WORKFLOW_FENCED=true
+      PARTIAL_TRACE_FENCED=true
+      WRITER_RECOVERY_FENCE_PENDING=true
+      ;;
+    api-fencing)
+      WRITER_RECOVERY=true
+      PARTIAL_BOOTSTRAP_RECOVERY=true
+      PARTIAL_HCC_FENCED=true
+      PARTIAL_WORKFLOW_FENCED=true
+      PARTIAL_TRACE_FENCED=true
+      PARTIAL_CONTROL_API_FENCED=true
+      WRITER_RECOVERY_FENCE_PENDING=true
+      ;;
+    api-fenced)
+      WRITER_RECOVERY=true
+      PARTIAL_BOOTSTRAP_RECOVERY=true
+      PARTIAL_HCC_FENCED=true
+      PARTIAL_WORKFLOW_FENCED=true
+      PARTIAL_TRACE_FENCED=true
+      PARTIAL_CONTROL_API_FENCED=true
+      WRITER_RECOVERY_FENCE_PENDING=true
+      ;;
+    policy-ready)
+      WRITER_RECOVERY=true
+      PARTIAL_BOOTSTRAP_RECOVERY=true
+      PARTIAL_HCC_FENCED=true
+      PARTIAL_WORKFLOW_FENCED=true
+      PARTIAL_TRACE_FENCED=true
+      PARTIAL_CONTROL_API_FENCED=true
+      # A persisted policy phase is historical evidence only. Re-fence and
+      # restage the current rendered policy before any writer is restored so a
+      # Minikube API endpoint change cannot resurrect the original egress drift.
+      WRITER_RECOVERY_FENCE_PENDING=true
+      ;;
+    roles-ready|api-restoring)
+      WRITER_RECOVERY=true
+      PARTIAL_BOOTSTRAP_RECOVERY=true
+      PARTIAL_HCC_FENCED=true
+      PARTIAL_WORKFLOW_FENCED=true
+      PARTIAL_TRACE_FENCED=true
+      PARTIAL_CONTROL_API_FENCED=true
+      if [ "$WRITER_RECOVERY_STATE_HEAD" = "$T2_HEAD" ]; then
+        WRITER_RECOVERY_MIGRATIONS_COMPLETE=true
+      else
+        log "Recovery state belongs to historical HEAD ${WRITER_RECOVERY_STATE_HEAD}; re-running migrations for ${T2_HEAD} while writers remain fenced"
+      fi
+      # The phase is written before the control-api restore. An interruption
+      # after scale but before the next phase must close every writer again.
+      WRITER_RECOVERY_FENCE_PENDING=true
+      ;;
+    api-restored|overlay-applying|overlay-applied)
+      WRITER_RECOVERY=true
+      PARTIAL_BOOTSTRAP_RECOVERY=true
+      PARTIAL_HCC_FENCED=true
+      PARTIAL_WORKFLOW_FENCED=true
+      PARTIAL_TRACE_FENCED=true
+      PARTIAL_CONTROL_API_FENCED=true
+      if [ "$WRITER_RECOVERY_STATE_HEAD" = "$T2_HEAD" ]; then
+        WRITER_RECOVERY_MIGRATIONS_COMPLETE=true
+      else
+        log "Recovery state belongs to historical HEAD ${WRITER_RECOVERY_STATE_HEAD}; re-running migrations for ${T2_HEAD} while writers remain fenced"
+      fi
+      # The overlay is rendered with all four database-writer Deployments at zero.
+      # Re-fence on every post-migration resume because an interrupted apply
+      # may have recreated a writer before its durable phase was updated.
+      WRITER_RECOVERY_FENCE_PENDING=true
+      ;;
+    *)
+      err "Durable writer-recovery state has an unsupported phase: $WRITER_RECOVERY_STATE_PHASE"
+      return 1
+      ;;
+  esac
+  log "Resuming durable writer recovery at phase ${WRITER_RECOVERY_STATE_PHASE}"
+}
+
+writer_recovery_state_prepare() {
+  local state
+  if [ "$WRITER_RECOVERY_STATE_LOADED" = true ]; then
+    return 0
+  fi
+  state="$($KC -n control-plane get deployment/host-context-controller \
+    -o 'jsonpath={.spec.replicas}')" || return 1
+  PARTIAL_HCC_REPLICAS="$state"
+  state="$($KC -n control-plane get deployment/workflow-recipes \
+    -o 'jsonpath={.spec.replicas}')" || return 1
+  PARTIAL_WORKFLOW_REPLICAS="$state"
+  state="$($KC -n control-plane get deployment/trace-maintenance-worker \
+    -o 'jsonpath={.spec.replicas}')" || return 1
+  PARTIAL_TRACE_REPLICAS="$state"
+  state="$($KC -n control-plane get deployment/control-api \
+    -o 'jsonpath={.spec.replicas}')" || return 1
+  PARTIAL_CONTROL_API_REPLICAS="$state"
+  [[ "$PARTIAL_HCC_REPLICAS" =~ ^[0-9]+$ ]] || return 1
+  [[ "$PARTIAL_WORKFLOW_REPLICAS" =~ ^[0-9]+$ ]] || return 1
+  [[ "$PARTIAL_TRACE_REPLICAS" =~ ^[0-9]+$ ]] || return 1
+  [[ "$PARTIAL_CONTROL_API_REPLICAS" =~ ^[1-9][0-9]*$ ]] || return 1
+  writer_recovery_state_phase planned
+}
+
+writer_recovery_policy_ready() {
+  case "$WRITER_RECOVERY_STATE_PHASE" in
+    policy-ready|roles-ready|api-restored|overlay-applied) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+control_api_is_ready() {
+  local state replicas ready
+  if ! state="$($KC -n control-plane get deployment/control-api \
+    -o 'jsonpath={.spec.replicas}{"|"}{.status.readyReplicas}' 2>/dev/null)"; then
+    return 2
+  fi
+  IFS='|' read -r replicas ready <<<"$state"
+  ready="${ready:-0}"
+  if [[ ! "$replicas" =~ ^[1-9][0-9]*$ || ! "$ready" =~ ^[0-9]+$ ]]; then
+    return 2
+  fi
+  [[ "$ready" == "$replicas" ]]
+}
+
+runtime_role_secret_is_missing() {
+  local dsn
+  if ! dsn="$($KC -n control-plane get secret control-api-postgres-runtime \
+    -o 'jsonpath={.data.connection-string}' --ignore-not-found 2>/dev/null)"; then
+    return 2
+  fi
+  [ -z "$dsn" ]
+}
+
+fence_partial_control_api() {
+  local pods
+  if [[ ! "$PARTIAL_CONTROL_API_REPLICAS" =~ ^[1-9][0-9]*$ ]]; then
+    err "control-api replica count is invalid; refusing partial-bootstrap recovery"
+    return 1
+  fi
+  log "Fencing control-api writers at ${PARTIAL_CONTROL_API_REPLICAS} replica(s)"
+  writer_recovery_state_phase api-fencing
+  $KC -n control-plane scale deployment/control-api --replicas=0 >/dev/null
+  pods="$($KC -n control-plane get pods -l 'app=control-api,!clerum.io/component' -o name)" \
+    || return 1
+  if [ -n "$pods" ]; then
+    $KC -n control-plane wait --for=delete pod \
+      -l 'app=control-api,!clerum.io/component' --timeout=180s >/dev/null
+  fi
+  PARTIAL_CONTROL_API_FENCED=true
+  writer_recovery_state_phase api-fenced
+}
+
+fence_partial_workflow_reconciler() {
+  local pods
+  if [[ ! "$PARTIAL_WORKFLOW_REPLICAS" =~ ^[0-9]+$ ]]; then
+    err "workflow-recipes replica count is invalid; refusing partial-bootstrap recovery"
+    return 1
+  fi
+  log "Fencing workflow-recipes at ${PARTIAL_WORKFLOW_REPLICAS} replica(s)"
+  writer_recovery_state_phase workflow-fencing
+  $KC -n control-plane scale deployment/workflow-recipes --replicas=0 >/dev/null
+  pods="$($KC -n control-plane get pods -l app=workflow-recipes -o name)" \
+    || return 1
+  if [ -n "$pods" ]; then
+    $KC -n control-plane wait --for=delete pod \
+      -l app=workflow-recipes --timeout=180s >/dev/null
+  fi
+  PARTIAL_WORKFLOW_FENCED=true
+  writer_recovery_state_phase workflow-fenced
+}
+
+fence_partial_trace_worker() {
+  local pods desired
+  if [[ ! "${PARTIAL_TRACE_REPLICAS}" =~ ^[0-9]+$ ]]; then
+    err "trace-maintenance-worker replica count is invalid; refusing partial-bootstrap recovery"
+    return 1
+  fi
+  log "Fencing trace-maintenance-worker at zero replicas (restore ${PARTIAL_TRACE_REPLICAS} after recovery)"
+  writer_recovery_state_phase trace-fencing
+  $KC -n control-plane scale deployment/trace-maintenance-worker --replicas=0 >/dev/null
+  desired="$($KC -n control-plane get deployment/trace-maintenance-worker \
+    -o 'jsonpath={.spec.replicas}')" || return 1
+  if [[ "${desired}" != 0 ]]; then
+    err "trace-maintenance-worker did not converge to zero desired replicas; refusing recovery"
+    return 1
+  fi
+  pods="$($KC -n control-plane get pods -l app=trace-maintenance-worker -o name)" \
+    || return 1
+  if [ -n "${pods}" ]; then
+    $KC -n control-plane wait --for=delete pod \
+      -l app=trace-maintenance-worker --timeout=180s >/dev/null
+  fi
+  pods="$($KC -n control-plane get pods -l app=trace-maintenance-worker -o name)" \
+    || return 1
+  if [ -n "${pods}" ]; then
+    err "trace-maintenance-worker pods remain after the zero-replica fence; refusing recovery"
+    return 1
+  fi
+  PARTIAL_TRACE_FENCED=true
+  writer_recovery_state_phase trace-fenced
+}
+
+fence_partial_hcc() {
+  local pods
+  if [[ ! "$PARTIAL_HCC_REPLICAS" =~ ^[0-9]+$ ]]; then
+    err "host-context-controller replica count is invalid; refusing partial-bootstrap recovery"
+    return 1
+  fi
+  log "Fencing host-context-controller at ${PARTIAL_HCC_REPLICAS} replica(s)"
+  writer_recovery_state_phase hcc-fencing
+  $KC -n control-plane scale deployment/host-context-controller --replicas=0 >/dev/null
+  pods="$($KC -n control-plane get pods -l app=host-context-controller -o name)" \
+    || return 1
+  if [ -n "$pods" ]; then
+    $KC -n control-plane wait --for=delete pod \
+      -l app=host-context-controller --timeout=180s >/dev/null
+  fi
+  PARTIAL_HCC_FENCED=true
+  writer_recovery_state_phase hcc-fenced
+}
+
+fence_partial_bootstrap_writers() {
+  # HCC is fenced first so it cannot reconcile the existing GlobalFileSystem
+  # while the control-plane writer window is being closed. The control-api
+  # selector excludes migration Jobs, which intentionally share app=control-api.
+  writer_recovery_state_prepare
+  fence_partial_hcc
+  fence_partial_workflow_reconciler
+  fence_partial_trace_worker
+  fence_partial_control_api
+}
+
+apply_refreshed_k8s_api_network_policies() {
+  if [ ! -s "$K8S_API_EGRESS_POLICY_FILE" ]; then
+    err "Validated Kubernetes API NetworkPolicy manifest is missing; refusing writer recovery"
+    return 1
+  fi
+  if writer_recovery_policy_ready && [ "$K8S_API_EGRESS_POLICY_DRIFT" != true ]; then
+    log "Validated Kubernetes API egress policy already staged; resuming writer recovery"
+    return 0
+  fi
+  if [ "$K8S_API_EGRESS_POLICY_DRIFT" = true ]; then
+    # The generated k8s-api-ip.yaml is a strategic-merge patch and omits the
+    # inherited podSelector. Apply only the complete object extracted from the
+    # active kustomize render, while every control-plane writer is fenced.
+    log "Applying the complete refreshed Kubernetes API egress policy while writers are fenced"
+    $KC apply -f "$K8S_API_EGRESS_POLICY_FILE" >/dev/null
+  else
+    log "Current Kubernetes API egress policy already matches the rendered endpoint"
+  fi
+  writer_recovery_state_phase policy-ready
+}
+
+prepare_refreshed_k8s_api_network_policy() {
+  local endpoint_ip rendered_file live_file live_status=0 check_status=0
+  local octet
+  endpoint_ip="$($KC get endpoints kubernetes \
+    -o 'jsonpath={.subsets[*].addresses[*].ip}' 2>/dev/null)" || {
+      err "Unable to read the Kubernetes API endpoint; refusing writer recovery"
+      return 1
+    }
+  if [[ ! "$endpoint_ip" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+    err "Kubernetes API endpoint is not exactly one IPv4 address; refusing writer recovery"
+    return 1
+  fi
+  IFS=. read -r endpoint_octet_1 endpoint_octet_2 endpoint_octet_3 endpoint_octet_4 <<<"$endpoint_ip"
+  for octet in "$endpoint_octet_1" "$endpoint_octet_2" "$endpoint_octet_3" "$endpoint_octet_4"; do
+    if ! [[ "$octet" =~ ^[0-9]+$ ]] || (( 10#$octet > 255 )); then
+      err "Kubernetes API endpoint contains an invalid IPv4 octet; refusing writer recovery"
+      return 1
+    fi
+  done
+
+  [ -f "$WRITER_RECOVERY_STATE_HELPER" ] || {
+    err "Writer recovery state helper is missing"
+    return 1
+  }
+  [ -f "${SCRIPT_DIR}/validate-k8s-api-egress-policy.rb" ] || {
+    err "Kubernetes API policy validator is missing; refusing writer recovery"
+    return 1
+  }
+  K8S_API_POLICY_TMP_DIR="$(mktemp -d "${T2_TMP_ROOT:-${TMPDIR:-/tmp}}/evenfire-k8s-api-policy.XXXXXX")"
+  rendered_file="${K8S_API_POLICY_TMP_DIR}/rendered.yaml"
+  K8S_API_EGRESS_POLICY_FILE="${K8S_API_POLICY_TMP_DIR}/control-plane-policy.yaml"
+  live_file="${K8S_API_POLICY_TMP_DIR}/live.json"
+
+  # Render the active overlay first so the object applied during recovery
+  # includes every inherited field from the base NetworkPolicy.
+  if ! $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" >"$rendered_file"; then
+    err "Unable to render the active overlay; refusing writer recovery"
+    return 1
+  fi
+  if ! RUBYOPT=--disable=gems ruby \
+    "${SCRIPT_DIR}/validate-k8s-api-egress-policy.rb" --extract "${endpoint_ip}/32" \
+    <"$rendered_file" >"$K8S_API_EGRESS_POLICY_FILE"; then
+    err "Rendered Kubernetes API NetworkPolicy is incomplete or unsafe; refusing writer recovery"
+    return 1
+  fi
+
+  if $KC -n control-plane get networkpolicy/allow-k8s-api-egress-control-plane \
+    -o json --ignore-not-found >"$live_file" 2>/dev/null; then
+    :
+  else
+    live_status=$?
+    err "Unable to inspect the live Kubernetes API NetworkPolicy (status ${live_status}); refusing writer recovery"
+    return 1
+  fi
+  if [ ! -s "$live_file" ] || [ "$(tr -d '[:space:]' <"$live_file")" = "{}" ]; then
+    K8S_API_EGRESS_POLICY_DRIFT=true
+    log "Kubernetes API egress NetworkPolicy is absent; a complete rendered policy will be staged after fencing"
+    return 0
+  fi
+  if RUBYOPT=--disable=gems ruby \
+    "${SCRIPT_DIR}/validate-k8s-api-egress-policy.rb" --check-live "${endpoint_ip}/32" \
+    <"$live_file" >/dev/null; then
+    K8S_API_EGRESS_POLICY_DRIFT=false
+    log "Kubernetes API egress NetworkPolicy matches the current endpoint"
+    return 0
+  else
+    check_status=$?
+  fi
+  if [ "$check_status" -eq 1 ]; then
+    K8S_API_EGRESS_POLICY_DRIFT=true
+    log "Kubernetes API egress NetworkPolicy has a recognized endpoint/port drift; a complete policy will be staged after fencing"
+    return 0
+  fi
+  err "Live Kubernetes API NetworkPolicy has an unexpected shape; refusing writer recovery"
+  return 1
+}
+
+restore_partial_control_api() {
+  if [ "$PARTIAL_CONTROL_API_FENCED" != true ]; then
+    if [[ "$WRITER_RECOVERY_STATE_PHASE" == api-restored ||
+      "$WRITER_RECOVERY_STATE_PHASE" == overlay-applied ]]; then
+      if control_api_is_ready; then
+        return 0
+      fi
+      return 1
+    fi
+    return 1
+  fi
+  log "Restoring control-api to ${PARTIAL_CONTROL_API_REPLICAS} replica(s) after runtime-role provisioning"
+  writer_recovery_state_phase api-restoring || return 1
+  $KC -n control-plane scale deployment/control-api \
+    --replicas="$PARTIAL_CONTROL_API_REPLICAS" >/dev/null || return 1
+  $KC -n control-plane rollout status deployment/control-api --timeout=180s >/dev/null || return 1
+  control_api_is_ready || return 1
+  PARTIAL_CONTROL_API_FENCED=false
+  writer_recovery_state_phase api-restored || return 1
+}
+
+restore_partial_non_api_writers() {
+  if [ "$PARTIAL_WORKFLOW_FENCED" = true ]; then
+    $KC -n control-plane scale deployment/workflow-recipes \
+      --replicas="$PARTIAL_WORKFLOW_REPLICAS" >/dev/null || return 1
+    PARTIAL_WORKFLOW_FENCED=false
+  fi
+  if [ "$PARTIAL_TRACE_FENCED" = true ]; then
+    $KC -n control-plane scale deployment/trace-maintenance-worker \
+      --replicas="$PARTIAL_TRACE_REPLICAS" >/dev/null || return 1
+    PARTIAL_TRACE_FENCED=false
+  fi
+  if [ "$PARTIAL_HCC_FENCED" = true ]; then
+    $KC -n control-plane scale deployment/host-context-controller \
+      --replicas="$PARTIAL_HCC_REPLICAS" >/dev/null || return 1
+    PARTIAL_HCC_FENCED=false
+  fi
+}
+
+reconcile_existing_gfs_credentials() {
+  # A staged sync may have deferred active-pod proof until the reconciler
+  # created the reader DSN. Complete that proof before the overlay changes HCC.
+  GFS_AUTH_SYNC_ALLOW_STAGED=true \
+    bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
+  # If gfsc-reader is already Ready, settle the leftover claim first so
+  # reconcile does not rollout restart and race HCC's gfsReconciler. The
+  # gfs-rollout-shim makes the wait judge readiness rather than the template
+  # generation HCC rewrites.
+  GFS_READER_ROLLOUT_AUTHORIZED=true ALLOWED_CONTEXTS="${PROFILE}" CONTEXT="${PROFILE}" \
+    T2_SKIP_LOCK=true \
+    bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
+  PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
+    GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
+    T2_SKIP_LOCK=true \
+    CONTEXT="${PROFILE}" \
+    bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+  # The staged sync may have deferred active-pod proof until this reconcile
+  # produced the reader DSN; the strict pass is the durable consumer attestation.
+  bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
+}
+
+render_fenced_recovery_overlay() {
+  local rendered_file="${K8S_API_POLICY_TMP_DIR}/recovery-rendered.yaml"
+  [ -n "${K8S_API_POLICY_TMP_DIR}" ] && [ -d "${K8S_API_POLICY_TMP_DIR}" ] || {
+    err "Recovery overlay workspace is unavailable; refusing writer recovery"
+    return 1
+  }
+  log "Rendering the recovery overlay with HCC, workflow-recipes, trace-maintenance-worker, and control-api fenced"
+  if ! $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | \
+    RUBYOPT=--disable=gems ruby "${SCRIPT_DIR}/render-fenced-writer-deployments.rb" \
+      --target control-plane/host-context-controller \
+      --target control-plane/workflow-recipes \
+      --target control-plane/trace-maintenance-worker \
+      --target control-plane/control-api >"$rendered_file"; then
+    err "Unable to render a complete fenced recovery overlay; refusing writer recovery"
+    return 1
+  fi
+  [ -s "$rendered_file" ] || {
+    err "Fenced recovery overlay is empty; refusing writer recovery"
+    return 1
+  }
+  RECOVERY_OVERLAY_FILE="$rendered_file"
+}
+
+apply_fenced_recovery_overlay() {
+  render_fenced_recovery_overlay || return 1
+  writer_recovery_state_phase overlay-applying || return 1
+  log "Applying the complete recovery overlay while all control-plane writers remain fenced"
+  $KC apply -f "$RECOVERY_OVERLAY_FILE" >/dev/null || return 1
+  writer_recovery_state_phase overlay-applied || return 1
+}
+
+writer_recovery_state_load || exit 1
+prepare_refreshed_k8s_api_network_policy || exit 1
 CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-gfs-writer-secret.sh"
 if [ "$RESET_DB" = true ]; then
   log "Database reset path — HCC cutover deferred until post-convergence verification"
 else
   writer_dsn="$($KC -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')"
   if [ -n "${writer_dsn}" ]; then
-    if ! $KC rollout status deployment/control-api -n control-plane --timeout=5s >/dev/null 2>&1; then
-      err "Existing GFS writer detected but control-api is not Ready; refusing HCC cutover"
-      exit 1
+    if [ "$WRITER_RECOVERY" = true ]; then
+      log "Existing GFS writer recovery is already in progress; preserving the durable fence state"
+    elif control_api_is_ready; then
+      log "Existing GFS writer detected — reconciling credentials before overlay upgrade"
+      reconcile_existing_gfs_credentials
+    else
+      control_api_ready_status=$?
+      if [ "$control_api_ready_status" -ne 1 ]; then
+        err "Unable to determine control-api readiness; refusing to classify the GFS upgrade path"
+        exit 1
+      fi
+      if runtime_role_secret_is_missing; then
+        runtime_secret_status=0
+      else
+        runtime_secret_status=$?
+      fi
+      if [ "$runtime_secret_status" -eq 0 ]; then
+        WRITER_RECOVERY=true
+        PARTIAL_BOOTSTRAP_RECOVERY=true
+        log "Existing GFS writer and empty control-api runtime Secret detected — fencing writers until migrations and runtime roles converge"
+      elif [ "$runtime_secret_status" -eq 1 ]; then
+        WRITER_RECOVERY=true
+        PARTIAL_BOOTSTRAP_RECOVERY=true
+        if [ "$K8S_API_EGRESS_POLICY_DRIFT" = true ]; then
+          log "Existing GFS writer detected with control-api not Ready — repairing the stale API-egress policy before runtime-role convergence"
+        else
+          log "Existing GFS writer detected with control-api not Ready — fencing all database writers before runtime-role convergence"
+        fi
+      else
+        err "Unable to inspect control-api-postgres-runtime; refusing to classify the GFS upgrade path"
+        exit 1
+      fi
+      fence_partial_bootstrap_writers
+      apply_refreshed_k8s_api_network_policies
     fi
-    log "Existing GFS writer detected — reconciling credentials before overlay upgrade"
-    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
   else
     log "Fresh bootstrap detected — reader staging deferred until migrations; GFSC remains fail-closed"
   fi
+fi
+
+if [ "$WRITER_RECOVERY" = true ] && [ "$WRITER_RECOVERY_FENCE_PENDING" = true ]; then
+  fence_partial_bootstrap_writers
+  apply_refreshed_k8s_api_network_policies
+  WRITER_RECOVERY_FENCE_PENDING=false
+fi
+if [ "$WRITER_RECOVERY_STATE_LOADED" = true ] &&
+  [ "$WRITER_RECOVERY_STATE_PHASE" = planned ] &&
+  [ "$WRITER_RECOVERY" = false ]; then
+  writer_recovery_state_clear
 fi
 
 log "Applying kustomize overlay (${ACTIVE_MINIKUBE_RENDER_DIR})..."
@@ -982,10 +1774,12 @@ if [ "$RESET_DB" = true ]; then
   # Keep control-api scaled to zero until migrations and role restoration are
   # complete; applying the full overlay here would race it against a fresh DB.
   $KC apply -k "$ACTIVE_MINIKUBE_RENDER_DIR" -l app=control-postgres
+elif [ "$WRITER_RECOVERY" = true ]; then
+  log "Deferring the full kustomize overlay until control-api/runtime roles converge"
 else
-  kubectl kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
+  $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
 fi
-ok "Kustomize overlay applied"
+ok "Kustomize overlay applied or safely deferred"
 
 if [ "$RESET_DB" = true ]; then
   log "Rebuilding database contracts and restoring GFS roles after reset..."
@@ -993,7 +1787,7 @@ if [ "$RESET_DB" = true ]; then
   CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/converge-control-db-after-reset.sh" \
     --overlay "$ACTIVE_MINIKUBE_RENDER_DIR" \
     --job-name control-api-db-migrate-reset
-  kubectl kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
+  $KC kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
   # The overlay declares ordinary one-replica defaults. Reassert the exact
   # pre-reset operating counts after applying it; credentials are verified and
   # HCC is restored by convergence before this safe rollout boundary.
@@ -1012,29 +1806,81 @@ if [ "$RESET_DB" = true ]; then
     $KC -n control-plane rollout status deployment/trace-maintenance-worker --timeout=180s >/dev/null
   fi
   if [ "$RESET_HCC_REPLICAS" -gt 0 ]; then
-    $KC -n control-plane rollout status deployment/host-context-controller --timeout=180s >/dev/null
+    $KC -n control-plane rollout status deployment/host-context-controller --timeout=900s >/dev/null
   fi
   ok "Control-api database and GFS roles converged after reset"
 else
-  ensure_control_postgres_ready
-  log "Applying control-api database migrations and runtime roles..."
-  CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
-    bash "${PROJECT_DIR}/deploy/scripts/run-control-api-db-migration.sh" \
-    --overlay "$ACTIVE_MINIKUBE_RENDER_DIR"
-  CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
-      bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
+  if [ "$WRITER_RECOVERY_MIGRATIONS_COMPLETE" != true ]; then
+    ensure_control_postgres_ready
+    log "Applying control-api database migrations and runtime roles..."
+    CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
+      bash "${PROJECT_DIR}/deploy/scripts/run-control-api-db-migration.sh" \
+      --overlay "$ACTIVE_MINIKUBE_RENDER_DIR"
+    CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
+        bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
     ok "Control-api database migrations and runtime roles applied"
+    if [ "$WRITER_RECOVERY" = true ] && [ "$PARTIAL_CONTROL_API_FENCED" = true ]; then
+      writer_recovery_state_phase roles-ready
+    fi
+  else
+    log "Skipping migrations and runtime-role provisioning; durable recovery state already completed that boundary"
+  fi
 
-    # The credential probe runs through control-api, so prove that deployment is
-    # live before normal staging on bootstrap or an idempotent upgrade.
+  if [ "$WRITER_RECOVERY" = true ]; then
+    # Keep every database writer at zero while the full overlay is applied. The overlay
+    # itself declares one replica for these Deployments, so applying it
+    # directly would reopen the writer window before the explicit restore.
+    apply_fenced_recovery_overlay
+    log "Recovery overlay is applied — restoring control-api before GFS reconciliation"
+    if ! restore_partial_control_api; then
+      if [ "$PARTIAL_BOOTSTRAP_RECOVERY" = true ]; then
+        err "Restored control-api is not Ready; refusing GFS cutover after runtime-role provisioning"
+      else
+        err "Existing GFS writer detected but control-api is not Ready; refusing HCC cutover"
+      fi
+      exit 1
+    fi
+    if ! control_api_is_ready; then
+      if [ "$PARTIAL_BOOTSTRAP_RECOVERY" = true ]; then
+        err "Restored control-api is not Ready; refusing GFS cutover after runtime-role provisioning"
+      else
+        err "Existing GFS writer detected but control-api is not Ready; refusing HCC cutover"
+      fi
+      exit 1
+    fi
+    log "Control-api/runtime roles are Ready — reconciling GFS after the fenced overlay"
+    reconcile_existing_gfs_credentials
+    restore_partial_non_api_writers
+    ok "Fenced recovery overlay applied after runtime-role readiness; writers restored explicitly"
+  else
     $KC scale deployment/control-api -n control-plane --replicas=1 >/dev/null
     $KC rollout status deployment/control-api -n control-plane --timeout=180s >/dev/null
-    # On the upgrade path the overlay above may still be cutting HCC over to
-    # the split writer/reader templates; reconciling before that lands leaves
-    # the staged reader credential rollout-pending and fails the final verify.
-    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/wait-gfsc-secret-references.sh"
-    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
-    ok "GFS credentials reconciled and writer bootstrap verified"
+  fi
+
+  # On the upgrade path the full overlay may still cut HCC over to the
+  # split writer/reader templates; reconciling after that lands leaves the
+  # staged reader credential rollout-pending and fails the final verify.
+  CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/wait-gfsc-secret-references.sh"
+  # The overlay apply re-declares the base gfs-config with an empty jwt-public-key;
+  # re-sync it before any reader pod may need to start, otherwise the reconcile
+  # readiness wait can only time out.
+  GFS_AUTH_SYNC_ALLOW_STAGED=true \
+    bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
+  GFS_READER_ROLLOUT_AUTHORIZED=true ALLOWED_CONTEXTS="${PROFILE}" CONTEXT="${PROFILE}" \
+    T2_SKIP_LOCK=true \
+    bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
+  PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
+    GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true \
+    T2_SKIP_LOCK=true \
+    CONTEXT="${PROFILE}" \
+    bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+  # The preceding staged sync is allowed to wait for this DSN-producing
+  # reconcile; the strict pass is the durable consumer attestation.
+  bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
+  if [ "$WRITER_RECOVERY" = true ]; then
+    writer_recovery_state_clear
+  fi
+  ok "GFS credentials reconciled and writer bootstrap verified"
 fi
 
 # 6c. Re-apply generated service tokens after kustomize.
@@ -1344,7 +2190,7 @@ done
 # ----------------------------------------------------------------------
 if $KC get configmap gfs-config -n gfs &>/dev/null; then
   log "Provisioning gfs serving (public key → gfs-config + gfs_controller DB login)..."
-  if ! bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}"; then
+  if ! bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs; then
     err "gfs public-key sync FAILED — gfsc cannot verify tokens. Fix and re-run."
     exit 1
   fi
@@ -1418,20 +2264,31 @@ else
   else
     # Minimal: the Control-UI admin IS the sole Desktop App member — no separate
     # seeded user. Point both the admin-bootstrap email and the seeded desktop
-    # user at the same evenfire-branded address so the seeder's (idempotent)
-    # user+team step converges on the admin identity that /admin/auth/setup
-    # already provisioned (users row + "<username> team" + chatllm/context1
-    # grants), instead of minting a second member/team. `admin@clerum.io` would
-    # leak the internal code name onto a product surface (the Desktop member
-    # list) — evenfire branding belongs here (docs/concepts/code-names.md). If
-    # the best-effort admin desktop provisioning ever fails, the seeder still
-    # creates this one identity, so the minimal install is never member-less.
-    SEED_USER_DEFAULT_EMAIL="admin@evenfire.local"
+    # user at the same evenfire-branded address. seed-e2e-data.sh consumes
+    # /admin/auth/setup before login on a fresh DB, so this identity is created
+    # atomically with the initial_setup operator link instead of minting a
+    # second ordinary member/team. `admin@clerum.io` would leak the internal
+    # code name onto a product surface (the Desktop member list) — evenfire
+    # branding belongs here (docs/concepts/code-names.md).
+    ADMIN_EMAIL="$(clerum_canonical_email "${ADMIN_EMAIL:-admin@evenfire.local}")"
+    SEED_USER_DEFAULT_EMAIL="$ADMIN_EMAIL"
     SEED_USER_DEFAULT_NAME="admin"
-    : "${ADMIN_EMAIL:=admin@evenfire.local}"
   fi
-  SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}}}"
+  if [ "$SEED_PROFILE" = "minimal" ]; then
+    # The minimal quickstart owns the bootstrap identity. Do not let a
+    # process/.env E2E override silently mint a second ordinary Desktop user;
+    # only the explicitly named seed override is considered, and the guard
+    # below still requires it to equal ADMIN_EMAIL.
+    SEED_USER_EMAIL="$(clerum_canonical_email "${CLERUM_SEED_USER_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}")"
+  else
+    SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}}}"
+  fi
   SEED_USER_NAME="${E2E_DEV_LOGIN_NAME:-${SEED_USER_DEFAULT_NAME}}"
+  if [ "$SEED_PROFILE" = "minimal" ] \
+    && ! clerum_minimal_identity_matches "$ADMIN_EMAIL" "$SEED_USER_EMAIL"; then
+    err "$(clerum_minimal_identity_error "$SEED_USER_EMAIL" "$ADMIN_EMAIL")"
+    exit 1
+  fi
   log "Seeding test user ${SEED_USER_EMAIL} → agent=chatllm, context=context1"
   SEED_USER_OK=true
   if CONTEXT="${PROFILE}" ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
@@ -1444,17 +2301,22 @@ else
   else
     SEED_USER_OK=false
     if [ "$SEED_PROFILE" = "minimal" ]; then
-      # This step is the only place that both creates the owner user AND
-      # rotates the bootstrap admin credential (POST /admin/auth/setup, called
-      # from seed-test-data.sh → scripts/e2e/seed-e2e-data.sh). generate-keys.sh
-      # bakes a hardcoded bcrypt hash of changeme123! into the admin Secret,
-      # and control-api/src/db.ts auto-inserts a live `admin` row from it on
-      # every fresh DB. If this step fails under the default (minimal)
-      # profile, that publicly-known credential is still live — a green
-      # summary would ship an install that is both unusable and insecure.
-      # Abort instead; setup is idempotent, so re-running after the underlying
-      # issue is fixed recovers cleanly.
-      err "Test user seed failed under SEED_PROFILE=minimal — aborting. The bootstrap admin password may still be the publicly-known default (see generate-keys.sh) until this step succeeds. Fix the error above and re-run setup."
+      # This step is the only place that both consumes the governed
+      # /admin/auth/setup path and creates the owner Desktop identity. The
+      # minimal seed is setup-first; it refuses to fall back to an ordinary
+      # /admin/users member when the initial_setup operator link is missing.
+      # generate-keys.sh bakes a hardcoded bcrypt hash of changeme123! into the
+      # admin Secret, and control-api/src/db.ts auto-inserts a live `admin` row
+      # from it on every fresh DB. If this step fails under the default
+      # (minimal) profile, that publicly-known credential is still live — a
+      # green summary would ship an install that is both unusable and insecure.
+      # Abort instead. Setup is idempotent, so re-running after the underlying
+      # issue is fixed recovers cleanly for every failure except a missing
+      # initial_setup link on a reused database: control-api stamps
+      # last_login_at on each admin login and setup only matches a bootstrap
+      # row whose last_login_at is NULL, so that one needs a DB rebuild. The
+      # seeder prints the exact recovery command for that case.
+      err "Test user seed failed under SEED_PROFILE=minimal, aborting. The bootstrap admin password may still be the publicly-known default (see generate-keys.sh) until this step succeeds. Fix the error above and re-run setup. If the seeder reported a missing initial_setup Desktop link, re-run without REUSE_DB/--keep-db so the control DB is rebuilt."
       exit 1
     else
       warn "Test user seed encountered errors — check output above"
@@ -1516,6 +2378,36 @@ done
 
 echo ""
 echo -e "${BOLD}================================================================${NC}"
+if [ "${T2_SETUP_HANDOFF_REQUIRED}" = true ]; then
+  # The ordinary setup summary historically gates only CORE_DEPLOYS and may
+  # return zero after printing "partially complete". A T2 handoff is stricter:
+  # reuse the final T2 deployment inventory contract (including additional
+  # deployed workloads) and make an unready/missing required deployment block
+  # both publication and setup success.
+  prior_bootstrap_required="${T2_BOOTSTRAP_REQUIRED}"
+  prior_plan_mode="${T2_PLAN_MODE}"
+  T2_BOOTSTRAP_REQUIRED=false
+  T2_PLAN_MODE=false
+  if ! t2_deployment_check; then
+    all_ready=false
+  fi
+  T2_BOOTSTRAP_REQUIRED="${prior_bootstrap_required}"
+  T2_PLAN_MODE="${prior_plan_mode}"
+  if ! T2_PROJECT_DIR="${T2_PROJECT_DIR}" T2_WORKTREE_ID="${T2_WORKTREE_ID}" \
+    T2_RUN_ID="${T2_RUN_ID}" T2_PROFILE="${T2_PROFILE}" T2_CONTEXT="${T2_CONTEXT}" \
+    T2_BRANCH="${T2_BRANCH}" T2_HEAD="${T2_HEAD}" T2_SKIP_LOCK="${T2_SKIP_LOCK}" \
+    T2_LOCK_KEY="${T2_LOCK_KEY}" T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" \
+    T2_IMAGE_MANIFEST="${T2_IMAGE_MANIFEST}" \
+    T2_SETUP_HANDOFF_ROOT="${T2_SETUP_HANDOFF_ROOT}" \
+    T2_SETUP_HANDOFF_TTL_SECONDS="${T2_SETUP_HANDOFF_TTL_SECONDS}" \
+    T2_SETUP_HANDOFF_TRANSITION="${T2_SETUP_HANDOFF_TRANSITION}" \
+    T2_SETUP_HANDOFF_SETUP_COMPLETE="${all_ready}" \
+      bash "${SCRIPT_DIR}/t2-setup-handoff.sh" create; then
+    err "T2 strict setup is incomplete; refusing setup success and handoff"
+    exit 1
+  fi
+  ok "Created the one-shot T2 setup-complete handoff"
+fi
 if [ "$all_ready" = true ]; then
   echo -e "${GREEN}${BOLD}  Minikube setup complete! All core services ready.${NC}"
 else

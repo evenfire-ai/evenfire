@@ -19,6 +19,15 @@ vi.mock('../src/db.js', () => ({
   pool: {
     query: (...args: unknown[]) => mockPoolQuery(...args),
   },
+  // The Host-create path runs inside a carrier transaction that holds a
+  // per-model-name advisory lock across the K8s write (R1-H3). Stub the
+  // transaction primitives so the work runs inline and the gateway's raw K8s
+  // 409 propagates to the global handler — matching routes.resources.test.ts.
+  withTransaction: (work: (db: { query: (...a: unknown[]) => unknown }) => Promise<unknown>) =>
+    work({ query: async () => ({ rows: [], rowCount: 0 }) }),
+  advisoryLockModelName: async () => {},
+  advisoryLockModelNames: async () => {},
+  boundCarrierTransactionIdleTimeout: async () => {},
 }))
 
 vi.mock('../src/utils/auth/adminAuthToken.js', () => ({

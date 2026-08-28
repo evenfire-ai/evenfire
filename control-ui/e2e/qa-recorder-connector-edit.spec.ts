@@ -59,7 +59,7 @@ async function createDiscoveryConnector(
   connectorName: string,
   contextName: string
 ): Promise<void> {
-  await page.getByRole('link', { name: 'Installed connectors', exact: true }).click()
+  await page.getByRole('link', { name: 'Installed Connectors', exact: true }).click()
   await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
   await page.getByRole('button', { name: 'Create Connector', exact: true }).click()
   await expect(page).toHaveURL(/\/connectors\/new$/, { timeout: 20_000 })
