@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Button, DataTable, EmptyState, Pill, ReferenceTag, TabButton } from '@components/Common'
+import {
+  Button,
+  DataTable,
+  EmptyState,
+  Pill,
+  ReferenceTag,
+  StatusBanner,
+  TabButton,
+} from '@components/Common'
 import { PageBreadcrumb } from '@components/PageBreadcrumb'
 import { ResourceBreadcrumbSwitcher } from '@components/ResourceBreadcrumbSwitcher'
 import { scopeCaption, statusPresentation } from '@lib/connectorPresentation'
@@ -50,6 +58,7 @@ export function ContextDetailsPage() {
   const {
     agents: connectorAgents,
     pendingKey: connectorPendingKey,
+    actionError: connectorActionError,
     authorize: authorizeConnector,
     disconnect: disconnectConnector,
   } = useConnectorsController()
@@ -548,6 +557,9 @@ export function ContextDetailsPage() {
 
         {activeTab === 'mcp-servers' && (
           <div className="context-resource-list">
+            {connectorActionError ? (
+              <StatusBanner tone="error">{connectorActionError}</StatusBanner>
+            ) : null}
             {selectedContextMcpServersUnscoped && (
               <p className="muted">
                 Preview mode: this list is not yet filtered by the selected context.
@@ -653,7 +665,8 @@ export function ContextDetailsPage() {
                                 loading={busy}
                                 onClick={event => {
                                   event.stopPropagation()
-                                  disconnectConnector(actionInput).catch(() => undefined)
+                                  // Failures surface via `connectorActionError`.
+                                  void disconnectConnector(actionInput)
                                 }}
                                 size="sm"
                                 variant="ghost"
@@ -667,7 +680,7 @@ export function ContextDetailsPage() {
                                 loading={busy}
                                 onClick={event => {
                                   event.stopPropagation()
-                                  authorizeConnector(actionInput).catch(() => undefined)
+                                  void authorizeConnector(actionInput)
                                 }}
                                 size="sm"
                                 variant="soft"

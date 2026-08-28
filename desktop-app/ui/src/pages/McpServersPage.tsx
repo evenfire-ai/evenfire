@@ -141,7 +141,8 @@ function ConnectorRowView({
 }
 
 export function McpServersPage() {
-  const { loading, error, agents, pendingKey, authorize, disconnect } = useConnectorsController()
+  const { loading, error, actionError, agents, pendingKey, authorize, disconnect } =
+    useConnectorsController()
   const { handleOpenContextDetails, handleOpenAgentWorkspace } = useNavigationContext()
 
   const rows = useMemo(() => deriveConnectorRows(agents), [agents])
@@ -158,7 +159,11 @@ export function McpServersPage() {
       </div>
 
       <div className="page-layout">
-        {error ? <StatusBanner tone="error">{error}</StatusBanner> : null}
+        {error ? (
+          <StatusBanner tone="error">{error}</StatusBanner>
+        ) : actionError ? (
+          <StatusBanner tone="error">{actionError}</StatusBanner>
+        ) : null}
 
         <section className="page-card mcp-servers-board-card" aria-label="Connectors">
           {loading && !hasRows ? (
@@ -196,10 +201,12 @@ export function McpServersPage() {
                     row={row}
                     busy={pendingKey === row.key}
                     onAuthorize={input => {
-                      authorize(input).catch(() => undefined)
+                      // The hook records any write failure in `actionError` and
+                      // never rejects, so the call site no longer swallows it.
+                      void authorize(input)
                     }}
                     onDisconnect={input => {
-                      disconnect(input).catch(() => undefined)
+                      void disconnect(input)
                     }}
                     onOpenContext={contextRef =>
                       handleOpenContextDetails(contextRef, 'mcp-servers')
