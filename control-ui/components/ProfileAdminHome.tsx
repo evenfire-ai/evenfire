@@ -837,7 +837,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                             <th className="cu-table__col-count">
                               <button
                                 type="button"
-                                className="cu-link cu-link--sm cu-table__sort-link"
+                                className="cu-table__sort-link"
                                 onClick={() =>
                                   setMemberTeamsSortDir(prev => (prev === 'asc' ? 'desc' : 'asc'))
                                 }
