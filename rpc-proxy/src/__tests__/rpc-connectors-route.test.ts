@@ -9,11 +9,23 @@ import { createRpcRouter } from '../routes/rpc.js'
 // the scope gate, the session-derived identity, and passthrough.
 
 const authTokenMock = vi.hoisted(() => ({ verifyRpcToken: vi.fn() }))
-const controlApiMock = vi.hoisted(() => ({
-  fetchUserConnectorsFromControlApi: vi.fn(),
-  fetchHostConnectionFromControlApi: vi.fn(),
-  requestHostWakeFromControlApi: vi.fn(),
-}))
+const controlApiMock = vi.hoisted(() => {
+  // The route does `error instanceof ControlApiConnectorsRejectedError`, so the
+  // mocked module must expose the real class shape — otherwise the import is
+  // undefined and the instanceof check throws.
+  class ControlApiConnectorsRejectedError extends Error {
+    constructor(readonly status: 401 | 403) {
+      super(`Control API rejected connectors read (${status})`)
+      this.name = 'ControlApiConnectorsRejectedError'
+    }
+  }
+  return {
+    ControlApiConnectorsRejectedError,
+    fetchUserConnectorsFromControlApi: vi.fn(),
+    fetchHostConnectionFromControlApi: vi.fn(),
+    requestHostWakeFromControlApi: vi.fn(),
+  }
+})
 // createRpcRouter also imports the proxy service barrel; stub it so the module
 // graph loads without real upstreams.
 const serviceMock = vi.hoisted(() => ({
@@ -116,5 +128,27 @@ describe('GET /rpc/connectors', () => {
     controlApiMock.fetchUserConnectorsFromControlApi.mockRejectedValue(new Error('boom'))
     const res = await request(makeApp()).get('/rpc/connectors').set('authorization', 'Bearer tok')
     expect(res.status).toBe(500)
+  })
+
+  // H2 — a control-api 401 must reach the client AS 401, not collapse to 500.
+  // The desktop only refreshes the rpc access token on 401 (or a scope 403);
+  // a 500 is non-refreshable, so an expired token surfaced as 500 would leave
+  // the panel permanently stuck.
+  it('maps a control-api 401 to a client 401 (keeps token refresh alive)', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue(claims(['mcp:servers:list']))
+    controlApiMock.fetchUserConnectorsFromControlApi.mockRejectedValue(
+      new controlApiMock.ControlApiConnectorsRejectedError(401)
+    )
+    const res = await request(makeApp()).get('/rpc/connectors').set('authorization', 'Bearer tok')
+    expect(res.status).toBe(401)
+  })
+
+  it('maps a control-api 403 to a client 403 (not 500)', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue(claims(['mcp:servers:list']))
+    controlApiMock.fetchUserConnectorsFromControlApi.mockRejectedValue(
+      new controlApiMock.ControlApiConnectorsRejectedError(403)
+    )
+    const res = await request(makeApp()).get('/rpc/connectors').set('authorization', 'Bearer tok')
+    expect(res.status).toBe(403)
   })
 })

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fetchUserConnectorsFromControlApi } from '../services/controlApiRestService.js'
+import {
+  ControlApiConnectorsRejectedError,
+  fetchUserConnectorsFromControlApi,
+} from '../services/controlApiRestService.js'
 
 // spec 11 U1 — unit test for the connectors SANEADOR. Unlike the route test
 // (rpc-connectors-route.test.ts) which mocks this function whole, here we stub
@@ -126,6 +129,22 @@ describe('fetchUserConnectorsFromControlApi — non-secret projection', () => {
     await expect(fetchUserConnectorsFromControlApi('local-user', 'rpc-tok')).rejects.toThrow(
       /connectors lookup failed \(502\)/
     )
+  })
+
+  // H2 — 401/403 carry a TYPED rejection (with status), so the route can map
+  // them to a real client status instead of a non-refreshable 500.
+  it.each([401, 403] as const)('throws a typed rejection carrying status %d', async status => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({}, false, status))
+    )
+    await expect(fetchUserConnectorsFromControlApi('local-user', 'rpc-tok')).rejects.toMatchObject({
+      name: 'ControlApiConnectorsRejectedError',
+      status,
+    })
+    // And it is the concrete class, so `instanceof` in the route holds.
+    const err = await fetchUserConnectorsFromControlApi('local-user', 'rpc-tok').catch(e => e)
+    expect(err).toBeInstanceOf(ControlApiConnectorsRejectedError)
   })
 
   it('bounds the control-api call with an abort signal (SM3 — no unbounded socket)', async () => {

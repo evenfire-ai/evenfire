@@ -10,6 +10,7 @@ import {
 } from '../middleware/auth.js'
 import { rpcInvocationContext } from '../rpcAccessContext.js'
 import {
+  ControlApiConnectorsRejectedError,
   type HostWakeApiResponse,
   fetchUserConnectorsFromControlApi,
   requestHostWakeFromControlApi,
@@ -239,6 +240,19 @@ export function createRpcRouter(): Router {
         const result = await fetchUserConnectorsFromControlApi(auth.sub, rpcAccessToken)
         res.status(200).json(result)
       } catch (error) {
+        // Map a control-api 401/403 to a real status instead of the default
+        // 500. A 500 is non-refreshable on the desktop (shouldRefreshRpcToken),
+        // so an expired rpc access token surfaced as 500 would never trigger a
+        // refresh and would leave the panel stuck. 401 keeps the refresh path
+        // alive; everything else stays 500/504 via the app error handler.
+        if (error instanceof ControlApiConnectorsRejectedError) {
+          if (error.status === 401) {
+            res.status(401).json({ error: 'Unauthorized' })
+            return
+          }
+          res.status(403).json({ error: 'Forbidden: user cannot read connectors' })
+          return
+        }
         next(error)
       }
     }
