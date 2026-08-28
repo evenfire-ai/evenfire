@@ -81,6 +81,8 @@ const SAFE_DOMAIN_REASONS = new Set([
   'subjects_invalid',
   'escalation_rejected',
   'manage_acl_required',
+  'desktop_requires_team',
+  'no_permitted_scopes',
 ])
 
 const PUBLIC_RATE_LIMIT_HEADERS = [
