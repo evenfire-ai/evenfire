@@ -366,16 +366,25 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
           return res.status(400).json({ error: 'server_missing_context' })
         }
 
-        await deleteOAuthGrant({ query: (text, values) => pool.query(text, values) }, key)
+        const deletedRows = await deleteOAuthGrant(
+          { query: (text, values) => pool.query(text, values) },
+          key
+        )
 
         // Audit trail (sensitive: a revocation). Structured, pino-redacted; no
-        // tokens/secrets are read or logged here.
+        // tokens/secrets are read or logged here. `userId` is the acting
+        // principal, `contextRef` the server's authoritative Context, and
+        // `deleted` records whether a row was actually removed (false on an
+        // idempotent no-op) so the audit trail is honest about what happened.
         req.log?.info(
           {
             event: 'mcp_oauth_grant_revoked',
             mcpServerName,
             grantScope: resolved.grantScope,
             oauthClientId: resolved.oauthClientId,
+            userId,
+            contextRef: resolved.contextRef,
+            deleted: deletedRows > 0,
           },
           'mcp oauth grant revoked'
         )

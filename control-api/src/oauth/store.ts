@@ -521,32 +521,38 @@ export async function oauthGrantExists(db: DbClient, input: GetOAuthGrantInput):
   return result.rows.length > 0
 }
 
-export async function deleteOAuthGrant(db: DbClient, input: GetOAuthGrantInput): Promise<void> {
+/**
+ * Delete a grant row by its flavored key. Returns the number of rows deleted so
+ * callers can audit "did this actually revoke something" (0 ⇒ the grant was
+ * already gone; the endpoint stays idempotent either way).
+ */
+export async function deleteOAuthGrant(db: DbClient, input: GetOAuthGrantInput): Promise<number> {
   const ownerKind = resolveOwnerKind(input)
   if (input.grantKind === 'user') {
-    await db.query(
+    const result = await db.query(
       `DELETE FROM oauth_grants
        WHERE owner_kind = $1 AND recipe_namespace = $2 AND recipe_name = $3
          AND user_id = $4 AND oauth_client_id = $5 AND grant_kind = 'user'`,
       [ownerKind, input.recipeNamespace, input.recipeName, input.userId, input.oauthClientId]
     )
-    return
+    return result.rowCount ?? 0
   }
   if (input.grantKind === 'shared') {
-    await db.query(
+    const result = await db.query(
       `DELETE FROM oauth_grants
        WHERE owner_kind = $1 AND recipe_namespace = $2 AND recipe_name = $3
          AND user_id IS NULL AND context_id = $4 AND oauth_client_id = $5 AND grant_kind = 'shared'`,
       [ownerKind, input.recipeNamespace, input.recipeName, input.contextId, input.oauthClientId]
     )
-    return
+    return result.rowCount ?? 0
   }
-  await db.query(
+  const result = await db.query(
     `DELETE FROM oauth_grants
      WHERE owner_kind = $1 AND recipe_namespace = $2 AND recipe_name = $3
        AND user_id IS NULL AND oauth_client_id = $4 AND grant_kind = 'service'`,
     [ownerKind, input.recipeNamespace, input.recipeName, input.oauthClientId]
   )
+  return result.rowCount ?? 0
 }
 
 /**
