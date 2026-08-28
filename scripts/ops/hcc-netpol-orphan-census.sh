@@ -31,6 +31,13 @@
 # reserved-name repairable approximation, not the controller's current
 # pass authority gate.
 #
+# Cap formula must stay aligned with evaluateNetPolOrphanSweepCap in
+# host-context-controller/src/networkPolicyReconciler.ts and the compiled
+# defaults in host-context-controller/src/config.ts (absolute 10, percent
+# 20, rpc-proxy namespace). If you change either side, change this script.
+# Typed membership requires clerum.io/managed-by=host-context-controller
+# so a foreign-owned typed policy cannot inflate listed/orphans (#484).
+#
 # Double-samples 90s apart. Adjudicates only when the desired Context +
 # McpServer identity set is identical across samples; otherwise
 # INCONCLUSIVE_RERUN. A sample that listed zero managed policies is
@@ -61,7 +68,7 @@ deployment_env() {
   local key="$1"
   local value
   local rc=0
-  value="$(kc -n "${HCC_NS}" get deploy "${HCC_DEPLOYMENT}" -o "jsonpath={.spec.template.spec.containers[0].env[?(@.name==\"${key}\")].value}")" || rc=$?
+  value="$(kc -n "${HCC_NS}" get deployments "${HCC_DEPLOYMENT}" -o "jsonpath={.spec.template.spec.containers[0].env[?(@.name==\"${key}\")].value}")" || rc=$?
   if [[ "${rc}" -ne 0 ]]; then
     echo "[census] FATAL: kubectl failed reading ${key} from ${HCC_NS}/${HCC_DEPLOYMENT} (exit ${rc})" >&2
     exit 2
@@ -106,14 +113,30 @@ if [[ "${RPC_NS}" == "UNSET" ]]; then
   RPC_NS="${COMPILED_RPC_NS_DEFAULT}"
 fi
 
+# Fail loud on a missing namespace. An empty list from a typo must never
+# print VERDICT=CLEAN (zero-tests-is-never-success).
+require_namespace() {
+  local ns="$1"
+  if ! kc get namespaces "${ns}" -o name >/dev/null; then
+    echo "[census] FATAL: namespace ${ns} does not exist; refusing to sample an empty inventory" >&2
+    exit 2
+  fi
+}
+require_namespace "${MAPPER_NS}"
+require_namespace "${HOST_NS}"
+require_namespace "${RPC_NS}"
+
 # Typed policy-type membership, plus the reserved-name repairable class
 # (managed-by present, policy-type absent). Shared by listed + orphan filters.
 CENSUS_MANAGED_JQ='
   def policy_type: .metadata.labels["clerum.io/policy-type"];
   def is_typed:
-    policy_type == "context-allow"
-    or policy_type == "rpc-proxy-egress"
-    or policy_type == "external-egress";
+    .metadata.labels["clerum.io/managed-by"] == "host-context-controller"
+    and (
+      policy_type == "context-allow"
+      or policy_type == "rpc-proxy-egress"
+      or policy_type == "external-egress"
+    );
   def is_untyped_repairable:
     .metadata.labels["clerum.io/managed-by"] == "host-context-controller"
     and (policy_type == null)
