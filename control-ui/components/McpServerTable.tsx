@@ -194,7 +194,7 @@ function ConnectorContexts({
       {onAdd ? (
         <button
           type="button"
-          className="cu-btn cu-btn--secondary cu-btn--sm cu-connector-context-access__add"
+          className="cu-btn cu-btn--sm cu-connector-context-access__add"
           disabled={busy}
           onClick={onAdd}
         >
@@ -365,7 +365,7 @@ export function McpServerTable({
     return (
       <button
         type="button"
-        className={`cu-link cu-link--sm cu-table__sort-link${isActive ? ' is-active' : ''}`}
+        className={`cu-table__sort-link${isActive ? ' is-active' : ''}`}
         onClick={() => toggleSort(key)}
         aria-label={`Sort by ${label.toLowerCase()} ${nextDirection}`}
         aria-pressed={isActive}
