@@ -1028,7 +1028,24 @@ describe('HostReconciler — per-Host RBAC scaffolding', () => {
   it('rewrites Role resourceNames when spec.secretRef changes (replace path)', async () => {
     const { reconciler, rbacApi } = createReconciler()
     rbacApi.createNamespacedRole.mockRejectedValueOnce({ code: 409 })
-    rbacApi.readNamespacedRole.mockResolvedValue({ metadata: { resourceVersion: '7' } })
+    rbacApi.readNamespacedRole.mockImplementation(async () => {
+      const desired = rbacApi.createNamespacedRole.mock.calls[0][0].body as {
+        metadata?: { labels?: Record<string, string> }
+        rules?: Array<{ resources?: string[]; verbs?: string[]; resourceNames?: string[] }>
+      }
+      const live = structuredClone(desired)
+      const secretRule = live.rules?.find(
+        rule => rule.resources?.[0] === 'secrets' && rule.verbs?.includes('get')
+      )
+      if (!secretRule?.resourceNames) {
+        throw new Error('expected the created Role to carry a secrets get rule')
+      }
+      secretRule.resourceNames[0] = 'host-secret'
+      return {
+        ...live,
+        metadata: { ...live.metadata, resourceVersion: '7' },
+      }
+    })
 
     await reconciler.reconcile(makeHost({ spec: { secretRef: 'rotated-secret' } } as never))
 
@@ -1046,6 +1063,17 @@ describe('HostReconciler — per-Host RBAC scaffolding', () => {
       'host-alpha-host-mcp-host-runtime-tokens',
     ])
     expect(replaced.metadata.resourceVersion).toBe('7')
+  })
+
+  it('replaces a live Role that has no rules (fail-open-to-write)', async () => {
+    const { reconciler, rbacApi } = createReconciler()
+    rbacApi.createNamespacedRole.mockRejectedValueOnce({ code: 409 })
+    rbacApi.readNamespacedRole.mockResolvedValue({ metadata: { resourceVersion: '7' } })
+
+    await reconciler.reconcile(makeHost({ spec: { secretRef: 'rotated-secret' } } as never))
+
+    expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledTimes(1)
+    expect(rbacApi.replaceNamespacedRole.mock.calls[0][0].body.metadata.resourceVersion).toBe('7')
   })
 
   it('cleans up RBAC on reconcileDelete', async () => {

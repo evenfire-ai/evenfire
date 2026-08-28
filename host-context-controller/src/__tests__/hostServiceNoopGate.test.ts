@@ -12,15 +12,11 @@ import {
   createMockCustomApi,
   createMockNetworkingApi,
   createMockRbacApi,
+  makeStubKc,
 } from '../../test/__fixtures__/testMocks'
 import { HostReconciler } from '../hostReconciler'
 import type { HostCRD } from '../types'
 import { asApiserverService, updatedServiceLogs } from './asApiserverService'
-
-function makeStubKc(): k8s.KubeConfig {
-  const stub = new Proxy({}, { get: () => vi.fn() })
-  return { makeApiClient: () => stub } as unknown as k8s.KubeConfig
-}
 
 function makeHost(): HostCRD {
   return {
