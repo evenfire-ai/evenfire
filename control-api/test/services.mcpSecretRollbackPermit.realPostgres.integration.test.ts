@@ -24,10 +24,7 @@ function quoteIdent(value: string): string {
 
 describeRealPostgres('MCP Secret rollback permits on real PostgreSQL', () => {
   const database = `mcp_rollback_${randomBytes(6).toString('hex')}`
-  const connectionString = databaseUrl(
-    adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
-    database
-  )
+  const connectionString = adminUrl ? databaseUrl(adminUrl, database) : ''
   const basePermit = {
     sessionJti: `session-${randomBytes(12).toString('hex')}`,
     namespace: 'mcp-server',
