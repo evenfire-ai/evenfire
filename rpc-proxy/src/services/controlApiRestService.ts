@@ -26,6 +26,15 @@ function controlApiBaseUrl(): string {
   return config.controlApiBaseUrl.replace(/\/+$/, '')
 }
 
+// Shared upstream deadline for every control-api call in this file. Without it a
+// hung control-api pins the proxy socket indefinitely (the sibling host rail in
+// mcpHostRestService.ts already bounds its fetches at the same budget).
+// AbortSignal.timeout throws a TimeoutError, which the app error handler maps to
+// a 504 via isUpstreamTimeoutError — never a silent 500 or an unbounded wait.
+function upstreamAbortSignal(): AbortSignal {
+  return AbortSignal.timeout(config.upstreamTimeoutMs)
+}
+
 export type DirectRunBindingRequest = {
   runId: string
   sessionId: string
@@ -39,6 +48,18 @@ export class ControlApiHostAccessRejectedError extends Error {
   }
 }
 
+// Typed rejection for the connectors read-model, mirroring the host rail above.
+// A generic Error collapses to 500 in the app error handler, which the desktop
+// reads as non-refreshable — so an expired/rotated rpc access token (401) would
+// never trigger a token refresh and the panel would stay broken. Carrying the
+// status lets the route map 401/403 to a real status the client can act on.
+export class ControlApiConnectorsRejectedError extends Error {
+  constructor(readonly status: 401 | 403) {
+    super(`Control API rejected connectors read (${status})`)
+    this.name = 'ControlApiConnectorsRejectedError'
+  }
+}
+
 export async function fetchUserAllowedServersFromControlApi(
   userId: string,
   rpcAccessToken: string
@@ -48,6 +69,7 @@ export async function fetchUserAllowedServersFromControlApi(
     {
       method: 'GET',
       headers: controlApiHeaders(rpcAccessToken),
+      signal: upstreamAbortSignal(),
     }
   )
 
@@ -156,9 +178,13 @@ export async function fetchUserConnectorsFromControlApi(
     {
       method: 'GET',
       headers: controlApiHeaders(rpcAccessToken),
+      signal: upstreamAbortSignal(),
     }
   )
 
+  if (response.status === 401 || response.status === 403) {
+    throw new ControlApiConnectorsRejectedError(response.status)
+  }
   if (!response.ok) {
     throw new Error(`Control API MCP connectors lookup failed (${response.status})`)
   }
@@ -192,6 +218,7 @@ export async function fetchHostConnectionFromControlApi(
         ...(directRunBinding ? { 'content-type': 'application/json' } : {}),
       },
       ...(directRunBinding ? { body: JSON.stringify(directRunBinding) } : {}),
+      signal: upstreamAbortSignal(),
     }
   )
 
@@ -267,6 +294,7 @@ export async function requestHostWakeFromControlApi(
     {
       method: 'POST',
       headers: controlApiHeaders(rpcAccessToken),
+      signal: upstreamAbortSignal(),
     }
   )
 
