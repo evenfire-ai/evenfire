@@ -340,9 +340,20 @@ describe('network/gateway intent (manifest-level)', () => {
     // so the derived guard below does not cover it — assert its location here or
     // rpc-proxy's GET /rpc/connectors 403s at the edge (the shipped regression).
     expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-connectors$')
+    // Scope the method assertion to THIS block: `[^}]*?` cannot cross the block's
+    // closing brace, so deleting the connectors' own `limit_except GET {` makes
+    // this fail instead of silently matching a later location's limit_except
+    // (the vacuous-match defect the old `[\s\S]*?` had).
     expect(gatewayConf).toMatch(
-      /location ~ \^\/api\/v1\/rpc\/access\/users\/\[\^\/\]\+\/mcp-connectors\$ \{[\s\S]*?limit_except GET \{/
+      /location ~ \^\/api\/v1\/rpc\/access\/users\/\[\^\/\]\+\/mcp-connectors\$ \{[^}]*?limit_except GET \{/
     )
+    // nginx resolves regex locations by first match in file order, so the
+    // default-deny `location /` MUST come after this allowlisted block.
+    const connectorsIdx = gatewayConf.indexOf('/mcp-connectors$ {')
+    const defaultDenyIdx = gatewayConf.indexOf('location / {')
+    expect(connectorsIdx).toBeGreaterThan(-1)
+    expect(defaultDenyIdx).toBeGreaterThan(-1)
+    expect(connectorsIdx).toBeLessThan(defaultDenyIdx)
     expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-hosts/[^/]+$')
     expect(gatewayConf).toMatch(
       /location ~ \^\/api\/v1\/rpc\/access\/users\/\[\^\/\]\+\/mcp-hosts\/\[\^\/\]\+\$ \{[\s\S]*?limit_except GET POST/
