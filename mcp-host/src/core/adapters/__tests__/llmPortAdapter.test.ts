@@ -266,6 +266,48 @@ describe('LlmPortAdapter usage reporting', () => {
     expect(typeof event.ts).toBe('string')
   })
 
+  it('does not enqueue Codex usage because proxy finalize owns the ledger', async () => {
+    const enqueue = vi.fn()
+    const onUsageRecorded = vi.fn()
+    const reporter = { enqueue, drain: vi.fn(), stop: vi.fn(), bufferSize: vi.fn() }
+    const provider: SingleTurnProvider = {
+      completeSingleTurn: vi.fn(),
+      completeSingleTurnWithTools: vi.fn().mockResolvedValue({
+        content: null,
+        tool_calls: [],
+        usage: { input_tokens: 100, output_tokens: 50, total_tokens: 150 },
+        finish_reason: FinishReason.Stop,
+      }),
+      getProviderType: () => 'codex-subscription' as const,
+      classifyError: vi.fn(),
+    }
+    const adapter = new LlmPortAdapter(
+      provider,
+      'gpt-5.1',
+      'codex-subscription',
+      reporter as never,
+      {
+        host_ref: 'research-host',
+        context_ref: null,
+        llm_secret_name: null,
+      },
+      undefined,
+      undefined,
+      onUsageRecorded
+    )
+    await adapter.completeWithTools({
+      messages: [],
+      tools: [],
+      usageContext: {
+        source_kind: 'channel',
+        team_id: null,
+        user_id: null,
+      },
+    })
+    expect(onUsageRecorded).toHaveBeenCalled()
+    expect(enqueue).not.toHaveBeenCalled()
+  })
+
   it('does not enqueue when usageContext is omitted', async () => {
     const enqueue = vi.fn()
     const reporter = { enqueue, drain: vi.fn(), stop: vi.fn(), bufferSize: vi.fn() }

@@ -276,7 +276,7 @@ describe('WorkflowService — UsageReporter integration', () => {
     expect(enqueued).toHaveLength(0)
   })
 
-  it('reports Codex workflow usage without an llmSecretName', async () => {
+  it('does not enqueue Codex workflow usage because proxy finalize owns the ledger', async () => {
     const llm = mockLlmProvider([{ content: 'final answer', tool_calls: null }])
     llm.getProviderType = () => 'codex-subscription'
     const { reporter, enqueued } = makeReporter()
@@ -297,12 +297,7 @@ describe('WorkflowService — UsageReporter integration', () => {
       contextVars: { workflowExecutionId, workflowTeamId, workflowUserId },
     })
     expect(res.status).toBe('completed')
-    expect(enqueued).toHaveLength(1)
-    expect(enqueued[0]).toMatchObject({
-      provider: 'codex-subscription',
-      model: 'gpt-5.3-codex',
-      llm_secret_name: null,
-    })
+    expect(enqueued).toHaveLength(0)
   })
 
   it('does NOT enqueue when no reporter is wired (workflow mode without ingest)', async () => {

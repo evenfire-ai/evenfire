@@ -1,14 +1,19 @@
-import { parseCodexAttemptReceiptV1 } from '@clerum/llm-provider-attempt-contract'
+import {
+  type CodexAttemptReceiptV1,
+  parseCodexAttemptReceiptV1,
+} from '@clerum/llm-provider-attempt-contract'
 import { config } from '../config.js'
-import { withTransaction } from '../db.js'
+import { type DbClient, withTransaction } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
 import { releaseReservation } from './budgets/reservations.js'
 import { hashCodexAttemptReceipt } from './llmProviderAttemptReceipt.js'
 import { opaqueAttemptReceipt } from './llmProviderAttemptRedemption.js'
 import {
+  type LlmProviderAttemptRow,
   loadLlmProviderAttempt,
   markLlmProviderAttemptFinalized,
 } from './llmProviderAttemptStore.js'
+import { ingestUsageEventsInTransaction } from './usageEvents.js'
 
 const log = rootLogger.child({ module: 'llm-provider-attempt-finalization' })
 
@@ -104,6 +109,9 @@ export async function finalizeLlmProviderAttempt(
         'provider attempt already has a different terminal outcome'
       )
     }
+    if (result === 'applied') {
+      await ingestCodexFinalizeLedgerRow(tx, attempt, receipt)
+    }
     if (attempt.budgetReservationId && attempt.budgetReservationId !== 'unbudgeted') {
       await releaseReservation(
         { reservationId: attempt.budgetReservationId, hostRef: attempt.hostRef },
@@ -125,4 +133,75 @@ export async function finalizeLlmProviderAttempt(
       duplicate: result === 'duplicate',
     }
   })
+}
+
+function completeSuccessUsage(
+  usage: CodexAttemptReceiptV1['usage']
+): { inputTokens: number; outputTokens: number } | null {
+  const inputTokens = usage?.inputTokens
+  const outputTokens = usage?.outputTokens
+  if (
+    typeof inputTokens !== 'number' ||
+    typeof outputTokens !== 'number' ||
+    !Number.isInteger(inputTokens) ||
+    !Number.isInteger(outputTokens) ||
+    inputTokens < 0 ||
+    outputTokens < 0
+  ) {
+    return null
+  }
+  return { inputTokens, outputTokens }
+}
+
+function buildCodexFinalizeLedgerEvent(
+  attempt: LlmProviderAttemptRow,
+  usage: { inputTokens: number; outputTokens: number }
+): Record<string, unknown> {
+  return {
+    request_id: attempt.id,
+    ts: new Date().toISOString(),
+    run_id: null,
+    host_ref: attempt.hostRef,
+    context_ref: null,
+    team_id: null,
+    provider: attempt.provider,
+    model: attempt.model,
+    llm_secret_name: null,
+    source_kind: 'channel',
+    user_id: null,
+    sender: null,
+    channel_type: null,
+    recipe_name: attempt.recipeName ?? null,
+    cron_job_id: null,
+    task_id: null,
+    iteration: null,
+    input_tokens: usage.inputTokens,
+    output_tokens: usage.outputTokens,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    cache_tokens_reported: false,
+    prompt_bridge_metadata: null,
+  }
+}
+
+async function ingestCodexFinalizeLedgerRow(
+  tx: DbClient,
+  attempt: LlmProviderAttemptRow,
+  receipt: CodexAttemptReceiptV1
+): Promise<void> {
+  if (receipt.outcome !== 'success') return
+  const usage = completeSuccessUsage(receipt.usage)
+  if (!usage) return
+  const ingest = await ingestUsageEventsInTransaction(
+    [buildCodexFinalizeLedgerEvent(attempt, usage)],
+    tx,
+    undefined,
+    { origin: 'finalize' }
+  )
+  if (ingest.result.rejected !== 0 || ingest.result.accepted + ingest.result.duplicates !== 1) {
+    throw new LlmProviderAttemptFinalizeError(
+      'invalid_receipt',
+      'Codex usage could not be bound to a single ledger row'
+    )
+  }
 }

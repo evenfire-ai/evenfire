@@ -173,7 +173,10 @@ run_group "control-api" "control-api" \
   "test/services.llmProviderAttemptAuthorizer.test.ts" \
   "test/services.llmProviderAttemptTicket.test.ts" \
   "test/services.llmProviderAttemptRedemption.test.ts" \
-  "test/services.llmProviderAttemptFinalization.test.ts"
+  "test/services.llmProviderAttemptFinalization.test.ts" \
+  "test/services.usageEvents.test.ts" \
+  "test/services.pluginWorkloadSdkFinalization.test.ts" \
+  "test/routes.usageEvents.test.ts"
 
 run_group "codex-llm-proxy" "codex-llm-proxy" \
   "test/codexTransport.conformance.test.ts" \
@@ -189,7 +192,10 @@ run_group "mcp-host" "mcp-host" \
   "src/llm/hostLlmBinding.test.ts" \
   "src/config/configStore.test.ts" \
   "src/llm/failover/__tests__/engine.test.ts" \
-  "src/pluginWorkloadSdk/promptBridge/llmBridge.failover.test.ts"
+  "src/pluginWorkloadSdk/promptBridge/llmBridge.failover.test.ts" \
+  "src/workflow/__tests__/workflowServiceUsageReporting.test.ts" \
+  "src/pluginWorkloadSdk/server/index.test.ts" \
+  "src/core/adapters/__tests__/llmPortAdapter.test.ts"
 
 run_group "host-context-controller" "host-context-controller" \
   "src/codexExecutionProjection.test.ts" \

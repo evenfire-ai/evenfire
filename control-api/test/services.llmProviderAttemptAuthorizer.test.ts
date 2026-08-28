@@ -320,6 +320,53 @@ describe('authorizeLlmProviderAttempt', () => {
     expect(resolveConnectionKey).toHaveBeenCalledWith('agent-c')
   })
 
+  it('evaluates budget with a null user_id even when claims.sub is present', async () => {
+    const result = await authorizeLlmProviderAttempt(
+      claims({ sub: 'default/research-host' }),
+      body({ userId: 'default/research-host' }),
+      current
+    )
+    expect(result.executionTicket).toBe('ticket.jwt')
+    expect(current.evaluateBudget).toHaveBeenCalledWith(
+      expect.objectContaining({
+        user_id: null,
+        source_kind: 'channel',
+        host_ref: 'research-host',
+      }),
+      expect.anything(),
+      expect.anything(),
+      expect.anything()
+    )
+    const budgetInput = vi.mocked(current.evaluateBudget).mock.calls[0]?.[0] as {
+      user_id: unknown
+    }
+    expect(budgetInput.user_id).not.toBe('default/research-host')
+  })
+
+  it('uses source_kind=channel for recipe callers and never feeds claims.sub to the budget', async () => {
+    await authorizeLlmProviderAttempt(
+      claims({
+        sub: 'sandbox-recipes/research-host',
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'research-host',
+        hostRefs: ['sandbox-recipes/research-host'],
+      }),
+      body(),
+      current
+    )
+    expect(current.evaluateBudget).toHaveBeenCalledWith(
+      expect.objectContaining({
+        user_id: null,
+        source_kind: 'channel',
+        host_ref: 'sandbox-recipes/research-host',
+        recipe_name: 'research-host',
+      }),
+      expect.anything(),
+      expect.anything(),
+      expect.anything()
+    )
+  })
+
   it('is disabled when the feature flag is off', async () => {
     await expect(
       authorizeLlmProviderAttempt(claims(), body(), { ...current, enabled: false })

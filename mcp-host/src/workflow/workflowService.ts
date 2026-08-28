@@ -569,6 +569,7 @@ export class WorkflowService {
       input_tokens: usage?.input_tokens ?? 0,
       output_tokens: usage?.output_tokens ?? 0,
     }
+    if (served.provider === 'codex-subscription') return
     this.usageReporter.enqueue(event)
   }
 

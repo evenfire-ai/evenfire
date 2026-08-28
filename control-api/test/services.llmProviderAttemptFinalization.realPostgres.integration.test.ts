@@ -15,6 +15,11 @@ import { insertLlmProviderAttempt } from '../src/services/llmProviderAttemptStor
 import { issueRegisteredCodexExecutionTicket } from '../src/services/llmProviderAttemptTicket.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
+if (process.env.CONTROL_API_REAL_PG_REQUIRED === '1' && !adminUrl) {
+  throw new Error(
+    'REAL_PG_REQUIRED_BUT_UNAVAILABLE: CONTROL_API_REAL_PG_ADMIN_URL is required for Codex finalize ledger proof'
+  )
+}
 const describeRealPostgres = adminUrl ? describe : describe.skip
 const KEY = deriveOAuthEncryptionKey('ab'.repeat(32))
 
@@ -178,5 +183,94 @@ describeRealPostgres('Codex attempt finalization on real PostgreSQL', () => {
         runTx
       )
     ).rejects.toMatchObject({ code: 'conflict' })
+
+    const unknownLedger = await pool.query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM usage_events WHERE request_id = $1::uuid`,
+      [attempt.id]
+    )
+    expect(unknownLedger.rows[0]?.count).toBe(0)
+  })
+
+  it('writes exactly one usage_events row with a null user_id on success finalize', async () => {
+    const attempt = await insertLlmProviderAttempt(pool, {
+      callerKind: 'host',
+      hostRef: 'research-host',
+      invocationId: `invocation-${randomUUID()}`,
+      attemptGeneration: 1,
+      providerAttemptIndex: 1,
+      model: 'gpt-5.1',
+      requestHash: 'c'.repeat(64),
+      policyRevision: 1,
+      policyHash: 'd'.repeat(64),
+      budgetReservationId: 'unbudgeted',
+      connectionRevision: 1,
+      connectionId,
+    })
+    const issued = await issueRegisteredCodexExecutionTicket(pool, {
+      sub: 'host/research-host',
+      hostRef: attempt.hostRef,
+      invocationId: attempt.invocationId,
+      attemptGeneration: attempt.attemptGeneration,
+      providerAttemptId: attempt.id,
+      providerAttemptIndex: attempt.providerAttemptIndex,
+      model: attempt.model,
+      requestHash: attempt.requestHash,
+      policyRevision: attempt.policyRevision,
+      policyHash: attempt.policyHash,
+      budgetReservationId: attempt.budgetReservationId,
+      connectionRevision: attempt.connectionRevision,
+    })
+    await redeemLlmProviderAttempt(
+      {
+        executionTicket: issued.executionTicket,
+        requestHash: attempt.requestHash,
+      },
+      txDeps()
+    )
+    const attemptReceipt = opaqueAttemptReceipt({
+      jti: issued.claims.jti,
+      providerAttemptId: attempt.id,
+      requestHash: attempt.requestHash,
+    })
+    const receipt = {
+      schemaVersion: 'codex-attempt-receipt.v1' as const,
+      providerAttemptId: attempt.id,
+      requestHash: attempt.requestHash,
+      outcome: 'success' as const,
+      usage: { inputTokens: 12, outputTokens: 4 },
+    }
+
+    const first = await finalizeLlmProviderAttempt({ attemptReceipt, receipt }, runTx)
+    const repeat = await finalizeLlmProviderAttempt({ attemptReceipt, receipt }, runTx)
+    expect(first).toMatchObject({
+      providerAttemptId: attempt.id,
+      outcome: 'success',
+      duplicate: false,
+    })
+    expect(repeat.duplicate).toBe(true)
+
+    const ledger = await pool.query<{
+      count: number
+      user_id: string | null
+      source_kind: string
+      llm_secret_name: string | null
+      provider: string
+    }>(
+      `SELECT COUNT(*)::int AS count,
+              MIN(user_id::text) AS user_id,
+              MIN(source_kind) AS source_kind,
+              MIN(llm_secret_name) AS llm_secret_name,
+              MIN(provider) AS provider
+         FROM usage_events
+        WHERE request_id = $1::uuid`,
+      [attempt.id]
+    )
+    expect(ledger.rows[0]).toEqual({
+      count: 1,
+      user_id: null,
+      source_kind: 'channel',
+      llm_secret_name: null,
+      provider: 'codex-subscription',
+    })
   })
 })
