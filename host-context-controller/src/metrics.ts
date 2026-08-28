@@ -151,7 +151,7 @@ export const netPolOrphanSweepCappedTotal = counter({
 
 export const netPolResyncTicksSkippedTotal = counter({
   name: 'clerum_hcc_netpol_resync_ticks_skipped_total',
-  help: 'Periodic NetworkPolicy resync ticks skipped because a convergence pass was already in flight.',
+  help: 'Periodic NetworkPolicy resync ticks skipped because a full pass (`pass-in-flight`) or a defaults-only tick (`defaults-only-in-flight`) was already in flight.',
   labelNames: ['reason'] as const,
 })
 
