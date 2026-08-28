@@ -13,16 +13,12 @@ import {
   createMockCustomApi,
   createMockNetworkingApi,
   createMockRbacApi,
+  makeStubKc,
 } from '../../test/__fixtures__/testMocks'
 import { HOST_LABEL } from '../constants'
 import { HostReconciler } from '../hostReconciler'
 import type { HostCRD } from '../types'
 import { asApiserverPolicyRule, asApiserverRole, updatedRoleLogs } from './asApiserverRole'
-
-function makeStubKc(): k8s.KubeConfig {
-  const stub = new Proxy({}, { get: () => vi.fn() })
-  return { makeApiClient: () => stub } as unknown as k8s.KubeConfig
-}
 
 function makeHost(secretRef = 'secret'): HostCRD {
   return {
@@ -90,6 +86,9 @@ describe('Host ensureHostRole no-op gate', () => {
       expect(authoredKeys).toEqual(['apiGroups', 'resources', 'resourceNames', 'verbs'])
       expect(liveKeys).toEqual(['apiGroups', 'resourceNames', 'resources', 'verbs'])
       expect(authoredKeys).not.toEqual(liveKeys)
+      const authoredLabelKeys = Object.keys(desiredFromCreate(rbacApi).metadata?.labels ?? {})
+      const liveLabelKeys = Object.keys(existing!.metadata?.labels ?? {})
+      expect(authoredLabelKeys).not.toEqual(liveLabelKeys)
       expect(desiredFromCreate(rbacApi).rules?.length).toBeGreaterThan(0)
       expect(rbacApi.replaceNamespacedRole).not.toHaveBeenCalled()
       expect(updatedRoleLogs(log, '"host-chatllm-config-reader"')).toEqual([])
@@ -267,6 +266,25 @@ describe('Host ensureHostRole no-op gate', () => {
       expect(updatedRoleLogs(log, '"host-chatllm-config-reader"')).toEqual([
         '[HostReconciler] Updated Role "host-chatllm-config-reader"',
       ])
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  it('NOOP-ROLE-9: extra live admission label skips replace', async () => {
+    rbacApi.createNamespacedRole.mockRejectedValue({ code: 409 })
+    let existing: k8s.V1Role | undefined
+    rbacApi.readNamespacedRole.mockImplementation(() => {
+      existing = asApiserverRole(desiredFromCreate(rbacApi))
+      existing.metadata!.labels!['argocd.argoproj.io/instance'] = 'clerum-dev'
+      return Promise.resolve(existing)
+    })
+    const log = vi.spyOn(console, 'log')
+    try {
+      await (reconciler as any).ensureHostRole(host)
+      expect(existing?.metadata?.labels?.['argocd.argoproj.io/instance']).toBe('clerum-dev')
+      expect(rbacApi.replaceNamespacedRole).not.toHaveBeenCalled()
+      expect(updatedRoleLogs(log, '"host-chatllm-config-reader"')).toEqual([])
     } finally {
       log.mockRestore()
     }
