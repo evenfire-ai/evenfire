@@ -1109,7 +1109,7 @@ describe('DELETE /admin/mcp-secrets/:name (identity and dependency guard)', () =
 
     await agent.delete('/admin/mcp-secrets/linear-credentials').expect(428)
 
-    expect(gateway.getSecret).not.toHaveBeenCalled()
+    expect(gateway.getSecret).toHaveBeenCalledOnce()
     expect(gateway.deleteSecret).not.toHaveBeenCalled()
   })
 

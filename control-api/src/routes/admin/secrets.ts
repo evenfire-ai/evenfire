@@ -24,7 +24,6 @@ import { toPublicDeleteSecretSummary, toPublicSecretSummary } from '../../servic
 import { SecretPreconditions, SecretUpsertRequest } from '../../types.js'
 import {
   MCP_SECRET_DELETE_PROOF_TTL_SECONDS,
-  type McpSecretDeleteProofClaims,
   createMcpSecretDeleteProof,
   mcpSecretDeleteProofCookieName,
   verifyMcpSecretDeleteProof,
@@ -816,12 +815,11 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
       }
       const name = req.params.name.trim()
       const requestedPrecondition = requestSecretPreconditions(req.body)
-      let deletePrecondition: SecretPreconditions
-      let signedCreateProof: McpSecretDeleteProofClaims | null = null
+      let deletePrecondition: SecretPreconditions | null = requestedPrecondition
+      let signedCreateProof: { proof: string; sessionJti: string } | null = null
       if (requestedPrecondition) {
         // Current clients send the identity returned by POST and retain the
         // established compare-and-delete contract.
-        deletePrecondition = requestedPrecondition
       } else {
         // Only the historical empty DELETE body can use the stateless rollback
         // proof minted during this browser session's successful create. Any
@@ -833,21 +831,11 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         const sessionJti = (req as UiAuthedRequest).adminAuth?.jti ?? ''
         const proofCookieName = mcpSecretDeleteProofCookieName(name)
         const proofCookie = readCookie(req, proofCookieName)
-        const candidateProof = verifyMcpSecretDeleteProof(proofCookie)
-        signedCreateProof =
-          candidateProof?.name === name &&
-          candidateProof.namespace === config.mcpServersNamespace &&
-          candidateProof.sessionJti === sessionJti
-            ? candidateProof
-            : null
-        if (!signedCreateProof) {
+        if (!sessionJti || !proofCookie) {
           res.status(428).json({ error: 'secret_identity_precondition_required' })
           return
         }
-        deletePrecondition = {
-          uid: signedCreateProof.uid,
-          resourceVersion: signedCreateProof.resourceVersion,
-        }
+        signedCreateProof = { proof: proofCookie, sessionJti }
       }
       let existing: {
         metadata?: { labels?: Record<string, string>; uid?: string; resourceVersion?: string }
@@ -868,6 +856,28 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
       const currentPrecondition = secretIdentityPreconditions(existing)
       if (!currentPrecondition) {
         res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
+        return
+      }
+      if (signedCreateProof) {
+        const proofVerification = verifyMcpSecretDeleteProof(signedCreateProof.proof, {
+          name,
+          namespace: config.mcpServersNamespace,
+          uid: currentPrecondition.uid!,
+          resourceVersion: currentPrecondition.resourceVersion!,
+          sessionJti: signedCreateProof.sessionJti,
+        })
+        if (proofVerification === 'identity-mismatch') {
+          res.status(409).json({ error: 'secret_identity_changed', outcome: 'repair_required' })
+          return
+        }
+        if (proofVerification !== 'valid') {
+          res.status(428).json({ error: 'secret_identity_precondition_required' })
+          return
+        }
+        deletePrecondition = currentPrecondition
+      }
+      if (!deletePrecondition) {
+        res.status(428).json({ error: 'secret_identity_precondition_required' })
         return
       }
       if (

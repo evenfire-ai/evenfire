@@ -15,25 +15,20 @@ const claims = {
 }
 
 describe('MCP Secret delete proof', () => {
-  it('binds exactly the Secret identity claims to the admin session', () => {
+  it('binds exactly the Secret identity to the admin session', () => {
     const now = 1_700_000_000_000
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now)
 
     try {
       const proof = createMcpSecretDeleteProof(claims)
 
-      expect(verifyMcpSecretDeleteProof(proof)).toEqual({
-        ...claims,
-        exp: Math.floor(now / 1000) + MCP_SECRET_DELETE_PROOF_TTL_SECONDS,
-      })
-      expect(Object.keys(verifyMcpSecretDeleteProof(proof) ?? {}).sort()).toEqual([
-        'exp',
-        'name',
-        'namespace',
-        'resourceVersion',
-        'sessionJti',
-        'uid',
-      ])
+      expect(verifyMcpSecretDeleteProof(proof, claims)).toBe('valid')
+      expect(verifyMcpSecretDeleteProof(proof, { ...claims, uid: 'uid-replacement' })).toBe(
+        'identity-mismatch'
+      )
+      expect(
+        verifyMcpSecretDeleteProof(proof, { ...claims, sessionJti: 'other-session-jti' })
+      ).toBeNull()
     } finally {
       nowSpy.mockRestore()
     }
@@ -48,10 +43,10 @@ describe('MCP Secret delete proof', () => {
       const tampered = proof.split('.')
       tampered[2] = `${tampered[2]}x`
 
-      expect(verifyMcpSecretDeleteProof(tampered.join('.'))).toBeNull()
+      expect(verifyMcpSecretDeleteProof(tampered.join('.'), claims)).toBeNull()
 
       nowSpy.mockReturnValue(now + (MCP_SECRET_DELETE_PROOF_TTL_SECONDS + 1) * 1000)
-      expect(verifyMcpSecretDeleteProof(proof)).toBeNull()
+      expect(verifyMcpSecretDeleteProof(proof, claims)).toBeNull()
     } finally {
       nowSpy.mockRestore()
     }
