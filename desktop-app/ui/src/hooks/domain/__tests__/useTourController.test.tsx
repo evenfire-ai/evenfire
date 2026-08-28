@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
 import { TOUR_SEEN_STORAGE_KEY } from '../../../constants/tour'
-import { useTourController } from '../useTourController'
+import { resetTourSeenSessionCache, useTourController } from '../useTourController'
 
 const params = (overrides: Partial<Parameters<typeof useTourController>[0]> = {}) => ({
   isAuthenticated: true,
@@ -13,6 +13,8 @@ const params = (overrides: Partial<Parameters<typeof useTourController>[0]> = {}
 
 beforeEach(() => {
   window.localStorage.clear()
+  // The seen flag is resolved once per app session; each test is a new session.
+  resetTourSeenSessionCache()
   vi.useRealTimers()
 })
 
@@ -42,6 +44,21 @@ describe('useTourController', () => {
     // Painted once and already durable: a force-quit mid-tour does not earn a
     // second showing.
     expect(window.localStorage.getItem(TOUR_SEEN_STORAGE_KEY)).toBe('true')
+  })
+
+  it('survives the remount its own write would otherwise cause', () => {
+    // Regression: the flag is written the moment the tour paints. When the
+    // seen value was re-read on every mount, StrictMode's mount → unmount →
+    // remount made the second read see what the first mount had just written,
+    // and the tour hid before a single frame reached the user.
+    const { result, unmount } = renderHook(() => useTourController(params()))
+    expect(result.current.visible).toBe(true)
+    expect(window.localStorage.getItem(TOUR_SEEN_STORAGE_KEY)).toBe('true')
+
+    unmount()
+    const remounted = renderHook(() => useTourController(params()))
+
+    expect(remounted.result.current.visible).toBe(true)
   })
 
   it('uses exactly the documented key', () => {

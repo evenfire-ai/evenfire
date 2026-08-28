@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { TOUR_CATALOG_GRACE_MS, TOUR_SEEN_STORAGE_KEY } from '@constants/tour'
+import { TOUR_CATALOG_GRACE_MS, TOUR_PREVIEW, TOUR_SEEN_STORAGE_KEY } from '@constants/tour'
 
 interface UseTourControllerParams {
   isAuthenticated: boolean
@@ -25,11 +25,35 @@ export interface TourViewModel {
  * tour is one where the tour must not reappear at every launch.
  */
 function readSeen(): boolean {
+  // Previewing must not consume the one real showing, so the flag is neither
+  // read nor written while the dev switch is on.
+  if (TOUR_PREVIEW) return false
   try {
     return window.localStorage.getItem(TOUR_SEEN_STORAGE_KEY) === 'true'
   } catch {
     return true
   }
+}
+
+/**
+ * Resolved once per app session, deliberately outside React.
+ *
+ * The flag is written the moment the tour paints, so any remount that re-read
+ * storage would see the value this run just wrote and hide the tour it is in
+ * the middle of showing. StrictMode makes that certain — it mounts, unmounts
+ * and remounts, which burned the tour before a single frame reached the user —
+ * but a remount for any other reason would do the same.
+ */
+let seenAtSessionStart: boolean | null = null
+
+function readSeenOncePerSession(): boolean {
+  if (seenAtSessionStart === null) seenAtSessionStart = readSeen()
+  return seenAtSessionStart
+}
+
+/** Test support: forget the memoized read so each case starts fresh. */
+export function resetTourSeenSessionCache(): void {
+  seenAtSessionStart = null
 }
 
 /**
@@ -46,8 +70,9 @@ export function useTourController({
   catalogSettled,
   blockedByOtherModal,
 }: UseTourControllerParams): TourViewModel {
-  // Read once: flipping this on the write below would hide the tour mid-run.
-  const [seenAtMount] = useState(readSeen)
+  // Read once per session: flipping this on the write below would hide the
+  // tour mid-run.
+  const [seenAtMount] = useState(readSeenOncePerSession)
   const [dismissed, setDismissed] = useState(false)
   const [graceElapsed, setGraceElapsed] = useState(false)
 
@@ -63,7 +88,7 @@ export function useTourController({
   const visible = eligible && (catalogSettled || graceElapsed) && !blockedByOtherModal
 
   useEffect(() => {
-    if (!visible) return
+    if (!visible || TOUR_PREVIEW) return
     try {
       window.localStorage.setItem(TOUR_SEEN_STORAGE_KEY, 'true')
     } catch {
