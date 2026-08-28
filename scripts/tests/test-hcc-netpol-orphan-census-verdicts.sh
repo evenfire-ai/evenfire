@@ -221,7 +221,9 @@ jq -n '
 
 # V7: member + typed reserved orphan without managed-by (controller
 # repairable arm: type present, managed-by absent, reserved + owner).
-# Pre-fix is_typed required managed-by and printed CLEAN (listed=1).
+# Hidden only after the intra-PR #484 tightening (30070fdd), which
+# required managed-by on is_typed and printed CLEAN (listed=1).
+# Against merge-base/dev, type-only is_typed already listed this case.
 jq -n '{
   items: [
     {
@@ -252,6 +254,26 @@ jq -n '{
   ]
 }' >"${WORKDIR}/np-v7.json"
 
+# V8: only the foreign typed reserved+owner shape (no HCC member).
+# listed=0 must not collapse to INCONCLUSIVE_EMPTY / CLEAN.
+jq -n '{
+  items: [
+    {
+      metadata: {
+        uid: "uid-foreign-only",
+        namespace: "mcp-server",
+        name: "ctx-ghost-allow",
+        labels: {
+          "clerum.io/managed-by": "someone-else",
+          "clerum.io/policy-type": "context-allow",
+          "clerum.io/context": "ctx-ghost",
+          "clerum.io/mcpserver": "srv-ghost"
+        }
+      }
+    }
+  ]
+}' >"${WORKDIR}/np-v8.json"
+
 run_census() {
   : >"$CASE_LOG"
   rm -f "${WORKDIR}/call-count-contexts"
@@ -281,14 +303,20 @@ run_census() {
 
 # V1
 run_census STUB_NP_MAPPER_FIXTURE="${WORKDIR}/np-v1.json"
-if [ "$RC" -ne 0 ]; then
-  fail "foreign-owned typed policy is excluded — exit ${RC}; got: $(head -c 400 <<<"$OUT")"
+if [ "$RC" -ne 5 ]; then
+  fail "foreign-owned typed reserved+owner is AMBIGUOUS_PRESENT — exit ${RC}; got: $(head -c 400 <<<"$OUT")"
 elif ! grep -Fq 'listed_managed=1' <<<"$OUT" || ! grep -Fq 'orphan_count=0' <<<"$OUT"; then
-  fail "foreign-owned typed policy is excluded — listed/orphan mismatch; got: $(head -c 400 <<<"$OUT")"
-elif ! grep -Fq 'VERDICT=CLEAN' <<<"$OUT"; then
-  fail "foreign-owned typed policy is excluded — missing CLEAN"
+  fail "foreign-owned typed reserved+owner is AMBIGUOUS_PRESENT — listed/orphan mismatch; got: $(head -c 400 <<<"$OUT")"
+elif ! grep -Fq 'ambiguous_count=1' <<<"$OUT"; then
+  fail "foreign-owned typed reserved+owner is AMBIGUOUS_PRESENT — ambiguous_count missing"
+elif ! grep -Fq 'VERDICT=AMBIGUOUS_PRESENT' <<<"$OUT"; then
+  fail "foreign-owned typed reserved+owner is AMBIGUOUS_PRESENT — missing verdict"
+elif grep -Fq 'VERDICT=CLEAN' <<<"$OUT"; then
+  fail "foreign-owned typed reserved+owner is AMBIGUOUS_PRESENT — printed CLEAN"
+elif ! grep -Fq $'mcp-server\tctx-ghost-allow\tcontext-allow\tsomeone-else' <<<"$OUT"; then
+  fail "foreign-owned typed reserved+owner is AMBIGUOUS_PRESENT — TSV missing; got: $(head -c 500 <<<"$OUT")"
 else
-  pass "foreign-owned typed policy is excluded from listed and orphans (#484)"
+  pass "foreign-owned typed reserved+owner stays out of listed/orphans and is AMBIGUOUS_PRESENT (#484 / R1-L1)"
 fi
 
 # V2
@@ -381,6 +409,20 @@ elif ! grep -Fq $'mcp-server\tctx-gone-allow\tcontext-allow' <<<"$OUT"; then
   fail "typed repairable without managed-by is counted — TSV line missing; got: $(head -c 500 <<<"$OUT")"
 else
   pass "typed reserved orphan without managed-by is listed and ORPHANS_PRESENT (RP-495-01)"
+fi
+
+# V8
+run_census STUB_NP_MAPPER_FIXTURE="${WORKDIR}/np-v8.json"
+if [ "$RC" -ne 5 ]; then
+  fail "foreign-only ambiguous is not EMPTY — exit ${RC}; got: $(head -c 400 <<<"$OUT")"
+elif ! grep -Fq 'listed_managed=0' <<<"$OUT" || ! grep -Fq 'ambiguous_count=1' <<<"$OUT"; then
+  fail "foreign-only ambiguous is not EMPTY — counters mismatch; got: $(head -c 500 <<<"$OUT")"
+elif ! grep -Fq 'VERDICT=AMBIGUOUS_PRESENT' <<<"$OUT"; then
+  fail "foreign-only ambiguous is not EMPTY — missing AMBIGUOUS_PRESENT"
+elif grep -Fq 'VERDICT=INCONCLUSIVE_EMPTY' <<<"$OUT" || grep -Fq 'VERDICT=CLEAN' <<<"$OUT"; then
+  fail "foreign-only ambiguous is not EMPTY — printed EMPTY or CLEAN"
+else
+  pass "foreign-only typed reserved+owner is AMBIGUOUS_PRESENT, never EMPTY or CLEAN (R1-L1)"
 fi
 
 if grep -Eq '(^|[[:space:]])(set|delete|apply|patch|rollout|scale|create|replace|annotate|label|exec|drain|edit|expose)([[:space:]]|$)' "$ALL_LOG"; then

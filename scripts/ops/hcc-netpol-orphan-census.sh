@@ -29,8 +29,13 @@
 # compiled default. Do not declare the key in deploy/ to unblock the job.
 #
 # This census reflects on-cluster orphans by policy-type plus the
-# reserved-name repairable approximation, not the controller's current
-# pass authority gate.
+# reserved-name repairable approximation. It is not the full pass
+# authority gate, but one abort-shaped class is reported:
+# VERDICT=AMBIGUOUS_PRESENT (exit 5) when a foreign managed-by,
+# typed, reserved-name policy also carries an owner label. That
+# object stays out of listed/orphans (#484) and must not print CLEAN
+# — classifySafetyInventoryPolicy tags it ambiguous and the
+# controller aborts the pass. Other ambiguous arms stay out of scope.
 #
 # Cap formula must stay aligned with evaluateNetPolOrphanSweepCap in
 # host-context-controller/src/networkPolicyReconciler.ts and the compiled
@@ -43,8 +48,8 @@
 #
 # Double-samples 90s apart. Adjudicates only when the desired Context +
 # McpServer identity set is identical across samples; otherwise
-# INCONCLUSIVE_RERUN. A sample that listed zero managed policies is
-# INCONCLUSIVE_EMPTY, never CLEAN.
+# INCONCLUSIVE_RERUN. A sample that listed zero managed policies and
+# zero ambiguous-foreign objects is INCONCLUSIVE_EMPTY, never CLEAN.
 #
 # Usage:
 #   CONTEXT=<kube-context> ./scripts/ops/hcc-netpol-orphan-census.sh
@@ -151,6 +156,23 @@ CENSUS_MANAGED_JQ='
       or (.metadata.name // "" | startswith("ext-egress-"))
     );
   def is_census_managed: is_typed or is_untyped_repairable;
+  def is_reserved:
+    (.metadata.name // "" | startswith("ctx-"))
+    or (.metadata.name // "" | startswith("rpc-egress-"))
+    or (.metadata.name // "" | startswith("ext-egress-"));
+  def has_owner:
+    (.metadata.labels["clerum.io/context"] != null)
+    or (.metadata.labels["clerum.io/mcpserver"] != null);
+  def is_ambiguous_foreign:
+    managed_by != null
+    and managed_by != "host-context-controller"
+    and (
+      policy_type == "context-allow"
+      or policy_type == "rpc-proxy-egress"
+      or policy_type == "external-egress"
+    )
+    and is_reserved
+    and has_owner;
   def census_lane:
     if policy_type == "external-egress"
        or (policy_type == null and (.metadata.name // "" | startswith("ext-egress-")))
@@ -171,6 +193,7 @@ sample_state() {
   )"
 
   local desired_contexts desired_servers listed untyped orphans orphan_count
+  local ambiguous ambiguous_count
   desired_contexts="$(printf "%s" "${contexts_json}" | jq -r '[.items[]?.spec.contextId // empty] | unique | sort | join(",")')"
   desired_servers="$(printf "%s" "${servers_json}" | jq -r '[.items[]?.metadata.name // empty] | unique | sort | join(",")')"
   listed="$(printf "%s" "${np_json}" | jq -r "${CENSUS_MANAGED_JQ} [.items[] | select(is_census_managed)] | length")"
@@ -200,13 +223,34 @@ sample_state() {
     orphan_count="$(printf "%s\n" "${orphans}" | awk 'NF { n++ } END { print n+0 }')"
   fi
 
+  ambiguous="$(printf "%s" "${np_json}" | jq -r "${CENSUS_MANAGED_JQ}"'
+    .items[]
+    | select(is_ambiguous_foreign)
+    | [
+        .metadata.namespace,
+        .metadata.name,
+        (.metadata.labels["clerum.io/policy-type"] // "none"),
+        (.metadata.labels["clerum.io/managed-by"] // "")
+      ]
+    | @tsv
+  ')"
+  if [[ -z "${ambiguous}" ]]; then
+    ambiguous_count=0
+  else
+    ambiguous_count="$(printf "%s\n" "${ambiguous}" | awk 'NF { n++ } END { print n+0 }')"
+  fi
+
   printf "DESIRED_CONTEXTS=%s\n" "${desired_contexts}"
   printf "DESIRED_SERVERS=%s\n" "${desired_servers}"
   printf "LISTED_MANAGED=%s\n" "${listed}"
   printf "REPAIRABLE_UNTYPED=%s\n" "${untyped}"
   printf "ORPHAN_COUNT=%s\n" "${orphan_count}"
+  printf "AMBIGUOUS_COUNT=%s\n" "${ambiguous_count}"
   printf "ORPHANS<<EOF\n"
   printf "%s\n" "${orphans}"
+  printf "EOF\n"
+  printf "AMBIGUOUS<<EOF\n"
+  printf "%s\n" "${ambiguous}"
   printf "EOF\n"
 }
 
@@ -217,14 +261,14 @@ parse_field() {
 
 echo "[census] sample 1"
 SAMPLE1="$(sample_state)"
-echo "${SAMPLE1}" | sed "/^ORPHANS<<EOF/,/^EOF/d"
+echo "${SAMPLE1}" | sed -e "/^ORPHANS<<EOF/,/^EOF/d" -e "/^AMBIGUOUS<<EOF/,/^EOF/d"
 
 echo "[census] waiting ${SAMPLE_GAP_SEC}s for second sample"
 sleep "${SAMPLE_GAP_SEC}"
 
 echo "[census] sample 2"
 SAMPLE2="$(sample_state)"
-echo "${SAMPLE2}" | sed "/^ORPHANS<<EOF/,/^EOF/d"
+echo "${SAMPLE2}" | sed -e "/^ORPHANS<<EOF/,/^EOF/d" -e "/^AMBIGUOUS<<EOF/,/^EOF/d"
 
 CTX1="$(parse_field "${SAMPLE1}" DESIRED_CONTEXTS)"
 SRV1="$(parse_field "${SAMPLE1}" DESIRED_SERVERS)"
@@ -244,10 +288,13 @@ fi
 ORPHAN_COUNT="$(parse_field "${SAMPLE2}" ORPHAN_COUNT)"
 LISTED="$(parse_field "${SAMPLE2}" LISTED_MANAGED)"
 REPAIRABLE_UNTYPED="$(parse_field "${SAMPLE2}" REPAIRABLE_UNTYPED)"
+AMBIGUOUS_COUNT="$(parse_field "${SAMPLE2}" AMBIGUOUS_COUNT)"
 echo "[census] desired set identical across samples"
-echo "[census] listed_managed=${LISTED} repairable_untyped=${REPAIRABLE_UNTYPED} orphan_count=${ORPHAN_COUNT}"
+echo "[census] listed_managed=${LISTED} repairable_untyped=${REPAIRABLE_UNTYPED} orphan_count=${ORPHAN_COUNT} ambiguous_count=${AMBIGUOUS_COUNT}"
 echo "[census] orphans (namespace name policy-type):"
 printf "%s" "${SAMPLE2}" | sed -n "/^ORPHANS<<EOF/,/^EOF/{ /^ORPHANS<<EOF/d; /^EOF/d; p; }"
+echo "[census] ambiguous (namespace name policy-type managed-by):"
+printf "%s" "${SAMPLE2}" | sed -n "/^AMBIGUOUS<<EOF/,/^EOF/{ /^AMBIGUOUS<<EOF/d; /^EOF/d; p; }"
 
 # Controller compiled defaults (config.ts). Used only for
 # controller_cap_would_trip, never as a substitute for live env.
@@ -321,11 +368,21 @@ CONTROLLER_CAP_REASON="$(cap_would_trip "${ORPHAN_COUNT}" "${LISTED}" "${CONTROL
 echo "[census] live_cap_would_trip=${CAP_REASON}"
 echo "[census] compiled_default_absolute=${COMPILED_ABS_DEFAULT} compiled_default_percent=${COMPILED_PCT_DEFAULT}"
 echo "[census] controller_cap_would_trip=${CONTROLLER_CAP_REASON} (live env, else compiled defaults)"
-if [[ "${LISTED}" -eq 0 ]]; then
+if ! is_uint "${AMBIGUOUS_COUNT}"; then
+  echo "[census] VERDICT=INCONCLUSIVE_EMPTY"
+  echo "[census] ambiguous_count is not an unsigned integer; do not treat this as CLEAN" >&2
+  exit 4
+fi
+if [[ "${LISTED}" -eq 0 && "${AMBIGUOUS_COUNT}" -eq 0 ]]; then
   echo "[census] VERDICT=INCONCLUSIVE_EMPTY"
   echo "[census] listed zero managed NetworkPolicies; \"found nothing\" is not CLEAN"
   echo "[census] hint: re-check CONTEXT, CONTEXT_MAPPER_RPC_PROXY_NAMESPACE, and kubectl connectivity"
   exit 4
+fi
+if [[ "${AMBIGUOUS_COUNT}" -gt 0 ]]; then
+  echo "[census] VERDICT=AMBIGUOUS_PRESENT"
+  echo "[census] foreign typed reserved+owner policy present; controller aborts the pass — not CLEAN"
+  exit 5
 fi
 if [[ "${ORPHAN_COUNT}" -eq 0 ]]; then
   echo "[census] VERDICT=CLEAN"

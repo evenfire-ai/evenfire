@@ -212,16 +212,8 @@ fi
 run_census "$GENERIC" CONTEXT="$TEST_CTX"
 if ! grep -Fq 'UNSET (controller applies compiled default: rpc-proxy)' <<<"$OUT"; then
   fail "UNSET rpc-proxy is two-tier — missing live label"
-elif ! grep -Fq 'get networkpolicy -n rpc-proxy' "$CASE_LOG" &&
-  ! grep -Fq 'get networkpolicy --namespace rpc-proxy' "$CASE_LOG" &&
-  ! grep -Eq -- '-n rpc-proxy get networkpolicy|get networkpolicy -n rpc-proxy' "$CASE_LOG"; then
-  # kubectl is invoked as: --context X -n rpc-proxy get networkpolicy -o json
-  # logged as the raw argv string from $*.
-  if ! grep -Fq -- '-n rpc-proxy' "$CASE_LOG" || ! grep -Fq 'networkpolicy' "$CASE_LOG"; then
-    fail "UNSET rpc-proxy is two-tier — did not sample rpc-proxy; got: $(tr '\n' '|' <"$CASE_LOG")"
-  else
-    pass "UNSET rpc-proxy namespace is labelled two-tier and sampled with the compiled default"
-  fi
+elif ! grep -Fq -- '-n rpc-proxy' "$CASE_LOG" || ! grep -Fq 'networkpolicy' "$CASE_LOG"; then
+  fail "UNSET rpc-proxy is two-tier — did not sample rpc-proxy; got: $(tr '\n' '|' <"$CASE_LOG")"
 else
   pass "UNSET rpc-proxy namespace is labelled two-tier and sampled with the compiled default"
 fi
@@ -240,10 +232,47 @@ fi
 # G8
 if grep -Fxq "CONTEXT=${PLACEHOLDER}" "$WRAPPER" &&
   ! grep -Eq 'CONTEXT=.*:-|\$\{CONTEXT:-' "$WRAPPER" &&
-  grep -Eq 'exec .*hcc-netpol-orphan-census\.sh' "$WRAPPER"; then
+  grep -Eq 'exec .*hcc-netpol-orphan-census\.sh' "$WRAPPER" &&
+  grep -Fq 'BASH_SOURCE[0]' "$WRAPPER"; then
   pass "wrapper source pins: unconditional assignment + exec of the generic census"
 else
-  fail "wrapper source pins — unconditional CONTEXT= or exec of the generic census is missing"
+  fail "wrapper source pins — unconditional CONTEXT=, BASH_SOURCE resolve, or exec of the generic census is missing"
+fi
+
+# G9: PATH + symlink invocation must still exec the sibling generic.
+ln -sf "$WRAPPER" "${STUB_BIN}/hcc-netpol-orphan-census-clerum-dev.sh"
+: >"$CASE_LOG"
+_g9_pwd="$(pwd)"
+cd "$WORKDIR"
+OUT="$(
+  env -i \
+    HOME="$HOME" \
+    TMPDIR="$WORKDIR" \
+    KUBECONFIG="$FAKE_KUBECONFIG" \
+    PATH="${STUB_BIN}:${PATH}" \
+    CENSUS_STUB_LOG="$CASE_LOG" \
+    SAMPLE_GAP_SEC=0 \
+    CONTEXT=gke_evil_inherited_ctx \
+    STUB_FAIL_ENV_READ=1 \
+    STUB_ENV_CONTEXT_MAPPER_NAMESPACE="$MAPPER_NS" \
+    STUB_ENV_CONTEXT_MAPPER_HOST_NAMESPACE="$HOST_NS" \
+    STUB_CONTEXTS_FIXTURE="${WORKDIR}/contexts.json" \
+    STUB_SERVERS_FIXTURE="${WORKDIR}/servers.json" \
+    STUB_NP_MAPPER_FIXTURE="${WORKDIR}/empty-np.json" \
+    STUB_NP_HOST_FIXTURE="${WORKDIR}/empty-np.json" \
+    STUB_NP_RPC_FIXTURE="${WORKDIR}/empty-np.json" \
+    bash -c 'hcc-netpol-orphan-census-clerum-dev.sh' 2>&1
+)"
+RC=$?
+cd "$_g9_pwd"
+cat "$CASE_LOG" >>"$ALL_LOG"
+if ! grep -Fq -- "--context ${PLACEHOLDER}" "$CASE_LOG" &&
+  ! grep -Fq -- "--context=${PLACEHOLDER}" "$CASE_LOG"; then
+  fail "wrapper PATH/symlink resolve — placeholder missing from argv; got: $(tr '\n' '|' <"$CASE_LOG")"
+elif grep -Fq 'gke_evil_inherited_ctx' "$CASE_LOG" || grep -Fq 'gke_evil_inherited_ctx' <<<"$OUT"; then
+  fail "wrapper PATH/symlink resolve — hostile inherited context leaked"
+else
+  pass "wrapper PATH/symlink invocation still execs the sibling generic and pins CONTEXT"
 fi
 
 if grep -Eq '(^|[[:space:]])(set|delete|apply|patch|rollout|scale|create|replace|annotate|label|exec|drain|edit|expose)([[:space:]]|$)' "$ALL_LOG"; then

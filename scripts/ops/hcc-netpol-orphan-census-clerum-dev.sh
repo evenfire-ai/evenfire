@@ -21,5 +21,24 @@ umask 077
 CONTEXT=gke_your-gcp-project_us-central1-a_example-dev
 export CONTEXT
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+# Resolve this file, including PATH invocation and a symlink, so exec
+# finds the sibling generic script. dirname "$0" is "." when the
+# wrapper is invoked by name off PATH (R1-L4).
+_self="${BASH_SOURCE[0]:-$0}"
+if [[ "${_self}" != /* && "$(dirname "${_self}")" == "." ]]; then
+  _found="$(command -v -- "$(basename "${_self}")" 2>/dev/null || true)"
+  if [[ -n "${_found}" ]]; then
+    _self="${_found}"
+  fi
+fi
+while [[ -L "${_self}" ]]; do
+  _dir="$(cd "$(dirname "${_self}")" && pwd)"
+  _link="$(readlink "${_self}")"
+  if [[ "${_link}" == /* ]]; then
+    _self="${_link}"
+  else
+    _self="${_dir}/${_link}"
+  fi
+done
+ROOT="$(cd "$(dirname "${_self}")" && pwd)"
 exec "${ROOT}/hcc-netpol-orphan-census.sh"
