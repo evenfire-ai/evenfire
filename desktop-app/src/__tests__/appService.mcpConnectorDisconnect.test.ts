@@ -143,6 +143,15 @@ describe('AppService.disconnectMcpServer (spec 11 U4 — destructive revoke)', (
     )
   })
 
+  it('defaults the destructive dialog to Cancel so a stray Enter never revokes (R1-M9)', async () => {
+    const svc = makeService()
+    await svc.disconnectMcpServer(SERVER, HOST_REF, CTX, { shared: true })
+
+    expect(mocks.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'warning', defaultId: 0, cancelId: 0 })
+    )
+  })
+
   it('non-shared copy scopes to the user only', async () => {
     const svc = makeService()
     await svc.disconnectMcpServer(SERVER, HOST_REF, undefined, { shared: false })

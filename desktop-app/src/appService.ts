@@ -4689,7 +4689,9 @@ export class AppService {
     const opts = {
       type: (action === 'disconnect' ? 'warning' : 'question') as 'warning' | 'question',
       buttons: ['Cancel', verb],
-      defaultId: 1,
+      // Disconnect is destructive: default to Cancel (0) so a stray Enter does
+      // NOT revoke. Connect is additive, so its default stays on the action (1).
+      defaultId: action === 'disconnect' ? 0 : 1,
       cancelId: 0,
       message,
       detail,
