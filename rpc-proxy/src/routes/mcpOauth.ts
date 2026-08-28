@@ -172,7 +172,23 @@ export function createMcpOauthRouter(): Router {
           }),
           signal: AbortSignal.timeout(config.upstreamTimeoutMs),
         })
-      } catch {
+      } catch (err) {
+        // Distinguish a timeout from a genuine connect failure. `AbortSignal.
+        // timeout()` rejects fetch with a `TimeoutError`; a manual abort would
+        // be `AbortError`. A timeout means control-api was reachable but slow →
+        // 504 (gateway timeout); anything else → 502 (unreachable). Bind + log
+        // the error either way (it was silently swallowed before).
+        const name = err instanceof Error ? err.name : ''
+        if (name === 'TimeoutError' || name === 'AbortError') {
+          console.warn(`[RPC_PROXY] control-api disconnect timed out server=${mcpServerName}`)
+          res.status(504).json({ error: 'control_api_timeout' })
+          return
+        }
+        console.warn(
+          `[RPC_PROXY] control-api disconnect fetch failed server=${mcpServerName} error=${
+            err instanceof Error ? err.message : String(err)
+          }`
+        )
         res.status(502).json({ error: 'control_api_unreachable' })
         return
       }

@@ -137,4 +137,28 @@ describe('DELETE /api/v1/mcp-oauth/:mcpServerName/grant (spec 11 U4 disconnect)'
     expect(res.status).toBe(502)
     expect(res.body.error).toBe('control_api_unreachable')
   })
+
+  it('returns 504 (not 502) when the control-api call times out, and logs it (R1-L1)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // AbortSignal.timeout() rejects fetch with a TimeoutError.
+    fetchSpy.mockRejectedValue(
+      Object.assign(new Error('The operation timed out'), {
+        name: 'TimeoutError',
+      })
+    )
+    const res = await request(makeApp()).delete(PATH).set('Authorization', 'Bearer t').send({})
+    expect(res.status).toBe(504)
+    expect(res.body.error).toBe('control_api_timeout')
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[RPC_PROXY]'))
+    warnSpy.mockRestore()
+  })
+
+  it('also treats a manual AbortError as a 504 timeout (R1-L1)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    fetchSpy.mockRejectedValue(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+    const res = await request(makeApp()).delete(PATH).set('Authorization', 'Bearer t').send({})
+    expect(res.status).toBe(504)
+    expect(res.body.error).toBe('control_api_timeout')
+    warnSpy.mockRestore()
+  })
 })
