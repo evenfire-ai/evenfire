@@ -2,6 +2,27 @@ import type { RpcAgentConnectors, RpcConnector } from '../../../src/types'
 import { formatMcpServerDisplayName } from './format'
 
 /**
+ * A connector is "shared by the team" when its grant is keyed by Context, not by
+ * user (spec §1.3). Authorizing/disconnecting it affects EVERYONE in the
+ * Context, so both the confirm-dialog copy and the panel warning key off this.
+ *
+ * Lives in `lib/` (pure, no react) so `lib/connectorPresentation` can consume it
+ * without `lib/` importing from `hooks/domain/` — the layering runs one way.
+ */
+export function isSharedConnector(
+  connector: Pick<RpcConnector, 'authKind' | 'grantScope'>
+): boolean {
+  return connector.grantScope === 'context' || connector.authKind === 'oauth-context'
+}
+
+/** A connector row is actionable from the connectors rail only when it is
+ *  OAuth-governed: `authorized` → disconnect, `requires_setup` → authorize.
+ *  `no_oauth` (static / none) is managed by Secret, out of scope — no button. */
+export function isActionableConnector(connector: Pick<RpcConnector, 'status'>): boolean {
+  return connector.status === 'authorized' || connector.status === 'requires_setup'
+}
+
+/**
  * A single deduplicated row of the Connectors table.
  *
  * The payload from rpc-proxy is grouped BY AGENT, but a grant is never

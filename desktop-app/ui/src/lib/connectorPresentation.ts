@@ -1,5 +1,5 @@
 import type { RpcConnector } from '../../../src/types'
-import { isSharedConnector } from '../hooks/domain/useConnectorsController'
+import { isSharedConnector } from './connectorRows'
 
 /**
  * Shared presentation helpers for a connector's tri-state grant, used by BOTH

@@ -1,9 +1,14 @@
 import { useCallback, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type { RpcAgentConnectors, RpcConnector } from '../../../../src/types'
-import { connectorRowKey } from '../../lib/connectorRows'
+import { connectorRowKey, isActionableConnector, isSharedConnector } from '../../lib/connectorRows'
 import { formatMcpServerDisplayName } from '../../lib/format'
 import { desktopQueryKeys } from './queryKeys'
+
+// Re-exported from their new home in `lib/` so existing importers (the pages)
+// keep their `from '.../useConnectorsController'` path. The layering rule is that
+// `lib/` never imports from `hooks/` — these pure predicates belong in `lib/`.
+export { isActionableConnector, isSharedConnector }
 
 const EMPTY_AGENTS: RpcAgentConnectors[] = []
 
@@ -25,24 +30,6 @@ function toActionErrorMessage(
 ): string {
   const name = formatMcpServerDisplayName(connector.name)
   return `Couldn't ${verb} "${name}". ${toErrorMessage(error)}`
-}
-
-/**
- * A connector is "shared by the team" when its grant is keyed by Context, not by
- * user (spec §1.3). Authorizing/disconnecting it affects EVERYONE in the
- * Context, so both the confirm-dialog copy and the panel warning key off this.
- */
-export function isSharedConnector(
-  connector: Pick<RpcConnector, 'authKind' | 'grantScope'>
-): boolean {
-  return connector.grantScope === 'context' || connector.authKind === 'oauth-context'
-}
-
-/** A connector row is actionable from THIS rail only when it is OAuth-governed:
- *  `authorized` → disconnect, `requires_setup` → authorize. `no_oauth` (static /
- *  none) is managed by Secret, out of scope — no button. */
-export function isActionableConnector(connector: Pick<RpcConnector, 'status'>): boolean {
-  return connector.status === 'authorized' || connector.status === 'requires_setup'
 }
 
 export type ConnectorActionInput = {
