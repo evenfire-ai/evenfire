@@ -790,10 +790,12 @@ export function CreateMcpServerForm({
                         : 'Create a context before creating a connector.'
                   }
                   error={contextsError || undefined}
+                  htmlFor="create-connector-context"
                   label="Context"
                   required
                 >
                   <SelectionDropdown
+                    ariaLabel="Context"
                     id="create-connector-context"
                     multiple={false}
                     onChange={next => setContextRef(next[0] ?? '')}

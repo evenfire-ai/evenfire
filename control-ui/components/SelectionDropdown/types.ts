@@ -9,6 +9,7 @@ export type SelectionDropdownOption = {
 }
 
 export type SelectionDropdownProps = {
+  ariaLabel?: string
   className?: string
   id?: string
   options: SelectionDropdownOption[]

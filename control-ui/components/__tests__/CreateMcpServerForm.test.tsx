@@ -102,7 +102,7 @@ describe('CreateMcpServerForm — render', () => {
     await waitFor(() =>
       expect(screen.getByRole('heading', { name: 'Context access' })).toBeInTheDocument()
     )
-    const contextSelector = screen.getByRole('button', { name: 'context1' })
+    const contextSelector = screen.getByRole('button', { name: 'Context' })
     fireEvent.click(contextSelector)
 
     expect(screen.getByRole('option', { name: 'context1' })).toBeInTheDocument()

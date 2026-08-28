@@ -12,6 +12,7 @@ import {
   adminCredentials,
   api,
   assertAllowedTarget,
+  directApi,
   loginThroughUi,
   requireRecorderConfirm,
   screenshotAndLog,
@@ -24,8 +25,8 @@ import {
 // or non-existent image would never converge, only time out.
 const MOCK_MCP_IMAGE = process.env.TEST_MOCK_MCP_IMAGE ?? 'clerum/mock-mcp-server:test'
 
-// The connector-form selects are not label-associated (no htmlFor/id), so use
-// their visible field label as the stable local scope for the select control.
+// The connector-form's Transport Type and Managed selects are not label-associated,
+// so use their visible field label as the stable local scope for those controls.
 async function fieldSelect(page: Page, fieldLabelText: string, value: string): Promise<void> {
   await page.getByText(fieldLabelText, { exact: true }).locator('..').getByRole('combobox').selectOption(value)
 }
@@ -35,7 +36,7 @@ async function createEmptyContext(page: Page, contextName: string): Promise<void
   await expect(page).toHaveURL(/\/contexts$/, { timeout: 20_000 })
   await page.getByRole('button', { name: 'Create context', exact: true }).click()
   await expect(page).toHaveURL(/\/contexts\/new$/, { timeout: 20_000 })
-  await page.getByPlaceholder('context1').fill(contextName)
+  await page.getByLabel('Context name').fill(contextName)
   await page
     .getByPlaceholder('Human-readable context description')
     .fill('QA recorder temporary context')
@@ -61,7 +62,8 @@ async function createDiscoveryConnector(
 ): Promise<void> {
   await page.getByRole('link', { name: 'Installed Connectors', exact: true }).click()
   await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
-  await page.getByRole('button', { name: 'Create Connector', exact: true }).click()
+  await page.getByRole('button', { name: 'Connector actions', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Create connector', exact: true }).click()
   await expect(page).toHaveURL(/\/connectors\/new$/, { timeout: 20_000 })
 
   await page.getByPlaceholder('my-mcp-server').fill(connectorName)
@@ -72,7 +74,17 @@ async function createDiscoveryConnector(
     .getByPlaceholder('Optional description of this connector')
     .fill('QA recorder discovery-only connector')
 
-  const contextDropdown = page.locator('.cu-selection-dropdown__button')
+  await page.getByText('Advanced options', { exact: true }).click()
+  await fieldSelect(page, 'Transport Type', 'stdio')
+  await expect(page.locator('input[type="number"]')).toHaveCount(0)
+  await fieldSelect(page, 'Managed', 'false')
+  await page.getByLabel('Egress mode').selectOption('exact-cidr')
+  await page.getByLabel('Allowed CIDRs/IPs').fill('8.8.8.8/32')
+  await page.getByLabel('Allowed ports').fill('443')
+
+  await page.getByRole('button', { name: 'Continue', exact: true }).click()
+
+  const contextDropdown = page.getByRole('button', { name: 'Context', exact: true })
   await expect(contextDropdown).toBeEnabled({ timeout: 20_000 })
   await contextDropdown.click()
   await expect(page.getByPlaceholder('Search contexts...')).toBeVisible({ timeout: 20_000 })
@@ -82,18 +94,10 @@ async function createDiscoveryConnector(
 
   await page.getByRole('button', { name: 'Continue', exact: true }).click()
 
-  await fieldSelect(page, 'Transport Type', 'stdio')
-  await expect(page.locator('input[type="number"]')).toHaveCount(0)
-  await fieldSelect(page, 'Managed', 'false')
-
-  await page.getByRole('button', { name: 'Continue', exact: true }).click()
-
-  await expect(page.getByText('External Egress', { exact: true })).toBeVisible({ timeout: 20_000 })
-  await page.getByRole('button', { name: 'Continue', exact: true }).click()
-
   await expect(
-    page.getByRole('checkbox', { name: 'Use Kubernetes Secret for credentials', exact: true })
-  ).not.toBeChecked()
+    page.getByRole('radio', { name: /^No credentials required/ })
+  ).toBeVisible({ timeout: 20_000 })
+  await page.getByRole('radio', { name: /^No credentials required/ }).check()
 
   await page.getByRole('button', { name: 'Create connector', exact: true }).click()
   await expect(page.getByText('Connector created successfully.', { exact: true })).toBeVisible({
@@ -151,7 +155,7 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
 
       // External Egress: switch to exact-CIDR mode and add one public CIDR + port.
       // 8.8.8.8/32 is a valid public target; the model rejects private/doc ranges.
-      await fieldSelect(page, 'Egress mode', 'exact-cidr')
+      await page.getByLabel('Egress mode').selectOption('exact-cidr')
       await page.getByLabel('Allowed CIDRs/IPs').fill('8.8.8.8/32')
       await page.getByLabel('Allowed ports').fill('443')
 
@@ -162,12 +166,16 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
 
       await screenshotAndLog(page, testInfo, 'control-ui-connector-edit')
     } finally {
-      await api(
+      await directApi(
         page.request,
         'DELETE',
         `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorName)}`
       )
-      await api(page.request, 'DELETE', `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`)
+      await directApi(
+        page.request,
+        'DELETE',
+        `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`
+      )
     }
   })
 
@@ -308,21 +316,21 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
 
       await screenshotAndLog(page, testInfo, 'control-ui-connector-credential-rotation')
     } finally {
-      const deleteConnector = await api(
+      const deleteConnector = await directApi(
         page.request,
         'DELETE',
         `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorName)}`
       )
       expect(deleteConnector.status, 'cleanup connector').toBe(200)
       if (!cleanupIdentity) throw new Error('missing cleanup identity')
-      const deleteSecret = await api(
+      const deleteSecret = await directApi(
         page.request,
         'DELETE',
         `/api/v1/admin/mcp-secrets/${encodeURIComponent(secretName)}`,
         cleanupIdentity
       )
       expect(deleteSecret.status, 'cleanup connector credential').toBe(200)
-      const deleteContext = await api(
+      const deleteContext = await directApi(
         page.request,
         'DELETE',
         `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`
