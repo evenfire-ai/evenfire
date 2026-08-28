@@ -318,6 +318,28 @@ describeRealPostgres('external team mutations final source authority on real Pos
         },
       },
       {
+        name: 'legacy team invitation creation',
+        invoke: server =>
+          request(server).post(`/external/teams/${teamId}/invitations`).send({
+            email: invitationEmail,
+            name: 'Invitee',
+            role: 'member',
+          }),
+        assertMutation: async () => {
+          const result = await databasePool.query<{ status: string }>(
+            `SELECT status FROM invitations WHERE email = $1`,
+            [invitationEmail]
+          )
+          expect(result.rows[0]?.status).toBe('pending')
+        },
+        assertNoMutation: async () => {
+          const result = await databasePool.query(`SELECT 1 FROM invitations WHERE email = $1`, [
+            invitationEmail,
+          ])
+          expect(result.rowCount).toBe(0)
+        },
+      },
+      {
         name: 'managed invitation resend',
         prepare: prepareInvitation,
         invoke: server =>
