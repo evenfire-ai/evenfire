@@ -56,6 +56,7 @@ import {
 import {
   applyNetworkPolicy,
   canonicalStringify,
+  canonicalizeValue,
   getErrorCode,
   preserveDeploymentAnnotations,
   preserveServiceAssignedFields,
@@ -4654,52 +4655,44 @@ export class HostReconciler {
 
 /**
  * True when the desired Role matches the live object on the fields HCC authors:
- * `rbacLabels` and `rules` in author order. Server metadata and annotations are
- * ignored — the builder does not write annotations, and comparing them would
- * force a PUT. Label keys are canonicalized. Object keys inside each rule are
- * also canonicalized: client-node rebuilds V1PolicyRule in attributeTypeMap
- * order (resourceNames before resources), so a raw JSON.stringify never matches
- * a live GET (#307). Rule arrays, verbs, and resourceNames stay in author order.
- * Missing rules or labels, or any compare failure, returns false
- * (fail-open-to-write).
+ * `rbacLabels` and `rules`. Server metadata and annotations are ignored — the
+ * builder does not write annotations, and comparing them would force a PUT.
+ *
+ * Label comparison is a subset of the keys HCC authors. Extra live labels
+ * (Kyverno/Gatekeeper add-labels, ArgoCD instance, cost tags) must not force a
+ * PUT that strips them and re-enters the write loop. A missing or changed
+ * authored key still fail-opens to write, so a later third `rbacLabels` key
+ * still lands. A key HCC stops authoring is treated as extra-live and will
+ * not PUT until some other authored field drifts; the previous exact-map
+ * compare used to retract it. `isHccOwnedHostResource` keys on the same two
+ * labels today.
+ *
+ * Object keys inside each rule are canonicalized: client-node rebuilds
+ * V1PolicyRule in attributeTypeMap order (resourceNames before resources), so a
+ * raw JSON.stringify never matches a live GET (#307). Rule arrays, verbs, and
+ * resourceNames stay in author order. Missing rules or labels, or any compare
+ * failure, returns false (fail-open-to-write).
  */
 function roleMatchesDesired(desired: k8s.V1Role, existing: k8s.V1Role): boolean {
   try {
     if (!desired.rules || !existing.rules) return false
-    if (!desired.metadata?.labels || !existing.metadata?.labels) return false
-    if (
-      JSON.stringify(canonicalizeLabelKeys(desired.metadata.labels)) !==
-      JSON.stringify(canonicalizeLabelKeys(existing.metadata.labels))
-    ) {
-      return false
+    const desiredLabels = desired.metadata?.labels
+    const existingLabels = existing.metadata?.labels
+    if (!desiredLabels || !existingLabels) return false
+    const authored: Record<string, string> = {}
+    const liveAuthored: Record<string, string> = {}
+    for (const key of Object.keys(desiredLabels)) {
+      if (existingLabels[key] === undefined) return false
+      authored[key] = desiredLabels[key]
+      liveAuthored[key] = existingLabels[key]
     }
     return (
-      JSON.stringify(canonicalizeRoleValue(desired.rules)) ===
-      JSON.stringify(canonicalizeRoleValue(existing.rules))
+      JSON.stringify(canonicalizeValue({ labels: authored, rules: desired.rules })) ===
+      JSON.stringify(canonicalizeValue({ labels: liveAuthored, rules: existing.rules }))
     )
   } catch {
     return false
   }
-}
-
-function canonicalizeLabelKeys(labels: Record<string, string>): Record<string, string> {
-  const canonical: Record<string, string> = {}
-  for (const key of Object.keys(labels).sort()) {
-    canonical[key] = labels[key]
-  }
-  return canonical
-}
-
-/** Sort object keys recursively. Arrays keep author order. */
-function canonicalizeRoleValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalizeRoleValue)
-  if (typeof value !== 'object' || value === null) return value
-  const canonical: Record<string, unknown> = {}
-  for (const key of Object.keys(value).sort()) {
-    const entry = (value as Record<string, unknown>)[key]
-    if (entry !== undefined) canonical[key] = canonicalizeRoleValue(entry)
-  }
-  return canonical
 }
 
 /**
@@ -4837,7 +4830,7 @@ function normalizeDeploymentForComparison(deployment: k8s.V1Deployment): unknown
     }
   }
 
-  return normalizeDeploymentValue(normalized)
+  return canonicalizeValue(normalized)
 }
 
 function normalizeContainerDefaults(container: k8s.V1Container): void {
@@ -4868,20 +4861,4 @@ function normalizeVolumeDefaults(volume: k8s.V1Volume): void {
   if (volume.persistentVolumeClaim?.readOnly === false) {
     delete volume.persistentVolumeClaim.readOnly
   }
-}
-
-function normalizeDeploymentValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalizeDeploymentValue)
-  if (!isDeploymentObject(value)) return value
-
-  const normalized: Record<string, unknown> = {}
-  for (const key of Object.keys(value).sort()) {
-    const entry = value[key]
-    if (entry !== undefined) normalized[key] = normalizeDeploymentValue(entry)
-  }
-  return normalized
-}
-
-function isDeploymentObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
