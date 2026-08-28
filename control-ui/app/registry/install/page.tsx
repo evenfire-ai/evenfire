@@ -10,6 +10,7 @@ import { CreatePageHeader } from '@components/CreatePageHeader'
 import { CreateStepFlow } from '@components/CreateStepFlow'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { EgressEditor } from '@components/EgressEditor'
+import { HookInstallForm } from '@components/HookInstallForm'
 import { RegistryInstallForm } from '@components/RegistryInstallForm'
 import { IconStore } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
@@ -128,7 +129,7 @@ export function providerForModel(model: string, catalog: LlmAllowedModel[]): str
 
 // Distinct providers the operator has enabled, for the override dropdown. Keeps
 // the picker honest — only providers with configured credentials are offered,
-// instead of a static enum of all 21.
+// instead of a static enum of all 22.
 export function enabledProviders(catalog: LlmAllowedModel[]): string[] {
   const seen = new Set<string>()
   for (const row of catalog) {
@@ -342,7 +343,7 @@ function RegistryRecipeInstallPreview({
 
               <div className="cu-card">
                 <div className="cu-card__body">
-                  <div className="cu-table-actions" style={{ justifyContent: 'flex-start' }}>
+                  <div className="cu-table-actions cu-registry-install-entry-heading">
                     <strong>
                       {entry.name} v{entry.version}
                     </strong>
@@ -354,7 +355,7 @@ function RegistryRecipeInstallPreview({
                       </span>
                     ) : null}
                   </div>
-                  <p className="cu-muted" style={{ margin: '6px 0 0' }}>
+                  <p className="cu-muted cu-registry-install-entry-description">
                     {entry.description}
                   </p>
                 </div>
@@ -420,7 +421,7 @@ function RegistryRecipeInstallPreview({
             {validationErrors.length > 0 ? (
               <div className="cu-banner cu-banner--error" role="alert">
                 This Marketplace recipe cannot be installed until its manifest validates.
-                <ul style={{ margin: '6px 0 0 18px' }}>
+                <ul className="cu-registry-install-validation-list">
                   {validationErrors.slice(0, 5).map(issue => (
                     <li key={`${issue.path}-${issue.message}`}>
                       {issue.path}: {issue.message}
@@ -497,11 +498,11 @@ function RegistryRecipeInstallPreview({
                     }
                   >
                     <strong>{finding.label}</strong>: {finding.message}
-                    <div style={{ marginTop: 4 }}>
+                    <div className="cu-registry-install-egress-detail">
                       Bindings: {finding.bindingCount}. Mode: {finding.mode}.
                     </div>
                     {finding.targets && finding.targets.length > 0 ? (
-                      <div style={{ marginTop: 4 }}>
+                      <div className="cu-registry-install-egress-detail">
                         Hosts: {finding.targets.join(', ')}
                         {finding.ports && finding.ports.length > 0
                           ? ` · Ports: ${finding.ports.join(', ')}`
@@ -611,7 +612,12 @@ function RegistryInstallPageContent() {
   }, [entryName, entryVersion])
 
   const isPrivate = entry?.visibility === 'private'
-  const kindLabel = entry?.entry_type === 'recipe' ? 'plugin' : 'connector'
+  const kindLabel =
+    entry?.entry_type === 'recipe'
+      ? 'plugin'
+      : entry?.entry_type === 'llm-hook'
+        ? 'guardrail hook'
+        : 'connector'
   // Scoped names are stored as `@org/name`; surface the org for a private entry.
   const orgScope = entry ? (entry.name.match(/^(@[^/]+)\//)?.[1] ?? null) : null
   const headerTitle = isPrivate ? `Install a private ${kindLabel}` : 'Install from Marketplace'
@@ -653,11 +659,18 @@ function RegistryInstallPageContent() {
                   )
                 }
               />
+            ) : entry?.entry_type === 'llm-hook' ? (
+              <HookInstallForm
+                entry={entry}
+                onCancel={() => router.push(CONTROL_ROUTES.marketplace.root)}
+                onInstalled={() => router.push(CONTROL_ROUTES.guardrails.root)}
+              />
             ) : entry ? (
               <RegistryInstallForm
                 entry={entry}
                 onCancel={() => router.push(CONTROL_ROUTES.marketplace.root)}
-                onInstalled={() => router.push(CONTROL_ROUTES.marketplace.root)}
+                onInstalled={() => undefined}
+                onViewConnectors={() => router.push(CONTROL_ROUTES.connectors.root)}
               />
             ) : null}
           </CreateFlowPanel>

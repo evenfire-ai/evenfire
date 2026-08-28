@@ -1,6 +1,11 @@
 import type { EnvSecret } from '../../lib/api'
 import type { CredentialSurface } from './resolveCredentialSurface'
 
+export type RegistryCredentialSource = {
+  name: string
+  version: string
+}
+
 export type UpdateConnectorCredentialsProps = {
   /**
    * McpServer CRD name — the connector currently being edited. Also the
@@ -38,6 +43,8 @@ export type UpdateConnectorCredentialsProps = {
    * secrets instead.
    */
   recipeOwned?: boolean
+  /** Marketplace source used to resolve operator-friendly credential labels. */
+  registryCredentialSource?: RegistryCredentialSource
 }
 
 /**

@@ -23,6 +23,7 @@ export function ContextDetailsPage() {
   } = useNavigationContext()
   const {
     agentNames,
+    agentDisplayByName,
     agentContextByName,
     mcpServersByAgent,
     accessCatalog: mcpAccessCatalog,
@@ -459,7 +460,13 @@ export function ContextDetailsPage() {
                     >
                       <td className="da-table__cell">
                         <span className="context-id-cell">
-                          <strong>{agent.name}</strong>
+                          {/* Visible agent name (spec.host). The catalog map is
+                              total only over catalog agents; scopedAgents also
+                              carries cross-team agents added from the team
+                              directory (no catalog display source), so fall back
+                              to the identifier for those — not the Decision #6
+                              `|| name` guard. */}
+                          <strong>{agentDisplayByName[agent.name] ?? agent.name}</strong>
                         </span>
                       </td>
                       <td className="da-table__cell">
@@ -577,7 +584,13 @@ export function ContextDetailsPage() {
                                 title={agentName}
                                 aria-label={`Open connectors for agent ${agentName}`}
                               >
-                                {agentName}
+                                {/* Visible agent name (spec.host). mappedAgents
+                                    can include cross-team agents (from scoped
+                                    context detail sources) absent from the
+                                    catalog map, so fall back to the identifier
+                                    for those — not the Decision #6 `|| name`
+                                    guard. */}
+                                {agentDisplayByName[agentName] ?? agentName}
                               </ReferenceTag>
                             ))}
                           </span>

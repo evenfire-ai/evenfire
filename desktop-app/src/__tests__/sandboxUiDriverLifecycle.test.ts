@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  findInActiveSandboxUi,
+  focusActiveSandboxUi,
   installSandboxUiCookie,
   mountSandboxUiView,
   unmountSandboxUiView,
@@ -21,6 +23,9 @@ const electronMocks = vi.hoisted(() => {
       this.currentUrl = url
     })
     setWindowOpenHandler = vi.fn()
+    stopFindInPage = vi.fn()
+    findInPage = vi.fn(() => 41)
+    focus = vi.fn()
 
     on(event: string, handler: (...args: unknown[]) => void): this {
       if (!this.listeners.has(event)) this.listeners.set(event, new Set())
@@ -31,6 +36,10 @@ const electronMocks = vi.hoisted(() => {
     removeListener(event: string, handler: (...args: unknown[]) => void): this {
       this.listeners.get(event)?.delete(handler)
       return this
+    }
+
+    emit(event: string, ...args: unknown[]): void {
+      this.listeners.get(event)?.forEach(handler => handler(...args))
     }
 
     getURL(): string {
@@ -189,8 +198,90 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
     await unmountSandboxUiView()
 
     expect(parentWindow.listenerCount('closed')).toBe(0)
+    expect(electronMocks.views[0]?.webContents.stopFindInPage).toHaveBeenCalledWith(
+      'clearSelection'
+    )
     parentWindow.emit('closed')
     expect(onClosed).not.toHaveBeenCalled()
+  })
+
+  it('focuses only the currently mounted native view', async () => {
+    expect(focusActiveSandboxUi()).toBe(false)
+    const parentWindow = new FakeParentWindow()
+    await mountSandboxUiView(mountArgs({ parentWindow }))
+
+    expect(focusActiveSandboxUi()).toBe(true)
+    expect(electronMocks.views[0]?.webContents.focus).toHaveBeenCalledOnce()
+  })
+
+  it('gates find by document readiness and invalidates it on main-frame navigation', async () => {
+    const parentWindow = new FakeParentWindow()
+    await mountSandboxUiView(mountArgs({ parentWindow }))
+    const webContents = electronMocks.views[0]!.webContents
+    const onResult = vi.fn()
+
+    expect(findInActiveSandboxUi('invoice', 'start', 1, onResult)).toEqual({
+      status: 'unavailable',
+      reason: 'document-loading',
+    })
+
+    webContents.emit('did-finish-load')
+    expect(findInActiveSandboxUi('invoice', 'start', 1, onResult)).toEqual({
+      status: 'started',
+      requestId: 41,
+    })
+    expect(webContents.findInPage).toHaveBeenCalledWith('invoice', {
+      forward: true,
+      findNext: true,
+    })
+    webContents.emit('found-in-page', {} as Electron.Event, {
+      requestId: 41,
+      activeMatchOrdinal: 1,
+      matches: 2,
+      selectionArea: { x: 0, y: 0, width: 1, height: 1 },
+      finalUpdate: true,
+    })
+    expect(findInActiveSandboxUi('invoice', 'next', 1, onResult).status).toBe('started')
+
+    webContents.emit(
+      'did-start-navigation',
+      {} as Electron.Event,
+      'https://rpc.example/next',
+      false,
+      true
+    )
+    expect(webContents.stopFindInPage).toHaveBeenCalledWith('clearSelection')
+    expect(findInActiveSandboxUi('invoice', 'next', 1, onResult)).toEqual({
+      status: 'unavailable',
+      reason: 'document-loading',
+    })
+  })
+
+  it('keeps the current document searchable after same-document navigation', async () => {
+    const parentWindow = new FakeParentWindow()
+    await mountSandboxUiView(mountArgs({ parentWindow }))
+    const webContents = electronMocks.views[0]!.webContents
+    const onResult = vi.fn()
+
+    webContents.emit('did-finish-load')
+    expect(findInActiveSandboxUi('invoice', 'start', 1, onResult).status).toBe('started')
+    webContents.emit('found-in-page', {} as Electron.Event, {
+      requestId: 41,
+      activeMatchOrdinal: 1,
+      matches: 2,
+      selectionArea: { x: 0, y: 0, width: 1, height: 1 },
+      finalUpdate: true,
+    })
+
+    webContents.emit(
+      'did-start-navigation',
+      {} as Electron.Event,
+      'https://rpc.example/app#next',
+      true,
+      true
+    )
+
+    expect(findInActiveSandboxUi('invoice', 'start', 2, onResult).status).toBe('started')
   })
 
   it('keeps only the newest view when cookie writes complete out of order', async () => {
@@ -266,6 +357,52 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
     expect(electronMocks.views).toHaveLength(0)
     expect(parentWindow.contentView.addChildView).not.toHaveBeenCalled()
     expect(parentWindow.listenerCount('closed')).toBe(0)
+  })
+
+  it('encodes the canonical client route before handing it to the mounted app', async () => {
+    const parentWindow = new FakeParentWindow()
+
+    await mountSandboxUiView(
+      mountArgs({
+        parentWindow,
+        routePath: '/café menu/literal%percent',
+      })
+    )
+    const view = electronMocks.views[0]
+    expect(view).toBeDefined()
+    view!.webContents.executeJavaScript.mockResolvedValue(true)
+    view!.webContents.emit(
+      'did-navigate',
+      {},
+      'https://rpc.example/api/v1/sandbox-ui/sandbox-recipes/task-board/view/',
+      200
+    )
+    view!.webContents.emit('did-finish-load')
+
+    await vi.waitFor(() => {
+      expect(view!.webContents.executeJavaScript).toHaveBeenCalledOnce()
+    })
+    expect(view!.webContents.executeJavaScript.mock.calls[0]?.[0]).toContain(
+      'https://rpc.example/api/v1/sandbox-ui/sandbox-recipes/task-board/view/' +
+        'caf%C3%A9%20menu/literal%25percent'
+    )
+  })
+
+  it('encodes the canonical default route before loading the mounted app', async () => {
+    const parentWindow = new FakeParentWindow()
+
+    await mountSandboxUiView(
+      mountArgs({
+        parentWindow,
+        defaultPath: '/café menu/literal%percent',
+      })
+    )
+    const view = electronMocks.views[0]
+
+    expect(view!.webContents.loadURL).toHaveBeenCalledWith(
+      'https://rpc.example/api/v1/sandbox-ui/sandbox-recipes/task-board/view/' +
+        'caf%C3%A9%20menu/literal%25percent'
+    )
   })
 
   it('rejects a refresh cookie scoped to a different recipe', async () => {

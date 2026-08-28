@@ -14,6 +14,7 @@ import {
   IconRobot,
   IconRunReplay,
   IconSettings,
+  IconShield,
   IconStore,
   IconTokenBudgets,
   IconTraceDashboard,
@@ -27,11 +28,16 @@ import type { SidebarItem, SidebarTab } from './types'
 export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
   hosts: { label: 'Agents', href: CONTROL_ROUTES.agents.root, icon: <IconRobot /> },
   'mcp-servers': {
-    label: 'Connectors',
+    label: 'Installed Connectors',
     href: CONTROL_ROUTES.connectors.root,
     icon: <IconCable />,
   },
   contexts: { label: 'Contexts', href: CONTROL_ROUTES.contexts.root, icon: <IconGroupWork /> },
+  guardrails: {
+    label: 'Installed Guardrails',
+    href: CONTROL_ROUTES.guardrails.root,
+    icon: <IconShield />,
+  },
   cost: {
     label: 'Cost & Usage',
     href: CONTROL_ROUTES.costAndUsage.root,
@@ -55,20 +61,20 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
     ],
   },
   directories: {
-    label: 'Directories',
+    label: 'Files',
     href: CONTROL_ROUTES.agentFiles.root,
     icon: <IconFolder />,
     children: [
+      {
+        label: 'Global File System',
+        href: CONTROL_ROUTES.globalFileSystem,
+        icon: <IconPaperclip />,
+      },
       {
         label: 'Agent Outputs',
         href: CONTROL_ROUTES.agentOutputs.root,
         icon: <IconOutputs />,
         matchPath: CONTROL_ROUTES.agentOutputs.base,
-      },
-      {
-        label: 'Global File System',
-        href: CONTROL_ROUTES.globalFileSystem,
-        icon: <IconPaperclip />,
       },
     ],
   },
@@ -88,7 +94,7 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
     icon: <IconStore />,
   },
   'workflow-recipes': {
-    label: 'Installed plugins',
+    label: 'Installed Plugins',
     href: CONTROL_ROUTES.plugins.root,
     icon: <IconWorkflow />,
   },
@@ -128,3 +134,20 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
   },
   settings: { label: 'Settings', href: CONTROL_ROUTES.settings.ui, icon: <IconSettings /> },
 }
+
+export const SIDEBAR_TAB_ORDER: SidebarTab[] = [
+  'profile-admin',
+  'hosts',
+  'contexts',
+  'registry-catalog',
+  'mcp-servers',
+  'workflow-recipes',
+  'guardrails',
+  'directories',
+  'communication-channels',
+  'llm-models',
+  'llm-secrets',
+  'cost',
+  'traces',
+  'settings',
+]

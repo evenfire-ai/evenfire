@@ -7,18 +7,26 @@ import {
   UpdateConnectorCredentials,
 } from '@components/UpdateConnectorCredentials'
 import type { CredentialSurface } from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
-import { createMcpSecret, getMcpServer, getMcpServers, updateMcpSecret } from '@lib/api'
+import {
+  createMcpSecret,
+  getMcpServer,
+  getMcpServers,
+  getRegistryCredentialSchema,
+  updateMcpSecret,
+} from '@lib/api'
 import type { EnvSecret, McpServerResource } from '@lib/api'
 
 vi.mock('@lib/api', () => ({
   getMcpServer: vi.fn(),
   getMcpServers: vi.fn(),
+  getRegistryCredentialSchema: vi.fn(),
   updateMcpSecret: vi.fn(),
   createMcpSecret: vi.fn(),
 }))
 
 const mockGetMcpServer = vi.mocked(getMcpServer)
 const mockGetMcpServers = vi.mocked(getMcpServers)
+const mockGetRegistryCredentialSchema = vi.mocked(getRegistryCredentialSchema)
 const mockUpdateMcpSecret = vi.mocked(updateMcpSecret)
 const mockCreateMcpSecret = vi.mocked(createMcpSecret)
 
@@ -197,6 +205,29 @@ describe('UpdateConnectorCredentials — masked inputs', () => {
       expect(input).toHaveAttribute('autocomplete', 'new-password')
       expect(input.value).toBe('')
     }
+  })
+
+  it('uses a Marketplace credential label while preserving the Secret key identifier', async () => {
+    mockGetRegistryCredentialSchema.mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'api-key', label: 'Linear API key', kind: 'api-key' }],
+    })
+    render(
+      <ToastProvider>
+        <UpdateConnectorCredentials
+          serverName={SERVER_NAME}
+          envSecret={ENV_SECRET}
+          registryCredentialSource={{ name: '@evenfire/linear', version: '1.0.0' }}
+        />
+      </ToastProvider>
+    )
+
+    await flush(3)
+
+    expect(mockGetRegistryCredentialSchema).toHaveBeenCalledWith('@evenfire/linear', '1.0.0')
+    expect(screen.getByLabelText('Linear API key')).toBeInTheDocument()
+    expect(screen.getByLabelText('workspace-id')).toBeInTheDocument()
   })
 
   it('never renders a stored credential value — inputs stay empty through a full rotation cycle', async () => {

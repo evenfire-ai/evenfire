@@ -2,6 +2,12 @@ import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import * as api from '../../lib/api'
+import {
+  buildHostReferencesForContext,
+  materializeContextResource,
+  materializeHostResource,
+} from '../../test/fixtures/contextResource'
+import { buildSecretSummary } from '../../test/fixtures/secretSummary'
 import { HostWizard } from '../HostWizard'
 import { ToastProvider } from '../Toast'
 
@@ -22,7 +28,6 @@ import { ToastProvider } from '../Toast'
 
 // Mock lib/api BEFORE importing the component. vi.mock is hoisted.
 vi.mock('../../lib/api', () => ({
-  apiGet: vi.fn().mockResolvedValue({ items: [] }),
   apiSend: vi.fn().mockResolvedValue({}),
   getAdminUsers: vi.fn().mockResolvedValue({
     items: [
@@ -49,6 +54,28 @@ vi.mock('../../lib/api', () => ({
         created_at: '',
         updated_at: '',
       },
+      {
+        id: 'm2',
+        provider: 'claude',
+        model: 'claude-sonnet-4-6',
+        vendor: 'Anthropic',
+        display_name: null,
+        context_window_tokens: null,
+        enabled: true,
+        created_at: '',
+        updated_at: '',
+      },
+      {
+        id: 'm3',
+        provider: 'zai',
+        model: 'glm-5.1',
+        vendor: 'Z.AI',
+        display_name: null,
+        context_window_tokens: null,
+        enabled: true,
+        created_at: '',
+        updated_at: '',
+      },
     ],
   }),
   isSilentApiError: vi.fn().mockReturnValue(false),
@@ -61,7 +88,7 @@ if (!Element.prototype.scrollIntoView) {
 
 async function renderWizard(props?: {
   mcpServers?: Array<{ metadata?: { name?: string; namespace?: string } }>
-  existingSecrets?: Array<{ name?: string }>
+  existingSecrets?: Array<{ name?: string; keys?: string[] }>
 }) {
   const onCreated = vi.fn().mockResolvedValue(undefined)
   const onClose = vi.fn()
@@ -69,7 +96,7 @@ async function renderWizard(props?: {
     <ToastProvider>
       <HostWizard
         mcpServers={props?.mcpServers ?? [{ metadata: { name: 'mcp-a' } }]}
-        existingSecrets={props?.existingSecrets ?? [{ name: 'secret-a' }]}
+        existingSecrets={props?.existingSecrets ?? [buildSecretSummary({ name: 'secret-a' })]}
         onCreated={onCreated}
         onClose={onClose}
       />
@@ -101,33 +128,68 @@ async function walkToAccessStep(opts?: { agentName?: string }) {
   })
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
-  // Step 1: Context — create a new context. MCP attachments are optional,
-  // but this helper selects one to keep existing submit payload coverage.
-  fireEvent.click(screen.getByLabelText(/Create new context/i))
-  fireEvent.change(screen.getByPlaceholderText(/context-name/i), {
-    target: { value: 'ctx1' },
-  })
-  // Select the first connector checkbox
-  const mcpCheckbox = screen.getByRole('checkbox', { name: /mcp-a/i }) as HTMLInputElement
-  fireEvent.click(mcpCheckbox)
-  fireEvent.click(screen.getByRole('button', { name: 'Next' }))
-
-  // Step 2: Model & Credentials — default model is valid; reuse the secret we provided.
-  fireEvent.click(screen.getByLabelText(/Reuse an existing Secret/i))
-  fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
+  // Step 1: Model & Credentials — default model is valid; reuse the secret we provided.
+  fireEvent.click(screen.getByLabelText(/Use an existing LLM Secret/i))
+  fireEvent.click(screen.getByRole('button', { name: /Select LLM Secret/i }))
   fireEvent.click(screen.getByRole('option', { name: /secret-a/i }))
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
   // Now at the "Access" step.
 }
 
-async function continueFromAccessToChannels() {
-  fireEvent.click(screen.getByRole('button', { name: 'Next' }))
-  expect(screen.getByRole('button', { name: /Skip channel setup/i })).toBeInTheDocument()
-}
-
 function openTeamsAccessTab() {
   fireEvent.click(screen.getByRole('tab', { name: /Teams/i }))
+}
+
+/**
+ * Walk to the Access step choosing "Create a new LLM Secret" so a Secret is actually
+ * created (secretMode='new'). This is the vehicle the create-only/compensation
+ * tests need: an already-POSTed secret that a later failure must roll back. The
+ * new LLM Secret name is auto-derived from the agent name as `${slug}-llm`.
+ */
+async function walkToAccessStepNewSecret(opts?: { agentName?: string }) {
+  const name = opts?.agentName ?? 'newsecretagent'
+
+  await waitFor(() => {
+    expect(api.getAdminUsers).toHaveBeenCalled()
+  })
+
+  // Step 0: Agent name
+  fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: name } })
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+  // Step 1: New LLM Secret → make the OpenAI primary usable; its internal name auto-derives.
+  // (dev's wizard renamed the "New credential" toggle to the "Create a new LLM Secret"
+  // secretMode radio — the create-only seam it drives is unchanged.)
+  fireEvent.click(screen.getByLabelText(/Create a new LLM Secret/i))
+  fireEvent.change(screen.getByLabelText(/OpenAI API key/i), { target: { value: 'sk-openai' } })
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
+  })
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+  // Now at the "Access" step.
+}
+
+function continueToConnectorsStep() {
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+}
+
+function submitFromConnectorsStep() {
+  fireEvent.click(screen.getByRole('button', { name: /Create Agent/i }))
+}
+
+/**
+ * Build the exact Error object the client's fetch layer would surface for a 409,
+ * derived from the REAL formatApiError (importActual, T1) — never hand-shaped —
+ * so `error.status`, `error.code`, and `error.body` carry precisely what the
+ * producer emits. `bodyObj` stands in for the server's JSON response body.
+ */
+async function build409(bodyObj: Record<string, unknown>): Promise<Error> {
+  const actual = await vi.importActual<typeof import('../../lib/api')>('../../lib/api')
+  const text = JSON.stringify(bodyObj)
+  const res = new Response(text, { status: 409, statusText: 'Conflict' })
+  return actual.formatApiError(res, text)
 }
 
 afterEach(() => {
@@ -136,6 +198,79 @@ afterEach(() => {
 })
 
 describe('HostWizard — credential draft is projected onto the active provider domain', () => {
+  it('shows every provider with complete credentials for an existing LLM Secret', async () => {
+    await renderWizard({
+      existingSecrets: [
+        buildSecretSummary({
+          name: 'shared-llm-keys',
+          keys: ['openai-api-key', 'aws-access-key-id', 'aws-secret-access-key'],
+        }),
+      ],
+    })
+    await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
+
+    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: 'testagent' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    fireEvent.click(screen.getByLabelText(/Use an existing LLM Secret/i))
+    fireEvent.click(screen.getByRole('button', { name: /Select LLM Secret/i }))
+
+    const option = screen.getByRole('option', { name: /shared-llm-keys/ })
+    expect(option).toHaveTextContent(/Providers: OpenAI, Amazon Bedrock/)
+  })
+
+  it('matches the primary provider to the selected credential', async () => {
+    await renderWizard({
+      existingSecrets: [
+        buildSecretSummary({ name: 'zai-only', keys: ['zai-api-key'] }),
+        buildSecretSummary({
+          name: 'anthropic-and-zai',
+          keys: ['claude-api-key', 'zai-api-key'],
+        }),
+      ],
+    })
+    await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
+
+    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: 'testagent' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+    fireEvent.click(screen.getByRole('button', { name: /Select LLM Secret/i }))
+    fireEvent.click(screen.getByRole('option', { name: /zai-only/i }))
+    const providerField = screen.getByText('Provider', { selector: 'label' }).parentElement
+    const modelField = screen.getByText('Default model', { selector: 'label' }).parentElement
+    expect(providerField).toHaveTextContent('Z.AI')
+    expect(modelField).toHaveTextContent('glm-5.1')
+
+    fireEvent.click(screen.getByRole('button', { name: /zai-only/i }))
+    fireEvent.click(screen.getByRole('option', { name: /anthropic-and-zai/i }))
+    expect(providerField).toHaveTextContent('Anthropic')
+    expect(modelField).toHaveTextContent('claude-sonnet-4-6')
+  })
+
+  it('leads with an existing LLM Secret and keeps fallback providers collapsed in create', async () => {
+    await renderWizard()
+    await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
+
+    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: 'testagent' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+    const existingCard = screen.getByLabelText(/Use an existing LLM Secret/i).closest('label')
+    const newCard = screen.getByLabelText(/Create a new LLM Secret/i).closest('label')
+    expect(existingCard).not.toBeNull()
+    expect(newCard).not.toBeNull()
+    expect(screen.getByLabelText(/Use an existing LLM Secret/i)).toBeChecked()
+    expect(screen.getByLabelText(/Create a new LLM Secret/i)).not.toBeChecked()
+    expect(screen.getByText('LLM Secret', { selector: 'strong' })).toBeInTheDocument()
+    expect(existingCard?.compareDocumentPosition(newCard as Node)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING
+    )
+
+    const fallbackToggle = screen.getByRole('button', { name: /Fallback providers/i })
+    expect(fallbackToggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('button', { name: 'Add fallback provider' })).not.toBeInTheDocument()
+    fireEvent.click(fallbackToggle)
+    expect(screen.getByRole('button', { name: 'Add fallback provider' })).toBeInTheDocument()
+  })
+
   it('a Bedrock fallback key does NOT block save nor get written once the fallback is removed', async () => {
     await renderWizard()
     await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
@@ -146,16 +281,13 @@ describe('HostWizard — credential draft is projected onto the active provider 
     })
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
-    // Step 1: a new context with just a name.
-    fireEvent.click(screen.getByLabelText(/Create new context/i))
-    fireEvent.change(screen.getByPlaceholderText(/context-name/i), { target: { value: 'ctx1' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
-
-    // Step 2: default "new secret". Make the OpenAI primary usable.
+    // Step 1: explicitly create a new LLM Secret and make the OpenAI primary usable.
+    fireEvent.click(screen.getByLabelText(/Create a new LLM Secret/i))
     fireEvent.change(screen.getByLabelText(/OpenAI API key/i), { target: { value: 'sk-openai' } })
 
     // Add a fallback and switch it to Bedrock (a different provider than the
     // primary), then type ONLY one of its two required keys.
+    fireEvent.click(screen.getByRole('button', { name: /Fallback providers/i }))
     fireEvent.click(screen.getByRole('button', { name: 'Add fallback provider' }))
     fireEvent.change(screen.getByLabelText('Provider', { selector: '#llm-fallback-0-provider' }), {
       target: { value: 'bedrock' },
@@ -174,10 +306,10 @@ describe('HostWizard — credential draft is projected onto the active provider 
       expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
     })
 
-    // Walk to the last step and create.
+    // Walk to Access, then through the final connector step and create.
     fireEvent.click(screen.getByRole('button', { name: 'Next' })) // → Access
-    await continueFromAccessToChannels() // → Channels
-    fireEvent.click(screen.getByRole('button', { name: /Skip channel setup/i }))
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
 
     await waitFor(() => {
       expect(api.apiSend).toHaveBeenCalledWith(
@@ -195,26 +327,143 @@ describe('HostWizard — credential draft is projected onto the active provider 
   })
 })
 
-describe('HostWizard — Context creation', () => {
-  it('allows a new context with only a name and no MCP servers selected', async () => {
+describe('HostWizard — connector selection and automatic context creation', () => {
+  it('moves connector selection after Access and keeps the context implementation detail hidden', async () => {
     await renderWizard()
+    await walkToAccessStep({ agentName: 'connector-agent' })
+
+    expect(
+      screen.queryByText('Context', { selector: '.cu-agent-step-rail__title' })
+    ).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Next' })).toBeInTheDocument()
+    continueToConnectorsStep()
+
+    expect(screen.getByText('Connectors', { selector: 'strong' })).toBeInTheDocument()
+    expect(screen.queryByPlaceholderText(/context-name/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Use existing context/i)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /mcp-a/i }))
+    expect(screen.getByRole('checkbox', { name: /mcp-a/i })).toBeChecked()
+  })
+
+  it('writes selected connectors to the generated context before attaching it to the agent', async () => {
+    await renderWizard()
+    await walkToAccessStep({ agentName: 'connector-agent' })
+    continueToConnectorsStep()
+    fireEvent.click(screen.getByRole('checkbox', { name: /mcp-a/i }))
+    submitFromConnectorsStep()
 
     await waitFor(() => {
-      expect(api.getAdminUsers).toHaveBeenCalled()
+      expect(api.apiSend).toHaveBeenCalledWith(
+        'POST',
+        '/api/v1/admin/hosts',
+        expect.objectContaining({
+          spec: expect.objectContaining({
+            contextRef: expect.stringMatching(/^connector-agent-[0-9]{5}$/),
+          }),
+        })
+      )
     })
 
-    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), {
-      target: { value: 'context-only-agent' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    const contextCall = vi
+      .mocked(api.apiSend)
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/contexts')
+    const hostCall = vi
+      .mocked(api.apiSend)
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/hosts')
+    const contextPayload = contextCall![2] as Parameters<typeof materializeContextResource>[0]
+    const hostPayload = hostCall![2] as { spec: { contextRef: string } }
+    const persistedContext = materializeContextResource(contextPayload)
 
-    fireEvent.click(screen.getByLabelText(/Create new context/i))
-    fireEvent.change(screen.getByPlaceholderText(/context-name/i), {
-      target: { value: 'empty-context' },
+    expect(persistedContext).toMatchObject({
+      metadata: {
+        name: contextPayload.metadata.name,
+        namespace: 'mcp-server',
+        resourceVersion: 'rv-context-read',
+      },
+      spec: {
+        contextId: contextPayload.metadata.name,
+        description: 'Connector context for agent connector-agent',
+        mcpServers: ['mcp-a'],
+        sharedFileSystems: [],
+      },
+      status: { sharedFileSystems: [] },
+    })
+    expect(hostPayload.spec.contextRef).toBe(contextPayload.metadata.name)
+  })
+
+  it('creates an agent-owned context with no connectors when none are selected', async () => {
+    await renderWizard()
+    await walkToAccessStep({ agentName: 'context-free-agent' })
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
+
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith(
+        'POST',
+        '/api/v1/admin/contexts',
+        expect.objectContaining({
+          metadata: { name: expect.stringMatching(/^context-free-agent-[0-9]{5}$/) },
+          spec: expect.objectContaining({ mcpServers: [] }),
+        })
+      )
     })
 
-    expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
-    expect(screen.queryByText(/Select at least one MCP server/i)).not.toBeInTheDocument()
+    const contextCall = vi
+      .mocked(api.apiSend)
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/contexts')
+    const contextPayload = contextCall![2] as Parameters<typeof materializeContextResource>[0]
+    const persistedContext = materializeContextResource(contextPayload)
+    expect(persistedContext.spec.contextId).toBe(persistedContext.metadata.name)
+    expect(persistedContext.spec.mcpServers).toEqual([])
+    expect(persistedContext.spec.sharedFileSystems).toEqual([])
+
+    const hostCall = vi
+      .mocked(api.apiSend)
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/hosts')
+    expect((hostCall![2] as { spec: { contextRef: string } }).spec.contextRef).toBe(
+      contextPayload.metadata.name
+    )
+  })
+
+  it('creates a producer-shaped Context that can be referenced by two Hosts (R1-H1)', async () => {
+    // Previous-head reproduction (43e0d17cc): the test only inspected a
+    // hand-cast POST body. Materializing the real producer response here keeps
+    // the generated Context contract explicit before checking shared references.
+    await renderWizard()
+    await walkToAccessStep({ agentName: 'shared-context-agent' })
+    continueToConnectorsStep()
+    fireEvent.click(screen.getByRole('checkbox', { name: /mcp-a/i }))
+    submitFromConnectorsStep()
+
+    await waitFor(() =>
+      expect(api.apiSend).toHaveBeenCalledWith('POST', '/api/v1/admin/hosts', expect.any(Object))
+    )
+    const contextCall = vi
+      .mocked(api.apiSend)
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/contexts')
+    const hostCall = vi
+      .mocked(api.apiSend)
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/hosts')
+    expect(contextCall).toBeDefined()
+    expect(hostCall).toBeDefined()
+
+    const context = materializeContextResource(
+      contextCall![2] as Parameters<typeof materializeContextResource>[0]
+    )
+    const createdHost = materializeHostResource(
+      hostCall![2] as Parameters<typeof materializeHostResource>[0],
+      { metadata: { resourceVersion: 'rv-host-created' } }
+    )
+    const secondHost = buildHostReferencesForContext(createdHost.spec.contextRef, ['second-agent'])[
+      'second-agent'
+    ]
+    const twoHosts = [createdHost, secondHost]
+
+    expect(context.spec.mcpServers).toEqual(['mcp-a'])
+    expect(createdHost.spec.contextRef).toBe(context.metadata.name)
+    expect(twoHosts).toHaveLength(2)
+    expect(twoHosts.every(host => host.spec.contextRef === context.metadata.name)).toBe(true)
   })
 })
 
@@ -251,23 +500,23 @@ describe("HostWizard — 'Access' empty state", () => {
   })
 })
 
-describe('HostWizard — Access selection does not gate continuing', () => {
+describe('HostWizard — Access precedes connector selection', () => {
   it("keeps 'Next' enabled when selection is empty", async () => {
     await renderWizard()
     await walkToAccessStep()
 
-    const nextBtn = screen.getByRole('button', { name: 'Next' })
-    expect(nextBtn).not.toBeDisabled()
+    expect(screen.queryByText('Channels')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
+    expect(screen.queryByRole('button', { name: /Create Agent/i })).not.toBeInTheDocument()
   })
 
-  it("enables 'Next' when a user is selected", async () => {
+  it("keeps 'Next' enabled when a user is selected", async () => {
     await renderWizard()
     await walkToAccessStep()
 
     fireEvent.click(screen.getByLabelText(/alice/i))
 
-    const nextBtn = screen.getByRole('button', { name: 'Next' })
-    expect(nextBtn).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
   })
 })
 
@@ -276,20 +525,30 @@ describe('HostWizard — submit path uses the atomic agent-centric endpoints', (
     await renderWizard()
     await walkToAccessStep({ agentName: 'empty-access-test' })
 
-    await continueFromAccessToChannels()
-    fireEvent.click(screen.getByRole('button', { name: /Skip channel setup/i }))
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
 
     await waitFor(() => {
       expect(screen.queryByText(/Failed to create agent resources/i)).not.toBeInTheDocument()
+      // Create-only contract (R5-C1/R5-B1): the Host is POSTed to the collection,
+      // never PUT to a name (which would upsert-overwrite a foreign agent).
       expect(api.apiSend).toHaveBeenCalledWith(
-        'PUT',
-        '/api/v1/admin/hosts/empty-access-test',
-        expect.any(Object)
+        'POST',
+        '/api/v1/admin/hosts',
+        expect.objectContaining({
+          metadata: { name: 'empty-access-test' },
+          spec: expect.objectContaining({ channels: [] }),
+        })
       )
     })
 
     expect(vi.mocked(api.updateAgentUsers)).not.toHaveBeenCalled()
     expect(vi.mocked(api.updateAgentTeams)).not.toHaveBeenCalled()
+    expect(
+      vi
+        .mocked(api.apiSend)
+        .mock.calls.some(call => String(call[1]).includes('/communication-channels'))
+    ).toBe(false)
   })
 
   it('calls updateAgentUsers exactly ONCE when selecting multiple users (not N times as the old loop did)', async () => {
@@ -301,8 +560,8 @@ describe('HostWizard — submit path uses the atomic agent-centric endpoints', (
     fireEvent.click(screen.getByLabelText(/bob/i))
 
     // Submit
-    await continueFromAccessToChannels()
-    fireEvent.click(screen.getByRole('button', { name: /Skip channel setup/i }))
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
 
     // Wait for the submit pipeline to reach the agent-user association step
     await waitFor(() => {
@@ -325,8 +584,8 @@ describe('HostWizard — submit path uses the atomic agent-centric endpoints', (
 
     openTeamsAccessTab()
     fireEvent.click(screen.getByLabelText(/engineering/i))
-    await continueFromAccessToChannels()
-    fireEvent.click(screen.getByRole('button', { name: /Skip channel setup/i }))
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
 
     await waitFor(() => {
       expect(vi.mocked(api.updateAgentTeams)).toHaveBeenCalled()
@@ -343,8 +602,8 @@ describe('HostWizard — submit path uses the atomic agent-centric endpoints', (
     fireEvent.click(screen.getByLabelText(/alice/i))
     openTeamsAccessTab()
     fireEvent.click(screen.getByLabelText(/engineering/i))
-    await continueFromAccessToChannels()
-    fireEvent.click(screen.getByRole('button', { name: /Skip channel setup/i }))
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
 
     await waitFor(() => {
       expect(vi.mocked(api.updateAgentUsers)).toHaveBeenCalled()
@@ -353,80 +612,6 @@ describe('HostWizard — submit path uses the atomic agent-centric endpoints', (
 
     expect(vi.mocked(api.updateAgentUsers)).toHaveBeenCalledTimes(1)
     expect(vi.mocked(api.updateAgentTeams)).toHaveBeenCalledTimes(1)
-  })
-
-  it('creates a new Telegram channel with provider settings and access grants', async () => {
-    vi.mocked(api.apiSend).mockImplementation(async (method, url) => {
-      if (
-        method === 'PUT' &&
-        String(url).includes('/api/v1/admin/communication-channels/new-telegram-channel')
-      ) {
-        throw new Error('not found')
-      }
-      return {}
-    })
-
-    await renderWizard()
-    await walkToAccessStep({ agentName: 'agent-with-channel' })
-
-    fireEvent.click(screen.getByLabelText(/alice/i))
-    await continueFromAccessToChannels()
-    fireEvent.click(screen.getByLabelText(/Create new channel/i))
-    fireEvent.change(screen.getByPlaceholderText(/^channel-name$/i), {
-      target: { value: 'new-telegram-channel' },
-    })
-    fireEvent.change(screen.getByPlaceholderText(/@your_bot/i), {
-      target: { value: '@clerum_test_bot' },
-    })
-    fireEvent.change(screen.getByLabelText(/Telegram Bot Token/i), {
-      target: { value: '123:ABC' },
-    })
-
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Create Agent/i })).not.toBeDisabled()
-    })
-    fireEvent.click(screen.getByRole('button', { name: /Create Agent/i }))
-
-    await waitFor(() => {
-      expect(api.apiSend).toHaveBeenCalledWith(
-        'POST',
-        '/api/v1/admin/communication-channels',
-        expect.objectContaining({
-          metadata: { name: 'new-telegram-channel' },
-          credentials: { 'telegram-bot-token': '123:ABC' },
-          spec: expect.objectContaining({
-            hostRef: 'agent-with-channel',
-            access: { users: ['user-a'], teams: [] },
-            telegram: [],
-            slack: [],
-            telegramSettings: {
-              botHandle: '@clerum_test_bot',
-              replyOnlyWhenMentioned: true,
-            },
-          }),
-        })
-      )
-    })
-    await waitFor(() => {
-      expect(api.apiSend).toHaveBeenCalledWith(
-        'PUT',
-        '/api/v1/admin/hosts/agent-with-channel',
-        expect.objectContaining({
-          spec: expect.objectContaining({
-            channels: ['new-telegram-channel'],
-            workflowControl: {
-              scopes: [
-                'workflow:list',
-                'workflow:read',
-                'workflow:trigger',
-                'workflow:approval:resolve',
-                'workflow:approval:decide',
-              ],
-            },
-          }),
-        })
-      )
-    })
   })
 })
 
@@ -438,7 +623,7 @@ describe('HostWizard — loadDirectory error surfacing (no more silent catch)', 
 
     // Wait for the error to surface
     await waitFor(() => {
-      expect(screen.getByText(/Failed to load users\/teams\/contexts/i)).toBeInTheDocument()
+      expect(screen.getByText(/Failed to load users\/teams/i)).toBeInTheDocument()
     })
   })
 
@@ -451,7 +636,7 @@ describe('HostWizard — loadDirectory error surfacing (no more silent catch)', 
 
     await waitFor(() => {
       // The error banner contains the wrapped message
-      expect(screen.getByText(/Failed to load users\/teams\/contexts/i)).toBeInTheDocument()
+      expect(screen.getByText(/Failed to load users\/teams/i)).toBeInTheDocument()
     })
   })
 })
@@ -472,11 +657,6 @@ describe('HostWizard — baseline render', () => {
 
     fireEvent.change(screen.getByPlaceholderText(/agent-name/i), {
       target: { value: 'default-model-agent' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
-    fireEvent.click(screen.getByLabelText(/Create new context/i))
-    fireEvent.change(screen.getByPlaceholderText(/context-name/i), {
-      target: { value: 'ctx1' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
@@ -501,22 +681,178 @@ describe('HostWizard — Agent type (stateless lifecycle)', () => {
   it('omits spec.lifecycle from the created Host when Stateful is kept (absent = disabled)', async () => {
     await renderWizard()
     await walkToAccessStep({ agentName: 'stateful-agent' })
-    await continueFromAccessToChannels()
-    fireEvent.click(screen.getByRole('button', { name: /Skip channel setup/i }))
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
 
     await waitFor(() => {
-      expect(api.apiSend).toHaveBeenCalledWith(
-        'PUT',
-        '/api/v1/admin/hosts/stateful-agent',
-        expect.any(Object)
-      )
+      // Create-only contract (R5-C1/R5-B1): POST to the collection, not PUT to a name.
+      expect(api.apiSend).toHaveBeenCalledWith('POST', '/api/v1/admin/hosts', expect.any(Object))
     })
     const hostCall = vi
       .mocked(api.apiSend)
-      .mock.calls.find(call => call[1] === '/api/v1/admin/hosts/stateful-agent')
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/hosts')
     expect(hostCall).toBeDefined()
     const payload = hostCall![2] as { spec: Record<string, unknown> }
     expect('lifecycle' in payload.spec).toBe(false)
     expect('workflowControl' in payload.spec).toBe(false)
+  })
+})
+
+describe('HostWizard — create-only seam + compensation (R5-C1/R5-B1, V-1, V-7)', () => {
+  it('surfaces the friendly collision message and rolls back the created secret when both generated context names collide', async () => {
+    // Code-less 409 from a create-only POST = unambiguous AlreadyExists collision.
+    const collision = await build409({
+      error: 'contexts.mcp.evenfire.io "ctx1" already exists',
+    })
+    vi.mocked(api.apiSend).mockImplementation(async (method: string, path: string) => {
+      if (method === 'POST' && path === '/api/v1/admin/contexts') throw collision
+      return {}
+    })
+
+    await renderWizard()
+    await walkToAccessStepNewSecret({ agentName: 'coll-agent' })
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
+
+    // Observable (T4): the friendly per-resource collision message is shown —
+    // NOT the raw K8s AlreadyExists text.
+    await waitFor(() => {
+      expect(screen.getByText(/agent connector context could not be created/i)).toBeInTheDocument()
+    })
+    expect(
+      vi
+        .mocked(api.apiSend)
+        .mock.calls.filter(call => call[0] === 'POST' && call[1] === '/api/v1/admin/contexts')
+    ).toHaveLength(2)
+    // Observable (T4): the already-created secret is compensated with an inverse DELETE.
+    expect(api.apiSend).toHaveBeenCalledWith('DELETE', '/api/v1/admin/secrets/coll-agent-llm')
+    // The Host was never POSTed (the seam aborted before the boundary).
+    expect(
+      vi.mocked(api.apiSend).mock.calls.some(c => c[0] === 'POST' && c[1] === '/api/v1/admin/hosts')
+    ).toBe(false)
+  })
+
+  it('retries a generated context name once after a collision and uses the fresh name on the Host', async () => {
+    const collision = await build409({
+      error: 'contexts.mcp.evenfire.io "ctx1" already exists',
+    })
+    let contextAttempts = 0
+    vi.mocked(api.apiSend).mockImplementation(async (method: string, path: string) => {
+      if (method === 'POST' && path === '/api/v1/admin/contexts') {
+        contextAttempts += 1
+        if (contextAttempts === 1) throw collision
+      }
+      return {}
+    })
+
+    await renderWizard()
+    await walkToAccessStepNewSecret({ agentName: 'retry-context-agent' })
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
+
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith('POST', '/api/v1/admin/hosts', expect.any(Object))
+    })
+    const contextCalls = vi
+      .mocked(api.apiSend)
+      .mock.calls.filter(call => call[0] === 'POST' && call[1] === '/api/v1/admin/contexts')
+    expect(contextCalls).toHaveLength(2)
+    const firstContextName = (contextCalls[0][2] as { metadata: { name: string } }).metadata.name
+    const secondContextName = (contextCalls[1][2] as { metadata: { name: string } }).metadata.name
+    const hostCall = vi
+      .mocked(api.apiSend)
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/hosts')
+    expect((hostCall![2] as { spec: { contextRef: string } }).spec.contextRef).toBe(
+      secondContextName
+    )
+    expect(firstContextName).not.toBe('')
+  })
+
+  it('rolls back the created secret AND context in inverse order when the HOST create fails', async () => {
+    const hostErr = await build409({
+      error: 'hosts.mcp.evenfire.io "hostfail" already exists',
+    })
+    vi.mocked(api.apiSend).mockImplementation(async (method: string, path: string) => {
+      if (method === 'POST' && path === '/api/v1/admin/hosts') throw hostErr
+      return {}
+    })
+
+    await renderWizard()
+    await walkToAccessStepNewSecret({ agentName: 'hostfail' })
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
+
+    await waitFor(() => {
+      expect(screen.getByText(/That agent name is already in use/i)).toBeInTheDocument()
+    })
+    // Inverse order: created = [secret, context] → compensate context THEN secret.
+    const contextCall = vi
+      .mocked(api.apiSend)
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/contexts')
+    const generatedContextName = (contextCall![2] as { metadata: { name: string } }).metadata.name
+    const deletePaths = vi
+      .mocked(api.apiSend)
+      .mock.calls.filter(c => c[0] === 'DELETE')
+      .map(c => c[1])
+    expect(deletePaths).toEqual([
+      `/api/v1/admin/contexts/${generatedContextName}`,
+      '/api/v1/admin/secrets/hostfail-llm',
+    ])
+  })
+
+  it('rolls back NOTHING when a GRANT fails after the host is created (V-7)', async () => {
+    // The grant runs AFTER hostCreated=true; its failure must not trigger any
+    // sibling rollback — the host + siblings stay and grants retry from detail.
+    // vi.clearAllMocks() resets call history but NOT implementations, so pin a
+    // clean all-resolving apiSend for this test (prior tests set throwing ones).
+    vi.mocked(api.apiSend).mockImplementation(async () => ({}))
+    vi.mocked(api.updateAgentUsers).mockRejectedValueOnce(new Error('grant boom'))
+
+    await renderWizard()
+    await walkToAccessStepNewSecret({ agentName: 'grantfail' })
+    // Select a user so updateAgentUsers is invoked.
+    fireEvent.click(screen.getByLabelText(/alice/i))
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
+
+    // The grant error is surfaced verbatim (no 409 remap at the top level).
+    await waitFor(() => {
+      expect(screen.getByText(/grant boom/i)).toBeInTheDocument()
+    })
+    // The host WAS created...
+    expect(
+      vi.mocked(api.apiSend).mock.calls.some(c => c[0] === 'POST' && c[1] === '/api/v1/admin/hosts')
+    ).toBe(true)
+    // ...so NO compensation DELETE runs.
+    expect(vi.mocked(api.apiSend).mock.calls.some(c => c[0] === 'DELETE')).toBe(false)
+  })
+
+  it('re-throws the server message untouched on a CODED 409 (CRD-outdated) — no collision remap', async () => {
+    // 409 WITH a body `code` = CRD-outdated, NOT a collision: keep the server's
+    // human message, do not remap to the friendly "already exists" text.
+    const crdErr = await build409({
+      error: 'context CRD is outdated; apply the latest CRDs and retry',
+      code: 'context_crd_outdated',
+    })
+    vi.mocked(api.apiSend).mockImplementation(async (method: string, path: string) => {
+      if (method === 'POST' && path === '/api/v1/admin/contexts') throw crdErr
+      return {}
+    })
+
+    await renderWizard()
+    await walkToAccessStepNewSecret({ agentName: 'crd-agent' })
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
+
+    await waitFor(() => {
+      expect(screen.getByText(/context CRD is outdated/i)).toBeInTheDocument()
+    })
+    // The friendly collision text must NOT appear (coded 409 is not a collision).
+    expect(
+      screen.queryByText(/agent connector context could not be created/i)
+    ).not.toBeInTheDocument()
+    // Boundary rule still applies: the secret created before the failing context
+    // is compensated (host never created), but nothing beyond that.
+    expect(api.apiSend).toHaveBeenCalledWith('DELETE', '/api/v1/admin/secrets/crd-agent-llm')
   })
 })

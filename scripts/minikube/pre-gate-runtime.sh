@@ -66,7 +66,8 @@ rollout_namespace_deployments() {
 assert_workflow_gateway_prompt_bridge_finalization_route() {
   local deployment="nginx-workflow-approval-gateway"
   local namespace="control-plane"
-  local candidate deletion ready pod_count=0
+  local expected_route='location ~ ^/api/v1/mcp-host/plugin-workload-sdk/invocations/[^/]+/finalize$'
+  local candidate deletion ready nginx_config inspect_rc pod_count=0
 
   if ! ${KC} get deployment "${deployment}" -n "${namespace}" >/dev/null 2>&1; then
     log "ERROR: ${namespace}/${deployment} is absent; refusing Plugin Workload SDK gate"
@@ -86,8 +87,21 @@ assert_workflow_gateway_prompt_bridge_finalization_route() {
       -o jsonpath='{.status.containerStatuses[?(@.name=="nginx")].ready}' 2>/dev/null || true)"
     [[ "${ready}" == "true" ]] || continue
     pod_count=$((pod_count + 1))
-    if ! ${KC} exec -n "${namespace}" "${candidate}" -c nginx -- nginx -T 2>&1 | \
-      grep -Fq 'location ~ ^/api/v1/mcp-host/plugin-workload-sdk/invocations/[^/]+/finalize$'; then
+
+    # Consume the complete command before searching it. With the caller's
+    # `set -o pipefail`, piping `kubectl exec ... nginx -T` into `grep -q`
+    # lets grep close the pipe as soon as it finds the route. kubectl can then
+    # exit on SIGPIPE (141), turning a present route into a false failure.
+    # Keeping execution and content validation separate also preserves the
+    # distinction between an unreachable pod and a genuinely stale config.
+    if nginx_config="$(${KC} exec -n "${namespace}" "${candidate}" -c nginx -- nginx -T 2>&1)"; then
+      :
+    else
+      inspect_rc=$?
+      log "ERROR: could not inspect the active nginx configuration in ${namespace}/${candidate} (kubectl exec rc=${inspect_rc}); refusing gate"
+      return 1
+    fi
+    if [[ "${nginx_config}" != *"${expected_route}"* ]]; then
       log "ERROR: active ${namespace}/${candidate} does not serve the SDK finalization route; refusing gate"
       return 1
     fi
@@ -99,6 +113,56 @@ assert_workflow_gateway_prompt_bridge_finalization_route() {
     return 1
   fi
   log "Workflow gateway serves the SDK promptBridge finalization route"
+}
+
+# The HCC gateway also mounts nginx.conf through a subPath. NP-08 gates must
+# prove every active pod serves only the caller-bound v2 Host routes while the
+# two caller-selected legacy Host routes are local tombstones. The global v1
+# inventory remains temporarily for the retained mcp-proxy poller (PR 2).
+assert_hcc_gateway_np08_routes() {
+  local deployment="host-context-controller-api-gateway"
+  local namespace="control-plane"
+  local candidate deletion ready rendered pod_count=0
+
+  if ! ${KC} get deployment "${deployment}" -n "${namespace}" >/dev/null 2>&1; then
+    log "ERROR: ${namespace}/${deployment} is absent; refusing NP-08 gate"
+    return 1
+  fi
+
+  while IFS= read -r candidate; do
+    [[ -z "${candidate}" ]] && continue
+    deletion="$(${KC} get pod "${candidate}" -n "${namespace}" \
+      -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)"
+    [[ -n "${deletion}" ]] && continue
+    ready="$(${KC} get pod "${candidate}" -n "${namespace}" \
+      -o jsonpath='{.status.containerStatuses[?(@.name=="nginx")].ready}' 2>/dev/null || true)"
+    [[ "${ready}" == "true" ]] || continue
+    pod_count=$((pod_count + 1))
+    rendered="$(${KC} exec -n "${namespace}" "${candidate}" -c nginx -- nginx -T 2>&1)" || {
+      log "ERROR: could not inspect active ${namespace}/${candidate}; refusing NP-08 gate"
+      return 1
+    }
+    if ! grep -Fq 'location = /api/v2/hosts/self/mcpservers {' <<<"${rendered}" ||
+       ! grep -Fq 'location = /api/v2/hosts/self/mcpservers/credential {' <<<"${rendered}" ||
+       ! grep -Fq 'location ~ ^/api/v1/mcpservers/context/[^/]+$ {' <<<"${rendered}" ||
+       ! grep -Fq 'location ~ ^/api/v1/mcpservers/[^/]+/auth$ {' <<<"${rendered}" ||
+       ! grep -Fq 'proxy_set_header Authorization $http_authorization;' <<<"${rendered}" ||
+       ! grep -Fq 'access_log /dev/stdout hcc_gateway_json;' <<<"${rendered}" ||
+       ! grep -Fq 'add_header Cache-Control "no-store, private" always;' <<<"${rendered}" ||
+       ! grep -Fq 'add_header Pragma "no-cache" always;' <<<"${rendered}" ||
+       ! grep -Fq 'add_header X-Content-Type-Options "nosniff" always;' <<<"${rendered}" ||
+       [[ "$(grep -Fc "return 410 '{\"error\":\"gone\"}';" <<<"${rendered}")" -lt 2 ]]; then
+      log "ERROR: active ${namespace}/${candidate} lacks the NP-08 gateway contract"
+      return 1
+    fi
+  done < <(${KC} get pods -n "${namespace}" -l app="${deployment}" \
+    --field-selector=status.phase=Running -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+
+  if [[ "${pod_count}" == "0" ]]; then
+    log "ERROR: ${namespace}/${deployment} has no Ready non-terminating pod; refusing NP-08 gate"
+    return 1
+  fi
+  log "HCC gateway serves caller-bound NP-08 routes"
 }
 
 gate_needs_registry() {

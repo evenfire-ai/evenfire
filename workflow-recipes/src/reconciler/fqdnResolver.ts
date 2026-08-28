@@ -1,4 +1,6 @@
+import type { RecordWithTtl } from 'node:dns'
 import { resolve4, resolve6 } from 'node:dns/promises'
+import { classifyDnsError } from '@clerum/network-policy-core'
 import type { SandboxUiExternalEgress } from '../types'
 
 const BLOCKED_EGRESS_CIDRS = [
@@ -56,7 +58,7 @@ function cidrOverlaps(left: string, right: string): boolean {
   return a.start <= b.end && b.start <= a.end
 }
 
-function isBlockedExternalIPv4(ip: string): boolean {
+export function isBlockedExternalIPv4(ip: string): boolean {
   if (ipv4ToNumber(ip) === undefined) return true
   return BLOCKED_EGRESS_CIDRS.some(blocked => cidrOverlaps(`${ip}/32`, blocked))
 }
@@ -71,10 +73,21 @@ export interface ResolvedExternalEgress {
   port: number
   reason?: string
   source: { kind: 'fqdn'; fqdn: string }
+  /**
+   * TTL (seconds) of the FQDN this /32 was resolved from — the MINIMUM TTL
+   * across the FQDN's A records, i.e. the refresh window for the whole name
+   * (issue #299). The sliding-window accumulator uses this to compute each
+   * entry's expiry = now + ttl + overlap. All /32s of one FQDN share it.
+   */
+  ttlSeconds: number
 }
 
 export type FqdnLookupResult =
-  | { kind: 'ok'; ipv4: string[]; ipv6: string[] }
+  // `ttlSeconds` is the MINIMUM TTL (seconds) across the resolved A records —
+  // the binding window for the whole FQDN, consumed by the egress accumulator
+  // (issue #299). It is 0 when only AAAA resolved (A-less), since no /32 is
+  // emitted for an IPv4-only enforcement target in that case.
+  | { kind: 'ok'; ipv4: string[]; ipv6: string[]; ttlSeconds: number }
   // `retryable` distinguishes a transient resolver failure (SERVFAIL, timeout,
   // unreachable upstream) — worth retrying on a later reconcile — from a
   // permanent one (the name genuinely has no A/AAAA records). Absent ⇒ permanent.
@@ -83,33 +96,13 @@ export type FqdnLookupResult =
 export type FqdnLookup = (host: string) => Promise<FqdnLookupResult>
 
 /**
- * c-ares / system error codes that mean the resolver or its upstream was
- * unavailable at query time, NOT that the name has no records. A reconcile that
- * hits one of these should be retried rather than bricking the recipe — these
- * map to `retryable: true`. Stable DNS answers (ENODATA, ENOTFOUND/NXDOMAIN, an
- * empty answer) fail closed permanently.
+ * Transient-vs-permanent DNS classification is centralized in
+ * `@clerum/network-policy-core` (`classifyDnsError`) so WRC and HCC agree on what
+ * a transient failure is — a single source of truth avoids drift between the two
+ * controllers' fail-static behavior (issue #299 audit F6). c-ares / system codes
+ * meaning "resolver/upstream temporarily unavailable" map to `retryable: true`;
+ * stable answers (ENODATA, ENOTFOUND/NXDOMAIN, empty) fail closed permanently.
  */
-const TRANSIENT_DNS_CODES = new Set([
-  'EAI_AGAIN', // system resolver temporary failure
-  'ESERVFAIL', // upstream returned SERVFAIL
-  'EFORMERR', // upstream/protocol format error for this query
-  'ENOTIMP', // upstream does not implement the query
-  'EREFUSED', // query refused (upstream policy / overload)
-  'ETIMEOUT', // c-ares query timeout
-  'ETIMEDOUT', // system-level timeout
-  'ECONNREFUSED', // nameserver unreachable
-  'ECONNRESET',
-  'ENETUNREACH',
-  'ECANCELLED', // query cancelled (e.g. resolver shutting down)
-  'EBADRESP', // malformed reply from upstream
-  'EOF', // resolver connection closed
-  'EFILE', // resolver config/file problem
-  'ENOMEM', // resolver allocation failure
-  'EDESTRUCTION', // channel destroyed while query was pending
-  'ENOTINITIALIZED',
-  'ELOADIPHLPAPI',
-  'EADDRGETNETWORKPARAMS',
-])
 
 /**
  * Default FQDN lookup using node:dns/promises. Returns ipv4 and ipv6 record
@@ -125,22 +118,40 @@ const TRANSIENT_DNS_CODES = new Set([
  * "no A or AAAA records".
  */
 export const defaultFqdnLookup: FqdnLookup = async host => {
-  const settle = (p: Promise<string[]>) =>
+  // A records are requested WITH per-record TTLs (`{ ttl: true }`) so the
+  // accumulator can size the sliding window off the real DNS TTL (issue #299).
+  // AAAA is resolved without TTLs: /128 blocks are dropped (IPv4-only targets),
+  // so their TTL would be inert.
+  const settleV4 = (p: Promise<RecordWithTtl[]>) =>
+    p.then(
+      records => ({ records }) as { records: RecordWithTtl[] },
+      (err: NodeJS.ErrnoException) => ({ err }) as { err: NodeJS.ErrnoException }
+    )
+  const settleV6 = (p: Promise<string[]>) =>
     p.then(
       addrs => ({ addrs }) as { addrs: string[] },
       (err: NodeJS.ErrnoException) => ({ err }) as { err: NodeJS.ErrnoException }
     )
 
-  const [v4, v6] = await Promise.all([settle(resolve4(host)), settle(resolve6(host))])
+  const [v4, v6] = await Promise.all([
+    settleV4(resolve4(host, { ttl: true })),
+    settleV6(resolve6(host)),
+  ])
 
-  const ipv4 = 'addrs' in v4 ? v4.addrs : []
+  const v4Records = 'records' in v4 ? v4.records : []
+  const ipv4 = v4Records.map(r => r.address)
   const ipv6 = 'addrs' in v6 ? v6.addrs : []
   if (ipv4.length > 0 || ipv6.length > 0) {
-    return { kind: 'ok', ipv4, ipv6 }
+    // Minimum TTL across the A records = the window for the whole FQDN. 0 when
+    // A-less (AAAA-only), where no /32 is emitted anyway.
+    const ttlSeconds = v4Records.length > 0 ? Math.min(...v4Records.map(r => r.ttl)) : 0
+    return { kind: 'ok', ipv4, ipv6, ttlSeconds }
   }
 
   const codes = ['err' in v4 ? v4.err.code : undefined, 'err' in v6 ? v6.err.code : undefined]
-  const transientCode = codes.find(code => code !== undefined && TRANSIENT_DNS_CODES.has(code))
+  const transientCode = codes.find(
+    code => code !== undefined && classifyDnsError(code) === 'transient'
+  )
   if (transientCode) {
     return {
       kind: 'error',
@@ -211,6 +222,7 @@ export async function resolveExternalEgress(
         port: entry.port,
         reason: entry.reason,
         source: { kind: 'fqdn', fqdn: entry.fqdn },
+        ttlSeconds: result.ttlSeconds,
       })
     }
   }

@@ -13,9 +13,22 @@ const sandboxUi = {
   setBounds: vi.fn(),
   setVisible: vi.fn(),
   capturePreview: vi.fn(),
+  findInPage: vi.fn(),
+  stopFindInPage: vi.fn(),
+  focusActive: vi.fn(),
+  onFindResult: vi.fn(() => vi.fn()),
   onClosed: vi.fn(() => vi.fn()),
   onRefreshError: vi.fn(() => vi.fn()),
 }
+let emitFindResult:
+  | ((result: {
+      requestId: number
+      clientRequestId: number
+      activeMatchOrdinal: number
+      matches: number
+      finalUpdate: boolean
+    }) => void)
+  | null = null
 
 function installClerumApi(): void {
   ;(window as unknown as { clerum: unknown }).clerum = { sandboxUi }
@@ -26,6 +39,13 @@ describe('SandboxUiPage', () => {
     vi.clearAllMocks()
     sandboxUi.setBounds.mockResolvedValue(undefined)
     sandboxUi.setVisible.mockResolvedValue(undefined)
+    sandboxUi.findInPage.mockResolvedValue({ status: 'started', requestId: 17 })
+    sandboxUi.onFindResult.mockImplementation(callback => {
+      emitFindResult = callback
+      return vi.fn()
+    })
+    sandboxUi.stopFindInPage.mockResolvedValue(undefined)
+    sandboxUi.focusActive.mockResolvedValue(true)
     installClerumApi()
     vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
       cb(0)
@@ -150,6 +170,7 @@ describe('SandboxUiPage', () => {
       expect(sandboxUi.open).toHaveBeenCalledWith({
         recipeNs: 'sandbox-recipes',
         recipeName: 'sales-crm',
+        title: "Andy's Sales CRM",
         defaultPath: '/',
         bounds: {
           x: 16,
@@ -162,6 +183,267 @@ describe('SandboxUiPage', () => {
     })
     expect(await screen.findByRole('button', { name: 'Back to apps' })).toBeTruthy()
     expect(screen.getAllByRole('button', { name: /^Back to / })).toHaveLength(1)
+  })
+
+  it('routes controlled refresh and back requests through mounted-app owners', async () => {
+    sandboxUi.listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: 'Sales CRM',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValue(undefined)
+    sandboxUi.close.mockResolvedValue(undefined)
+    sandboxUi.reload.mockResolvedValue(undefined)
+    const onEmbeddedAppBack = vi.fn()
+    const { rerender } = render(
+      <SandboxUiPage actionRequest={null} onEmbeddedAppBack={onEmbeddedAppBack} />
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Sales CRM' }))
+    await screen.findByRole('button', { name: 'Refresh' })
+
+    rerender(
+      <SandboxUiPage
+        actionRequest={{ id: 1, action: 'refresh' }}
+        onEmbeddedAppBack={onEmbeddedAppBack}
+      />
+    )
+    await waitFor(() => expect(sandboxUi.reload).toHaveBeenCalledOnce())
+
+    rerender(
+      <SandboxUiPage
+        actionRequest={{ id: 2, action: 'back-to-apps' }}
+        onEmbeddedAppBack={onEmbeddedAppBack}
+      />
+    )
+    await waitFor(() => {
+      expect(sandboxUi.close).toHaveBeenCalledOnce()
+      expect(onEmbeddedAppBack).toHaveBeenCalledOnce()
+    })
+  })
+
+  it('does not replay an app action requested while the native view is mounting', async () => {
+    sandboxUi.listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: 'Sales CRM',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    let finishOpen!: () => void
+    sandboxUi.open.mockImplementation(
+      () =>
+        new Promise<void>(resolve => {
+          finishOpen = resolve
+        })
+    )
+    sandboxUi.reload.mockResolvedValue(undefined)
+    const onEmbeddedAppMounted = vi.fn()
+    const { rerender } = render(
+      <SandboxUiPage actionRequest={null} onEmbeddedAppMounted={onEmbeddedAppMounted} />
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Sales CRM' }))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledOnce())
+
+    rerender(
+      <SandboxUiPage
+        actionRequest={{ id: 1, action: 'refresh' }}
+        onEmbeddedAppMounted={onEmbeddedAppMounted}
+      />
+    )
+    expect(sandboxUi.reload).not.toHaveBeenCalled()
+
+    finishOpen()
+    await waitFor(() => expect(onEmbeddedAppMounted).toHaveBeenCalledOnce())
+    expect(sandboxUi.reload).not.toHaveBeenCalled()
+  })
+
+  it('routes controlled conversation return through the existing transition owner', async () => {
+    sandboxUi.listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: 'Sales CRM',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValue(undefined)
+    sandboxUi.close.mockResolvedValue(undefined)
+    const onBackToConversation = vi.fn().mockResolvedValue(undefined)
+    const props = {
+      conversationOrigin: { agentName: 'agent', chatId: 'chat', title: 'Conversation' },
+      onBackToConversation,
+    }
+    const { rerender } = render(<SandboxUiPage {...props} actionRequest={null} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Sales CRM' }))
+    await screen.findByRole('button', { name: 'Refresh' })
+
+    rerender(<SandboxUiPage {...props} actionRequest={{ id: 1, action: 'back-to-conversation' }} />)
+
+    await waitFor(() => {
+      expect(onBackToConversation).toHaveBeenCalledOnce()
+      expect(sandboxUi.close).toHaveBeenCalledOnce()
+    })
+  })
+
+  it('runs contextual find only against the mounted active WebContents contract', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+
+    render(<SandboxUiPage localSearchRequestId={1} />)
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    const input = await screen.findByRole('textbox', { name: 'Find in current app' })
+    fireEvent.change(input, { target: { value: 'invoice' } })
+    await waitFor(() => {
+      expect(sandboxUi.findInPage).toHaveBeenCalledWith('invoice', {
+        operation: 'start',
+        clientRequestId: expect.any(Number),
+      })
+    })
+    expect(screen.getByRole('status').textContent).toBe('Searching…')
+    const startOptions = sandboxUi.findInPage.mock.calls.at(-1)?.[1]
+    emitFindResult?.({
+      requestId: 17,
+      clientRequestId: startOptions.clientRequestId,
+      activeMatchOrdinal: 1,
+      matches: 2,
+      finalUpdate: true,
+    })
+    await waitFor(() => expect(screen.getByRole('status').textContent).toBe('1/2'))
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
+    expect(sandboxUi.findInPage).toHaveBeenLastCalledWith('invoice', {
+      operation: 'previous',
+      clientRequestId: startOptions.clientRequestId,
+    })
+    fireEvent.keyDown(input, { key: 'Escape' })
+    await waitFor(() => {
+      expect(sandboxUi.stopFindInPage).toHaveBeenCalled()
+      expect(sandboxUi.focusActive).toHaveBeenCalled()
+    })
+    expect(screen.queryByRole('textbox', { name: 'Find in current app' })).toBeNull()
+  })
+
+  it('accepts the first native find result before the invoke response resolves', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    sandboxUi.findInPage.mockReturnValueOnce(new Promise(() => undefined))
+
+    render(<SandboxUiPage localSearchRequestId={1} />)
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    const input = await screen.findByRole('textbox', { name: 'Find in current app' })
+    fireEvent.change(input, { target: { value: 'invoice' } })
+    const options = sandboxUi.findInPage.mock.calls.at(-1)?.[1]
+    expect(options?.clientRequestId).toEqual(expect.any(Number))
+
+    emitFindResult?.({
+      requestId: 17,
+      clientRequestId: options.clientRequestId,
+      activeMatchOrdinal: 1,
+      matches: 2,
+      finalUpdate: true,
+    })
+
+    await waitFor(() => expect(screen.getByRole('status').textContent).toBe('1/2'))
+
+    fireEvent.change(input, { target: { value: 'receipt' } })
+    const nextOptions = sandboxUi.findInPage.mock.calls.at(-1)?.[1]
+    expect(nextOptions.clientRequestId).not.toBe(options.clientRequestId)
+    emitFindResult?.({
+      requestId: 17,
+      clientRequestId: options.clientRequestId,
+      activeMatchOrdinal: 2,
+      matches: 9,
+      finalUpdate: true,
+    })
+    expect(screen.getByRole('status').textContent).toBe('Searching…')
+    emitFindResult?.({
+      requestId: 18,
+      clientRequestId: nextOptions.clientRequestId,
+      activeMatchOrdinal: 1,
+      matches: 1,
+      finalUpdate: true,
+    })
+    await waitFor(() => expect(screen.getByRole('status').textContent).toBe('1/1'))
+  })
+
+  it('rejects a queued find result from a prior mounted page', async () => {
+    const listing = {
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    }
+    sandboxUi.listApps.mockResolvedValue(listing)
+    sandboxUi.open.mockResolvedValue(undefined)
+
+    const first = render(<SandboxUiPage localSearchRequestId={1} />)
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Find in current app' }), {
+      target: { value: 'old' },
+    })
+    const oldOptions = sandboxUi.findInPage.mock.calls.at(-1)?.[1]
+    const emitOldResult = emitFindResult
+    first.unmount()
+
+    render(<SandboxUiPage localSearchRequestId={1} />)
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Find in current app' }), {
+      target: { value: 'new' },
+    })
+    const newOptions = sandboxUi.findInPage.mock.calls.at(-1)?.[1]
+    expect(newOptions.clientRequestId).not.toBe(oldOptions.clientRequestId)
+
+    emitOldResult?.({
+      requestId: 17,
+      clientRequestId: oldOptions.clientRequestId,
+      activeMatchOrdinal: 7,
+      matches: 7,
+      finalUpdate: true,
+    })
+    expect(screen.getByRole('status').textContent).toBe('Searching…')
   })
 
   it('opens a deep-linked app at its stable entry point before handing off the client route', async () => {
@@ -188,6 +470,9 @@ describe('SandboxUiPage', () => {
       expect(sandboxUi.open).toHaveBeenCalledWith({
         recipeNs: 'sandbox-recipes',
         recipeName: 'task-board',
+        // Host-owned title: consent prompts and notification attribution read
+        // this, so it must come from the app list, never from the plugin.
+        title: 'Agentic Task Board',
         defaultPath: '/',
         routePath: '/tasks/task-42',
         bounds: {
@@ -270,6 +555,37 @@ describe('SandboxUiPage', () => {
       expect(sandboxUi.close).toHaveBeenCalledTimes(1)
       expect(onBackToConversation).toHaveBeenCalledTimes(1)
     })
+  })
+
+  it('keeps a long conversation return label available to assistive technology and hover text', async () => {
+    const title =
+      'A deliberately long conversation title that must remain available to assistive technology'
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+
+    render(
+      <SandboxUiPage
+        conversationOrigin={{ agentName: 'sales-agent', chatId: 'chat-123', title }}
+        onBackToConversation={vi.fn()}
+      />
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    const button = await screen.findByRole('button', { name: `Back to ${title}` })
+
+    expect(button.getAttribute('title')).toBe(`Back to ${title}`)
+    expect(button.querySelector('span')?.textContent).toBe(`Back to ${title}`)
   })
 
   it('keeps the app mounted when returning to the conversation fails', async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   SANDBOX_UI_COOKIE_NAME,
   applySandboxUiClientRoute,
+  beginSandboxUiFind,
   canApplySandboxUiClientRoute,
   extractSandboxUiCookie,
   extractSandboxUiPath,
@@ -10,7 +11,101 @@ import {
   reloadSandboxUiWebContents,
   resolveSandboxUiDefaultPath,
   resolveSandboxUiSharePath,
+  sandboxFindOptionsForOperation,
 } from '../sandboxUiDriver.js'
+
+describe('sandbox WebContents local find', () => {
+  it('does not lose a native result delivered as the first request starts', () => {
+    let listener: ((event: Electron.Event, result: Electron.FoundInPageResult) => void) | undefined
+    const result = {
+      requestId: 41,
+      activeMatchOrdinal: 1,
+      matches: 2,
+      selectionArea: { x: 0, y: 0, width: 1, height: 1 },
+      finalUpdate: true,
+    }
+    const webContents = {
+      findInPage: vi.fn(() => {
+        listener?.({} as Electron.Event, result)
+        return 41
+      }),
+      on: vi.fn((_name: string, callback: typeof listener) => {
+        listener = callback
+        return webContents
+      }),
+      removeListener: vi.fn(() => webContents),
+    }
+    const onResult = vi.fn()
+
+    beginSandboxUiFind(webContents as never, 'invoice', { forward: true, findNext: true }, onResult)
+
+    expect(onResult).toHaveBeenCalledWith({
+      requestId: 41,
+      activeMatchOrdinal: 1,
+      matches: 2,
+      finalUpdate: true,
+    })
+  })
+
+  it('uses the native producer, filters request IDs, minimizes results, and removes its listener', () => {
+    let listener: ((event: Electron.Event, result: Electron.FoundInPageResult) => void) | undefined
+    const webContents = {
+      findInPage: vi.fn(() => 41),
+      on: vi.fn((_name: string, callback: typeof listener) => {
+        listener = callback
+        return webContents
+      }),
+      removeListener: vi.fn(() => webContents),
+    }
+    const onResult = vi.fn()
+    const session = beginSandboxUiFind(
+      webContents as never,
+      'invoice',
+      { forward: false, findNext: true },
+      onResult
+    )
+
+    expect(session.requestId).toBe(41)
+    expect(webContents.findInPage).toHaveBeenCalledWith('invoice', {
+      forward: false,
+      findNext: true,
+    })
+    listener?.({} as Electron.Event, {
+      requestId: 40,
+      activeMatchOrdinal: 1,
+      matches: 9,
+      selectionArea: { x: 0, y: 0, width: 1, height: 1 },
+      finalUpdate: true,
+    })
+    expect(onResult).not.toHaveBeenCalled()
+    listener?.({} as Electron.Event, {
+      requestId: 41,
+      activeMatchOrdinal: 2,
+      matches: 4,
+      selectionArea: { x: 8, y: 8, width: 100, height: 40 },
+      finalUpdate: true,
+    })
+    expect(onResult).toHaveBeenCalledWith({
+      requestId: 41,
+      activeMatchOrdinal: 2,
+      matches: 4,
+      finalUpdate: true,
+    })
+    session.cleanup()
+    expect(webContents.removeListener).toHaveBeenCalledWith('found-in-page', listener)
+  })
+})
+
+describe('sandbox find operation mapping', () => {
+  it('maps semantic operations to Electron find session flags', () => {
+    expect(sandboxFindOptionsForOperation('start')).toEqual({ forward: true, findNext: true })
+    expect(sandboxFindOptionsForOperation('next')).toEqual({ forward: true, findNext: false })
+    expect(sandboxFindOptionsForOperation('previous')).toEqual({
+      forward: false,
+      findNext: false,
+    })
+  })
+})
 
 describe('applySandboxUiClientRoute', () => {
   it('hands a nested route to the loaded app without requesting it from the server', async () => {
@@ -23,6 +118,7 @@ describe('applySandboxUiClientRoute', () => {
 
     expect(applied).toBe(true)
     expect(executeJavaScript).toHaveBeenCalledOnce()
+    expect(executeJavaScript.mock.calls[0]?.[0]).toContain('/tasks/task-42')
     expect(executeJavaScript.mock.calls[0]?.[0]).toContain('window.history.replaceState')
     expect(executeJavaScript.mock.calls[0]?.[0]).toContain("PopStateEvent('popstate'")
   })
@@ -130,6 +226,39 @@ describe('sandbox UI route normalization', () => {
         recipeNs: 'ns',
         recipeName: 'app',
         defaultPath: '/index.php?view=board',
+      })
+    ).toBeUndefined()
+  })
+
+  it('uses the shared canonical route contract for default path acceptance', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    expect(resolveSandboxUiDefaultPath('/café menu/literal%percent')).toBe(
+      '/café menu/literal%percent'
+    )
+    expect(resolveSandboxUiDefaultPath('/caf%C3%A9%20menu/literal%25percent')).toBe(
+      '/café menu/literal%percent'
+    )
+    expect(resolveSandboxUiDefaultPath('/safe/%252e%252e/admin')).toBe('/')
+    expect(resolveSandboxUiDefaultPath('/safe/%252Fadmin')).toBe('/')
+    expect(resolveSandboxUiDefaultPath('/tasks\u2028admin')).toBe('/')
+    expect(resolveSandboxUiDefaultPath('/report ')).toBe('/')
+    expect(resolveSandboxUiDefaultPath('/report%20')).toBe('/')
+    expect(warn).toHaveBeenCalledTimes(5)
+
+    warn.mockRestore()
+  })
+
+  it('omits equivalent canonical default routes when sharing', () => {
+    expect(
+      resolveSandboxUiSharePath({
+        currentUrl:
+          'https://rpc.example/api/v1/sandbox-ui/ns/app/view/' +
+          'caf%C3%A9%20menu/literal%25percent',
+        rpcProxyOrigin: 'https://rpc.example',
+        recipeNs: 'ns',
+        recipeName: 'app',
+        defaultPath: resolveSandboxUiDefaultPath('/caf%C3%A9%20menu/literal%25percent'),
       })
     ).toBeUndefined()
   })

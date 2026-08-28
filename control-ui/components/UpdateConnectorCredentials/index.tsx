@@ -4,7 +4,13 @@ import React, { useEffect, useRef, useState } from 'react'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
 import { Button, Field, FormSection, TextInput } from '@components/ui'
-import { createMcpSecret, getMcpServer, getMcpServers, updateMcpSecret } from '@lib/api'
+import {
+  createMcpSecret,
+  getMcpServer,
+  getMcpServers,
+  getRegistryCredentialSchema,
+  updateMcpSecret,
+} from '@lib/api'
 import type { McpServerCondition } from '@lib/api'
 import type { RotationPhase, UpdateConnectorCredentialsProps } from './types'
 
@@ -123,6 +129,7 @@ export function UpdateConnectorCredentials({
   envSecret,
   surface = 'rotate',
   recipeOwned = false,
+  registryCredentialSource,
 }: UpdateConnectorCredentialsProps) {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
@@ -145,6 +152,10 @@ export function UpdateConnectorCredentials({
   const [phaseMessage, setPhaseMessage] = useState('')
   const [rotationCutoff, setRotationCutoff] = useState<string | null>(null)
   const [rotationAffected, setRotationAffected] = useState<string[]>([])
+  // Labels use the same Kubernetes-valid key namespace as drafts. Keep this
+  // map prototype-safe as well, because Marketplace schemas may contain keys
+  // such as `constructor` or `__proto__`.
+  const [credentialLabels, setCredentialLabels] = useState<CredentialMap>(emptyCredentialMap)
   // Latches the form onto rotate semantics after a successful create, so a
   // stale `surface` prop cannot leave "set" copy on a Secret that now exists.
   const [secretCreated, setSecretCreated] = useState(false)
@@ -194,6 +205,32 @@ export function UpdateConnectorCredentials({
       cancelled = true
     }
   }, [envSecret])
+
+  useEffect(() => {
+    if (!registryCredentialSource) {
+      setCredentialLabels(emptyCredentialMap())
+      return
+    }
+
+    let cancelled = false
+    void getRegistryCredentialSchema(
+      registryCredentialSource.name,
+      registryCredentialSource.version
+    )
+      .then(schema => {
+        if (cancelled) return
+        const labels = emptyCredentialMap()
+        for (const key of schema.keys) labels[key.name] = key.label || key.name
+        setCredentialLabels(labels)
+      })
+      .catch(() => {
+        if (!cancelled) setCredentialLabels(emptyCredentialMap())
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [registryCredentialSource])
 
   // Poll THIS connector's own McpServer CRD until DeploymentReady resolves,
   // fails, or the bounded timeout expires. Success is NEVER declared from the
@@ -575,14 +612,18 @@ export function UpdateConnectorCredentials({
           NAMES the missing keys. The `required` attributes below are kept for
           their programmatic semantics (assistive technology reads the required
           state regardless of novalidate); the enforcement stays ours. */}
-      <form className="cu-form-stack" onSubmit={handleSubmit} noValidate>
+      <form
+        className="cu-connector-credentials-form cu-form-stack"
+        onSubmit={handleSubmit}
+        noValidate
+      >
         {envSecret.keys.map(k => {
           const isInvalid = invalidKeys.includes(k.secretKey)
           return (
             <Field
               key={k.secretKey}
               htmlFor={inputId(k.secretKey)}
-              label={k.secretKey}
+              label={ownCredentialValue(credentialLabels, k.secretKey) ?? k.secretKey}
               required={mode === 'set'}
             >
               <TextInput

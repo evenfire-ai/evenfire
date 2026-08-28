@@ -42,6 +42,7 @@ function baseProps(overrides: Partial<SidebarNavProps> = {}): SidebarNavProps {
     activeSandboxUiApp: null,
     availableSandboxUiApps: [],
     onCollapsedChange: vi.fn(),
+    onNewChat: vi.fn(),
     onOpenSandboxUiApp: vi.fn(),
     onSelect: vi.fn(),
     ...overrides,
@@ -105,13 +106,65 @@ describe('SidebarNav logo', () => {
     expect(container.querySelector('.sidebar-logo-copy')).toBeNull()
   })
 
-  it('labels the Files destination as Global File System in Resources', () => {
+  it('renders Files as a top-level nav item labelled Files (not under Resources)', () => {
     render(<SidebarNav {...baseProps()} />)
 
-    fireEvent.click(screen.getByTestId('nav-settings-menu'))
+    // Files is always visible as a primary nav destination — no menu opening needed.
+    const filesItem = screen.getByTestId('nav-files')
+    expect(filesItem.textContent).toContain('Files')
+    expect(filesItem.textContent).not.toContain('Global File System')
 
-    expect(screen.getByTestId('nav-files').textContent).toContain('Global File System')
-    expect(screen.queryByRole('menuitem', { name: 'Files' })).toBeNull()
+    // Files is no longer nested under the Settings → Resources submenu.
+    fireEvent.click(screen.getByTestId('nav-settings-menu'))
+    expect(screen.getByTestId('nav-data-menu').textContent).not.toContain('Global File System')
+  })
+
+  it('mounts the GFS solid-folder SVG inside the Files nav item so the icon is visible', () => {
+    const { container } = render(<SidebarNav {...baseProps()} />)
+    const filesLink = container.querySelector('[data-testid="nav-files"]')
+    const icon = filesLink?.querySelector('.ui-nav-item__icon svg')
+    expect(icon).toBeTruthy()
+    expect(icon?.getAttribute('viewBox')).toBe('0 0 512 512')
+    // Solid Font Awesome fa-folder path data.
+    expect(icon?.querySelector('path')?.getAttribute('d')).toContain(
+      'M464 128H272l-64-64H48C21.49 64 0 85.49 0 112v288'
+    )
+  })
+
+  it('routes a controlled palette request through desktop collapse behavior', () => {
+    const onCollapsedChange = vi.fn()
+    const { rerender } = render(
+      <SidebarNav {...baseProps({ onCollapsedChange, toggleRequestId: 0 })} />
+    )
+
+    rerender(<SidebarNav {...baseProps({ onCollapsedChange, toggleRequestId: 1 })} />)
+
+    expect(onCollapsedChange).toHaveBeenCalledWith(true)
+  })
+
+  it('routes a controlled palette request through the mobile drawer behavior', () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      query =>
+        ({
+          matches: true,
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        }) as MediaQueryList
+    )
+    const onCollapsedChange = vi.fn()
+    const { container, rerender } = render(
+      <SidebarNav {...baseProps({ onCollapsedChange, toggleRequestId: 0 })} />
+    )
+
+    rerender(<SidebarNav {...baseProps({ onCollapsedChange, toggleRequestId: 1 })} />)
+
+    expect(container.querySelector('.left-nav')?.classList.contains('mobile-open')).toBe(true)
+    expect(onCollapsedChange).not.toHaveBeenCalled()
   })
 })
 
@@ -140,16 +193,18 @@ describe('SidebarNav new-chat affordance', () => {
     cleanup()
   })
 
-  it('renders a new-chat button on the chat nav row that selects chat', () => {
+  it('routes the new-chat button through the dedicated new-chat owner', () => {
     const onSelect = vi.fn()
-    render(<SidebarNav {...baseProps({ navItem: 'chat', onSelect })} />)
+    const onNewChat = vi.fn()
+    render(<SidebarNav {...baseProps({ navItem: 'chat', onSelect })} onNewChat={onNewChat} />)
 
     const newChatBtn = screen.getByTestId('nav-new-chat')
     expect(newChatBtn).not.toBeNull()
     expect(newChatBtn.getAttribute('title')).toBe('New chat')
 
     fireEvent.click(newChatBtn)
-    expect(onSelect).toHaveBeenCalledWith('chat')
+    expect(onNewChat).toHaveBeenCalledOnce()
+    expect(onSelect).not.toHaveBeenCalled()
   })
 
   it('renders exactly one new-chat button (on the chat nav row)', () => {

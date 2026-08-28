@@ -1,11 +1,73 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
+import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   HostMessageRequest,
   ProfileSettingsOpenOptions,
   SandboxUiDeepLinkEnvelope,
 } from './types.js'
 
+// Sandboxed Electron preloads cannot load relative runtime modules. Keep this
+// allowlist self-contained and pin it to the authoritative registry in
+// desktopCommands.test.ts, matching the existing sandbox embed-preload pattern.
+const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
+  'chat.newTab',
+  'chat.closeTab',
+  'tabs.select1',
+  'tabs.select2',
+  'tabs.select3',
+  'tabs.select4',
+  'tabs.select5',
+  'tabs.select6',
+  'tabs.select7',
+  'tabs.select8',
+  'tabs.selectLast',
+  'tabs.next',
+  'tabs.previous',
+  'search.open',
+  'search.current',
+  'composer.focus',
+  'commands.open',
+  'settings.shortcuts',
+  'settings.open',
+  'auth.logout',
+  'navigate.chat',
+  'navigate.apps',
+  'navigate.agents',
+  'notifications.open',
+  'navigate.plugins',
+  'navigate.contexts',
+  'navigate.teams',
+  'navigate.connectors',
+  'navigate.files',
+  'sidebar.toggle',
+  'app.refresh',
+  'app.backToApps',
+  'app.backToConversation',
+])
+
+function isDesktopCommandId(value: unknown): value is DesktopCommandId {
+  return typeof value === 'string' && DESKTOP_COMMAND_IDS.has(value as DesktopCommandId)
+}
+
 const clerum = Object.freeze({
+  shortcuts: {
+    onCommand: (callback: (commandId: DesktopCommandId, source: DesktopCommandSource) => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        payload: { commandId?: unknown; source?: unknown }
+      ) => {
+        if (
+          isDesktopCommandId(payload?.commandId) &&
+          (payload?.source === 'host' || payload?.source === 'sandbox')
+        ) {
+          callback(payload.commandId, payload.source)
+        }
+      }
+      ipcRenderer.on('shortcuts:command', listener)
+      return () => ipcRenderer.off('shortcuts:command', listener)
+    },
+  },
   auth: {
     getSessionState: () => ipcRenderer.invoke('auth:getSessionState'),
     getDependenciesHealth: () => ipcRenderer.invoke('auth:getDependenciesHealth'),
@@ -23,6 +85,7 @@ const clerum = Object.freeze({
     googleLogin: (idToken: string) => ipcRenderer.invoke('auth:googleLogin', { idToken }),
     passwordLogin: (email: string, password: string) =>
       ipcRenderer.invoke('auth:passwordLogin', { email, password }),
+    diagnoseLoginBackend: () => ipcRenderer.invoke('auth:diagnoseLoginBackend'),
     startDesktopSetup: (email: string) => ipcRenderer.invoke('auth:startDesktopSetup', { email }),
     openForgotPassword: (email?: string) =>
       ipcRenderer.invoke('auth:openForgotPassword', { email }),
@@ -81,10 +144,58 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('gfs:createFolder', { parentResourceId, name, drive }),
     createFile: (parentResourceId: string, name: string, encodedData: string, drive?: string) =>
       ipcRenderer.invoke('gfs:createFile', { parentResourceId, name, encodedData, drive }),
+    createFileFromPath: (
+      parentResourceId: string,
+      name: string,
+      filePath: string,
+      drive?: string
+    ) => ipcRenderer.invoke('gfs:createFileFromPath', { parentResourceId, name, filePath, drive }),
+    startFileUpload: (
+      parentResourceId: string,
+      name: string,
+      filePath: string,
+      drive?: string,
+      resumeUploadId?: string
+    ) =>
+      ipcRenderer.invoke('gfs:startFileUpload', {
+        parentResourceId,
+        name,
+        filePath,
+        drive,
+        resumeUploadId,
+      }),
+    startFileReplace: (
+      resourceId: string,
+      filePath: string,
+      drive?: string,
+      ifMatch?: number,
+      resumeUploadId?: string
+    ) =>
+      ipcRenderer.invoke('gfs:startFileReplace', {
+        resourceId,
+        filePath,
+        drive,
+        ifMatch,
+        resumeUploadId,
+      }),
+    getUploadSnapshot: (uploadId: string, drive = 'main') =>
+      ipcRenderer.invoke('gfs:getUploadSnapshot', { uploadId, drive }),
+    listUploadSessions: (drive = 'main') => ipcRenderer.invoke('gfs:listUploadSessions', { drive }),
+    pauseUpload: (uploadId: string, drive = 'main') =>
+      ipcRenderer.invoke('gfs:pauseUpload', { uploadId, drive }),
+    resumeUpload: (uploadId: string, drive = 'main') =>
+      ipcRenderer.invoke('gfs:resumeUpload', { uploadId, drive }),
+    cancelUpload: (uploadId: string, drive = 'main') =>
+      ipcRenderer.invoke('gfs:cancelUpload', { uploadId, drive }),
     replaceFile: (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:replaceFile', { resourceId, encodedData, drive, ifMatch }),
+    replaceFileFromPath: (resourceId: string, filePath: string, drive?: string, ifMatch?: number) =>
+      ipcRenderer.invoke('gfs:replaceFileFromPath', { resourceId, filePath, drive, ifMatch }),
+    getPathForFile: (file: File) => webUtils.getPathForFile(file),
     renameResource: (resourceId: string, newName: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:renameResource', { resourceId, newName, drive, ifMatch }),
+    moveResource: (resourceId: string, destinationId: string, drive?: string, ifMatch?: number) =>
+      ipcRenderer.invoke('gfs:moveResource', { resourceId, destinationId, drive, ifMatch }),
     deleteResource: (resourceId: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:deleteResource', { resourceId, drive, ifMatch }),
     grant: (
@@ -97,6 +208,9 @@ const clerum = Object.freeze({
     listGrants: (resourceId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:listGrants', { resourceId, drive }),
     revokeGrant: (grantId: string) => ipcRenderer.invoke('gfs:revokeGrant', { grantId }),
+    listShares: (resourceId: string, drive?: string) =>
+      ipcRenderer.invoke('gfs:listShares', { resourceId, drive }),
+    revokeShare: (shareId: string) => ipcRenderer.invoke('gfs:revokeShare', { shareId }),
     // A desktop share grants READ access only (the minimal shared capability) —
     // unlike `grant`, it takes no permission bits by design. The server still
     // enforces the caller holds read + share (no-escalation).
@@ -437,6 +551,7 @@ const clerum = Object.freeze({
     open: (args: {
       recipeNs: string
       recipeName: string
+      title?: string
       defaultPath?: string
       routePath?: string
       bounds: { x: number; y: number; width: number; height: number; dpr?: number }
@@ -452,6 +567,47 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('sandboxUi:setBounds', { bounds }),
     setVisible: (visible: boolean) => ipcRenderer.invoke('sandboxUi:setVisible', { visible }),
     capturePreview: () => ipcRenderer.invoke('sandboxUi:capturePreview'),
+    findInPage: (
+      query: string,
+      options: { operation: 'start' | 'next' | 'previous'; clientRequestId: number }
+    ) =>
+      ipcRenderer.invoke('sandboxUi:findInPage', { query, ...options }) as Promise<
+        | { status: 'started'; requestId: number }
+        | { status: 'unavailable'; reason: 'no-active-view' | 'document-loading' | 'no-session' }
+      >,
+    stopFindInPage: () => ipcRenderer.invoke('sandboxUi:stopFindInPage') as Promise<void>,
+    focusActive: () => ipcRenderer.invoke('sandboxUi:focusActive') as Promise<boolean>,
+    onFindResult: (
+      callback: (result: {
+        requestId: number
+        clientRequestId: number
+        activeMatchOrdinal: number
+        matches: number
+        finalUpdate: boolean
+      }) => void
+    ) => {
+      const listener = (_event: unknown, result: unknown) => {
+        const value = result as Record<string, unknown>
+        if (
+          Number.isInteger(value?.requestId) &&
+          Number.isSafeInteger(value?.clientRequestId) &&
+          Number(value.clientRequestId) > 0 &&
+          Number.isInteger(value?.activeMatchOrdinal) &&
+          Number.isInteger(value?.matches) &&
+          typeof value?.finalUpdate === 'boolean'
+        ) {
+          callback({
+            requestId: Number(value.requestId),
+            clientRequestId: Number(value.clientRequestId),
+            activeMatchOrdinal: Number(value.activeMatchOrdinal),
+            matches: Number(value.matches),
+            finalUpdate: value.finalUpdate,
+          })
+        }
+      }
+      ipcRenderer.on('sandboxUi:findResult', listener)
+      return () => ipcRenderer.off('sandboxUi:findResult', listener)
+    },
     onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => {
       const listener = (_event: unknown, args: SandboxUiDeepLinkEnvelope) => callback(args)
       ipcRenderer.on('sandboxUi:deepLink', listener)
@@ -468,6 +624,48 @@ const clerum = Object.freeze({
       ipcRenderer.on('sandboxUi:refreshError', listener)
       return () => ipcRenderer.off('sandboxUi:refreshError', listener)
     },
+  },
+  /**
+   * Plugin permissions, trusted-renderer half: the consent modal and the
+   * Settings revocation surface. The plugin-facing half lives in a different
+   * preload (`sandboxUiEmbedPreload.ts`) behind a different trust model.
+   */
+  pluginSdk: {
+    onConsentRequested: (callback: (request: PluginConsentRequest) => void) => {
+      const listener = (_event: unknown, request: PluginConsentRequest) => callback(request)
+      ipcRenderer.on('pluginSdk:consentRequested', listener)
+      return () => ipcRenderer.off('pluginSdk:consentRequested', listener)
+    },
+    onConsentCancelled: (callback: (args: { promptId: string }) => void) => {
+      const listener = (_event: unknown, args: { promptId: string }) => callback(args)
+      ipcRenderer.on('pluginSdk:consentCancelled', listener)
+      return () => ipcRenderer.off('pluginSdk:consentCancelled', listener)
+    },
+    onOpenGfsResource: (
+      callback: (args: { gfsUri: string; name: string; kind: string; bytes: number | null }) => void
+    ) => {
+      const listener = (
+        _event: unknown,
+        args: { gfsUri: string; name: string; kind: string; bytes: number | null }
+      ) => callback(args)
+      ipcRenderer.on('pluginSdk:openGfsResource', listener)
+      return () => ipcRenderer.off('pluginSdk:openGfsResource', listener)
+    },
+    onNotificationClicked: (callback: (args: { pluginId: string; ref: string | null }) => void) => {
+      const listener = (_event: unknown, args: { pluginId: string; ref: string | null }) =>
+        callback(args)
+      ipcRenderer.on('pluginSdk:notificationClicked', listener)
+      return () => ipcRenderer.off('pluginSdk:notificationClicked', listener)
+    },
+    resolveConsent: (promptId: string, allowed: string[]) =>
+      ipcRenderer.invoke('pluginSdk:resolveConsent', { promptId, allowed }),
+    listGrants: () => ipcRenderer.invoke('pluginSdk:listGrants'),
+    revoke: (pluginId: string, capability?: string) =>
+      ipcRenderer.invoke('pluginSdk:revoke', { pluginId, capability }),
+    activity: (limit?: number, includeAmbient?: boolean) =>
+      ipcRenderer.invoke('pluginSdk:activity', { limit, includeAmbient }),
+    clearActivity: () => ipcRenderer.invoke('pluginSdk:clearActivity'),
+    setTheme: (theme: string) => ipcRenderer.invoke('pluginSdk:setTheme', { theme }),
   },
 })
 

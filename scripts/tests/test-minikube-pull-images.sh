@@ -31,6 +31,9 @@ printf '%s\n' "$*" >>"${TEST_LOG_FILE:?}"
 case "${1:-}" in
   pull)
     ref="${2:-}"
+    if [ "${TEST_HANG_PULL:-false}" = true ]; then
+      while :; do sleep 60; done
+    fi
     for missing in ${TEST_MISSING_TAGS:-}; do
       if [[ "$ref" == "$missing" ]]; then
         for i in $(seq 1 20); do
@@ -56,9 +59,31 @@ case "${1:-}" in
     done
     exit 0
     ;;
+  context)
+    if [[ "${2:-}" == inspect ]]; then
+      if [[ "$*" == *SkipTLSVerify* ]]; then
+        printf 'unix:///tmp/evenfire-docker.sock\tfalse\t{}\n'
+      else
+        printf 'unix:///tmp/evenfire-docker.sock\n'
+      fi
+    fi
+    exit 0
+    ;;
   tag) exit 0 ;;
   images) echo "sha256:aaaaaaaaaaaa"; exit 0 ;;
-  inspect) echo "sha256:aaaaaaaaaaaabbbbbbbbbbbbcccccccccccc"; exit 0 ;;
+  inspect)
+    if [ "${TEST_INSPECT_FAIL:-false}" = true ]; then
+      exit 1
+    fi
+    if [ "${TEST_INSPECT_HANG:-false}" = true ]; then
+      while :; do sleep 60; done
+    fi
+    if [ "${TEST_INSPECT_EMPTY:-false}" = true ]; then
+      exit 0
+    fi
+    echo "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    exit 0
+    ;;
   *) exit 0 ;;
 esac
 STUB
@@ -66,8 +91,15 @@ STUB
 #!/usr/bin/env bash
 printf 'minikube %s\n' "$*" >>"${TEST_LOG_FILE:?}"
 if [[ "$*" == *"docker-env"* ]]; then
+  if [ "${TEST_EMPTY_DOCKER_ENV:-false}" = true ]; then
+    exit 0
+  fi
   echo 'export DOCKER_HOST="tcp://127.0.0.1:2376"'
   exit 0
+fi
+if [[ "$*" == *"image load clerum/"* ]] &&
+   [ "${TEST_IMAGE_LOAD_ALIAS_FAIL:-false}" = true ]; then
+  exit 1
 fi
 exit 0
 STUB
@@ -91,6 +123,14 @@ copy_repo() {
   cp -R "$REPO_ROOT/deploy" "$d/repo/deploy"
   cp -R "$REPO_ROOT/scripts" "$d/repo/scripts"
   rm -f "$d/repo/deploy/minikube/.image-manifest.json"
+  # The real puller is a mutating child and validates the inherited lease.
+  # This fixture is intentionally a no-op child validator; the puller's
+  # explicit profile/project/context contract is still exercised below.
+  cat > "$d/repo/scripts/minikube/require-t2-mutation-lock.sh" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+  chmod +x "$d/repo/scripts/minikube/require-t2-mutation-lock.sh"
   if [ -n "$manifest" ]; then
     mkdir -p "$d/repo/deploy/minikube"
     printf '%s' "$manifest" > "$d/repo/deploy/minikube/.image-manifest.json"
@@ -123,10 +163,123 @@ run_puller_prepared() {
   TEST_FLAKY_TAGS="${TEST_FLAKY_TAGS:-}" \
   TEST_FLAKY_FAIL_COUNT="${TEST_FLAKY_FAIL_COUNT:-}" \
   TEST_FLAKY_COUNTER_DIR="${TEST_FLAKY_COUNTER_DIR:-}" \
+  TEST_EMPTY_DOCKER_ENV="${TEST_EMPTY_DOCKER_ENV:-}" \
+  TEST_IMAGE_LOAD_ALIAS_FAIL="${TEST_IMAGE_LOAD_ALIAS_FAIL:-}" \
+  TEST_INSPECT_FAIL="${TEST_INSPECT_FAIL:-}" \
+  TEST_INSPECT_HANG="${TEST_INSPECT_HANG:-}" \
+  TEST_INSPECT_EMPTY="${TEST_INSPECT_EMPTY:-}" \
   MINIKUBE_IMAGE_TAG="${MINIKUBE_IMAGE_TAG:-}" \
   MINIKUBE_IMAGE_PULL_RETRIES="${MINIKUBE_IMAGE_PULL_RETRIES:-}" \
   MINIKUBE_IMAGE_PULL_DELAY_SECS="${MINIKUBE_IMAGE_PULL_DELAY_SECS:-}" \
+  MINIKUBE_PULL_PARALLELISM="${MINIKUBE_PULL_PARALLELISM:-}" \
+  TEST_HANG_PULL="${TEST_HANG_PULL:-}" \
+  MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS="${MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS:-}" \
+  MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS="${MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS:-}" \
+  MINIKUBE_DOCKER_BUILD_TIMEOUT_SECONDS="${MINIKUBE_DOCKER_BUILD_TIMEOUT_SECONDS:-}" \
+  T2_PROJECT_DIR="$d/repo" \
+  T2_PROFILE=clerum-test T2_CONTEXT=clerum-test \
+  MINIKUBE_PROFILE=clerum-test CONTROL_API_REAL_PG_CONTEXT=clerum-test \
+  DOCKER_HOST=unix:///tmp/evenfire-docker.sock \
     bash "$d/repo/scripts/minikube/pull-images.sh" "$@" 2>&1
+}
+
+run_puller_without_lease() {
+  local d=$1; shift
+  make_stubs "$d"
+  copy_repo "$d"
+  env -u T2_PROJECT_DIR -u T2_PROFILE -u T2_CONTEXT \
+    -u CONTROL_API_REAL_PG_CONTEXT \
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" \
+    MINIKUBE_PROFILE=clerum-test DOCKER_HOST=unix:///tmp/evenfire-docker.sock \
+    bash "$d/repo/scripts/minikube/pull-images.sh" "$@" 2>&1
+}
+
+assert_puller_requires_the_inherited_profile_lease() {
+  local d out rc
+  d="$(mktemp -d)"
+  out="$(run_puller_without_lease "$d" --only=control-api)"; rc=$?
+  if [ "$rc" -ne 0 ] && grep -Fq 'PROFILE_LOCK_REQUIRED' <<< "$out" \
+     && [ ! -s "$d/ops.log" ]; then
+    pass "puller refuses mutation without the inherited profile lease"
+  else
+    fail "puller did not fail before Docker mutation without its lease: rc=$rc out=$out"
+  fi
+  rm -rf "$d"
+}
+
+assert_hung_pull_hits_the_finite_deadline() {
+  local d out rc
+  d="$(mktemp -d)"
+  export TEST_HANG_PULL=true
+  export MINIKUBE_IMAGE_TAG=deadline-test
+  export MINIKUBE_IMAGE_PULL_RETRIES=1
+  export MINIKUBE_IMAGE_PULL_DELAY_SECS=0
+  export MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS=1
+  out="$(run_puller "$d" --only=control-api)"; rc=$?
+  unset TEST_HANG_PULL MINIKUBE_IMAGE_TAG MINIKUBE_IMAGE_PULL_RETRIES \
+    MINIKUBE_IMAGE_PULL_DELAY_SECS MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS
+  if [ "$rc" -ne 0 ] && grep -Eq 'HARNESS_DEADLINE.*pull-image-control-api.*timeout' <<< "$out"; then
+    pass "a hung image pull is terminated by its finite deadline"
+  else
+    fail "hung pull did not produce the bounded deadline failure: rc=$rc out=$out"
+  fi
+  rm -rf "$d"
+}
+
+assert_empty_docker_env_fails_closed() {
+  local d out rc
+  d="$(mktemp -d)"
+  export TEST_EMPTY_DOCKER_ENV=true
+  out="$(run_puller "$d" --only=control-api)"; rc=$?
+  unset TEST_EMPTY_DOCKER_ENV
+  if [ "$rc" -ne 0 ] \
+     && grep -Fq 'DOCKER_ENV_UNRESOLVED' <<<"$out" \
+     && ! grep -q '^pull ' "$d/ops.log"; then
+    pass "empty successful minikube docker-env output fails closed"
+  else
+    fail "empty docker-env output returned success or reached Docker: rc=$rc out=$out"
+  fi
+  rm -rf "$d"
+}
+
+assert_multinode_alias_load_failure_fails_closed() {
+  local d out rc
+  d="$(mktemp -d)"
+  export MINIKUBE_MULTI_NODE=true TEST_IMAGE_LOAD_ALIAS_FAIL=true
+  out="$(run_puller "$d" --only=control-api)"; rc=$?
+  unset MINIKUBE_MULTI_NODE TEST_IMAGE_LOAD_ALIAS_FAIL
+  if [ "$rc" -ne 0 ] &&
+     grep -Fq 'alias load to clerum/control-api:test' <<<"$out" &&
+     ! grep -Fq 'All published images pulled successfully' <<<"$out"; then
+    pass "multi-node alias-load failure prevents a false acquisition success"
+  else
+    fail "multi-node alias-load failure was hidden: rc=$rc out=$out"
+  fi
+  rm -rf "$d"
+}
+
+assert_invalid_pull_knobs_fail_closed() {
+  local d out rc
+  d="$(mktemp -d)"
+
+  export MINIKUBE_PULL_PARALLELISM=0
+  out="$(run_puller "$d" --only=control-api)"; rc=$?
+  unset MINIKUBE_PULL_PARALLELISM
+  if [ "$rc" -ne 2 ] || ! grep -Fq 'MINIKUBE_PULL_PARALLELISM must be an integer' <<<"$out"; then
+    fail "parallelism=0 did not fail with the parameter error: rc=$rc out=$out"
+    rm -rf "$d"
+    return
+  fi
+
+  export MINIKUBE_IMAGE_PULL_DELAY_SECS=301
+  out="$(run_puller "$d" --only=control-api)"; rc=$?
+  unset MINIKUBE_IMAGE_PULL_DELAY_SECS
+  if [ "$rc" -eq 2 ] && grep -Fq 'MINIKUBE_IMAGE_PULL_DELAY_SECS must be an integer' <<<"$out"; then
+    pass "parallelism, retry, and delay knobs fail closed outside their finite ranges"
+  else
+    fail "delay=301 did not fail with the parameter error: rc=$rc out=$out"
+  fi
+  rm -rf "$d"
 }
 
 assert_it_pulls_every_pull_in_ghcr_mode_image() {
@@ -278,20 +431,25 @@ assert_it_never_pulls_a_registry_distributed_mcp_server() {
 # of main can pin a tag that is not promoted yet). A raw MANIFEST_UNKNOWN gives
 # a new contributor nothing to act on.
 assert_a_missing_tag_names_the_tag_and_the_override() {
-  local d out rc
+  local d out rc pin
   d="$(mktemp -d)"
+  # The tag has to be the one the puller will actually ask for, which is the
+  # committed pin. Hardcoding the release of the day made this assertion pass
+  # vacuously the moment the next release was cut: the simulated 404 was for a
+  # tag nobody requested, the pull succeeded, and rc=0 failed the assert.
+  pin="$(committed_pin)"
   # `A=1 out="$(cmd)"` does NOT put A in cmd's environment: every assignment's
   # value is expanded BEFORE any of them takes effect. Export it instead.
-  export TEST_MISSING_TAGS="ghcr.io/evenfire-ai/control-api:v0.6.0"
+  export TEST_MISSING_TAGS="ghcr.io/evenfire-ai/control-api:${pin}"
   out="$(run_puller "$d" --only=control-api)"; rc=$?
   unset TEST_MISSING_TAGS
   if [ "$rc" -ne 0 ] \
-     && grep -q "v0.6.0" <<< "$out" \
+     && grep -q "$pin" <<< "$out" \
      && grep -q "MINIKUBE_IMAGE_TAG" <<< "$out" \
      && grep -q "control-api" <<< "$out"; then
     pass "a missing tag fails naming the image, the tag, and MINIKUBE_IMAGE_TAG"
   else
-    fail "expected a named failure mentioning control-api, v0.6.0 and MINIKUBE_IMAGE_TAG; got rc=$rc out='$out'"
+    fail "expected a named failure mentioning control-api, ${pin} and MINIKUBE_IMAGE_TAG; got rc=$rc out='$out'"
   fi
   rm -rf "$d"
 }
@@ -304,6 +462,104 @@ assert_minikube_image_tag_overrides_the_pin() {
     pass "MINIKUBE_IMAGE_TAG overrides the committed pin"
   else
     fail "MINIKUBE_IMAGE_TAG=latest did not reach the pull: $out"
+  fi
+  rm -rf "$d"
+}
+
+# Manifest publication must be transactional. Mutation coverage: restoring the
+# old `|| echo NOT_PULLED` fallback or writing directly to MANIFEST_FILE makes
+# this case either return success or destroy the known-good manifest.
+assert_manifest_inspect_failure_preserves_previous_manifest() {
+  local d out rc before after
+  d="$(mktemp -d)"
+  make_stubs "$d"
+  copy_repo "$d" "$(recorded_manifest ghcr previous-good-tag)"
+  before="$(cat "$d/repo/deploy/minikube/.image-manifest.json")"
+  export TEST_INSPECT_FAIL=true MINIKUBE_IMAGE_TAG=inspect-fail-tag
+  export MINIKUBE_IMAGE_PULL_RETRIES=1 MINIKUBE_IMAGE_PULL_DELAY_SECS=0
+  out="$(run_puller_prepared "$d" --only=control-api)"; rc=$?
+  unset TEST_INSPECT_FAIL MINIKUBE_IMAGE_TAG MINIKUBE_IMAGE_PULL_RETRIES MINIKUBE_IMAGE_PULL_DELAY_SECS
+  after="$(cat "$d/repo/deploy/minikube/.image-manifest.json")"
+  if [ "$rc" -ne 0 ] \
+     && [ "$after" = "$before" ] \
+     && ! grep -Fq 'NOT_PULLED' <<<"$out" \
+     && ! grep -Fq 'published image(s) pulled at' <<<"$out"; then
+    pass "docker inspect failure preserves the previous manifest and fails closed"
+  else
+    fail "docker inspect failure published false evidence: rc=$rc unchanged=$([ "$after" = "$before" ] && echo yes || echo no) out=$out"
+  fi
+  rm -rf "$d"
+}
+
+# A deadline is an inspect failure too. Mutation coverage: removing the
+# inspect deadline or turning its status into NOT_PULLED makes this case pass
+# without the required HARNESS_DEADLINE evidence and manifest preservation.
+assert_manifest_inspect_deadline_preserves_previous_manifest() {
+  local d out rc before after
+  d="$(mktemp -d)"
+  make_stubs "$d"
+  copy_repo "$d" "$(recorded_manifest ghcr previous-good-tag)"
+  before="$(cat "$d/repo/deploy/minikube/.image-manifest.json")"
+  export TEST_INSPECT_HANG=true MINIKUBE_IMAGE_TAG=inspect-hang-tag
+  export MINIKUBE_IMAGE_PULL_RETRIES=1 MINIKUBE_IMAGE_PULL_DELAY_SECS=0
+  export MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS=1
+  out="$(run_puller_prepared "$d" --only=control-api)"; rc=$?
+  unset TEST_INSPECT_HANG MINIKUBE_IMAGE_TAG MINIKUBE_IMAGE_PULL_RETRIES \
+    MINIKUBE_IMAGE_PULL_DELAY_SECS MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS
+  after="$(cat "$d/repo/deploy/minikube/.image-manifest.json")"
+  if [ "$rc" -ne 0 ] \
+     && grep -Eq 'HARNESS_DEADLINE.*inspect-image' <<<"$out" \
+     && [ "$after" = "$before" ] \
+     && ! grep -Fq 'published image(s) pulled at' <<<"$out"; then
+    pass "docker inspect deadline preserves the previous manifest and fails closed"
+  else
+    fail "docker inspect deadline did not preserve the manifest: rc=$rc unchanged=$([ "$after" = "$before" ] && echo yes || echo no) out=$out"
+  fi
+  rm -rf "$d"
+}
+
+assert_empty_manifest_inspect_output_fails_closed() {
+  local d out rc before after
+  d="$(mktemp -d)"
+  make_stubs "$d"
+  copy_repo "$d" "$(recorded_manifest ghcr previous-good-tag)"
+  before="$(cat "$d/repo/deploy/minikube/.image-manifest.json")"
+  export TEST_INSPECT_EMPTY=true MINIKUBE_IMAGE_TAG=inspect-empty-tag
+  export MINIKUBE_IMAGE_PULL_RETRIES=1 MINIKUBE_IMAGE_PULL_DELAY_SECS=0
+  out="$(run_puller_prepared "$d" --only=control-api)"; rc=$?
+  unset TEST_INSPECT_EMPTY MINIKUBE_IMAGE_TAG MINIKUBE_IMAGE_PULL_RETRIES MINIKUBE_IMAGE_PULL_DELAY_SECS
+  after="$(cat "$d/repo/deploy/minikube/.image-manifest.json")"
+  if [ "$rc" -ne 0 ] \
+     && [ "$after" = "$before" ] \
+     && ! grep -Fq 'published image(s) pulled at' <<<"$out"; then
+    pass "empty docker inspect output is rejected without changing the manifest"
+  else
+    fail "empty docker inspect output was accepted: rc=$rc unchanged=$([ "$after" = "$before" ] && echo yes || echo no) out=$out"
+  fi
+  rm -rf "$d"
+}
+
+assert_successful_manifest_contains_valid_digests_and_aliases() {
+  local d out rc manifest problems
+  d="$(mktemp -d)"
+  out="$(run_puller "$d" --only=control-api)"; rc=$?
+  manifest="$d/repo/deploy/minikube/.image-manifest.json"
+  problems="$(node -e '
+    const fs = require("node:fs")
+    const path = process.argv[1]
+    const j = JSON.parse(fs.readFileSync(path, "utf8"))
+    const entries = Object.entries(j.images || {})
+    const bad = entries.filter(([, id]) => !/^sha256:[0-9a-f]{64}$/.test(id))
+    const keys = entries.map(([ref]) => ref)
+    if (bad.length) console.log("invalid image id")
+    if (entries.some(([, id]) => id === "NOT_PULLED")) console.log("NOT_PULLED")
+    if (!keys.includes("ghcr.io/evenfire-ai/control-api:manifest-success-tag")) console.log("missing ghcr ref")
+    if (!keys.includes("clerum/control-api:test")) console.log("missing local alias")
+  ' "$manifest" 2>&1)"
+  if [ "$rc" -eq 0 ] && [ -z "$problems" ] && [ -f "$manifest" ]; then
+    pass "successful manifest publication records valid digests and GHCR/local refs"
+  else
+    fail "successful manifest publication was invalid: rc=$rc problems=$problems out=$out"
   fi
   rm -rf "$d"
 }
@@ -677,6 +933,11 @@ assert_every_defined_case_is_invoked() {
 }
 
 assert_it_pulls_every_pull_in_ghcr_mode_image
+assert_puller_requires_the_inherited_profile_lease
+assert_hung_pull_hits_the_finite_deadline
+assert_empty_docker_env_fails_closed
+assert_multinode_alias_load_failure_fails_closed
+assert_invalid_pull_knobs_fail_closed
 assert_it_never_pulls_an_unpublished_image
 assert_it_never_pulls_a_registry_distributed_mcp_server
 assert_it_repulls_a_tag_already_present_in_the_daemon
@@ -684,6 +945,12 @@ assert_it_aliases_each_image_to_its_local_ref
 assert_the_alias_honours_local_tag_and_local_name
 assert_a_missing_tag_names_the_tag_and_the_override
 assert_minikube_image_tag_overrides_the_pin
+assert_manifest_inspect_failure_preserves_previous_manifest
+assert_manifest_inspect_deadline_preserves_previous_manifest
+assert_empty_manifest_inspect_output_fails_closed
+export MINIKUBE_IMAGE_TAG=manifest-success-tag
+assert_successful_manifest_contains_valid_digests_and_aliases
+unset MINIKUBE_IMAGE_TAG
 assert_it_writes_the_image_manifest_consumers_read
 assert_a_transient_pull_failure_is_retried_until_it_succeeds
 assert_a_permanently_failing_pull_stops_after_the_retry_bound

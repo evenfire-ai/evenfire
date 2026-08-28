@@ -11,9 +11,43 @@ import { type UiAuthedRequest, requireAuthForControlUI } from '../../middleware/
 import { rootLogger } from '../../observability/logger.js'
 
 const DEFAULT_DRIVE = 'main'
-const PASSTHROUGH_RESPONSE_HEADERS = ['content-type', 'content-disposition', 'content-length']
+const PASSTHROUGH_RESPONSE_HEADERS = [
+  'content-type',
+  'content-disposition',
+  'content-length',
+  'location',
+  'upload-offset',
+  'upload-length',
+  'upload-part-bytes',
+  'upload-part-count',
+  'upload-active-parts',
+  'upload-state',
+  'upload-expires',
+  'upload-part-number',
+  'upload-part-offset',
+  'upload-part-length',
+  'upload-checksum',
+  'retry-after',
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
+  'x-gfs-ratelimit-scope',
+]
+const UUID_PATH = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+const UPLOAD_PART_PATH = new RegExp(`^/v1/uploads/${UUID_PATH}/parts/[0-9]+(?:\\?|$)`, 'i')
+const UPLOAD_PATH = /^\/v1\/(?:capabilities|uploads)(?:\/|\?|$)/i
+const STREAM_REQUEST_HEADERS = [
+  'content-type',
+  'upload-part-number',
+  'upload-offset',
+  'upload-chunk-length',
+  'upload-checksum',
+]
 
-function gfscBaseUrlFor(method: string): string {
+function gfscBaseUrlFor(method: string, path: string): string {
+  // Upload lifecycle reads (capabilities, HEAD/status) are stateful writer
+  // operations too.  Routing them to the reader can return stale session
+  // offsets immediately after a part commit and break resume/cancel races.
+  if (UPLOAD_PATH.test(path)) return config.gfscWriteBaseUrl
   return method === 'GET' || method === 'HEAD' ? config.gfscBaseUrl : config.gfscWriteBaseUrl
 }
 
@@ -35,9 +69,19 @@ export function registerGfsProxyRoute(router: Router): void {
         res.status(401).json({ error: 'unauthorized' })
         return
       }
+      const authGeneration = req.adminAuth?.sessionVersion
+      if (
+        typeof authGeneration !== 'number' ||
+        !Number.isSafeInteger(authGeneration) ||
+        authGeneration < 1
+      ) {
+        res.status(401).json({ error: 'unauthorized' })
+        return
+      }
 
-      const scope =
-        req.method === 'GET' || req.method === 'HEAD'
+      const scope = UPLOAD_PATH.test(req.url || '')
+        ? GFS_WRITE_SCOPE
+        : req.method === 'GET' || req.method === 'HEAD'
           ? GFS_READ_SCOPE
           : req.method === 'POST' || req.method === 'PUT'
             ? GFS_WRITE_SCOPE
@@ -51,22 +95,93 @@ export function registerGfsProxyRoute(router: Router): void {
       }
 
       const subPath = req.url === '/' ? '' : req.url
-      const target = `${gfscBaseUrlFor(req.method).replace(/\/+$/, '')}${subPath}`
-      const { token } = signGfsToken({ subject, drive: DEFAULT_DRIVE, scopes: [scope] })
+      const target = `${gfscBaseUrlFor(req.method, subPath).replace(/\/+$/, '')}${subPath}`
+      const { token } = signGfsToken({
+        subject,
+        drive: DEFAULT_DRIVE,
+        scopes: [scope],
+        authGeneration,
+        principalType: 'control-admin',
+      })
       const headers: Record<string, string> = {}
       headers['author' + 'ization'] = ['Bearer', token].join(' ')
-      if (req.method !== 'GET' && req.method !== 'HEAD') {
+      const isUploadPart = req.method === 'PUT' && UPLOAD_PART_PATH.test(subPath)
+      if (isUploadPart) {
+        for (const name of STREAM_REQUEST_HEADERS) {
+          const value = req.headers[name]
+          if (typeof value === 'string') headers[name] = value
+        }
+      } else if (req.method !== 'GET' && req.method !== 'HEAD') {
         headers['content-type'] = 'application/json'
       }
 
-      const upstreamRes = await fetch(target, {
-        method: req.method,
-        headers,
-        body:
-          req.method === 'GET' || req.method === 'HEAD'
-            ? undefined
-            : JSON.stringify(req.body ?? {}),
-      })
+      let upstreamRes: Response
+      // Header-only deadline: guard the wait for gfsc to START responding, but do
+      // NOT bound the streamed response body. A GET download can legitimately
+      // stream longer than the mutation budget, and a total-deadline abort would
+      // truncate it into a 200 with a short body (control-ui exempts GET for the
+      // same reason). Cleared the moment headers arrive, so an upload still fails
+      // loud (504) when gfsc never answers.
+      const deadline = new AbortController()
+      const deadlineTimer = setTimeout(() => deadline.abort(), config.gfscProxyTimeoutMs)
+      try {
+        const fetchInit: RequestInit & { duplex?: 'half' } = {
+          method: req.method,
+          headers,
+          body:
+            req.method === 'GET' || req.method === 'HEAD'
+              ? undefined
+              : isUploadPart
+                ? (req as unknown as BodyInit)
+                : JSON.stringify(req.body ?? {}),
+          signal: deadline.signal,
+        }
+        if (isUploadPart) fetchInit.duplex = 'half'
+        upstreamRes = await fetch(target, fetchInit)
+      } catch (err) {
+        // Never silent: a failed or timed-out gfsc fetch is logged with the target.
+        const timedOut =
+          deadline.signal.aborted || (err instanceof Error && err.name === 'TimeoutError')
+        rootLogger.error(
+          { err, target, method: req.method, timeoutMs: config.gfscProxyTimeoutMs },
+          timedOut
+            ? 'gfs operator proxy: gfsc fetch timed out'
+            : 'gfs operator proxy: gfsc fetch failed'
+        )
+        res
+          .status(timedOut ? 504 : 502)
+          .json({ error: timedOut ? 'gfsc_timeout' : 'gfsc_unreachable' })
+        return
+      } finally {
+        clearTimeout(deadlineTimer)
+      }
+
+      if (upstreamRes.status >= 400) {
+        // Error envelopes are small JSON: buffer, LOG (so a gfsc 5xx is never
+        // undiagnosable at this hop again — the base64 RangeError 500 was invisible
+        // here before), then forward the body verbatim.
+        const errorBody = await upstreamRes.text()
+        const logCtx = {
+          target,
+          method: req.method,
+          status: upstreamRes.status,
+          body: errorBody.slice(0, 2048),
+        }
+        if (upstreamRes.status >= 500)
+          rootLogger.error(logCtx, 'gfs operator proxy: gfsc upstream error')
+        else rootLogger.warn(logCtx, 'gfs operator proxy: gfsc upstream client error')
+        res.status(upstreamRes.status)
+        const contentType = upstreamRes.headers.get('content-type')
+        if (contentType) res.setHeader('content-type', contentType)
+        const retryAfter = upstreamRes.headers.get('retry-after')
+        if (retryAfter) res.setHeader('retry-after', retryAfter)
+        for (const header of PASSTHROUGH_RESPONSE_HEADERS) {
+          const value = upstreamRes.headers.get(header)
+          if (value) res.setHeader(header, value)
+        }
+        res.send(errorBody)
+        return
+      }
 
       res.status(upstreamRes.status)
       for (const header of PASSTHROUGH_RESPONSE_HEADERS) {

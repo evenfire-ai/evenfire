@@ -3,11 +3,13 @@ import { config } from './config.js'
 export class ApiError extends Error {
   status: number
   bodyText: string
+  retryAfter?: string
 
-  constructor(message: string, status: number, bodyText: string) {
+  constructor(message: string, status: number, bodyText: string, retryAfter?: string | null) {
     super(message)
     this.status = status
     this.bodyText = bodyText
+    if (retryAfter) this.retryAfter = retryAfter
   }
 }
 
@@ -27,8 +29,14 @@ const TRANSIENT_RETRY_DELAY_MS = 250
  * through the FULL request lifecycle, covering a rpc-proxy that streams headers
  * then stalls the response body (security review, M8 follow-up).
  */
-export function withTimeout(signal?: AbortSignal): AbortSignal {
-  const timeout = AbortSignal.timeout(config.requestTimeoutMs)
+export function withTimeout(signal?: AbortSignal, timeoutMs?: number): AbortSignal {
+  // A caller may pass a longer per-call deadline (e.g. GFS uploads) than the
+  // app-wide default; fall back to config.requestTimeoutMs otherwise.
+  const effectiveTimeoutMs =
+    typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? timeoutMs
+      : config.requestTimeoutMs
+  const timeout = AbortSignal.timeout(effectiveTimeoutMs)
   if (!signal) return timeout
   // Abort on whichever fires first (caller cancellation OR timeout).
   return AbortSignal.any([signal, timeout])
@@ -81,13 +89,15 @@ async function sleep(ms: number): Promise<void> {
 }
 
 export async function requestJson<T>(
-  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'HEAD' | 'DELETE',
   url: string,
   options?: {
     token?: string
     body?: unknown
     headers?: Record<string, string>
     signal?: AbortSignal
+    /** Per-call deadline override (ms); defaults to config.requestTimeoutMs. */
+    timeoutMs?: number
     retryTransientOnce?: boolean
   }
 ): Promise<T> {
@@ -104,7 +114,7 @@ export async function requestJson<T>(
       method,
       headers,
       body: options?.body === undefined ? undefined : JSON.stringify(options.body),
-      signal: withTimeout(options?.signal),
+      signal: withTimeout(options?.signal, options?.timeoutMs),
     })
 
     const raw = await response.text()
@@ -117,7 +127,12 @@ export async function requestJson<T>(
       } catch {
         // Keep raw text as message.
       }
-      throw new ApiError(`${response.status} ${response.statusText}: ${msg}`, response.status, raw)
+      throw new ApiError(
+        `${response.status} ${response.statusText}: ${msg}`,
+        response.status,
+        raw,
+        response.headers.get('retry-after')
+      )
     }
 
     if (!raw) return {} as T

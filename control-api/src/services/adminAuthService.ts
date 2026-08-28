@@ -1,6 +1,7 @@
 import { config } from '../config.js'
 import { type DbClient, pool, withTransaction } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
+import { gfsDesktopOperatorLinkService } from './gfsDesktopOperatorLinkService.js'
 import { currentAdministrativeRequestContext } from './tracing/adminOperationContext.js'
 import { AdministrativeEventService } from './tracing/administrativeEvents.js'
 import { CONTROL_API_LOCAL_ADMINISTRATIVE_PRINCIPAL_V1 } from './tracing/controlApiLocalAdministrativeBindingResolver.js'
@@ -32,6 +33,17 @@ export type ControlAdminListItem = {
   status: 'active' | 'disabled' | 'pending_password'
   passwordPending?: boolean
   invitationId?: string
+  gfsOperatorLink?: {
+    desktopUserId: string
+    controlAdminId: string
+    source: 'initial_setup' | 'unknown'
+    createdAt: string | null
+    status: 'active' | 'inactive_admin' | 'revoked' | 'error'
+    generation: number | null
+    rowVersion: number | null
+    revocationReason: string | null
+  } | null
+  gfsOperatorLinkStatus?: 'none' | 'active' | 'inactive_admin' | 'revoked' | 'error'
   lastLoginAt: string | null
   createdAt: string
 }
@@ -319,9 +331,10 @@ export async function setupInitialAdminCredentials(
   bootstrapUsername: string,
   email: string,
   username: string,
-  passwordHash: string
+  passwordHash: string,
+  db: Pick<DbClient, 'query'> = pool
 ): Promise<AdminUserRecord | null> {
-  const result = await pool.query(
+  const result = await db.query(
     `UPDATE control_admin_users
         SET email = $2,
             username = $3,
@@ -549,9 +562,33 @@ export async function deleteControlAdmin(
         LIMIT 1`,
       [actorAdminId]
     )
-    const deletedResult = await db.query(
-      `DELETE FROM control_admin_users
+
+    // Serialize retirement against a concurrent delete/disable. The lifecycle
+    // transition is active -> disabled; a replay must be a stable not-found
+    // result and must not revoke another generation or append duplicate audit.
+    const targetResult = await db.query(
+      `SELECT id, username, email, status
+         FROM control_admin_users
         WHERE id = $1
+        FOR UPDATE`,
+      [adminId]
+    )
+    const target = targetResult.rows[0] as
+      | { id: string; username: string; email: string | null; status: 'active' | 'disabled' }
+      | undefined
+    if (!target || target.status !== 'active') return { error: 'not_found' as const }
+
+    await gfsDesktopOperatorLinkService.retireParentInTransaction(db, {
+      kind: 'control_admin',
+      parentId: adminId,
+      actor: { kind: 'control_admin', controlAdminId: actorAdminId },
+      reason: 'control_admin_retired',
+    })
+    const deletedResult = await db.query(
+      `UPDATE control_admin_users
+          SET status = 'disabled', session_version = session_version + 1, updated_at = NOW()
+        WHERE id = $1
+          AND status = 'active'
         RETURNING id, username, email`,
       [adminId]
     )
@@ -648,11 +685,27 @@ export async function listControlAdmins(): Promise<{
               a.username,
               a.email,
               u.id AS member_id,
+              gfs_link.user_id AS gfs_operator_user_id,
+              gfs_link.control_admin_id AS gfs_operator_admin_id,
+              gfs_link.source AS gfs_operator_source,
+              gfs_link.created_at AS gfs_operator_link_created_at,
+              gfs_link.state AS gfs_operator_link_state,
+              gfs_link.generation AS gfs_operator_link_generation,
+              gfs_link.row_version AS gfs_operator_link_row_version,
+              gfs_link.revocation_reason AS gfs_operator_link_revocation_reason,
               a.status,
               a.last_login_at,
               a.created_at
          FROM control_admin_users a
     LEFT JOIN users u ON lower(u.email) = lower(a.email)
+    LEFT JOIN LATERAL (
+      SELECT user_id, control_admin_id, source, created_at, state, generation,
+             row_version, revocation_reason
+        FROM gfs_desktop_operator_links
+       WHERE control_admin_id = a.id
+       ORDER BY generation DESC NULLS LAST, created_at DESC
+       LIMIT 1
+    ) gfs_link ON TRUE
         ORDER BY a.created_at ASC`
     ),
     pool.query(
@@ -678,6 +731,14 @@ export async function listControlAdmins(): Promise<{
           username: string
           email: string | null
           member_id: string | null
+          gfs_operator_user_id: string | null
+          gfs_operator_admin_id: string | null
+          gfs_operator_source: 'initial_setup' | null
+          gfs_operator_link_created_at: Date | null
+          gfs_operator_link_state: 'active' | 'revoked' | null
+          gfs_operator_link_generation: number | null
+          gfs_operator_link_row_version: number | null
+          gfs_operator_link_revocation_reason: string | null
           status: 'active' | 'disabled'
           last_login_at: Date | null
           created_at: Date
@@ -687,6 +748,45 @@ export async function listControlAdmins(): Promise<{
           username: record.username,
           email: record.email || null,
           memberId: record.member_id || null,
+          gfsOperatorLink: record.gfs_operator_user_id
+            ? {
+                desktopUserId: record.gfs_operator_user_id,
+                controlAdminId: record.gfs_operator_admin_id || 'unknown',
+                source: (record.gfs_operator_source === 'initial_setup'
+                  ? 'initial_setup'
+                  : 'unknown') as 'initial_setup' | 'unknown',
+                createdAt: record.gfs_operator_link_created_at
+                  ? record.gfs_operator_link_created_at.toISOString()
+                  : null,
+                status: (record.gfs_operator_link_state === 'revoked'
+                  ? 'revoked'
+                  : record.gfs_operator_source === 'initial_setup' &&
+                      record.gfs_operator_link_created_at
+                    ? record.status === 'active'
+                      ? 'active'
+                      : 'inactive_admin'
+                    : 'error') as 'active' | 'inactive_admin' | 'revoked' | 'error',
+                generation:
+                  record.gfs_operator_link_generation === null
+                    ? null
+                    : Number(record.gfs_operator_link_generation),
+                rowVersion:
+                  record.gfs_operator_link_row_version === null
+                    ? null
+                    : Number(record.gfs_operator_link_row_version),
+                revocationReason: record.gfs_operator_link_revocation_reason ?? null,
+              }
+            : null,
+          gfsOperatorLinkStatus: (record.gfs_operator_user_id
+            ? record.gfs_operator_link_state === 'revoked'
+              ? 'revoked'
+              : record.gfs_operator_source === 'initial_setup' &&
+                  record.gfs_operator_link_created_at
+                ? record.status === 'active'
+                  ? 'active'
+                  : 'inactive_admin'
+                : 'error'
+            : 'none') as 'none' | 'active' | 'inactive_admin' | 'revoked' | 'error',
           status: record.status,
           lastLoginAt: record.last_login_at ? record.last_login_at.toISOString() : null,
           createdAt: record.created_at.toISOString(),
@@ -858,8 +958,8 @@ export async function completeControlAdminInvitation(input: {
     if (row.username_exists) return { error: 'duplicate_username' as const }
 
     const inserted = await db.query(
-      `INSERT INTO control_admin_users(email, username, password_hash, role, status)
-       VALUES($1, $2, $3, 'admin', 'active')
+      `INSERT INTO control_admin_users(email, username, password_hash, role, status, session_version)
+       VALUES($1, $2, $3, 'admin', 'active', 1)
        RETURNING id, username, email, password_hash, session_version, role, status, failed_attempts, locked_until`,
       [email, username, input.passwordHash]
     )

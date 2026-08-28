@@ -17,6 +17,15 @@ export type GfsErrorCode =
   | "precondition_failed"
   | "payload_too_large"
   | "quota_exceeded"
+  | "conflict"
+  | "idempotency_conflict"
+  | "upload_incomplete"
+  | "upload_finalizing"
+  | "upload_completed"
+  | "upload_aborted"
+  | "upload_expired"
+  | "checksum_mismatch"
+  | "insufficient_storage"
   | "cross_boundary"
   | "forbidden"
   | "unauthorized"
@@ -34,6 +43,15 @@ export const HTTP_STATUS: Record<GfsErrorCode, number> = {
   precondition_failed: 412, // spec-pinned
   payload_too_large: 413, // spec-pinned
   quota_exceeded: 429,
+  conflict: 409,
+  idempotency_conflict: 409,
+  upload_incomplete: 409,
+  upload_finalizing: 409,
+  upload_completed: 409,
+  upload_aborted: 410,
+  upload_expired: 410,
+  checksum_mismatch: 422,
+  insufficient_storage: 507,
   cross_boundary: 409,
   forbidden: 403,
   unauthorized: 401,
@@ -48,12 +66,23 @@ export type GoneReason = "resource_deleted" | "artifact_expired";
 export class GfsError extends Error {
   readonly code: GfsErrorCode;
   readonly reason?: string;
+  readonly retryAfterSeconds?: number;
+  readonly limit?: string;
+  readonly rateLimitLimit?: number;
 
-  constructor(code: GfsErrorCode, message: string, reason?: string) {
+  constructor(
+    code: GfsErrorCode,
+    message: string,
+    reason?: string,
+    details?: { retryAfterSeconds?: number; limit?: string; rateLimitLimit?: number },
+  ) {
     super(message);
     this.name = "GfsError";
     this.code = code;
     this.reason = reason;
+    this.retryAfterSeconds = details?.retryAfterSeconds;
+    this.limit = details?.limit;
+    this.rateLimitLimit = details?.rateLimitLimit;
   }
 
   get status(): number {

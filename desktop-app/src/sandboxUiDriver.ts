@@ -1,6 +1,7 @@
 import { BrowserWindow, WebContentsView, screen, session } from 'electron'
 import path from 'node:path'
 import { getActiveEnvKey } from './config.js'
+import { createSandboxFindResultGate } from './sandboxFindSession.js'
 import { extractSandboxUiViewRoute, normalizeSandboxUiRoute } from './sandboxUiDeepLinks.js'
 import { touchSandboxUiPartition } from './sandboxUiPartitionGc.js'
 import {
@@ -8,6 +9,7 @@ import {
   applySandboxUiPartitionPolicies,
   isSandboxUiNavigationWithinPrefix as isNavigationWithinPrefix,
 } from './sandboxUiPartitionPolicies.js'
+import { wireDesktopShortcutRouting } from './shortcutRouter.js'
 
 /**
  * Sandbox UI embed driver. Owns the lifecycle of the single active
@@ -45,6 +47,28 @@ export type SandboxUiBounds = {
   width: number
   height: number
   dpr?: number
+}
+
+export type SandboxUiFindResult = {
+  requestId: number
+  activeMatchOrdinal: number
+  matches: number
+  finalUpdate: boolean
+}
+
+export type SandboxUiFindOperation = 'start' | 'next' | 'previous'
+
+export type SandboxUiFindStartResult =
+  | { status: 'started'; requestId: number }
+  | { status: 'unavailable'; reason: 'no-active-view' | 'document-loading' | 'no-session' }
+
+export function sandboxFindOptionsForOperation(operation: SandboxUiFindOperation): {
+  forward: boolean
+  findNext: boolean
+} {
+  return operation === 'start'
+    ? { forward: true, findNext: true }
+    : { forward: operation === 'next', findNext: false }
 }
 
 function toViewBounds(
@@ -87,6 +111,13 @@ export type MountSandboxUiArgs = {
    * rpc-proxy for the provider authorize URL and `shell.openExternal`s it.
    */
   onOauthAuthorize?: (oauthClientId: string, background: boolean) => void
+  /**
+   * Fired when the embed navigates to `gfs://<drive>/<resource>` — a plugin
+   * rendering a link to a shared file. The driver only forwards; the host
+   * resolves the URI with the USER's session and shows it in the Desktop's own
+   * viewer, so a click reveals nothing to the plugin.
+   */
+  onGfsOpen?: (uri: string) => void
 }
 
 type ActiveView = {
@@ -99,6 +130,18 @@ type ActiveView = {
   rpcProxyOrigin: string
   cleanupClientRouteHandoff?: () => void
   cleanupParentClosed?: () => void
+  cleanupShortcutRouting?: () => void
+  cleanupDocumentLifecycle?: () => void
+  cleanupFindResults?: () => void
+  documentGeneration: number
+  documentReady: boolean
+  findSession?: {
+    query: string
+    clientRequestId: number
+    documentGeneration: number
+    nativeRequestId: number
+    complete: boolean
+  }
 }
 
 let active: ActiveView | null = null
@@ -270,6 +313,12 @@ async function teardownActive(reason: 'replaced' | 'closed' | 'parent_closed'): 
   try {
     current.cleanupClientRouteHandoff?.()
     current.cleanupParentClosed?.()
+    current.cleanupShortcutRouting?.()
+    current.cleanupDocumentLifecycle?.()
+    current.cleanupFindResults?.()
+    if (!current.view.webContents.isDestroyed()) {
+      current.view.webContents.stopFindInPage('clearSelection')
+    }
     // contentView.removeChildView is the documented teardown step; it both
     // detaches the view from layout AND severs the parent's ownership ref.
     if (!current.parentWindow.isDestroyed()) {
@@ -319,6 +368,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   const proxyOriginUrl = new URL(rpcProxyUrl).toString().replace(/\/+$/, '')
   const viewPath = resolveSandboxUiDefaultPath(defaultPath)
   const clientRoutePath = normalizeSandboxUiRoute(routePath || '')
+  const sharedViewPath = sharedPathForDefaultPath(viewPath)
   const allowedNavigationPrefix =
     `${proxyOriginUrl}/api/v1/sandbox-ui/` +
     `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view`
@@ -369,13 +419,14 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   // else (links to other origins, target=_blank, window.open) goes to the
   // OS browser or is dropped. `clerum://oauth?clientId=…` is intercepted
   // and handed back to the AppService.
-  applySandboxUiNavigationPolicies(
-    view.webContents,
-    allowedNavigationPrefix,
-    (oauthClientId, background) => {
+  applySandboxUiNavigationPolicies(view.webContents, allowedNavigationPrefix, {
+    onOauthAuthorize: (oauthClientId, background) => {
       args.onOauthAuthorize?.(oauthClientId, background)
-    }
-  )
+    },
+    onGfsOpen: uri => {
+      args.onGfsOpen?.(uri)
+    },
+  })
 
   // The closed callback fires when the renderer gives up the view (parent
   // window closed, teardown via removeChildView, or the embed crashed).
@@ -400,7 +451,40 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     parentWindow,
     rpcProxyOrigin: proxyOriginUrl,
     cleanupParentClosed,
+    documentGeneration: 0,
+    documentReady: false,
   }
+
+  const invalidateFindForNavigation = (requiresDocumentLoad: boolean): void => {
+    if (!active || active.view !== view) return
+    active.documentGeneration += 1
+    if (requiresDocumentLoad) active.documentReady = false
+    stopActiveSandboxUiFind()
+  }
+  const onDidStartNavigation = (
+    _event: Electron.Event,
+    _url: string,
+    isInPlace: boolean,
+    isMainFrame: boolean
+  ): void => {
+    if (isMainFrame) invalidateFindForNavigation(!isInPlace)
+  }
+  const onDocumentReady = (): void => {
+    if (active?.view === view) active.documentReady = true
+  }
+  view.webContents.on('did-start-navigation', onDidStartNavigation)
+  view.webContents.on('did-finish-load', onDocumentReady)
+  active.cleanupDocumentLifecycle = () => {
+    view.webContents.removeListener('did-start-navigation', onDidStartNavigation)
+    view.webContents.removeListener('did-finish-load', onDocumentReady)
+  }
+
+  active.cleanupShortcutRouting = wireDesktopShortcutRouting({
+    source: 'sandbox',
+    sourceWebContents: view.webContents,
+    trustedRenderer: parentWindow.webContents,
+    isCurrentSource: () => active?.view.webContents.id === view.webContents.id,
+  })
 
   parentWindow.contentView.addChildView(view)
   // Re-apply bounds after attach. On macOS at fractional DPR (e.g. 2.4 on a
@@ -418,11 +502,14 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
 
   const url =
     `${proxyOriginUrl}/api/v1/sandbox-ui/` +
-    `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view${viewPath}`
-  if (clientRoutePath && clientRoutePath !== viewPath) {
+    `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view${encodeSandboxUiDefaultPath(
+      viewPath
+    )}`
+  if (clientRoutePath && clientRoutePath !== sharedViewPath) {
+    const encodedClientRoutePath = encodeSandboxUiRoutePath(clientRoutePath)
     const clientRouteUrl =
       `${proxyOriginUrl}/api/v1/sandbox-ui/` +
-      `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view${clientRoutePath}`
+      `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view${encodedClientRoutePath}`
     let lastNavigation = { url: '', status: 0 }
     let handoffFinished = false
     let handoffTimeout: NodeJS.Timeout | null = null
@@ -526,49 +613,90 @@ export async function applySandboxUiClientRoute(
 }
 
 export function resolveSandboxUiDefaultPath(defaultPath?: string): string {
-  const rawDefaultPath = String(defaultPath || '').trim()
-  if (!rawDefaultPath) return '/'
+  const rawDefaultPath = String(defaultPath || '')
+  if (!rawDefaultPath.trim()) return '/'
   const normalized = normalizeSandboxUiDefaultPath(rawDefaultPath)
   if (normalized) return normalized
   console.warn('[SandboxUI] Invalid recipe defaultPath; falling back to "/":', rawDefaultPath)
   return '/'
 }
 
-const DOT_SEGMENT_PATTERN = /^(?:\.|%2e){1,2}$/i
+function encodeSandboxUiRoutePath(routePath: string): string {
+  return routePath
+    .split('/')
+    .map((segment, index) => (index === 0 ? '' : encodeURIComponent(segment)))
+    .join('/')
+}
 
-function pathHasDotSegment(pathname: string): boolean {
-  return pathname.split('/').some(segment => DOT_SEGMENT_PATTERN.test(segment))
+function firstDefaultPathMetaIndex(defaultPath: string): number | undefined {
+  const firstQueryIndex = defaultPath.indexOf('?')
+  const firstHashIndex = defaultPath.indexOf('#')
+  return [firstQueryIndex, firstHashIndex].filter(index => index !== -1).sort((a, b) => a - b)[0]
 }
 
 function sharedPathForDefaultPath(defaultPath: string): string {
-  const firstQueryIndex = defaultPath.indexOf('?')
-  const firstHashIndex = defaultPath.indexOf('#')
-  const firstMetaIndex = [firstQueryIndex, firstHashIndex]
-    .filter(index => index !== -1)
-    .sort((a, b) => a - b)[0]
-  return firstMetaIndex === undefined ? defaultPath : defaultPath.slice(0, firstMetaIndex) || '/'
+  const firstMetaIndex = firstDefaultPathMetaIndex(defaultPath)
+  const pathname = firstMetaIndex === undefined ? defaultPath : defaultPath.slice(0, firstMetaIndex)
+  return normalizeSandboxUiRoute(pathname || '/') || '/'
+}
+
+function normalizeSandboxUiDefaultMetadata(metadata: string): string | null {
+  const hashIndex = metadata.indexOf('#')
+  if (hashIndex === -1) return metadata
+  const hashRouteStart = hashIndex + 1
+  const hashRemainder = metadata.slice(hashRouteStart)
+  const hashQueryIndex = hashRemainder.indexOf('?')
+  const hashRoute = hashQueryIndex === -1 ? hashRemainder : hashRemainder.slice(0, hashQueryIndex)
+  if (!hashRoute.startsWith('/')) return metadata
+  const normalizedHashRoute = normalizeSandboxUiRoute(hashRoute)
+  if (!normalizedHashRoute) return null
+  return (
+    metadata.slice(0, hashRouteStart) +
+    normalizedHashRoute +
+    (hashQueryIndex === -1 ? '' : hashRemainder.slice(hashQueryIndex))
+  )
+}
+
+function encodeSandboxUiDefaultMetadata(metadata: string): string {
+  const hashIndex = metadata.indexOf('#')
+  if (hashIndex === -1) return metadata
+  const hashRouteStart = hashIndex + 1
+  const hashRemainder = metadata.slice(hashRouteStart)
+  const hashQueryIndex = hashRemainder.indexOf('?')
+  const hashRoute = hashQueryIndex === -1 ? hashRemainder : hashRemainder.slice(0, hashQueryIndex)
+  if (!hashRoute.startsWith('/')) return metadata
+  return (
+    metadata.slice(0, hashRouteStart) +
+    encodeSandboxUiRoutePath(hashRoute) +
+    (hashQueryIndex === -1 ? '' : hashRemainder.slice(hashQueryIndex))
+  )
+}
+
+function encodeSandboxUiDefaultPath(defaultPath: string): string {
+  const firstMetaIndex = firstDefaultPathMetaIndex(defaultPath)
+  const pathname = firstMetaIndex === undefined ? defaultPath : defaultPath.slice(0, firstMetaIndex)
+  const metadata = firstMetaIndex === undefined ? '' : defaultPath.slice(firstMetaIndex)
+  return `${encodeSandboxUiRoutePath(pathname || '/')}${encodeSandboxUiDefaultMetadata(metadata)}`
 }
 
 function normalizeSandboxUiDefaultPath(rawPath: string): string | null {
-  const routePath = String(rawPath || '').trim()
-  if (!routePath) return '/'
+  const routePath = String(rawPath || '')
+  if (!routePath.trim()) return '/'
   if (
     routePath.length > 4096 ||
-    !routePath.startsWith('/') ||
-    routePath.startsWith('//') ||
     routePath.includes('\\') ||
-    /[\u0000-\u001f\u007f\s]/.test(routePath)
+    /[\u0000-\u001f\u007f\u2028\u2029]/.test(routePath)
   ) {
     return null
   }
-  const firstHashIndex = routePath.indexOf('#')
-  const serverPath = sharedPathForDefaultPath(routePath)
-  if (pathHasDotSegment(serverPath)) return null
-  if (firstHashIndex !== -1) {
-    const hashRoute = routePath.slice(firstHashIndex + 1).split('?')[0] || ''
-    if (hashRoute.startsWith('/') && pathHasDotSegment(hashRoute)) return null
-  }
-  return routePath
+  const firstMetaIndex = firstDefaultPathMetaIndex(routePath)
+  const pathname = firstMetaIndex === undefined ? routePath : routePath.slice(0, firstMetaIndex)
+  const metadata = firstMetaIndex === undefined ? '' : routePath.slice(firstMetaIndex)
+  const normalizedPathname = normalizeSandboxUiRoute(pathname || '/')
+  if (!normalizedPathname) return null
+  const normalizedMetadata = normalizeSandboxUiDefaultMetadata(metadata)
+  if (normalizedMetadata === null) return null
+  return `${normalizedPathname}${normalizedMetadata}`
 }
 
 export function canApplySandboxUiClientRoute(input: {
@@ -612,6 +740,122 @@ export function setSandboxUiBounds(bounds: SandboxUiBounds): void {
 export function setSandboxUiVisible(visible: boolean): void {
   if (!active) return
   active.view.setVisible(visible)
+}
+
+type FindableSandboxWebContents = Pick<
+  WebContentsView['webContents'],
+  'findInPage' | 'on' | 'removeListener'
+>
+
+export function beginSandboxUiFind(
+  webContents: FindableSandboxWebContents,
+  query: string,
+  options: { forward: boolean; findNext: boolean },
+  onResult: (result: SandboxUiFindResult) => void,
+  isCurrent: () => boolean = () => true
+): { requestId: number; cleanup: () => void } {
+  let requestId: number | null = null
+  const pendingResults: Electron.FoundInPageResult[] = []
+  const deliver = (result: Electron.FoundInPageResult) => {
+    if (requestId === null) {
+      pendingResults.push(result)
+      return
+    }
+    if (!isCurrent() || result.requestId !== requestId) return
+    onResult({
+      requestId: result.requestId,
+      activeMatchOrdinal: result.activeMatchOrdinal,
+      matches: result.matches,
+      finalUpdate: result.finalUpdate,
+    })
+  }
+  const listener = (_event: Electron.Event, result: Electron.FoundInPageResult) => deliver(result)
+  webContents.on('found-in-page', listener)
+  requestId = webContents.findInPage(query, options)
+  for (const result of pendingResults.splice(0)) deliver(result)
+  return {
+    requestId,
+    cleanup: () => webContents.removeListener('found-in-page', listener),
+  }
+}
+
+export function findInActiveSandboxUi(
+  query: string,
+  operation: SandboxUiFindOperation,
+  clientRequestId: number,
+  onResult: (result: SandboxUiFindResult) => void
+): SandboxUiFindStartResult {
+  if (!active || active.view.webContents.isDestroyed()) {
+    return { status: 'unavailable', reason: 'no-active-view' }
+  }
+  const current = active
+  if (!current.documentReady) {
+    return { status: 'unavailable', reason: 'document-loading' }
+  }
+  const continuing = operation !== 'start'
+  if (
+    continuing &&
+    (!current.findSession ||
+      !current.findSession.complete ||
+      current.findSession.query !== query ||
+      current.findSession.clientRequestId !== clientRequestId ||
+      current.findSession.documentGeneration !== current.documentGeneration)
+  ) {
+    return { status: 'unavailable', reason: 'no-session' }
+  }
+  const webContents = current.view.webContents
+  current.cleanupFindResults?.()
+  if (operation === 'start') webContents.stopFindInPage('clearSelection')
+  const options = sandboxFindOptionsForOperation(operation)
+  let completedSynchronously = false
+  const documentGeneration = current.documentGeneration
+  const resultGate = createSandboxFindResultGate(result => {
+    if (result.finalUpdate && active === current) {
+      completedSynchronously = true
+      if (current.findSession?.nativeRequestId === result.requestId) {
+        current.findSession.complete = true
+      }
+    }
+    onResult(result)
+  })
+  const session = beginSandboxUiFind(
+    webContents,
+    query,
+    options,
+    resultGate.accept,
+    () =>
+      active === current &&
+      current.documentReady &&
+      documentGeneration === current.documentGeneration
+  )
+  current.cleanupFindResults = () => {
+    resultGate.dispose()
+    session.cleanup()
+  }
+  current.findSession = {
+    query,
+    clientRequestId,
+    documentGeneration,
+    nativeRequestId: session.requestId,
+    complete: completedSynchronously,
+  }
+  return { status: 'started', requestId: session.requestId }
+}
+
+export function stopActiveSandboxUiFind(): void {
+  if (!active) return
+  active.cleanupFindResults?.()
+  active.cleanupFindResults = undefined
+  active.findSession = undefined
+  if (!active.view.webContents.isDestroyed()) {
+    active.view.webContents.stopFindInPage('clearSelection')
+  }
+}
+
+export function focusActiveSandboxUi(): boolean {
+  if (!active || active.view.webContents.isDestroyed()) return false
+  active.view.webContents.focus()
+  return true
 }
 
 export async function captureSandboxUiPreview(): Promise<string | null> {

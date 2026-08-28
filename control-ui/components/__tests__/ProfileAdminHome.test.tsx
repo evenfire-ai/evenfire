@@ -164,13 +164,53 @@ describe('ProfileAdminHome — members invitations', () => {
 
     await screen.findByLabelText('Open member Accepted Invitee')
 
-    fireEvent.click(
-      screen.getByRole('button', { name: 'Create admin for member Accepted Invitee' })
+    const createAdminButton = screen.getByRole('button', {
+      name: 'Create admin for member Accepted Invitee',
+    })
+    expect(createAdminButton).toHaveAttribute('title', 'Create admin')
+    expect(createAdminButton.querySelector('svg')).toHaveAttribute(
+      'data-relationship-role',
+      'admin'
     )
+    expect(createAdminButton.querySelector('svg')).toHaveAttribute('data-create-badge', 'true')
+
+    fireEvent.click(createAdminButton)
 
     expect(mockPush).toHaveBeenCalledWith(
       '/users-and-teams/admins/new?email=accepted%40example.com&name=Accepted+Invitee&step=review&source=member'
     )
+  })
+
+  it('views the matching admin from a member with the destination-role SVG', async () => {
+    vi.mocked(getProfileAdminOverview).mockResolvedValueOnce({
+      teams: [],
+      users: [
+        {
+          id: 'member-1',
+          email: 'member@example.com',
+          name: 'Member',
+          picture: null,
+          displayName: 'Member',
+          controlAdminId: 'admin-1',
+          activeTeamCount: 0,
+        },
+      ],
+      pendingInvitations: [],
+      teamAgentCounts: {},
+      teamContextCounts: {},
+    })
+    renderProfileAdminHome()
+
+    const viewAdminButton = await screen.findByRole('button', {
+      name: 'View admin for member Member',
+    })
+    expect(viewAdminButton).toHaveAttribute('title', 'View admin')
+    expect(viewAdminButton.querySelector('svg')).toHaveAttribute('data-relationship-role', 'admin')
+    expect(viewAdminButton.querySelector('svg')).not.toHaveAttribute('data-create-badge')
+
+    fireEvent.click(viewAdminButton)
+
+    expect(mockPush).toHaveBeenCalledWith('/users-and-teams/admins?highlightAdminId=admin-1')
   })
 
   it('opens a team detail page from the whole team row', async () => {
@@ -293,11 +333,42 @@ describe('ProfileAdminHome — members invitations', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete account' }))
 
     await waitFor(() => {
-      expect(deleteAdminUser).toHaveBeenCalledWith('accepted-password-pending-user')
+      expect(deleteAdminUser).toHaveBeenCalledWith(
+        'accepted-password-pending-user',
+        expect.objectContaining({
+          reason: 'control_ui_user_retirement',
+          idempotencyKey: expect.any(String),
+          correlationId: expect.any(String),
+        })
+      )
       expect(deleteAdminTeam).toHaveBeenCalledWith('team-1')
     })
     expect(vi.mocked(deleteAdminUser).mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(deleteAdminTeam).mock.invocationCallOrder[0]
+    )
+  })
+
+  it('reuses the same retirement request identity when a failed delete is retried', async () => {
+    vi.mocked(deleteAdminUser)
+      .mockRejectedValueOnce(new Error('temporary upstream failure'))
+      .mockResolvedValueOnce({ deleted: true, id: 'accepted-password-pending-user' })
+    renderProfileAdminHome()
+
+    await waitFor(() => expect(screen.getByText('Accepted Invitee')).toBeInTheDocument())
+    fireEvent.click(screen.getByLabelText('Delete member Accepted Invitee'))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Delete account' })).toBeEnabled()
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete account' }))
+    await waitFor(() => expect(deleteAdminUser).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(screen.getByText('temporary upstream failure')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete account' }))
+    await waitFor(() => expect(deleteAdminUser).toHaveBeenCalledTimes(2))
+
+    expect(vi.mocked(deleteAdminUser).mock.calls[1]?.[1]).toEqual(
+      vi.mocked(deleteAdminUser).mock.calls[0]?.[1]
     )
   })
 })

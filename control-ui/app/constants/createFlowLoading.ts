@@ -4,10 +4,10 @@ export const CREATE_FLOW_LOADING = {
   createAgent: {
     iconKey: 'robot',
     title: 'Create agent',
-    subtitle: 'Provision a new agent with context, channels, and access.',
+    subtitle: 'Provision a new agent with connectors, credentials, and access.',
     backLabel: 'Back to agents',
-    steps: ['Agent', 'Context', 'Model & Credentials', 'Access', 'Channels'],
-    stepFlowClassName: 'cu-create-step-flow--5',
+    steps: ['Agent', 'Model & Credentials', 'Access', 'Add Connectors'],
+    stepFlowClassName: 'cu-create-step-flow--4',
   },
   createCommunicationChannel: {
     iconKey: 'broadcast',

@@ -284,7 +284,7 @@ spec:
                       # transport is mono-credential and cannot deliver Bedrock's key
                       # pair nor azure's required non-secret AZURE_OPENAI_ENDPOINT —
                       # fail at admission, not mid-workflow (see workflowService).
-                      enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita]
+                      enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax]
                       description: LLM provider.
                     secretRef:
                       type: object
@@ -558,7 +558,7 @@ spec:
                             # bedrock AND azure intentionally absent (mono-credential
                             # WRC transport; see the comment on the first llm provider
                             # enum above).
-                            enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita]
+                            enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax]
                           soul:
                             type: string
                             description: Per-step SOUL content override.
@@ -1707,6 +1707,11 @@ spec:
                         maxRequestsPerRun:
                           type: integer
                           minimum: 1
+                          description: >-
+                            DEPRECATED — accepted for compatibility but no
+                            longer enforced. Platform per-minute rate limits
+                            apply instead. Scheduled for removal in a future
+                            version.
                         maxRequestContentBytes:
                           type: integer
                           minimum: 1
@@ -1718,7 +1723,7 @@ spec:
                         maxInvocationsPerMinute:
                           type: integer
                           minimum: 1
-                          description: Rate limit per workload; default 60.
+                          description: Rate limit per workload; platform default 120 when unset (ENV CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN, issue #348).
                         resultRetentionHours:
                           type: integer
                           minimum: 1
@@ -1757,10 +1762,15 @@ spec:
                         maxNotificationsPerRun:
                           type: integer
                           minimum: 1
+                          description: >-
+                            DEPRECATED — notifications per-run quota is
+                            accepted for compatibility but no longer enforced.
+                            Platform per-minute rate limits apply instead.
+                            Scheduled for removal in a future version.
                         maxNotificationsPerMinute:
                           type: integer
                           minimum: 1
-                          description: Rate limit per workload; default 120.
+                          description: Rate limit per workload; platform default 150 when unset (ENV CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN, issue #348).
                         maxTitleBytes:
                           type: integer
                           minimum: 1

@@ -164,9 +164,11 @@ function requiredProperty(properties: Map<string, string>, name: string, what: s
 
 // ─── Extraction 1: the condition writes ────────────────────────────────────
 //
-// Anchored on the CALL — `await this.writeStatusCondition(server, {` — not on
-// any condition type literal, so the condition type itself is derived rather
-// than assumed.
+// Anchored on the CALL — not on any condition type literal, so the condition
+// type itself is derived rather than assumed. The HCC writes are deliberately
+// formatted across arguments (`writeStatusCondition(\n server,\n { ... })`) to
+// make the cancellation callback explicit, while older producer revisions
+// used `writeStatusCondition(server, { ... })`; both are accepted here.
 
 type ConditionWrite = {
   /** 1-based line of the call, for failure messages. */
@@ -179,14 +181,35 @@ type ConditionWrite = {
   message: string
 }
 
-const WRITE_CALL = /^\s*await this\.writeStatusCondition\(server, \{$/
+const WRITE_CALL = /^\s*await this\.writeStatusCondition\($/
+const LEGACY_WRITE_CALL = /^\s*await this\.writeStatusCondition\(server, \{$/
+
+function conditionObjectStart(callIndex: number): number | null {
+  if (LEGACY_WRITE_CALL.test(lines[callIndex])) return callIndex
+  const serverArgument = lines[callIndex + 1]?.trim()
+  // This contract models reconcile's McpServer SecretResolved writes. Other
+  // controller paths write conditions for `state.server`; they are not part of
+  // the validateSecret producer contract and must not make this extractor
+  // reject a source file that legitimately contains them.
+  if (serverArgument !== 'server,') return null
+  const conditionObject = lines[callIndex + 2]?.trim()
+  if (conditionObject !== '{') {
+    fail(
+      `the writeStatusCondition call at line ${callIndex + 1} no longer passes ` +
+        '`server` followed by a condition object. Re-derive the producer contract.'
+    )
+  }
+  return callIndex + 2
+}
 
 function extractConditionWrites(): ConditionWrite[] {
   const writes: ConditionWrite[] = []
   lines.forEach((line, index) => {
-    if (!WRITE_CALL.test(line)) return
+    if (!WRITE_CALL.test(line) && !LEGACY_WRITE_CALL.test(line)) return
+    const objectStart = conditionObjectStart(index)
+    if (objectStart === null) return
     const what = `condition write at line ${index + 1}`
-    const properties = propertiesOf(index, blockEnd(index, what))
+    const properties = propertiesOf(objectStart, blockEnd(objectStart, what))
     const typeExpression = requiredProperty(properties, 'type', what)
     if (!isStringLiteral(typeExpression)) {
       fail(
@@ -205,7 +228,7 @@ function extractConditionWrites(): ConditionWrite[] {
   })
   if (writes.length === 0) {
     fail(
-      `found NO \`await this.writeStatusCondition(server, {\` calls. Either the producer stopped ` +
+      'found NO writeStatusCondition calls with a server and condition object. Either the producer stopped ' +
         `writing status conditions altogether, or this extractor no longer matches the call.`
     )
   }

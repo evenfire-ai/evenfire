@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { GfsPermissionDropdown } from '@components/GfsPermissionDropdown'
+import { GFS_PERMISSION_LABELS } from '@components/GfsPermissionDropdown/constants'
 import { GfsSubjectPicker } from '@components/GfsSubjectPicker'
 import type { SelectionDropdownOption } from '@components/SelectionDropdown/types'
+import { IconFolder } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
-import { IconTrash } from '@components/icons'
 import { Button, CheckboxField } from '@components/ui'
 import { GFS_MAX_BULK_SUBJECTS } from '@constants/gfsGrantSubjects'
 import {
@@ -50,7 +51,10 @@ const OPERATOR_OPTION: SelectionDropdownOption = {
   badge: 'Operator',
 }
 
-export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Element {
+export function GfsGrantPanel({
+  resource,
+  onCreateShareActionChange,
+}: GfsGrantPanelProps): React.JSX.Element {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [users, setUsers] = useState<AdminUser[]>([])
@@ -71,6 +75,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   const [existingAccessError, setExistingAccessError] = useState('')
   const existingAccessRequest = useRef(0)
   const existingAccessController = useRef<AbortController | null>(null)
+  const submitShareRef = useRef<() => void>(() => undefined)
   const canIncludeDescendants = resource.kind === 'directory'
 
   const loadExistingAccess = useCallback(async () => {
@@ -299,6 +304,16 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     }
   }
 
+  submitShareRef.current = () => {
+    void submit('share')
+  }
+
+  useEffect(() => {
+    if (!onCreateShareActionChange) return
+    onCreateShareActionChange(() => submitShareRef.current(), !canSubmit || !canCreateShare)
+    return () => onCreateShareActionChange(null, true)
+  }, [canCreateShare, canSubmit, onCreateShareActionChange])
+
   function subjectLabel(item: GfsExistingAccessItem): string {
     if (item.subject.type === 'operator') return 'Operator'
     const option = bulkSubjectOptions.find(
@@ -378,14 +393,35 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
           removed.
         </p>
       ) : null}
-      <section className="cu-gfs-existing-access" aria-label="Existing access">
+      <div className="cu-gfs-grant__scope-actions">
+        {canIncludeDescendants ? (
+          <CheckboxField
+            className="cu-gfs-grant__scope"
+            label="Include contents of this folder"
+            checked={includeDescendants}
+            onChange={() => setIncludeDescendants(current => !current)}
+            disabled={actionPending}
+          />
+        ) : null}
+        <div className="cu-gfs-grant__actions">
+          <Button variant="primary" disabled={!canSubmit} onClick={() => submit('grant')}>
+            Grant access
+          </Button>
+        </div>
+      </div>
+      {error ? (
+        <p role="alert" className="cu-field__error">
+          {error}
+        </p>
+      ) : null}
+      <section className="cu-gfs-existing-access" aria-label="Who has access">
         <div className="cu-gfs-existing-access__header">
-          <h3>Existing access</h3>
-          <p>Direct grants and shares configured on this resource.</p>
+          <h4>Who has access</h4>
+          <p>Existing grants on this resource. Revoking is immediate.</p>
         </div>
         {existingAccessLoading ? (
           <p className="cu-gfs-existing-access__empty" role="status">
-            Loading existing access…
+            Loading access…
           </p>
         ) : existingAccessError ? (
           <div className="cu-gfs-existing-access__error">
@@ -397,32 +433,52 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
             </Button>
           </div>
         ) : existingAccess.length === 0 ? (
-          <p className="cu-gfs-existing-access__empty">No direct access configured.</p>
+          <p className="cu-gfs-existing-access__empty">No direct grants or shares yet.</p>
         ) : (
-          <ul className="cu-gfs-existing-access__list">
+          <ul className="cu-gfs-existing-access__list" aria-label="Resource access">
             {existingAccess.map(item => {
               const label = subjectLabel(item)
               const coversDescendants =
                 item.kind === 'grant' ? item.inherit : item.includeDescendants
               return (
-                <li className="cu-gfs-existing-access__item" key={`${item.kind}:${item.id}`}>
-                  <div className="cu-gfs-existing-access__copy">
+                <li
+                  className="cu-gfs-existing-access__item"
+                  data-testid={`gfs-access-row-${item.kind}-${item.id}`}
+                  key={`${item.kind}:${item.id}`}
+                >
+                  <span className="cu-gfs-existing-access__identity">
                     <span className="cu-gfs-existing-access__subject">{label}</span>
                     <span className="cu-gfs-existing-access__detail">
-                      {item.kind === 'grant' ? 'Grant' : 'Share'} · {item.permissions.join(', ')} ·{' '}
-                      {coversDescendants ? 'resource and descendants' : 'resource only'}
+                      {item.kind === 'grant' ? 'Direct grant' : 'Direct share'} ·{' '}
+                      {item.subject.type}
                     </span>
-                  </div>
+                  </span>
+                  <span className="cu-gfs-existing-access__meta">
+                    <span className="cu-gfs-existing-access__chips" aria-label="Permissions">
+                      {item.permissions.map(permission => (
+                        <span className="cu-gfs-existing-access__permission" key={permission}>
+                          {GFS_PERMISSION_LABELS[permission] ?? permission}
+                        </span>
+                      ))}
+                    </span>
+                    {coversDescendants ? (
+                      <span className="cu-gfs-existing-access__inherit">
+                        <IconFolder />
+                        Includes contents
+                      </span>
+                    ) : null}
+                  </span>
                   <Button
                     aria-label={`Remove ${item.kind} access for ${label}`}
+                    className="cu-gfs-existing-access__revoke"
+                    data-testid={`gfs-revoke-${item.kind}-${item.id}`}
                     title={`Remove ${item.kind} access for ${label}`}
-                    variant="danger"
                     size="sm"
                     disabled={actionPending}
                     onClick={() => void revokeAccess(item)}
+                    variant="ghost"
                   >
-                    <IconTrash width={15} height={15} />
-                    Remove
+                    X
                   </Button>
                 </li>
               )
@@ -430,29 +486,6 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
           </ul>
         )}
       </section>
-      {canIncludeDescendants ? (
-        <CheckboxField
-          className="cu-gfs-grant__scope"
-          label="Include descendants"
-          description="Apply this grant or share to the full folder tree."
-          checked={includeDescendants}
-          onChange={() => setIncludeDescendants(current => !current)}
-          disabled={actionPending}
-        />
-      ) : null}
-      <div className="cu-gfs-grant__actions">
-        <Button variant="primary" disabled={!canSubmit} onClick={() => submit('grant')}>
-          Grant access
-        </Button>
-        <Button disabled={!canSubmit || !canCreateShare} onClick={() => submit('share')}>
-          Create share
-        </Button>
-      </div>
-      {error ? (
-        <p role="alert" className="cu-field__error">
-          {error}
-        </p>
-      ) : null}
       {confirmDialog}
     </div>
   )

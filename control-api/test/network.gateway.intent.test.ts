@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import {
+  boundedEnvBytesFromSource,
+  staticExportedBytesFromSource,
+} from './helpers/staticSourceAuthority.js'
+import { assertUploadV2TransportBounds } from './helpers/uploadV2TransportBounds.js'
 
 /** Paths are relative to this file: control-api/test/ → repo root is ../.. */
 const BASE = '../../deploy/base'
@@ -81,6 +86,18 @@ function locationBlock(config: string, marker: string): string {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function staticBytes(relPath: string, symbol: string): number {
+  return staticExportedBytesFromSource(read(relPath), symbol, relPath)
+}
+
+function boundedEnvBytes(
+  relPath: string,
+  property: string,
+  envName: string
+): { fallback: number; ceiling: number } {
+  return boundedEnvBytesFromSource(read(relPath), 'config', property, envName, relPath)
 }
 
 function expectCanonicalPublicEgressExceptions(): void {
@@ -331,6 +348,118 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(gatewayConf).toContain('location / {')
     expect(gatewayConf).toContain('return 403;')
     expect(gatewayConf).not.toContain('/api/v1/external/')
+  })
+
+  it('keeps the profile-control-funnel body cap at gfsc write-cap parity (24MiB)', () => {
+    const configmaps = read(`${BASE}/profiles/configmaps.yaml`)
+    const funnelConf = docContaining(yamlDocs(configmaps), 'name: profile-control-funnel-nginx')
+    // nginx defaults client_max_body_size to 1m. Without an explicit cap the
+    // me-path (external-rest-api → funnel → control-api) 413s GFS uploads at
+    // ~1MB, far below the gfsc write cap (GFS_MAX_WRITE_BODY_BYTES = 25165824,
+    // 24MiB) that the operator path already honors end to end.
+    expect(funnelConf).toContain('client_max_body_size 25165824;')
+  })
+
+  it('keeps the GFS v2 part cap chain below the gateway request cap', () => {
+    // Upload v2 is indexed binary streaming: product policy is writer-advertised
+    // session metadata, while protocol and per-request safety remain compiled.
+    // Do not compare the runtime product policy with a single-request body cap.
+    // The legacy JSON/base64 path still requires the HCC-owned gfsc body cap to
+    // agree with the profile funnel. It is not the Upload v2 product authority.
+    const hccDeployment = read(`${BASE}/control-plane/host-context-controller.yaml`)
+    const gfscCapMatch = hccDeployment.match(
+      /GFS_MAX_WRITE_BODY_BYTES[\s\S]{0,80}?value:\s*(["']?)(\d+)\1/
+    )
+    expect(
+      gfscCapMatch,
+      'GFS_MAX_WRITE_BODY_BYTES env must be set on the HCC deployment'
+    ).not.toBeNull()
+    const legacyGfscWriteCap = Number(gfscCapMatch![2])
+    const funnelConf = docContaining(
+      yamlDocs(read(`${BASE}/profiles/configmaps.yaml`)),
+      'name: profile-control-funnel-nginx'
+    )
+    const funnelCapMatch = funnelConf.match(/client_max_body_size\s+(\d+);/)
+    expect(funnelCapMatch, 'profile-control-funnel body cap not found').not.toBeNull()
+    const profileFunnelCap = Number(funnelCapMatch![1])
+    expect(profileFunnelCap).toBe(legacyGfscWriteCap)
+
+    // The writer defines the absolute protocol and part bounds. Both packaged
+    // Desktop layers and Control UI mirror those wire limits, not product policy.
+    const writerProtocol = staticBytes(
+      '../../gfs-controller/src/upload/protocol.ts',
+      'GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES'
+    )
+    const writerPart = staticBytes(
+      '../../gfs-controller/src/upload/protocol.ts',
+      'GFS_UPLOAD_V2_MAX_PART_BYTES'
+    )
+    const protocolMirrors = [
+      staticBytes(
+        '../../control-ui/app/constants/gfsFileUpload.ts',
+        'GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES'
+      ),
+      staticBytes(
+        '../../desktop-app/ui/src/constants/gfsFileUpload.ts',
+        'GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES'
+      ),
+      staticBytes('../../desktop-app/src/gfs/upload.ts', 'GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES'),
+    ]
+    const partMirrors = [
+      staticBytes(
+        '../../control-ui/app/constants/gfsFileUpload.ts',
+        'GFS_FILE_UPLOAD_MAX_PART_BYTES'
+      ),
+      staticBytes(
+        '../../desktop-app/ui/src/constants/gfsFileUpload.ts',
+        'GFS_FILE_UPLOAD_MAX_PART_BYTES'
+      ),
+      staticBytes('../../desktop-app/src/gfs/upload.ts', 'GFS_UPLOAD_V2_MAX_PART_BYTES'),
+      staticBytes(
+        '../../control-ui/app/control-api/[...path]/route.ts',
+        'GFS_UPLOAD_MAX_PART_BYTES'
+      ),
+    ]
+    // Every relay defaults to the writer part maximum and refuses configuration
+    // above it. A part must also fit through the profile gateway with headroom.
+    const controlApiRelay = boundedEnvBytes(
+      '../src/config.ts',
+      'gfsUploadMaxPartBytes',
+      'CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES'
+    )
+    const externalRestRelay = boundedEnvBytes(
+      '../../external-rest-api/src/config.ts',
+      'gfsUploadMaxPartBytes',
+      'EXTERNAL_REST_API_GFS_UPLOAD_MAX_PART_BYTES'
+    )
+    assertUploadV2TransportBounds({
+      writerProtocol,
+      writerPart,
+      protocolMirrors,
+      partMirrors,
+      relayBounds: [controlApiRelay, externalRestRelay],
+      gatewayBytes: profileFunnelCap,
+    })
+  })
+
+  it('keeps control-api memory at >=768Mi in base AND the minikube overlay (RC3 OOM guard)', () => {
+    // RC3: a base64 GFS upload holds ~5 transient body copies; at 256Mi two
+    // concurrent uploads OOMKilled the pod (exit 137). The base fix was inert in
+    // minikube until the overlay was also raised — re-pinning any overlay below
+    // 768Mi silently reintroduces the 7.5MB-PDF OOM, so assert it executably.
+    const controlApiLimitMi = (yaml: string): number => {
+      const doc = yamlDocs(yaml).find(
+        d => /kind:\s*Deployment/.test(d) && /name:\s*control-api\b/.test(d)
+      )
+      expect(doc, 'control-api Deployment not found').toBeTruthy()
+      const m = doc!.match(/limits:[\s\S]*?memory:\s*(\d+)Mi/)
+      expect(m, 'control-api limits.memory (Mi) not found').not.toBeNull()
+      return Number(m![1])
+    }
+    const base = controlApiLimitMi(read(`${BASE}/control-plane/control-api.yaml`))
+    const minikube = controlApiLimitMi(read(`${OVERLAYS}/minikube/patches/resource-limits.yaml`))
+    expect(base).toBeGreaterThanOrEqual(768)
+    expect(minikube).toBeGreaterThanOrEqual(768)
   })
 
   it('keeps the Minikube control-api Marketplace on the shared registry', () => {

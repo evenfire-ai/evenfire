@@ -78,6 +78,9 @@ webhook and file planes, see [/ARCHITECTURE.md](../../ARCHITECTURE.md). For the
 three human surfaces — the Control UI console, the Desktop App client, and the
 Profile UI — see [docs/surfaces/](../surfaces/README.md).
 
+The self-hosted Desktop GFS authority boundary, lifecycle generations, and
+validation flow are documented in [Desktop GFS operator parity](gfs-desktop-operator-parity.md).
+
 | Service                     | Directory                  | Namespace       | Port | Role                                                                                                 |
 | --------------------------- | -------------------------- | --------------- | ---- | ---------------------------------------------------------------------------------------------------- |
 | **channel-reader**          | `/channel-reader`          | `channels`      | -    | Watches CommunicationChannel CRDs, polls Telegram/Email/Slack, forwards to mcp-host                  |
@@ -746,14 +749,30 @@ Both support Bearer token authentication via `Authorization` header.
 
 #### Server Discovery (Production)
 
-mcp-host polls host-context-controller REST API to discover MCP servers:
+mcp-host polls the host-context-controller REST API with its existing
+caller-bound access JWT. HCC resolves the live Host and its Context from that
+identity; the caller never supplies a Context selector:
 
 ```
-mcp-host ──GET /api/v1/mcpservers/context/{contextRef}──▶ host-context-controller
-         ◀──── { servers: McpServerInfo[], timestamp }────
+mcp-host ──GET /api/v2/hosts/self/mcpservers + Bearer Host JWT──▶ HCC gateway
+         ◀──── Host-scoped { servers: McpServerInfo[], timestamp }────
 ```
 
-Polling interval: 30 seconds (configurable via `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`)
+When an authenticated McpServer needs a credential, mcp-host posts the server
+name to `/api/v2/hosts/self/mcpservers/credential` with the same JWT. HCC
+checks the live Host → Context grant before reading the referenced Secret.
+The former caller-selected Context and global `/auth` routes are retired with
+HTTP 410; the remaining global v1 inventory is metadata-only transitional
+surface for the separately reviewed mcp-proxy PR2 and is not used by mcp-host.
+
+Polling interval: 30 seconds (configurable via `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`).
+In cluster mode it must remain strictly below `HCC_AUTHORITY_MAX_STALENESS_MS`
+(default 180 s, operator-tunable up to a 600 s hard ceiling); mcp-host rejects an
+invalid relation at startup rather than allowing the fleet to flap between
+successful polls and authority revocation. The staleness window governs only the
+`unavailable` failure class (HCC unreachable / 5xx): it is sized to absorb a
+normal HCC `Recreate` rollout without tearing down the MCP fleet. Identity/401
+revocations are immediate and are not gated by this window (issue #425).
 
 On each poll, mcp-host compares new server list with previous state and:
 
@@ -798,26 +817,27 @@ The HTTP response is held open until the agent finishes processing. The response
 
 ### Configuration
 
-| Variable                              | Default          | Description                                     |
-| ------------------------------------- | ---------------- | ----------------------------------------------- |
-| `CLERUM_DEV_MODE`                     | `false`          | Enable dev mode                                 |
-| `CLERUM_HOST_NAME`                    | -                | Host CRD name (production, required)            |
-| `CLERUM_NAMESPACE`                    | `"default"`      | Kubernetes namespace                            |
-| `CLERUM_SERVER_PORT`                  | `8080`           | HTTP server port                                |
-| `CLERUM_CONTEXT_MAPPER_URL`           | auto             | Context-mapper service URL                      |
-| `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL` | `30000`          | Poll interval (ms)                              |
-| `CLERUM_MODEL_PROVIDER`               | auto-detected    | `"openai"`, `"claude"`, `"zai"`, or `"bailian"` |
-| `CLERUM_MODEL_NAME`                   | provider default | Specific model name                             |
-| `OPENAI_API_KEY`                      | -                | OpenAI key (dev mode)                           |
-| `CLAUDE_API_KEY`                      | -                | Claude key (dev mode)                           |
-| `ZAI_API_KEY`                         | -                | ZAI/z.ai key (dev mode)                         |
-| `BAILIAN_API_KEY`                     | -                | Bailian/DashScope key (dev mode)                |
-| `CLERUM_HOST_CONFIG`                  | -                | JSON host config (dev mode)                     |
-| `CLERUM_MCP_SERVERS`                  | -                | JSON MCP server array (dev mode)                |
-| `CLERUM_AGENT_TASK_DELAY`             | `100`            | Delay between tasks (ms)                        |
-| `CLERUM_AGENT_MAX_TASK_DURATION`      | `300000`         | Max task duration (ms)                          |
-| `CLERUM_AGENT_MAX_TOOL_CALLS`         | `50`             | Max tool calls per task                         |
-| `CLERUM_AGENT_MAX_QUEUE_SIZE`         | `100`            | Max pending queue size                          |
+| Variable                              | Default          | Description                                                                                 |
+| ------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------- |
+| `CLERUM_DEV_MODE`                     | `false`          | Enable dev mode                                                                             |
+| `CLERUM_HOST_NAME`                    | -                | Host CRD name (production, required)                                                        |
+| `CLERUM_NAMESPACE`                    | `"default"`      | Kubernetes namespace                                                                        |
+| `CLERUM_SERVER_PORT`                  | `8080`           | HTTP server port                                                                            |
+| `CLERUM_CONTEXT_MAPPER_URL`           | auto             | Context-mapper service URL                                                                  |
+| `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL` | `30000`          | Poll interval (ms)                                                                          |
+| `HCC_AUTHORITY_MAX_STALENESS_MS`      | `180000`         | Max retained HCC authority while HCC is unreachable (ms); operator-tunable, hard-capped at 600000; must be greater than the poll interval in cluster mode (issue #425) |
+| `CLERUM_MODEL_PROVIDER`               | auto-detected    | `"openai"`, `"claude"`, `"zai"`, or `"bailian"`                                             |
+| `CLERUM_MODEL_NAME`                   | provider default | Specific model name                                                                         |
+| `OPENAI_API_KEY`                      | -                | OpenAI key (dev mode)                                                                       |
+| `CLAUDE_API_KEY`                      | -                | Claude key (dev mode)                                                                       |
+| `ZAI_API_KEY`                         | -                | ZAI/z.ai key (dev mode)                                                                     |
+| `BAILIAN_API_KEY`                     | -                | Bailian/DashScope key (dev mode)                                                            |
+| `CLERUM_HOST_CONFIG`                  | -                | JSON host config (dev mode)                                                                 |
+| `CLERUM_MCP_SERVERS`                  | -                | JSON MCP server array (dev mode)                                                            |
+| `CLERUM_AGENT_TASK_DELAY`             | `100`            | Delay between tasks (ms)                                                                    |
+| `CLERUM_AGENT_MAX_TASK_DURATION`      | `300000`         | Max task duration (ms)                                                                      |
+| `CLERUM_AGENT_MAX_TOOL_CALLS`         | `50`             | Max tool calls per task                                                                     |
+| `CLERUM_AGENT_MAX_QUEUE_SIZE`         | `100`            | Max pending queue size                                                                      |
 
 ### Dependencies
 
@@ -1009,13 +1029,15 @@ One policy per (context, server) pair. Only allows traffic from the mcp-host nam
 
 ### REST API
 
-| Method | Path                                      | Description                          |
-| ------ | ----------------------------------------- | ------------------------------------ |
-| `GET`  | `/`                                       | API information                      |
-| `GET`  | `/health`                                 | Health check                         |
-| `GET`  | `/api/v1/mcpservers`                      | List ALL MCP servers                 |
-| `GET`  | `/api/v1/mcpservers/context/{contextRef}` | List servers filtered by Context CRD |
-| `GET`  | `/api/v1/mcpservers/{name}/auth`          | Get auth token for a server          |
+| Method | Path                                       | Description                                                                        |
+| ------ | ------------------------------------------ | ---------------------------------------------------------------------------------- |
+| `GET`  | `/`                                        | API information                                                                    |
+| `GET`  | `/health`                                  | Health check                                                                       |
+| `GET`  | `/api/v2/hosts/self/mcpservers`            | List MCP servers granted to the authenticated Host                                 |
+| `POST` | `/api/v2/hosts/self/mcpservers/credential` | Return a credential only after the live Host → Context → McpServer check           |
+| `GET`  | `/api/v1/mcpservers`                       | Transitional metadata-only system inventory; no Secret fields; PR2 review required |
+| `GET`  | `/api/v1/mcpservers/context/{contextRef}`  | Retired caller-selected route; HTTP 410                                            |
+| `GET`  | `/api/v1/mcpservers/{name}/auth`           | Retired unbound credential route; HTTP 410                                         |
 
 **Server info response**:
 
@@ -1025,23 +1047,25 @@ One policy per (context, server) pair. Only allows traffic from the mcp-host nam
     {
       "name": "mongodb-server",
       "description": "MongoDB MCP server",
-      "contextRef": "context1",
       "transport": { "type": "streamableHttp", "url": "http://...:3000/mcp" },
-      "auth": { "type": "bearer", "secretRef": "...", "secretKey": "..." },
       "enabled": true,
+      "authRequired": true,
+      "credentialRevision": "opaque-revision",
       "status": {
         "deployed": true,
         "ready": true,
-        "message": "1/1 replicas ready"
+        "message": "ready"
       }
     }
   ],
-  "contextRef": "context1",
   "timestamp": "2024-01-15T10:30:00.000Z"
 }
 ```
 
-**Context-based filtering**: Reads the Context CRD's `mcpServers` allowlist and only returns servers that appear in that list.
+**Host-based authorization**: HCC derives the current Host's Context from the
+verified JWT and live Host object, checks the Context's `mcpServers` allowlist,
+and returns only the sanitized v2 DTO. Context names, auth selectors, and
+Secret references never appear in the Host response.
 
 **Deployment status**: The reconciler checks the actual Deployment status (`readyReplicas`) to populate the `deployed` and `ready` fields.
 

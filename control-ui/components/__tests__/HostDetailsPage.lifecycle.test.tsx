@@ -31,6 +31,12 @@ vi.mock('../HostIdentityTab', () => ({
   ),
 }))
 
+vi.mock('../HostAccessTab', () => ({
+  HostAccessTab: ({ hostName }: { hostName: string }) => (
+    <div data-testid="access-tab">Access editor for {hostName}</div>
+  ),
+}))
+
 vi.mock('../../lib/api', () => ({
   apiGet: vi.fn(),
   apiSend: vi.fn(),
@@ -40,10 +46,12 @@ vi.mock('../../lib/api', () => ({
   getAgentUsers: vi.fn(),
   getHost: vi.fn(),
   getHostDetailBundle: vi.fn(),
+  getMcpServers: vi.fn(),
   getLlmModels: vi.fn().mockResolvedValue({ rows: [] }),
   isSilentApiError: vi.fn().mockReturnValue(false),
   updateAdminTeamAgents: vi.fn(),
   updateAdminUserAgents: vi.fn(),
+  updateContext: vi.fn(),
 }))
 
 const baseSpec = {
@@ -145,13 +153,13 @@ function render(children: ReactNode) {
 }
 
 async function openOverviewEdit() {
-  const [overviewEditButton] = await screen.findAllByRole('button', { name: 'Edit' })
+  const overviewEditButton = await screen.findByRole('button', { name: 'Edit lifecycle' })
   await waitFor(() => expect(overviewEditButton).toBeEnabled())
   fireEvent.click(overviewEditButton)
 }
 
 async function saveOverviewAndGetPayload(): Promise<{ spec: Record<string, unknown> }> {
-  fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Save lifecycle' }))
   await waitFor(() =>
     expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
   )
@@ -333,7 +341,7 @@ describe('HostDetailsPage stateless lifecycle', () => {
     expect(await screen.findByText('Stateless mode rejected:')).toBeInTheDocument()
 
     await openOverviewEdit()
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save lifecycle' }))
 
     await waitFor(() =>
       expect(screen.queryByText('Stateless mode rejected:')).not.toBeInTheDocument()

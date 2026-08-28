@@ -20,6 +20,10 @@ vi.mock('../../hooks/domain/useTeamsDataController', () => ({
   useTeamsDataController: vi.fn(),
 }))
 
+vi.mock('../../hooks/domain/useAgentsDataController', () => ({
+  useAgentsDataController: () => ({ agentDisplayByName: {} }),
+}))
+
 const useTeamsDataControllerMock = vi.mocked(useTeamsDataController)
 
 const ME: SessionMe = {
@@ -66,6 +70,7 @@ const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextVa
   runtimeConfigState: null,
   desktopReleaseStatus: null,
   pendingDesktopEnvironmentSetup: null,
+  backendSwitchHint: null,
   runtimeConfigMissing: false,
   showRuntimeConfigSelector: false,
   dependencyHealth: null,
@@ -82,6 +87,7 @@ const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextVa
   setStatus: vi.fn(),
   loadSession: vi.fn(),
   handlePasswordLogin: vi.fn(),
+  handleSwitchLoginBackend: vi.fn(),
   handleStartDesktopSetup: vi.fn(),
   handleCompleteDesktopSetup: vi.fn(),
   handleSaveRuntimeConfig: vi.fn(),

@@ -28,7 +28,22 @@ function applyRule(pathname: string, rule: RouteRule): string | null {
     return rule.destination.replace(':path*', rest).replace(/\/$/, '') || '/'
   }
 
-  return pathname === rule.source ? rule.destination : null
+  const sourceParts = rule.source.split('/')
+  const pathnameParts = pathname.split('/')
+  if (sourceParts.length !== pathnameParts.length) return null
+
+  const params: Record<string, string> = {}
+  for (let index = 0; index < sourceParts.length; index += 1) {
+    const sourcePart = sourceParts[index]
+    const pathnamePart = pathnameParts[index]
+    if (sourcePart.startsWith(':')) {
+      params[sourcePart.slice(1)] = pathnamePart
+    } else if (sourcePart !== pathnamePart) {
+      return null
+    }
+  }
+
+  return rule.destination.replace(/:([^/]+)/g, (match, name: string) => params[name] ?? match)
 }
 
 function appRoutePatterns(): RegExp[] {
@@ -115,6 +130,78 @@ describe('CONTROL_ROUTES App Router resolution', () => {
         {
           source: '/shared-files',
           destination: CONTROL_ROUTES.agentFiles.root,
+          permanent: true,
+        },
+      ])
+    )
+  })
+
+  it('preserves the old host-detail tab slugs as compatibility redirects', async () => {
+    // R1-H1: the host-detail page consolidated Member access + Team access
+    // into a single Access tab, and Per-tool approval + Env vars into a
+    // single Advanced tab. The old slugs must still resolve so bookmarks,
+    // shared links, and the approval-tools E2E keep working.
+    const redirects = ((await nextConfig.redirects?.()) ?? []) as RouteRule[]
+
+    expect(redirects).toEqual(
+      expect.arrayContaining([
+        {
+          source: '/agents/:name/member-access',
+          destination: '/agents/:name/access',
+          permanent: true,
+        },
+        {
+          source: '/agents/:name/team-access',
+          destination: '/agents/:name/access',
+          permanent: true,
+        },
+        {
+          source: '/agents/:name/approvals',
+          destination: '/agents/:name/advanced',
+          permanent: true,
+        },
+        {
+          source: '/agents/:name/env-vars',
+          destination: '/agents/:name/advanced',
+          permanent: true,
+        },
+        {
+          source: '/agents/:name/contexts',
+          destination: '/agents/:name/connectors',
+          permanent: true,
+        },
+      ])
+    )
+  })
+
+  it('follows the legacy tab slugs all the way to an app route', async () => {
+    const redirects = ((await nextConfig.redirects?.()) ?? []) as RouteRule[]
+    const rewrites = ((await nextConfig.rewrites?.()) ?? []) as RouteRule[]
+    const appRoutes = appRoutePatterns()
+    const legacySlugs = ['member-access', 'team-access', 'approvals', 'env-vars', 'contexts']
+
+    for (const slug of legacySlugs) {
+      const pathname = `/agents/foo/${slug}`
+      expect(resolvesToAppRoute(pathname, redirects, rewrites, appRoutes)).toBe(true)
+    }
+  })
+
+  it('redirects the legacy agent Contexts deep link to the Connectors experience', async () => {
+    const redirects = ((await nextConfig.redirects?.()) ?? []) as RouteRule[]
+    const rewrites = ((await nextConfig.rewrites?.()) ?? []) as RouteRule[]
+    const appRoutes = appRoutePatterns()
+
+    // Direct-route regression: before this compatibility rule, the /agents
+    // rewrite reached hosts/[name]/[tab] with tab="contexts", which called
+    // notFound() because the renamed tab only accepted "connectors".
+    expect(resolvesToAppRoute('/agents/demo-agent/contexts', redirects, rewrites, appRoutes)).toBe(
+      true
+    )
+    expect(redirects).toEqual(
+      expect.arrayContaining([
+        {
+          source: '/agents/:name/contexts',
+          destination: '/agents/:name/connectors',
           permanent: true,
         },
       ])

@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { LlmErrorCode } from '../../core/errors'
 import { ClaudeProvider } from '../claude'
+import { anthropicApiError } from './sdkErrorFixtures'
 
 describe('ClaudeProvider.classifyError', () => {
   const provider = new ClaudeProvider('fake-key', 'claude-3-5-sonnet-20241022')
 
   it('classifies 429 as RateLimited, retryable', () => {
-    expect(provider.classifyError({ status: 429, message: 'rate limited' })).toEqual({
+    expect(provider.classifyError({ status: 429, message: 'rate limited' })).toMatchObject({
       code: LlmErrorCode.RateLimited,
       retryable: true,
       message: 'rate limited',
@@ -20,11 +21,61 @@ describe('ClaudeProvider.classifyError', () => {
   })
 
   it('classifies 529 as ModelOverloaded, retryable', () => {
-    expect(provider.classifyError({ status: 529, message: 'overloaded' })).toEqual({
+    expect(provider.classifyError({ status: 529, message: 'overloaded' })).toMatchObject({
       code: LlmErrorCode.ModelOverloaded,
       retryable: true,
       message: 'overloaded',
     })
+  })
+
+  // Fixtures derived from Anthropic.APIError.generate: the modeled type is
+  // nested at `.error.error.type`. A classifier reading the wrong level would
+  // (a) fall through to the HTTP-status branch — which coincidentally maps some
+  // of these right — and (b) surface providerCode='error' and the ugly
+  // enveloped `.message`. The providerCode + message assertions below are what
+  // catch that regression regardless of the status coincidence.
+  it('classifies error.type not_found_error as ModelNotAvailable, not retryable', () => {
+    const err = anthropicApiError(404, 'not_found_error', 'model: claude-x not found')
+    const c = provider.classifyError(err)
+    expect(c.code).toBe(LlmErrorCode.ModelNotAvailable)
+    expect(c.retryable).toBe(false)
+    expect(c.httpStatus).toBe(404)
+    expect(c.providerCode).toBe('not_found_error')
+    expect(c.message).toBe('model: claude-x not found')
+  })
+
+  it('classifies error.type overloaded_error as ModelOverloaded, retryable', () => {
+    const err = anthropicApiError(529, 'overloaded_error', 'overloaded')
+    const c = provider.classifyError(err)
+    expect(c.code).toBe(LlmErrorCode.ModelOverloaded)
+    expect(c.retryable).toBe(true)
+    expect(c.providerCode).toBe('overloaded_error')
+    expect(c.message).toBe('overloaded')
+  })
+
+  it('classifies error.type billing_error as InsufficientQuota, not retryable', () => {
+    // Anthropic surfaces billing as a 400 in practice (not the documented 402),
+    // so the HTTP-status branch would map this to ApiCallFailed — only the
+    // modeled type gets it to InsufficientQuota. This case fails on `code` too
+    // when the nesting is read wrong.
+    const err = anthropicApiError(400, 'billing_error', 'billing issue')
+    const c = provider.classifyError(err)
+    expect(c.code).toBe(LlmErrorCode.InsufficientQuota)
+    expect(c.retryable).toBe(false)
+    expect(c.providerCode).toBe('billing_error')
+    expect(c.message).toBe('billing issue')
+  })
+
+  it('classifies error.type permission_error as AuthenticationFailed (403 identity/authz), not retryable (R1-M1)', () => {
+    // A 403 is identity/authorization (account access / IAM permission), not
+    // billing — it lands on the `auth` failover class uniformly with the other
+    // arms. billing_error above keeps InsufficientQuota (Anthropic's quota channel).
+    const err = anthropicApiError(403, 'permission_error', 'no permission')
+    const c = provider.classifyError(err)
+    expect(c.code).toBe(LlmErrorCode.AuthenticationFailed)
+    expect(c.retryable).toBe(false)
+    expect(c.providerCode).toBe('permission_error')
+    expect(c.message).toBe('no permission')
   })
 
   it("reclassifies 400 with 'credit balance is too low' as InsufficientQuota", () => {
@@ -47,6 +98,18 @@ describe('ClaudeProvider.classifyError', () => {
       error: { type: 'invalid_request_error', message: 'messages.0.role: Field required' },
     }
     expect(provider.classifyError(err).code).toBe(LlmErrorCode.ApiCallFailed)
+  })
+
+  it('surfaces the inner modeled type as providerCode for an unmapped enveloped error (R1-L1)', () => {
+    // Derived from the real SDK constructor: `.error` is the FULL envelope, so a
+    // fallthrough that reads the outer level gets the constant 'error' instead of
+    // the real modeled type. invalid_request_error is not in the byType switch, so
+    // it falls through to the shared HTTP classifier.
+    const err = anthropicApiError(400, 'invalid_request_error', 'messages.0.role: Field required')
+    const c = provider.classifyError(err)
+    expect(c.code).toBe(LlmErrorCode.ApiCallFailed)
+    expect(c.providerCode).toBe('invalid_request_error')
+    expect(c.providerCode).not.toBe('error')
   })
 
   it('falls back to unknown for plain Error', () => {

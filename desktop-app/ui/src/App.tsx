@@ -11,13 +11,35 @@ import {
 } from '@contexts/index'
 import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
+import { ChatLocalSearch } from '@components/ChatLocalSearch'
+import { ChatViewWorkspace } from '@components/ChatViewWorkspace'
+import { CommandPalette } from '@components/CommandPalette'
 import { Button, ToastStack } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
+import { GfsImagePreview } from '@components/GfsImagePreview'
+import { PluginConsentModal } from '@components/PluginConsentModal'
+import type { PluginConsentRequest } from '@components/PluginConsentModal/types'
 import { SidebarNav } from '@components/SidebarNav'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
+import type { ChatLocalMatch } from '@lib/chatLocalSearch'
+import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
+import {
+  activeChatViewTab,
+  addBlankChatViewTab,
+  closeChatViewTab,
+  createChatViewTabsState,
+  cycleChatViewTab,
+  focusBlankChatViewTab,
+  openPersistedChatViewTab,
+  selectChatViewTab,
+  selectChatViewTabAt,
+  selectLastChatViewTab,
+} from '@lib/chatViewTabs'
+import type { ChatViewTab } from '@lib/chatViewTabs.types'
+import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import {
   canProcessSandboxUiDeepLinks,
   resolveSandboxUiDeepLinkApp,
@@ -33,6 +55,7 @@ import {
   deferPendingSandboxUiDeepLink,
   enqueuePendingSandboxUiDeepLink,
   failPendingSandboxUiDeepLink,
+  findPendingSandboxUiDeepLinkAwaitingConfirmation,
   isPendingSandboxUiDeepLinkAwaitingConfirmation,
   isPendingSandboxUiDeepLinkStale,
   removePendingSandboxUiDeepLink,
@@ -58,6 +81,12 @@ import { UnavailablePage } from '@pages/UnavailablePage'
 import { WorkflowsPage } from '@pages/WorkflowsPage'
 import type { PendingSandboxUiDeepLink, SandboxUiDeepLinkEnvelope } from '@/App.types'
 import type { ActiveSandboxUiApp, NavItem, ThemeMode } from '@/uiTypes'
+import {
+  type DesktopCommandId,
+  getDesktopCommand,
+  isDesktopCommandEligible,
+  platformFromNavigator,
+} from '../../src/desktopCommands'
 
 type PendingSandboxUiDeepLinkLaunch = {
   linkId: number
@@ -67,6 +96,67 @@ type PendingSandboxUiDeepLinkLaunch = {
   linkTeamId?: string
   switchedTeam: boolean
   conversationOrigin: SandboxUiConversationOrigin | null
+}
+
+const TRANSIENT_TEAM_CONTEXT_ERROR_CODES = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'EPIPE',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+])
+
+const SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE =
+  'App link paused because you switched teams. Retry to open it from the current team, or dismiss it.'
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error || 'Unknown error')
+}
+
+function hasBlockingDesktopDialog(): boolean {
+  return Boolean(
+    document.querySelector('[role="dialog"][aria-modal="true"], .da-plugin-consent[role="dialog"]')
+  )
+}
+
+function errorCode(error: unknown): string {
+  if (!error || typeof error !== 'object') return ''
+  const record = error as { code?: unknown; cause?: { code?: unknown } }
+  return String(record.code || record.cause?.code || '').toUpperCase()
+}
+
+function isTransientSandboxUiTeamContextError(error: unknown): boolean {
+  const message = errorMessage(error).toLowerCase()
+  if (
+    /\b(400|401|403|404)\b/.test(message) ||
+    message.includes('access denied') ||
+    message.includes('authenticat') ||
+    message.includes('forbidden') ||
+    message.includes('not a member') ||
+    message.includes('permission') ||
+    message.includes('select a team') ||
+    message.includes('teamid is required') ||
+    message.includes('validation')
+  ) {
+    return false
+  }
+
+  const code = errorCode(error)
+  if (TRANSIENT_TEAM_CONTEXT_ERROR_CODES.has(code)) return true
+
+  return (
+    message.includes('connection refused') ||
+    message.includes('connection reset') ||
+    message.includes('fetch failed') ||
+    message.includes('network error') ||
+    message.includes('socket hang up') ||
+    message.includes('temporarily unavailable') ||
+    message.includes('timed out') ||
+    message.includes('timeout')
+  )
 }
 
 function getInitialThemeMode(): ThemeMode {
@@ -158,6 +248,7 @@ export function App() {
   const [activeSandboxUiApp, setActiveSandboxUiApp] = React.useState<ActiveSandboxUiApp | null>(
     null
   )
+  const [sandboxUiMounted, setSandboxUiMounted] = React.useState(false)
   const [sandboxUiConversationOrigin, setSandboxUiConversationOrigin] =
     React.useState<SandboxUiConversationOrigin | null>(null)
   const [sidebarSettingsMenuOpen, setSidebarSettingsMenuOpen] = React.useState(false)
@@ -172,14 +263,138 @@ export function App() {
     PendingSandboxUiDeepLink[]
   >([])
   const [sandboxUiDeepLinkRetryTick, setSandboxUiDeepLinkRetryTick] = React.useState(0)
+  const nextChatTabSequenceRef = React.useRef(2)
+  const [chatViewTabs, setChatViewTabs] = React.useState(() =>
+    createChatViewTabsState('chat-tab-1')
+  )
+  const chatViewTabsRef = React.useRef(chatViewTabs)
+  const [composerFocusRequestId, setComposerFocusRequestId] = React.useState(0)
+  const [globalSearchFocusRequestId, setGlobalSearchFocusRequestId] = React.useState(0)
+  const [notificationOpenRequestId, setNotificationOpenRequestId] = React.useState(0)
+  const [sidebarToggleRequestId, setSidebarToggleRequestId] = React.useState(0)
+  const [chatLocalSearchOpen, setChatLocalSearchOpen] = React.useState(false)
+  const [chatLocalSearchState, setChatLocalSearchState] = React.useState<{
+    query: string
+    currentMatch: ChatLocalMatch | null
+  }>({ query: '', currentMatch: null })
+  const [sandboxLocalSearchRequestId, setSandboxLocalSearchRequestId] = React.useState(0)
+  const [sandboxActionRequest, setSandboxActionRequest] = React.useState<{
+    id: number
+    action: 'refresh' | 'back-to-apps' | 'back-to-conversation'
+  } | null>(null)
+  const [commandPaletteOpen, setCommandPaletteOpen] = React.useState(false)
+  const [commandPaletteReturnToSandbox, setCommandPaletteReturnToSandbox] = React.useState(false)
+  const [settingsShortcutsRequestId, setSettingsShortcutsRequestId] = React.useState(0)
+  const chatLocalSearchPreviousFocusRef = React.useRef<HTMLElement | null>(null)
   const contentPanelRef = React.useRef<HTMLElement | null>(null)
   const activeConversationOriginRef = React.useRef<SandboxUiConversationOrigin | null>(null)
   const processingSandboxUiDeepLinkIdRef = React.useRef<number | null>(null)
   const launchingSandboxUiDeepLinkRef = React.useRef<PendingSandboxUiDeepLinkLaunch | null>(null)
   const pendingSandboxUiDeepLinksRef = React.useRef<PendingSandboxUiDeepLink[]>([])
+  const sandboxUiDeepLinkRestoreTeamByIdRef = React.useRef(new Map<number, string>())
   const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
   const sandboxUiShortcutOpenRequestIdRef = React.useRef(0)
+  chatViewTabsRef.current = chatViewTabs
+
+  const nextChatTabId = React.useCallback(() => `chat-tab-${nextChatTabSequenceRef.current++}`, [])
+
+  const leaveSandboxForChat = React.useCallback(() => {
+    setActiveSandboxUiApp(null)
+    setSandboxUiMounted(false)
+    setSandboxUiConversationOrigin(null)
+    setHeaderShellOverlayOpen(false)
+    setSidebarSettingsMenuOpen(false)
+  }, [])
+
+  const revealChatViewTab = React.useCallback(
+    (tab: ChatViewTab) => {
+      leaveSandboxForChat()
+      if (tab.agentRef) {
+        vm.handleSelectChatAgent(
+          tab.agentRef,
+          tab.chatId
+            ? { chatId: tab.chatId, title: tab.title, selectLatest: false }
+            : { selectLatest: false }
+        )
+      } else {
+        vm.handleNavSelect(DESKTOP_ROUTES.chat)
+      }
+    },
+    [leaveSandboxForChat, vm.handleNavSelect, vm.handleSelectChatAgent]
+  )
+
+  const handleSelectChatViewTab = React.useCallback(
+    (id: string) => {
+      const state = selectChatViewTab(chatViewTabsRef.current, id)
+      if (state === chatViewTabsRef.current) return
+      setChatViewTabs(state)
+      revealChatViewTab(activeChatViewTab(state))
+    },
+    [revealChatViewTab]
+  )
+
+  const handleCloseChatViewTab = React.useCallback(
+    (id: string) => {
+      const current = chatViewTabsRef.current
+      const wasActive = current.activeTabId === id
+      const next = closeChatViewTab(current, id, nextChatTabId())
+      if (next === current) return
+      setChatViewTabs(next)
+      if (wasActive) revealChatViewTab(activeChatViewTab(next))
+    },
+    [nextChatTabId, revealChatViewTab]
+  )
+
+  const handleNewChatViewTab = React.useCallback(() => {
+    const next = addBlankChatViewTab(chatViewTabsRef.current, nextChatTabId(), vm.selectedAgent)
+    setChatViewTabs(next)
+    revealChatViewTab(activeChatViewTab(next))
+    setComposerFocusRequestId(value => value + 1)
+  }, [nextChatTabId, revealChatViewTab, vm.selectedAgent])
+
+  const closeChatLocalSearch = React.useCallback((restoreFocus = true) => {
+    setChatLocalSearchOpen(false)
+    setChatLocalSearchState({ query: '', currentMatch: null })
+    if (!restoreFocus) return
+    const previous = chatLocalSearchPreviousFocusRef.current
+    requestAnimationFrame(() => {
+      if (previous?.isConnected) previous.focus()
+    })
+  }, [])
+
+  const handleChatLocalSearchStateChange = React.useCallback(
+    (query: string, currentMatch: ChatLocalMatch | null) => {
+      setChatLocalSearchState(previous =>
+        previous.query === query &&
+        previous.currentMatch?.messageId === currentMatch?.messageId &&
+        previous.currentMatch?.occurrence === currentMatch?.occurrence
+          ? previous
+          : { query, currentMatch }
+      )
+    },
+    []
+  )
+
+  const handleSelectChatAgentWithTabs = React.useCallback(
+    (
+      agentName: string,
+      options: { selectLatest?: boolean; chatId?: string; isRemote?: boolean; title?: string } = {}
+    ) => {
+      const chatId = String(options.chatId || '').trim()
+      const next = chatId
+        ? openPersistedChatViewTab(chatViewTabsRef.current, {
+            id: nextChatTabId(),
+            agentRef: agentName,
+            chatId,
+            title: options.title,
+          })
+        : focusBlankChatViewTab(chatViewTabsRef.current, nextChatTabId(), agentName)
+      setChatViewTabs(next)
+      vm.handleSelectChatAgent(agentName, options)
+    },
+    [nextChatTabId, vm.handleSelectChatAgent]
+  )
   const bootSplashLoading = vm.booting || vm.initialExperienceLoading
   const isAgentChatView =
     (vm.navItem === DESKTOP_ROUTES.agents && Boolean(vm.selectedAgent)) ||
@@ -211,6 +426,78 @@ export function App() {
   ])
   activeConversationOriginRef.current = activeConversationOrigin
 
+  /**
+   * Plugin permission prompts (spec §9). Main hides the plugin's
+   * `WebContentsView` before pushing the request and restores it once the user
+   * answers, so the plugin can neither fake the prompt nor paint over it. The
+   * prompt is centered over — and its backdrop scoped to — the plugin's embed
+   * rect, not the whole window; the rest of the trusted app chrome stays visible.
+   */
+  const [pluginConsentPrompt, setPluginConsentPrompt] = React.useState<PluginConsentRequest | null>(
+    null
+  )
+
+  React.useEffect(() => {
+    const offRequested = window.clerum.pluginSdk?.onConsentRequested?.(request => {
+      setPluginConsentPrompt(request)
+    })
+    const offCancelled = window.clerum.pluginSdk?.onConsentCancelled?.(({ promptId }) => {
+      // Main withdrew the prompt (timeout, or the plugin was closed under it).
+      setPluginConsentPrompt(current => (current?.promptId === promptId ? null : current))
+    })
+    return () => {
+      offRequested?.()
+      offCancelled?.()
+    }
+  }, [])
+
+  /**
+   * A plugin asked to show a shared file — either through `clerum.gfs.open()` or
+   * by the user activating a `gfs://` link it rendered. Main has already
+   * resolved it with the user's session, so this only decides where it goes:
+   * images get a preview over the plugin, everything else hands off to Files.
+   */
+  const [pluginGfsPreview, setPluginGfsPreview] = React.useState<{
+    gfsUri: string
+    name: string
+    bytes: number
+    mimeType: string
+  } | null>(null)
+  const [pendingGfsUri, setPendingGfsUri] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    const off = window.clerum.pluginSdk?.onOpenGfsResource?.(resource => {
+      const mimeType = resource.kind === 'file' ? gfsImagePreviewMimeType(resource.name) : null
+      if (mimeType) {
+        // The embed's WebContentsView paints above renderer DOM, so it has to be
+        // hidden for the overlay to be visible at all.
+        void window.clerum.sandboxUi.setVisible(false).catch(() => undefined)
+        setPluginGfsPreview({
+          gfsUri: resource.gfsUri,
+          name: resource.name,
+          bytes: resource.bytes ?? 0,
+          mimeType,
+        })
+        return
+      }
+      // Folders and non-previewable files belong in the full browser, where the
+      // user gets breadcrumbs, download, and sharing.
+      setPendingGfsUri(resource.gfsUri)
+      vm.handleNavSelect(DESKTOP_ROUTES.files)
+    })
+    return () => off?.()
+  }, [vm.handleNavSelect])
+
+  const closePluginGfsPreview = React.useCallback(() => {
+    setPluginGfsPreview(null)
+    void window.clerum.sandboxUi.setVisible(true).catch(() => undefined)
+  }, [])
+
+  const resolvePluginConsent = React.useCallback((promptId: string, allowed: string[]) => {
+    setPluginConsentPrompt(current => (current?.promptId === promptId ? null : current))
+    void window.clerum.pluginSdk?.resolveConsent?.(promptId, allowed)?.catch?.(() => undefined)
+  }, [])
+
   React.useEffect(() => {
     document.documentElement.setAttribute('data-theme', themeMode)
     try {
@@ -218,6 +505,11 @@ export function App() {
     } catch {
       // Ignore storage failures in restricted environments.
     }
+    // Mirror into the main process so `theme.read` and the `theme.changed`
+    // event can answer for plugin embeds, which have no access to this
+    // renderer's localStorage. The renderer stays the writer; main only keeps
+    // the last value it was told.
+    void window.clerum.pluginSdk?.setTheme?.(themeMode)?.catch?.(() => undefined)
   }, [themeMode])
 
   React.useEffect(() => {
@@ -275,6 +567,7 @@ export function App() {
     setPendingSandboxUiDeepLinks([])
     processingSandboxUiDeepLinkIdRef.current = null
     launchingSandboxUiDeepLinkRef.current = null
+    sandboxUiDeepLinkRestoreTeamByIdRef.current.clear()
     sandboxUiDeepLinkGenerationRef.current += 1
     void window.clerum.sandboxUi.clearPendingDeepLinks().catch(error => {
       console.warn('[Desktop] Could not clear stale app deep links:', error)
@@ -282,11 +575,17 @@ export function App() {
   }, [vm.authenticatedPrincipalIdentity])
 
   const handleSandboxUiOpening = React.useCallback((app: ActiveSandboxUiApp) => {
+    setSandboxUiMounted(false)
     setActiveSandboxUiApp(app)
+  }, [])
+
+  const handleSandboxUiMounted = React.useCallback(() => {
+    setSandboxUiMounted(true)
   }, [])
 
   const handleSandboxUiClosed = React.useCallback(() => {
     setActiveSandboxUiApp(null)
+    setSandboxUiMounted(false)
     setSandboxUiConversationOrigin(null)
     setHeaderShellOverlayOpen(false)
     setSidebarSettingsMenuOpen(false)
@@ -294,6 +593,7 @@ export function App() {
 
   const handleSandboxUiRemoved = React.useCallback(() => {
     setActiveSandboxUiApp(null)
+    setSandboxUiMounted(false)
     setSandboxUiConversationOrigin(null)
     setHeaderShellOverlayOpen(false)
     setSidebarSettingsMenuOpen(false)
@@ -352,6 +652,7 @@ export function App() {
     (app: ActiveSandboxUiApp, conversationOrigin: SandboxUiConversationOrigin | null) => {
       const requestId = sandboxUiShortcutOpenRequestIdRef.current + 1
       sandboxUiShortcutOpenRequestIdRef.current = requestId
+      setSandboxUiMounted(false)
       setSandboxUiConversationOrigin(conversationOrigin)
       setActiveSandboxUiApp(app)
       vm.handleNavSelect(DESKTOP_ROUTES.apps)
@@ -406,6 +707,7 @@ export function App() {
       const next = removePendingSandboxUiDeepLink(pendingSandboxUiDeepLinksRef.current, linkId)
       setPendingSandboxUiDeepLinkState(next)
       clearSandboxUiDeepLinkProcessing(linkId)
+      sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(linkId)
       try {
         await window.clerum.sandboxUi.acknowledgeDeepLink(linkId)
       } catch (error) {
@@ -416,7 +718,11 @@ export function App() {
   )
 
   const deferSandboxUiDeepLink = React.useCallback(
-    (pending: PendingSandboxUiDeepLink, message: string, tone: 'info' | 'error' = 'error') => {
+    (
+      pending: PendingSandboxUiDeepLink,
+      message: string,
+      tone: 'info' | 'error' = 'error'
+    ): boolean => {
       clearSandboxUiDeepLinkProcessing(pending.link.id)
       if ((pending.retryCount ?? 0) >= MAX_SANDBOX_UI_DEEP_LINK_RETRY_ATTEMPTS) {
         const next = failPendingSandboxUiDeepLink(
@@ -426,7 +732,7 @@ export function App() {
         )
         setPendingSandboxUiDeepLinkState(next)
         vm.pushToast(`Could not open app link: ${message}`, 'error')
-        return
+        return true
       }
       const next = deferPendingSandboxUiDeepLink(
         pendingSandboxUiDeepLinksRef.current,
@@ -435,6 +741,7 @@ export function App() {
       )
       setPendingSandboxUiDeepLinkState(next)
       vm.pushToast(message, tone)
+      return false
     },
     [clearSandboxUiDeepLinkProcessing, setPendingSandboxUiDeepLinkState, vm.pushToast]
   )
@@ -467,6 +774,20 @@ export function App() {
       }
     },
     [vm.getCurrentTeamId, vm.handleEnsureTeamContext, vm.handleSelectChatAgent, vm.pushToast]
+  )
+
+  const deferSandboxUiDeepLinkUntilTerminal = React.useCallback(
+    async (
+      pending: PendingSandboxUiDeepLink,
+      message: string,
+      launchContext: PendingSandboxUiDeepLinkLaunch,
+      tone: 'info' | 'error' = 'error'
+    ) => {
+      if (deferSandboxUiDeepLink(pending, message, tone)) {
+        await restoreSandboxUiDeepLinkTeam(launchContext)
+      }
+    },
+    [deferSandboxUiDeepLink, restoreSandboxUiDeepLinkTeam]
   )
 
   const closeActiveSandboxUiEmbedForHandoff = React.useCallback(async () => {
@@ -530,21 +851,73 @@ export function App() {
     const processingGeneration = sandboxUiDeepLinkGenerationRef.current
 
     void (async () => {
-      const originalTeamId = vm.getCurrentTeamId()
-      let switchedTeam = false
+      const restoreTeamId = sandboxUiDeepLinkRestoreTeamByIdRef.current.get(pending.link.id)
+      const originalTeamId = restoreTeamId ?? vm.getCurrentTeamId()
+      let switchedTeam = Boolean(
+        restoreTeamId && pending.link.teamId && restoreTeamId !== pending.link.teamId
+      )
+      const currentTeamId = vm.getCurrentTeamId()
       try {
         if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
-        if (pending.link.teamId && pending.link.teamId !== vm.getCurrentTeamId()) {
+        if (
+          restoreTeamId &&
+          pending.retryCount &&
+          pending.link.teamId &&
+          currentTeamId !== pending.link.teamId
+        ) {
+          sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(pending.link.id)
+          clearSandboxUiDeepLinkProcessing(pending.link.id)
+          const next = failPendingSandboxUiDeepLink(
+            pendingSandboxUiDeepLinksRef.current,
+            pending.link.id,
+            SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE
+          )
+          setPendingSandboxUiDeepLinkState(next)
+          vm.pushToast(
+            `Could not open app link: ${SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE}`,
+            'error'
+          )
+          return
+        }
+        if (pending.link.teamId && pending.link.teamId !== currentTeamId) {
           await closeActiveSandboxUiEmbedForHandoff()
           try {
-            switchedTeam = await vm.handleEnsureTeamContext({
+            const didSwitchTeam = await vm.handleEnsureTeamContext({
               teamId: pending.link.teamId,
               announce: true,
             })
+            switchedTeam = switchedTeam || didSwitchTeam
+            if (switchedTeam && originalTeamId !== pending.link.teamId) {
+              sandboxUiDeepLinkRestoreTeamByIdRef.current.set(pending.link.id, originalTeamId)
+            }
           } catch (error) {
             switchedTeam =
-              originalTeamId !== pending.link.teamId &&
-              vm.getCurrentTeamId() === pending.link.teamId
+              switchedTeam ||
+              (originalTeamId !== pending.link.teamId &&
+                vm.getCurrentTeamId() === pending.link.teamId)
+            if (switchedTeam && originalTeamId !== pending.link.teamId) {
+              sandboxUiDeepLinkRestoreTeamByIdRef.current.set(pending.link.id, originalTeamId)
+            }
+            if (isTransientSandboxUiTeamContextError(error)) {
+              const launchContext: PendingSandboxUiDeepLinkLaunch = {
+                linkId: pending.link.id,
+                requestId: 0,
+                generation: processingGeneration,
+                originalTeamId,
+                linkTeamId: pending.link.teamId,
+                switchedTeam,
+                conversationOrigin: pending.conversationOrigin,
+              }
+              await deferSandboxUiDeepLinkUntilTerminal(
+                pending,
+                `Could not switch to the linked team yet: ${errorMessage(
+                  error
+                )}. This link will retry shortly.`,
+                launchContext,
+                'info'
+              )
+              return
+            }
             throw error
           }
         }
@@ -567,10 +940,10 @@ export function App() {
             switchedTeam,
             conversationOrigin: pending.conversationOrigin,
           }
-          await restoreSandboxUiDeepLinkTeam(launchContext)
-          deferSandboxUiDeepLink(
+          await deferSandboxUiDeepLinkUntilTerminal(
             pending,
             `${resolution.label} is still starting up. This link will retry shortly.`,
+            launchContext,
             'info'
           )
           return
@@ -617,7 +990,8 @@ export function App() {
     activeSandboxUiApp,
     bootSplashLoading,
     closeActiveSandboxUiEmbedForHandoff,
-    deferSandboxUiDeepLink,
+    clearSandboxUiDeepLinkProcessing,
+    deferSandboxUiDeepLinkUntilTerminal,
     launchSandboxUiApp,
     pendingSandboxUiDeepLinks,
     restoreSandboxUiDeepLinkTeam,
@@ -628,6 +1002,7 @@ export function App() {
     vm.handleEnsureTeamContext,
     vm.isAuthenticated,
     vm.pushToast,
+    setPendingSandboxUiDeepLinkState,
   ])
 
   React.useEffect(() => {
@@ -662,64 +1037,307 @@ export function App() {
         await acknowledgeSandboxUiDeepLink(launch.linkId)
         return
       }
-      await restoreSandboxUiDeepLinkTeam(launch)
-      deferSandboxUiDeepLink(pending, result.message || 'The native app view did not mount')
+      await deferSandboxUiDeepLinkUntilTerminal(
+        pending,
+        result.message || 'The native app view did not mount',
+        launch
+      )
     },
     [
       acknowledgeSandboxUiDeepLink,
       clearSandboxUiDeepLinkProcessing,
-      deferSandboxUiDeepLink,
-      restoreSandboxUiDeepLinkTeam,
+      deferSandboxUiDeepLinkUntilTerminal,
     ]
   )
 
   React.useEffect(() => {
-    const handleNewChatShortcut = (event: KeyboardEvent) => {
-      const isNewChatShortcut =
-        event.key.toLowerCase() === 'n' &&
-        (event.metaKey || event.ctrlKey) &&
-        !event.altKey &&
-        !event.shiftKey
+    if (vm.navItem !== DESKTOP_ROUTES.chat || !vm.selectedAgent) return
+    if (!vm.activeChatId) {
+      setChatViewTabs(state =>
+        focusBlankChatViewTab(state, nextChatTabId(), vm.selectedAgent as string)
+      )
+      return
+    }
+    const conversation =
+      vm.chatList.find(chat => chat.id === vm.activeChatId) ??
+      vm.latestChatSessions.find(
+        chat => chat.agentRef === vm.selectedAgent && chat.id === vm.activeChatId
+      )
+    setChatViewTabs(state =>
+      openPersistedChatViewTab(state, {
+        id: nextChatTabId(),
+        agentRef: vm.selectedAgent as string,
+        chatId: vm.activeChatId as string,
+        title: conversation?.title,
+      })
+    )
+  }, [
+    nextChatTabId,
+    vm.activeChatId,
+    vm.chatList,
+    vm.latestChatSessions,
+    vm.navItem,
+    vm.selectedAgent,
+  ])
 
-      if (!isNewChatShortcut || event.repeat || event.defaultPrevented) return
+  React.useEffect(() => {
+    nextChatTabSequenceRef.current = 2
+    setChatViewTabs(createChatViewTabsState('chat-tab-1'))
+    setComposerFocusRequestId(0)
+    setGlobalSearchFocusRequestId(0)
+    setNotificationOpenRequestId(0)
+    setSidebarToggleRequestId(0)
+    setChatLocalSearchOpen(false)
+    setSandboxLocalSearchRequestId(0)
+    setSandboxActionRequest(null)
+    setSandboxUiMounted(false)
+    setCommandPaletteOpen(false)
+    setCommandPaletteReturnToSandbox(false)
+    setSettingsShortcutsRequestId(0)
+  }, [vm.authenticatedPrincipalIdentity])
 
-      event.preventDefault()
-      if (activeSandboxUiApp) {
-        setActiveSandboxUiApp(null)
-        setSandboxUiConversationOrigin(null)
-      }
-      setHeaderShellOverlayOpen(false)
-      setSidebarSettingsMenuOpen(false)
+  const desktopCommandContext = React.useMemo(
+    () => ({
+      tabCount: chatViewTabs.tabs.length,
+      searchableContent:
+        (vm.navItem === DESKTOP_ROUTES.apps && Boolean(activeSandboxUiApp)) ||
+        (vm.navItem === DESKTOP_ROUTES.chat && Boolean(vm.activeChatId)),
+      composerAvailable:
+        vm.navItem === DESKTOP_ROUTES.chat &&
+        Boolean(activeChatViewTab(chatViewTabs).agentRef) &&
+        vm.hostRuntimeStatus?.degraded?.reason !== 'llm_key_missing',
+      appMounted:
+        vm.navItem === DESKTOP_ROUTES.apps && Boolean(activeSandboxUiApp) && sandboxUiMounted,
+      conversationOriginAvailable:
+        vm.navItem === DESKTOP_ROUTES.apps &&
+        Boolean(activeSandboxUiApp) &&
+        sandboxUiMounted &&
+        Boolean(sandboxUiConversationOrigin),
+      applicationBusy: vm.busy,
+    }),
+    [
+      activeSandboxUiApp,
+      chatViewTabs,
+      sandboxUiConversationOrigin,
+      sandboxUiMounted,
+      vm.activeChatId,
+      vm.busy,
+      vm.hostRuntimeStatus,
+      vm.navItem,
+    ]
+  )
 
-      if (vm.selectedAgent) {
-        vm.handleSelectChatAgent(vm.selectedAgent, { selectLatest: false })
+  const isCommandEligible = React.useCallback(
+    (commandId: DesktopCommandId) =>
+      isDesktopCommandEligible(getDesktopCommand(commandId), desktopCommandContext),
+    [desktopCommandContext]
+  )
+
+  const closeCommandPalette = React.useCallback(() => {
+    const returnToSandbox = commandPaletteReturnToSandbox
+    setCommandPaletteOpen(false)
+    setCommandPaletteReturnToSandbox(false)
+    if (returnToSandbox) {
+      requestAnimationFrame(() => {
+        void window.clerum.sandboxUi.focusActive().catch(() => undefined)
+      })
+    }
+  }, [commandPaletteReturnToSandbox])
+
+  const executeDesktopCommand = React.useCallback(
+    (
+      commandId: DesktopCommandId,
+      origin: 'shortcut-host' | 'shortcut-sandbox' | 'palette' = 'shortcut-host'
+    ) => {
+      if (!vm.isAuthenticated) return
+      if (origin !== 'palette' && commandPaletteOpen) {
+        if (commandId === 'commands.open') closeCommandPalette()
         return
       }
+      const command = getDesktopCommand(commandId)
+      if (origin !== 'palette' && hasBlockingDesktopDialog()) return
+      const state = chatViewTabsRef.current
+      if (!isDesktopCommandEligible(command, desktopCommandContext)) return
+      if (commandId === 'commands.open') {
+        closeChatLocalSearch(false)
+        if (origin === 'palette') {
+          setCommandPaletteOpen(false)
+          setCommandPaletteReturnToSandbox(false)
+        } else {
+          setCommandPaletteReturnToSandbox(origin === 'shortcut-sandbox')
+          setCommandPaletteOpen(true)
+        }
+        return
+      }
+      if (origin === 'palette') {
+        setCommandPaletteOpen(false)
+        setCommandPaletteReturnToSandbox(false)
+      }
+      if (commandId === 'settings.shortcuts') {
+        closeChatLocalSearch(false)
+        setCommandPaletteOpen(false)
+        vm.handleNavSelect(DESKTOP_ROUTES.settings)
+        setSettingsShortcutsRequestId(value => value + 1)
+        return
+      }
+      if (commandId === 'settings.open') {
+        closeChatLocalSearch(false)
+        handleSidebarNavSelect(DESKTOP_ROUTES.settings)
+        return
+      }
+      if (commandId === 'auth.logout') {
+        void vm.handleLogout()
+        return
+      }
+      if (
+        commandId === 'navigate.chat' ||
+        commandId === 'navigate.apps' ||
+        commandId === 'navigate.agents'
+      ) {
+        const route =
+          commandId === 'navigate.chat'
+            ? DESKTOP_ROUTES.chat
+            : commandId === 'navigate.apps'
+              ? DESKTOP_ROUTES.apps
+              : DESKTOP_ROUTES.agents
+        handleSidebarNavSelect(route)
+        return
+      }
+      if (commandId === 'notifications.open') {
+        setNotificationOpenRequestId(value => value + 1)
+        return
+      }
+      if (
+        commandId === 'navigate.plugins' ||
+        commandId === 'navigate.contexts' ||
+        commandId === 'navigate.teams' ||
+        commandId === 'navigate.connectors' ||
+        commandId === 'navigate.files'
+      ) {
+        const routes = {
+          'navigate.plugins': DESKTOP_ROUTES.plugins,
+          'navigate.contexts': DESKTOP_ROUTES.contexts,
+          'navigate.teams': DESKTOP_ROUTES.teams,
+          'navigate.connectors': DESKTOP_ROUTES.connectors,
+          'navigate.files': DESKTOP_ROUTES.files,
+        } as const
+        handleSidebarNavSelect(routes[commandId])
+        return
+      }
+      if (commandId === 'sidebar.toggle') {
+        setSidebarToggleRequestId(value => value + 1)
+        return
+      }
+      if (
+        commandId === 'app.refresh' ||
+        commandId === 'app.backToApps' ||
+        commandId === 'app.backToConversation'
+      ) {
+        const action =
+          commandId === 'app.refresh'
+            ? 'refresh'
+            : commandId === 'app.backToApps'
+              ? 'back-to-apps'
+              : 'back-to-conversation'
+        setSandboxActionRequest(previous => ({ id: (previous?.id ?? 0) + 1, action }))
+        return
+      }
+      if (commandId === 'chat.newTab') {
+        closeChatLocalSearch(false)
+        handleNewChatViewTab()
+        return
+      }
+      if (commandId === 'chat.closeTab') {
+        closeChatLocalSearch(false)
+        handleCloseChatViewTab(state.activeTabId)
+        return
+      }
+      if (command.eligibility === 'tab-index' && command.tabIndex !== undefined) {
+        const next = selectChatViewTabAt(state, command.tabIndex)
+        if (next !== state) {
+          setChatViewTabs(next)
+          revealChatViewTab(activeChatViewTab(next))
+        }
+        return
+      }
+      if (commandId === 'tabs.selectLast') {
+        const next = selectLastChatViewTab(state)
+        setChatViewTabs(next)
+        revealChatViewTab(activeChatViewTab(next))
+        return
+      }
+      if (commandId === 'tabs.next' || commandId === 'tabs.previous') {
+        if (state.tabs.length < 2) return
+        const next = cycleChatViewTab(state, commandId === 'tabs.next' ? 'next' : 'previous')
+        setChatViewTabs(next)
+        revealChatViewTab(activeChatViewTab(next))
+        return
+      }
+      if (commandId === 'composer.focus') {
+        closeChatLocalSearch(false)
+        revealChatViewTab(activeChatViewTab(state))
+        setComposerFocusRequestId(value => value + 1)
+        return
+      }
+      if (commandId === 'search.open') {
+        closeChatLocalSearch(false)
+        setGlobalSearchFocusRequestId(value => value + 1)
+        return
+      }
+      if (commandId === 'search.current') {
+        if (activeSandboxUiApp && sandboxUiMounted && vm.navItem === DESKTOP_ROUTES.apps) {
+          closeChatLocalSearch(false)
+          setSandboxLocalSearchRequestId(value => value + 1)
+        } else if (vm.navItem === DESKTOP_ROUTES.chat && vm.activeChatId) {
+          chatLocalSearchPreviousFocusRef.current = document.activeElement as HTMLElement | null
+          setChatLocalSearchOpen(true)
+        }
+      }
+    },
+    [
+      activeSandboxUiApp,
+      closeChatLocalSearch,
+      closeCommandPalette,
+      commandPaletteOpen,
+      desktopCommandContext,
+      handleCloseChatViewTab,
+      handleNewChatViewTab,
+      handleSidebarNavSelect,
+      revealChatViewTab,
+      sandboxUiMounted,
+      vm.activeChatId,
+      vm.handleNavSelect,
+      vm.handleLogout,
+      vm.isAuthenticated,
+      vm.navItem,
+    ]
+  )
 
-      vm.handleNavSelect(DESKTOP_ROUTES.chat)
-    }
-
-    window.addEventListener('keydown', handleNewChatShortcut)
-    return () => window.removeEventListener('keydown', handleNewChatShortcut)
-  }, [activeSandboxUiApp, vm.handleNavSelect, vm.handleSelectChatAgent, vm.selectedAgent])
+  React.useEffect(() => {
+    if (!window.clerum.shortcuts) return undefined
+    return window.clerum.shortcuts.onCommand((commandId, source) =>
+      executeDesktopCommand(commandId, source === 'sandbox' ? 'shortcut-sandbox' : 'shortcut-host')
+    )
+  }, [executeDesktopCommand])
 
   const sandboxUiBoundsRefreshKey = `${sidebarCollapsed ? 'collapsed' : 'expanded'}:${
     appNotificationDrawerOpen ? 'notification-drawer-open' : 'notification-drawer-closed'
   }`
 
-  const pendingSandboxUiConfirmation = vm.authenticatedPrincipalIdentity
-    ? pendingSandboxUiDeepLinks.find(item =>
-        isPendingSandboxUiDeepLinkAwaitingConfirmation(item, vm.authenticatedPrincipalIdentity)
-      )
-    : null
+  const pendingSandboxUiConfirmation =
+    findPendingSandboxUiDeepLinkAwaitingConfirmation(
+      pendingSandboxUiDeepLinks,
+      vm.authenticatedPrincipalIdentity
+    ) ?? null
   const failedSandboxUiDeepLink = vm.authenticatedPrincipalIdentity
     ? pendingSandboxUiDeepLinks.find(item => item.failedMessage)
     : null
 
   const handleConfirmSandboxUiDeepLink = React.useCallback(() => {
     const identity = vm.authenticatedPrincipalIdentity
-    const pending = pendingSandboxUiDeepLinksRef.current.find(item =>
-      identity ? isPendingSandboxUiDeepLinkAwaitingConfirmation(item, identity) : false
+    const pending = findPendingSandboxUiDeepLinkAwaitingConfirmation(
+      pendingSandboxUiDeepLinksRef.current,
+      identity
     )
     if (!identity || !pending) return
     const next = confirmPendingSandboxUiDeepLink(
@@ -732,8 +1350,9 @@ export function App() {
 
   const handleDismissSandboxUiDeepLink = React.useCallback(() => {
     const identity = vm.authenticatedPrincipalIdentity
-    const pending = pendingSandboxUiDeepLinksRef.current.find(item =>
-      identity ? isPendingSandboxUiDeepLinkAwaitingConfirmation(item, identity) : false
+    const pending = findPendingSandboxUiDeepLinkAwaitingConfirmation(
+      pendingSandboxUiDeepLinksRef.current,
+      identity
     )
     if (!pending) return
     void acknowledgeSandboxUiDeepLink(pending.link.id)
@@ -803,6 +1422,7 @@ export function App() {
       runtimeConfigState: vm.runtimeConfigState,
       desktopReleaseStatus: vm.desktopReleaseStatus,
       pendingDesktopEnvironmentSetup: vm.pendingDesktopEnvironmentSetup,
+      backendSwitchHint: vm.backendSwitchHint,
       runtimeConfigMissing: vm.runtimeConfigMissing,
       showRuntimeConfigSelector: vm.showRuntimeConfigSelector,
       dependencyHealth: vm.dependencyHealth,
@@ -819,6 +1439,7 @@ export function App() {
       setStatus: vm.setStatus,
       loadSession: vm.loadSession,
       handlePasswordLogin: vm.handlePasswordLogin,
+      handleSwitchLoginBackend: vm.handleSwitchLoginBackend,
       handleStartDesktopSetup: vm.handleStartDesktopSetup,
       handleCompleteDesktopSetup: vm.handleCompleteDesktopSetup,
       handleSaveRuntimeConfig: vm.handleSaveRuntimeConfig,
@@ -832,6 +1453,7 @@ export function App() {
     }),
     [
       vm.authTransitioning,
+      vm.backendSwitchHint,
       vm.booting,
       vm.busy,
       vm.dependencyHealth,
@@ -848,6 +1470,7 @@ export function App() {
       vm.handleLogout,
       vm.handleOpenDesktopRelease,
       vm.handlePasswordLogin,
+      vm.handleSwitchLoginBackend,
       vm.handleSaveRuntimeConfig,
       vm.handleSelectRuntimeConfig,
       vm.handleStartDesktopSetup,
@@ -887,7 +1510,7 @@ export function App() {
       selectedTeam: vm.selectedTeam,
       handleNavSelect: vm.handleNavSelect,
       handleOpenAgentWorkspace: vm.handleOpenAgentWorkspace,
-      handleSelectChatAgent: vm.handleSelectChatAgent,
+      handleSelectChatAgent: handleSelectChatAgentWithTabs,
       handleBackToAgents: vm.handleBackToAgents,
       handleOpenContextDetails: vm.handleOpenContextDetails,
       handleBackToContexts: vm.handleBackToContexts,
@@ -902,7 +1525,7 @@ export function App() {
       vm.handleOpenAgentWorkspace,
       vm.handleOpenContextDetails,
       vm.handleOpenTeamDetails,
-      vm.handleSelectChatAgent,
+      handleSelectChatAgentWithTabs,
       vm.navItem,
       vm.selectedAgent,
       vm.selectedAgentRoute,
@@ -1004,6 +1627,7 @@ export function App() {
       agentError: vm.agentError,
       failedAgentSend: vm.failedAgentSend,
       activeMessageCount: vm.activeMessages.length,
+      composerFocusRequestId,
     }),
     [
       vm.activeChatId,
@@ -1013,7 +1637,13 @@ export function App() {
       vm.agentError,
       vm.failedAgentSend,
       vm.activeMessages.length,
+      composerFocusRequestId,
     ]
+  )
+
+  const chatSemanticModels = React.useMemo(
+    () => buildLoadedChatSemanticModels(vm.activeMessages),
+    [vm.activeMessages]
   )
 
   const chatThreadStateValue = React.useMemo(
@@ -1027,6 +1657,11 @@ export function App() {
       handleLoadOlderMessages: vm.handleLoadOlderMessages,
       activityByMessageId: vm.activityByMessageId,
       progressByMessageId: vm.progressByMessageId,
+      localSearchQuery: chatLocalSearchOpen ? chatLocalSearchState.query : '',
+      localSearchCurrentMatch: chatLocalSearchOpen ? chatLocalSearchState.currentMatch : null,
+      semanticModelsByMessageId: new Map(
+        chatSemanticModels.map(model => [model.messageId, model] as const)
+      ),
     }),
     [
       vm.activeChatId,
@@ -1038,6 +1673,9 @@ export function App() {
       vm.handleLoadOlderMessages,
       vm.activityByMessageId,
       vm.progressByMessageId,
+      chatLocalSearchOpen,
+      chatLocalSearchState,
+      chatSemanticModels,
     ]
   )
 
@@ -1165,9 +1803,11 @@ export function App() {
                             availableSandboxUiApps={availableSandboxUiApps}
                             collapsed={sidebarCollapsed}
                             onCollapsedChange={setSidebarCollapsed}
+                            onNewChat={handleNewChatViewTab}
                             onOpenSandboxUiApp={handleOpenSandboxUiApp}
                             onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
                             onSelect={handleSidebarNavSelect}
+                            toggleRequestId={sidebarToggleRequestId}
                           />
                           <section className="workspace-layout">
                             <section
@@ -1181,6 +1821,8 @@ export function App() {
                               }`}
                             >
                               <AppHeader
+                                searchFocusRequestId={globalSearchFocusRequestId}
+                                notificationOpenRequestId={notificationOpenRequestId}
                                 notificationTrayMode={
                                   notificationTrayUsesDrawer ? 'drawer' : 'overlay'
                                 }
@@ -1190,14 +1832,35 @@ export function App() {
                               />
                               <ToastStack items={vm.toasts} />
                               {vm.navItem === DESKTOP_ROUTES.chat && (
-                                <ChatPage scrollContainerRef={contentPanelRef} />
+                                <ChatViewWorkspace
+                                  activeTabId={chatViewTabs.activeTabId}
+                                  localSearch={
+                                    chatLocalSearchOpen ? (
+                                      <ChatLocalSearch
+                                        models={chatSemanticModels}
+                                        onClose={closeChatLocalSearch}
+                                        onSearchStateChange={handleChatLocalSearchStateChange}
+                                      />
+                                    ) : null
+                                  }
+                                  onClose={handleCloseChatViewTab}
+                                  onSelect={handleSelectChatViewTab}
+                                  surfaceId="chat-view-panel"
+                                  tabs={chatViewTabs.tabs}
+                                >
+                                  <ChatPage scrollContainerRef={contentPanelRef} />
+                                </ChatViewWorkspace>
                               )}
                               {vm.navItem === DESKTOP_ROUTES.agents && (
                                 <AgentsPage scrollContainerRef={contentPanelRef} />
                               )}
                               {vm.navItem === DESKTOP_ROUTES.contexts && <ContextsPage />}
                               {vm.navItem === DESKTOP_ROUTES.files && (
-                                <FilesPage pushToast={vm.pushToast} />
+                                <FilesPage
+                                  pushToast={vm.pushToast}
+                                  pendingGfsUri={pendingGfsUri}
+                                  onPendingGfsUriHandled={() => setPendingGfsUri(null)}
+                                />
                               )}
                               {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
                               {vm.navItem === DESKTOP_ROUTES.contextDetails && (
@@ -1207,15 +1870,20 @@ export function App() {
                               {vm.navItem === DESKTOP_ROUTES.apps && (
                                 <SandboxUiPage
                                   boundsRefreshKey={sandboxUiBoundsRefreshKey}
+                                  actionRequest={sandboxActionRequest}
                                   conversationOrigin={sandboxUiConversationOrigin}
                                   currentTeamId={vm.currentTeamId}
-                                  headerShellOverlayOpen={headerShellOverlayOpen}
+                                  headerShellOverlayOpen={
+                                    headerShellOverlayOpen || commandPaletteOpen
+                                  }
                                   sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
                                   toastShellOverlayOpen={vm.toasts.length > 0}
                                   shortcutApp={activeSandboxUiApp}
                                   shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
+                                  localSearchRequestId={sandboxLocalSearchRequestId}
                                   onBackToConversation={handleSandboxUiBackToConversation}
                                   onEmbeddedAppOpening={handleSandboxUiOpening}
+                                  onEmbeddedAppMounted={handleSandboxUiMounted}
                                   onEmbeddedAppBack={handleSandboxUiClosed}
                                   onEmbeddedAppRemoved={handleSandboxUiRemoved}
                                   onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
@@ -1225,6 +1893,7 @@ export function App() {
                               )}
                               {vm.navItem === DESKTOP_ROUTES.settings && (
                                 <SettingsPage
+                                  shortcutsFocusRequestId={settingsShortcutsRequestId}
                                   notificationSettings={vm.notificationSettings}
                                   desktopNotificationPermission={vm.desktopNotificationPermission}
                                   themeMode={themeMode}
@@ -1250,10 +1919,34 @@ export function App() {
                             </section>
                           </section>
                         </main>
+                        {commandPaletteOpen ? (
+                          <CommandPalette
+                            platform={platformFromNavigator(navigator.platform)}
+                            isEligible={isCommandEligible}
+                            onClose={closeCommandPalette}
+                            onExecute={commandId => executeDesktopCommand(commandId, 'palette')}
+                            restorePreviousFocus={!commandPaletteReturnToSandbox}
+                          />
+                        ) : null}
                         {desktopUpdateRequiredDialog}
                         {environmentSetupConfirmationDialog}
                         {environmentSetupSuccessDialog}
                         {sandboxUiDeepLinkDialog}
+                        {pluginConsentPrompt ? (
+                          <PluginConsentModal
+                            request={pluginConsentPrompt}
+                            onResolve={resolvePluginConsent}
+                          />
+                        ) : null}
+                        {pluginGfsPreview ? (
+                          <GfsImagePreview
+                            byteLength={pluginGfsPreview.bytes}
+                            fileName={pluginGfsPreview.name}
+                            gfsUri={pluginGfsPreview.gfsUri}
+                            mimeType={pluginGfsPreview.mimeType}
+                            onClose={closePluginGfsPreview}
+                          />
+                        ) : null}
                       </DesktopStateProvider>
                     </McpRuntimeProvider>
                   </AgentChatProviders>

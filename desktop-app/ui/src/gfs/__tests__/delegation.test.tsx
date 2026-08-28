@@ -7,8 +7,12 @@ import { GfsDelegationPanel } from '../delegation'
  * P4-S07 — Desktop delegation panel (renderer). Affordance-driven: it only SHOWS
  * controls the caller can exercise. Covers the user-type journey at the UI layer
  * (plain reader vs folder owner) and proves no-escalation is reflected (only the
- * caller's own bits are offered) while enforcement stays server-side.
+ * caller's own bits are offered) while enforcement stays server-side. People,
+ * teams, and the caller's own agents share a single picker; a host in the
+ * selection caps the whole bulk grant to read/write.
  */
+
+const PICKER_LABEL = 'Add people, teams, or agents'
 
 afterEach(cleanup)
 
@@ -18,6 +22,7 @@ describe('GfsDelegationPanel', () => {
       <GfsDelegationPanel
         affordances={{ canDelegate: false, grantableBits: [], canCreateShare: false }}
         subjectOptions={[]}
+        isDirectory={false}
         onGrant={vi.fn()}
       />
     )
@@ -37,6 +42,7 @@ describe('GfsDelegationPanel', () => {
         subjectOptions={[
           { type: 'user', id: 'u2', label: 'Delegate User', description: 'test2@clerum.io' },
         ]}
+        isDirectory={false}
         onGrant={onGrant}
       />
     )
@@ -47,24 +53,42 @@ describe('GfsDelegationPanel', () => {
     expect(screen.queryByRole('menuitemcheckbox', { name: 'Edit' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Create share' })).toBeNull()
 
-    fireEvent.focus(screen.getByRole('combobox', { name: 'Add people or teams' }))
+    fireEvent.focus(screen.getByRole('combobox', { name: PICKER_LABEL }))
     fireEvent.click(screen.getByRole('option', { name: /Delegate User/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
 
-    await waitFor(() => expect(onGrant).toHaveBeenCalledWith(['user:u2'], ['read']))
+    // Files never send inherit.
+    await waitFor(() => expect(onGrant).toHaveBeenCalledWith(['user:u2'], ['read'], false))
   })
 
-  it('shows Create share only when the caller holds the share bit', () => {
+  it('registers Create share only when the caller holds the share bit', async () => {
     const onCreateShare = vi.fn().mockResolvedValue(undefined)
+    let createShareAction: (() => void) | null = null
+    let createShareDisabled = true
     render(
       <GfsDelegationPanel
         affordances={{ canDelegate: true, grantableBits: ['read', 'share'], canCreateShare: true }}
         subjectOptions={[{ type: 'team', id: 'team-1', label: 'Core Team', description: 'member' }]}
+        isDirectory={false}
         onGrant={vi.fn()}
         onCreateShare={onCreateShare}
+        onCreateShareActionChange={(action, disabled) => {
+          createShareAction = action
+          createShareDisabled = disabled
+        }}
       />
     )
-    expect(screen.getByRole('button', { name: 'Create share' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Create share' })).toBeNull()
+    expect(createShareDisabled).toBe(true)
+
+    fireEvent.focus(screen.getByRole('combobox', { name: PICKER_LABEL }))
+    fireEvent.click(screen.getByRole('option', { name: /Core Team/ }))
+    await waitFor(() => {
+      expect(createShareDisabled).toBe(false)
+      expect(createShareAction).not.toBeNull()
+    })
+    createShareAction?.()
+    await waitFor(() => expect(onCreateShare).toHaveBeenCalledWith(['team:team-1']))
   })
 
   it('surfaces a server no-escalation rejection mapped to its human message (fail-loud)', async () => {
@@ -75,10 +99,11 @@ describe('GfsDelegationPanel', () => {
         subjectOptions={[
           { type: 'user', id: 'u2', label: 'Delegate User', description: 'test2@clerum.io' },
         ]}
+        isDirectory={false}
         onGrant={onGrant}
       />
     )
-    fireEvent.focus(screen.getByRole('combobox', { name: 'Add people or teams' }))
+    fireEvent.focus(screen.getByRole('combobox', { name: PICKER_LABEL }))
     fireEvent.click(screen.getByRole('option', { name: /Delegate User/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
 
@@ -92,35 +117,35 @@ describe('GfsDelegationPanel', () => {
       <GfsDelegationPanel
         affordances={{ canDelegate: true, grantableBits: ['read'], canCreateShare: false }}
         subjectOptions={[]}
+        isDirectory={false}
         onGrant={vi.fn()}
       />
     )
 
-    expect(screen.getByRole('combobox', { name: 'Add people or teams' })).toHaveProperty(
-      'tagName',
-      'INPUT'
-    )
+    expect(screen.getByRole('combobox', { name: PICKER_LABEL })).toHaveProperty('tagName', 'INPUT')
     expect(screen.getByRole('button', { name: 'Grant access' })).toHaveProperty('disabled', true)
     expect(screen.queryByPlaceholderText(/uuid/i)).toBeNull()
   })
 
-  it('exposes user and team options together without privileged subject types', () => {
+  it('exposes user, team, and agent options together without privileged subject types', () => {
     render(
       <GfsDelegationPanel
         affordances={{ canDelegate: true, grantableBits: ['read'], canCreateShare: false }}
         subjectOptions={[
           { type: 'user', id: 'u2', label: 'Delegate User' },
           { type: 'team', id: 'team-1', label: 'Core Team' },
+          { type: 'host', id: '1st:mcp-host/chatllm', label: 'chatllm', badge: 'Agent' },
         ]}
+        isDirectory={false}
         onGrant={vi.fn()}
       />
     )
 
-    fireEvent.focus(screen.getByRole('combobox', { name: 'Add people or teams' }))
+    fireEvent.focus(screen.getByRole('combobox', { name: PICKER_LABEL }))
     expect(screen.getByRole('option', { name: /Delegate User/ })).toBeTruthy()
     expect(screen.getByRole('option', { name: /Core Team/ })).toBeTruthy()
+    expect(screen.getByRole('option', { name: /chatllm/ })).toBeTruthy()
     expect(screen.queryByText('Operator')).toBeNull()
-    expect(screen.queryByText('Host')).toBeNull()
     expect(screen.queryByText('Context')).toBeNull()
   })
 
@@ -135,11 +160,12 @@ describe('GfsDelegationPanel', () => {
           { type: 'user', id: 'successful', label: 'Successful User' },
           { type: 'team', id: 'blocked', label: 'Blocked Team' },
         ]}
+        isDirectory={false}
         onGrant={onGrant}
       />
     )
 
-    const picker = screen.getByRole('combobox', { name: 'Add people or teams' })
+    const picker = screen.getByRole('combobox', { name: PICKER_LABEL })
     fireEvent.focus(picker)
     fireEvent.click(screen.getByRole('option', { name: /Successful User/ }))
     fireEvent.click(screen.getByRole('option', { name: /Blocked Team/ }))
@@ -147,8 +173,88 @@ describe('GfsDelegationPanel', () => {
 
     await screen.findByText('Some selected subjects are invalid and were rejected.')
     expect(onGrant).toHaveBeenCalledTimes(1)
-    expect(onGrant).toHaveBeenCalledWith(['user:successful', 'team:blocked'], ['read'])
+    expect(onGrant).toHaveBeenCalledWith(['user:successful', 'team:blocked'], ['read'], false)
     expect(screen.getByRole('button', { name: 'Remove Successful User' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Remove Blocked Team' })).toBeTruthy()
+  })
+
+  it('caps the whole grant to read/write when an agent is selected and strips incompatible bits', async () => {
+    const onGrant = vi.fn().mockResolvedValue(undefined)
+    render(
+      <GfsDelegationPanel
+        affordances={{
+          canDelegate: true,
+          grantableBits: ['read', 'write', 'manage_acl'],
+          canCreateShare: true,
+        }}
+        subjectOptions={[
+          { type: 'host', id: '1st:mcp-host/chatllm', label: 'chatllm', badge: 'Agent' },
+        ]}
+        isDirectory={false}
+        onGrant={onGrant}
+        onCreateShare={vi.fn().mockResolvedValue(undefined)}
+      />
+    )
+
+    // Hold a bit a host cannot receive, then add the host.
+    fireEvent.click(screen.getByRole('button', { name: 'Read' })) // open the dropdown
+    fireEvent.click(screen.getByRole('menuitemcheckbox', { name: 'Manage access' }))
+
+    fireEvent.focus(screen.getByRole('combobox', { name: PICKER_LABEL }))
+    fireEvent.click(screen.getByRole('option', { name: /chatllm/ }))
+
+    // Hint explains the cap; manage_acl has been stripped (the trigger summary
+    // is back to a single bit, not "2 permissions") and hosts can't be shared to.
+    expect(screen.getByText(/limited to read and write/i)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Read' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /2 permissions/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Create share' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
+    await waitFor(() =>
+      expect(onGrant).toHaveBeenCalledWith(['host:1st:mcp-host/chatllm'], ['read'], false)
+    )
+  })
+
+  it('offers an Include contents toggle for directories (default ON) and honors it', async () => {
+    const onGrant = vi.fn().mockResolvedValue(undefined)
+    render(
+      <GfsDelegationPanel
+        affordances={{ canDelegate: true, grantableBits: ['read'], canCreateShare: false }}
+        subjectOptions={[{ type: 'user', id: 'u2', label: 'Delegate User' }]}
+        isDirectory
+        onGrant={onGrant}
+      />
+    )
+
+    const toggle = screen.getByRole('checkbox', { name: 'Include contents of this folder' })
+    expect(toggle).toHaveProperty('checked', true)
+
+    const picker = screen.getByRole('combobox', { name: PICKER_LABEL })
+    fireEvent.focus(picker)
+    fireEvent.click(screen.getByRole('option', { name: /Delegate User/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
+    await waitFor(() => expect(onGrant).toHaveBeenCalledWith(['user:u2'], ['read'], true))
+
+    // The panel clears the selection after a successful grant, so re-pick before
+    // proving the unchecked toggle sends inherit=false.
+    fireEvent.focus(picker)
+    fireEvent.click(screen.getByRole('option', { name: /Delegate User/ }))
+    fireEvent.click(toggle)
+    expect(toggle).toHaveProperty('checked', false)
+    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
+    await waitFor(() => expect(onGrant).toHaveBeenNthCalledWith(2, ['user:u2'], ['read'], false))
+  })
+
+  it('never shows the Include contents toggle for files', () => {
+    render(
+      <GfsDelegationPanel
+        affordances={{ canDelegate: true, grantableBits: ['read'], canCreateShare: false }}
+        subjectOptions={[{ type: 'user', id: 'u2', label: 'Delegate User' }]}
+        isDirectory={false}
+        onGrant={vi.fn()}
+      />
+    )
+    expect(screen.queryByRole('checkbox', { name: 'Include contents of this folder' })).toBeNull()
   })
 })

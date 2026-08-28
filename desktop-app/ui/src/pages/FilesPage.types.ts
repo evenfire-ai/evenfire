@@ -8,11 +8,18 @@ export type GfsDriveResource = GfsBrowserChild & {
 }
 
 export type GfsPreviewResource = Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name'> &
-  ({ kind: 'image'; mimeType: string } | { kind: 'markdown' })
+  ({ kind: 'image'; mimeType: string } | { kind: 'markdown' } | { kind: 'video'; mimeType: string })
 
 export interface FilesPageProps {
   /** App-level toast dispatcher for success feedback (desktop-app/ui rule). */
   pushToast?: (message: string, tone: Tone) => void
+  /**
+   * A `gfs://` link handed over from elsewhere in the app — today, a plugin
+   * asking to open a resource this page can show better than an overlay can
+   * (a folder, or a file with no preview). Opened once, then cleared.
+   */
+  pendingGfsUri?: string | null
+  onPendingGfsUriHandled?: () => void
 }
 
 /**
@@ -22,5 +29,7 @@ export interface FilesPageProps {
  */
 export interface MyAgentEntry {
   name: string
+  /** Visible name (Agent CRD `spec.host`) surfaced on the wire; may be absent on older builds. */
+  displayName?: string
   gfsSubject?: { type: string; id: string }
 }

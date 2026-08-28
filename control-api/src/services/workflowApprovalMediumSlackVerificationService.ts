@@ -1,6 +1,7 @@
 import type { K8sGateway } from '../k8s.js'
 import { decodeSlackTargetId, encodeSlackTargetId } from '../utils/slackTargetId.js'
 import { getTeamAgents, getUserAgents, listTeams } from './directory/index.js'
+import { secretKeyNames } from './secretKeyNames.js'
 import type { VerifiedMediumAccount } from './workflowApprovalMediumIdentityService.js'
 
 type CommunicationChannelResource = {
@@ -63,6 +64,16 @@ export type SlackIdentity = {
 }
 
 const SLACK_WORKSPACE_ID_RE = /^T[A-Z0-9]+$/
+
+/**
+ * Keys a channel's credentials Secret must hold before it can serve Slack.
+ * Kept identical to `PROVIDER_REQUIRED_KEYS.slack` in
+ * `routes/admin/resources.ts`, which is the write-side gate: the picker must not
+ * offer a target the write path would have refused to create. Not imported from
+ * there — a service importing an admin route would invert the layering and
+ * close an import cycle.
+ */
+const SLACK_REQUIRED_SECRET_KEYS = ['slack-signing-secret', 'slack-bot-token']
 
 function optionalString(value: unknown): string | null {
   if (value === undefined || value === null) return null
@@ -200,12 +211,55 @@ export async function listSlackApprovalTargets(params: {
     'communicationchannels',
     '*'
   )) as CommunicationChannelResource[]
-  const items = channels
-    .flatMap(channel => {
-      const target = projectTarget(channel)
-      if (!target || !userCanAccessChannel(channel, params.userId, access)) return []
-      return [target]
+  // Two phases, and the order is a security property rather than a style
+  // choice. This lists communicationchannels across ALL namespaces and the
+  // route is gated only by a valid external session, so reading Secrets before
+  // the access check would let any authenticated profile user drive one request
+  // into reading the credentials Secret of every channel in the cluster. Project
+  // and access-check first; read keys only for what survived, which bounds the
+  // reads to the caller's own channels.
+  const candidates = channels.flatMap(channel => {
+    const target = projectTarget(channel)
+    if (!target || !userCanAccessChannel(channel, params.userId, access)) return []
+    return [{ channel, target }]
+  })
+
+  const keysBySecret = new Map<string, Promise<string[]>>()
+  const readable = await Promise.all(
+    candidates.map(async ({ channel, target }) => {
+      const secretName = optionalString(channel.spec?.credentialsSecretRef?.name)
+      if (!secretName) return null
+      const cacheKey = `${target.channelNamespace}/${secretName}`
+      if (!keysBySecret.has(cacheKey)) {
+        // Fails OPEN, unlike the write-path validator, and deliberately so: this
+        // is a read-only listing, and one channel with a broken or unreadable
+        // Secret must not blank the user's entire verification picker. Log the
+        // cause anyway: RBAC drift is a real condition on these clusters, and a
+        // target that silently vanishes from the picker is unreportable.
+        keysBySecret.set(
+          cacheKey,
+          secretKeyNames(params.gateway, secretName, target.channelNamespace).catch(error => {
+            console.warn(
+              `[WorkflowApprovalMedium] Slack target hidden: cannot read Secret "${cacheKey}": ${error instanceof Error ? error.message : String(error)}`
+            )
+            return []
+          })
+        )
+      }
+      const keys = await keysBySecret.get(cacheKey)!
+      // A channel can carry a Slack App Name while its Secret only ever held
+      // another provider's credentials. It projects as ready and then 409s on
+      // use, so it must not be offered as a target at all.
+      //
+      // Both keys, matching PROVIDER_REQUIRED_KEYS.slack on the write path
+      // (routes/admin/resources.ts). Signing-secret-only would list a target
+      // that accepts events and then fails when the approval message is posted.
+      return SLACK_REQUIRED_SECRET_KEYS.every(key => keys.includes(key)) ? target : null
     })
+  )
+
+  const items = readable
+    .filter((target): target is SlackApprovalTarget => target !== null)
     .sort(
       (a, b) =>
         a.agentName.localeCompare(b.agentName) ||

@@ -2,9 +2,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { ComposerPanel } from '../ComposerPanel'
 
-const composerStyles = readFileSync('ui/src/styles.css', 'utf8')
+// Resolve the stylesheet relative to THIS test file (not process.cwd()) so the
+// test passes regardless of the directory vitest is launched from. CI runs it
+// from desktop-app/ui, where the old cwd-relative 'ui/src/styles.css' resolved
+// to desktop-app/ui/ui/src/styles.css and failed with ENOENT.
+const composerStyles = readFileSync(resolve(__dirname, '../../../styles.css'), 'utf8')
 
 const composerState = {
   composerImageAttachments: [],
@@ -14,6 +19,7 @@ const composerState = {
   failedAgentSend: null,
   activeChatId: null,
   activeMessageCount: 0,
+  composerFocusRequestId: 0,
 }
 
 const draftState = { value: '', set: vi.fn() }
@@ -94,6 +100,7 @@ afterEach(() => {
   cleanup()
   draftState.value = ''
   draftState.set.mockReset()
+  composerState.composerFocusRequestId = 0
   delete (window as Partial<typeof window>).clerum
 })
 
@@ -163,5 +170,26 @@ describe.each([
     expect(shell?.contains(modelMenu)).toBe(true)
     expect(cssRule('\\.composer-input-shell')).not.toMatch(/overflow\s*:/)
     expect(cssRule('\\.composer-textarea-viewport')).toMatch(/overflow\s*:\s*hidden/)
+  })
+
+  it('focuses on a trusted request and preserves selection when already focused', () => {
+    const otherInput = document.createElement('input')
+    document.body.append(otherInput)
+    otherInput.focus()
+    const { rerender } = render(<ComposerPanel inline={inline} />)
+    const textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
+
+    composerState.composerFocusRequestId = 1
+    rerender(<ComposerPanel inline={inline} />)
+    expect(document.activeElement).toBe(textarea)
+
+    draftState.value = 'preserve this draft'
+    rerender(<ComposerPanel inline={inline} />)
+    textarea.setSelectionRange(4, 8)
+    composerState.composerFocusRequestId = 2
+    rerender(<ComposerPanel inline={inline} />)
+    expect(textarea.selectionStart).toBe(4)
+    expect(textarea.selectionEnd).toBe(8)
+    otherInput.remove()
   })
 })

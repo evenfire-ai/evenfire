@@ -3,7 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ToastProvider } from '@components/Toast'
 import EditMcpServerPage from '../../app/mcp-servers/[name]/edit/page'
-import { createMcpSecret, getMcpServer, getMcpServers, updateMcpSecret } from '../../lib/api'
+import {
+  createMcpSecret,
+  getContexts,
+  getMcpServer,
+  getMcpServers,
+  updateMcpSecret,
+} from '../../lib/api'
 import type { McpServerCondition, McpServerResource } from '../../lib/api'
 import {
   secretFound,
@@ -54,6 +60,7 @@ vi.mock('../../lib/api', async () => {
   const actual = await vi.importActual<typeof import('../../lib/api')>('../../lib/api')
   return {
     ...actual,
+    getContexts: vi.fn(),
     getMcpServer: vi.fn(),
     getMcpServers: vi.fn(),
     updateMcpServer: vi.fn(),
@@ -64,6 +71,7 @@ vi.mock('../../lib/api', async () => {
 
 const mockGetMcpServer = vi.mocked(getMcpServer)
 const mockGetMcpServers = vi.mocked(getMcpServers)
+const mockGetContexts = vi.mocked(getContexts)
 const mockUpdateMcpSecret = vi.mocked(updateMcpSecret)
 const mockCreateMcpSecret = vi.mocked(createMcpSecret)
 
@@ -108,10 +116,11 @@ async function renderPage(server: McpServerResource) {
       <EditMcpServerPage />
     </ToastProvider>
   )
-  // Anchor on the loaded connector's own image: it renders only after
-  // getMcpServer() resolves, and it is surface-independent (the credential
-  // panel's own title changes between set/rotate/recipe-owned).
-  await screen.findByText(CONNECTOR_IMAGE)
+  // The credentials tab owns this heading and renders only after
+  // getMcpServer() resolves. The current edit-page layout no longer repeats
+  // the image in this tab, so use the credential section itself as the loaded
+  // anchor rather than a detail rendered by the egress tab.
+  await screen.findByRole('heading', { name: /^(Update|Set) credentials$/ })
 }
 
 /** The credential panel, scoped so "no submit control" means no control in
@@ -179,6 +188,7 @@ function expectRecoveredIntoCreateForm() {
 
 beforeEach(() => {
   mockGetMcpServers.mockResolvedValue({ items: [] })
+  mockGetContexts.mockResolvedValue({ items: [] })
 })
 
 afterEach(() => {

@@ -1,16 +1,12 @@
 import { useCallback, useEffect, useRef } from 'react'
+import { CHAT_NEAR_BOTTOM_THRESHOLD_PX } from '@constants/agents'
 import type { AgentChatMessage, TaskProgress } from '../../uiTypes'
-
-/**
- * Distance (px) from the bottom of the scroll container within which we still
- * treat the user as "following" the conversation and auto-scroll on new content.
- * Beyond it, the user is reading history and we must NOT yank them down (B4-a).
- */
-const NEAR_BOTTOM_THRESHOLD_PX = 120
 
 interface UseChatScrollParams {
   selectedAgent: string | null
+  activeChatId: string | null
   chatMessages: AgentChatMessage[]
+  chatMessagesLoading: boolean
   agentSending: boolean
   /**
    * Progress slice for the ACTIVE view only (the selected agent's
@@ -35,13 +31,18 @@ interface UseChatScrollParams {
  */
 export function useChatScroll({
   selectedAgent,
+  activeChatId,
   chatMessages,
+  chatMessagesLoading,
   agentSending,
   activeChatProgress,
 }: UseChatScrollParams) {
   const chatEndRef = useRef<HTMLDivElement | null>(null)
   const scrollAnimationFrameIdsRef = useRef<number[]>([])
   const scrollTimeoutIdsRef = useRef<number[]>([])
+  const pendingEntryScrollChatKeyRef = useRef<string | null>(null)
+  const activeChatKey =
+    selectedAgent && activeChatId ? `${selectedAgent}\u0000${activeChatId}` : null
 
   const cancelScheduledScrolls = useCallback(() => {
     if (typeof window !== 'undefined') {
@@ -125,7 +126,7 @@ export function useChatScroll({
     while (node) {
       const { scrollHeight, scrollTop, clientHeight } = node
       if (scrollHeight > clientHeight) {
-        return scrollHeight - scrollTop - clientHeight <= NEAR_BOTTOM_THRESHOLD_PX
+        return scrollHeight - scrollTop - clientHeight <= CHAT_NEAR_BOTTOM_THRESHOLD_PX
       }
       node = node.parentElement
     }
@@ -144,6 +145,28 @@ export function useChatScroll({
     isNearBottom,
     scrollChatToBottom,
   ])
+
+  // A newly selected chat must open at its latest message even when its local
+  // cache was empty and the remote transcript arrives after the first scroll.
+  // Keep the entry scroll pending until at least one message is rendered; later
+  // updates still follow the near-bottom guard above.
+  useEffect(() => {
+    pendingEntryScrollChatKeyRef.current = activeChatKey
+  }, [activeChatKey])
+
+  useEffect(() => {
+    if (
+      !activeChatKey ||
+      chatMessagesLoading ||
+      chatMessages.length === 0 ||
+      pendingEntryScrollChatKeyRef.current !== activeChatKey
+    ) {
+      return
+    }
+
+    scrollChatToBottom()
+    pendingEntryScrollChatKeyRef.current = null
+  }, [activeChatKey, chatMessages, chatMessagesLoading, scrollChatToBottom])
 
   useEffect(() => cancelScheduledScrolls, [cancelScheduledScrolls])
 

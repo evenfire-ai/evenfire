@@ -50,11 +50,20 @@ export type Metadata = {
    * optimistic-concurrency precondition (docs/architecture/stateless-invariants.md).
    */
   resourceVersion?: string
+  /** K8s-standard creation timestamp (RFC3339). Not in the type for older
+   *  endpoints but carried by the new admin payloads. */
+  creationTimestamp?: string
+  /** K8s-standard resource UID. Same caveat as creationTimestamp. */
+  uid?: string
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_CONTROL_API_BASE_URL || '/control-api'
 const ADMIN_TOKEN_STORAGE_KEY = 'controlUiAdminToken'
 const API_REQUEST_TIMEOUT_MS = 30000
+// Legacy JSON GFS uploads send file bytes base64-encoded inside a request body. The
+// v2 path uses binary indexed parts and does not use this timeout/body contract;
+// this constant remains only for the compatibility helper and old API callers.
+export const GFS_UPLOAD_TIMEOUT_MS = 300000
 const inFlightGetRequests = new Map<string, Promise<unknown>>()
 let sessionEpoch = 0
 type ApiRequestOptions = {
@@ -81,7 +90,7 @@ async function parseJsonResponse(res: Response): Promise<unknown> {
   return JSON.parse(text)
 }
 
-function formatApiError(res: Response, text: string): Error {
+export function formatApiError(res: Response, text: string): Error {
   let detail = text
   let parsedBody: Record<string, unknown> | null = null
   try {
@@ -161,10 +170,15 @@ async function apiPublicPost<T>(path: string, body: unknown): Promise<T> {
 
 async function fetchWithTimeout(
   input: RequestInfo | URL,
-  init: RequestInit = {}
+  init: RequestInit = {},
+  timeoutMs: number = API_REQUEST_TIMEOUT_MS
 ): Promise<Response> {
   const controller = new AbortController()
-  const timeoutId = window.setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS)
+  // A non-positive or non-finite override means "use the default", never "abort
+  // immediately" — this matches the server proxy's resolveProxyTimeoutMs semantics.
+  const effectiveTimeoutMs =
+    Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : API_REQUEST_TIMEOUT_MS
+  const timeoutId = window.setTimeout(() => controller.abort(), effectiveTimeoutMs)
   const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal
   try {
     return await fetch(input, {
@@ -216,20 +230,27 @@ export async function apiGet(
       const text = await res.text().catch(() => '')
       let message = `${res.status} ${res.statusText}`
       let code: string | undefined
+      let body: Record<string, unknown> | undefined
       try {
-        const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
+        const parsed = JSON.parse(text) as unknown
         if (parsed && typeof parsed === 'object') {
-          if (typeof parsed.message === 'string' && parsed.message.trim()) {
-            message = parsed.message
+          body = parsed as Record<string, unknown>
+          if (typeof body.message === 'string' && body.message.trim()) {
+            message = body.message
           }
-          if (typeof parsed.error === 'string') code = parsed.error
+          if (typeof body.error === 'string') code = body.error
         }
       } catch {
         /* non-JSON error body: keep the status-text message */
       }
-      const error = new Error(message) as Error & { status?: number; code?: string }
+      const error = new Error(message) as Error & {
+        status?: number
+        code?: string
+        body?: Record<string, unknown>
+      }
       error.status = res.status
       if (code) error.code = code
+      if (body) error.body = body
       throw error
     }
     return parseJsonResponse(res)
@@ -249,17 +270,22 @@ export async function apiSend(
   path: string,
   body?: unknown,
   query: Record<string, string | undefined> = {},
-  extraHeaders: Record<string, string> = {}
+  extraHeaders: Record<string, string> = {},
+  options: { timeoutMs?: number } = {}
 ) {
-  const res = await fetchWithTimeout(`${API_BASE}${path}${qs(query)}`, {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeaders(),
-      ...extraHeaders,
+  const res = await fetchWithTimeout(
+    `${API_BASE}${path}${qs(query)}`,
+    {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders(),
+        ...extraHeaders,
+      },
+      body: body ? JSON.stringify(body) : undefined,
     },
-    body: body ? JSON.stringify(body) : undefined,
-  })
+    options.timeoutMs
+  )
   if (!res.ok) {
     const text = await res.text()
     if (res.status === 401) {
@@ -528,6 +554,17 @@ export type ControlAdminListItem = {
   status: 'active' | 'disabled' | 'pending_password'
   passwordPending?: boolean
   invitationId?: string
+  gfsOperatorLink?: {
+    desktopUserId: string
+    controlAdminId: string
+    source: 'initial_setup' | 'unknown'
+    createdAt: string | null
+    status: 'active' | 'inactive_admin' | 'revoked' | 'error'
+    generation?: number | null
+    rowVersion?: number | null
+    revocationReason?: string | null
+  } | null
+  gfsOperatorLinkStatus?: 'none' | 'active' | 'inactive_admin' | 'revoked' | 'error'
   lastLoginAt: string | null
   createdAt: string
 }
@@ -614,6 +651,56 @@ export async function cancelControlAdminInvitation(invitationId: string): Promis
 export async function deleteControlAdmin(adminId: string): Promise<{ deleted: true }> {
   return apiSend('DELETE', `/api/v1/admin/control-admins/${adminId}`) as Promise<{
     deleted: true
+  }>
+}
+
+export async function revokeControlAdminGfsOperatorLink(
+  adminId: string,
+  payload: { rowVersion?: number | null; reason?: string } = {}
+): Promise<{
+  revoked: boolean
+  gfsOperatorLinkStatus: 'revoked'
+  controlAdminId: string
+  desktopUserId: string | null
+  generation?: number | null
+  rowVersion?: number | null
+}> {
+  return apiSend(
+    'DELETE',
+    `/api/v1/admin/control-admins/${encodeURIComponent(adminId)}/gfs-operator-link`,
+    payload
+  ) as Promise<{
+    revoked: boolean
+    gfsOperatorLinkStatus: 'revoked'
+    controlAdminId: string
+    desktopUserId: string | null
+    generation?: number | null
+    rowVersion?: number | null
+  }>
+}
+
+export async function reactivateControlAdminGfsOperatorLink(
+  adminId: string,
+  payload: { rowVersion: number; reason: string }
+): Promise<{
+  reactivated: boolean
+  gfsOperatorLinkStatus: 'active' | 'revoked'
+  controlAdminId: string
+  desktopUserId: string | null
+  generation?: number | null
+  rowVersion?: number | null
+}> {
+  return apiSend(
+    'POST',
+    `/api/v1/admin/control-admins/${encodeURIComponent(adminId)}/gfs-operator-link/reactivate`,
+    payload
+  ) as Promise<{
+    reactivated: boolean
+    gfsOperatorLinkStatus: 'active' | 'revoked'
+    controlAdminId: string
+    desktopUserId: string | null
+    generation?: number | null
+    rowVersion?: number | null
   }>
 }
 
@@ -764,6 +851,9 @@ export type ContextSharedFileSystemStatus = {
 }
 export type ContextSpec = {
   contextId: string
+  // Editable, human-visible name (free text). Optional/new: existing contexts
+  // won't have it, so consumers fall back to `metadata.name`.
+  displayName?: string
   description?: string
   mcpServers: string[]
   sharedFileSystems?: ContextSharedFileSystemRef[]
@@ -812,6 +902,27 @@ export type McpServerResource = {
   metadata?: Metadata
   spec?: AnyRecord
   status?: { conditions?: McpServerCondition[] }
+}
+
+// Installed guardrail hook CRs (LlmHook). Reconciler-written status follows the
+// same conditions[] convention as McpServer, plus hook-specific fields.
+export type LlmHookCondition = {
+  type: string
+  status: 'True' | 'False' | 'Unknown'
+  reason?: string
+  message?: string
+  lastTransitionTime?: string
+}
+export type LlmHookStatus = {
+  conditions?: LlmHookCondition[]
+  observedDigest?: string
+  readyReplicas?: number
+  lastReconciled?: string
+}
+export type LlmHookResource = {
+  metadata?: Metadata
+  spec?: AnyRecord
+  status?: LlmHookStatus
 }
 export type ContextUser = {
   id: string
@@ -999,7 +1110,10 @@ export async function createContext(payload: { metadata: { name: string }; spec:
   return apiSend('POST', '/api/v1/admin/contexts', payload) as Promise<ContextResource>
 }
 
-export async function updateContext(name: string, payload: { spec: ContextSpec }) {
+export async function updateContext(
+  name: string,
+  payload: { metadata: { resourceVersion: string }; spec: ContextSpec }
+) {
   return apiSend(
     'PUT',
     `/api/v1/admin/contexts/${encodeURIComponent(name)}`,
@@ -1013,6 +1127,20 @@ export async function deleteContext(name: string) {
 
 export async function getMcpServers() {
   return apiGet('/api/v1/admin/mcp-servers') as Promise<{ items?: McpServerResource[] }>
+}
+
+// ── Installed guardrail hooks (LlmHook CRDs) — read + uninstall ─────────────
+// Creation is via the org-scoped registry install-hook saga, not a raw write.
+export async function getLlmHooks() {
+  return apiGet('/api/v1/admin/llm-hooks') as Promise<{ items?: LlmHookResource[] }>
+}
+
+export async function getLlmHook(name: string) {
+  return apiGet(`/api/v1/admin/llm-hooks/${encodeURIComponent(name)}`) as Promise<LlmHookResource>
+}
+
+export async function deleteLlmHook(name: string) {
+  return apiSend('DELETE', `/api/v1/admin/llm-hooks/${encodeURIComponent(name)}`)
 }
 
 // ── SharedFileSystem CRD admin + per-SFS file browsing ──────────────────
@@ -1641,16 +1769,183 @@ export async function createLlmModel(input: CreateLlmModelInput) {
   return apiSend('POST', '/api/v1/admin/llm-models', input) as Promise<LlmAllowedModel>
 }
 
-export async function updateLlmModel(id: string, input: UpdateLlmModelInput) {
+// A disable (PUT enabled→false) or delete of a referenced model is gated by
+// control-api (Fase 3): without `?force` it answers 409 `model_in_use` with the
+// impact. Passing `{ force: true }` appends `?force=true`, which the operator
+// confirms only after seeing that impact — never automatically.
+export async function updateLlmModel(
+  id: string,
+  input: UpdateLlmModelInput,
+  opts: { force?: boolean } = {}
+) {
   return apiSend(
     'PUT',
     `/api/v1/admin/llm-models/${encodeURIComponent(id)}`,
-    input
+    input,
+    opts.force ? { force: 'true' } : {}
   ) as Promise<LlmAllowedModel>
 }
 
-export async function deleteLlmModel(id: string) {
-  return apiSend('DELETE', `/api/v1/admin/llm-models/${encodeURIComponent(id)}`)
+export async function deleteLlmModel(id: string, opts: { force?: boolean } = {}) {
+  return apiSend(
+    'DELETE',
+    `/api/v1/admin/llm-models/${encodeURIComponent(id)}`,
+    undefined,
+    opts.force ? { force: 'true' } : {}
+  )
+}
+
+// ── Model references, 409 impact + operator attention feed ─────────────────
+// See control-api/src/services/llmAttention.ts and llmModelImpact.ts. The 409
+// `model_in_use` impact body (Fase 3) and each attention item (Fase 5, Pieza C)
+// carry the SAME `hostsAffected`/`grantsAffected` shape, so both surfaces render
+// the references identically.
+
+/** A Host CR that references a (provider, model) pair, with the matched roles. */
+export type ModelHostReference = {
+  namespace: string
+  name: string
+  // 'primary' | 'allowedModels' | 'fallback' — kept as string[] so an unknown
+  // role from a newer backend renders rather than being dropped.
+  roles: string[]
+}
+
+/** A capability grant that references a (provider, model) pair. */
+export type ModelGrantReference = {
+  id: string
+  recipeNamespace: string
+  recipeName: string
+  capabilityFamily: string
+}
+
+/** Live references to a (provider, model) pair, shared by both surfaces. */
+export type ModelReferences = {
+  hostsAffected: ModelHostReference[]
+  grantsAffected: ModelGrantReference[]
+}
+
+/**
+ * One actionable operator-attention item. `kind` is an OPEN string union — today
+ * only `'stale_model_referenced'`; the banner switches on it and ignores kinds
+ * it does not recognize. `displayName` is optional (omitted, not null).
+ */
+export type AdminAttentionItem = ModelReferences & {
+  kind: string
+  provider: string
+  model: string
+  displayName?: string
+}
+
+/** The `GET /admin/attention` response contract consumed by the banner. */
+export type AdminAttentionReport = {
+  items: AdminAttentionItem[]
+  generatedAt: string
+}
+
+/** The 409 `model_in_use` impact body (Fase 3): the model plus its references. */
+export type ModelInUseImpact = ModelReferences & {
+  provider: string
+  model: string
+}
+
+function coerceModelHostReferences(raw: unknown): ModelHostReference[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap(entry => {
+    if (!entry || typeof entry !== 'object') return []
+    const rec = entry as Record<string, unknown>
+    if (typeof rec.namespace !== 'string' || typeof rec.name !== 'string') return []
+    const roles = Array.isArray(rec.roles)
+      ? rec.roles.filter((r): r is string => typeof r === 'string')
+      : []
+    return [{ namespace: rec.namespace, name: rec.name, roles }]
+  })
+}
+
+function coerceModelGrantReferences(raw: unknown): ModelGrantReference[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap(entry => {
+    if (!entry || typeof entry !== 'object') return []
+    const rec = entry as Record<string, unknown>
+    if (
+      typeof rec.id !== 'string' ||
+      typeof rec.recipeNamespace !== 'string' ||
+      typeof rec.recipeName !== 'string' ||
+      typeof rec.capabilityFamily !== 'string'
+    ) {
+      return []
+    }
+    return [
+      {
+        id: rec.id,
+        recipeNamespace: rec.recipeNamespace,
+        recipeName: rec.recipeName,
+        capabilityFamily: rec.capabilityFamily,
+      },
+    ]
+  })
+}
+
+// Keep every item whose (kind, provider, model) are strings — including unknown
+// kinds, so the banner (not the fetch layer) decides what to render. Malformed
+// items are dropped rather than tumbling the whole feed.
+function coerceAttentionItem(raw: unknown): AdminAttentionItem[] {
+  if (!raw || typeof raw !== 'object') return []
+  const rec = raw as Record<string, unknown>
+  if (
+    typeof rec.kind !== 'string' ||
+    typeof rec.provider !== 'string' ||
+    typeof rec.model !== 'string'
+  ) {
+    return []
+  }
+  const item: AdminAttentionItem = {
+    kind: rec.kind,
+    provider: rec.provider,
+    model: rec.model,
+    hostsAffected: coerceModelHostReferences(rec.hostsAffected),
+    grantsAffected: coerceModelGrantReferences(rec.grantsAffected),
+  }
+  if (typeof rec.displayName === 'string') item.displayName = rec.displayName
+  return [item]
+}
+
+export async function getAdminAttention(): Promise<AdminAttentionReport> {
+  const raw = (await apiGet('/api/v1/admin/attention')) as {
+    items?: unknown
+    generatedAt?: unknown
+  }
+  return {
+    items: Array.isArray(raw.items) ? raw.items.flatMap(coerceAttentionItem) : [],
+    generatedAt: typeof raw.generatedAt === 'string' ? raw.generatedAt : '',
+  }
+}
+
+/**
+ * When a disable (PUT enabled→false) or delete is rejected with 409
+ * `model_in_use` — the model is still referenced and `?force` was not sent —
+ * returns the impact so the caller can show it and offer a forced retry. Returns
+ * null for any other error. Mirrors `getBudgetsUsingPrice`: reads the structured
+ * `.body` `formatApiError` preserves.
+ */
+export function getModelInUseImpact(err: unknown): ModelInUseImpact | null {
+  if ((err as { status?: number })?.status !== 409) return null
+  const body = apiErrorBody(err)
+  if (!body || body.error !== 'model_in_use') return null
+  const impact = body.impact
+  if (!impact || typeof impact !== 'object') return null
+  const rec = impact as Record<string, unknown>
+  const hostsAffected = coerceModelHostReferences(rec.hostsAffected)
+  const grantsAffected = coerceModelGrantReferences(rec.grantsAffected)
+  // A matched code with an empty/malformed impact would open the "still in use"
+  // confirm with no references to show — fall through to the generic error
+  // banner instead, matching getBudgetsUsingPrice/getUnpricedModelsError.
+  if (hostsAffected.length === 0 && grantsAffected.length === 0) return null
+  return {
+    provider: typeof rec.provider === 'string' ? rec.provider : '',
+    model: typeof rec.model === 'string' ? rec.model : '',
+    hostsAffected,
+    grantsAffected,
+  }
 }
 
 // ── Catalog discovery (spec 09 §7, F2) ────────────────────────────────────
@@ -2071,12 +2366,62 @@ export async function deleteAdminTeam(teamId: string) {
   }>
 }
 
+export type DeleteAdminUserRequest = {
+  /** Persisted with the governed retirement operation for its audit trail. */
+  reason?: string
+  /** Reuse this on a transport retry of the same user action. */
+  idempotencyKey?: string
+  /** Connects the browser request to the Control API retirement audit row. */
+  correlationId?: string
+}
+
+const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+function generateRetirementRequestId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  // The Control API accepts a correlation header only when it is UUID-shaped.
+  // This compatibility branch keeps embedded/legacy browser retries traceable.
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, marker => {
+    const nibble = Math.floor(Math.random() * 16)
+    return (marker === 'x' ? nibble : (nibble & 0x3) | 0x8).toString(16)
+  })
+}
+
+/** Creates one stable request identity for all transport retries in a UI operation. */
+export function createDeleteAdminUserRequest(
+  reason = 'control_ui_user_retirement'
+): Required<DeleteAdminUserRequest> {
+  return {
+    reason,
+    idempotencyKey: generateRetirementRequestId(),
+    correlationId: generateRetirementRequestId(),
+  }
+}
+
 /**
- * Hard-deletes the user account (CASCADE on profile and personal access).
- * Team memberships cascade; teams are retained even when this leaves them with no members.
+ * Retires the user through the governed lifecycle contract. A caller may retain
+ * the supplied key when retrying the same action; an ordinary UI action gets a
+ * new request identity and an explicit audit reason.
  */
-export async function deleteAdminUser(userId: string) {
-  return apiSend('DELETE', `/api/v1/admin/users/${encodeURIComponent(userId)}`) as Promise<{
+export async function deleteAdminUser(userId: string, request: DeleteAdminUserRequest = {}) {
+  const idempotencyKey = request.idempotencyKey?.trim() || generateRetirementRequestId()
+  const providedCorrelationId = request.correlationId?.trim() || ''
+  const correlationId = UUID_ANY_RE.test(providedCorrelationId)
+    ? providedCorrelationId.toLowerCase()
+    : generateRetirementRequestId()
+  const reason = request.reason?.trim() || 'control_ui_user_retirement'
+  return apiSend(
+    'DELETE',
+    `/api/v1/admin/users/${encodeURIComponent(userId)}`,
+    { reason },
+    {},
+    {
+      'Idempotency-Key': idempotencyKey,
+      'x-correlation-id': correlationId,
+    }
+  ) as Promise<{
     deleted: boolean
     id: string
   }>
@@ -2643,7 +2988,7 @@ export type RegistryEntry = {
   id: string
   name: string
   version: string
-  entry_type: string // "mcp-server" | "recipe"
+  entry_type: string // "mcp-server" | "recipe" | "llm-hook"
   description: string
   author: string
   origin: string
@@ -2669,6 +3014,43 @@ export type RegistryEntry = {
     | (Record<string, unknown> & {
         recipeYaml?: string
         stepCount?: number
+      })
+    | null
+  // Present on `entry_type: "llm-hook"` (guardrail hook) entries. Mirrors the
+  // registry's hook_meta shape: where the hook runs (image/service/remote), which
+  // lifecycle points it hooks, the callback path, its credential schema, default
+  // config, and any egress it requires. See control-api install-hook contract.
+  hook_meta?:
+    | (Record<string, unknown> & {
+        // Exactly one of image | service | remote — each an object, not a string.
+        target?: {
+          image?: { ref?: string; port?: number; security?: { addCapabilities?: string[] } }
+          service?: { name?: string; namespace?: string; port?: number }
+          remote?: { baseUrl?: string }
+        }
+        // The CRD enumerates six: the four LLM-lane points below plus the tool
+        // lane's preToolUse/postToolUse.
+        lifecyclePoints?: string[] // "preCall" | "moderate" | "postCallSuccess" | "onError" | "preToolUse" | "postToolUse"
+        path?: string
+        credentialSchema?: CredentialSchema
+        defaultConfig?: Record<string, unknown>
+        requiredEgress?: unknown
+        // What the hook author says the hook needs to function. Advisory: it
+        // seeds the install form, but the operator's selection is the grant and
+        // stays bounded by Host.spec.guardrails.capabilityCeiling.
+        requiredCapabilities?: HookCapability[]
+        // The author's suggested runtime posture, used to pre-fill the install
+        // form. `orderHint` is a word, not the CRD's numeric `order`.
+        authorDefaults?: {
+          failMode?: 'open' | 'closed'
+          orderHint?: string
+          timeoutMs?: number
+          onUnavailable?: {
+            mode?: 'strict' | 'breaker'
+            failureThreshold?: number
+            cooldownMs?: number
+          }
+        }
       })
     | null
   artifact_refs: Record<string, unknown> | null
@@ -2717,6 +3099,7 @@ export type RegistryInstalledState = {
   catalogKeys: string[]
   serverNames: string[]
   recipeKeys: string[]
+  hookKeys?: string[]
 }
 export type RegistryCatalogResponse = RegistryEntryListResponse & {
   categories: string[]
@@ -2826,6 +3209,49 @@ export async function installRecipeFromRegistry(
   ) as Promise<InstallRecipeFromRegistryResponse>
 }
 
+// Guardrail-hook install: binds a registry `llm-hook` entry to a target Host as an
+// LlmHook CR. Mirrors installFromRegistry / installRecipeFromRegistry but hits the
+// admin install-hook route. Backend enforces trust floor, §8.4 content-egress, the
+// capability ceiling, and the may_deny ⇒ fail-closed rule; error bodies arrive as
+// { error, reason? } (surfaced via the thrown Error's `.body`/`.code`).
+export type HookCapability =
+  | 'may_deny'
+  | 'may_rewrite'
+  | 'may_substitute_result'
+  | 'may_add_context'
+
+export type InstallHookFromRegistryRequest = {
+  hostRef: string
+  registryEntryName: string
+  registryEntryVersion: string
+  capabilities?: HookCapability[]
+  order?: number
+  failMode?: 'open' | 'closed'
+  credentials?: Record<string, string>
+}
+
+export type InstallHookFromRegistryResponse = {
+  hookName: string
+  namespace: string
+  hostRef: string
+  trustLevel: string
+  lifecyclePoints: string[]
+  registryEntry: string
+  registryVersion: string
+  correlationId: string
+  pendingCredentials?: PendingWorkflowCredentialRef[]
+}
+
+export async function installHookFromRegistry(
+  req: InstallHookFromRegistryRequest
+): Promise<InstallHookFromRegistryResponse> {
+  return apiSend(
+    'POST',
+    '/api/v1/admin/registry/install-hook',
+    req
+  ) as Promise<InstallHookFromRegistryResponse>
+}
+
 export type TriggerWorkflowRequest = {
   inputs?: Record<string, unknown>
   intermediateParameters?: Record<string, unknown>
@@ -2898,10 +3324,12 @@ export type OwnedRegistryEntry = {
   version: string
   visibility: 'public' | 'private'
   status: string // "published" | "deprecated" | "removed"
-  entry_type?: string // "mcp-server" | "recipe"
-  // Present ("local"/"remote") for mcp-servers, null/absent for recipes. The
-  // registry's /org/:org/entries returns this but NOT entry_type, so the
-  // Publisher's Type column infers Connector/Plugin from it (see OwnedEntries).
+  // The registry's /org/:org/entries returns the type as `entryType` (camelCase),
+  // NOT `entry_type`; keep both so the Publisher's Type column reads it directly
+  // instead of mis-inferring "Plugin" for llm-hook entries (see OwnedEntries).
+  entryType?: string // "mcp-server" | "recipe" | "llm-hook"
+  entry_type?: string
+  // Present ("local"/"remote") for mcp-servers, null/absent for others.
   serverMode?: string | null
 }
 export type OwnedRegistryEntriesResponse = {
@@ -3206,7 +3634,15 @@ export type PluginWorkloadSdkPromptTarget = {
 }
 
 export type PluginWorkloadSdkQuotaLimits = {
+  /**
+   * @deprecated No longer enforced (issue #348); platform per-minute ENV rate
+   * limits apply. Still returned on legacy grants; never sent by this UI.
+   */
   maxRequestsPerRun?: number
+  /**
+   * @deprecated No longer enforced (issue #348); platform per-minute ENV rate
+   * limits apply. Still returned on legacy grants; never sent by this UI.
+   */
   maxNotificationsPerRun?: number
   maxInvocationsPerMinute?: number
   maxNotificationsPerMinute?: number
@@ -3269,7 +3705,10 @@ export type PluginWorkloadSdkGrantInput = {
   allowedTargetRefs?: string[]
   allowedUserRefs?: string[]
   allowedCallers?: string[]
-  quotaLimits?: PluginWorkloadSdkQuotaLimits
+  // Input type omits the deprecated per-run keys (issue #348): this UI never
+  // sends them and the server strips them on write. The response
+  // PluginWorkloadSdkQuotaLimits still carries them for legacy grants.
+  quotaLimits?: Omit<PluginWorkloadSdkQuotaLimits, 'maxRequestsPerRun' | 'maxNotificationsPerRun'>
   modelPolicies?: Record<string, PluginWorkloadSdkModelPolicy>
   promptTargets?: PluginWorkloadSdkPromptTarget[]
   defaultTargetRef?: string

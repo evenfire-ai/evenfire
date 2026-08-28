@@ -3,6 +3,7 @@ import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import type { K8sGateway } from '../../k8s.js'
+import { secretKeyNames } from '../../services/secretKeyNames.js'
 
 function ccCredentialsSecretName(ccName: string): string {
   return `cc-${ccName}-credentials`
@@ -48,6 +49,40 @@ export function registerCommunicationChannelCredentialsRoutes(
   router: Router,
   gateway: K8sGateway
 ): void {
+  /**
+   * Which credential keys this channel actually holds — names only, never values.
+   *
+   * The credentials panel used to infer presence from `credentialsSecretRef`
+   * alone, so a Telegram-only channel rendered a populated Slack Signing Secret
+   * field. Per-key names are the smallest answer that stops that lie.
+   *
+   * An absent Secret is 200 with `keys: []`, not 404: "no credentials yet" is a
+   * normal state the panel renders, and a 404 would make every caller handle
+   * two shapes for one meaning. An unreadable Secret (RBAC, apiserver failure)
+   * propagates instead, so a denial is never laundered into "not configured".
+   */
+  router.get(
+    '/admin/communication-channels/:name/credentials',
+    enforceNamespace(config.communicationChannelsNamespace),
+    asyncHandler(async (req, res) => {
+      const ns = config.communicationChannelsNamespace
+      const name = req.params.name
+
+      const cc = (await gateway.getResource('communicationchannels', name, ns)) as {
+        spec?: { credentialsSecretRef?: { name?: string } }
+      }
+      // Same resolution as the PUT: an operator-supplied ref wins, otherwise the
+      // conventional name the PUT would create. Reading the ref matters — a
+      // channel pointing at a custom Secret would otherwise report the keys of a
+      // `cc-<name>-credentials` that does not exist, reintroducing the lie.
+      const secretName = cc.spec?.credentialsSecretRef?.name || ccCredentialsSecretName(name)
+
+      const keys = await secretKeyNames(gateway, secretName, ns)
+
+      res.status(200).json({ name, secretName, namespace: ns, keys })
+    })
+  )
+
   router.put(
     '/admin/communication-channels/:name/credentials',
     enforceNamespace(config.communicationChannelsNamespace),
@@ -69,18 +104,24 @@ export function registerCommunicationChannelCredentialsRoutes(
       }
       const existingSecretName = cc.spec?.credentialsSecretRef?.name
       if (existingSecretName) {
-        const merged = await gateway.mergeSecret({
+        await gateway.mergeSecret({
           name: existingSecretName,
           namespace: ns,
           type: 'Opaque',
           stringData: data,
         })
+        // Names-only response (mirrors routes/admin/secrets.ts, PR #223 policy):
+        // respond with only the rotated key NAMES, never secret values. The write
+        // result is not echoed — a merge-patch touches the whole Secret (including
+        // keys the caller did not send), so echoing raw k8s data would leak values
+        // into the HTTP response body (logs/proxies/error-trackers). `rotatedKeys`
+        // reflects exactly the keys this request wrote.
         res.status(200).json({
           name,
           secretName: existingSecretName,
           namespace: ns,
           rotated: true,
-          result: merged,
+          rotatedKeys: Object.keys(data).sort((a, b) => a.localeCompare(b)),
         })
         return
       }
@@ -96,18 +137,16 @@ export function registerCommunicationChannelCredentialsRoutes(
         ...(cc.spec ?? {}),
         credentialsSecretRef: { name: secretName },
       }
-      const updated = await gateway.updateResource(
-        'communicationchannels',
-        name,
-        { spec: nextSpec },
-        ns
-      )
+      await gateway.updateResource('communicationchannels', name, { spec: nextSpec }, ns)
+      // Names-only for consistency with the rotated:true branch and the #223
+      // policy. The updateResource result (the CommunicationChannel CRD) is not
+      // echoed — respond with only the written key NAMES.
       res.status(200).json({
         name,
         secretName,
         namespace: ns,
         rotated: false,
-        result: updated,
+        rotatedKeys: Object.keys(data).sort((a, b) => a.localeCompare(b)),
       })
     })
   )

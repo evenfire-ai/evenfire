@@ -50,7 +50,7 @@ describe('Sidebar publisher gating', () => {
     expect(screen.getByRole('link', { name: /agents/i })).toBeInTheDocument()
   })
 
-  it('keeps Traces hidden and sorts visible navigation labels alphabetically', () => {
+  it('keeps Traces hidden and renders visible navigation in the defined order', () => {
     vi.mocked(hook.usePublishScope).mockReturnValue(
       publishScopeState({ scope: null, loading: false, error: false })
     )
@@ -61,9 +61,20 @@ describe('Sidebar publisher gating', () => {
     const labels = Array.from(nav.children).map(item =>
       item.querySelector('.cu-sidebar__label')?.textContent?.trim()
     )
-    expect(labels).toEqual(
-      [...labels].sort((first, second) => (first ?? '').localeCompare(second ?? ''))
-    )
+    expect(labels).toEqual([
+      'Users & Teams',
+      'Agents',
+      'Contexts',
+      'Marketplace',
+      'Installed Connectors',
+      'Installed Plugins',
+      'Installed Guardrails',
+      'Files',
+      'External Channels',
+      'LLM Models',
+      'Secrets',
+      'Cost & Usage',
+    ])
   })
 
   it('keeps Settings in the footer on its canonical route', () => {
@@ -95,14 +106,14 @@ describe('Sidebar publisher gating', () => {
     ['/agent-outputs/recipe-artifacts', 'Agent Outputs', '/agent-outputs/recipe-artifacts'],
     ['/agent-outputs/desktop-app-artifacts', 'Agent Outputs', '/agent-outputs/recipe-artifacts'],
     ['/global-file-system', 'Global File System', '/global-file-system'],
-  ])('selects the matching Directories child for %s', (pathname, label, href) => {
+  ])('selects the matching Files child for %s', (pathname, label, href) => {
     vi.mocked(hook.usePublishScope).mockReturnValue(
       publishScopeState({ scope: null, loading: false, error: false })
     )
     navigationState.pathname = pathname
     render(<Sidebar currentTab="directories" />)
 
-    const group = screen.getByRole('button', { name: 'Directories' })
+    const group = screen.getByRole('button', { name: 'Files' })
     expect(group).toHaveAttribute('aria-expanded', 'true')
     expect(group).toHaveAttribute('data-active', 'true')
     const child = screen.getByRole('link', { name: label })
@@ -122,14 +133,39 @@ describe('Sidebar publisher gating', () => {
     }
   })
 
-  it('renders an icon for the Directories group', () => {
+  it('uses a borderless solid output arrow for Agent Outputs', () => {
     vi.mocked(hook.usePublishScope).mockReturnValue(
       publishScopeState({ scope: null, loading: false, error: false })
     )
     render(<Sidebar currentTab="directories" />)
 
-    const directories = screen.getByRole('button', { name: 'Directories' })
-    expect(directories.querySelector('.cu-sidebar__icon svg')).toBeInTheDocument()
+    const agentOutputs = screen.getByRole('link', { name: 'Agent Outputs' })
+    const icon = agentOutputs.querySelector('.cu-sidebar__subitem-icon svg')
+    expect(icon).toHaveAttribute('data-solid', 'true')
+    expect(icon).toHaveAttribute('stroke-width', '0')
+    expect(icon?.querySelectorAll('path')).toHaveLength(1)
+    expect(icon?.querySelector('path')).toHaveAttribute(
+      'd',
+      'm17 17 5-5-5-5-1.41 1.41L18.17 11H9v2h9.17l-2.58 2.59z'
+    )
+  })
+
+  it('renders an icon for the Files group', () => {
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: false })
+    )
+    render(<Sidebar currentTab="directories" />)
+
+    const directories = screen.getByRole('button', { name: 'Files' })
+    const icon = directories.querySelector('.cu-sidebar__icon svg')
+    expect(icon).toBeInTheDocument()
+    expect(icon).toHaveAttribute('width', '18')
+    expect(icon).toHaveAttribute('height', '18')
+    expect(icon).toHaveAttribute('viewBox', '0 0 512 512')
+    expect(icon?.querySelector('path')).toHaveAttribute(
+      'd',
+      'M464 128H272l-64-64H48C21.49 64 0 85.49 0 112v288c0 26.51 21.49 48 48 48h416c26.51 0 48-21.49 48-48V176c0-26.51-21.49-48-48-48z'
+    )
   })
 
   it('hides Agent Files from the sidebar without changing its route', () => {
@@ -165,7 +201,7 @@ describe('Sidebar publisher gating', () => {
 
   it('sorts standard sidebar groups by the displayed child label', () => {
     for (const [tab, item] of Object.entries(SIDEBAR_TABS)) {
-      if (tab === 'cost') continue
+      if (tab === 'cost' || tab === 'directories') continue
       const labels = item.children?.map(child => child.label) ?? []
       expect(labels).toEqual([...labels].sort((first, second) => first.localeCompare(second)))
     }
@@ -174,6 +210,10 @@ describe('Sidebar publisher gating', () => {
       'Usage',
       'Token Budgets',
       'LLM Prices',
+    ])
+    expect(SIDEBAR_TABS.directories.children?.map(child => child.label)).toEqual([
+      'Global File System',
+      'Agent Outputs',
     ])
   })
 

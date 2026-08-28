@@ -31,7 +31,8 @@
 #                   needs them: no clerum build runs there to pull them in.
 #   --only=<svc>    Build only the image(s) whose tag matches the substring <svc>
 #                   (e.g. --only=control-api, --only=workflow-recipes). Skips
-#                   public-image pulls and manifest regeneration.
+#                   public-image pulls and preserves the recorded manifest
+#                   acquisition mode/tag while refreshing image IDs.
 #   --include-e2e-fixtures
 #                  --verify-only: also demand the two E2E-only fixtures
 #                  (workflow-custom-sdk-e2e, workflow-plugin-sdk-e2e) in ghcr
@@ -51,9 +52,18 @@
 #   MINIKUBE_PRELOAD_BASE_IMAGES=false  Skip preloading Dockerfile base images
 #                                      from the host Docker cache into minikube.
 #   MINIKUBE_BASE_IMAGE_PULL_RETRIES    Pull attempts for each missing base
-#                                      image before failing (default: 3).
+#                                      image before failing (default: 3,
+#                                      maximum: 10).
 #   MINIKUBE_BASE_IMAGE_PULL_DELAY_SECS Delay between failed pull attempts
-#                                      (default: 5).
+#                                      (default: 5, range: 0-300).
+#   MINIKUBE_{STATUS,DOCKER_ENV,KUBECTL}_TIMEOUT_SECONDS
+#                                      Finite deadlines for Minikube status,
+#                                      docker-env, and node inventory probes
+#                                      (default: 30, maximum: 300).
+#   MINIKUBE_KUBECTL_REQUEST_TIMEOUT_SECONDS
+#                                      kubectl request timeout nested inside
+#                                      its process deadline (default: 20,
+#                                      maximum: 300).
 #   MINIKUBE_BUILD_DESKTOP_IMAGE=true  Include the heavy mcp-host-desktop
 #                                      image. It is excluded from normal
 #                                      runtime gates unless explicitly needed.
@@ -70,6 +80,22 @@
 #   MINIKUBE_PLAYWRIGHT_MCP_SOURCE_IMAGE
 #                                      Published image to retag locally when
 #                                      Playwright MCP is explicitly enabled.
+#   MINIKUBE_PLAYWRIGHT_MCP_SOURCE_VISIBILITY
+#                                      private (default) requires the explicit
+#                                      MINIKUBE_DOCKER_AUTH_CONFIG for that
+#                                      source pull; public uses the isolated
+#                                      unauthenticated Docker config.
+#   MINIKUBE_DOCKER_AUTH_CONFIG         Explicit Docker config directory for a
+#                                      private-registry pull. Ambient Docker
+#                                      auth is never inherited or copied.
+#   MINIKUBE_DOCKER_{INFO,PULL,BUILD}_TIMEOUT_SECONDS
+#                                      Finite operation deadlines (defaults:
+#                                      30, 600, and 1800 seconds).
+#   MINIKUBE_IMAGE_INVENTORY_TIMEOUT_SECONDS
+#                                      Deadline for each read-only Minikube
+#                                      image inventory (default: 30 seconds).
+#   MINIKUBE_DOCKER_BUILDX_PLUGIN       Explicit path to an already-installed
+#                                      buildx plugin. No plugin is downloaded.
 #   MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE=true
 #                                      Include the optional local Airtable MCP
 #                                      image. MCP servers are distributed via
@@ -92,21 +118,37 @@ export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
+PROFILE="${MINIKUBE_PROFILE:-${T2_PROFILE:-clerum-test}}"
+CONTEXT="${T2_CONTEXT:-${CONTROL_API_REAL_PG_CONTEXT:-${PROFILE}}}"
 SKIP_PUBLIC=false
 VERIFY_ONLY=false
 PUBLIC_ONLY=false
 ONLY_SVC=""
+ONLY_REQUESTED=false
 FAILED_IMAGES=()
 MINIKUBE_PRELOAD_BASE_IMAGES="${MINIKUBE_PRELOAD_BASE_IMAGES:-true}"
 MINIKUBE_BASE_IMAGE_PULL_RETRIES="${MINIKUBE_BASE_IMAGE_PULL_RETRIES:-3}"
 MINIKUBE_BASE_IMAGE_PULL_DELAY_SECS="${MINIKUBE_BASE_IMAGE_PULL_DELAY_SECS:-5}"
+MINIKUBE_STATUS_TIMEOUT_SECONDS="${MINIKUBE_STATUS_TIMEOUT_SECONDS:-30}"
+MINIKUBE_DOCKER_ENV_TIMEOUT_SECONDS="${MINIKUBE_DOCKER_ENV_TIMEOUT_SECONDS:-30}"
+MINIKUBE_KUBECTL_TIMEOUT_SECONDS="${MINIKUBE_KUBECTL_TIMEOUT_SECONDS:-30}"
+MINIKUBE_KUBECTL_REQUEST_TIMEOUT_SECONDS="${MINIKUBE_KUBECTL_REQUEST_TIMEOUT_SECONDS:-20}"
 MINIKUBE_BUILD_DESKTOP_IMAGE="${MINIKUBE_BUILD_DESKTOP_IMAGE:-false}"
 MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE="${MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE:-false}"
 MINIKUBE_REUSE_PLAYWRIGHT_MCP_IMAGE="${MINIKUBE_REUSE_PLAYWRIGHT_MCP_IMAGE:-true}"
 MINIKUBE_PLAYWRIGHT_MCP_SOURCE_IMAGE="${MINIKUBE_PLAYWRIGHT_MCP_SOURCE_IMAGE:-us-central1-docker.pkg.dev/your-gcp-project/clerum/playwright-server:latest}"
+MINIKUBE_PLAYWRIGHT_MCP_SOURCE_VISIBILITY="${MINIKUBE_PLAYWRIGHT_MCP_SOURCE_VISIBILITY:-private}"
 MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE="${MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE:-false}"
+MINIKUBE_IMAGE_INVENTORY_TIMEOUT_SECONDS="${MINIKUBE_IMAGE_INVENTORY_TIMEOUT_SECONDS:-30}"
 SKIP_UIS="${MINIKUBE_SKIP_UIS:-false}"
+
+case "$MINIKUBE_PLAYWRIGHT_MCP_SOURCE_VISIBILITY" in
+  public|private) ;;
+  *)
+    echo "Unknown MINIKUBE_PLAYWRIGHT_MCP_SOURCE_VISIBILITY: '${MINIKUBE_PLAYWRIGHT_MCP_SOURCE_VISIBILITY}' (expected: public | private)" >&2
+    exit 1
+    ;;
+esac
 
 case "${SKIP_UIS}" in
   true|1|yes) SKIP_UIS=true ;;
@@ -147,6 +189,21 @@ MANIFEST_FILE="${PROJECT_DIR}/deploy/minikube/.image-manifest.json"
 # exact failure this key exists to prevent.
 # shellcheck source=scripts/minikube/image-mode.sh
 source "${SCRIPT_DIR}/image-mode.sh"
+# shellcheck source=scripts/minikube/docker-cli-env.sh
+source "${SCRIPT_DIR}/docker-cli-env.sh"
+
+cleanup_docker_cli_env() {
+  local status=$? cleanup_status=0
+  trap - EXIT INT TERM
+  docker_cli_env_cleanup || cleanup_status=$?
+  if [[ "$status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
+    status="$cleanup_status"
+  fi
+  exit "$status"
+}
+trap cleanup_docker_cli_env EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 recorded_image_source() {
   image_mode_recorded_source "$PROJECT_DIR"
@@ -187,16 +244,32 @@ for arg in "$@"; do
     --skip-uis) SKIP_UIS=true ;;
     --verify-only) VERIFY_ONLY=true ;;
     --public-only) PUBLIC_ONLY=true ;;
-    --only=*) ONLY_SVC="${arg#--only=}" ;;
+    --only=*)
+      if [[ "$ONLY_REQUESTED" == true ]]; then
+        printf 'Duplicate --only selector: %s\n' "$arg" >&2
+        exit 2
+      fi
+      ONLY_REQUESTED=true
+      ONLY_SVC="${arg#--only=}"
+      ;;
     --include-e2e-fixtures) INCLUDE_E2E_FIXTURES=true ;;
     --include-desktop-image) MINIKUBE_BUILD_DESKTOP_IMAGE=true ;;
     --include-playwright-mcp-image) MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE=true ;;
     --include-airtable-mcp-image) MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE=true ;;
+    *)
+      printf 'Unknown build-images argument: %s\n' "$arg" >&2
+      exit 2
+      ;;
   esac
 done
 
-# When --only is set we skip public-image pulls and manifest regen.
-if [ -n "$ONLY_SVC" ]; then
+if [[ "$ONLY_REQUESTED" == true && -z "$ONLY_SVC" ]]; then
+  printf '%s\n' 'Invalid --only selector: the selector must not be empty' >&2
+  exit 2
+fi
+
+# When --only is set we skip public-image pulls and preserve manifest mode/tag.
+if [[ "$ONLY_REQUESTED" == true ]]; then
   SKIP_PUBLIC=true
   if [[ "$ONLY_SVC" == *"mcp-host-desktop"* ]]; then
     MINIKUBE_BUILD_DESKTOP_IMAGE=true
@@ -217,6 +290,107 @@ if [ "$SKIP_UIS" = true ]; then
   MINIKUBE_BUILD_DESKTOP_IMAGE=false
 fi
 
+# All images built in this session. Every entry here must have a matching
+# row in deploy/images.json (via localRef()) -- scripts/tests/test-images-
+# manifest.sh enforces it. This declaration intentionally precedes every
+# runtime call so an invalid --only selector cannot acquire a lease or touch a
+# daemon before it is rejected.
+ALL_IMAGES=(
+  "clerum/host-context-controller:test"
+  "clerum/workflow-recipes:test"
+  "clerum/workflow-coordinator:test"
+  "clerum/workflow-snippet-runner:test"
+  "clerum/workflow-custom-sdk-e2e:test"
+  "clerum/workflow-plugin-sdk-e2e:test"
+  "clerum/mcp-host:test"
+  "clerum/mcp-host-slim:test"
+  "clerum/mcp-host-full:test"
+  "clerum/mcp-proxy:test"
+  "clerum/nginx-egress-proxy:test"
+  "clerum/gfs-controller:test"
+  "clerum/control-api:test"
+  "clerum/external-rest-api:test"
+  "clerum/rpc-proxy:test"
+  "clerum/webhook-proxy:test"
+  "clerum/webhook-gateway:test"
+  "clerum/channel-reader:test"
+  "clerum/workflow-approval-request-reader:test"
+  "clerum/stdio-bridge:test"
+  "clerum/control-ui:test"
+  "clerum/profile-ui:test"
+  "clerum/mock-mcp-server:test"
+  "clerum/mock-stdio-mcp-server:test"
+  "clerum/workspace-files-controller:test"
+)
+
+KNOWN_BUILD_NAMES=(
+  hcc
+  wrc
+  workflow-coordinator
+  workflow-snippet-runner
+  workflow-custom-sdk-e2e
+  workflow-plugin-sdk-e2e
+  mcp-host
+  mcp-host-slim
+  mcp-host-full
+  mcp-proxy
+  nginx-egress-proxy
+  gfs-controller
+  control-api
+  external-rest-api
+  rpc-proxy
+  webhook-proxy
+  webhook-gateway
+  channel-reader
+  workflow-approval-request-reader
+  stdio-bridge
+  mock-mcp
+  mock-stdio-mcp
+  workspace-files-controller
+)
+
+if [ "$MINIKUBE_BUILD_DESKTOP_IMAGE" = "true" ]; then
+  ALL_IMAGES+=("clerum/mcp-host-desktop:test")
+  KNOWN_BUILD_NAMES+=(mcp-host-desktop)
+fi
+
+if [ "$MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE" = "true" ]; then
+  ALL_IMAGES+=("clerum/playwright-mcp-server:test")
+  KNOWN_BUILD_NAMES+=(playwright-mcp)
+fi
+
+if [ "$MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE" = "true" ]; then
+  ALL_IMAGES+=("clerum/airtable-mcp-server:test")
+  KNOWN_BUILD_NAMES+=(airtable-mcp)
+fi
+
+if [ "$SKIP_UIS" = true ]; then
+  FILTERED_IMAGES=()
+  for image in "${ALL_IMAGES[@]}"; do
+    case "$image" in
+      clerum/control-ui:*|clerum/profile-ui:*) continue ;;
+      *) FILTERED_IMAGES+=("$image") ;;
+    esac
+  done
+  ALL_IMAGES=("${FILTERED_IMAGES[@]}")
+else
+  KNOWN_BUILD_NAMES+=(control-ui profile-ui)
+fi
+
+if [[ "$ONLY_REQUESTED" == true ]]; then
+  SELECTOR_MATCHED=false
+  for candidate in "${ALL_IMAGES[@]}" "${KNOWN_BUILD_NAMES[@]}"; do
+    if [[ "$candidate" == *"$ONLY_SVC"* ]]; then
+      SELECTOR_MATCHED=true
+      break
+    fi
+  done
+  if [[ "$SELECTOR_MATCHED" != true ]]; then
+    printf 'Unknown --only selector: %s\n' "$ONLY_SVC" >&2
+    exit 2
+  fi
+fi
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -229,17 +403,111 @@ ok()   { echo -e "${GREEN}  OK${NC} -- $*"; }
 warn() { echo -e "${YELLOW}  WARN${NC} -- $*"; }
 err()  { echo -e "${RED}  ERROR${NC} -- $*"; }
 
-# Verify minikube is running
-if ! minikube -p "$PROFILE" status &>/dev/null; then
-  err "Minikube profile '${PROFILE}' is not running. Start with: minikube start -p ${PROFILE}"
+validate_nonnegative_integer() {
+  local name="$1" value="$2" maximum="$3"
+  if ! [[ "$value" =~ ^[0-9]+$ ]] \
+    || [[ "${#value}" -gt "${#maximum}" ]] \
+    || (( 10#$value > maximum )); then
+    printf 'DOCKER_DEADLINE_INVALID: %s must be an integer from 0 to %s\n' \
+      "$name" "$maximum" >&2
+    return 2
+  fi
+}
+
+validate_build_configuration() {
+  if [[ ! "$PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    printf 'PROFILE_LOCK_REQUIRED: invalid Minikube profile: %s\n' "$PROFILE" >&2
+    return 2
+  fi
+  if [[ ! "$CONTEXT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    printf 'PROFILE_LOCK_REQUIRED: invalid Kubernetes context: %s\n' "$CONTEXT" >&2
+    return 2
+  fi
+  if [[ "$PROFILE" != "$CONTEXT" ]]; then
+    printf '%s\n' 'PROFILE_LOCK_REQUIRED: Minikube profile and Kubernetes context must match' >&2
+    return 1
+  fi
+
+  docker_cli_env_validate_deadlines || return $?
+  docker_cli_env_validate_seconds MINIKUBE_STATUS_TIMEOUT_SECONDS \
+    "$MINIKUBE_STATUS_TIMEOUT_SECONDS" 300 || return $?
+  docker_cli_env_validate_seconds MINIKUBE_DOCKER_ENV_TIMEOUT_SECONDS \
+    "$MINIKUBE_DOCKER_ENV_TIMEOUT_SECONDS" 300 || return $?
+  docker_cli_env_validate_seconds MINIKUBE_KUBECTL_TIMEOUT_SECONDS \
+    "$MINIKUBE_KUBECTL_TIMEOUT_SECONDS" 300 || return $?
+  docker_cli_env_validate_seconds MINIKUBE_KUBECTL_REQUEST_TIMEOUT_SECONDS \
+    "$MINIKUBE_KUBECTL_REQUEST_TIMEOUT_SECONDS" 300 || return $?
+  docker_cli_env_validate_seconds MINIKUBE_IMAGE_INVENTORY_TIMEOUT_SECONDS \
+    "$MINIKUBE_IMAGE_INVENTORY_TIMEOUT_SECONDS" 300 || return $?
+  docker_cli_env_validate_seconds MINIKUBE_BASE_IMAGE_PULL_RETRIES \
+    "$MINIKUBE_BASE_IMAGE_PULL_RETRIES" 10 || return $?
+  validate_nonnegative_integer MINIKUBE_BASE_IMAGE_PULL_DELAY_SECS \
+    "$MINIKUBE_BASE_IMAGE_PULL_DELAY_SECS" 300 || return $?
+}
+
+require_inherited_mutation_lease() {
+  if [[ "$VERIFY_ONLY" == true ]]; then
+    return 0
+  fi
+  if [[ -z "${T2_PROJECT_DIR:-}" || -z "${T2_PROFILE:-}" || -z "${T2_CONTEXT:-}" \
+    || "$T2_PROJECT_DIR" != "$PROJECT_DIR" || "$T2_PROFILE" != "$PROFILE" \
+    || "$T2_CONTEXT" != "$CONTEXT" || "$PROFILE" != "$CONTEXT" ]]; then
+    printf '%s\n' 'PROFILE_LOCK_REQUIRED: build-images requires the inherited mutation lease for its exact worktree, profile, and context' >&2
+    return 1
+  fi
+
+  T2_GATE_ID=build-images \
+    MINIKUBE_PROFILE="$PROFILE" CONTROL_API_REAL_PG_CONTEXT="$CONTEXT" \
+    bash "${SCRIPT_DIR}/require-t2-mutation-lock.sh"
+}
+
+run_with_deadline() {
+  local label="$1" timeout_seconds="$2"
+  shift 2
+  node "$DOCKER_CLI_DEADLINE_RUNNER" \
+    --timeout-seconds "$timeout_seconds" \
+    --heartbeat-seconds "$MINIKUBE_DOCKER_HEARTBEAT_SECONDS" \
+    --kill-grace-seconds "$MINIKUBE_DOCKER_KILL_GRACE_SECONDS" \
+    --label "$label" -- "$@"
+}
+
+validate_build_configuration
+require_inherited_mutation_lease
+
+if ! command -v node >/dev/null 2>&1 || [[ ! -f "$DOCKER_CLI_DEADLINE_RUNNER" ]]; then
+  err "The existing deadline runner and Node.js are required"
   exit 1
 fi
 
+# Verify minikube is running. Preserve timeout (124), signal, and ordinary
+# child exit statuses so callers can distinguish a dead process from a stopped
+# profile.
+minikube_status=0
+run_with_deadline minikube-status "$MINIKUBE_STATUS_TIMEOUT_SECONDS" \
+  minikube -p "$PROFILE" status >/dev/null || minikube_status=$?
+if [[ "$minikube_status" -ne 0 ]]; then
+  err "Minikube profile '${PROFILE}' is not running. Start with: minikube start -p ${PROFILE}"
+  exit "$minikube_status"
+fi
+
 minikube_node_count() {
-  kubectl --context "$PROFILE" get nodes --no-headers 2>/dev/null | wc -l | tr -d '[:space:]'
+  local nodes status=0
+  nodes="$(run_with_deadline minikube-get-nodes "$MINIKUBE_KUBECTL_TIMEOUT_SECONDS" \
+    kubectl --context="$CONTEXT" get nodes \
+      --request-timeout="${MINIKUBE_KUBECTL_REQUEST_TIMEOUT_SECONDS}s" \
+      --no-headers)" || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    return "$status"
+  fi
+  awk 'NF { count += 1 } END { print count + 0 }' <<<"$nodes"
 }
 
-MINIKUBE_NODE_COUNT="$(minikube_node_count)"
+node_count_status=0
+MINIKUBE_NODE_COUNT="$(minikube_node_count)" || node_count_status=$?
+if [[ "$node_count_status" -ne 0 ]]; then
+  err "Unable to list nodes for minikube profile '${PROFILE}'"
+  exit "$node_count_status"
+fi
 if [[ -z "$MINIKUBE_NODE_COUNT" || "$MINIKUBE_NODE_COUNT" == "0" ]]; then
   err "Unable to list nodes for minikube profile '${PROFILE}'"
   exit 1
@@ -280,33 +548,89 @@ normalize_minikube_image_tag() {
   printf '%s' "$image"
 }
 
-minikube_image_present() {
-  local image=$1
-  local normalized
-  normalized="$(normalize_minikube_image_tag "$image")"
-  minikube -p "$PROFILE" image ls 2>/dev/null | grep -Fxq "$normalized"
+MINIKUBE_IMAGE_INVENTORY_JSON=""
+MINIKUBE_IMAGE_INVENTORY_CACHED=false
+# Return code 1 is reserved for a successful inventory proving that a requested
+# image is absent. Remap only a real inventory failure that happens to return 1;
+# preserve every other deadline/process status so callers retain diagnostics and
+# cannot turn an infrastructure failure into a pull/load cache miss.
+MINIKUBE_IMAGE_INVENTORY_ERROR_STATUS=2
+
+minikube_image_inventory() {
+  local inventory_status=0
+  run_with_deadline minikube-image-inventory \
+    "$MINIKUBE_IMAGE_INVENTORY_TIMEOUT_SECONDS" \
+    minikube -p "$PROFILE" image ls --format=json || inventory_status=$?
+  if [[ "$inventory_status" -ne 0 ]]; then
+    err "Minikube image inventory failed or exceeded its deadline" >&2
+    if [[ "$inventory_status" -eq 1 ]]; then
+      return "$MINIKUBE_IMAGE_INVENTORY_ERROR_STATUS"
+    fi
+    return "$inventory_status"
+  fi
+}
+
+cache_minikube_image_inventory() {
+  local inventory_status=0
+  MINIKUBE_IMAGE_INVENTORY_JSON="$(minikube_image_inventory)" || inventory_status=$?
+  if [[ "$inventory_status" -ne 0 ]]; then
+    return "$inventory_status"
+  fi
+  MINIKUBE_IMAGE_INVENTORY_CACHED=true
 }
 
 minikube_image_id() {
   local image=$1
-  local normalized
+  local normalized inventory inventory_status=0
   normalized="$(normalize_minikube_image_tag "$image")"
+  if [[ "$MINIKUBE_IMAGE_INVENTORY_CACHED" == true ]]; then
+    inventory="$MINIKUBE_IMAGE_INVENTORY_JSON"
+  else
+    inventory="$(minikube_image_inventory)" || inventory_status=$?
+    if [[ "$inventory_status" -ne 0 ]]; then
+      return "$inventory_status"
+    fi
+  fi
   # shellcheck disable=SC2016
-  minikube -p "$PROFILE" image ls --format=json 2>/dev/null \
-    | node -e '
+  printf '%s' "$inventory" | node -e '
 const tag = process.argv[1]
+const raw = require("fs").readFileSync(0, "utf8").trim()
 let items = []
-try { items = JSON.parse(require("fs").readFileSync(0, "utf8")) } catch {}
+if (raw) {
+  try {
+    items = JSON.parse(raw)
+  } catch {
+    process.stderr.write("MINIKUBE_IMAGE_INVENTORY_INVALID: inventory is not valid JSON\n")
+    process.exit(2)
+  }
+  if (!Array.isArray(items)) {
+    process.stderr.write("MINIKUBE_IMAGE_INVENTORY_INVALID: inventory is not an array\n")
+    process.exit(2)
+  }
+}
 const hit = items.find((item) => Array.isArray(item.repoTags) && item.repoTags.includes(tag))
 process.stdout.write(hit?.id ? `sha256:${hit.id}` : "NOT_FOUND")
 ' "$normalized"
 }
 
+minikube_image_present() {
+  local image=$1 image_id inventory_status=0
+  image_id="$(minikube_image_id "$image")" || inventory_status=$?
+  if [[ "$inventory_status" -ne 0 ]]; then
+    return "$inventory_status"
+  fi
+  [[ "$image_id" != "NOT_FOUND" ]]
+}
+
 pull_host_image_with_retry() {
   local image=$1
   local attempt=1
+  local pull_status=1
   while [ "$attempt" -le "$MINIKUBE_BASE_IMAGE_PULL_RETRIES" ]; do
-    if docker pull "$image"; then
+    pull_status=0
+    docker_cli_run_public pull-base-image "$MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS" \
+      docker pull "$image" || pull_status=$?
+    if [ "$pull_status" -eq 0 ]; then
       return 0
     fi
     if [ "$attempt" -lt "$MINIKUBE_BASE_IMAGE_PULL_RETRIES" ]; then
@@ -315,10 +639,57 @@ pull_host_image_with_retry() {
     fi
     attempt=$((attempt + 1))
   done
-  return 1
+  return "$pull_status"
+}
+
+require_docker_info() {
+  local label="$1" status=0
+  docker_cli_run_public "$label" "$MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS" \
+    docker info >/dev/null || status=$?
+  if [ "$status" -ne 0 ]; then
+    err "Docker daemon check failed (${label})"
+    return "$status"
+  fi
+}
+
+docker_local_image_query() {
+  local image="$1"
+  docker_cli_run_public docker-images-query "$MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS" \
+    docker images -q "$image"
+}
+
+docker_local_image_id() {
+  local image="$1"
+  docker_cli_run_public docker-image-id "$MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS" \
+    docker inspect --format='{{.Id}}' "$image"
+}
+
+docker_local_image_tag() {
+  local source="$1" tag="$2"
+  docker_cli_run_public docker-image-tag "$MINIKUBE_DOCKER_INFO_TIMEOUT_SECONDS" \
+    docker tag "$source" "$tag"
+}
+
+minikube_load_local_image() {
+  local image="$1"
+  # A local image transfer can be as large as the preceding build, so it uses
+  # the build budget rather than the short metadata budget.
+  docker_cli_run_public minikube-image-load "$MINIKUBE_DOCKER_BUILD_TIMEOUT_SECONDS" \
+    minikube -p "$PROFILE" image load "$image" >/dev/null
+}
+
+load_and_resolve_image_id() {
+  local image="$1"
+  if [[ "$MINIKUBE_MULTI_NODE" == true ]]; then
+    minikube_load_local_image "$image" || return $?
+    minikube_image_id "$image"
+  else
+    docker_local_image_id "$image"
+  fi
 }
 
 ensure_base_images_in_minikube() {
+  local presence_status query_status image_ids
   if [ "$MINIKUBE_PRELOAD_BASE_IMAGES" = "false" ]; then
     warn "Skipping base image preload (MINIKUBE_PRELOAD_BASE_IMAGES=false)"
     return 0
@@ -326,90 +697,63 @@ ensure_base_images_in_minikube() {
 
   echo -e "\n${BOLD}=== Ensuring Build Base Images ===${NC}"
   for image in "${BUILD_BASE_IMAGES[@]}"; do
-    if minikube_image_present "$image"; then
+    presence_status=0
+    minikube_image_present "$image" || presence_status=$?
+    if [[ "$presence_status" -eq 0 ]]; then
       ok "${image} already present in minikube"
       continue
     fi
+    if [[ "$presence_status" -ne 1 ]]; then
+      err "Could not inspect '${image}' in minikube"
+      return "$presence_status"
+    fi
 
-    if ! docker image inspect "$image" >/dev/null 2>&1; then
+    query_status=0
+    image_ids="$(docker_local_image_query "$image")" || query_status=$?
+    if [[ "$query_status" -ne 0 ]]; then
+      err "Could not inventory '${image}' in the host Docker cache"
+      return "$query_status"
+    fi
+    if [[ -z "$image_ids" ]]; then
       log "Pulling base image '${image}' into host Docker cache..."
-      pull_host_image_with_retry "$image"
+      pull_host_image_with_retry "$image" || return $?
     fi
 
     log "Loading base image '${image}' into minikube '${PROFILE}'..."
-    minikube -p "$PROFILE" image load "$image" >/dev/null
+    minikube_load_local_image "$image" || return $?
     ok "${image} loaded into minikube"
   done
 }
 
 if [ "$VERIFY_ONLY" = false ]; then
+  docker_cli_env_prepare
+  require_docker_info docker-info-host
   ensure_base_images_in_minikube
-fi
 
-# ---- Point Docker CLI at minikube's Docker daemon when safe ----
-if [ "$MINIKUBE_MULTI_NODE" = false ]; then
-  # This makes `docker build` execute INSIDE minikube — no image transfer needed.
-  log "Configuring Docker CLI to use minikube's Docker daemon..."
-  eval "$(minikube -p "$PROFILE" docker-env)"
-  # Let Docker negotiate API version automatically (minikube v1.38+ requires >=1.44)
-  unset DOCKER_API_VERSION 2>/dev/null || true
-  ok "Docker CLI now targets minikube '${PROFILE}'"
-else
-  log "Skipping docker-env; multi-node profiles use host builds plus 'minikube image load'"
-fi
-
-# All images built in this session. Every entry here must have a matching
-# row in deploy/images.json (via localRef()) -- scripts/tests/test-images-
-# manifest.sh enforces it.
-ALL_IMAGES=(
-  "clerum/host-context-controller:test"
-  "clerum/workflow-recipes:test"
-  "clerum/workflow-coordinator:test"
-  "clerum/workflow-snippet-runner:test"
-  "clerum/workflow-custom-sdk-e2e:test"
-  "clerum/workflow-plugin-sdk-e2e:test"
-  "clerum/mcp-host:test"
-  "clerum/mcp-host-slim:test"
-  "clerum/mcp-host-full:test"
-  "clerum/mcp-proxy:test"
-  "clerum/nginx-egress-proxy:test"
-  "clerum/gfs-controller:test"
-  "clerum/control-api:test"
-  "clerum/external-rest-api:test"
-  "clerum/rpc-proxy:test"
-  "clerum/webhook-proxy:test"
-  "clerum/webhook-gateway:test"
-  "clerum/channel-reader:test"
-  "clerum/workflow-approval-request-reader:test"
-  "clerum/stdio-bridge:test"
-  "clerum/control-ui:test"
-  "clerum/profile-ui:test"
-  "clerum/mock-mcp-server:test"
-  "clerum/mock-stdio-mcp-server:test"
-  "clerum/workspace-files-controller:test"
-)
-
-if [ "$MINIKUBE_BUILD_DESKTOP_IMAGE" = "true" ]; then
-  ALL_IMAGES+=("clerum/mcp-host-desktop:test")
-fi
-
-if [ "$MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE" = "true" ]; then
-  ALL_IMAGES+=("clerum/playwright-mcp-server:test")
-fi
-
-if [ "$MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE" = "true" ]; then
-  ALL_IMAGES+=("clerum/airtable-mcp-server:test")
-fi
-
-if [ "$SKIP_UIS" = true ]; then
-  FILTERED_IMAGES=()
-  for image in "${ALL_IMAGES[@]}"; do
-    case "$image" in
-      clerum/control-ui:*|clerum/profile-ui:*) continue ;;
-      *) FILTERED_IMAGES+=("$image") ;;
-    esac
-  done
-  ALL_IMAGES=("${FILTERED_IMAGES[@]}")
+  # ---- Point Docker CLI at minikube's Docker daemon when safe ----
+  if [ "$MINIKUBE_MULTI_NODE" = false ]; then
+    # This makes `docker build` execute INSIDE minikube — no image transfer needed.
+    log "Configuring Docker CLI to use minikube's Docker daemon..."
+    docker_env_status=0
+    docker_env_output="$(run_with_deadline minikube-docker-env \
+      "$MINIKUBE_DOCKER_ENV_TIMEOUT_SECONDS" \
+      minikube -p "$PROFILE" docker-env --shell bash)" || docker_env_status=$?
+    if [[ "$docker_env_status" -ne 0 ]]; then
+      err "Could not resolve Docker environment for minikube '${PROFILE}'"
+      exit "$docker_env_status"
+    fi
+    if [[ -z "$docker_env_output" ]]; then
+      err "Minikube '${PROFILE}' returned an empty Docker environment"
+      exit 1
+    fi
+    eval "$docker_env_output"
+    # Let Docker negotiate API version automatically (minikube v1.38+ requires >=1.44)
+    unset DOCKER_API_VERSION 2>/dev/null || true
+    require_docker_info docker-info-minikube
+    ok "Docker CLI now targets minikube '${PROFILE}'"
+  else
+    log "Skipping docker-env; multi-node profiles use host builds plus 'minikube image load'"
+  fi
 fi
 
 # ---- Verify-only mode ----
@@ -513,6 +857,11 @@ if [ "$VERIFY_ONLY" = true ]; then
     VERIFY_IMAGES=("${FILTERED_VERIFY[@]}")
   fi
 
+  # Verification is read-only and deliberately does not initialise Docker or
+  # buildx. One bounded Minikube inventory is enough for every tag and avoids
+  # multiplying a daemon/runtime hang by the size of VERIFY_IMAGES.
+  cache_minikube_image_inventory
+
   fail_count=0
   for img in "${VERIFY_IMAGES[@]}"; do
     sha=$(minikube_image_id "$img")
@@ -589,18 +938,23 @@ build_image() {
     docker_args+=(-f "$dockerfile")
   fi
   local build_cmd=(docker build "${docker_args[@]}" "$dir")
-  if ! "${build_cmd[@]}" 2>&1 | tail -3; then
+  local build_status=0
+  docker_cli_run_public "build-${name}" "$MINIKUBE_DOCKER_BUILD_TIMEOUT_SECONDS" \
+    "${build_cmd[@]}" || build_status=$?
+  if [ "$build_status" -ne 0 ]; then
     err "Failed to build ${tag}"
     FAILED_IMAGES+=("$tag")
-    return 1
+    return "$build_status"
   fi
-  local sha
+  local sha sha_status=0
   if [ "$MINIKUBE_MULTI_NODE" = true ]; then
     log "Loading ${tag} into all minikube nodes..."
-    minikube -p "$PROFILE" image load "$tag" >/dev/null
-    sha=$(minikube_image_id "$tag")
-  else
-    sha=$(docker inspect --format='{{.Id}}' "$tag" 2>/dev/null || echo "NOT_FOUND")
+  fi
+  sha="$(load_and_resolve_image_id "$tag")" || sha_status=$?
+  if [[ "$sha_status" -ne 0 ]]; then
+    err "Could not verify ${tag} after build"
+    FAILED_IMAGES+=("$tag")
+    return "$sha_status"
   fi
   if [ "$sha" = "NOT_FOUND" ]; then
     err "Image ${tag} not found after build!"
@@ -622,18 +976,23 @@ build_control_ui_image() {
   )
   docker_args+=(-f "${PROJECT_DIR}/control-ui/Dockerfile")
   local build_cmd=(docker build "${docker_args[@]}" "${PROJECT_DIR}")
-  if ! "${build_cmd[@]}" 2>&1 | tail -3; then
+  local build_status=0
+  docker_cli_run_public build-control-ui "$MINIKUBE_DOCKER_BUILD_TIMEOUT_SECONDS" \
+    "${build_cmd[@]}" || build_status=$?
+  if [ "$build_status" -ne 0 ]; then
     err "Failed to build ${tag}"
     FAILED_IMAGES+=("$tag")
-    return 1
+    return "$build_status"
   fi
-  local sha
+  local sha sha_status=0
   if [ "$MINIKUBE_MULTI_NODE" = true ]; then
     log "Loading ${tag} into all minikube nodes..."
-    minikube -p "$PROFILE" image load "$tag" >/dev/null
-    sha=$(minikube_image_id "$tag")
-  else
-    sha=$(docker inspect --format='{{.Id}}' "$tag" 2>/dev/null || echo "NOT_FOUND")
+  fi
+  sha="$(load_and_resolve_image_id "$tag")" || sha_status=$?
+  if [[ "$sha_status" -ne 0 ]]; then
+    err "Could not verify ${tag} after build"
+    FAILED_IMAGES+=("$tag")
+    return "$sha_status"
   fi
   if [ "$sha" = "NOT_FOUND" ]; then
     err "Image ${tag} not found after build!"
@@ -644,23 +1003,36 @@ build_control_ui_image() {
 }
 
 reuse_image_as_tag() {
-  local name=$1 source=$2 tag=$3
+  local name=$1 source=$2 tag=$3 visibility=${4:-private}
   if [ -n "$ONLY_SVC" ] && [[ "$tag" != *"$ONLY_SVC"* ]] && [[ "$name" != *"$ONLY_SVC"* ]]; then
     return 0
   fi
   log "Reusing ${source} as ${tag}..."
-  if ! docker pull "$source" 2>&1 | tail -3; then
+  local pull_status=0
+  if [ "$visibility" = private ]; then
+    docker_cli_run_private pull-reusable-image "$MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS" \
+      docker pull "$source" || pull_status=$?
+  else
+    docker_cli_run_public pull-reusable-image "$MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS" \
+      docker pull "$source" || pull_status=$?
+  fi
+  if [ "$pull_status" -ne 0 ]; then
     err "Failed to pull ${source}"
     FAILED_IMAGES+=("$tag")
-    return 1
+    return "$pull_status"
   fi
-  docker tag "$source" "$tag"
-  local sha
-  if [ "$MINIKUBE_MULTI_NODE" = true ]; then
-    minikube -p "$PROFILE" image load "$tag" >/dev/null
-    sha=$(minikube_image_id "$tag")
-  else
-    sha=$(docker inspect --format='{{.Id}}' "$tag" 2>/dev/null || echo "NOT_FOUND")
+  local tag_status=0 sha sha_status=0
+  docker_local_image_tag "$source" "$tag" || tag_status=$?
+  if [[ "$tag_status" -ne 0 ]]; then
+    err "Failed to tag ${source} as ${tag}"
+    FAILED_IMAGES+=("$tag")
+    return "$tag_status"
+  fi
+  sha="$(load_and_resolve_image_id "$tag")" || sha_status=$?
+  if [[ "$sha_status" -ne 0 ]]; then
+    err "Could not verify ${tag} after retag"
+    FAILED_IMAGES+=("$tag")
+    return "$sha_status"
   fi
   if [ "$sha" = "NOT_FOUND" ]; then
     err "Image ${tag} not found after retag!"
@@ -829,7 +1201,8 @@ if [ "$MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE" = "true" ]; then
   if [ "$MINIKUBE_REUSE_PLAYWRIGHT_MCP_IMAGE" = "true" ]; then
     reuse_image_as_tag "playwright-mcp" \
       "$MINIKUBE_PLAYWRIGHT_MCP_SOURCE_IMAGE" \
-      "clerum/playwright-mcp-server:test"
+      "clerum/playwright-mcp-server:test" \
+      "$MINIKUBE_PLAYWRIGHT_MCP_SOURCE_VISIBILITY"
   else
     build_image "playwright-mcp" \
       "${PROJECT_DIR}/mcp-servers/playwright" \
@@ -868,16 +1241,33 @@ if [ "$SKIP_PUBLIC" = false ]; then
     "ghcr.io/aas-ee/open-web-search:latest"
   )
   for img in "${PUBLIC_IMAGES[@]}"; do
-    if [ "$MINIKUBE_MULTI_NODE" = true ] && minikube_image_present "$img"; then
+    public_presence_status=1
+    public_image_ids=""
+    if [[ "$MINIKUBE_MULTI_NODE" == true ]]; then
+      public_presence_status=0
+      minikube_image_present "$img" || public_presence_status=$?
+    else
+      public_presence_status=0
+      public_image_ids="$(docker_local_image_query "$img")" || public_presence_status=$?
+    fi
+    if { [[ "$MINIKUBE_MULTI_NODE" == true ]] && [[ "$public_presence_status" -gt 1 ]]; } \
+      || { [[ "$MINIKUBE_MULTI_NODE" == false ]] && [[ "$public_presence_status" -ne 0 ]]; }; then
+      err "Could not inventory public image '${img}'"
+      exit "$public_presence_status"
+    fi
+
+    if [ "$MINIKUBE_MULTI_NODE" = true ] && [[ "$public_presence_status" -eq 0 ]]; then
       log "Image '$img' already present -- skipping"
-    elif [ "$MINIKUBE_MULTI_NODE" = false ] && docker images -q "$img" 2>/dev/null | grep -q .; then
+    elif [ "$MINIKUBE_MULTI_NODE" = false ] && [[ -n "$public_image_ids" ]]; then
       log "Image '$img' already present -- skipping"
     else
       log "Pulling '$img' into minikube..."
       if [ "$MINIKUBE_MULTI_NODE" = true ]; then
-        minikube -p "$PROFILE" image load --pull "$img" >/dev/null
+        docker_cli_run_public pull-public-image "$MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS" \
+          minikube -p "$PROFILE" image load --pull "$img" >/dev/null
       else
-        docker pull "$img" 2>/dev/null
+        docker_cli_run_public pull-public-image "$MINIKUBE_DOCKER_PULL_TIMEOUT_SECONDS" \
+          docker pull "$img"
       fi
       ok "$img"
     fi
@@ -887,8 +1277,6 @@ fi
 # ---- Generate build manifest JSON ----
 # MANIFEST_FILE is declared at the top of the script; the verify path needs it
 # too and exits long before this point.
-mkdir -p "$(dirname "$MANIFEST_FILE")"
-echo -e "\n${BOLD}=== Generating Image Manifest ===${NC}"
 
 # How this cluster's images were acquired, read back by --verify-only.
 # pull-images.sh writes "ghcr"; this script only ever BUILDS, so a full run
@@ -924,6 +1312,49 @@ if [ -n "$ONLY_SVC" ]; then
     esac
   fi
 fi
+
+# Resolve every manifest value before opening MANIFEST_FILE. A daemon query is
+# authoritative only when it exits zero: empty output then means the image is
+# absent, while every nonzero status is an inventory failure. In particular,
+# Docker's generic exit 1 must never trigger a pull or be rewritten as
+# NOT_BUILT. Staging the values also preserves any prior good manifest when an
+# inventory or inspect command fails partway through the list.
+MANIFEST_SHAS=()
+if [[ "$MINIKUBE_MULTI_NODE" == true ]]; then
+  cache_minikube_image_inventory
+fi
+for img in "${ALL_IMAGES[@]}"; do
+  sha=""
+  if [[ "$MINIKUBE_MULTI_NODE" == true ]]; then
+    manifest_inventory_status=0
+    sha="$(minikube_image_id "$img")" || manifest_inventory_status=$?
+    if [[ "$manifest_inventory_status" -ne 0 ]]; then
+      err "Could not inventory ${img} while generating the image manifest" >&2
+      exit "$manifest_inventory_status"
+    fi
+  else
+    manifest_inventory_status=0
+    manifest_image_ids="$(docker_local_image_query "$img")" || manifest_inventory_status=$?
+    if [[ "$manifest_inventory_status" -ne 0 ]]; then
+      err "Could not inventory ${img} while generating the image manifest" >&2
+      exit "$manifest_inventory_status"
+    fi
+    if [[ -z "$manifest_image_ids" ]]; then
+      sha="NOT_BUILT"
+    else
+      manifest_inspect_status=0
+      sha="$(docker_local_image_id "$img")" || manifest_inspect_status=$?
+      if [[ "$manifest_inspect_status" -ne 0 ]]; then
+        err "Could not inspect ${img} while generating the image manifest" >&2
+        exit "$manifest_inspect_status"
+      fi
+    fi
+  fi
+  MANIFEST_SHAS+=("$sha")
+done
+
+mkdir -p "$(dirname "$MANIFEST_FILE")"
+echo -e "\n${BOLD}=== Generating Image Manifest ===${NC}"
 {
   echo "{"
   echo "  \"generated\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
@@ -933,13 +1364,10 @@ fi
   echo "  \"images\": {"
   count=0
   total=${#ALL_IMAGES[@]}
-  for img in "${ALL_IMAGES[@]}"; do
+  for image_index in "${!ALL_IMAGES[@]}"; do
+    img="${ALL_IMAGES[$image_index]}"
+    sha="${MANIFEST_SHAS[$image_index]}"
     count=$((count + 1))
-    if [ "$MINIKUBE_MULTI_NODE" = true ]; then
-      sha=$(minikube_image_id "$img")
-    else
-      sha=$(docker inspect --format='{{.Id}}' "$img" 2>/dev/null || echo "NOT_BUILT")
-    fi
     comma=","
     if [ "$count" -eq "$total" ]; then comma=""; fi
     echo "    \"${img}\": \"${sha}\"${comma}"
