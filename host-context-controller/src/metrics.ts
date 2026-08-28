@@ -279,6 +279,14 @@ export const hostFleetRequestsTotal = counter({
   labelNames: ['result'] as const,
 })
 
+// #493: successful replace() only, inside replaceWithConflictRetry. Kind is
+// next.kind ?? 'unknown'. Direct Role PUTs stay invisible until G5.
+export const writesTotal = counter({
+  name: 'clerum_hcc_writes_total',
+  help: 'Successful Kubernetes replace() calls issued through replaceWithConflictRetry, by object kind.',
+  labelNames: ['kind'] as const,
+})
+
 export const hostCleanupDeferredTotal = counter({
   name: 'clerum_hcc_host_cleanup_deferred_total',
   help: 'Orphan Host cleanup deferrals by bounded reason.',
