@@ -6,6 +6,7 @@ import {
   CODEX_CONNECTION_REF_ANNOTATION,
   assignedCodexConnectionKey,
 } from '@clerum/codex-catalog-projection'
+import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import { loadConfig } from '../config'
 import type {
   GovernedTraceReporter,
@@ -706,6 +707,21 @@ export function createWorkflowEndpointHandlers(
       wrcConfigureToken,
       handleOpts
     )
+    if (
+      isLlmProviderId(body.provider) &&
+      PROVIDER_AUTH_MODE[body.provider] === 'oauth-broker' &&
+      result.status >= 200 &&
+      result.status < 300
+    ) {
+      return {
+        status: result.status,
+        body: {
+          ...result.body,
+          identityBound: result.body.identityBound === true,
+          grantRedeemable: result.body.grantRedeemable === true,
+        },
+      }
+    }
     return { status: result.status, body: result.body }
   }
 

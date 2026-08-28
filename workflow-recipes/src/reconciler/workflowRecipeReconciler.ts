@@ -1050,6 +1050,7 @@ export class WorkflowRecipeReconciler {
         ? parent.annotations
         : recipe.metadata.annotations
     setter.call(this.workflowReconciler, {
+      recipeUid: recipe.metadata.uid,
       recipeName: recipe.metadata.name,
       runtimeScopeRecipeName,
       claimedParent: this.claimedCodexParent(recipe),
@@ -1172,7 +1173,8 @@ export class WorkflowRecipeReconciler {
         recipe.metadata.namespace,
         recipe.metadata.name,
         recipe.spec,
-        runtimeScopeRecipeName
+        runtimeScopeRecipeName,
+        recipe.metadata.uid
       )
     } catch (error) {
       console.error(

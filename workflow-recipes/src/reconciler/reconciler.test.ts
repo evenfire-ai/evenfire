@@ -5885,7 +5885,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'parent-recipe'
+      'parent-recipe',
+      'uid-child'
     )
     expect(mockVerifyWorkflowRunProvenance).toHaveBeenCalledWith({
       runId: 'run-child',
@@ -6170,7 +6171,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'parent-recipe'
+      'parent-recipe',
+      'uid-child'
     )
   })
 
@@ -6214,7 +6216,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
   })
 
@@ -6540,7 +6543,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
   })
 
@@ -6592,7 +6596,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
   })
 
@@ -6652,7 +6657,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
   })
 
@@ -6692,7 +6698,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
   })
 
@@ -6730,7 +6737,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
   })
 
@@ -6768,6 +6776,7 @@ describe('WorkflowRecipeReconciler', () => {
     await reconciler.reconcile(recipe)
 
     expect(setCodexReconcileContext).toHaveBeenCalledWith({
+      recipeUid: 'uid-child',
       recipeName: 'child-run',
       runtimeScopeRecipeName: 'child-run',
       claimedParent: true,
@@ -6825,6 +6834,7 @@ describe('WorkflowRecipeReconciler', () => {
     await reconciler.reconcile(recipe)
 
     expect(setCodexReconcileContext).toHaveBeenCalledWith({
+      recipeUid: 'uid-child',
       recipeName: 'child-run',
       runtimeScopeRecipeName: 'parent-recipe',
       claimedParent: true,
@@ -6885,6 +6895,7 @@ describe('WorkflowRecipeReconciler', () => {
     await reconciler.reconcile(recipe)
 
     expect(setCodexReconcileContext).toHaveBeenCalledWith({
+      recipeUid: 'uid-child',
       recipeName: 'child-run',
       runtimeScopeRecipeName: 'parent-recipe',
       claimedParent: true,
@@ -7144,7 +7155,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'test-recipe',
       recipe.spec,
-      'test-recipe'
+      'test-recipe',
+      'uid-123'
     )
   })
 
@@ -7193,7 +7205,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'test-recipe',
       recipe.spec,
-      'test-recipe'
+      'test-recipe',
+      'uid-123'
     )
   })
 

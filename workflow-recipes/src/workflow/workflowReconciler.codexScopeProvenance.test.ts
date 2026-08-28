@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { WorkflowRecipeSpec } from '../types'
+import {
+  CODEX_CONNECTION_REF_ANNOTATION,
+  readRecipeCodexConnectionRef,
+} from './llmAllowedModelsSnapshot'
 import { issueMcpHostRuntimeTokens } from './mcpHostRuntimeTokenIssuerClient'
 import {
   type CodexReconcileContext,
@@ -77,18 +81,45 @@ function makeCodexSpec(overrides?: Partial<WorkflowRecipeSpec>): WorkflowRecipeS
   }
 }
 
+function recipeUidFor(recipeName: string): string {
+  return `uid-${recipeName}`
+}
+
+function bindFromCr(
+  reconciler: WorkflowReconciler,
+  cr: {
+    name: string
+    uid?: string
+    annotations?: Record<string, string>
+    runtimeScopeRecipeName?: string
+    claimedParent?: boolean
+    parentSpec?: WorkflowRecipeSpec | null
+    connectionKey?: string
+  }
+) {
+  const recipeName = cr.name
+  reconciler.setCodexReconcileContext({
+    recipeUid: cr.uid ?? recipeUidFor(recipeName),
+    recipeName,
+    runtimeScopeRecipeName: cr.runtimeScopeRecipeName ?? recipeName,
+    claimedParent: cr.claimedParent ?? false,
+    parentSpec: cr.parentSpec ?? null,
+    connectionKey: cr.connectionKey ?? readRecipeCodexConnectionRef(cr.annotations),
+  })
+}
+
 function bindNamedGrant(
   reconciler: WorkflowReconciler,
   recipeName = 'codex-recipe',
   extras: Partial<CodexReconcileContext> = {}
 ) {
-  reconciler.setCodexReconcileContext({
-    recipeName,
-    runtimeScopeRecipeName: extras.runtimeScopeRecipeName ?? recipeName,
-    claimedParent: extras.claimedParent ?? false,
+  bindFromCr(reconciler, {
+    name: recipeName,
+    uid: extras.recipeUid,
+    runtimeScopeRecipeName: extras.runtimeScopeRecipeName,
+    claimedParent: extras.claimedParent,
     parentSpec: extras.parentSpec ?? null,
     connectionKey: extras.connectionKey ?? 'team-plus',
-    ...extras,
   })
 }
 
@@ -224,9 +255,53 @@ describe('WorkflowReconciler Codex scope provenance', () => {
     })
   })
 
+  it('issues derived Codex scope from a live CR annotation without bindNamedGrant', async () => {
+    const { reconciler, networkingApi } = createHarness()
+    bindFromCr(reconciler, {
+      name: 'codex-recipe',
+      annotations: { [CODEX_CONNECTION_REF_ANNOTATION]: 'team-plus' },
+    })
+
+    await reconcileRecipe(reconciler, makeCodexSpec())
+
+    expect(issueMcpHostRuntimeTokens).toHaveBeenCalled()
+    expect(issuedScopes()).toContain('llm:codex:execute')
+    expect(proxyPolicyBodies(networkingApi)[0]).toBeDefined()
+  })
+
+  it('does not mint Codex when the live CR has no grant annotation', async () => {
+    const { reconciler, networkingApi } = createHarness()
+    bindFromCr(reconciler, { name: 'codex-recipe', annotations: {} })
+
+    await reconcileRecipe(reconciler, makeCodexSpec())
+
+    expect(issuedScopes()).not.toContain('llm:codex:execute')
+    expect(proxyPolicyBodies(networkingApi)).toEqual([])
+  })
+
+  it('does not reuse a leftover setter after the recipe uid is recycled', async () => {
+    const { reconciler, networkingApi } = createHarness()
+    bindFromCr(reconciler, {
+      name: 'codex-recipe',
+      uid: 'uid-stale-name-reuse',
+      annotations: { [CODEX_CONNECTION_REF_ANNOTATION]: 'team-plus' },
+    })
+
+    await reconcileRecipe(reconciler, makeCodexSpec())
+
+    expect(issuedScopes()).not.toContain('llm:codex:execute')
+    expect(proxyPolicyBodies(networkingApi)).toEqual([])
+    reconciler.setCodexReconcileContext(null, 'uid-stale-name-reuse')
+    await reconcileRecipe(reconciler, makeCodexSpec())
+    expect(issuedScopes()).not.toContain('llm:codex:execute')
+  })
+
   it('issues derived Codex scope and proxy egress from the same reconcile projection', async () => {
     const { reconciler, networkingApi } = createHarness()
-    bindNamedGrant(reconciler)
+    bindFromCr(reconciler, {
+      name: 'codex-recipe',
+      annotations: { [CODEX_CONNECTION_REF_ANNOTATION]: 'team-plus' },
+    })
 
     await reconcileRecipe(reconciler, makeCodexSpec())
 

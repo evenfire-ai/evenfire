@@ -354,6 +354,7 @@ const EFFECTIVE_WORKFLOW_CONTROL_SCOPE_ORDER: EffectiveWorkflowControlScope[] = 
 ]
 
 export type CodexReconcileContext = {
+  recipeUid: string
   recipeName: string
   runtimeScopeRecipeName: string
   claimedParent: boolean
@@ -903,8 +904,8 @@ export class WorkflowReconciler {
       tokenFactory: deps.tokenFactory,
       modelConfigHandler: deps.modelConfigHandler,
       log: this.log,
-      ensureMcpHostSecrets: (namespace, recipeName, runtimeScopeRecipeName, spec) =>
-        this.ensureMcpHostSecrets(namespace, recipeName, runtimeScopeRecipeName, spec),
+      ensureMcpHostSecrets: (namespace, recipeName, runtimeScopeRecipeName, spec, recipeUid) =>
+        this.ensureMcpHostSecrets(namespace, recipeName, runtimeScopeRecipeName, spec, recipeUid),
       applyWorkflowNetworkPolicies: (
         recipeName,
         recipeUid,
@@ -927,31 +928,39 @@ export class WorkflowReconciler {
     })
   }
 
-  setCodexReconcileContext(context: CodexReconcileContext | null): void {
-    if (!context) return
-    this.codexContexts.set(context.recipeName, context)
+  setCodexReconcileContext(context: CodexReconcileContext | null, recipeUid?: string): void {
+    if (!context) {
+      const uid = recipeUid?.trim()
+      if (uid) this.codexContexts.delete(uid)
+      return
+    }
+    this.codexContexts.set(context.recipeUid, context)
   }
 
   private resolveCodexContext(
+    recipeUid: string,
     recipeName: string,
     runtimeScopeRecipeName: string
   ): CodexReconcileContext {
-    const stored = this.codexContexts.get(recipeName)
+    const stored = this.codexContexts.get(recipeUid)
     if (stored) return stored
     return {
+      recipeUid,
       recipeName,
       runtimeScopeRecipeName,
       claimedParent: false,
       parentSpec: null,
+      connectionKey: CODEX_UNASSIGNED_CONNECTION_KEY,
     }
   }
 
   private projectCodex(
     spec: WorkflowRecipeSpec,
+    recipeUid: string,
     recipeName: string,
     runtimeScopeRecipeName: string
   ) {
-    const context = this.resolveCodexContext(recipeName, runtimeScopeRecipeName)
+    const context = this.resolveCodexContext(recipeUid, recipeName, runtimeScopeRecipeName)
     const resolved = resolveCodexAuthoritativeSpec({
       recipeName: context.recipeName,
       runtimeScopeRecipeName: context.runtimeScopeRecipeName,
@@ -978,6 +987,7 @@ export class WorkflowReconciler {
 
   private resolveEffectiveControlScopes(
     spec: WorkflowRecipeSpec,
+    recipeUid: string,
     recipeName: string,
     runtimeScopeRecipeName: string
   ): EffectiveWorkflowControlScope[] {
@@ -986,6 +996,7 @@ export class WorkflowReconciler {
     })
     const derived = this.projectCodex(
       spec,
+      recipeUid,
       recipeName,
       runtimeScopeRecipeName
     ).derivedScopes.filter(scope => !workflow.includes(scope as WorkflowControlScope))
@@ -1798,7 +1809,13 @@ export class WorkflowReconciler {
       }
 
       if (needsMcpHost && !awaitsTriggeredRun) {
-        await this.ensureMcpHostSecrets(namespace, recipeName, runtimeScopeRecipeName, spec)
+        await this.ensureMcpHostSecrets(
+          namespace,
+          recipeName,
+          runtimeScopeRecipeName,
+          spec,
+          recipeUid
+        )
       }
 
       if (runtime.output.ensurePvc) {
@@ -2589,7 +2606,8 @@ export class WorkflowReconciler {
     recipeNamespace: string,
     recipeName: string,
     spec: WorkflowRecipeSpec,
-    runtimeScopeRecipeName = recipeName
+    runtimeScopeRecipeName = recipeName,
+    recipeUid?: string
   ): Promise<void> {
     const runtime = deriveWorkflowRuntimePlan(spec, {
       recipeName,
@@ -2598,7 +2616,13 @@ export class WorkflowReconciler {
     })
     if (!runtime.mcpHost.required) return
     await this.refreshCodexSnapshot()
-    await this.ensureMcpHostSecrets(recipeNamespace, recipeName, runtimeScopeRecipeName, spec)
+    await this.ensureMcpHostSecrets(
+      recipeNamespace,
+      recipeName,
+      runtimeScopeRecipeName,
+      spec,
+      recipeUid
+    )
   }
 
   async ensureCoordinatorRuntimeCredentials(
@@ -2824,8 +2848,9 @@ export class WorkflowReconciler {
     const includeMcpHost = runtime.network.includeMcpHost && mcpHostLaneLive
     const codexProjection = this.projectCodex(
       spec,
+      recipeUid,
       recipeName,
-      this.resolveCodexContext(recipeName, recipeName).runtimeScopeRecipeName
+      this.resolveCodexContext(recipeUid, recipeName, recipeName).runtimeScopeRecipeName
     )
     const npConfig: NetworkPolicyConfig = {
       recipeName,
@@ -2946,8 +2971,9 @@ export class WorkflowReconciler {
     const codexProxyPolicyName = `${recipeName}-mcp-host-to-codex-proxy`
     const codexProjection = this.projectCodex(
       spec,
+      recipeUid,
       recipeName,
-      this.resolveCodexContext(recipeName, recipeName).runtimeScopeRecipeName
+      this.resolveCodexContext(recipeUid, recipeName, recipeName).runtimeScopeRecipeName
     )
     if (!policyNames.has(codexProxyPolicyName) && codexProjection.eligibility !== 'uncertain') {
       await this.safeDelete(() =>
@@ -3657,13 +3683,14 @@ export class WorkflowReconciler {
     namespace: string,
     recipeName: string,
     runtimeScopeRecipeName: string,
-    spec: WorkflowRecipeSpec
+    spec: WorkflowRecipeSpec,
+    recipeUid?: string
   ): Promise<void> {
     await this.ensureMcpHostRuntimeTokenSecret(
       namespace,
       recipeName,
       runtimeScopeRecipeName,
-      this.resolveEffectiveControlScopes(spec, recipeName, runtimeScopeRecipeName),
+      this.resolveEffectiveControlScopes(spec, recipeUid ?? '', recipeName, runtimeScopeRecipeName),
       deriveRecipeHostGfsScopes(spec)
     )
     if (this.deps.config.pluginWorkloadSdkEnabled && spec.pluginWorkloadSdk) {

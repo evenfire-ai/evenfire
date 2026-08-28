@@ -457,6 +457,8 @@ describe('POST /configure-model — R3 allowlist gate', () => {
       configured: true,
       provider: 'codex-subscription',
       model: 'gpt-5.3-codex',
+      identityBound: true,
+      grantRedeemable: true,
     })
     expect(k8s.readSecret).not.toHaveBeenCalled()
     expect(mcpHost.configure).toHaveBeenCalledWith('http://mcp:8080', 'tok', {
@@ -728,8 +730,9 @@ describe('POST /configure-model — security invariants', () => {
       'tok',
       { codexConnectionKey: 'personal-pro' }
     )
-    expect(denied.status).toBe(403)
-    expect(denied.body.code).toBe('model_not_allowed')
+    expect(denied.status).toBe(202)
+    expect(denied.body.identityBound).toBe(true)
+    expect(denied.body.grantRedeemable).toBe(false)
 
     const allowed = await handler.handle(
       { stepId: 's1', provider: 'codex-subscription', model: 'gpt-5.1' },
@@ -739,6 +742,7 @@ describe('POST /configure-model — security invariants', () => {
     )
     expect(allowed.status).toBe(202)
     expect(allowed.body.configured).toBe(true)
+    expect(allowed.body.grantRedeemable).toBe(true)
   })
 
   it('does not let an unassigned recipe inherit the flat Codex catalog', async () => {
@@ -747,12 +751,14 @@ describe('POST /configure-model — security invariants', () => {
     }
     const k8s = mockK8s({}, null, allowlist)
     const handler = new ModelConfigHandler(k8s, mockMcpHost())
-    const denied = await handler.handle(
+    const identityOnly = await handler.handle(
       { stepId: 's1', provider: 'codex-subscription', model: 'gpt-5.3-codex' },
       'http://mcp:8080',
       'tok'
     )
-    expect(denied.status).toBe(403)
-    expect(denied.body.code).toBe('model_not_allowed')
+    expect(identityOnly.status).toBe(202)
+    expect(identityOnly.body.configured).toBe(true)
+    expect(identityOnly.body.identityBound).toBe(true)
+    expect(identityOnly.body.grantRedeemable).toBe(false)
   })
 })

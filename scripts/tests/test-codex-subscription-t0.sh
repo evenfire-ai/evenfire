@@ -193,6 +193,7 @@ run_group "mcp-host" "mcp-host" \
   "src/config/configStore.test.ts" \
   "src/llm/failover/__tests__/engine.test.ts" \
   "src/pluginWorkloadSdk/promptBridge/llmBridge.failover.test.ts" \
+  "src/workflow/__tests__/configureHandler.test.ts" \
   "src/workflow/__tests__/workflowServiceUsageReporting.test.ts" \
   "src/pluginWorkloadSdk/server/index.test.ts" \
   "src/core/adapters/__tests__/llmPortAdapter.test.ts"
@@ -202,6 +203,9 @@ run_group "host-context-controller" "host-context-controller" \
   "src/hostReconciler.codexScopeProvenance.test.ts" \
   "src/llmAllowedModelsSnapshot.test.ts" \
   "src/networkPolicyReconciler.test.ts"
+
+run_group "workflow-runtime-core" "packages/workflow-runtime-core" \
+  "tests/unit/injection.test.ts"
 
 run_group "workflow-recipes" "workflow-recipes" \
   "src/workflow/codexExecutionProjection.test.ts" \

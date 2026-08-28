@@ -431,6 +431,7 @@ export class ModelConfigHandler {
       CONFIGMAP_NAMESPACE,
       ALLOWLIST_CONFIGMAP_NAME
     )
+    const brokerBacked = PROVIDER_AUTH_MODE[req.provider] === 'oauth-broker'
     if (allowlistCm.exists) {
       const allowed = isCodexModelAllowed(
         req.provider,
@@ -438,7 +439,9 @@ export class ModelConfigHandler {
         allowlistCm,
         opts?.codexConnectionKey
       )
-      if (!allowed) {
+      // oauth-broker configure is identity-only. Spend is gated by
+      // grantRedeemable on the coordinator and by authorize, not by 4xx here.
+      if (!allowed && !brokerBacked) {
         return {
           status: 403,
           body: {
@@ -462,7 +465,7 @@ export class ModelConfigHandler {
 
     // Broker-backed providers never resolve or mount a Secret. Control API
     // remains the OAuth custodian; WRC only forwards provider/model identity.
-    if (PROVIDER_AUTH_MODE[req.provider] === 'oauth-broker') {
+    if (brokerBacked) {
       const configureBody: Record<string, unknown> = {
         provider: req.provider,
         model: req.model,
@@ -498,7 +501,15 @@ export class ModelConfigHandler {
       }
       return {
         status: 202,
-        body: { configured: true, provider: req.provider, model: req.model },
+        body: {
+          configured: true,
+          provider: req.provider,
+          model: req.model,
+          identityBound: true,
+          grantRedeemable:
+            allowlistCm.exists &&
+            isCodexModelAllowed(req.provider, req.model, allowlistCm, opts?.codexConnectionKey),
+        },
       }
     }
 

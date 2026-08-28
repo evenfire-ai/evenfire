@@ -655,7 +655,12 @@ export class WorkflowService {
         this.stepSoulContent = pendingSoul
         this.soulOverrideActive = true
       }
-      return { configured: true, provider: req.provider, model }
+      return {
+        configured: true,
+        provider: req.provider,
+        model,
+        ...oauthIdentityReadiness(req.provider),
+      }
     }
 
     let provider: SingleTurnProvider | null
@@ -688,7 +693,12 @@ export class WorkflowService {
     }
     this.notifyLlmConfigured(req.provider, model, apiKey)
 
-    return { configured: true, provider: req.provider, model }
+    return {
+      configured: true,
+      provider: req.provider,
+      model,
+      ...oauthIdentityReadiness(req.provider),
+    }
   }
 
   private clearConfiguredProvider(): void {
@@ -1478,4 +1488,10 @@ function extractHttpStatus(err: unknown): number | undefined {
   const msg = err instanceof Error ? err.message : String(err)
   const match = msg.match(/\b(4\d{2}|5\d{2})\b/)
   return match ? parseInt(match[1], 10) : undefined
+}
+
+function oauthIdentityReadiness(provider: string): { identityBound: true } | Record<string, never> {
+  return isLlmProvider(provider) && descriptorFor(provider).authMode === 'oauth-broker'
+    ? { identityBound: true }
+    : {}
 }

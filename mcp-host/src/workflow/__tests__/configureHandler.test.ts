@@ -128,8 +128,23 @@ describe('POST /configure — provider hot-swap', () => {
       configured: true,
       provider: 'codex-subscription',
       model: 'gpt-5.3-codex',
+      identityBound: true,
     })
+    expect(result.grantRedeemable).toBeUndefined()
     expect(factory).toHaveBeenLastCalledWith('codex-subscription', 'gpt-5.3-codex', '')
+  })
+
+  it('treats a 200 Codex configure as identity-bound, not execute-ready', () => {
+    const svc = new WorkflowService('test', { llmFactory: mockLlmFactory() })
+    const result = svc.configure({
+      provider: 'codex-subscription',
+      model: 'gpt-5.3-codex',
+    } as ConfigureRequest)
+    expect(result.configured).toBe(true)
+    expect(result.identityBound).toBe(true)
+    expect(result.grantRedeemable).not.toBe(true)
+    expect(result).not.toHaveProperty('connectionRef')
+    expect(result).not.toHaveProperty('apiKey')
   })
 
   it('does not leave the prior provider ready when a Codex configure fails', () => {
@@ -166,7 +181,9 @@ describe('POST /configure — provider hot-swap', () => {
         configured: true,
         provider: 'codex-subscription',
         model: 'gpt-5.3-codex',
+        identityBound: true,
       })
+      expect(result.grantRedeemable).toBeUndefined()
       expect(svc.isReady()).toBe(true)
     } finally {
       if (previous === undefined) delete process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED
