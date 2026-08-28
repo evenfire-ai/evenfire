@@ -183,6 +183,29 @@ export class McpManager {
     return undefined
   }
 
+  /**
+   * The representative to probe on behalf of the PLATFORM (background
+   * heartbeat) — the SHARED partition ONLY, with NO per-user fallback.
+   *
+   * A platform probe (`probeTools`) makes a REAL network call. It must never be
+   * charged to a user's OAuth token/quota, so it may only ride the SHARED
+   * connection:
+   *   - static / oauth-context / the token-less oauth-user SHARED representative
+   *     all live under the SHARED key, so they are still probed here.
+   *   - the sole case skipped is the pathological "SHARED down + a per-user
+   *     partition alive" — there `representativeClient` would fall back to a
+   *     per-user client and spend that user's identity on a platform probe.
+   *     Such a server simply goes un-refreshed this round (status left stale)
+   *     rather than being probed with a user's token.
+   *
+   * Catalog reads (`getAllTools` / `describeCapabilities`) intentionally KEEP
+   * the per-user fallback: they read `client.availableTools` from cache — no
+   * network, no token spent — so falling back keeps the catalog populated.
+   */
+  private probeRepresentativeClient(serverName: string): McpClient | undefined {
+    return this.clients.get(this.sharedKey(serverName))
+  }
+
   private buildTokenProvider(
     serverConfig: McpServerInfo,
     principal: McpPrincipal,
@@ -1016,7 +1039,9 @@ export class McpManager {
    * Probe every connected server's tool list and update the status tracker.
    * Called by the background heartbeat to keep `observedAt` fresh and to
    * classify refresh failures (spec §4.5 — stay connected, attach reason).
-   * Probes the representative connection per serverName.
+   * Probes the SHARED representative per serverName (probeRepresentativeClient):
+   * a platform probe is a real network call and must never spend a user's OAuth
+   * token, so a server whose only live client is per-user is skipped this round.
    *
    * Probes a stable client snapshot. State is written only after every probe
    * settles; an aborted round never mutates the last known server status.
@@ -1027,7 +1052,7 @@ export class McpManager {
     // probes each server once via its representative; iterating raw clients would
     // double-count those partitions in the summary tally.
     const entries = [...this.byServer.keys()]
-      .map(name => [name, this.representativeClient(name)] as const)
+      .map(name => [name, this.probeRepresentativeClient(name)] as const)
       .filter((entry): entry is readonly [string, McpClient] => entry[1] !== undefined)
     if (options.signal?.aborted) {
       return {
@@ -1067,7 +1092,7 @@ export class McpManager {
     // inflate `failed` and flip the run's outcome on the series #148 watches.
     const committed = results.filter(
       ({ name, client, result }) =>
-        this.representativeClient(name) === client && !(!result.ok && result.stale)
+        this.probeRepresentativeClient(name) === client && !(!result.ok && result.stale)
     )
     const succeeded = committed.filter(({ result }) => result.ok).length
     const summary: McpStatusRefreshSummary = {
