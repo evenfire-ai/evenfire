@@ -1,14 +1,9 @@
 import type { NextFunction, Request, Response } from 'express'
 import { config } from '../config.js'
+import { publicCorrelationId } from '../http/publicApiError.js'
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 const SAFE_FETCH_SITES = new Set(['same-origin', 'same-site'])
-
-function correlationId(req: Request): string {
-  return (
-    String(req.header('x-correlation-id') || '').trim() || Math.random().toString(36).slice(2, 12)
-  )
-}
 
 function configuredOrigins(): Set<string> {
   if (config.corsOrigin === '*') {
@@ -53,7 +48,7 @@ export function requireTrustedBrowserMutation(
       error: {
         code: 'forbidden',
         message: 'The browser request origin is not allowed.',
-        correlationId: correlationId(req),
+        correlationId: publicCorrelationId(req),
         retryable: false,
       },
     })
