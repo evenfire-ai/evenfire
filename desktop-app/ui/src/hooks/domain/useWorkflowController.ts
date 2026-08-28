@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type {
+  WorkflowInputContractSchema,
   WorkflowInputValues,
   WorkflowRecipeListResult,
   WorkflowRecipeResource,
@@ -56,6 +57,86 @@ async function loadRunsWithArtifacts(wf: WorkflowSummary): Promise<WorkflowRunsR
 function sameWorkflow(left: WorkflowSummary | null, right: WorkflowSummary | null): boolean {
   if (!left || !right) return left === right
   return left.namespace === right.namespace && left.name === right.name
+}
+
+// The flat Plugins table (spec 12 §5.F) shows a compact "Recent Runs" cell per
+// row: the latest run's phase/time plus a run count. We fetch a small window
+// and enrich only the latest run with artifacts (the download affordance lives
+// on that most-recent run) so the cell stays cheap relative to the old
+// accordion, which enriched every run of the one selected workflow.
+export const RECENT_RUNS_LIMIT = 5
+
+async function loadRecentRunsWithLatestArtifacts(
+  wf: WorkflowSummary,
+  limit: number
+): Promise<WorkflowRunsResult> {
+  const raw = (await window.clerum.workflows.runs(
+    wf.namespace,
+    wf.name,
+    limit
+  )) as WorkflowRunsResult
+  const items = Array.isArray(raw?.items) ? raw.items : []
+  const [latest, ...rest] = items
+  if (!latest || !latest.executionRef) {
+    return { ...raw, items }
+  }
+  try {
+    const result = await window.clerum.workflows.listRunArtifacts(wf.namespace, wf.name, latest.id)
+    return { ...raw, items: [{ ...latest, artifacts: result.artifacts ?? [] }, ...rest] }
+  } catch {
+    return { ...raw, items: [{ ...latest, artifacts: [] }, ...rest] }
+  }
+}
+
+export type WorkflowRecentRuns = {
+  latestRun: WorkflowRunsResult['items'][number] | null
+  runCount: number
+  loading: boolean
+  refreshing: boolean
+  error: string | null
+  refresh: () => Promise<void>
+}
+
+/**
+ * Per-row recent-runs source for the flat Plugins table. Uses the shared runs
+ * query key so navigating back to Plugins reads cache (staleTime: Infinity)
+ * instead of refetching; the per-row Refresh button forces a re-fetch.
+ */
+export function useWorkflowRecentRuns(wf: WorkflowSummary): WorkflowRecentRuns {
+  const queryClient = useQueryClient()
+  const query = useQuery({
+    queryKey: desktopQueryKeys.workflowRuns(wf.namespace, wf.name, RECENT_RUNS_LIMIT),
+    queryFn: () => loadRecentRunsWithLatestArtifacts(wf, RECENT_RUNS_LIMIT),
+    staleTime: Infinity,
+    gcTime: Infinity,
+  })
+
+  const items =
+    query.data && Array.isArray(query.data.items) ? query.data.items : EMPTY_WORKFLOW_RUNS
+  const namespace = wf.namespace
+  const name = wf.name
+
+  const refresh = useCallback(async () => {
+    try {
+      await queryClient.fetchQuery({
+        queryKey: desktopQueryKeys.workflowRuns(namespace, name, RECENT_RUNS_LIMIT),
+        queryFn: () =>
+          loadRecentRunsWithLatestArtifacts({ ...wf, namespace, name }, RECENT_RUNS_LIMIT),
+        staleTime: 0,
+      })
+    } catch {
+      // Query state already records the error for consumers.
+    }
+  }, [queryClient, namespace, name, wf])
+
+  return {
+    latestRun: items[0] ?? null,
+    runCount: typeof query.data?.count === 'number' ? query.data.count : items.length,
+    loading: query.isFetching && items.length === 0,
+    refreshing: query.isFetching,
+    error: query.error ? toErrorMessage(query.error) : null,
+    refresh,
+  }
 }
 
 export function useWorkflowController(params: UseWorkflowControllerParams) {
@@ -180,7 +261,7 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
   )
 
   const handleSelectWorkflow = useCallback(
-    async (wf: WorkflowSummary | null) => {
+    async (wf: WorkflowSummary | null): Promise<WorkflowInputContractSchema | null> => {
       const seq = ++selectWorkflowSeqRef.current
       const selectionVersion =
         queryClient.getQueryData<WorkflowSelectionState>(desktopQueryKeys.workflowSelection)
@@ -191,7 +272,7 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
         workflowInputValues: EMPTY_WORKFLOW_SELECTION.workflowInputValues,
       }))
       if (!wf) {
-        return
+        return null
       }
 
       const detailPromise = queryClient
@@ -205,7 +286,7 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
       const runsPromise = loadWorkflowRunsFor(wf)
 
       const detail = await detailPromise
-      if (seq !== selectWorkflowSeqRef.current) return
+      if (seq !== selectWorkflowSeqRef.current) return null
       const currentSelection = queryClient.getQueryData<WorkflowSelectionState>(
         desktopQueryKeys.workflowSelection
       )
@@ -213,9 +294,9 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
         (currentSelection?.selectionVersion ?? EMPTY_WORKFLOW_SELECTION.selectionVersion) !==
         selectionVersion
       ) {
-        return
+        return null
       }
-      if (!sameWorkflow(currentSelection?.selectedWorkflow ?? null, wf)) return
+      if (!sameWorkflow(currentSelection?.selectedWorkflow ?? null, wf)) return null
       const schema = detail?.spec?.inputContract ?? null
       const nextWorkflow = detail
         ? {
@@ -230,55 +311,25 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
         workflowInputValues: nextInputValues,
       }))
       await runsPromise
+      return schema
     },
     [loadWorkflowRunsFor, queryClient, setWorkflowSelection]
   )
 
-  const handleRefreshSelectedWorkflow = useCallback(async () => {
-    await handleRefreshWorkflows()
-    const detailPromise = selectedWorkflow
-      ? queryClient
-          .fetchQuery({
-            queryKey: desktopQueryKeys.workflowDetail(
-              selectedWorkflow.namespace,
-              selectedWorkflow.name
-            ),
-            queryFn: () =>
-              window.clerum.workflows.read(
-                selectedWorkflow.namespace,
-                selectedWorkflow.name
-              ) as Promise<WorkflowRecipeResource>,
-            staleTime: 0,
-          })
-          .catch(() => null)
-      : Promise.resolve(null)
-    const [detail] = await Promise.all([detailPromise, loadWorkflowRunsFor(selectedWorkflow)])
-    if (selectedWorkflow && detail) {
-      setWorkflowSelection(current => ({
-        ...current,
-        selectedWorkflow: {
-          ...selectedWorkflow,
-          triggerableByUser: canTriggerWorkflowAsUser(detail),
-        },
-      }))
-    }
-  }, [
-    handleRefreshWorkflows,
-    loadWorkflowRunsFor,
-    queryClient,
-    selectedWorkflow,
-    setWorkflowSelection,
-  ])
-
   const handleTriggerWorkflow = useCallback(
-    async (ns: string, name: string) => {
+    async (ns: string, name: string, explicitInputs?: WorkflowInputValues) => {
       setWorkflowTriggerLoading(true)
       try {
         const idempotencyKey =
           globalThis.crypto?.randomUUID?.() ??
           `wf-${Date.now()}-${Math.random().toString(16).slice(2)}`
-        const hasInputs = Object.keys(workflowInputValues).length > 0
-        const payload = hasInputs ? workflowInputValues : undefined
+        // The flat table's direct-trigger path (a recipe with no input contract)
+        // passes `{}` explicitly so a stale render-time closure over the last
+        // selection's inputs can never leak into a contract-less trigger. The
+        // modal path omits the argument and uses the live edited values.
+        const values = explicitInputs ?? workflowInputValues
+        const hasInputs = Object.keys(values).length > 0
+        const payload = hasInputs ? values : undefined
         const result = await window.clerum.workflows.trigger(ns, name, payload, idempotencyKey)
         if (isWorkflowApprovalRequestResult(result)) {
           setStatus('Approval requested. Open notifications to approve.', 'success', undefined, {
@@ -289,6 +340,14 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
           setStatus('Workflow triggered.', 'success', undefined, { global: false, toast: true })
         }
         await handleRefreshWorkflows()
+        // The flat Plugins table reads recent runs from the RECENT_RUNS_LIMIT
+        // key (see useWorkflowRecentRuns), a different cache entry than the
+        // selection path's limit-20 query. Invalidate that key so the row's
+        // "Recent Runs" cell shows the just-created run without a manual Refresh
+        // (both trigger paths — direct and modal — flow through here).
+        await queryClient.invalidateQueries({
+          queryKey: desktopQueryKeys.workflowRuns(ns, name, RECENT_RUNS_LIMIT),
+        })
         const wf = workflows.find(workflow => workflow.namespace === ns && workflow.name === name)
         if (wf) await handleSelectWorkflow(wf)
       } catch (error) {
@@ -300,7 +359,14 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
         setWorkflowTriggerLoading(false)
       }
     },
-    [handleRefreshWorkflows, handleSelectWorkflow, setStatus, workflowInputValues, workflows]
+    [
+      handleRefreshWorkflows,
+      handleSelectWorkflow,
+      queryClient,
+      setStatus,
+      workflowInputValues,
+      workflows,
+    ]
   )
 
   const clearSelectedWorkflow = useCallback(() => {
@@ -326,13 +392,6 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
     'spec' in selectedWorkflowDetailQuery.data
       ? ((selectedWorkflowDetailQuery.data as WorkflowRecipeResource).spec?.inputContract ?? null)
       : null
-  const selectedWorkflowSdkCapability =
-    selectedWorkflowDetailQuery.data &&
-    typeof selectedWorkflowDetailQuery.data === 'object' &&
-    'status' in selectedWorkflowDetailQuery.data
-      ? ((selectedWorkflowDetailQuery.data as WorkflowRecipeResource).status?.pluginWorkloadSdk ??
-        null)
-      : null
   const workflowRuns =
     workflowRunsQuery.data && Array.isArray(workflowRunsQuery.data.items)
       ? workflowRunsQuery.data.items
@@ -351,7 +410,6 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
       workflowsError,
       selectedWorkflow,
       selectedWorkflowInputContract,
-      selectedWorkflowSdkCapability,
       workflowInputValues,
       workflowRuns,
       workflowRunsLoading,
@@ -359,7 +417,6 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
       setWorkflowInputValues,
       handleRefreshWorkflows,
       handleSelectWorkflow,
-      handleRefreshSelectedWorkflow,
       handleTriggerWorkflow,
       loadWorkflowRunsFor,
       clearSelectedWorkflow,
@@ -371,7 +428,6 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
       workflowsError,
       selectedWorkflow,
       selectedWorkflowInputContract,
-      selectedWorkflowSdkCapability,
       workflowInputValues,
       workflowRuns,
       workflowRunsLoading,
@@ -379,7 +435,6 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
       setWorkflowInputValues,
       handleRefreshWorkflows,
       handleSelectWorkflow,
-      handleRefreshSelectedWorkflow,
       handleTriggerWorkflow,
       loadWorkflowRunsFor,
       clearSelectedWorkflow,
