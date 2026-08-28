@@ -3,10 +3,22 @@ import express from 'express'
 import { readFileSync } from 'node:fs'
 import request from 'supertest'
 import { createExternalMembersRouter } from '../src/routes/external/members.js'
+import {
+  MemberRegistrationMisconfiguredError,
+  MemberRegistrationUnavailableError,
+  memberRegistrationErrorResponse,
+} from '../src/services/memberRegistrationErrors.js'
 
 const invitationErrorContract = JSON.parse(
   readFileSync(
     new URL('../../tests/contracts/external-member-invitation-errors.json', import.meta.url),
+    'utf8'
+  )
+) as Record<string, { control: { status: number; body: { error: string } } }>
+
+const memberRegistrationErrorContract = JSON.parse(
+  readFileSync(
+    new URL('../../tests/contracts/member-registration-public-errors.json', import.meta.url),
     'utf8'
   )
 ) as Record<string, { control: { status: number; body: { error: string } } }>
@@ -109,6 +121,23 @@ describe('external member invitation producer contract', () => {
     expect(rateLimitMock.checkAndIncrement).toHaveBeenCalledWith(
       'external_member_mutation:user:manager-1',
       10
+    )
+  })
+
+  it.each([
+    {
+      contract: 'unavailable',
+      error: new MemberRegistrationUnavailableError(),
+    },
+    {
+      contract: 'misconfigured',
+      error: new MemberRegistrationMisconfiguredError('private configuration detail'),
+    },
+  ])('emits the shared $contract member-registration failure', ({ contract, error }) => {
+    const produced = memberRegistrationErrorResponse(error)
+    expect(produced).not.toBeNull()
+    expect({ status: produced!.status, body: { error: produced!.error } }).toEqual(
+      memberRegistrationErrorContract[contract].control
     )
   })
 })
