@@ -1,5 +1,6 @@
 import { createHash, createHmac } from 'node:crypto'
 import type { ClerumResourceType } from '../../types.js'
+import { compareCanonicalUtf8Text } from './canonicalText.js'
 
 export const OPERATIONAL_SOURCE_FAMILIES = [
   'host',
@@ -134,7 +135,7 @@ function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value)
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
   return `{${Object.entries(value as Record<string, unknown>)
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => compareCanonicalUtf8Text(left, right))
     .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
     .join(',')}}`
 }

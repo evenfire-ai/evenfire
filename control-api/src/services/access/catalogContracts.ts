@@ -2,6 +2,7 @@ import type { DbClient } from '../../db.js'
 import type { TeamRole } from '../../profileTypes.js'
 import type { AccessExecutionBudget } from './accessExecutionBudget.js'
 import type { AccessPathSeed } from './accessPath.js'
+import { compareCanonicalUtf8Text } from './canonicalText.js'
 import type { OperationalSourceFamily } from './operationalAccessProjection.js'
 import type { CanonicalResourceIdentity } from './resourceIdentity.js'
 
@@ -124,7 +125,7 @@ export function catalogKey(
 
 /** Exact lexicographic ordering of the unsigned UTF-8 bytes for stored catalog text. */
 export function compareCatalogText(left: string, right: string): number {
-  return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'))
+  return compareCanonicalUtf8Text(left, right)
 }
 
 export function compareCatalogKey(left: CatalogKey, right: CatalogKey): number {
