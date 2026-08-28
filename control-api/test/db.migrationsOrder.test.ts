@@ -58,4 +58,41 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     expect(duplicates).toEqual([])
     expect(currentCollisions).toEqual([])
   })
+
+  it('requires 0101_mcp_secret_rollback_permits to persist expiring rollback permits', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0101_mcp_secret_rollback_permits'
+    )
+
+    expect(migration).toBeDefined()
+    if (!migration) return
+
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    await migration.apply({ query } as never)
+
+    const sql = query.mock.calls.map(([statement]) => String(statement)).join('\n')
+    expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS mcp_secret_rollback_permits/i)
+    for (const column of [
+      'session_hash',
+      'namespace',
+      'name',
+      'uid',
+      'resource_version',
+      'expires_at',
+      'claim_token',
+      'claim_expires_at',
+    ]) {
+      expect(sql).toMatch(new RegExp(`\\b${column}\\b`, 'i'))
+    }
+    expect(sql).toMatch(/session_hash\s+BYTEA/i)
+    expect(sql).toMatch(/octet_length\s*\(\s*session_hash\s*\)\s*=\s*32/i)
+    expect(sql).toMatch(/expires_at\s*<=\s*created_at\s*\+\s*INTERVAL\s*'120 seconds'/i)
+    expect(sql).toMatch(/claim_token\s+UUID/i)
+    expect(sql).toMatch(/claim_expires_at\s+TIMESTAMPTZ/i)
+    expect(sql).toMatch(/claim_token IS NULL[\s\S]+claim_expires_at IS NULL/i)
+    expect(sql).toMatch(
+      /CREATE INDEX IF NOT EXISTS[\s\S]+?ON mcp_secret_rollback_permits\s*\(\s*expires_at\s*\)/i
+    )
+  })
 })

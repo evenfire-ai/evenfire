@@ -69,6 +69,8 @@ const provisionedSecret: RecipeSecretItem = {
   namespace: 'sandbox-recipes',
   keys: ['apiKey', 'dbPassword'],
   ownership: { kind: 'owner-recipe', recipeName: 'operator-secret-recipe' },
+  uid: 'uid-operator-api-credentials',
+  resourceVersion: '7',
 }
 
 function mockRecipeSecrets(items: RecipeSecretItem[]) {

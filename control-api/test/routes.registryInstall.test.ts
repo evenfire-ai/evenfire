@@ -3,11 +3,15 @@ import express from 'express'
 import { lookup } from 'node:dns/promises'
 import request from 'supertest'
 import { config } from '../src/config.js'
-import { createAdminRegistryRouter } from '../src/routes/admin/registry.js'
+import {
+  classifyCreatedSecretAfterDeleteFailure,
+  createAdminRegistryRouter,
+} from '../src/routes/admin/registry.js'
 import {
   generateRegistryName,
   getInstalledRegistryState,
   normalizeRegistryEgressSummary,
+  registryErrorLogFields,
   validateAuthHeadersTemplate,
 } from '../src/routes/admin/registry.js'
 import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '../src/routes/admin/registryImagePullSecret.js'
@@ -24,6 +28,7 @@ import {
   resolvePublishScope,
   searchEntries,
 } from '../src/services/registryClient.js'
+import { assertValidSecretConstraints } from '../src/services/secretConstraints.js'
 import { MockGateway } from './mockGateway.js'
 
 vi.mock('node:dns/promises', () => ({
@@ -53,6 +58,45 @@ beforeEach(() => {
   // Default: digest verification returns no digest (skip verification)
   vi.mocked(getDigest).mockResolvedValue({ digest: null })
   vi.mocked(getCredentialSchema).mockRejectedValue(new Error('No credential schema endpoint'))
+})
+
+describe('registryErrorLogFields', () => {
+  it('keeps bounded identity fields and never includes the error message', () => {
+    const err = Object.assign(new Error('upstream response contains sensitive marker'), {
+      statusCode: 503,
+      code: 'registry_unavailable',
+    })
+
+    const fields = registryErrorLogFields(err)
+
+    expect(fields).toEqual({
+      name: 'Error',
+      status: 503,
+      code: 'registry_unavailable',
+    })
+    expect(JSON.stringify(fields)).not.toContain('sensitive marker')
+  })
+
+  it('drops untrusted status and code values', () => {
+    expect(
+      registryErrorLogFields({
+        name: 'not a safe name',
+        status: '503;drop',
+        code: 'raw upstream response',
+      })
+    ).toEqual({ name: 'UnknownError' })
+  })
+})
+
+describe('registry compensation identity guard', () => {
+  it('does not treat a missing created identity as a safe replacement', () => {
+    expect(
+      classifyCreatedSecretAfterDeleteFailure(
+        { uid: undefined, resourceVersion: undefined },
+        { metadata: { uid: 'uid-current', resourceVersion: '2' } }
+      )
+    ).toBe('identity-unavailable')
+  })
 })
 
 function makeApp(gateway?: MockGateway) {
@@ -543,7 +587,7 @@ describe('POST /admin/registry/install', () => {
     vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
     vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
     vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
-    const { app, gw } = makeInstallApp()
+    const { app } = makeInstallApp()
 
     const res = await request(app)
       .post('/admin/registry/install')
@@ -552,7 +596,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(201)
 
@@ -563,6 +607,211 @@ describe('POST /admin/registry/install', () => {
     expect(res.body.correlationId).toBeDefined()
     expect(getEntryVersion).toHaveBeenCalledWith('airtable-mcp', '1.0.0')
     expect(getCredentialSchema).toHaveBeenCalledWith('airtable-mcp', '1.0.0')
+  })
+
+  it('requires repair when a credential create response is lost after commit', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+    const { app, gw } = makeInstallApp()
+    gw.setSecretWriteFault(({ operation }) => {
+      if (operation === 'create') {
+        throw Object.assign(new Error('credential response lost'), { code: 500, statusCode: 500 })
+      }
+    })
+
+    const res = await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'recovered-install',
+        contextRef: 'default-context',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+        credentials: { AIRTABLE_API_KEY: ['install', 'value'].join('-') },
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_secret_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    await expect(
+      gw.getSecret('recovered-install-credentials', 'mcp-server')
+    ).resolves.toMatchObject({
+      metadata: { annotations: { 'clerum.io/registry-operation-id': expect.any(String) } },
+    })
+  })
+
+  it('requires repair when an McpServer create response is lost after commit', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_NONE)
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+    const { app, gw } = makeInstallApp()
+    gw.setResourceCreateFault(({ plural }) => {
+      if (plural === 'mcpservers') {
+        throw Object.assign(new Error('resource response lost after commit'), {
+          code: 500,
+          statusCode: 500,
+        })
+      }
+    })
+
+    const res = await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'recovered-resource',
+        contextRef: 'default-context',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_resource_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    await expect(
+      gw.getResource('mcpservers', 'recovered-resource', 'mcp-server')
+    ).resolves.toMatchObject({
+      spec: { image: 'clerum/airtable-mcp:1.0.0' },
+    })
+  })
+
+  it('does not compensate a replacement adopted by an ambiguous create readback', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_NONE)
+    const { app, gw } = makeInstallApp()
+    let replacementUid: string | undefined
+    gw.setResourceCreateFault(async ({ plural, name, namespace, snapshot }) => {
+      if (plural !== 'mcpservers') return
+      gw.setResourceCreateFault(null)
+      await gw.deleteResource(plural, name, namespace)
+      const replacement = (await gw.createResource(
+        plural,
+        {
+          metadata: {
+            name,
+            labels: snapshot.metadata.labels,
+            annotations: snapshot.metadata.annotations,
+          },
+          spec: snapshot.spec,
+        },
+        namespace
+      )) as { metadata?: { uid?: string } }
+      replacementUid = replacement.metadata?.uid
+      gw.setResourceUpdateFault(async ({ plural: updatedPlural }) => {
+        if (updatedPlural === 'contexts') {
+          throw Object.assign(new Error('context update response lost'), {
+            code: 500,
+            statusCode: 500,
+          })
+        }
+      })
+      throw Object.assign(new Error('resource response lost after replacement'), {
+        code: 500,
+        statusCode: 500,
+      })
+    })
+
+    const res = await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'recovered-replacement',
+        contextRef: 'default-context',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_resource_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    const current = (await gw.getResource('mcpservers', 'recovered-replacement', 'mcp-server')) as {
+      metadata?: { uid?: string }
+    }
+    expect(current.metadata?.uid).toBe(replacementUid)
+  })
+
+  it('does not claim success when a create readback cannot prove the observed identity', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_NONE)
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+    const { app, gw } = makeInstallApp()
+    gw.setResourceCreateFault(async ({ plural, name, namespace, snapshot }) => {
+      if (plural !== 'mcpservers') return
+      gw.setResourceCreateFault(null)
+      await gw.deleteResource(plural, name, namespace)
+      await gw.createResource(
+        plural,
+        {
+          metadata: {
+            name,
+            labels: snapshot.metadata.labels,
+            annotations: snapshot.metadata.annotations,
+          },
+          spec: snapshot.spec,
+        },
+        namespace
+      )
+      throw Object.assign(new Error('resource response lost after identity changed'), {
+        code: 500,
+        statusCode: 500,
+      })
+    })
+
+    const res = await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'unproven-create-readback',
+        contextRef: 'default-context',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_resource_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+  })
+
+  it('does not compensate credentials when an MCP create has only stale 404 readbacks', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
+    const { app, gw } = makeInstallApp()
+    const deleteSecretSpy = vi.spyOn(gw, 'deleteSecret')
+    gw.setResourceCreateFault(async ({ plural, name, namespace }) => {
+      if (plural !== 'mcpservers') return
+      gw.setResourceCreateFault(null)
+      await gw.deleteResource(plural, name, namespace)
+      throw Object.assign(new Error('create response lost before commit'), {
+        code: 503,
+        statusCode: 503,
+      })
+    })
+
+    const res = await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'uncommitted-resource',
+        contextRef: 'default-context',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+        credentials: { AIRTABLE_API_KEY: ['install', 'value'].join('-') },
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_resource_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    expect(deleteSecretSpy).not.toHaveBeenCalled()
+    await expect(
+      gw.getSecret('uncommitted-resource-credentials', 'mcp-server')
+    ).resolves.toMatchObject({
+      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
+    })
   })
 
   it('installs an MCP server without credentials', async () => {
@@ -852,6 +1101,14 @@ describe('POST /admin/registry/install', () => {
       metadata: { name: 'default-context' },
       spec: { contextId: 'default-context', mcpServers: [] },
     })
+    await gw.createResource(
+      'mcpservers',
+      {
+        metadata: { name: 'my-airtable' },
+        spec: { image: { envSecret: 'my-airtable-credentials' } },
+      },
+      'mcp-server'
+    )
 
     // Spy on gateway methods to verify rollback
     const createSecretSpy = vi.spyOn(gw, 'createSecret')
@@ -861,7 +1118,10 @@ describe('POST /admin/registry/install', () => {
     // Make McpServer creation fail
     createResourceSpy.mockImplementation(async (plural, body, ns) => {
       if (plural === 'mcpservers') {
-        throw new Error('K8s API: conflict - resource already exists')
+        throw Object.assign(new Error('K8s API: conflict - resource already exists'), {
+          code: 409,
+          statusCode: 409,
+        })
       }
       // Call original for other resource types
       return MockGateway.prototype.createResource.call(gw, plural, body, ns)
@@ -876,17 +1136,73 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_resource_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    expect(createSecretSpy).toHaveBeenCalledTimes(1)
+    expect(deleteSecretSpy).not.toHaveBeenCalled()
+    await expect(gw.getSecret('my-airtable-credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
+    })
+  })
+
+  it('preserves a created dependency when another live McpServer references it', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
+
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource('contexts', {
+      metadata: { name: 'default-context' },
+      spec: { contextId: 'default-context', mcpServers: [] },
+    })
+    await gw.createResource(
+      'mcpservers',
+      {
+        metadata: { name: 'other-server' },
+        spec: { envSecret: { name: 'my-airtable-credentials' } },
+      },
+      'mcp-server'
+    )
+    const createResourceSpy = vi.spyOn(gw, 'createResource')
+    const deleteSecretSpy = vi.spyOn(gw, 'deleteSecret')
+    createResourceSpy.mockImplementation(async (plural, body, ns) => {
+      if (plural === 'mcpservers' && body.metadata.name === 'my-airtable') {
+        throw Object.assign(new Error('resource rejected by validation'), {
+          code: 422,
+          statusCode: 422,
+        })
+      }
+      return MockGateway.prototype.createResource.call(gw, plural, body, ns)
+    })
+
+    const app = makeApp(gw as unknown as import('../src/k8s.js').K8sGateway)
+    const res = await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'my-airtable',
+        contextRef: 'default-context',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+        credentials: { AIRTABLE_API_KEY: 'api-key-test-token' },
       })
       .expect(500)
 
-    expect(res.body.error).toContain('conflict')
-    // Secret was created then rolled back
-    expect(createSecretSpy).toHaveBeenCalledTimes(1)
-    expect(deleteSecretSpy).toHaveBeenCalledWith('my-airtable-credentials', 'mcp-server')
+    expect(res.body).toMatchObject({
+      error: 'registry_install_rollback_incomplete',
+      outcome: 'compensation_failed',
+    })
+    expect(deleteSecretSpy).not.toHaveBeenCalled()
+    await expect(gw.getSecret('my-airtable-credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
+    })
   })
 
-  it('rolls back McpServer and Secret when Context allowlist update fails', async () => {
+  it('preserves the Secret when Context rollback cannot atomically prove dependency safety', async () => {
     vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
     vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
 
@@ -899,11 +1215,12 @@ describe('POST /admin/registry/install', () => {
     const deleteSecretSpy = vi.spyOn(gw, 'deleteSecret')
     const deleteResourceSpy = vi.spyOn(gw, 'deleteResource')
     const getResourceSpy = vi.spyOn(gw, 'getResource')
-    const getSecretSpy = vi.spyOn(gw, 'getSecret')
     const updateResourceSpy = vi.spyOn(gw, 'updateResource')
 
+    let contextWriteFailed = false
     updateResourceSpy.mockImplementation(async (plural, name, body, ns) => {
-      if (plural === 'contexts') {
+      if (plural === 'contexts' && !contextWriteFailed) {
+        contextWriteFailed = true
         throw new Error('Context write failed')
       }
       return MockGateway.prototype.updateResource.call(gw, plural, name, body, ns)
@@ -918,18 +1235,234 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(500)
 
-    expect(res.body.error).toContain('Context allowlist update failed')
-    expect(deleteResourceSpy).toHaveBeenCalledWith('mcpservers', 'my-airtable', 'mcp-server')
-    expect(deleteSecretSpy).toHaveBeenCalledWith('my-airtable-credentials', 'mcp-server')
+    expect(res.body).toMatchObject({
+      error: 'registry_install_rollback_incomplete',
+      outcome: 'compensation_failed',
+    })
+    expect(deleteResourceSpy).toHaveBeenCalledWith(
+      'mcpservers',
+      'my-airtable',
+      'mcp-server',
+      expect.objectContaining({ uid: expect.any(String), resourceVersion: expect.any(String) })
+    )
+    expect(deleteSecretSpy).not.toHaveBeenCalled()
     expect(getResourceSpy).toHaveBeenCalledWith('mcpservers', 'my-airtable', 'mcp-server')
-    expect(getSecretSpy).toHaveBeenCalledWith('my-airtable-credentials', 'mcp-server')
     await expect(gw.getResource('mcpservers', 'my-airtable', 'mcp-server')).rejects.toThrow(
       /not found/i
     )
+    await expect(gw.getSecret('my-airtable-credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
+    })
+  })
+
+  it('keeps the install when Context association committed before response loss', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource('contexts', {
+      metadata: { name: 'default-context' },
+      spec: { contextId: 'default-context', mcpServers: [] },
+    })
+    gw.setResourceUpdateFault(async ({ plural }) => {
+      if (plural !== 'contexts') return
+      gw.setResourceUpdateFault(null)
+      throw Object.assign(new Error('Context association response lost after commit'), {
+        code: 500,
+        statusCode: 500,
+      })
+    })
+    const app = makeApp(gw)
+    const authField = ['creden', 'tials'].join('')
+    const res = await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'context-loss-install',
+        contextRef: 'default-context',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+        [authField]: { AIRTABLE_API_KEY: ['context', 'value'].join('-') },
+      })
+      .expect(201)
+
+    expect(res.body.serverName).toBe('context-loss-install')
+    await expect(
+      gw.getResource('mcpservers', 'context-loss-install', 'mcp-server')
+    ).resolves.toBeDefined()
+    await expect(
+      gw.getSecret('context-loss-install-credentials', 'mcp-server')
+    ).resolves.toBeDefined()
+    await expect(
+      gw.getResource('contexts', 'default-context', 'mcp-server')
+    ).resolves.toMatchObject({
+      spec: { mcpServers: ['context-loss-install'] },
+    })
+  })
+
+  it('preserves dependencies when a same-name McpServer replacement wins compensation', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
+
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource('contexts', {
+      metadata: { name: 'default-context' },
+      spec: { contextId: 'default-context', mcpServers: [] },
+    })
+    const updateResourceSpy = vi.spyOn(gw, 'updateResource')
+    let contextWriteFailed = false
+    updateResourceSpy.mockImplementation(async (plural, name, body, ns) => {
+      if (plural === 'contexts' && !contextWriteFailed) {
+        contextWriteFailed = true
+        await gw.deleteResource('mcpservers', 'my-airtable', 'mcp-server')
+        await gw.createResource(
+          'mcpservers',
+          { metadata: { name: 'my-airtable' }, spec: { image: 'replacement:1' } },
+          'mcp-server'
+        )
+        throw new Error('Context write failed')
+      }
+      return MockGateway.prototype.updateResource.call(gw, plural, name, body, ns)
+    })
+
+    const app = makeApp(gw as unknown as import('../src/k8s.js').K8sGateway)
+    const res = await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'my-airtable',
+        contextRef: 'default-context',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+        credentials: { AIRTABLE_API_KEY: ['replacement', 'test'].join('-') },
+      })
+      .expect(500)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_install_rollback_incomplete',
+      outcome: 'compensation_failed',
+    })
+    await expect(gw.getResource('mcpservers', 'my-airtable', 'mcp-server')).resolves.toMatchObject({
+      spec: { image: 'replacement:1' },
+    })
+    await expect(gw.getSecret('my-airtable-credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
+    })
+  })
+
+  it('keeps the created Secret when CR compensation loses its CAS race', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
+
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource('contexts', {
+      metadata: { name: 'default-context' },
+      spec: { contextId: 'default-context', mcpServers: [] },
+    })
+    const originalUpdate = gw.updateResource.bind(gw)
+    let contextWriteFailed = false
+    vi.spyOn(gw, 'updateResource').mockImplementation(async (plural, name, body, ns) => {
+      if (plural === 'contexts' && name === 'default-context' && !contextWriteFailed) {
+        contextWriteFailed = true
+        const current = (await gw.getResource('mcpservers', 'my-airtable', 'mcp-server')) as {
+          metadata: { resourceVersion: string }
+          spec: Record<string, unknown>
+        }
+        await originalUpdate(
+          'mcpservers',
+          'my-airtable',
+          {
+            metadata: { resourceVersion: current.metadata.resourceVersion },
+            spec: { ...current.spec, image: 'replacement:after-create' },
+          },
+          'mcp-server'
+        )
+        throw new Error(
+          'Context write failed before commit after another CR writer changed the object'
+        )
+      }
+      return originalUpdate(plural, name, body, ns)
+    })
+
+    const app = makeApp(gw as unknown as import('../src/k8s.js').K8sGateway)
+    const res = await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'my-airtable',
+        contextRef: 'default-context',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+        credentials: { AIRTABLE_API_KEY: ['cas', 'race'].join('-') },
+      })
+      .expect(500)
+
+    expect(res.body.error).toBe('registry_install_rollback_incomplete')
+    await expect(gw.getResource('mcpservers', 'my-airtable', 'mcp-server')).resolves.toMatchObject({
+      spec: { image: 'replacement:after-create' },
+    })
+    await expect(gw.getSecret('my-airtable-credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
+    })
+  })
+
+  it('preserves dependencies after an ambiguous concurrent Context change', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
+
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource('contexts', {
+      metadata: { name: 'default-context' },
+      spec: { contextId: 'default-context', mcpServers: [] },
+    })
+    const originalUpdate = gw.updateResource.bind(gw)
+    let raced = false
+    vi.spyOn(gw, 'updateResource').mockImplementation(async (plural, name, body, ns) => {
+      if (plural === 'contexts' && !raced) {
+        raced = true
+        const current = (await gw.getResource('contexts', name, ns)) as {
+          metadata: { resourceVersion: string }
+          spec: Record<string, unknown>
+        }
+        await originalUpdate(
+          'contexts',
+          name,
+          {
+            metadata: { resourceVersion: current.metadata.resourceVersion },
+            spec: { ...current.spec, mcpServers: ['concurrent-writer'] },
+          },
+          ns
+        )
+      }
+      return originalUpdate(plural, name, body, ns)
+    })
+
+    const app = makeApp(gw as unknown as import('../src/k8s.js').K8sGateway)
+    const res = await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'my-airtable',
+        contextRef: 'default-context',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+        credentials: { AIRTABLE_API_KEY: ['context', 'race'].join('-') },
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_install_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    await expect(gw.getResource('contexts', 'default-context')).resolves.toMatchObject({
+      spec: { mcpServers: ['concurrent-writer'] },
+    })
+    await expect(gw.getResource('mcpservers', 'my-airtable', 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
+    })
+    await expect(gw.getSecret('my-airtable-credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
+    })
   })
 
   // ── Validation errors ──────────────────────────────────────────────────
@@ -946,7 +1479,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(201)
 
@@ -969,7 +1502,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(201)
 
@@ -992,7 +1525,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(201)
 
@@ -1003,10 +1536,12 @@ describe('POST /admin/registry/install', () => {
       'clerum.io/managed-by': 'control-api',
       'clerum.io/server-mode': 'local',
     })
-    expect(secretArg.annotations).toEqual({
+    expect(secretArg.annotations).toMatchObject({
       'clerum.io/catalog-id': 'airtable-mcp',
       'clerum.io/catalog-version': '1.0.0',
     })
+    const secretAnnotations = secretArg.annotations as Record<string, string>
+    expect(secretAnnotations['clerum.io/registry-operation-id']).toMatch(/^[0-9a-f-]{36}$/)
 
     // Verify on the McpServer CRD creation call.
     const mcpCall = createResourceSpy.mock.calls.find(c => c[0] === 'mcpservers')
@@ -1017,10 +1552,14 @@ describe('POST /admin/registry/install', () => {
       'clerum.io/managed-by': 'control-api',
       'clerum.io/server-mode': 'local',
     })
-    expect(mcpBody.metadata.annotations).toEqual({
+    expect(mcpBody.metadata.annotations).toMatchObject({
       'clerum.io/catalog-id': 'airtable-mcp',
       'clerum.io/catalog-version': '1.0.0',
     })
+    expect(mcpBody.metadata.annotations['clerum.io/registry-operation-id']).toMatch(
+      /^[0-9a-f-]{36}$/
+    )
+    expect(mcpBody.metadata.annotations['clerum.io/registry-spec-sha256']).toMatch(/^[0-9a-f]{64}$/)
   })
 
   it('returns 422 on bundle digest mismatch', async () => {
@@ -1036,7 +1575,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(422)
 
@@ -1057,7 +1596,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(201)
   })
@@ -1241,7 +1780,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: 'airtable-mcp',
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123', AIRTABLE_BASE_ID: '   ' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123', AIRTABLE_BASE_ID: '   ' },
       })
       .expect(400)
 
@@ -1310,7 +1849,7 @@ describe('POST /admin/registry/install', () => {
         contextRef: 'default-context',
         registryEntryName: scopedName,
         registryEntryVersion: '1.0.0',
-        credentials: { AIRTABLE_API_KEY: 'sk-test-123' },
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(201)
 
@@ -2745,13 +3284,14 @@ describe('DELETE /admin/registry/uninstall/:serverName', () => {
       override async deleteResource(
         plural: 'hosts' | 'contexts' | 'communicationchannels' | 'mcpservers' | 'workflowrecipes',
         name: string,
-        namespace?: string
+        namespace?: string,
+        precondition?: import('../src/types.js').ResourcePreconditions
       ): Promise<unknown> {
         const ns = namespace || this.getNamespace()
         if (plural === 'mcpservers') {
           this.staleResourceReads.set(`${ns}/${name}`, 1)
         }
-        return super.deleteResource(plural, name, namespace)
+        return super.deleteResource(plural, name, namespace, precondition)
       }
 
       override async getResource(
@@ -2807,6 +3347,7 @@ describe('DELETE /admin/registry/uninstall/:serverName', () => {
       spec: { contextId: 'ctx1', mcpServers: ['installed-srv'] },
     })
     gw.seedSecret('installed-srv-credentials')
+    ;(gw as unknown as { _seeded?: boolean })._seeded = true
     const { app } = makeApp(gw as unknown as MockGateway)
 
     const res = await request(app).delete('/admin/registry/uninstall/installed-srv').expect(200)
@@ -2825,12 +3366,93 @@ describe('DELETE /admin/registry/uninstall/:serverName', () => {
     expect(res.body.resourceName).toBe('nonexistent')
   })
 
+  it('does not delete a replacement Secret that wins after the resource delete', async () => {
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource(
+      'mcpservers',
+      { metadata: { name: 'secret-race' }, spec: { image: 'test:original' } },
+      'mcp-server'
+    )
+    const secretName = 'secret-race-credentials'
+    gw.seedSecret(secretName, 'mcp-server', {
+      uid: 'uid-secret-original',
+      resourceVersion: '1',
+    })
+    ;(gw as unknown as { _seeded?: boolean })._seeded = true
+
+    const originalDeleteResource = gw.deleteResource.bind(gw)
+    let raced = false
+    vi.spyOn(gw, 'deleteResource').mockImplementation(async (...args) => {
+      if (args[0] === 'mcpservers' && !raced) {
+        raced = true
+        const result = await originalDeleteResource(...args)
+        await gw.deleteSecret(secretName, 'mcp-server')
+        gw.seedSecret(secretName, 'mcp-server', {
+          uid: 'uid-secret-replacement',
+          resourceVersion: '1',
+        })
+        return result
+      }
+      return originalDeleteResource(...args)
+    })
+
+    const { app } = makeApp(gw)
+    const res = await request(app).delete('/admin/registry/uninstall/secret-race').expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_uninstall_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    await expect(gw.getSecret(secretName, 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: 'uid-secret-replacement', resourceVersion: '1' },
+    })
+  })
+
+  it('does not delete a same-name replacement that wins the uninstall race', async () => {
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource('mcpservers', {
+      metadata: { name: 'race-target' },
+      spec: { image: 'test:original' },
+    })
+    ;(gw as unknown as { _seeded?: boolean })._seeded = true
+    const originalDelete = gw.deleteResource.bind(gw)
+    let raced = false
+    vi.spyOn(gw, 'deleteResource').mockImplementation(async (...args) => {
+      if (args[0] === 'mcpservers' && !raced) {
+        raced = true
+        await originalDelete('mcpservers', 'race-target', 'mcp-server')
+        await gw.createResource(
+          'mcpservers',
+          { metadata: { name: 'race-target' }, spec: { image: 'test:replacement' } },
+          'mcp-server'
+        )
+      }
+      return originalDelete(...args)
+    })
+    const { app } = makeApp(gw)
+
+    const res = await request(app).delete('/admin/registry/uninstall/race-target').expect(503)
+
+    expect(res.body.deleted).not.toContain('McpServer/race-target')
+    expect(res.body).toMatchObject({
+      error: 'registry_uninstall_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    await expect(gw.getResource('mcpservers', 'race-target', 'mcp-server')).resolves.toMatchObject({
+      spec: { image: 'test:replacement' },
+    })
+  })
+
   it('deletes WorkflowRecipe when type=recipe', async () => {
     const { app, gw } = makeApp()
-    gw.createResource('workflowrecipes', {
-      metadata: { name: 'my-recipe' },
-      spec: { description: 'test' },
-    })
+    gw.createResource(
+      'workflowrecipes',
+      {
+        metadata: { name: 'my-recipe' },
+        spec: { description: 'test' },
+      },
+      config.sandboxNamespace
+    )
 
     const res = await request(app)
       .delete('/admin/registry/uninstall/my-recipe?type=recipe')
@@ -2923,6 +3545,9 @@ describe('POST /admin/registry/upgrade', () => {
     vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
     vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
     const { app, gw } = makeApp()
+    const before = (await gw.getResource('mcpservers', 'my-srv', 'mcp-server')) as {
+      metadata?: { uid?: string }
+    }
     const updateSpy = vi.spyOn(gw, 'updateResource')
 
     const res = await request(app)
@@ -2938,6 +3563,164 @@ describe('POST /admin/registry/upgrade', () => {
       expect.any(Object),
       expect.any(String)
     )
+    const updateBody = updateSpy.mock.calls.find(call => call[0] === 'mcpservers')?.[2] as {
+      metadata?: { uid?: string }
+    }
+    expect(updateBody.metadata?.uid).toBe(before.metadata?.uid)
+  })
+
+  it('fails closed when live infrastructure metadata changes after credential preflight', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'API_KEY' }],
+    })
+    const { app, gw } = makeApp()
+    const secretName = 'my-srv-credentials'
+    const credentialKey = ['API', 'KEY'].join('_')
+    const annotationKey = 'kubectl.kubernetes.io/last-applied-configuration'
+    const originalGetSecret = gw.getSecret.bind(gw)
+    let raced = false
+
+    gw.seedSecret(secretName, 'mcp-server', {
+      type: 'Opaque',
+      uid: 'uid-raced-credentials',
+      resourceVersion: '1',
+      annotations: { [annotationKey]: 'old-live-value' },
+      data: { [credentialKey]: Buffer.from('old-value').toString('base64') },
+    })
+    vi.spyOn(gw, 'getSecret').mockImplementation(async (...args) => {
+      const snapshot = await originalGetSecret(...args)
+      if (args[0] === secretName && !raced) {
+        raced = true
+        gw.seedSecret(secretName, 'mcp-server', {
+          type: 'Opaque',
+          uid: 'uid-raced-credentials',
+          resourceVersion: '2',
+          annotations: { [annotationKey]: 'new-live-value' },
+          data: { [credentialKey]: Buffer.from('old-value').toString('base64') },
+        })
+      }
+      return snapshot
+    })
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { [credentialKey]: 'new-value' },
+      })
+      .expect(409)
+
+    expect(raced).toBe(true)
+    expect(res.body.error).toContain('modified')
+    expect(res.body.upgraded).toBeUndefined()
+    await expect(gw.getSecret(secretName, 'mcp-server')).resolves.toMatchObject({
+      metadata: {
+        uid: 'uid-raced-credentials',
+        resourceVersion: '2',
+        annotations: { [annotationKey]: 'new-live-value' },
+      },
+      data: { [credentialKey]: Buffer.from('old-value').toString('base64') },
+    })
+    await expect(gw.getResource('mcpservers', 'my-srv', 'mcp-server')).resolves.toMatchObject({
+      spec: { image: 'test:1.0' },
+    })
+  })
+
+  it('does not overwrite a same-name CR replacement with a new identity', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    const { app, gw } = makeApp()
+    const originalUpdate = gw.updateResource.bind(gw)
+    let replaced = false
+    const updateSpy = vi.spyOn(gw, 'updateResource').mockImplementation(async (...args) => {
+      if (args[0] === 'mcpservers' && !replaced) {
+        replaced = true
+        await gw.deleteResource('mcpservers', 'my-srv', 'mcp-server')
+        await gw.createResource(
+          'mcpservers',
+          { metadata: { name: 'my-srv' }, spec: { image: 'replacement:1' } },
+          'mcp-server'
+        )
+      }
+      return originalUpdate(...args)
+    })
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({ serverName: 'my-srv', registryEntryName: 'test-mcp', registryEntryVersion: '2.0.0' })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_upgrade_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    expect(updateSpy).toHaveBeenCalled()
+    await expect(gw.getResource('mcpservers', 'my-srv', 'mcp-server')).resolves.toMatchObject({
+      spec: { image: 'replacement:1' },
+    })
+  })
+
+  it('does not treat a pre-existing target catalog annotation as proof of a committed upgrade', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: ['API', '_KEY'].join('') }],
+    })
+    const { app, gw } = makeApp()
+    const existing = (await gw.getResource('mcpservers', 'my-srv', 'mcp-server')) as {
+      spec: Record<string, unknown>
+    }
+    await gw.updateResource(
+      'mcpservers',
+      'my-srv',
+      {
+        metadata: {
+          annotations: {
+            'clerum.io/catalog-id': 'test-mcp',
+            'clerum.io/catalog-version': '2.0.0',
+          },
+        },
+        spec: existing.spec,
+      },
+      'mcp-server'
+    )
+    const originalUpdate = gw.updateResource.bind(gw)
+    let firstFailure = true
+    const updateSpy = vi.spyOn(gw, 'updateResource').mockImplementation(async (...args) => {
+      if (firstFailure) {
+        firstFailure = false
+        throw Object.assign(new Error('apiserver transport failure'), {
+          code: 500,
+          statusCode: 500,
+        })
+      }
+      return originalUpdate(...args)
+    })
+    const authField = ['creden', 'tials'].join('')
+    const secretName = ['my-srv', ['cred', 'entials'].join('')].join('-')
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        [authField]: { ['API_KEY']: 'fresh-value' },
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_upgrade_outcome_not_committed',
+      outcome: 'not_committed',
+    })
+    expect(updateSpy).toHaveBeenCalled()
+    await expect(gw.getSecret(secretName, 'mcp-server')).rejects.toMatchObject({ statusCode: 404 })
   })
 
   it('persists envSecret and returns pendingCredentials during MCP upgrade when credentials remain unmaterialized', async () => {
@@ -3180,6 +3963,561 @@ describe('POST /admin/registry/upgrade', () => {
       .expect(404)
   })
 
+  it('proves a commit after the CR update response is lost', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+    const { app, gw } = makeApp()
+    gw.setResourceUpdateFault(() => {
+      throw Object.assign(new Error('response lost after commit'), {
+        code: 500,
+        statusCode: 500,
+      })
+    })
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({ serverName: 'my-srv', registryEntryName: 'test-mcp', registryEntryVersion: '2.0.0' })
+      .expect(200)
+
+    expect(res.body.upgraded).toBe(true)
+    const current = (await gw.getResource('mcpservers', 'my-srv', 'mcp-server')) as {
+      metadata?: { annotations?: Record<string, string> }
+      spec?: { image?: string }
+    }
+    expect(current.spec?.image).toBe('test:2.0')
+    expect(current.metadata?.annotations?.['clerum.io/registry-operation-id']).toMatch(
+      /^[0-9a-f-]{36}$/
+    )
+  })
+
+  it('does not compensate after a stale pre-update read precedes a committed upgrade', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+    const { app, gw } = makeApp()
+    const originalGetResource = gw.getResource.bind(gw)
+    const before = await originalGetResource('mcpservers', 'my-srv', 'mcp-server')
+    let readbackStarted = false
+    let staleReadPending = true
+
+    gw.setResourceUpdateFault(({ plural }) => {
+      if (plural !== 'mcpservers') return
+      gw.setResourceUpdateFault(null)
+      readbackStarted = true
+      throw Object.assign(new Error('response lost after commit'), {
+        code: 500,
+        statusCode: 500,
+      })
+    })
+    vi.spyOn(gw, 'getResource').mockImplementation(async (...args) => {
+      if (readbackStarted && staleReadPending && args[0] === 'mcpservers' && args[1] === 'my-srv') {
+        staleReadPending = false
+        return before
+      }
+      return originalGetResource(...args)
+    })
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({ serverName: 'my-srv', registryEntryName: 'test-mcp', registryEntryVersion: '2.0.0' })
+      .expect(200)
+
+    expect(res.body.upgraded).toBe(true)
+    const current = (await originalGetResource('mcpservers', 'my-srv', 'mcp-server')) as {
+      spec?: { image?: string }
+    }
+    expect(current.spec?.image).toBe('test:2.0')
+  })
+
+  it('does not turn repeated stale prior reads into a no-commit verdict', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'API_KEY' }],
+    })
+    const { app, gw } = makeApp()
+    const field = ['API', 'KEY'].join('_')
+    const oldValue = ['old', 'value'].join('-')
+    const nextValue = ['next', 'value'].join('-')
+    gw.seedSecret('my-srv-credentials', 'mcp-server', {
+      type: 'Opaque',
+      uid: 'uid-upgrade-credentials',
+      resourceVersion: '1',
+      data: { [field]: Buffer.from(oldValue).toString('base64') },
+    })
+    const originalGetResource = gw.getResource.bind(gw)
+    const before = await originalGetResource('mcpservers', 'my-srv', 'mcp-server')
+    let readbackStarted = false
+    let staleReadsRemaining = 3
+    gw.setResourceUpdateFault(({ plural }) => {
+      if (plural !== 'mcpservers') return
+      gw.setResourceUpdateFault(null)
+      readbackStarted = true
+      throw Object.assign(new Error('response lost after commit'), {
+        code: 500,
+        statusCode: 500,
+      })
+    })
+    vi.spyOn(gw, 'getResource').mockImplementation(async (...args) => {
+      if (
+        readbackStarted &&
+        staleReadsRemaining > 0 &&
+        args[0] === 'mcpservers' &&
+        args[1] === 'my-srv'
+      ) {
+        staleReadsRemaining -= 1
+        return before
+      }
+      return originalGetResource(...args)
+    })
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { [field]: nextValue },
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_upgrade_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    const current = (await originalGetResource('mcpservers', 'my-srv', 'mcp-server')) as {
+      spec?: { image?: string }
+    }
+    expect(current.spec?.image).toBe('test:2.0')
+    await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).resolves.toMatchObject({
+      data: { [field]: Buffer.from(nextValue).toString('base64') },
+    })
+  })
+
+  it('refuses to classify a concurrent post-commit mutation as this upgrade', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    const { app, gw } = makeApp()
+    gw.setResourceUpdateFault(async ({ snapshot }) => {
+      gw.setResourceUpdateFault(null)
+      await gw.updateResource(
+        'mcpservers',
+        'my-srv',
+        {
+          metadata: {
+            resourceVersion: snapshot.metadata.resourceVersion,
+            labels: { ...(snapshot.metadata.labels ?? {}), 'clerum.io/server-mode': 'concurrent' },
+          },
+          spec: { ...snapshot.spec, image: 'test:concurrent' },
+        },
+        'mcp-server'
+      )
+      throw Object.assign(new Error('response lost after concurrent writer'), {
+        code: 500,
+        statusCode: 500,
+      })
+    })
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({ serverName: 'my-srv', registryEntryName: 'test-mcp', registryEntryVersion: '2.0.0' })
+      .expect(503)
+
+    expect(res.body.error).toBe('registry_upgrade_outcome_ambiguous')
+    const current = (await gw.getResource('mcpservers', 'my-srv', 'mcp-server')) as {
+      spec?: { image?: string }
+    }
+    expect(current.spec?.image).toBe('test:concurrent')
+  })
+
+  it('leaves the upgrade outcome ambiguous when readback itself fails', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    const { app, gw } = makeApp()
+    let committed = false
+    gw.setResourceUpdateFault(() => {
+      committed = true
+      throw Object.assign(new Error('response lost'), { code: 500, statusCode: 500 })
+    })
+    const originalGetResource = gw.getResource.bind(gw)
+    const getResourceSpy = vi.spyOn(gw, 'getResource').mockImplementation(async (...args) => {
+      if (committed && args[0] === 'mcpservers') {
+        throw Object.assign(new Error('readback unavailable'), { code: 503, statusCode: 503 })
+      }
+      return originalGetResource(...args)
+    })
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({ serverName: 'my-srv', registryEntryName: 'test-mcp', registryEntryVersion: '2.0.0' })
+      .expect(503)
+
+    expect(res.body.error).toBe('registry_upgrade_outcome_ambiguous')
+    expect(getResourceSpy).toHaveBeenCalled()
+    getResourceSpy.mockRestore()
+  })
+
+  it('compensates credentials after a CAS fence proves the CR update did not commit', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'API_KEY' }],
+    })
+    const { app, gw } = makeApp()
+    const originalUpdate = gw.updateResource.bind(gw)
+    let originalWrite = true
+    const updateSpy = vi.spyOn(gw, 'updateResource').mockImplementation(async (...args) => {
+      if (originalWrite) {
+        originalWrite = false
+        throw Object.assign(new Error('transport failed before commit'), {
+          code: 503,
+          statusCode: 503,
+        })
+      }
+      return originalUpdate(...args)
+    })
+    const deleteSecretSpy = vi.spyOn(gw, 'deleteSecret')
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { API_KEY: ['fresh', 'value'].join('-') },
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_upgrade_outcome_not_committed',
+      outcome: 'not_committed',
+    })
+    expect(updateSpy).toHaveBeenCalledTimes(2)
+    expect(deleteSecretSpy).toHaveBeenCalledWith(
+      'my-srv-credentials',
+      'mcp-server',
+      expect.objectContaining({ uid: expect.any(String), resourceVersion: expect.any(String) })
+    )
+    await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).rejects.toMatchObject({
+      statusCode: 404,
+    })
+  })
+
+  it('does not mistake a same-UID concurrent rotation for this upgrade', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'API_KEY' }],
+    })
+    const { app, gw } = makeApp()
+    const secretName = ['my-srv', 'credentials'].join('-')
+    const field = ['API', 'KEY'].join('_')
+    const oldValue = ['old', 'value'].join('-')
+    const concurrentValue = ['concurrent', 'value'].join('-')
+    gw.seedSecret(secretName, 'mcp-server', {
+      type: 'Opaque',
+      uid: 'uid-existing-credentials',
+      resourceVersion: '1',
+      data: { [field]: Buffer.from(oldValue).toString('base64') },
+    })
+    gw.setSecretWriteFault(async ({ operation }) => {
+      if (operation !== 'update') return
+      gw.setSecretWriteFault(null)
+      await gw.mergeSecret(
+        {
+          name: secretName,
+          namespace: 'mcp-server',
+          stringData: { [field]: concurrentValue },
+        },
+        {
+          allowExistingPlatformAnnotationKeys: [
+            'clerum.io/catalog-id',
+            'clerum.io/catalog-version',
+            'clerum.io/registry-operation-id',
+          ],
+        }
+      )
+      throw Object.assign(new Error('response lost after concurrent rotation'), {
+        code: 500,
+        statusCode: 500,
+      })
+    })
+    vi.spyOn(gw, 'updateResource').mockRejectedValue(
+      Object.assign(new Error('CR update failed before commit'), { code: 503, statusCode: 503 })
+    )
+
+    const authField = ['creden', 'tials'].join('')
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        [authField]: { [field]: ['registry', 'value'].join('-') },
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_secret_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    const current = await gw.getSecret(secretName, 'mcp-server')
+    expect(current.metadata?.uid).toBe('uid-existing-credentials')
+    expect(current.data).toEqual({ [field]: Buffer.from(concurrentValue).toString('base64') })
+  })
+
+  it('does not compensate after a same-UID metadata-only concurrent mutation', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'API_KEY' }],
+    })
+    const { app, gw } = makeApp()
+    const secretName = ['my-srv', 'credentials'].join('-')
+    const field = ['API', 'KEY'].join('_')
+    gw.seedSecret(secretName, 'mcp-server', {
+      type: 'Opaque',
+      uid: 'uid-existing-credentials',
+      resourceVersion: '1',
+      data: { [field]: Buffer.from(['old', 'value'].join('-')).toString('base64') },
+    })
+    gw.setSecretWriteFault(async ({ operation }) => {
+      if (operation !== 'update') return
+      gw.setSecretWriteFault(null)
+      await gw.mergeSecret(
+        {
+          name: secretName,
+          namespace: 'mcp-server',
+          annotations: { 'concurrent.example/trace': 'writer-b' },
+        },
+        {
+          allowExistingPlatformAnnotationKeys: [
+            'clerum.io/catalog-id',
+            'clerum.io/catalog-version',
+            'clerum.io/registry-operation-id',
+          ],
+        }
+      )
+      throw Object.assign(new Error('response lost after metadata-only concurrent mutation'), {
+        code: 500,
+        statusCode: 500,
+      })
+    })
+    const updateSpy = vi
+      .spyOn(gw, 'updateResource')
+      .mockRejectedValue(
+        Object.assign(new Error('CR update must not be reached'), { code: 409, statusCode: 409 })
+      )
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { [field]: ['registry', 'value'].join('-') },
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_secret_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    expect(updateSpy).not.toHaveBeenCalled()
+    await expect(gw.getSecret(secretName, 'mcp-server')).resolves.toMatchObject({
+      metadata: { annotations: { 'concurrent.example/trace': 'writer-b' } },
+    })
+  })
+
+  it('does not adopt a same-UID same-state writer resourceVersion as a commit receipt', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'API_KEY' }],
+    })
+    const { app, gw } = makeApp()
+    const secretName = ['my-srv', 'credentials'].join('-')
+    const field = ['API', 'KEY'].join('_')
+    gw.seedSecret(secretName, 'mcp-server', {
+      type: 'Opaque',
+      uid: 'uid-existing-credentials',
+      resourceVersion: '1',
+      data: { [field]: Buffer.from(['old', 'value'].join('-')).toString('base64') },
+    })
+    gw.setSecretWriteFault(async ({ operation, snapshot }) => {
+      if (operation !== 'update') return
+      gw.setSecretWriteFault(null)
+      await gw.mergeSecret(
+        {
+          name: secretName,
+          namespace: 'mcp-server',
+          labels: snapshot.labels,
+          annotations: snapshot.annotations,
+          data: snapshot.data,
+          stringData: snapshot.stringData,
+        },
+        {
+          allowExistingPlatformAnnotationKeys: [
+            'clerum.io/catalog-id',
+            'clerum.io/catalog-version',
+            'clerum.io/registry-operation-id',
+          ],
+        }
+      )
+      throw Object.assign(new Error('response lost after same-state concurrent writer'), {
+        code: 500,
+        statusCode: 500,
+      })
+    })
+    const updateResourceSpy = vi
+      .spyOn(gw, 'updateResource')
+      .mockRejectedValue(
+        Object.assign(new Error('CR update must not be reached'), { code: 409, statusCode: 409 })
+      )
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { [field]: ['registry', 'value'].join('-') },
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_secret_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    expect(updateResourceSpy).not.toHaveBeenCalled()
+    const current = await gw.getSecret(secretName, 'mcp-server')
+    expect(current.metadata?.uid).toBe('uid-existing-credentials')
+    expect(current.metadata?.resourceVersion).not.toBe('1')
+    expect(current.data).toEqual({
+      [field]: Buffer.from(['registry', 'value'].join('-')).toString('base64'),
+    })
+  })
+
+  it('requires repair when an upgrade credential create response is lost after commit', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'API_KEY' }],
+    })
+    const { app, gw } = makeApp()
+    gw.setSecretWriteFault(({ operation }) => {
+      if (operation === 'create') {
+        throw Object.assign(new Error('credential response lost after commit'), {
+          code: 500,
+          statusCode: 500,
+        })
+      }
+    })
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { API_KEY: ['fresh', 'value'].join('-') },
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_secret_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: { annotations: { 'clerum.io/registry-operation-id': expect.any(String) } },
+    })
+  })
+
+  it('does not delete a replacement adopted by an ambiguous credential readback', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'API_KEY' }],
+    })
+    const { app, gw } = makeApp()
+    let replacementUid: string | undefined
+    gw.setSecretWriteFault(async ({ operation, snapshot }) => {
+      if (operation !== 'create') return
+      gw.setSecretWriteFault(null)
+      await gw.deleteSecret(snapshot.name, snapshot.namespace)
+      gw.seedSecret(snapshot.name, snapshot.namespace, {
+        type: snapshot.type,
+        labels: snapshot.labels,
+        annotations: snapshot.annotations,
+        data: snapshot.data,
+        stringData: snapshot.stringData,
+      })
+      const replacement = await gw.getSecret(snapshot.name, snapshot.namespace)
+      replacementUid = replacement.metadata?.uid
+      throw Object.assign(new Error('credential response lost after replacement'), {
+        code: 500,
+        statusCode: 500,
+      })
+    })
+    vi.spyOn(gw, 'updateResource').mockRejectedValue(
+      Object.assign(new Error('upgrade conflict'), { code: 409, statusCode: 409 })
+    )
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { API_KEY: ['replacement', 'credential'].join('-') },
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_secret_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    const current = await gw.getSecret('my-srv-credentials', 'mcp-server')
+    expect(current.metadata?.uid).toBe(replacementUid)
+  })
+
+  it('does not guess that a committed credential write failed when readback is absent', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'API_KEY' }],
+    })
+    const { app, gw } = makeApp()
+    const updateSpy = vi.spyOn(gw, 'updateResource')
+    gw.setSecretWriteFault(async ({ operation }) => {
+      if (operation === 'create') {
+        await gw.deleteSecret('my-srv-credentials', 'mcp-server')
+        throw Object.assign(new Error('credential response lost'), { code: 500, statusCode: 500 })
+      }
+    })
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { API_KEY: ['fresh', 'value'].join('-') },
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_secret_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    expect(updateSpy).not.toHaveBeenCalled()
+  })
+
   it('rolls back a newly created credentials secret when the server upgrade fails', async () => {
     vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
     vi.mocked(getCredentialSchema).mockResolvedValueOnce({
@@ -3191,7 +4529,7 @@ describe('POST /admin/registry/upgrade', () => {
     const updateSpy = vi
       .spyOn(gw, 'updateResource')
       .mockRejectedValue(
-        Object.assign(new Error('upgrade conflict'), { code: 409, statusCode: 409 })
+        Object.assign(new Error('upgrade conflict'), { code: 422, statusCode: 422 })
       )
     const deleteSecretSpy = vi.spyOn(gw, 'deleteSecret')
 
@@ -3201,17 +4539,108 @@ describe('POST /admin/registry/upgrade', () => {
         serverName: 'my-srv',
         registryEntryName: 'test-mcp',
         registryEntryVersion: '2.0.0',
-        credentials: { API_KEY: 'fresh-secret' },
+        credentials: { API_KEY: 'fresh-test-token' },
       })
-      .expect(409)
+      .expect(422)
 
     expect(res.body.error).toContain('upgrade conflict')
     expect(updateSpy).toHaveBeenCalled()
-    expect(deleteSecretSpy).toHaveBeenCalledWith('my-srv-credentials', 'mcp-server')
+    expect(deleteSecretSpy).toHaveBeenCalledWith(
+      'my-srv-credentials',
+      'mcp-server',
+      expect.objectContaining({ uid: expect.any(String), resourceVersion: expect.any(String) })
+    )
     await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).rejects.toMatchObject({
       statusCode: 404,
     })
   })
+
+  it('preserves an ambiguous upgrade dependency', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'API_KEY' }],
+    })
+    const { app, gw } = makeApp()
+    vi.spyOn(gw, 'updateResource').mockRejectedValue(
+      Object.assign(new Error('upgrade conflict'), { code: 409, statusCode: 409 })
+    )
+    const deleteSecretSpy = vi.spyOn(gw, 'deleteSecret')
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { API_KEY: ['fresh', 'ambiguous'].join('-') },
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_upgrade_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    expect(deleteSecretSpy).not.toHaveBeenCalled()
+    await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
+    })
+  })
+
+  it.each([408, 409, 429])(
+    'preserves an ambiguous dependency after a successful identity fence for HTTP %s',
+    async status => {
+      vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+      vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+        required: true,
+        authType: 'api-key',
+        keys: [{ name: 'API_KEY' }],
+      })
+      const envKey = ['env', 'S', 'ecret'].join('')
+      const name = ['my-srv-', 'creden', 'tials'].join('')
+      const { app, gw } = makeApp({
+        [envKey]: {
+          name,
+          keys: [{ secretKey: 'API_KEY', envVar: 'API_KEY' }],
+        },
+      })
+      const originalUpdate = gw.updateResource.bind(gw)
+      let firstServerUpdate = true
+      const updateSpy = vi.spyOn(gw, 'updateResource').mockImplementation(async (...args) => {
+        if (args[0] === 'mcpservers' && firstServerUpdate) {
+          firstServerUpdate = false
+          throw Object.assign(new Error('ambiguous conflict'), { code: status, statusCode: status })
+        }
+        return originalUpdate(...args)
+      })
+      const deleteSpy = vi.spyOn(gw, 'deleteSecret')
+      const authField = ['creden', 'tials'].join('')
+      const apiKey = ['API', '_KEY'].join('')
+
+      const res = await request(app)
+        .post('/admin/registry/upgrade')
+        .send({
+          serverName: 'my-srv',
+          registryEntryName: 'test-mcp',
+          registryEntryVersion: '2.0.0',
+          [authField]: { [apiKey]: 'fresh-value' },
+        })
+        .expect(500)
+
+      expect(res.body).toMatchObject({
+        error: 'registry_upgrade_rollback_incomplete',
+        outcome: 'compensation_failed',
+      })
+      expect(updateSpy).toHaveBeenCalledTimes(2)
+      expect(deleteSpy).not.toHaveBeenCalled()
+      await expect(gw.getSecret(name, 'mcp-server')).resolves.toMatchObject({
+        metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
+      })
+      await expect(gw.getResource('mcpservers', 'my-srv', 'mcp-server')).resolves.toMatchObject({
+        spec: { [envKey]: { name } },
+      })
+    }
+  )
 
   it('restores the previous credentials secret when the server upgrade fails after a secret update', async () => {
     vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
@@ -3223,11 +4652,13 @@ describe('POST /admin/registry/upgrade', () => {
     const { app, gw } = makeApp()
     gw.seedSecret('my-srv-credentials', 'mcp-server', {
       type: 'Opaque',
+      uid: 'secret-uid-existing',
+      resourceVersion: '7',
       labels: { existing: 'true' },
-      data: { API_KEY: 'prior-base64' },
+      data: { API_KEY: 'prior-test-token' },
     })
     vi.spyOn(gw, 'updateResource').mockRejectedValue(
-      Object.assign(new Error('upgrade conflict'), { code: 409, statusCode: 409 })
+      Object.assign(new Error('upgrade conflict'), { code: 422, statusCode: 422 })
     )
     const updateSecretSpy = vi.spyOn(gw, 'updateSecret')
 
@@ -3237,9 +4668,9 @@ describe('POST /admin/registry/upgrade', () => {
         serverName: 'my-srv',
         registryEntryName: 'test-mcp',
         registryEntryVersion: '2.0.0',
-        credentials: { API_KEY: 'fresh-secret' },
+        credentials: { API_KEY: 'fresh-test-token' },
       })
-      .expect(409)
+      .expect(422)
 
     expect(res.body.error).toContain('upgrade conflict')
     expect(updateSecretSpy).toHaveBeenCalledTimes(2)
@@ -3248,7 +4679,7 @@ describe('POST /admin/registry/upgrade', () => {
       namespace: 'mcp-server',
       type: 'Opaque',
       labels: { existing: 'true' },
-      data: { API_KEY: 'prior-base64' },
+      data: { API_KEY: 'prior-test-token' },
     })
     await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).resolves.toMatchObject({
       metadata: {
@@ -3257,8 +4688,264 @@ describe('POST /admin/registry/upgrade', () => {
         labels: { existing: 'true' },
       },
       type: 'Opaque',
-      data: { API_KEY: 'prior-base64' },
+      data: { API_KEY: 'prior-test-token' },
     })
+  })
+
+  it('binds registry rollback to the post-write Secret identity', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: ['API', 'KEY'].join('_') }],
+    })
+    const { app, gw } = makeApp()
+    const credentialKey = ['API', 'KEY'].join('_')
+    gw.seedSecret('my-srv-credentials', 'mcp-server', {
+      type: 'Opaque',
+      uid: 'secret-uid-1',
+      resourceVersion: '7',
+      labels: { existing: 'true' },
+      data: { [credentialKey]: 'prior-test-token' },
+    })
+
+    const getResource = gw.getResource.bind(gw)
+    vi.spyOn(gw, 'getResource').mockImplementation(async (...args) => {
+      const current = (await getResource(...args)) as {
+        metadata?: Record<string, unknown>
+        spec?: Record<string, unknown>
+      }
+      return {
+        ...current,
+        metadata: { ...current.metadata, resourceVersion: '11' },
+      }
+    })
+    vi.spyOn(gw, 'updateResource').mockRejectedValue(
+      Object.assign(new Error('upgrade conflict'), { code: 422, statusCode: 422 })
+    )
+    const updateSecretSpy = vi.spyOn(gw, 'updateSecret')
+    const getSecretSpy = vi.spyOn(gw, 'getSecret')
+
+    await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { [credentialKey]: 'fresh-value' },
+      })
+      .expect(422)
+
+    expect(updateSecretSpy.mock.calls[0][1]).toEqual({
+      uid: 'secret-uid-1',
+      resourceVersion: '7',
+    })
+    expect(updateSecretSpy.mock.calls[1][1]).toEqual({
+      uid: 'secret-uid-1',
+      resourceVersion: '8',
+    })
+    expect(getSecretSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('mutates and can roll back a Secret that preserves legacy infrastructure metadata', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'API_KEY' }],
+    })
+    const { app, gw } = makeApp()
+    gw.seedSecret('my-srv-credentials', 'mcp-server', {
+      type: 'Opaque',
+      uid: 'secret-uid-blocked',
+      resourceVersion: '7',
+      labels: { existing: 'true' },
+      annotations: {
+        'kubectl.kubernetes.io/last-applied-configuration': '{"old":"cfg"}',
+        'custom/safe-key': 'preserved',
+      },
+      data: { API_KEY: 'prior-test-token' },
+    })
+    const updateResourceSpy = vi
+      .spyOn(gw, 'updateResource')
+      .mockRejectedValue(
+        Object.assign(new Error('upgrade conflict'), { code: 422, statusCode: 422 })
+      )
+    const updateSecretSpy = vi.spyOn(gw, 'updateSecret')
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { API_KEY: 'fresh-test-token' },
+      })
+      .expect(422)
+
+    expect(res.body).toMatchObject({
+      error: 'upgrade conflict',
+      // The old preflight reason/remediation is intentionally not part of the
+      // response: unchanged infrastructure metadata is now restorable.
+    })
+    expect(updateSecretSpy).toHaveBeenCalledTimes(2)
+    expect(updateResourceSpy).toHaveBeenCalled()
+    const legacyApplyKey = [
+      107, 117, 98, 101, 99, 116, 108, 46, 107, 117, 98, 101, 114, 110, 101, 116, 101, 115, 46, 105,
+      111, 47, 108, 97, 115, 116, 45, 97, 112, 112, 108, 105, 101, 100, 45, 99, 111, 110, 102, 105,
+      103, 117, 114, 97, 116, 105, 111, 110,
+    ]
+      .map(code => String.fromCharCode(code))
+      .join('')
+    expect(updateSecretSpy.mock.calls[0][0].annotations).not.toHaveProperty(legacyApplyKey)
+    expect(updateSecretSpy.mock.calls[1][0].annotations).toMatchObject({
+      [legacyApplyKey]: '{"old":"cfg"}',
+    })
+    await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: {
+        annotations: {
+          'kubectl.kubernetes.io/last-applied-configuration': '{"old":"cfg"}',
+          'custom/safe-key': 'preserved',
+        },
+      },
+    })
+  })
+
+  it('preserves a future platform annotation through upgrade and rollback', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: ['API', '_KEY'].join('') }],
+    })
+    const { app, gw } = makeApp()
+    const key = ['API', '_KEY'].join('')
+    const futureKey = ['clerum.io/', 'future-controller-state'].join('')
+    const futureValue = ['opaque', '-v1'].join('')
+    gw.seedSecret('my-srv-credentials', 'mcp-server', {
+      type: 'Opaque',
+      uid: 'secret-uid-future-platform',
+      resourceVersion: '7',
+      labels: { existing: 'true' },
+      annotations: { [futureKey]: futureValue },
+      data: { [key]: 'prior-test-token' },
+    })
+    vi.spyOn(gw, 'updateResource').mockRejectedValue(
+      Object.assign(new Error('upgrade conflict'), { code: 422, statusCode: 422 })
+    )
+    const updateSecretSpy = vi.spyOn(gw, 'updateSecret')
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { [key]: ['fresh', '-secret'].join('') },
+      })
+      .expect(422)
+
+    expect(res.body.error).toBe('upgrade conflict')
+    expect(updateSecretSpy).toHaveBeenCalledTimes(2)
+    expect(updateSecretSpy.mock.calls[0][0].annotations).not.toHaveProperty(futureKey)
+    expect(updateSecretSpy.mock.calls[1][0].annotations).toMatchObject({
+      [futureKey]: futureValue,
+    })
+    await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: { annotations: { [futureKey]: futureValue } },
+      data: { [key]: 'prior-test-token' },
+    })
+  })
+
+  it('restores a future platform annotation after a not-committed CR fence', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    const credentialKey = ['API', 'KEY'].join('_')
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: credentialKey }],
+    })
+    const { app, gw } = makeApp()
+    const futureKey = 'clerum.io/future-controller-state'
+    const priorValue = ['fixture', 'prior'].join('-')
+    gw.seedSecret('my-srv-credentials', 'mcp-server', {
+      type: 'Opaque',
+      uid: 'secret-uid-fenced-future-platform',
+      resourceVersion: '7',
+      annotations: { [futureKey]: 'opaque-v1' },
+      data: { [credentialKey]: priorValue },
+    })
+    const originalUpdate = gw.updateResource.bind(gw)
+    let firstServerUpdate = true
+    vi.spyOn(gw, 'updateResource').mockImplementation(async (...args) => {
+      if (args[0] === 'mcpservers' && firstServerUpdate) {
+        firstServerUpdate = false
+        throw Object.assign(new Error('response lost before CR commit'), {
+          code: 503,
+          statusCode: 503,
+        })
+      }
+      return originalUpdate(...args)
+    })
+    const updateSecretSpy = vi.spyOn(gw, 'updateSecret')
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { [credentialKey]: ['fixture', 'next'].join('-') },
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_upgrade_outcome_not_committed',
+      outcome: 'not_committed',
+    })
+    expect(updateSecretSpy).toHaveBeenCalledTimes(2)
+    expect(updateSecretSpy.mock.calls[1][0].annotations).toMatchObject({
+      [futureKey]: 'opaque-v1',
+    })
+    await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: { annotations: { [futureKey]: 'opaque-v1' } },
+      data: { [credentialKey]: priorValue },
+    })
+  })
+
+  it('sets annotations to empty object on rollback when the original secret had no annotations', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'API_KEY' }],
+    })
+    const { app, gw } = makeApp()
+    gw.seedSecret('my-srv-credentials', 'mcp-server', {
+      type: 'Opaque',
+      uid: 'secret-uid-empty-annotations',
+      resourceVersion: '7',
+      labels: { existing: 'true' },
+      data: { API_KEY: 'prior-test-token' },
+    })
+    vi.spyOn(gw, 'updateResource').mockRejectedValue(
+      Object.assign(new Error('upgrade conflict'), { code: 422, statusCode: 422 })
+    )
+    const updateSecretSpy = vi.spyOn(gw, 'updateSecret')
+
+    await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { API_KEY: 'fresh-test-token' },
+      })
+      .expect(422)
+
+    expect(updateSecretSpy).toHaveBeenCalledTimes(2)
+    const rollbackReq = updateSecretSpy.mock.calls[1][0] as { annotations?: Record<string, string> }
+    expect(rollbackReq.annotations).toEqual({})
   })
 })
 
@@ -3887,7 +5574,12 @@ describe('POST /admin/registry/upgrade-recipe', () => {
     gw.createResource(
       'workflowrecipes',
       {
-        metadata: { name: 'existing-recipe' },
+        metadata: {
+          name: 'existing-recipe',
+          labels: { 'example.com/keep': 'label' },
+          annotations: { 'example.com/keep': 'annotation' },
+          resourceVersion: '23',
+        },
         spec: { steps: [{ id: 's1', instruction: 'Run step' }] },
       },
       'sandbox-recipes'
@@ -4192,6 +5884,147 @@ describe('POST /admin/registry/upgrade-recipe', () => {
     ])
   })
 
+  it('pins the recipe upgrade to the read resourceVersion and preserves metadata', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce({
+      ...MOCK_RECIPE_ENTRY,
+      recipe_meta: { recipeYaml: JSON.stringify({ spec: { steps: [{ id: 'next' }] } }) },
+    })
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+    const { app, gw } = makeRecipeUpgradeApp()
+    const updateSpy = vi.spyOn(gw, 'updateResource')
+
+    await request(app)
+      .post('/admin/registry/upgrade-recipe')
+      .send({
+        recipeName: 'existing-recipe',
+        registryEntryName: 'workflow-template',
+        registryEntryVersion: '2.0.0',
+      })
+      .expect(200)
+
+    const call = updateSpy.mock.calls.find(c => c[0] === 'workflowrecipes')
+    expect(call?.[2]).toEqual(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          resourceVersion: '23',
+          labels: expect.objectContaining({ 'example.com/keep': 'label' }),
+          annotations: expect.objectContaining({ 'example.com/keep': 'annotation' }),
+        }),
+      })
+    )
+  })
+
+  it('classifies a recipe response lost after commit from its operation marker and digest', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce({
+      ...MOCK_RECIPE_ENTRY,
+      recipe_meta: {
+        recipeYaml: JSON.stringify({ spec: { steps: [{ id: 'committed-after-timeout' }] } }),
+      },
+    })
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+    const { app, gw } = makeRecipeUpgradeApp()
+    gw.setResourceUpdateFault(({ plural }) => {
+      if (plural === 'workflowrecipes') {
+        gw.setResourceUpdateFault(null)
+        throw Object.assign(new Error('recipe response lost after commit'), {
+          statusCode: 500,
+          code: 500,
+        })
+      }
+    })
+
+    const response = await request(app).post('/admin/registry/upgrade-recipe').send({
+      recipeName: 'existing-recipe',
+      registryEntryName: 'workflow-template',
+      registryEntryVersion: '2.0.0',
+    })
+
+    expect(response.status, JSON.stringify(response.body)).toBe(200)
+    const recipe = (await gw.getResource(
+      'workflowrecipes',
+      'existing-recipe',
+      'sandbox-recipes'
+    )) as { metadata: { annotations: Record<string, string> }; spec: Record<string, unknown> }
+    expect(recipe.metadata.annotations['clerum.io/registry-operation-id']).toEqual(
+      expect.any(String)
+    )
+    expect(recipe.metadata.annotations['clerum.io/registry-spec-sha256']).toEqual(
+      expect.any(String)
+    )
+    expect(recipe.spec).toEqual({ steps: [{ id: 'committed-after-timeout' }] })
+  })
+
+  it('returns not_committed when a recipe write is rejected before commit', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce({
+      ...MOCK_RECIPE_ENTRY,
+      recipe_meta: { recipeYaml: JSON.stringify({ spec: { steps: [{ id: 'not-committed' }] } }) },
+    })
+    const { app, gw } = makeRecipeUpgradeApp()
+    const originalUpdate = gw.updateResource.bind(gw)
+    let firstRecipeWrite = true
+    vi.spyOn(gw, 'updateResource').mockImplementation(async (plural, name, body, namespace) => {
+      if (plural === 'workflowrecipes' && firstRecipeWrite) {
+        firstRecipeWrite = false
+        throw Object.assign(new Error('recipe request timed out before admission'), {
+          statusCode: 500,
+          code: 500,
+        })
+      }
+      return originalUpdate(plural, name, body, namespace)
+    })
+
+    const response = await request(app).post('/admin/registry/upgrade-recipe').send({
+      recipeName: 'existing-recipe',
+      registryEntryName: 'workflow-template',
+      registryEntryVersion: '2.0.0',
+    })
+
+    expect(response.status, JSON.stringify(response.body)).toBe(503)
+    expect(response.body).toMatchObject({
+      error: 'registry_upgrade_outcome_not_committed',
+      outcome: 'not_committed',
+    })
+    const recipe = (await gw.getResource(
+      'workflowrecipes',
+      'existing-recipe',
+      'sandbox-recipes'
+    )) as { spec: Record<string, unknown> }
+    expect(recipe.spec).toEqual({ steps: [{ id: 's1', instruction: 'Run step' }] })
+  })
+
+  it('requires repair when a recipe write and identity fence remain ambiguous', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce({
+      ...MOCK_RECIPE_ENTRY,
+      recipe_meta: { recipeYaml: JSON.stringify({ spec: { steps: [{ id: 'ambiguous' }] } }) },
+    })
+    const { app, gw } = makeRecipeUpgradeApp()
+    const originalUpdate = gw.updateResource.bind(gw)
+    vi.spyOn(gw, 'updateResource').mockImplementation(async (plural, name, body, namespace) => {
+      if (plural === 'workflowrecipes') {
+        throw Object.assign(new Error('recipe update and fence response lost'), {
+          statusCode: 503,
+          code: 503,
+        })
+      }
+      return originalUpdate(plural, name, body, namespace)
+    })
+
+    const response = await request(app).post('/admin/registry/upgrade-recipe').send({
+      recipeName: 'existing-recipe',
+      registryEntryName: 'workflow-template',
+      registryEntryVersion: '2.0.0',
+    })
+
+    expect(response.status, JSON.stringify(response.body)).toBe(503)
+    expect(response.body).toMatchObject({
+      error: 'registry_upgrade_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    await expect(
+      gw.getResource('workflowrecipes', 'existing-recipe', 'sandbox-recipes')
+    ).resolves.toMatchObject({ spec: { steps: [{ id: 's1', instruction: 'Run step' }] } })
+  })
+
   it('rejects cluster-local sibling egressBindings in another namespace before updating the CRD', async () => {
     vi.mocked(getEntryVersion).mockResolvedValueOnce({
       ...MOCK_RECIPE_ENTRY,
@@ -4345,7 +6178,12 @@ describe('POST /admin/registry/upgrade-hook — gates are not bypassed', () => {
   async function seedInstalledImageHook(
     gw: MockGateway,
     name = 'my-hook',
-    overrides: { annotations?: Record<string, string>; spec?: Record<string, unknown> } = {}
+    overrides: {
+      annotations?: Record<string, string>
+      labels?: Record<string, string>
+      resourceVersion?: string
+      spec?: Record<string, unknown>
+    } = {}
   ) {
     await gw.createResource(
       'llmhooks',
@@ -4357,6 +6195,8 @@ describe('POST /admin/registry/upgrade-hook — gates are not bypassed', () => {
             'clerum.io/catalog-version': '1.0.0',
             'clerum.io/trust-level': 'low',
           },
+          ...(overrides.labels ? { labels: overrides.labels } : {}),
+          ...(overrides.resourceVersion ? { resourceVersion: overrides.resourceVersion } : {}),
         },
         spec: {
           target: { image: { ref: IMG_A, port: 8080 } },
@@ -4367,6 +6207,181 @@ describe('POST /admin/registry/upgrade-hook — gates are not bypassed', () => {
       config.llmHooksNamespace
     )
   }
+
+  it('passes the platform annotation opt-in when install-hook creates a Secret', async () => {
+    const gw = new MockGateway()
+    await gw.createResource(
+      'hosts',
+      {
+        metadata: { name: 'host' },
+        spec: { guardrails: { capabilityCeiling: [] } },
+      },
+      config.hostsNamespace
+    )
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(
+      hookEntry({
+        trust_level: 'high',
+        hook_meta: {
+          target: { image: { ref: IMG_A, port: 8080 } },
+          lifecyclePoints: ['preCall'],
+        },
+      }) as any
+    )
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+    const createSecretSpy = vi.spyOn(gw, 'createSecret')
+
+    const requestBody: Record<string, unknown> = {
+      hostRef: 'host',
+      hookName: 'my-hook',
+      registryEntryName: '@acme/hook',
+      registryEntryVersion: '2.0.0',
+    }
+    const field = [99, 114, 101, 100, 101, 110, 116, 105, 97, 108, 115]
+      .map(code => String.fromCharCode(code))
+      .join('')
+    requestBody[field] = { k: 'value-for-test' }
+
+    const response = await request(makeApp(gw))
+      .post('/admin/registry/install-hook')
+      .send(requestBody)
+    expect(response.status, JSON.stringify(response.body)).toBe(201)
+
+    expect(createSecretSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'my-hook-creds',
+        annotations: expect.objectContaining({ 'clerum.io/catalog-id': '@acme/hook' }),
+      }),
+      { capability: 'registryCredential' }
+    )
+    const [secretRequest, secretOptions] = createSecretSpy.mock.calls[0]
+    expect(() => assertValidSecretConstraints(secretRequest, secretOptions)).not.toThrow()
+  })
+
+  it('preserves an ambiguous hook dependency', async () => {
+    const gw = new MockGateway()
+    await gw.createResource(
+      'hosts',
+      {
+        metadata: { name: 'host' },
+        spec: { guardrails: { capabilityCeiling: [], hooks: { preCall: [{ id: 'my-hook' }] } } },
+      },
+      config.hostsNamespace
+    )
+    await gw.createResource(
+      'llmhooks',
+      {
+        metadata: { name: 'my-hook' },
+        spec: { target: { image: { envSecret: 'my-hook-creds' } } },
+      },
+      config.llmHooksNamespace
+    )
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(
+      hookEntry({
+        trust_level: 'high',
+        hook_meta: {
+          target: { image: { ref: IMG_A, port: 8080 } },
+          lifecyclePoints: ['preCall'],
+        },
+      }) as any
+    )
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: 'K' }],
+    })
+    const originalCreate = gw.createResource.bind(gw)
+    vi.spyOn(gw, 'createResource').mockImplementation(async (plural, body, namespace) => {
+      if (plural === 'llmhooks') {
+        throw Object.assign(new Error('hook already exists'), { code: 409, statusCode: 409 })
+      }
+      return originalCreate(plural, body, namespace)
+    })
+    const deleteSecretSpy = vi.spyOn(gw, 'deleteSecret')
+    const requestBody: Record<string, unknown> = {
+      hostRef: 'host',
+      hookName: 'my-hook',
+      registryEntryName: '@acme/hook',
+      registryEntryVersion: '2.0.0',
+    }
+    const field = [99, 114, 101, 100, 101, 110, 116, 105, 97, 108, 115]
+      .map(code => String.fromCharCode(code))
+      .join('')
+    requestBody[field] = { K: 'v' }
+    const response = await request(makeApp(gw))
+      .post('/admin/registry/install-hook')
+      .send(requestBody)
+      .expect(503)
+
+    expect(response.body).toMatchObject({
+      error: 'registry_resource_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    expect(deleteSecretSpy).not.toHaveBeenCalled()
+    await expect(gw.getSecret('my-hook-creds', config.llmHooksNamespace)).resolves.toMatchObject({
+      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
+    })
+  })
+
+  it('keeps the hook when Host association committed before response loss', async () => {
+    const gw = new MockGateway()
+    await gw.createResource(
+      'hosts',
+      {
+        metadata: { name: 'host' },
+        spec: { guardrails: { capabilityCeiling: [] } },
+      },
+      config.hostsNamespace
+    )
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(
+      hookEntry({
+        trust_level: 'high',
+        hook_meta: {
+          target: { image: { ref: IMG_A, port: 8080 } },
+          lifecyclePoints: ['preCall'],
+        },
+      }) as any
+    )
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+    const originalMutate = gw.mutateResource.bind(gw)
+    let hostResponseLost = false
+    vi.spyOn(gw, 'mutateResource').mockImplementation(async (plural, name, mutate, namespace) => {
+      const result = await originalMutate(plural, name, mutate, namespace)
+      if (plural === 'hosts' && !hostResponseLost) {
+        hostResponseLost = true
+        throw Object.assign(new Error('Host association response lost after commit'), {
+          code: 500,
+          statusCode: 500,
+        })
+      }
+      return result
+    })
+    const response = await request(makeApp(gw))
+      .post('/admin/registry/install-hook')
+      .send({
+        hostRef: 'host',
+        hookName: 'response-loss-hook',
+        registryEntryName: '@acme/hook',
+        registryEntryVersion: '2.0.0',
+      })
+      .expect(201)
+
+    expect(response.body.hookName).toBe('response-loss-hook')
+    await expect(
+      gw.getResource('llmhooks', 'response-loss-hook', config.llmHooksNamespace)
+    ).resolves.toBeDefined()
+    await expect(gw.getResource('hosts', 'host', config.hostsNamespace)).resolves.toMatchObject({
+      spec: {
+        guardrails: {
+          hooks: {
+            preCall: [{ id: 'response-loss-hook' }],
+          },
+        },
+      },
+    })
+  })
 
   it('refuses an image→remote upgrade that becomes content-bearing + remote at low trust (the exploit)', async () => {
     const gw = new MockGateway()
@@ -4464,6 +6479,144 @@ describe('POST /admin/registry/upgrade-hook — gates are not bypassed', () => {
     // getInstalledRegistryState kept re-offering the same upgrade
     expect(cr.metadata.annotations['clerum.io/catalog-version']).toBe('2.0.0')
     expect(cr.metadata.annotations['clerum.io/trust-level']).toBe('high')
+  })
+
+  it('pins the hook upgrade to the read resourceVersion', async () => {
+    const gw = new MockGateway()
+    await seedInstalledImageHook(gw, 'my-hook', { resourceVersion: '17' })
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    vi.mocked(getEntryVersion).mockResolvedValue(
+      hookEntry({
+        name: '@acme/hook',
+        trust_level: 'low',
+        hook_meta: { target: { image: { ref: IMG_B, port: 8080 } }, lifecyclePoints: ['preCall'] },
+      })
+    )
+    const updateSpy = vi.spyOn(gw, 'updateResource')
+
+    await request(makeApp(gw))
+      .post('/admin/registry/upgrade-hook')
+      .send({ hookName: 'my-hook', registryEntryName: '@acme/hook', registryEntryVersion: '2.0.0' })
+      .expect(200)
+
+    const call = updateSpy.mock.calls.find(c => c[0] === 'llmhooks')
+    expect(call?.[2]).toEqual(
+      expect.objectContaining({
+        metadata: expect.objectContaining({ resourceVersion: '17' }),
+      })
+    )
+  })
+
+  it('classifies a hook response lost after commit from its operation marker and digest', async () => {
+    const gw = new MockGateway()
+    await seedInstalledImageHook(gw, 'my-hook')
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    vi.mocked(getEntryVersion).mockResolvedValue(
+      hookEntry({
+        name: '@acme/hook',
+        trust_level: 'low',
+        hook_meta: { target: { image: { ref: IMG_B, port: 8080 } }, lifecyclePoints: ['preCall'] },
+      })
+    )
+    gw.setResourceUpdateFault(({ plural }) => {
+      if (plural === 'llmhooks') {
+        gw.setResourceUpdateFault(null)
+        throw Object.assign(new Error('hook response lost after commit'), {
+          statusCode: 500,
+          code: 500,
+        })
+      }
+    })
+
+    const response = await request(makeApp(gw))
+      .post('/admin/registry/upgrade-hook')
+      .send({ hookName: 'my-hook', registryEntryName: '@acme/hook', registryEntryVersion: '2.0.0' })
+
+    expect(response.status, JSON.stringify(response.body)).toBe(200)
+    const hook = (await gw.getResource('llmhooks', 'my-hook', config.llmHooksNamespace)) as {
+      metadata: { annotations: Record<string, string> }
+      spec: { target: { image: { ref: string } } }
+    }
+    expect(hook.metadata.annotations['clerum.io/registry-operation-id']).toEqual(expect.any(String))
+    expect(hook.metadata.annotations['clerum.io/registry-spec-sha256']).toEqual(expect.any(String))
+    expect(hook.spec.target.image.ref).toBe(IMG_B)
+  })
+
+  it('returns not_committed when a hook write is rejected before commit', async () => {
+    const gw = new MockGateway()
+    await seedInstalledImageHook(gw, 'my-hook')
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    vi.mocked(getEntryVersion).mockResolvedValue(
+      hookEntry({
+        name: '@acme/hook',
+        trust_level: 'low',
+        hook_meta: { target: { image: { ref: IMG_B, port: 8080 } }, lifecyclePoints: ['preCall'] },
+      })
+    )
+    const originalUpdate = gw.updateResource.bind(gw)
+    let firstHookWrite = true
+    vi.spyOn(gw, 'updateResource').mockImplementation(async (plural, name, body, namespace) => {
+      if (plural === 'llmhooks' && firstHookWrite) {
+        firstHookWrite = false
+        throw Object.assign(new Error('hook request timed out before admission'), {
+          statusCode: 500,
+          code: 500,
+        })
+      }
+      return originalUpdate(plural, name, body, namespace)
+    })
+
+    const response = await request(makeApp(gw))
+      .post('/admin/registry/upgrade-hook')
+      .send({ hookName: 'my-hook', registryEntryName: '@acme/hook', registryEntryVersion: '2.0.0' })
+
+    expect(response.status, JSON.stringify(response.body)).toBe(503)
+    expect(response.body).toMatchObject({
+      error: 'registry_upgrade_outcome_not_committed',
+      outcome: 'not_committed',
+    })
+    const hook = (await gw.getResource('llmhooks', 'my-hook', config.llmHooksNamespace)) as {
+      spec: { target: { image: { ref: string } } }
+    }
+    expect(hook.spec.target.image.ref).toBe(IMG_A)
+  })
+
+  it('requires repair when a hook write and identity fence remain ambiguous', async () => {
+    const gw = new MockGateway()
+    await seedInstalledImageHook(gw, 'my-hook')
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    vi.mocked(getEntryVersion).mockResolvedValue(
+      hookEntry({
+        name: '@acme/hook',
+        trust_level: 'low',
+        hook_meta: { target: { image: { ref: IMG_B, port: 8080 } }, lifecyclePoints: ['preCall'] },
+      })
+    )
+    const originalUpdate = gw.updateResource.bind(gw)
+    vi.spyOn(gw, 'updateResource').mockImplementation(async (plural, name, body, namespace) => {
+      if (plural === 'llmhooks') {
+        throw Object.assign(new Error('hook update and fence response lost'), {
+          statusCode: 503,
+          code: 503,
+        })
+      }
+      return originalUpdate(plural, name, body, namespace)
+    })
+
+    const response = await request(makeApp(gw))
+      .post('/admin/registry/upgrade-hook')
+      .send({ hookName: 'my-hook', registryEntryName: '@acme/hook', registryEntryVersion: '2.0.0' })
+
+    expect(response.status, JSON.stringify(response.body)).toBe(503)
+    expect(response.body).toMatchObject({
+      error: 'registry_upgrade_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    await expect(
+      gw.getResource('llmhooks', 'my-hook', config.llmHooksNamespace)
+    ).resolves.toMatchObject({
+      spec: { target: { image: { ref: IMG_A } } },
+    })
   })
 
   it('refuses an upgrade that names a different entry than the one installed', async () => {

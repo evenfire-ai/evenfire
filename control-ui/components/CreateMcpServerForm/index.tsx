@@ -17,11 +17,13 @@ import {
   getContextUsers,
   getContexts,
   getHosts,
+  getMcpSecretRollbackRepairIdentity,
   listOrgImages,
   updateContext,
 } from '@/lib/api'
 import type { EnvSecretKeyMapping, EnvVar, OrgImage } from '@/lib/api'
 import type { EgressBinding } from '@/lib/api'
+import type { SecretIdentity } from '@/lib/api'
 import { buildContextUpdatePayload } from '@/lib/contextMutation'
 import type { EgressEditorStatus } from '@/lib/egressModel'
 import { EgressEditor } from '../EgressEditor'
@@ -532,11 +534,16 @@ export function CreateMcpServerForm({
     const willCreateSecret =
       useEnvSecret && envSecretName.trim().length > 0 && Object.keys(secretData).length > 0
 
-    let secretCreated = false
+    let createdSecretName: string | null = null
+    let createdSecretIdentity: SecretIdentity | undefined
     try {
       if (willCreateSecret) {
-        await createMcpSecret(envSecretName.trim(), secretData)
-        secretCreated = true
+        const secretName = envSecretName.trim()
+        const created = await createMcpSecret(secretName, secretData)
+        createdSecretName = secretName
+        if (created.uid && created.resourceVersion) {
+          createdSecretIdentity = { uid: created.uid, resourceVersion: created.resourceVersion }
+        }
       }
 
       await createMcpServer({
@@ -575,17 +582,39 @@ export function CreateMcpServerForm({
         onCreated()
       }, 600)
     } catch (submitError) {
-      // Rollback: if we created the Secret but the CRD (or anything after)
-      // failed, the Secret is orphan — best-effort delete.
-      if (secretCreated) {
-        try {
-          await deleteMcpSecret(envSecretName.trim())
-        } catch {
-          // best-effort rollback; swallow — the operator already sees the
-          // primary error below.
+      // Roll back only a Secret this submission created. A successful legacy
+      // create may use the bounded bodyless-delete compatibility path. A
+      // rejected create is eligible only when its exact repair response gives
+      // us a complete CAS identity; incomplete repair data never falls back to
+      // a bodyless delete.
+      let cleanupError: unknown
+      let cleanupSecretName = createdSecretName
+      let cleanupSecretIdentity = createdSecretIdentity
+      if (!cleanupSecretName) {
+        const repairIdentity = getMcpSecretRollbackRepairIdentity(submitError, envSecretName.trim())
+        if (repairIdentity) {
+          cleanupSecretName = repairIdentity.name
+          cleanupSecretIdentity = {
+            uid: repairIdentity.uid,
+            resourceVersion: repairIdentity.resourceVersion,
+          }
         }
       }
-      setError(formatCreateError(submitError))
+      if (cleanupSecretName) {
+        try {
+          await deleteMcpSecret(cleanupSecretName, cleanupSecretIdentity)
+        } catch (error) {
+          cleanupError = error
+        }
+      }
+      const primaryError = formatCreateError(submitError)
+      setError(
+        cleanupError
+          ? `${primaryError} Cleanup of the created Secret also failed: ${formatCreateError(
+              cleanupError
+            )}. Refresh the page and review the Secret before taking further action.`
+          : primaryError
+      )
     } finally {
       setSubmitting(false)
     }
@@ -789,10 +818,12 @@ export function CreateMcpServerForm({
                         : 'Create a context before creating a connector.'
                   }
                   error={contextsError || undefined}
+                  htmlFor="create-connector-context"
                   label="Context"
                   required
                 >
                   <SelectionDropdown
+                    ariaLabel="Context"
                     id="create-connector-context"
                     multiple={false}
                     onChange={next => setContextRef(next[0] ?? '')}

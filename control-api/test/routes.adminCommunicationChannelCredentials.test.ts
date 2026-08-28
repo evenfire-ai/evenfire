@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import type { K8sGateway } from '../src/k8s.js'
-import { createAdminResourcesRouter } from '../src/routes/admin/resources.js'
+import { adminResourcesLogger, createAdminResourcesRouter } from '../src/routes/admin/resources.js'
 
 // vi.fn() arrays mirror the pattern in routes.adminChannelSecrets.test.ts —
 // minimal hand-crafted gateway double that exposes only the K8sGateway methods
@@ -160,7 +160,11 @@ describe('admin communicationchannels — credentials cascade', () => {
   })
 
   it('POST communicationchannels with credentials creates Secret + CC and injects credentialsSecretRef', async () => {
-    gatewayMock.createSecret.mockResolvedValue({ name: 'cc-foo-credentials' })
+    gatewayMock.createSecret.mockResolvedValue({
+      name: 'cc-foo-credentials',
+      uid: 'uid-cc-foo-credentials',
+      resourceVersion: '1',
+    })
     gatewayMock.createResource.mockResolvedValue({
       metadata: { name: 'foo', namespace: 'channels' },
       spec: {
@@ -204,7 +208,11 @@ describe('admin communicationchannels — credentials cascade', () => {
   })
 
   it('POST: rolls back Secret if CC create fails', async () => {
-    gatewayMock.createSecret.mockResolvedValue({ name: 'cc-foo-credentials' })
+    gatewayMock.createSecret.mockResolvedValue({
+      name: 'cc-foo-credentials',
+      uid: 'uid-cc-foo-credentials',
+      resourceVersion: '1',
+    })
     gatewayMock.createResource.mockRejectedValue(new Error('CC create failed'))
     gatewayMock.deleteSecret.mockResolvedValue({})
 
@@ -220,7 +228,10 @@ describe('admin communicationchannels — credentials cascade', () => {
       })
 
     expect(res.status).toBeGreaterThanOrEqual(500)
-    expect(gatewayMock.deleteSecret).toHaveBeenCalledWith('cc-foo-credentials', 'channels')
+    expect(gatewayMock.deleteSecret).toHaveBeenCalledWith('cc-foo-credentials', 'channels', {
+      uid: 'uid-cc-foo-credentials',
+      resourceVersion: '1',
+    })
   })
 
   it('PUT /admin/communication-channels/:name/credentials patches existing Secret', async () => {
@@ -442,7 +453,7 @@ describe('admin communicationchannels — credentials cascade', () => {
     const e500 = Object.assign(new Error('boom'), { statusCode: 500 })
     gatewayMock.deleteSecret.mockRejectedValue(e500)
     gatewayMock.deleteResource.mockResolvedValue({ deleted: true })
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(adminResourcesLogger, 'error').mockImplementation(() => undefined)
 
     const res = await request(makeApp()).delete('/admin/communicationchannels/foo')
 

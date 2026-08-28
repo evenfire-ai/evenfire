@@ -1,4 +1,6 @@
 import { Router } from 'express'
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
+import { createHash } from 'node:crypto'
 import { PROVIDER_CREDENTIAL_SLOTS } from '@clerum/llm-providers'
 import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '@clerum/workflow-runtime-core'
 import { config } from '../../config.js'
@@ -6,6 +8,8 @@ import { asyncHandler } from '../../http/asyncHandler.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { isValidDNSSubdomain } from '../../http/rfc1123.js'
 import { K8sGateway, extractHttpStatus } from '../../k8s.js'
+import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../../observability/logger.js'
 import {
   OWNER_RECIPE_LABEL_KEY,
@@ -13,13 +17,62 @@ import {
   type SecretOwnership,
   parseSecretOwnership,
 } from '../../secretOwnership.js'
+import {
+  type McpSecretRollbackPermit,
+  type McpSecretRollbackPermitClaim,
+  type McpSecretRollbackPermitClaimBinding,
+  type McpSecretRollbackPermitLookup,
+  claimMcpSecretRollbackPermit,
+  finalizeMcpSecretRollbackPermitClaim,
+  issueMcpSecretRollbackPermit,
+  releaseMcpSecretRollbackPermitClaim,
+} from '../../services/mcpSecretRollbackPermitService.js'
 import { invalidSecretDataKeyReason } from '../../services/secretKeys.js'
+import { findSecretReferenceState } from '../../services/secretReferenceService.js'
+import { secretIdentityPreconditions } from '../../services/secretRepository.js'
 import { toPublicDeleteSecretSummary, toPublicSecretSummary } from '../../services/secretService.js'
-import { SecretUpsertRequest } from '../../types.js'
+import { SecretPreconditions, SecretUpsertRequest } from '../../types.js'
 import { listHostSecrets } from './hostSecrets.js'
 import { isLlmHostSecret } from './llmSecretIdentity.js'
 
 const logger = rootLogger
+
+export type McpSecretRollbackPermitStore = {
+  issue(input: McpSecretRollbackPermit): Promise<void>
+  claim(input: McpSecretRollbackPermitLookup): Promise<McpSecretRollbackPermitClaim | null>
+  release(input: McpSecretRollbackPermitClaimBinding): Promise<void>
+  finalize(input: McpSecretRollbackPermitClaimBinding): Promise<void>
+}
+
+const defaultMcpSecretRollbackPermitStore: McpSecretRollbackPermitStore = {
+  issue: issueMcpSecretRollbackPermit,
+  claim: claimMcpSecretRollbackPermit,
+  release: releaseMcpSecretRollbackPermitClaim,
+  finalize: finalizeMcpSecretRollbackPermitClaim,
+}
+
+const mcpSecretDeleteEdgeRateLimit = rateLimit({
+  windowMs: 60_000,
+  limit: 60,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  keyGenerator: req => {
+    const sessionJti = (req as UiAuthedRequest).adminAuth?.jti
+    return sessionJti
+      ? `admin-session:${createHash('sha256').update(sessionJti).digest('hex')}`
+      : ipKeyGenerator(req.ip ?? '127.0.0.1')
+  },
+})
+
+const mcpSecretDeleteRateLimit = rateLimitMiddleware({
+  bucketType: 'admin_mcp_secret_delete',
+  maxPerMinute: 30,
+  getBucketKey: req => {
+    const sessionJti = (req as UiAuthedRequest).adminAuth?.jti
+    const caller = sessionJti || req.ip || 'unknown-admin'
+    return `admin-mcp-secret-delete:${createHash('sha256').update(caller).digest('hex')}`
+  },
+})
 
 // The bedrock credential-slot keys and the vertex service-account key, derived
 // from the shared provider package (never hardcoded here) so the write-side
@@ -52,6 +105,31 @@ function isPlatformManagedSecretName(name: unknown): boolean {
 const PLATFORM_MANAGED_SECRET_ERROR =
   `Secret "${EVENFIRE_REGISTRY_PULL_SECRET_NAME}" is platform-managed (the evenfire ` +
   'registry image-pull credential) and cannot be created, modified, or deleted here'
+
+/**
+ * A data-only merge is allowed to compose with another owner updating a
+ * disjoint key. UID still fences delete/recreate, while resourceVersion is
+ * deliberately omitted so the merge-patch remains multi-owner safe.
+ */
+function secretUidPrecondition(raw: unknown): SecretPreconditions | null {
+  const identity = secretIdentityPreconditions(raw)
+  return identity ? { uid: identity.uid } : null
+}
+
+function requestSecretPreconditions(raw: unknown): SecretPreconditions | null {
+  const body = (raw ?? {}) as { uid?: unknown; resourceVersion?: unknown }
+  if (typeof body.uid !== 'string' || !body.uid.trim()) return null
+  if (typeof body.resourceVersion !== 'string' || !body.resourceVersion.trim()) return null
+  return { uid: body.uid, resourceVersion: body.resourceVersion }
+}
+
+function isLegacyMcpSecretDeleteBody(raw: unknown): boolean {
+  return (
+    raw === undefined ||
+    raw === null ||
+    (typeof raw === 'object' && !Array.isArray(raw) && Object.keys(raw).length === 0)
+  )
+}
 
 // The plaintext data being written, merging base64 `data` and plaintext
 // `stringData` (stringData wins, matching Kubernetes Secret semantics).
@@ -220,7 +298,10 @@ export function validateLlmSecretSlots(body: unknown): string | null {
   return null
 }
 
-export function createAdminSecretsRouter(gateway: K8sGateway): Router {
+export function createAdminSecretsRouter(
+  gateway: K8sGateway,
+  rollbackPermits: McpSecretRollbackPermitStore = defaultMcpSecretRollbackPermitStore
+): Router {
   const router = Router()
 
   router.get(
@@ -513,8 +594,55 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         stringData: data,
       }
 
-      await gateway.createSecret(secretReq)
-      res.status(201).json({ name: name.trim(), namespace: targetNs, created: true })
+      const created = await gateway.createSecret(secretReq)
+      const identity = secretIdentityPreconditions(created)
+      const completeIdentity =
+        identity?.uid && identity.resourceVersion
+          ? { uid: identity.uid, resourceVersion: identity.resourceVersion }
+          : null
+      if (!completeIdentity) {
+        res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
+        return
+      }
+      const rollbackPermit: McpSecretRollbackPermit = {
+        sessionJti: (req as UiAuthedRequest).adminAuth?.jti ?? '',
+        name: secretReq.name,
+        namespace: targetNs,
+        uid: completeIdentity.uid,
+        resourceVersion: completeIdentity.resourceVersion,
+      }
+      try {
+        await rollbackPermits.issue(rollbackPermit)
+      } catch (err) {
+        logger.error(
+          {
+            err,
+            module: 'admin-secrets',
+            event: 'mcp-secret-create-rollback-permit-repair-required',
+            name: secretReq.name,
+            namespace: targetNs,
+          },
+          'MCP Secret create could not persist its rollback permit'
+        )
+        res.status(503).json({
+          error: 'mcp_secret_rollback_permit_unavailable',
+          outcome: 'repair_required',
+          created: {
+            name: secretReq.name,
+            namespace: targetNs,
+            uid: completeIdentity.uid,
+            resourceVersion: completeIdentity.resourceVersion,
+          },
+        })
+        return
+      }
+      res.status(201).json({
+        name: name.trim(),
+        namespace: targetNs,
+        uid: completeIdentity.uid,
+        resourceVersion: completeIdentity.resourceVersion,
+        created: true,
+      })
     })
   )
 
@@ -596,7 +724,12 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
       // job. Read it first so a missing Secret is a 404 instead of a silent
       // upsert, and so the ownership guard below sees the stored labels.
       let existing: {
-        metadata?: { labels?: Record<string, string> }
+        metadata?: {
+          labels?: Record<string, string>
+          annotations?: Record<string, string>
+          uid?: string
+          resourceVersion?: string
+        }
         data?: Record<string, string>
       }
       try {
@@ -623,7 +756,18 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
 
-      const merged = await gateway.mergeSecret({ name, namespace: targetNs, stringData: data })
+      const precondition = secretUidPrecondition(existing)
+      if (!precondition) {
+        res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
+        return
+      }
+      const merged = await gateway.mergeSecret(
+        { name, namespace: targetNs, stringData: data },
+        // Public rotation has no metadata capability; the optional constraints
+        // parameter precedes the UID fence in the gateway contract.
+        undefined,
+        precondition
+      )
 
       // The credential IS rotated at this point. Emit the audit record NOW,
       // before anything that could throw — a rotation that actually happened
@@ -673,10 +817,16 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         )
       }
 
+      const summary = toPublicSecretSummary(merged, name, targetNs)
+      const mergedIdentity = secretIdentityPreconditions(merged)
+      if (!mergedIdentity) {
+        res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
+        return
+      }
       res.status(200).json({
-        name: merged.name,
-        namespace: merged.namespace,
-        keys: [...merged.keys],
+        ...summary,
+        uid: mergedIdentity.uid,
+        resourceVersion: mergedIdentity.resourceVersion,
         affectedConnectors,
       })
     })
@@ -688,14 +838,91 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
   router.delete(
     '/admin/mcp-secrets/:name',
     enforceNamespace(config.mcpServersNamespace),
+    mcpSecretDeleteEdgeRateLimit,
+    mcpSecretDeleteRateLimit,
     asyncHandler(async (req, res) => {
-      // This route deletes by name with no ownership guard, so the reserved name is the
-      // only thing standing between a rollback call and the platform pull credential.
       if (isPlatformManagedSecretName(req.params.name)) {
         res.status(400).json({ error: PLATFORM_MANAGED_SECRET_ERROR })
         return
       }
       const name = req.params.name.trim()
+      const requestedPrecondition = requestSecretPreconditions(req.body)
+      let deletePrecondition: SecretPreconditions | null = requestedPrecondition
+      let rollbackClaim: McpSecretRollbackPermitClaimBinding | null = null
+      const settleRollbackClaim = async (mode: 'release' | 'finalize'): Promise<void> => {
+        if (!rollbackClaim) return
+        const binding = rollbackClaim
+        rollbackClaim = null
+        try {
+          await rollbackPermits[mode](binding)
+        } catch (err) {
+          logger.warn(
+            {
+              err,
+              module: 'admin-secrets',
+              event: `mcp-secret-delete-rollback-claim-${mode}-failed`,
+              name,
+              namespace: config.mcpServersNamespace,
+            },
+            `MCP Secret rollback claim could not ${mode}`
+          )
+        }
+      }
+      if (requestedPrecondition) {
+        // Current clients send the identity returned by POST and retain the
+        // established compare-and-delete contract.
+      } else {
+        // Only the historical empty DELETE body can use the short-lived
+        // server-side permit issued during this admin session's successful
+        // create. Any other body must use the complete identity contract.
+        if (!isLegacyMcpSecretDeleteBody(req.body)) {
+          res.status(428).json({ error: 'secret_identity_precondition_required' })
+          return
+        }
+        const sessionJti = (req as UiAuthedRequest).adminAuth?.jti ?? ''
+        if (!sessionJti) {
+          res.status(428).json({ error: 'secret_identity_precondition_required' })
+          return
+        }
+        try {
+          const claimed = await rollbackPermits.claim({
+            sessionJti,
+            name,
+            namespace: config.mcpServersNamespace,
+          })
+          deletePrecondition = claimed
+            ? { uid: claimed.uid, resourceVersion: claimed.resourceVersion }
+            : null
+          if (claimed) {
+            rollbackClaim = {
+              sessionJti,
+              name,
+              namespace: config.mcpServersNamespace,
+              claimToken: claimed.claimToken,
+            }
+          }
+        } catch (err) {
+          logger.error(
+            {
+              err,
+              module: 'admin-secrets',
+              event: 'mcp-secret-delete-rollback-permit-unavailable',
+              name,
+              namespace: config.mcpServersNamespace,
+            },
+            'MCP Secret delete could not read its rollback permit'
+          )
+          res.status(503).json({
+            error: 'mcp_secret_rollback_permit_unavailable',
+            outcome: 'repair_required',
+          })
+          return
+        }
+        if (!deletePrecondition?.uid || !deletePrecondition.resourceVersion) {
+          res.status(428).json({ error: 'secret_identity_precondition_required' })
+          return
+        }
+      }
       let existing: {
         metadata?: { labels?: Record<string, string>; uid?: string; resourceVersion?: string }
       } | null
@@ -703,33 +930,89 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         existing = (await gateway.getSecret(name, config.mcpServersNamespace)) as typeof existing
       } catch (err) {
         if (extractHttpStatus(err) === 404) {
+          await settleRollbackClaim('finalize')
           res.status(404).json({ error: `Secret "${name}" not found` })
           return
         }
+        await settleRollbackClaim('release')
         throw err
       }
       if (!existing) {
+        await settleRollbackClaim('finalize')
         res.status(404).json({ error: `Secret "${name}" not found` })
         return
       }
+      const currentPrecondition = secretIdentityPreconditions(existing)
+      if (!currentPrecondition) {
+        await settleRollbackClaim('release')
+        res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
+        return
+      }
+      if (!deletePrecondition) {
+        res.status(428).json({ error: 'secret_identity_precondition_required' })
+        return
+      }
+      if (
+        currentPrecondition.uid !== deletePrecondition.uid ||
+        currentPrecondition.resourceVersion !== deletePrecondition.resourceVersion
+      ) {
+        await settleRollbackClaim('finalize')
+        res.status(409).json({ error: 'secret_identity_changed', outcome: 'repair_required' })
+        return
+      }
       if (existing.metadata?.labels?.[RECIPE_SECRET_LABEL_KEY] === RECIPE_SECRET_LABEL_VALUE) {
+        await settleRollbackClaim('release')
         res.status(409).json({
           error: `Secret "${name}" is owned by a WorkflowRecipe; delete it through /admin/recipe-secrets`,
         })
         return
       }
-      const metadata = existing.metadata
-      const precondition =
-        metadata?.uid || metadata?.resourceVersion
-          ? {
-              ...(metadata.uid ? { uid: metadata.uid } : {}),
-              ...(metadata.resourceVersion ? { resourceVersion: metadata.resourceVersion } : {}),
-            }
-          : undefined
-      const deleted = precondition
-        ? await gateway.deleteSecret(name, config.mcpServersNamespace, precondition)
-        : await gateway.deleteSecret(name, config.mcpServersNamespace)
-      res.status(200).json(toPublicDeleteSecretSummary(deleted))
+      const referenceState = await findSecretReferenceState(
+        gateway,
+        name,
+        config.mcpServersNamespace
+      )
+      if (referenceState === 'referenced') {
+        await settleRollbackClaim('release')
+        res.status(409).json({ error: 'mcp_secret_in_use', outcome: 'repair_required' })
+        return
+      }
+      if (referenceState === 'unknown') {
+        await settleRollbackClaim('release')
+        res
+          .status(503)
+          .json({ error: 'mcp_secret_reference_check_unavailable', outcome: 'repair_required' })
+        return
+      }
+      if (rollbackClaim) {
+        logger.warn(
+          {
+            module: 'admin-secrets',
+            event: 'mcp-secret-delete-legacy-server-side-permit',
+            name,
+            namespace: config.mcpServersNamespace,
+            preconditionSource: 'server-side-permit',
+          },
+          'MCP Secret delete used a server-side rollback permit'
+        )
+      }
+      try {
+        const deleted = await gateway.deleteSecret(
+          name,
+          config.mcpServersNamespace,
+          deletePrecondition
+        )
+        await settleRollbackClaim('finalize')
+        res.status(200).json(toPublicDeleteSecretSummary(deleted))
+      } catch (err) {
+        if (extractHttpStatus(err) === 409) {
+          await settleRollbackClaim('finalize')
+          res.status(409).json({ error: 'secret_identity_changed', outcome: 'repair_required' })
+          return
+        }
+        await settleRollbackClaim('release')
+        throw err
+      }
     })
   )
 
@@ -846,23 +1129,25 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         config.sandboxNamespace
       )) as Array<{ metadata?: { name?: string } }>
       return items.some(r => r.metadata?.name === recipeName)
-    } catch {
-      // List failure: don't block Secret creation on a transient apiserver
-      // hiccup — the WRC reconciler is the second line of defense (it rejects
-      // owner-recipe Secrets that don't match the requesting recipe).
-      return true
+    } catch (err) {
+      // The ownership claim cannot be validated when the source of truth is
+      // unavailable. Fail closed before creating a Secret rather than treating
+      // an apiserver failure as proof that the recipe exists.
+      throw err
     }
   }
 
-  async function isRecipeSecret(
+  async function getRecipeSecret(
     name: string,
     namespace = config.sandboxNamespace
-  ): Promise<boolean> {
+  ): Promise<Record<string, unknown> | null> {
     const existing = await gateway.getSecret(name, namespace).catch(() => null)
-    if (!existing) return false
+    if (!existing) return null
     const labels = ((existing as { metadata?: { labels?: Record<string, string> } }).metadata
       ?.labels || {}) as Record<string, string>
     return labels[RECIPE_SECRET_LABEL_KEY] === RECIPE_SECRET_LABEL_VALUE
+      ? (existing as Record<string, unknown>)
+      : null
   }
 
   router.get(
@@ -881,14 +1166,28 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
           })
           .map(item => {
             const metadata = (
-              item as { metadata?: { name?: string; labels?: Record<string, string> } }
+              item as {
+                metadata?: {
+                  name?: string
+                  labels?: Record<string, string>
+                  uid?: string
+                  resourceVersion?: string
+                }
+              }
             ).metadata
             const name = String(metadata?.name || '').trim()
             const keys = Array.isArray((item as { keys?: string[] }).keys)
               ? (item as { keys: string[] }).keys
               : []
             const ownership = parseSecretOwnership(metadata?.labels || {})
-            return { name, namespace, keys, ownership }
+            const identity = secretIdentityPreconditions(item)
+            return {
+              name,
+              namespace,
+              keys,
+              ownership,
+              ...(identity ?? {}),
+            }
           })
           .filter(row => row.name.length > 0)
       )
@@ -967,11 +1266,17 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         stringData: data,
       }
 
-      await gateway.createSecret(secretReq)
+      const created = await gateway.createSecret(secretReq)
+      const identity = secretIdentityPreconditions(created)
+      if (!identity) {
+        res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
+        return
+      }
       res.status(201).json({
         name: name.trim(),
         namespace: targetNamespace,
         ownership,
+        ...identity,
         created: true,
       })
     })
@@ -1023,12 +1328,21 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
       const existing = (await gateway
         .getSecret(name.trim(), targetNamespace)
         .catch(() => null)) as {
-        metadata?: { labels?: Record<string, string> }
+        metadata?: {
+          labels?: Record<string, string>
+          uid?: string
+          resourceVersion?: string
+        }
         data?: Record<string, string>
       } | null
       const existingLabels = (existing && existing.metadata?.labels) || {}
       if (existingLabels[RECIPE_SECRET_LABEL_KEY] !== RECIPE_SECRET_LABEL_VALUE) {
         res.status(404).json({ error: 'Recipe secret not found' })
+        return
+      }
+      const precondition = secretIdentityPreconditions(existing)
+      if (!precondition) {
+        res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
         return
       }
 
@@ -1061,7 +1375,7 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         data: mergedData,
       }
 
-      const updated = await gateway.updateSecret(secretReq)
+      const updated = await gateway.updateSecret(secretReq, precondition)
       res.status(200).json(toPublicSecretSummary(updated))
     })
   )
@@ -1077,11 +1391,29 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
       const targetNamespace = namespaceParse.namespace
-      if (!(await isRecipeSecret(name, targetNamespace))) {
+      const existing = await getRecipeSecret(name, targetNamespace)
+      if (!existing) {
         res.status(404).json({ error: 'Recipe secret not found' })
         return
       }
-      const deleted = await gateway.deleteSecret(name, targetNamespace)
+      const requestedPrecondition = requestSecretPreconditions(req.body)
+      if (!requestedPrecondition) {
+        res.status(428).json({ error: 'secret_identity_precondition_required' })
+        return
+      }
+      const currentPrecondition = secretIdentityPreconditions(existing)
+      if (!currentPrecondition) {
+        res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
+        return
+      }
+      if (
+        currentPrecondition.uid !== requestedPrecondition.uid ||
+        currentPrecondition.resourceVersion !== requestedPrecondition.resourceVersion
+      ) {
+        res.status(409).json({ error: 'secret_identity_changed', outcome: 'repair_required' })
+        return
+      }
+      const deleted = await gateway.deleteSecret(name, targetNamespace, requestedPrecondition)
       res.status(200).json(toPublicDeleteSecretSummary(deleted))
     })
   )

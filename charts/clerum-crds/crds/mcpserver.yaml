@@ -2,6 +2,26 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: mcpservers.clerum.io
+  annotations:
+    clerum.io/secret-reference-contract: |-
+      {
+        "version": 1,
+        "plural": "mcpservers",
+        "fields": [
+          {
+            "path": "spec.auth.secretRef",
+            "namespaceBinding": "resource"
+          },
+          {
+            "path": "spec.envSecret",
+            "namespaceBinding": "resource"
+          },
+          {
+            "path": "spec.imagePullSecrets",
+            "namespaceBinding": "resource"
+          }
+        ]
+      }
   labels:
     app.kubernetes.io/name: mcpserver
     app.kubernetes.io/part-of: clerum

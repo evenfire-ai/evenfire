@@ -5,6 +5,7 @@ import {
   ClerumResource,
   ClerumResourceType,
   ResourceListResponse,
+  ResourcePreconditions,
 } from '../types.js'
 import {
   addNonEmpty,
@@ -55,8 +56,11 @@ export type MutableResourceSnapshot = {
   metadata?: {
     annotations?: Record<string, string>
     labels?: Record<string, string>
+    uid?: string
     resourceVersion?: string
     generation?: number
+    ownerReferences?: Array<Record<string, unknown>>
+    finalizers?: string[]
   }
   spec?: Record<string, unknown>
 }
@@ -290,6 +294,13 @@ export class ResourceService {
         labels?: Record<string, string>
         annotations?: Record<string, string>
         /**
+         * AP-6 identity precondition. When present, the replacement must
+         * still address the same Kubernetes object the caller read. This is
+         * required for compensations: a same-name delete/recreate must never
+         * receive the old object's rollback payload.
+         */
+        uid?: string
+        /**
          * AP-6 — reader's-version precondition. When present, this is the
          * resourceVersion the CALLER READ (e.g. the version the control-ui
          * edit form was built from). It is used as the replace precondition
@@ -320,9 +331,12 @@ export class ResourceService {
   ): Promise<unknown> {
     const ns = this.resolveNamespace(plural, namespace)
     const intent = await persistHostIntent({ plural, action: 'update', namespace: ns, name })
+    const readerUid = body.metadata?.uid || undefined
     const readerResourceVersion = body.metadata?.resourceVersion || undefined
-    // With a reader-supplied precondition a retry can never succeed with the
-    // same payload, so the loop collapses to a single attempt.
+    // A reader resourceVersion freezes the caller's edit and must not be retried:
+    // re-reading then replaying that stale payload would lose a concurrent update.
+    // A UID alone guards only against same-name delete/recreate, so it keeps the
+    // legacy bounded retry contract while every fresh read revalidates identity.
     const maxAttempts = readerResourceVersion ? 1 : 3
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const current = (
@@ -333,9 +347,23 @@ export class ResourceService {
         metadata?: {
           annotations?: Record<string, string>
           labels?: Record<string, string>
+          uid?: string
           resourceVersion?: string
           generation?: number
+          ownerReferences?: Array<Record<string, unknown>>
+          finalizers?: string[]
         }
+      }
+
+      // resourceVersion detects a stale edit; UID detects a delete/recreate
+      // under the same name. Both are checked before constructing the replace
+      // body so an identity-bound compensation fails closed without sending
+      // any payload to the apiserver.
+      if (readerUid && current.metadata?.uid !== readerUid) {
+        await persistHostFailure(intent)
+        throw new K8sConflictError(
+          `${plural}/${name} changed identity since it was read (stale uid ${readerUid})`
+        )
       }
 
       const sanitizedMetadata = stripAdministrativeIntentAnnotation(body.metadata)
@@ -356,9 +384,14 @@ export class ResourceService {
         metadata: {
           name,
           namespace: ns,
+          ...(readerUid ? { uid: readerUid } : {}),
           ...(current.metadata?.labels && { labels: current.metadata.labels }),
           ...(sanitizedMetadata?.labels && { labels: sanitizedMetadata.labels }),
           ...(annotations && { annotations }),
+          ...(current.metadata?.ownerReferences && {
+            ownerReferences: current.metadata.ownerReferences,
+          }),
+          ...(current.metadata?.finalizers && { finalizers: current.metadata.finalizers }),
         },
         spec: body.spec,
       }
@@ -579,6 +612,10 @@ export class ResourceService {
           ...(current.metadata?.labels && { labels: current.metadata.labels }),
           ...(sanitizedMetadata?.labels && { labels: sanitizedMetadata.labels }),
           ...(annotations && { annotations }),
+          ...(current.metadata?.ownerReferences && {
+            ownerReferences: current.metadata.ownerReferences,
+          }),
+          ...(current.metadata?.finalizers && { finalizers: current.metadata.finalizers }),
         },
         spec: next.spec,
       }
@@ -612,7 +649,8 @@ export class ResourceService {
   async deleteResource(
     plural: ClerumResourceType,
     name: string,
-    namespace?: string
+    namespace?: string,
+    precondition?: ResourcePreconditions
   ): Promise<unknown> {
     const ns = this.resolveNamespace(plural, namespace)
     const intent = await persistHostIntent({ plural, action: 'delete', namespace: ns, name })
@@ -623,6 +661,18 @@ export class ResourceService {
         namespace: ns,
         plural,
         name,
+        ...(precondition && (precondition.uid || precondition.resourceVersion)
+          ? {
+              body: {
+                preconditions: {
+                  ...(precondition.uid ? { uid: precondition.uid } : {}),
+                  ...(precondition.resourceVersion
+                    ? { resourceVersion: precondition.resourceVersion }
+                    : {}),
+                },
+              },
+            }
+          : {}),
       })
       if (intent && administrativeOperationService) {
         await administrativeOperationService.persistHostOutcome(intent, 'succeeded', 'deleted')

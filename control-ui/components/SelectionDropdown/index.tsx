@@ -14,6 +14,7 @@ function optionMatches(option: SelectionDropdownOption, query: string): boolean 
 }
 
 export function SelectionDropdown({
+  ariaLabel,
   className,
   disabled = false,
   emptyLabel = 'No options available.',
@@ -118,6 +119,7 @@ export function SelectionDropdown({
           aria-expanded={open}
           aria-haspopup="listbox"
           aria-invalid={invalid || undefined}
+          aria-label={ariaLabel}
           disabled={disabled}
           onClick={() => setOpen(current => !current)}
         >

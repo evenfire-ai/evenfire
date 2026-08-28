@@ -9,6 +9,7 @@
 // DeploymentReady=True (not the tolerated timeout). Recorded via the
 // human-e2e-recorder skill (headed, slowMo, video). Opt-in: QA_RECORDER_CONFIRM_MUTATIONS=1.
 import { expect, test } from '@playwright/test'
+import { requireSecretIdentity, type SecretIdentity } from '../test-utils/secretIdentity'
 import {
   CONTROL_API_URL,
   CONTROL_UI_URL,
@@ -34,6 +35,7 @@ test.describe('demo: Control UI credential-rotation journey', () => {
     assertAllowedTarget('CONTROL_API_URL', CONTROL_API_URL)
 
     const credentials = adminCredentials()
+    let cleanupIdentity: SecretIdentity | null = null
     const contextName = uniqueE2EName('demo-context')
     const connectorName = uniqueE2EName('demo-connector')
     const secretName = uniqueE2EName('demo-secret')
@@ -52,6 +54,8 @@ test.describe('demo: Control UI credential-rotation journey', () => {
           data: { [secretKey]: 'initial-value-123' },
         })
         expect(s.status, `Secret: ${JSON.stringify(s.data)}`).toBeLessThan(300)
+        cleanupIdentity = requireSecretIdentity(s.data, 'stage cleanup identity')
+
         const c = await api(page.request, 'POST', '/api/v1/admin/contexts', {
           metadata: { name: contextName },
           spec: { contextId: contextName, description: 'demo rotation context', mcpServers: [] },
@@ -124,10 +128,19 @@ test.describe('demo: Control UI credential-rotation journey', () => {
         const dialog = page.getByRole('alertdialog', { name: 'Rotate credentials' })
         await expect(dialog).toBeVisible({ timeout: 20_000 })
         await humanPause(page)
+        const rotateResponse = page.waitForResponse(
+          response =>
+            response.request().method() === 'PUT' &&
+            response.url().includes(encodeURIComponent(secretName)),
+          { timeout: 30_000 }
+        )
         await humanClick(
           page,
           dialog.getByRole('button', { name: 'Rotate & restart', exact: true })
         )
+        const rotated = await rotateResponse
+        expect(rotated.status()).toBe(200)
+        cleanupIdentity = requireSecretIdentity(await rotated.json(), 'rotate cleanup identity')
       })
 
       await test.step('watch the rollout reach "Credentials rotated"', async () => {
@@ -139,17 +152,26 @@ test.describe('demo: Control UI credential-rotation journey', () => {
         await humanPause(page, 3000, 4000)
       })
     } finally {
-      await api(
+      const deleteConnector = await api(
         page.request,
         'DELETE',
         `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorName)}`
       )
-      await api(
+      expect(deleteConnector.status, 'cleanup connector').toBe(200)
+      if (!cleanupIdentity) throw new Error('missing cleanup identity')
+      const deleteSecret = await api(
         page.request,
         'DELETE',
-        `/api/v1/admin/mcp-secrets/${encodeURIComponent(secretName)}`
+        `/api/v1/admin/mcp-secrets/${encodeURIComponent(secretName)}`,
+        cleanupIdentity
       )
-      await api(page.request, 'DELETE', `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`)
+      expect(deleteSecret.status, 'cleanup connector credential').toBe(200)
+      const deleteContext = await api(
+        page.request,
+        'DELETE',
+        `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`
+      )
+      expect(deleteContext.status, 'cleanup context').toBe(200)
     }
   })
 })

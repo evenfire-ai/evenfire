@@ -146,11 +146,20 @@ describe('routes/secrets', () => {
           if (!(name in labelledSecrets)) throw new Error('not found')
           const entry = labelledSecrets[name]
           return {
-            metadata: { name, namespace: 'sandbox-recipes', labels: entry.labels },
+            metadata: {
+              name,
+              namespace: 'sandbox-recipes',
+              uid: `uid-${name}`,
+              resourceVersion: '1',
+              labels: entry.labels,
+            },
             data: entry.data,
           }
         }),
-        createSecret: vi.fn(async (body: unknown) => writeSummary(body)),
+        createSecret: vi.fn(async (body: unknown) => {
+          const summary = writeSummary(body)
+          return { ...summary, uid: `uid-${summary.name}`, resourceVersion: '1' }
+        }),
         updateSecret: vi.fn(async (body: unknown) => writeSummary(body)),
         deleteSecret: vi.fn(async (name: string, namespace?: string) => ({
           deleted: true,
@@ -384,6 +393,8 @@ describe('routes/secrets', () => {
             metadata: {
               name,
               namespace,
+              uid: `uid-${name}`,
+              resourceVersion: '1',
               labels: { 'clerum.io/recipe-secret': 'true', 'clerum.io/shared': 'true' },
             },
             data: {},
@@ -405,7 +416,8 @@ describe('routes/secrets', () => {
           name: 'ui-creds',
           namespace: 'sandbox-ui',
           labels: { 'clerum.io/recipe-secret': 'true', 'clerum.io/shared': 'true' },
-        })
+        }),
+        { uid: 'uid-ui-creds', resourceVersion: '1' }
       )
     })
 
@@ -471,8 +483,26 @@ describe('routes/secrets', () => {
       app.use(express.json())
       app.use(createAdminSecretsRouter(gateway as never))
 
-      await request(app).delete('/admin/recipe-secrets/r1').expect(200)
-      expect(gateway.deleteSecret).toHaveBeenCalledWith('r1', 'sandbox-recipes')
+      await request(app)
+        .delete('/admin/recipe-secrets/r1')
+        .send({ uid: 'uid-r1', resourceVersion: '1' })
+        .expect(200)
+      expect(gateway.deleteSecret).toHaveBeenCalledWith('r1', 'sandbox-recipes', {
+        uid: 'uid-r1',
+        resourceVersion: '1',
+      })
+    })
+
+    it('keeps recipe Secret DELETE identity-gated for clients without a body', async () => {
+      const gateway = createRecipeGateway()
+      const app = express()
+      app.use(express.json())
+      app.use(createAdminSecretsRouter(gateway as never))
+
+      const res = await request(app).delete('/admin/recipe-secrets/r1').expect(428)
+
+      expect(res.body).toMatchObject({ error: 'secret_identity_precondition_required' })
+      expect(gateway.deleteSecret).not.toHaveBeenCalled()
     })
 
     it('deletes a recipe secret from an allowed runtime namespace', async () => {
@@ -483,6 +513,8 @@ describe('routes/secrets', () => {
             metadata: {
               name,
               namespace,
+              uid: `uid-${name}`,
+              resourceVersion: '1',
               labels: { 'clerum.io/recipe-secret': 'true', 'clerum.io/shared': 'true' },
             },
             data: {},
@@ -496,8 +528,12 @@ describe('routes/secrets', () => {
 
       await request(app)
         .delete('/admin/recipe-secrets/ui-creds?targetNamespace=sandbox-ui')
+        .send({ uid: 'uid-ui-creds', resourceVersion: '1' })
         .expect(200)
-      expect(gateway.deleteSecret).toHaveBeenCalledWith('ui-creds', 'sandbox-ui')
+      expect(gateway.deleteSecret).toHaveBeenCalledWith('ui-creds', 'sandbox-ui', {
+        uid: 'uid-ui-creds',
+        resourceVersion: '1',
+      })
     })
 
     it('rejects recipe secret delete outside the workflow secret namespace allowlist', async () => {

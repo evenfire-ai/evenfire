@@ -1,11 +1,16 @@
 import * as k8s from '@kubernetes/client-node'
 import { SecretPreconditions, SecretUpsertRequest } from '../types.js'
+import {
+  type SecretConstraintOptions,
+  assertMutablePreservedSecretType,
+  assertValidSecretAnnotations,
+  assertValidSecretConstraints,
+  assertValidSecretType,
+  resolveSecretAnnotationsForReplace,
+} from './secretConstraints.js'
 import { assertValidSecretDataKey, assertValidSecretWriteKeys } from './secretKeys.js'
+import { SecretResource, SecretSnapshot, toSecretSnapshot } from './secretRepository.js'
 
-// A write-side summary of a Secret — NEVER carries `.data` values. Every admin
-// secret-write route echoes this, so secret values cannot leave the Secret store
-// via an HTTP response body. Reads that legitimately need values use `getSecret`,
-// which deliberately stays full-fat.
 export interface SecretSummary {
   name: string
   namespace: string
@@ -18,44 +23,50 @@ export interface DeleteSecretSummary {
   deleted: true
 }
 
-export function toPublicSecretSummary(summary: SecretSummary): SecretSummary {
+export function toPublicSecretSummary(
+  raw: SecretSummary | SecretSnapshot | Record<string, unknown> | null | undefined,
+  fallbackName = '',
+  fallbackNamespace = ''
+): SecretSummary {
+  const value = (raw ?? {}) as {
+    name?: unknown
+    namespace?: unknown
+    keys?: unknown
+    data?: unknown
+    stringData?: unknown
+    metadata?: { name?: unknown; namespace?: unknown }
+  }
+  const name =
+    fallbackName ||
+    (typeof value.name === 'string' ? value.name : '') ||
+    (typeof value.metadata?.name === 'string' ? value.metadata.name : '')
+  const namespace =
+    fallbackNamespace ||
+    (typeof value.namespace === 'string' ? value.namespace : '') ||
+    (typeof value.metadata?.namespace === 'string' ? value.metadata.namespace : '')
+  const keys = Array.isArray(value.keys)
+    ? value.keys.filter((key): key is string => typeof key === 'string')
+    : [
+        ...Object.keys(
+          value.data && typeof value.data === 'object'
+            ? (value.data as Record<string, unknown>)
+            : {}
+        ),
+        ...Object.keys(
+          value.stringData && typeof value.stringData === 'object'
+            ? (value.stringData as Record<string, unknown>)
+            : {}
+        ),
+      ]
   return {
-    name: summary.name,
-    namespace: summary.namespace,
-    keys: [...summary.keys],
+    name,
+    namespace,
+    keys: [...new Set(keys)].sort((a, b) => a.localeCompare(b)),
   }
 }
 
 export function toPublicDeleteSecretSummary(summary: DeleteSecretSummary): DeleteSecretSummary {
-  return {
-    name: summary.name,
-    namespace: summary.namespace,
-    deleted: true,
-  }
-}
-
-type Assert<T extends true> = T
-type HasExactKeys<T, Keys extends PropertyKey> =
-  Exclude<keyof T, Keys> extends never
-    ? Exclude<Keys, keyof T> extends never
-      ? true
-      : false
-    : false
-
-// Compile-time ratchet: adding `data`, `stringData`, or another field to either
-// public write DTO fails the production typecheck.
-type _SecretSummaryIsNamesOnly = Assert<HasExactKeys<SecretSummary, 'name' | 'namespace' | 'keys'>>
-type _DeleteSecretSummaryIsNamesOnly = Assert<
-  HasExactKeys<DeleteSecretSummary, 'name' | 'namespace' | 'deleted'>
->
-
-function summarizeSecret(result: unknown, name: string, namespace: string): SecretSummary {
-  const data = (result as k8s.V1Secret | undefined)?.data
-  return toPublicSecretSummary({
-    name,
-    namespace,
-    keys: Object.keys(data ?? {}).sort((a, b) => a.localeCompare(b)),
-  })
+  return { name: summary.name, namespace: summary.namespace, deleted: true }
 }
 
 export class SecretService {
@@ -70,10 +81,9 @@ export class SecretService {
       metadata: {
         name: s.metadata?.name,
         namespace: s.metadata?.namespace,
+        ...(s.metadata?.uid ? { uid: s.metadata.uid } : {}),
+        ...(s.metadata?.resourceVersion ? { resourceVersion: s.metadata.resourceVersion } : {}),
         labels: s.metadata?.labels || {},
-        // Listing is a metadata projection, not a write response. Preserve the
-        // existing annotation contract for catalog/recipe consumers while still
-        // excluding Secret data and stringData entirely.
         annotations: s.metadata?.annotations || {},
       },
       type: s.type,
@@ -85,19 +95,22 @@ export class SecretService {
    * Read a single Secret by name. Throws the underlying K8s client error
    * (including 404) so callers can branch on statusCode.
    */
-  async getSecret(name: string, namespace = this.defaultNamespace): Promise<unknown> {
+  async getSecret(name: string, namespace = this.defaultNamespace): Promise<SecretResource> {
     return this.coreApi.readNamespacedSecret({ namespace, name })
   }
 
-  async createSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
+  private async createSecretRaw(
+    req: SecretUpsertRequest,
+    opts?: SecretConstraintOptions
+  ): Promise<unknown> {
+    assertValidSecretConstraints(req, opts)
     assertValidSecretWriteKeys(req)
-    const ns = req.namespace || this.defaultNamespace
     const body: k8s.V1Secret = {
       apiVersion: 'v1',
       kind: 'Secret',
       metadata: {
         name: req.name,
-        namespace: ns,
+        namespace: req.namespace || this.defaultNamespace,
         labels: req.labels,
         annotations: req.annotations,
       },
@@ -106,9 +119,29 @@ export class SecretService {
       stringData: req.stringData,
     }
 
-    // Names-only return: never surface the created Secret's `.data` to callers.
-    const created = await this.coreApi.createNamespacedSecret({ namespace: ns, body })
-    return summarizeSecret(created, req.name, ns)
+    const created = await this.coreApi.createNamespacedSecret({
+      namespace: req.namespace || this.defaultNamespace,
+      body,
+    })
+    return created
+  }
+
+  async createSecretSnapshot(
+    req: SecretUpsertRequest,
+    opts?: SecretConstraintOptions
+  ): Promise<SecretSnapshot> {
+    const namespace = req.namespace || this.defaultNamespace
+    const created = await this.createSecretRaw(req, opts)
+    return toSecretSnapshot(created, req.name, namespace)
+  }
+
+  async createSecret(
+    req: SecretUpsertRequest,
+    opts?: SecretConstraintOptions
+  ): Promise<SecretSummary> {
+    const namespace = req.namespace || this.defaultNamespace
+    const created = await this.createSecretRaw(req, opts)
+    return toPublicSecretSummary(created as Record<string, unknown>, req.name, namespace)
   }
 
   /**
@@ -124,24 +157,27 @@ export class SecretService {
    *
    * Pass `precondition` to make the replace ownership-bound rather than
    * last-writer-wins (see `SecretPreconditions`). When it carries a
-   * `resourceVersion` the pre-read is SKIPPED and that version is sent as-is,
-   * so the API server rejects the write with 409 if anything touched the
-   * object since the caller read it. Re-reading here would defeat the entire
-   * point, by refreshing away the staleness we are trying to detect.
-   *
-   * Because that read is skipped, a precondition caller must supply everything
-   * it wants persisted: the `labels`/`annotations`/`type` fallbacks to the
-   * existing object are not available on this path.
+   * `resourceVersion` the current object is still read so a full replacement
+   * cannot drop protected metadata merely because the caller omitted it. The
+   * caller's `resourceVersion`/`uid` is sent as-is, so the apiserver remains
+   * the authoritative CAS boundary.
    */
-  async updateSecret(
+  private async updateSecretRaw(
     req: SecretUpsertRequest,
-    precondition?: SecretPreconditions
-  ): Promise<SecretSummary> {
+    precondition?: SecretPreconditions,
+    opts?: SecretConstraintOptions
+  ): Promise<unknown> {
+    if (req.type !== undefined) assertValidSecretType(req.type)
     assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
-    const existing = precondition?.resourceVersion
-      ? undefined
-      : await this.coreApi.readNamespacedSecret({ namespace: ns, name: req.name })
+    const existing = await this.coreApi.readNamespacedSecret({ namespace: ns, name: req.name })
+    assertMutablePreservedSecretType(existing.type)
+    assertValidSecretAnnotations(req.annotations, opts, existing.metadata?.annotations)
+    const effectiveAnnotations = resolveSecretAnnotationsForReplace(
+      existing?.metadata?.annotations,
+      req.annotations,
+      opts
+    )
 
     const body: k8s.V1Secret = {
       apiVersion: 'v1',
@@ -154,20 +190,46 @@ export class SecretService {
         // stored object is refused. Free when the caller does not set it.
         ...(precondition?.uid ? { uid: precondition.uid } : {}),
         labels: req.labels || existing?.metadata?.labels,
-        annotations: req.annotations || existing?.metadata?.annotations,
+        annotations: effectiveAnnotations,
+        ...(existing?.metadata?.ownerReferences
+          ? { ownerReferences: existing.metadata.ownerReferences }
+          : {}),
+        ...(existing?.metadata?.finalizers ? { finalizers: existing.metadata.finalizers } : {}),
       },
-      type: req.type || existing?.type || 'Opaque',
+      type: req.type ?? existing?.type ?? 'Opaque',
       data: req.data,
       stringData: req.stringData,
+      ...(typeof existing?.immutable === 'boolean' ? { immutable: existing.immutable } : {}),
     }
 
-    // Names-only return: never surface the replaced Secret's `.data` to callers.
-    const updated = await this.coreApi.replaceNamespacedSecret({
+    // Explicit types passed the write allowlist above. A preserved type is
+    // mutable unless it belongs to a Kubernetes or Helm-managed Secret.
+    const replaced = await this.coreApi.replaceNamespacedSecret({
       namespace: ns,
       name: req.name,
       body,
     })
-    return summarizeSecret(updated, req.name, ns)
+    return replaced
+  }
+
+  async updateSecretSnapshot(
+    req: SecretUpsertRequest,
+    precondition?: SecretPreconditions,
+    opts?: SecretConstraintOptions
+  ): Promise<SecretSnapshot> {
+    const namespace = req.namespace || this.defaultNamespace
+    const replaced = await this.updateSecretRaw(req, precondition, opts)
+    return toSecretSnapshot(replaced, req.name, namespace)
+  }
+
+  async updateSecret(
+    req: SecretUpsertRequest,
+    precondition?: SecretPreconditions,
+    opts?: SecretConstraintOptions
+  ): Promise<SecretSummary> {
+    const namespace = req.namespace || this.defaultNamespace
+    const replaced = await this.updateSecretRaw(req, precondition, opts)
+    return toPublicSecretSummary(replaced as Record<string, unknown>, req.name, namespace)
   }
 
   /**
@@ -190,22 +252,55 @@ export class SecretService {
    * from a route targeting any OTHER namespace unless that namespace's Role
    * has been granted `patch`.
    */
-  async mergeSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
+  private async mergeSecretRaw(
+    req: SecretUpsertRequest,
+    opts?: SecretConstraintOptions,
+    precondition?: SecretPreconditions
+  ): Promise<unknown> {
+    if (req.type !== undefined) assertValidSecretType(req.type)
     assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
+    const existing = await this.coreApi.readNamespacedSecret({ namespace: ns, name: req.name })
+    assertMutablePreservedSecretType(existing.type)
+    assertValidSecretAnnotations(req.annotations, opts, existing.metadata?.annotations)
+    const effectiveAnnotations = resolveSecretAnnotationsForReplace(
+      existing.metadata?.annotations,
+      req.annotations,
+      opts
+    )
 
     const body: Partial<k8s.V1Secret> = {}
     if (req.stringData !== undefined) body.stringData = req.stringData
     if (req.data !== undefined) body.data = req.data
-    // NOTE: merge-patch on metadata.labels REPLACES the whole labels map (it's
-    // a leaf merge — the map IS the leaf). Do not pass req.labels for
-    // multi-owner Secrets where another owner (e.g. HCC) writes labels.
-    if (req.labels !== undefined) body.metadata = { labels: req.labels }
+    // RFC 7396 merges object members recursively. The labels map therefore
+    // preserves omitted labels; callers that intend to replace the complete
+    // map must use updateSecret. A metadata merge without an explicit identity
+    // fence carries the version read above so two writers cannot silently
+    // replace each other's metadata map. A data-only merge may carry a UID
+    // fence without a resourceVersion: that preserves delete/recreate safety
+    // while allowing independent owners to update disjoint data keys.
+    if (
+      req.labels !== undefined ||
+      req.annotations !== undefined ||
+      precondition?.uid !== undefined ||
+      precondition?.resourceVersion !== undefined
+    ) {
+      body.metadata = {
+        ...(req.labels !== undefined ? { labels: req.labels } : {}),
+        ...(req.annotations !== undefined ? { annotations: effectiveAnnotations } : {}),
+        ...(precondition?.resourceVersion
+          ? { resourceVersion: precondition.resourceVersion }
+          : !precondition?.uid &&
+              (req.labels !== undefined || req.annotations !== undefined) &&
+              existing.metadata?.resourceVersion
+            ? { resourceVersion: existing.metadata.resourceVersion }
+            : {}),
+        ...(precondition?.uid ? { uid: precondition.uid } : {}),
+      }
+    }
     if (req.type !== undefined) body.type = req.type
 
-    // Names-only return: the patch response is the merged WHOLE Secret (all keys,
-    // including ones the caller did not send) — return only the key NAMES.
-    const merged = await this.coreApi.patchNamespacedSecret(
+    const patched = await this.coreApi.patchNamespacedSecret(
       {
         namespace: ns,
         name: req.name,
@@ -215,19 +310,58 @@ export class SecretService {
         middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')],
       }
     )
-    return summarizeSecret(merged, req.name, ns)
+    return patched
   }
 
-  async removeSecretKey(req: {
-    name: string
-    namespace?: string
-    key: string
-  }): Promise<SecretSummary> {
+  async mergeSecretSnapshot(
+    req: SecretUpsertRequest,
+    opts?: SecretConstraintOptions,
+    precondition?: SecretPreconditions
+  ): Promise<SecretSnapshot> {
+    const namespace = req.namespace || this.defaultNamespace
+    const patched = await this.mergeSecretRaw(req, opts, precondition)
+    return toSecretSnapshot(patched, req.name, namespace)
+  }
+
+  async mergeSecret(
+    req: SecretUpsertRequest,
+    opts?: SecretConstraintOptions,
+    precondition?: SecretPreconditions
+  ): Promise<SecretSummary> {
+    const namespace = req.namespace || this.defaultNamespace
+    const patched = await this.mergeSecretRaw(req, opts, precondition)
+    return toPublicSecretSummary(patched as Record<string, unknown>, req.name, namespace)
+  }
+
+  private async removeSecretKeyRaw(
+    req: {
+      name: string
+      namespace?: string
+      key: string
+    },
+    precondition?: SecretPreconditions
+  ): Promise<unknown> {
     assertValidSecretDataKey(req.key)
     const ns = req.namespace || this.defaultNamespace
-    const body = { data: { [req.key]: null } } as unknown as Partial<k8s.V1Secret>
+    const existing = await this.coreApi.readNamespacedSecret({ namespace: ns, name: req.name })
 
-    const updated = await this.coreApi.patchNamespacedSecret(
+    // Removing one data key still mutates the Secret, so controller-owned
+    // Secret types remain off limits here too.
+    assertMutablePreservedSecretType(existing.type ?? 'Opaque')
+
+    const body = {
+      ...(precondition && {
+        metadata: {
+          ...(precondition.uid ? { uid: precondition.uid } : {}),
+          ...(precondition.resourceVersion
+            ? { resourceVersion: precondition.resourceVersion }
+            : {}),
+        },
+      }),
+      data: { [req.key]: null },
+    } as unknown as Partial<k8s.V1Secret>
+
+    const patched = await this.coreApi.patchNamespacedSecret(
       {
         namespace: ns,
         name: req.name,
@@ -237,7 +371,33 @@ export class SecretService {
         middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')],
       }
     )
-    return summarizeSecret(updated, req.name, ns)
+    return patched
+  }
+
+  async removeSecretKeySnapshot(
+    req: {
+      name: string
+      namespace?: string
+      key: string
+    },
+    precondition?: SecretPreconditions
+  ): Promise<SecretSnapshot> {
+    const namespace = req.namespace || this.defaultNamespace
+    const patched = await this.removeSecretKeyRaw(req, precondition)
+    return toSecretSnapshot(patched, req.name, namespace)
+  }
+
+  async removeSecretKey(
+    req: {
+      name: string
+      namespace?: string
+      key: string
+    },
+    precondition?: SecretPreconditions
+  ): Promise<SecretSummary> {
+    const namespace = req.namespace || this.defaultNamespace
+    const patched = await this.removeSecretKeyRaw(req, precondition)
+    return toPublicSecretSummary(patched as Record<string, unknown>, req.name, namespace)
   }
 
   /**
@@ -256,10 +416,9 @@ export class SecretService {
     namespace?: string,
     precondition?: SecretPreconditions
   ): Promise<DeleteSecretSummary> {
-    const ns = namespace || this.defaultNamespace
     const hasPrecondition = Boolean(precondition?.uid || precondition?.resourceVersion)
     await this.coreApi.deleteNamespacedSecret({
-      namespace: ns,
+      namespace: namespace || this.defaultNamespace,
       name,
       ...(hasPrecondition && {
         body: {
@@ -272,6 +431,10 @@ export class SecretService {
         },
       }),
     })
-    return { name, namespace: ns, deleted: true }
+    return toPublicDeleteSecretSummary({
+      name,
+      namespace: namespace || this.defaultNamespace,
+      deleted: true,
+    })
   }
 }

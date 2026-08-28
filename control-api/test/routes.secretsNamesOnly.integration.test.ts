@@ -27,7 +27,7 @@ function fullSecret(
   return {
     apiVersion: 'v1',
     kind: 'Secret',
-    metadata: { name, namespace, resourceVersion: '7', labels },
+    metadata: { name, namespace, resourceVersion: '7', uid: `uid-${name}`, labels },
     type: 'Opaque',
     data,
   }

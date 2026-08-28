@@ -19,6 +19,15 @@ const WORKFLOW_TEAM_ID = '11111111-1111-4111-8111-111111111111'
 const NON_TRANSPORT_PUBLIC_WEB_MESSAGE =
   'public-web is only supported on MCP transport workloads; non-transport workloads must use exact-host egressBindings'
 
+function decodeKubernetesData(snapshot: { data?: Record<string, string> }): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(snapshot.data ?? {}).map(([key, value]) => [
+      key,
+      Buffer.from(value, 'base64').toString('utf8'),
+    ])
+  )
+}
+
 const VALID_RECIPE = {
   metadata: { name: 'my-recipe' },
   spec: {
@@ -1554,8 +1563,10 @@ describe.sequential('routes/admin/recipes', () => {
     })
     expect(JSON.stringify(res.body)).not.toContain('CG-test-secret')
     const stored = (await gateway.getSecret('coingecko-api', SANDBOX_NS)) as {
+      data?: Record<string, string>
       stringData?: Record<string, string>
     }
+    stored.stringData = decodeKubernetesData(stored)
     expect(stored.stringData?.apiKey).toBe('CG-test-secret')
     await expect(gateway.getSecret('coingecko-api', MCP_NS)).rejects.toThrow()
   })
@@ -1580,8 +1591,10 @@ describe.sequential('routes/admin/recipes', () => {
     })
     expect(JSON.stringify(res.body)).not.toContain('transport-secret')
     const stored = (await gateway.getSecret('workflow-api-credentials', MCP_NS)) as {
+      data?: Record<string, string>
       stringData?: Record<string, string>
     }
+    stored.stringData = decodeKubernetesData(stored)
     expect(stored.stringData?.apiKey).toBe('transport-secret')
     await expect(gateway.getSecret('workflow-api-credentials', SANDBOX_NS)).rejects.toThrow()
   })
@@ -1619,6 +1632,7 @@ describe.sequential('routes/admin/recipes', () => {
       data?: Record<string, string>
       stringData?: Record<string, string>
     }
+    stored.stringData = decodeKubernetesData(stored)
     expect(stored.data?.existingKey).toBe('ZXhpc3Rpbmc=')
     expect(stored.stringData?.apiKey).toBe('CG-test-secret')
   })

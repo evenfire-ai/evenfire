@@ -9,6 +9,7 @@
 // creation + the connector shell; the secret is removed via the Control API in
 // `finally` (DELETE /api/v1/admin/mcp-secrets/<name>).
 import { expect, test } from '@playwright/test'
+import { requireSecretIdentity, type SecretIdentity } from '../test-utils/secretIdentity'
 import {
   CONTROL_API_URL,
   CONTROL_UI_URL,
@@ -34,11 +35,16 @@ test.describe('optional QA recorder: Control UI connector secret lifecycle', () 
 
     const credentials = adminCredentials()
     const secretName = uniqueE2EName('qa-recorder-connector-secret')
+    let secretIdentity: SecretIdentity | null = null
 
     try {
       await loginThroughUi(page, credentials)
 
-      await page.goto(`${CONTROL_UI_URL}/secrets/new?scope=mcp`)
+      await page.getByRole('link', { name: 'Secrets', exact: true }).click()
+      await expect(page).toHaveURL(/\/secrets$/, { timeout: 20_000 })
+      await page.getByRole('tab', { name: 'Connector', exact: true }).click()
+      await expect(page).toHaveURL(/\/secrets\/connector$/, { timeout: 20_000 })
+      await page.getByRole('button', { name: 'Add connector secret', exact: true }).click()
       await expect(
         page.getByRole('heading', { name: 'Create connector secret', exact: true })
       ).toBeVisible({ timeout: 20_000 })
@@ -52,10 +58,24 @@ test.describe('optional QA recorder: Control UI connector secret lifecycle', () 
       await page.getByRole('button', { name: 'Continue', exact: true }).click()
 
       await expect(page.getByPlaceholder('API_KEY')).toBeVisible({ timeout: 20_000 })
-      await page.getByRole('button', { name: 'Add key', exact: true }).click()
-      await page.getByPlaceholder('API_KEY').last().fill('API_KEY')
-      await page.getByPlaceholder('secret value').last().fill('qa-recorder-dummy')
+      await page.getByPlaceholder('API_KEY').fill('API_KEY')
+      await page.getByPlaceholder('secret value').fill('qa-recorder-dummy')
+      const createSecretResponse = page.waitForResponse(
+        response => {
+          const request = response.request()
+          if (!response.url().includes('/admin/mcp-secrets') || request.method() !== 'POST') {
+            return false
+          }
+          const body = request.postDataJSON() as { name?: string } | null
+          return body?.name === secretName
+        },
+        { timeout: 30_000 }
+      )
       await page.getByRole('button', { name: 'Create secret', exact: true }).click()
+
+      const created = await createSecretResponse
+      expect(created.status()).toBe(201)
+      secretIdentity = requireSecretIdentity(await created.json(), 'Create MCP Secret')
 
       await expect(page.getByText(`Secret ${secretName} created.`, { exact: true })).toBeVisible({
         timeout: 20_000,
@@ -64,7 +84,7 @@ test.describe('optional QA recorder: Control UI connector secret lifecycle', () 
       // The connector list is McpServer-derived; a standalone secret is not listed
       // and connector scope has no delete action in the UI. Record the connector
       // shell and clean up through the Control API below.
-      await page.goto(`${CONTROL_UI_URL}/secrets/connector`)
+      await expect(page).toHaveURL(/\/secrets\/connector$/, { timeout: 20_000 })
       await expect(
         page.getByText('Manage LLM, connector, and recipe credentials in one place.', {
           exact: true,
@@ -73,14 +93,14 @@ test.describe('optional QA recorder: Control UI connector secret lifecycle', () 
 
       await screenshotAndLog(page, testInfo, 'control-ui-secret-connector')
     } finally {
-      try {
-        await api(
+      if (secretIdentity) {
+        const deleted = await api(
           page.request,
           'DELETE',
-          `/api/v1/admin/mcp-secrets/${encodeURIComponent(secretName)}`
+          `/api/v1/admin/mcp-secrets/${encodeURIComponent(secretName)}`,
+          secretIdentity
         )
-      } catch {
-        // Best-effort: ignore cleanup failures.
+        expect(deleted.status, 'cleanup MCP Secret').toBe(200)
       }
     }
   })

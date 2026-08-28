@@ -3,6 +3,22 @@ import express from 'express'
 import request from 'supertest'
 import { rootLogger } from '../src/observability/logger.js'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
+import { checkAndIncrement } from '../src/services/rateLimiterService.js'
+import { CONTROL_UI_ADMIN_SESSION_COOKIE } from '../src/utils/auth/sessionCookies.js'
+import { MockGateway } from './mockGateway.js'
+
+const TEST_ADMIN_SESSION_JTI = 'test-admin-session-jti'
+
+vi.mock('../src/services/rateLimiterService.js', () => ({
+  checkAndIncrement: vi.fn(async (_key: string, maxPerMinute: number) => ({
+    allowed: true,
+    remaining: maxPerMinute - 1,
+    resetMs: Date.now() + 60_000,
+    windowStartMs: Date.now(),
+    count: 1,
+    backendAvailable: true,
+  })),
+}))
 
 /** The write shape the admin routes hand to the gateway. */
 type SecretWrite = {
@@ -29,7 +45,11 @@ function writeSummary(body: SecretWrite) {
 function createGateway() {
   return {
     listSecrets: vi.fn(async () => []),
-    createSecret: vi.fn(async (body: SecretWrite) => writeSummary(body)),
+    createSecret: vi.fn(async (body: SecretWrite) => ({
+      ...writeSummary(body),
+      uid: `uid-${body.name}`,
+      resourceVersion: '1',
+    })),
     updateSecret: vi.fn(async (body: SecretWrite) => writeSummary(body)),
     deleteSecret: vi.fn(async (name: string, namespace?: string) => ({
       name,
@@ -41,10 +61,21 @@ function createGateway() {
         name: string,
         namespace?: string
       ): Promise<{
-        metadata: { name: string; namespace?: string; labels: Record<string, string> }
+        metadata: {
+          name: string
+          namespace?: string
+          labels: Record<string, string>
+          annotations?: Record<string, string>
+        }
         data: Record<string, string>
       }> => ({
-        metadata: { name, namespace, labels: {} },
+        metadata: {
+          name,
+          namespace,
+          uid: `uid-${name}`,
+          resourceVersion: '1',
+          labels: {},
+        },
         // base64 of 'old-value' — the stored form of an existing key.
         data: { EXISTING_KEY: 'b2xkLXZhbHVl' },
       })
@@ -55,6 +86,8 @@ function createGateway() {
     mergeSecret: vi.fn(async (body: SecretWrite) => ({
       name: body.name,
       namespace: body.namespace || 'mcp-server',
+      uid: `uid-${body.name}`,
+      resourceVersion: '2',
       keys: ['EXISTING_KEY', ...Object.keys(body.stringData ?? {})].sort((a, b) =>
         a.localeCompare(b)
       ),
@@ -74,10 +107,90 @@ function k8sError(statusCode: number, message: string): Error & { statusCode: nu
   return Object.assign(new Error(message), { statusCode })
 }
 
-function makeApp(gateway: ReturnType<typeof createGateway>) {
+type RollbackPermit = {
+  sessionJti: string
+  name: string
+  namespace: string
+  uid: string
+  resourceVersion: string
+}
+
+function rollbackPermitKey(input: Pick<RollbackPermit, 'sessionJti' | 'name' | 'namespace'>) {
+  return `${input.sessionJti}:${input.namespace}:${input.name}`
+}
+
+function createRollbackPermitStore() {
+  const permits = new Map<
+    string,
+    {
+      uid: string
+      resourceVersion: string
+      expiresAt: number
+      claimToken?: string
+      claimExpiresAt?: number
+    }
+  >()
+  let claimCounter = 0
+  return {
+    issue: vi.fn(async (input: RollbackPermit) => {
+      permits.set(rollbackPermitKey(input), {
+        uid: input.uid,
+        resourceVersion: input.resourceVersion,
+        expiresAt: Date.now() + 120_000,
+      })
+    }),
+    claim: vi.fn(async (input: Pick<RollbackPermit, 'sessionJti' | 'name' | 'namespace'>) => {
+      const permit = permits.get(rollbackPermitKey(input))
+      if (!permit || permit.expiresAt <= Date.now()) return null
+      if (permit.claimToken && (permit.claimExpiresAt ?? 0) > Date.now()) return null
+      claimCounter += 1
+      permit.claimToken = `00000000-0000-4000-8000-${String(claimCounter).padStart(12, '0')}`
+      permit.claimExpiresAt = Math.min(permit.expiresAt, Date.now() + 15_000)
+      return {
+        uid: permit.uid,
+        resourceVersion: permit.resourceVersion,
+        claimToken: permit.claimToken,
+      }
+    }),
+    release: vi.fn(
+      async (
+        input: Pick<RollbackPermit, 'sessionJti' | 'name' | 'namespace'> & {
+          claimToken: string
+        }
+      ) => {
+        const permit = permits.get(rollbackPermitKey(input))
+        if (permit?.claimToken !== input.claimToken) return
+        permit.claimToken = undefined
+        permit.claimExpiresAt = undefined
+      }
+    ),
+    finalize: vi.fn(
+      async (
+        input: Pick<RollbackPermit, 'sessionJti' | 'name' | 'namespace'> & {
+          claimToken: string
+        }
+      ) => {
+        const key = rollbackPermitKey(input)
+        if (permits.get(key)?.claimToken === input.claimToken) permits.delete(key)
+      }
+    ),
+  }
+}
+
+function makeApp(
+  gateway: ReturnType<typeof createGateway>,
+  rollbackPermits = createRollbackPermitStore(),
+  sessionJti = TEST_ADMIN_SESSION_JTI
+) {
   const app = express()
   app.use(express.json())
-  app.use(createAdminSecretsRouter(gateway as never))
+  app.use((req, _res, next) => {
+    ;(req as express.Request & { adminAuth?: { jti: string } }).adminAuth = {
+      jti: sessionJti,
+    }
+    next()
+  })
+  app.use(createAdminSecretsRouter(gateway as never, rollbackPermits as never))
   // Error handler so gateway errors return 500 instead of crashing
   app.use(
     (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -85,6 +198,18 @@ function makeApp(gateway: ReturnType<typeof createGateway>) {
     }
   )
   return app
+}
+
+const TEST_CONTROL_UI_SESSION = 'test-control-ui-session'
+
+function createAuthenticatedAgent(app: express.Express) {
+  const agent = request.agent(app)
+  agent.jar.setCookie(
+    `${CONTROL_UI_ADMIN_SESSION_COOKIE}=${TEST_CONTROL_UI_SESSION}; Path=/; HttpOnly`,
+    '127.0.0.1',
+    '/'
+  )
+  return agent
 }
 
 describe('POST /admin/mcp-secrets', () => {
@@ -114,6 +239,66 @@ describe('POST /admin/mcp-secrets', () => {
     expect(arg.namespace).toBe('mcp-server')
     expect(arg.type).toBe('Opaque')
     expect(arg.stringData).toEqual({ DB_PASSWORD: 's3cret' })
+  })
+
+  it('keeps legacy rollback identity server-side without emitting a proof cookie', async () => {
+    const gateway = createGateway()
+    const rollbackPermits = createRollbackPermitStore()
+    const app = makeApp(gateway, rollbackPermits)
+    const agent = createAuthenticatedAgent(app)
+
+    const created = await agent
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+
+    expect(rollbackPermits.issue).toHaveBeenCalledWith({
+      sessionJti: TEST_ADMIN_SESSION_JTI,
+      name: 'linear-credentials',
+      namespace: 'mcp-server',
+      uid: 'uid-linear-credentials',
+      resourceVersion: '1',
+    })
+    expect(created.headers['set-cookie'] ?? []).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/^mcp_secret_delete_proof_/)])
+    )
+
+    await agent.delete('/admin/mcp-secrets/linear-credentials').expect(200)
+
+    expect(rollbackPermits.claim).toHaveBeenCalledWith({
+      sessionJti: TEST_ADMIN_SESSION_JTI,
+      name: 'linear-credentials',
+      namespace: 'mcp-server',
+    })
+    expect(rollbackPermits.finalize).toHaveBeenCalledWith({
+      sessionJti: TEST_ADMIN_SESSION_JTI,
+      name: 'linear-credentials',
+      namespace: 'mcp-server',
+      claimToken: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    })
+  })
+
+  it('fails closed without deleting the created resource when the permit cannot be persisted', async () => {
+    const gateway = createGateway()
+    const rollbackPermits = createRollbackPermitStore()
+    rollbackPermits.issue.mockRejectedValueOnce(new Error('postgres unavailable'))
+
+    const res = await request(makeApp(gateway, rollbackPermits))
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(503)
+
+    expect(res.body).toEqual({
+      error: 'mcp_secret_rollback_permit_unavailable',
+      outcome: 'repair_required',
+      created: {
+        name: 'linear-credentials',
+        namespace: 'mcp-server',
+        uid: 'uid-linear-credentials',
+        resourceVersion: '1',
+      },
+    })
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
   })
 
   it('trims whitespace from name', async () => {
@@ -367,7 +552,10 @@ describe('DELETE /admin/mcp-secrets/:name', () => {
     const gateway = createGateway()
     const app = makeApp(gateway)
 
-    const res = await request(app).delete('/admin/mcp-secrets/my-db-creds').expect(200)
+    const res = await request(app)
+      .delete('/admin/mcp-secrets/my-db-creds')
+      .send({ uid: 'uid-my-db-creds', resourceVersion: '1' })
+      .expect(200)
 
     expect(res.body).toEqual({
       name: 'my-db-creds',
@@ -375,14 +563,20 @@ describe('DELETE /admin/mcp-secrets/:name', () => {
       deleted: true,
     })
     expect(gateway.deleteSecret).toHaveBeenCalledOnce()
-    expect(gateway.deleteSecret).toHaveBeenCalledWith('my-db-creds', 'mcp-server')
+    expect(gateway.deleteSecret).toHaveBeenCalledWith('my-db-creds', 'mcp-server', {
+      uid: 'uid-my-db-creds',
+      resourceVersion: '1',
+    })
   })
 
   it('always targets config.mcpServersNamespace (ignores any caller intent)', async () => {
     const gateway = createGateway()
     const app = makeApp(gateway)
 
-    await request(app).delete('/admin/mcp-secrets/orphan-secret').expect(200)
+    await request(app)
+      .delete('/admin/mcp-secrets/orphan-secret')
+      .send({ uid: 'uid-orphan-secret', resourceVersion: '1' })
+      .expect(200)
 
     const [, ns] = gateway.deleteSecret.mock.calls[0]
     expect(ns).toBe('mcp-server')
@@ -395,11 +589,16 @@ describe('DELETE /admin/mcp-secrets/:name', () => {
         name: 'recipe-creds',
         namespace: 'mcp-server',
         labels: { 'clerum.io/recipe-secret': 'true' },
+        uid: 'uid-recipe-creds',
+        resourceVersion: '1',
       },
     })
     const app = makeApp(gateway)
 
-    const res = await request(app).delete('/admin/mcp-secrets/recipe-creds').expect(409)
+    const res = await request(app)
+      .delete('/admin/mcp-secrets/recipe-creds')
+      .send({ uid: 'uid-recipe-creds', resourceVersion: '1' })
+      .expect(409)
 
     expect(res.body.error).toContain('WorkflowRecipe')
     expect(gateway.deleteSecret).not.toHaveBeenCalled()
@@ -418,7 +617,10 @@ describe('DELETE /admin/mcp-secrets/:name', () => {
     })
     const app = makeApp(gateway)
 
-    await request(app).delete('/admin/mcp-secrets/versioned-creds').expect(200)
+    await request(app)
+      .delete('/admin/mcp-secrets/versioned-creds')
+      .send({ uid: 'secret-uid', resourceVersion: '17' })
+      .expect(200)
 
     expect(gateway.deleteSecret).toHaveBeenCalledWith('versioned-creds', 'mcp-server', {
       uid: 'secret-uid',
@@ -431,7 +633,10 @@ describe('DELETE /admin/mcp-secrets/:name', () => {
     gateway.deleteSecret.mockRejectedValueOnce(new Error('K8s API timeout'))
     const app = makeApp(gateway)
 
-    const res = await request(app).delete('/admin/mcp-secrets/any-name').expect(500)
+    const res = await request(app)
+      .delete('/admin/mcp-secrets/any-name')
+      .send({ uid: 'uid-any-name', resourceVersion: '1' })
+      .expect(500)
 
     expect(res.body.error).toContain('K8s API timeout')
   })
@@ -470,6 +675,44 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
     expect(res.body.keys).toEqual(['EXISTING_KEY', 'LINEAR_API_KEY'])
     expect(res.body.name).toBe('linear-credentials')
     expect(res.body.namespace).toBe('mcp-server')
+    expect(res.body.uid).toBe('uid-linear-credentials')
+    expect(res.body.resourceVersion).toBe('2')
+  })
+
+  it('does not grant public rotation a registry annotation capability', async () => {
+    const gateway = createGateway()
+    gateway.getSecret.mockResolvedValueOnce({
+      metadata: {
+        name: 'linear-credentials',
+        namespace: 'mcp-server',
+        uid: 'uid-linear-credentials',
+        resourceVersion: '1',
+        labels: { 'clerum.io/managed-by': 'control-api' },
+        annotations: {
+          'clerum.io/catalog-id': 'linear',
+          'clerum.io/catalog-version': '1.0.0',
+        },
+      },
+      data: { EXISTING_KEY: 'b2xkLXZhbHVl' },
+    })
+    const app = makeApp(gateway)
+
+    await request(app)
+      .put('/admin/mcp-secrets/linear-credentials')
+      .send({ data: { LINEAR_API_KEY: 'rotated-value' } })
+      .expect(200)
+
+    expect(gateway.mergeSecret).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'linear-credentials',
+        namespace: 'mcp-server',
+        stringData: { LINEAR_API_KEY: 'rotated-value' },
+      }),
+      undefined,
+      {
+        uid: 'uid-linear-credentials',
+      }
+    )
   })
 
   it('always targets config.mcpServersNamespace and ignores a namespace in the body', async () => {
@@ -750,5 +993,373 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
       .expect(500)
 
     expect(res.body.error).toContain('K8s API timeout')
+  })
+})
+
+describe('DELETE /admin/mcp-secrets/:name (identity and dependency guard)', () => {
+  it('rate-limits delete attempts before reading or mutating a Secret', async () => {
+    vi.mocked(checkAndIncrement).mockResolvedValueOnce({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 31,
+      backendAvailable: true,
+    })
+    const gateway = createGateway()
+
+    await request(makeApp(gateway))
+      .delete('/admin/mcp-secrets/linear-credentials')
+      .send({ uid: 'uid-linear-credentials', resourceVersion: '1' })
+      .expect(429)
+
+    expect(gateway.getSecret).not.toHaveBeenCalled()
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('requires both server-issued identity values when a client supplies either one', async () => {
+    const gateway = createGateway()
+    const app = makeApp(gateway)
+
+    for (const body of [{ uid: 'uid-linear-credentials' }, { resourceVersion: '1' }]) {
+      await request(app).delete('/admin/mcp-secrets/linear-credentials').send(body).expect(428)
+    }
+
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('supports an old UI POST plus bodyless DELETE with a server-side permit', async () => {
+    const gateway = createGateway()
+    const app = makeApp(gateway)
+    const agent = createAuthenticatedAgent(app)
+
+    await agent
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+    const warnSpy = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+
+    try {
+      const res = await agent.delete('/admin/mcp-secrets/linear-credentials').expect(200)
+
+      expect(res.body).toEqual({
+        name: 'linear-credentials',
+        namespace: 'mcp-server',
+        deleted: true,
+      })
+      expect(res.status).toBe(200)
+      expect(gateway.getSecret).toHaveBeenCalledWith('linear-credentials', 'mcp-server')
+      expect(gateway.deleteSecret).toHaveBeenCalledWith('linear-credentials', 'mcp-server', {
+        uid: 'uid-linear-credentials',
+        resourceVersion: '1',
+      })
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          module: 'admin-secrets',
+          event: 'mcp-secret-delete-legacy-server-side-permit',
+          name: 'linear-credentials',
+          namespace: 'mcp-server',
+          preconditionSource: 'server-side-permit',
+        }),
+        'MCP Secret delete used a server-side rollback permit'
+      )
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain(TEST_CONTROL_UI_SESSION)
+      expect(res.headers['set-cookie'] ?? []).not.toEqual(
+        expect.arrayContaining([expect.stringMatching(/^mcp_secret_delete_proof_/)])
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('rejects a bodyless old UI DELETE with no server-side rollback permit', async () => {
+    const gateway = createGateway()
+    const app = makeApp(gateway)
+    const agent = createAuthenticatedAgent(app)
+
+    await agent.delete('/admin/mcp-secrets/linear-credentials').expect(428)
+
+    expect(gateway.getSecret).not.toHaveBeenCalled()
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when the server-side rollback permit lookup is unavailable', async () => {
+    const gateway = createGateway()
+    const rollbackPermits = createRollbackPermitStore()
+    rollbackPermits.claim.mockRejectedValueOnce(new Error('postgres unavailable'))
+    const agent = createAuthenticatedAgent(makeApp(gateway, rollbackPermits))
+
+    const res = await agent.delete('/admin/mcp-secrets/linear-credentials').expect(503)
+
+    expect(res.body).toEqual({
+      error: 'mcp_secret_rollback_permit_unavailable',
+      outcome: 'repair_required',
+    })
+    expect(gateway.getSecret).not.toHaveBeenCalled()
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('releases a claim after a transient reference-check failure so the old UI can retry', async () => {
+    const gateway = createGateway()
+    const rollbackPermits = createRollbackPermitStore()
+    const agent = createAuthenticatedAgent(makeApp(gateway, rollbackPermits))
+
+    await agent
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+    gateway.listResource.mockRejectedValueOnce(new Error('reference graph unavailable'))
+
+    await agent.delete('/admin/mcp-secrets/linear-credentials').expect(503)
+    expect(rollbackPermits.release).toHaveBeenCalledOnce()
+
+    await agent.delete('/admin/mcp-secrets/linear-credentials').expect(200)
+    expect(rollbackPermits.claim).toHaveBeenCalledTimes(2)
+    expect(rollbackPermits.finalize).toHaveBeenCalledOnce()
+  })
+
+  it('rejects a stale supplied identity before delete', async () => {
+    const gateway = createGateway()
+    gateway.getSecret.mockResolvedValueOnce({
+      metadata: {
+        name: 'linear-credentials',
+        namespace: 'mcp-server',
+        uid: 'uid-current',
+        resourceVersion: '2',
+        labels: {},
+      },
+      data: {},
+    })
+    const app = makeApp(gateway)
+
+    const res = await request(app)
+      .delete('/admin/mcp-secrets/linear-credentials')
+      .send({ uid: 'uid-linear-credentials', resourceVersion: '1' })
+      .expect(409)
+
+    expect(res.body).toMatchObject({ error: 'secret_identity_changed', outcome: 'repair_required' })
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('server-side rollback permit refuses to delete a Secret referenced by a live connector', async () => {
+    const gateway = createGateway()
+    gateway.listResource.mockResolvedValueOnce([
+      {
+        metadata: { name: 'linear', namespace: 'mcp-server' },
+        spec: { envSecret: { name: 'linear-credentials' } },
+      },
+    ])
+    const app = makeApp(gateway)
+    const agent = createAuthenticatedAgent(app)
+
+    await agent
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+    const res = await agent.delete('/admin/mcp-secrets/linear-credentials').expect(409)
+
+    expect(res.body).toMatchObject({ error: 'mcp_secret_in_use', outcome: 'repair_required' })
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('server-side rollback permit refuses to delete a WorkflowRecipe-owned Secret', async () => {
+    const gateway = createGateway()
+    gateway.getSecret.mockResolvedValueOnce({
+      metadata: {
+        name: 'recipe-creds',
+        namespace: 'mcp-server',
+        uid: 'uid-recipe-creds',
+        resourceVersion: '1',
+        labels: { 'clerum.io/recipe-secret': 'true' },
+      },
+      data: {},
+    })
+    const app = makeApp(gateway)
+    const agent = createAuthenticatedAgent(app)
+
+    await agent
+      .post('/admin/mcp-secrets')
+      .send({ name: 'recipe-creds', data: { RECIPE_KEY: 'create-value' } })
+      .expect(201)
+    const res = await agent.delete('/admin/mcp-secrets/recipe-creds').expect(409)
+
+    expect(res.body.error).toContain('WorkflowRecipe')
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('refuses to delete a Secret used as a live connector image pull Secret', async () => {
+    const gateway = createGateway()
+    gateway.listResource.mockResolvedValueOnce([
+      {
+        metadata: { name: 'linear', namespace: 'mcp-server' },
+        spec: { imagePullSecrets: [{ name: 'linear-credentials' }] },
+      },
+    ])
+    const app = makeApp(gateway)
+
+    const res = await request(app)
+      .delete('/admin/mcp-secrets/linear-credentials')
+      .send({ uid: 'uid-linear-credentials', resourceVersion: '1' })
+      .expect(409)
+
+    expect(res.body).toMatchObject({ error: 'mcp_secret_in_use', outcome: 'repair_required' })
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when the dependency graph cannot be read', async () => {
+    const gateway = createGateway()
+    gateway.listResource.mockRejectedValueOnce(new Error('connector list unavailable'))
+    const app = makeApp(gateway)
+
+    const res = await request(app)
+      .delete('/admin/mcp-secrets/linear-credentials')
+      .send({ uid: 'uid-linear-credentials', resourceVersion: '1' })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'mcp_secret_reference_check_unavailable',
+      outcome: 'repair_required',
+    })
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('deletes an unreferenced Secret with its identity precondition', async () => {
+    const gateway = createGateway()
+    const app = makeApp(gateway)
+
+    await request(app)
+      .delete('/admin/mcp-secrets/linear-credentials')
+      .send({ uid: 'uid-linear-credentials', resourceVersion: '1' })
+      .expect(200)
+
+    expect(gateway.deleteSecret).toHaveBeenCalledWith('linear-credentials', 'mcp-server', {
+      uid: 'uid-linear-credentials',
+      resourceVersion: '1',
+    })
+  })
+
+  it('rejects a malformed fallback body even when a signed proof exists', async () => {
+    const gateway = createGateway()
+    const app = makeApp(gateway)
+    const agent = createAuthenticatedAgent(app)
+
+    await agent
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+    await agent
+      .delete('/admin/mcp-secrets/linear-credentials')
+      .send({ unexpected: true })
+      .expect(428)
+
+    expect(gateway.getSecret).not.toHaveBeenCalled()
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('rejects a bodyless rollback from a different admin session', async () => {
+    const gateway = createGateway()
+    const rollbackPermits = createRollbackPermitStore()
+    const agent = createAuthenticatedAgent(makeApp(gateway, rollbackPermits))
+
+    await agent
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+    const otherSessionAgent = createAuthenticatedAgent(
+      makeApp(gateway, rollbackPermits, 'other-admin-session-jti')
+    )
+
+    await otherSessionAgent.delete('/admin/mcp-secrets/linear-credentials').expect(428)
+
+    expect(gateway.getSecret).not.toHaveBeenCalled()
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('rejects an expired server-side rollback permit', async () => {
+    const gateway = createGateway()
+    const app = makeApp(gateway)
+    const agent = createAuthenticatedAgent(app)
+
+    await agent
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 121_000)
+    try {
+      await agent.delete('/admin/mcp-secrets/linear-credentials').expect(428)
+    } finally {
+      dateNowSpy.mockRestore()
+    }
+
+    expect(gateway.getSecret).not.toHaveBeenCalled()
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('does not delete a replacement that wins before server-side permit consumption', async () => {
+    const gateway = new MockGateway('mcp-server')
+    const name = 'linear-credentials'
+    const app = makeApp(gateway as never)
+    const agent = createAuthenticatedAgent(app)
+
+    const created = await agent
+      .post('/admin/mcp-secrets')
+      .send({ name, data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+    const originalIdentity = {
+      uid: created.body.uid as string,
+      resourceVersion: created.body.resourceVersion as string,
+    }
+    await gateway.deleteSecret(name, 'mcp-server', originalIdentity)
+    gateway.seedSecret(name, 'mcp-server', {
+      uid: 'uid-linear-replacement',
+      resourceVersion: '1',
+    })
+
+    const res = await agent.delete(`/admin/mcp-secrets/${name}`).expect(409)
+
+    expect(res.body).toMatchObject({ error: 'secret_identity_changed', outcome: 'repair_required' })
+    await expect(gateway.getSecret(name, 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: 'uid-linear-replacement', resourceVersion: '1' },
+    })
+  })
+
+  it('does not delete a replacement that wins after server-side permit consumption', async () => {
+    const gateway = new MockGateway('mcp-server')
+    const name = 'linear-credentials'
+    const app = makeApp(gateway as never)
+    const agent = createAuthenticatedAgent(app)
+
+    const created = await agent
+      .post('/admin/mcp-secrets')
+      .send({ name, data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+    const originalIdentity = {
+      uid: created.body.uid as string,
+      resourceVersion: created.body.resourceVersion as string,
+    }
+
+    const deleteSpy = vi.spyOn(gateway, 'deleteSecret')
+    const listResources = gateway.listResource.bind(gateway)
+    let replacementCreated = false
+    vi.spyOn(gateway, 'listResource').mockImplementation(async (...args) => {
+      if (!replacementCreated && args[0] === 'mcpservers' && args[1] === 'mcp-server') {
+        replacementCreated = true
+        await gateway.deleteSecret(name, 'mcp-server', originalIdentity)
+        gateway.seedSecret(name, 'mcp-server', {
+          uid: 'uid-linear-replacement',
+          resourceVersion: '1',
+        })
+      }
+      return listResources(...args)
+    })
+
+    const res = await agent.delete(`/admin/mcp-secrets/${name}`).expect(409)
+
+    expect(res.body).toMatchObject({ error: 'secret_identity_changed', outcome: 'repair_required' })
+    expect(replacementCreated).toBe(true)
+    expect(deleteSpy).toHaveBeenLastCalledWith(name, 'mcp-server', originalIdentity)
+    await expect(gateway.getSecret(name, 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: 'uid-linear-replacement', resourceVersion: '1' },
+    })
   })
 })

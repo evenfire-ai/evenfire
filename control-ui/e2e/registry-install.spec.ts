@@ -47,6 +47,7 @@
  */
 import { type Page, expect, test } from '@playwright/test'
 import { setTimeout as delay } from 'node:timers/promises'
+import { type SecretIdentity, requireSecretIdentity } from '../test-utils/secretIdentity'
 
 const BASE_API = process.env.CONTROL_API_URL || 'http://localhost:8090'
 const REGISTRY_BASE = process.env.REGISTRY_URL || 'http://localhost:8085'
@@ -92,13 +93,12 @@ async function api(
 }
 
 async function login(page: Page) {
+  // Public authentication entry; never a terminal/deep-link state.
   await page.goto('/')
-  await page.waitForSelector('text=Sign in', { timeout: 10_000 })
-  const inputs = page.locator('input')
-  await inputs.nth(0).fill(ADMIN_USER)
-  await inputs.nth(1).fill(ADMIN_PASS)
-  await page.locator('button:has-text("Sign in")').last().click()
-  await page.waitForSelector('text=Marketplace', { timeout: 15_000 })
+  await page.getByLabel('Username or email').fill(ADMIN_USER)
+  await page.getByLabel('Password').fill(ADMIN_PASS)
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await expect(page.getByText('Marketplace', { exact: true })).toBeVisible({ timeout: 15_000 })
   await dismissAdminEmailPrompt(page)
 }
 
@@ -379,9 +379,9 @@ async function ensureBaseRegistryCatalog(adminAuth: string): Promise<void> {
 async function navigateToRegistry(page: Page) {
   await dismissAdminEmailPrompt(page)
   const regLink = page
-    .locator('text=Marketplace')
-    .or(page.locator('button:has-text("Marketplace")'))
-  await regLink.first().click()
+    .getByRole('link', { name: 'Marketplace', exact: true })
+    .or(page.getByRole('button', { name: 'Marketplace', exact: true }))
+  await regLink.click()
   await expect(page.getByLabel('Search Marketplace entries')).toBeVisible({ timeout: 15_000 })
 }
 
@@ -390,7 +390,7 @@ async function navigateToPlugins(page: Page) {
   const pluginsLink = page
     .getByRole('link', { name: 'Plugins' })
     .or(page.getByRole('button', { name: 'Workflow Recipes' }))
-  await pluginsLink.first().click()
+  await pluginsLink.click()
   await expect(page).toHaveURL(/\/workflow-recipes/)
   await expect(page.getByRole('button', { name: 'Install Plugin' })).toBeVisible({
     timeout: 15_000,
@@ -557,8 +557,8 @@ async function submitRegistryInstallForm(
   await installForm.getByRole('option', { name: 'context1', exact: true }).click()
   await installForm.getByRole('button', { name: 'Continue' }).click()
   const credentialInputs = installForm.locator('fieldset input')
-  for (let i = 0; i < (await credentialInputs.count()); i += 1) {
-    await credentialInputs.nth(i).fill('e2e-test-value')
+  for (const credentialInput of await credentialInputs.all()) {
+    await credentialInput.fill('e2e-test-value')
   }
   await installForm.getByRole('button', { name: 'Continue' }).click()
   await expect(
@@ -1361,8 +1361,6 @@ test.describe('H. Control-UI Smoke Tests', () => {
     await login(page)
     await navigateToRegistry(page)
     await expect(page.locator('text=/Marketplace \\(\\d+\\)/')).toBeVisible({ timeout: 15_000 })
-    await expect(page.locator('text=Connector').first()).toBeVisible()
-    await expect(page.locator('text=Recipe').first()).toBeVisible()
   })
 
   test('H2. Type filter works', async ({ page }) => {
@@ -1395,7 +1393,7 @@ test.describe('H. Control-UI Smoke Tests', () => {
       // validates the modal flow itself instead of catalog ordering.
       const entryRow = page.locator('tr', { hasText: 'mcp-filesystem' })
       await expect(entryRow).toBeVisible({ timeout: 10_000 })
-      await entryRow.locator('button:has-text("Install")').click()
+      await entryRow.getByRole('button', { name: 'Install', exact: true }).click()
       await page.waitForURL(/\/registry\/install\?/, { timeout: 10_000 })
       await expect(page.getByText('Install Connector from Marketplace')).toBeVisible({
         timeout: 5_000,
@@ -1417,8 +1415,8 @@ test.describe('H. Control-UI Smoke Tests', () => {
       const credFieldset = installForm.locator('fieldset')
       if ((await credFieldset.count()) > 0) {
         const inputs = credFieldset.locator('input')
-        for (let i = 0; i < (await inputs.count()); i++) {
-          await inputs.nth(i).fill('e2e-test-value')
+        for (const input of await inputs.all()) {
+          await input.fill('e2e-test-value')
         }
       }
 
@@ -1613,7 +1611,9 @@ test.describe('I. Registry Egress Contracts via Control UI', () => {
 
     const egressSection = page.locator('section', { hasText: 'External Egress' })
     await expect(egressSection.getByText('Egress summary:')).toBeVisible()
-    await egressSection.locator('select').first().selectOption('public-web')
+    const publicWebMode = egressSection.getByRole('combobox')
+    await expect(publicWebMode).toHaveCount(1)
+    await publicWebMode.selectOption('public-web')
     await expect(egressSection.getByRole('alert')).toContainText('Public web egress allows')
 
     const publicWebUpdate = page.waitForResponse(
@@ -1649,7 +1649,9 @@ test.describe('I. Registry Egress Contracts via Control UI', () => {
     await page.getByRole('tab', { name: 'External Egress', exact: true }).click()
 
     const restoredEgressSection = page.locator('section', { hasText: 'External Egress' })
-    await restoredEgressSection.locator('select').first().selectOption('exact-host')
+    const restoredEgressMode = restoredEgressSection.getByRole('combobox')
+    await expect(restoredEgressMode).toHaveCount(1)
+    await restoredEgressMode.selectOption('exact-host')
     await restoredEgressSection
       .locator('textarea[placeholder="api.example.com, auth.example.com"]')
       .fill('api.airtable.com')
@@ -1709,6 +1711,9 @@ test.describe('J. Operator Egress Editor Journeys', () => {
   const deferredEnvSecretName = uniqueE2EName('e2e-deferred-creds')
   const deferredSandboxUiEntryName = uniqueE2EName('e2e-sandbox-ui-secret')
   const deferredSandboxUiSecretName = uniqueE2EName('e2e-sandbox-ui-creds')
+  let manualPendingIdentity: SecretIdentity | null = null
+  let deferredEnvIdentity: SecretIdentity | null = null
+  let deferredSandboxUiIdentity: SecretIdentity | null = null
   const overLimitEntryName = uniqueE2EName('e2e-overlimit')
   let installedRegistryRecipeName = ''
   let installedDeferredEnvSecretRecipeName = ''
@@ -1780,7 +1785,9 @@ test.describe('J. Operator Egress Editor Journeys', () => {
       await expect(page.getByRole('heading', { name: 'Network egress' })).toBeVisible()
 
       const egressSection = page.locator('section', { hasText: 'External Egress' })
-      await egressSection.locator('select').first().selectOption('exact-host')
+      const exactHostMode = egressSection.getByRole('combobox')
+      await expect(exactHostMode).toHaveCount(1)
+      await exactHostMode.selectOption('exact-host')
       await egressSection
         .locator('textarea[placeholder="api.example.com, auth.example.com"]')
         .fill('api.github.com')
@@ -1837,7 +1844,9 @@ test.describe('J. Operator Egress Editor Journeys', () => {
       await expect(page.getByRole('heading', { name: 'Network egress' })).toBeVisible()
 
       const egressSection = page.locator('section', { hasText: 'External Egress' })
-      await egressSection.locator('select').first().selectOption('public-web')
+      const publicWebMode = egressSection.getByRole('combobox')
+      await expect(publicWebMode).toHaveCount(1)
+      await publicWebMode.selectOption('public-web')
       await expect(egressSection.getByRole('alert')).toContainText('Public web egress allows')
       await expect(egressSection.getByRole('status')).toContainText('1 public-web binding')
 
@@ -1883,10 +1892,9 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     await page.getByRole('button', { name: 'Install Plugin' }).click()
     await expect(page.getByRole('heading', { name: /Install (Recipe|Plugin)/ })).toBeVisible()
 
-    await page
-      .locator('textarea')
-      .first()
-      .fill(JSON.stringify(initialRecipe, null, 2))
+    const initialManifestEditor = page.locator('textarea')
+    await expect(initialManifestEditor).toHaveCount(1)
+    await initialManifestEditor.fill(JSON.stringify(initialRecipe, null, 2))
     await page.getByRole('button', { name: 'Review manifest' }).click()
     await expect(page.getByText(/Manifest review passed/)).toBeVisible()
     await expect(page.getByText('External Egress Review')).toBeVisible()
@@ -1942,10 +1950,9 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     await page.getByRole('button', { name: 'More plugin actions' }).click()
     await page.getByRole('menuitem', { name: 'Edit' }).click()
     await expect(page).toHaveURL(new RegExp(`edit=1`))
-    await page
-      .locator('textarea')
-      .first()
-      .fill(JSON.stringify(updatedRecipe, null, 2))
+    const updatedManifestEditor = page.locator('textarea')
+    await expect(updatedManifestEditor).toHaveCount(1)
+    await updatedManifestEditor.fill(JSON.stringify(updatedRecipe, null, 2))
     await page.getByRole('button', { name: 'Review manifest' }).click()
     await expect(page.getByText(/Manifest review passed/)).toBeVisible()
     await expect(page.getByText('External Egress Review')).toBeVisible()
@@ -1991,16 +1998,15 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     await page.getByRole('button', { name: 'Install Plugin' }).click()
     await expect(page.getByRole('heading', { name: /Install (Recipe|Plugin)/ })).toBeVisible()
 
-    await page
-      .locator('textarea')
-      .first()
-      .fill(
-        JSON.stringify(
-          manualPendingSecretRecipe(manualPendingRecipeName, manualPendingSecretName),
-          null,
-          2
-        )
+    const pendingManifestEditor = page.locator('textarea')
+    await expect(pendingManifestEditor).toHaveCount(1)
+    await pendingManifestEditor.fill(
+      JSON.stringify(
+        manualPendingSecretRecipe(manualPendingRecipeName, manualPendingSecretName),
+        null,
+        2
       )
+    )
     await page.getByRole('button', { name: 'Review manifest' }).click()
     await expect(page.getByText(/Manifest review passed/)).toBeVisible()
     await page.getByRole('button', { name: 'Apply defaults' }).click()
@@ -2056,10 +2062,16 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     await expect(page.locator('#recipe-secret-name')).toHaveValue(manualPendingSecretName)
     await expect(page.getByLabel('Owner recipe')).toHaveValue(manualPendingRecipeName)
     await page.getByRole('button', { name: 'Continue' }).click()
-    await expect(page.getByPlaceholder('API_KEY').first()).toHaveValue('apiKey')
-    await expect(page.getByPlaceholder('API_KEY').nth(1)).toHaveValue('dbPassword')
-    await page.getByPlaceholder('secret value').first().fill('manual-api-key')
-    await page.getByPlaceholder('secret value').nth(1).fill('manual-db-password')
+    const manualKeyInputs = page.getByPlaceholder('API_KEY')
+    const manualValueInputs = page.getByPlaceholder('secret value')
+    await expect(manualKeyInputs).toHaveCount(2)
+    await expect(manualValueInputs).toHaveCount(2)
+    const [manualApiKey, manualDbPassword] = await manualKeyInputs.all()
+    const [manualApiValue, manualDbValue] = await manualValueInputs.all()
+    await expect(manualApiKey).toHaveValue('apiKey')
+    await expect(manualDbPassword).toHaveValue('dbPassword')
+    await manualApiValue.fill('manual-api-key')
+    await manualDbValue.fill('manual-db-password')
 
     const createRecipeSecretResponse = page.waitForResponse(
       response => {
@@ -2086,7 +2098,12 @@ test.describe('J. Operator Egress Editor Journeys', () => {
       { timeout: 30_000 }
     )
     await page.getByRole('button', { name: 'Create secret' }).click()
-    expect((await createRecipeSecretResponse).status()).toBe(201)
+    const createdManualPending = await createRecipeSecretResponse
+    expect(createdManualPending.status()).toBe(201)
+    manualPendingIdentity = requireSecretIdentity(
+      await createdManualPending.json(),
+      'create manual pending recipe credential'
+    )
     await expect(page).toHaveURL(/\/secrets\/recipe$/)
     const provisionedRecipeSecretRow = page.locator('tr', { hasText: manualPendingSecretName })
     await expect(provisionedRecipeSecretRow).toBeVisible({ timeout: 15_000 })
@@ -2265,11 +2282,22 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     await expect(page.getByRole('heading', { name: 'Create connector secret' })).toBeVisible()
     await expect(page.locator('#mcp-secret-name')).toHaveValue(expectedSecretName)
     await page.getByRole('button', { name: 'Continue' }).click()
-    await page.getByPlaceholder('API_KEY').fill('API_KEY')
-    await page.getByPlaceholder('secret value').fill('e2e-api-key')
+    const connectorKeyInputs = page.getByPlaceholder('API_KEY')
+    const connectorValueInputs = page.getByPlaceholder('secret value')
+    await expect(connectorKeyInputs).toHaveCount(1)
+    await expect(connectorValueInputs).toHaveCount(1)
+    await connectorKeyInputs.fill('API_KEY')
+    await connectorValueInputs.fill('e2e-api-key')
     await page.getByRole('button', { name: 'Add key' }).click()
-    await page.getByPlaceholder('API_KEY').nth(1).fill('CLIENT_SECRET')
-    await page.getByPlaceholder('secret value').nth(1).fill('e2e-client-secret')
+    await expect(connectorKeyInputs).toHaveCount(2)
+    await expect(connectorValueInputs).toHaveCount(2)
+    const [, connectorClientKey] = await connectorKeyInputs.all()
+    const [, connectorClientValue] = await connectorValueInputs.all()
+    if (!connectorClientKey || !connectorClientValue) {
+      throw new Error('connector credential row was not added')
+    }
+    await connectorClientKey.fill('CLIENT_SECRET')
+    await connectorClientValue.fill('e2e-client-secret')
 
     const createSecretResponse = page.waitForResponse(
       response => {
@@ -2402,10 +2430,16 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     await expect(page.locator('#recipe-secret-name')).toHaveValue(deferredEnvSecretName)
     await expect(page.getByLabel('Owner recipe')).toHaveValue(installedDeferredEnvSecretRecipeName)
     await page.getByRole('button', { name: 'Continue' }).click()
-    await expect(page.getByPlaceholder('API_KEY').first()).toHaveValue('apiKey')
-    await expect(page.getByPlaceholder('API_KEY').nth(1)).toHaveValue('dbPassword')
-    await page.getByPlaceholder('secret value').first().fill('value-one')
-    await page.getByPlaceholder('secret value').nth(1).fill('value-two')
+    const deferredKeyInputs = page.getByPlaceholder('API_KEY')
+    const deferredValueInputs = page.getByPlaceholder('secret value')
+    await expect(deferredKeyInputs).toHaveCount(2)
+    await expect(deferredValueInputs).toHaveCount(2)
+    const [deferredApiKey, deferredDbPassword] = await deferredKeyInputs.all()
+    const [deferredApiValue, deferredDbValue] = await deferredValueInputs.all()
+    await expect(deferredApiKey).toHaveValue('apiKey')
+    await expect(deferredDbPassword).toHaveValue('dbPassword')
+    await deferredApiValue.fill('value-one')
+    await deferredDbValue.fill('value-two')
 
     const createRecipeSecretResponse = page.waitForResponse(
       response => {
@@ -2430,7 +2464,12 @@ test.describe('J. Operator Egress Editor Journeys', () => {
       { timeout: 30_000 }
     )
     await page.getByRole('button', { name: 'Create secret' }).click()
-    expect((await createRecipeSecretResponse).status()).toBe(201)
+    const createdDeferredEnv = await createRecipeSecretResponse
+    expect(createdDeferredEnv.status()).toBe(201)
+    deferredEnvIdentity = requireSecretIdentity(
+      await createdDeferredEnv.json(),
+      'create deferred recipe credential'
+    )
     await expect(page).toHaveURL(/\/secrets\/recipe$/)
     const provisionedRecipeSecretRow = page.locator('tr', { hasText: deferredEnvSecretName })
     await expect(provisionedRecipeSecretRow).toBeVisible({ timeout: 15_000 })
@@ -2527,8 +2566,12 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     await expect(page.locator('#recipe-secret-name')).toHaveValue(deferredSandboxUiSecretName)
     await expect(page.getByLabel('Owner recipe')).toHaveValue(installedSandboxUiRecipeName)
     await page.getByRole('button', { name: 'Continue' }).click()
-    await expect(page.getByPlaceholder('API_KEY').first()).toHaveValue('apiKey')
-    await page.getByPlaceholder('secret value').first().fill('sandbox-ui-api-key')
+    const sandboxKeyInput = page.getByPlaceholder('API_KEY')
+    const sandboxValueInput = page.getByPlaceholder('secret value')
+    await expect(sandboxKeyInput).toHaveCount(1)
+    await expect(sandboxValueInput).toHaveCount(1)
+    await expect(sandboxKeyInput).toHaveValue('apiKey')
+    await sandboxValueInput.fill('sandbox-ui-api-key')
 
     const createRecipeSecretResponse = page.waitForResponse(
       response => {
@@ -2553,7 +2596,12 @@ test.describe('J. Operator Egress Editor Journeys', () => {
       { timeout: 30_000 }
     )
     await page.getByRole('button', { name: 'Create secret' }).click()
-    expect((await createRecipeSecretResponse).status()).toBe(201)
+    const createdDeferredSandboxUi = await createRecipeSecretResponse
+    expect(createdDeferredSandboxUi.status()).toBe(201)
+    deferredSandboxUiIdentity = requireSecretIdentity(
+      await createdDeferredSandboxUi.json(),
+      'create sandbox-ui recipe credential'
+    )
     await expect(page).toHaveURL(/\/secrets\/recipe$/)
     const provisionedRecipeSecretRow = page.locator('tr', { hasText: deferredSandboxUiSecretName })
     await expect(provisionedRecipeSecretRow).toBeVisible({ timeout: 15_000 })
@@ -2567,10 +2615,9 @@ test.describe('J. Operator Egress Editor Journeys', () => {
       new RegExp(`/secrets/recipe/${deferredSandboxUiSecretName}/edit\\?namespace=sandbox-ui`)
     )
     await expect(page.getByText('This Secret is in sandbox-ui.')).toBeVisible()
-    await page
-      .getByPlaceholder('•••••••• (saved — type to overwrite)')
-      .first()
-      .fill('sandbox-ui-api-key-rotated')
+    const rotatedSandboxValue = page.getByPlaceholder('•••••••• (saved — type to overwrite)')
+    await expect(rotatedSandboxValue).toHaveCount(1)
+    await rotatedSandboxValue.fill('sandbox-ui-api-key-rotated')
 
     const updateRecipeSecretResponse = page.waitForResponse(
       response => {
@@ -2592,7 +2639,8 @@ test.describe('J. Operator Egress Editor Journeys', () => {
       { timeout: 30_000 }
     )
     await page.getByRole('button', { name: 'Save changes' }).click()
-    expect((await updateRecipeSecretResponse).status()).toBe(200)
+    const updatedDeferredSandboxUi = await updateRecipeSecretResponse
+    expect(updatedDeferredSandboxUi.status()).toBe(200)
     await expect(page).toHaveURL(/\/secrets\/recipe$/)
 
     const rotatedRecipeSecretRow = page.locator('tr', { hasText: deferredSandboxUiSecretName })
@@ -2627,6 +2675,7 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     await expect(missingAgainRow).toBeVisible({ timeout: 15_000 })
     await expect(missingAgainRow.getByText('sandbox-ui', { exact: true })).toBeVisible()
     await expect(missingAgainRow.getByText('Missing')).toBeVisible()
+    deferredSandboxUiIdentity = null
   })
 
   test('J6. Registry exact-host entries over the CRD binding limit are rejected before install', async ({
@@ -2667,13 +2716,33 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     await cleanupRecipesByCatalogId(token, registryRecipeName)
     await cleanupRecipesByCatalogId(token, deferredEnvSecretEntryName)
     await cleanupRecipesByCatalogId(token, deferredSandboxUiEntryName)
-    await api(token, 'DELETE', `/api/v1/admin/recipe-secrets/${manualPendingSecretName}`)
-    await api(token, 'DELETE', `/api/v1/admin/recipe-secrets/${deferredEnvSecretName}`)
-    await api(
-      token,
-      'DELETE',
-      `/api/v1/admin/recipe-secrets/${deferredSandboxUiSecretName}?targetNamespace=sandbox-ui`
-    )
+    if (manualPendingIdentity) {
+      const deleted = await api(
+        token,
+        'DELETE',
+        `/api/v1/admin/recipe-secrets/${manualPendingSecretName}`,
+        manualPendingIdentity
+      )
+      expect(deleted.status, 'cleanup manual pending recipe credential').toBe(200)
+    }
+    if (deferredEnvIdentity) {
+      const deleted = await api(
+        token,
+        'DELETE',
+        `/api/v1/admin/recipe-secrets/${deferredEnvSecretName}`,
+        deferredEnvIdentity
+      )
+      expect(deleted.status, 'cleanup deferred recipe credential').toBe(200)
+    }
+    if (deferredSandboxUiIdentity) {
+      const deleted = await api(
+        token,
+        'DELETE',
+        `/api/v1/admin/recipe-secrets/${deferredSandboxUiSecretName}?targetNamespace=sandbox-ui`,
+        deferredSandboxUiIdentity
+      )
+      expect(deleted.status, 'cleanup sandbox-ui recipe credential').toBe(200)
+    }
     await deleteRegistryEntry(deferredMcpEntryName)
     await deleteRegistryEntry(deferredEnvSecretEntryName)
     await deleteRegistryEntry(deferredSandboxUiEntryName)

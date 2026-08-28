@@ -2,6 +2,46 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: workflowrecipes.clerum.io
+  annotations:
+    clerum.io/secret-reference-contract: |-
+      {
+        "version": 1,
+        "plural": "workflowrecipes",
+        "fields": [
+          {
+            "path": "spec.agent.secretRef",
+            "namespaceBinding": "reference-value"
+          },
+          {
+            "path": "spec.steps[].run.capabilities.secrets[].secretRef",
+            "namespaceBinding": "workflow-recipe"
+          },
+          {
+            "path": "spec.workloads[].envSecret",
+            "namespaceBinding": "workflow-workload"
+          },
+          {
+            "path": "spec.workloads[].imagePullSecrets",
+            "namespaceBinding": "workflow-workload"
+          },
+          {
+            "path": "spec.oauthClients[].clientIdRef",
+            "namespaceBinding": "workflow-recipe"
+          },
+          {
+            "path": "spec.oauthClients[].clientSecretRef",
+            "namespaceBinding": "workflow-recipe"
+          },
+          {
+            "path": "spec.webhooks[].verification.secretRef",
+            "namespaceBinding": "workflow-recipe"
+          },
+          {
+            "path": "spec.webhooks[].verification.setupHandshake.secretRef",
+            "namespaceBinding": "workflow-recipe"
+          }
+        ]
+      }
   labels:
     app.kubernetes.io/name: workflowrecipe
     app.kubernetes.io/part-of: clerum
@@ -396,6 +436,9 @@ spec:
                                     secretRef:
                                       type: object
                                       required: [name, key]
+                                      description: >-
+                                        Reference to a Secret in the recipe namespace
+                                        containing the snippet capability value.
                                       properties:
                                         name:
                                           type: string
