@@ -174,10 +174,6 @@ instead of inventing local equivalents. The current exported set is:
 | `TextInput`        | `dense` + native `<input>` props                                 |
 | `ToastStack`       | `items: ToastMessage[]`                                          |
 
-Button-, menu-, navigation-, and option-like UI must also reuse `IconButton`,
-`TabButton`, `MenuItem`, `NavItem`, `Pill`, and `SelectableOption` from this
-same export boundary rather than recreating them in a page.
-
 Do not recreate equivalents inline. If a real new common control is needed, add it under `src/components/Common/<Component>/index.tsx` with colocated `types.ts`, then re-export it from `src/components/Common/index.ts` — not as a one-off in a page file.
 
 ## 5. Where pages live
