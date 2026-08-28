@@ -147,7 +147,8 @@ function safePathDescriptors(value: unknown): PublicPathDescriptor[] | undefined
 
 export function sanitizeControlApiPublicError(
   error: unknown,
-  propagatedStatuses: ReadonlySet<number>
+  propagatedStatuses: ReadonlySet<number>,
+  fallbackCorrelationId = ''
 ): SanitizedControlApiPublicError | null {
   if (!(error instanceof ControlApiError) || !propagatedStatuses.has(error.status)) return null
   const rawBody =
@@ -171,9 +172,12 @@ export function sanitizeControlApiPublicError(
     rawEnvelope && typeof (rawEnvelope as { correlationId?: unknown }).correlationId === 'string'
       ? String((rawEnvelope as { correlationId: string }).correlationId)
       : ''
+  const safeFallbackCorrelationId = /^[A-Za-z0-9_-]{1,128}$/.test(fallbackCorrelationId)
+    ? fallbackCorrelationId
+    : ''
   const correlationId = /^[A-Za-z0-9_-]{1,128}$/.test(rawCorrelationId)
     ? rawCorrelationId
-    : randomUUID()
+    : safeFallbackCorrelationId || randomUUID()
   const retryable = [408, 425, 429, 502, 503, 504].includes(error.status)
   const rawDetails =
     rawEnvelope && typeof (rawEnvelope as { details?: unknown }).details === 'object'

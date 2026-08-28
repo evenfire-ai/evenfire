@@ -66,6 +66,7 @@ function createRelayApp() {
 }
 
 describe('Profile UI public error compatibility', () => {
+  const requestCorrelationId = 'caller-correlation-123'
   const originalControlApiBaseUrl = config.controlApiBaseUrl
   const producer = createControlApiWireProducer()
   let server: Server
@@ -102,12 +103,15 @@ describe('Profile UI public error compatibility', () => {
     'preserves the safe %s producer reason through External REST and Profile UI',
     async (_name, expected) => {
       producer.respondWith(expected.control)
-      const relayed = await request(createRelayApp()).post('/relay')
+      const relayed = await request(createRelayApp())
+        .post('/relay')
+        .set('x-correlation-id', requestCorrelationId)
 
       expect(relayed.status).toBe(expected.control.status)
       expect(relayed.body.error).toMatchObject({
         code: expected.public.code,
         message: expected.public.message,
+        correlationId: requestCorrelationId,
         retryable: true,
       })
 
@@ -134,11 +138,14 @@ describe('Profile UI public error compatibility', () => {
       status: 503,
       body: { error: 'private_database_failure', detail: 'private topology' },
     })
-    const relayed = await request(createRelayApp()).post('/relay')
+    const relayed = await request(createRelayApp())
+      .post('/relay')
+      .set('x-correlation-id', requestCorrelationId)
     expect(relayed.status).toBe(503)
     expect(relayed.body.error).toMatchObject({
       code: 'authority_unavailable',
       message: 'Authorization is temporarily unavailable.',
+      correlationId: requestCorrelationId,
       retryable: true,
     })
     expect(JSON.stringify(relayed.body)).not.toMatch(/private_database_failure|private topology/)
