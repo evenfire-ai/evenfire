@@ -7,8 +7,7 @@ const SAFE_PUBLIC_CORRELATION_ID = /^[A-Za-z0-9_-]{1,128}$/
 export function selectPublicCorrelationId(...candidates: readonly unknown[]): string {
   for (const candidate of candidates) {
     if (typeof candidate !== 'string') continue
-    const value = candidate.trim()
-    if (SAFE_PUBLIC_CORRELATION_ID.test(value)) return value
+    if (SAFE_PUBLIC_CORRELATION_ID.test(candidate)) return candidate
   }
   return randomUUID()
 }
