@@ -3,11 +3,12 @@
 #
 # get/list only — never create, patch, replace, or delete.
 # Classifies by clerum.io/policy-type in {context-allow, rpc-proxy-egress,
-# external-egress}, plus the controller's `repairable` class: managed-by
-# present, policy-type absent, reserved name (ctx-/rpc-egress-/ext-egress-).
-# That last set is what a policy-type-strip corruption looks like; omitting
-# it can print VERDICT=CLEAN while the controller counts those objects and
-# may trip the cap. This is not the full four-lane classifier (reserved
+# external-egress} when managed-by is absent or host-context-controller
+# (#484: exclude only present-and-foreign), plus both controller
+# `repairable` one-marker arms: (1) managed-by present, policy-type absent,
+# reserved name; (2) policy-type present, managed-by absent. Omitting either
+# can print VERDICT=CLEAN while the controller still counts those objects
+# and may trip the cap. This is not the full four-lane classifier (reserved
 # names without owner labels can over-count vs the controller).
 #
 # CONTEXT_MAPPER_* knobs are read from the live host-context-controller
@@ -35,8 +36,10 @@
 # host-context-controller/src/networkPolicyReconciler.ts and the compiled
 # defaults in host-context-controller/src/config.ts (absolute 10, percent
 # 20, rpc-proxy namespace). If you change either side, change this script.
-# Typed membership requires clerum.io/managed-by=host-context-controller
-# so a foreign-owned typed policy cannot inflate listed/orphans (#484).
+# Typed membership excludes clerum.io/managed-by when it is present and
+# not host-context-controller so a foreign-owned typed policy cannot
+# inflate listed/orphans (#484). A typed policy with managed-by absent
+# stays eligible — that is the controller's other repairable arm.
 #
 # Double-samples 90s apart. Adjudicates only when the desired Context +
 # McpServer identity set is identical across samples; otherwise
@@ -126,17 +129,19 @@ require_namespace "${MAPPER_NS}"
 require_namespace "${HOST_NS}"
 require_namespace "${RPC_NS}"
 
-# Typed policy-type membership, plus the reserved-name repairable class
-# (managed-by present, policy-type absent). Shared by listed + orphan filters.
+# Typed membership (type in set and managed-by null-or-HCC) plus the
+# reserved-name untyped repairable class (managed-by present, type absent).
+# Shared by listed + orphan filters.
 CENSUS_MANAGED_JQ='
   def policy_type: .metadata.labels["clerum.io/policy-type"];
+  def managed_by: .metadata.labels["clerum.io/managed-by"];
   def is_typed:
-    .metadata.labels["clerum.io/managed-by"] == "host-context-controller"
-    and (
+    (
       policy_type == "context-allow"
       or policy_type == "rpc-proxy-egress"
       or policy_type == "external-egress"
-    );
+    )
+    and (managed_by == null or managed_by == "host-context-controller");
   def is_untyped_repairable:
     .metadata.labels["clerum.io/managed-by"] == "host-context-controller"
     and (policy_type == null)

@@ -219,6 +219,39 @@ jq -n '
   }
 ' >"${WORKDIR}/np-v5.json"
 
+# V7: member + typed reserved orphan without managed-by (controller
+# repairable arm: type present, managed-by absent, reserved + owner).
+# Pre-fix is_typed required managed-by and printed CLEAN (listed=1).
+jq -n '{
+  items: [
+    {
+      metadata: {
+        uid: "uid-member",
+        namespace: "mcp-server",
+        name: "ctx-alpha-allow",
+        labels: {
+          "clerum.io/managed-by": "host-context-controller",
+          "clerum.io/policy-type": "context-allow",
+          "clerum.io/context": "ctx-alpha",
+          "clerum.io/mcpserver": "srv-a"
+        }
+      }
+    },
+    {
+      metadata: {
+        uid: "uid-repairable-typed",
+        namespace: "mcp-server",
+        name: "ctx-gone-allow",
+        labels: {
+          "clerum.io/policy-type": "context-allow",
+          "clerum.io/context": "ctx-gone",
+          "clerum.io/mcpserver": "srv-gone"
+        }
+      }
+    }
+  ]
+}' >"${WORKDIR}/np-v7.json"
+
 run_census() {
   : >"$CASE_LOG"
   rm -f "${WORKDIR}/call-count-contexts"
@@ -330,6 +363,24 @@ elif [ "$v6_elapsed" -gt 60 ]; then
   fail "SAMPLE_GAP_SEC is honored — run took ${v6_elapsed}s (hardcoded sleep?)"
 else
   pass "SAMPLE_GAP_SEC is honored (no fixed 90s sleep)"
+fi
+
+# V7
+run_census STUB_NP_MAPPER_FIXTURE="${WORKDIR}/np-v7.json"
+if [ "$RC" -ne 0 ]; then
+  fail "typed repairable without managed-by is counted — exit ${RC}; got: $(head -c 400 <<<"$OUT")"
+elif ! grep -Fq 'listed_managed=2' <<<"$OUT" ||
+  ! grep -Fq 'repairable_untyped=0' <<<"$OUT" ||
+  ! grep -Fq 'orphan_count=1' <<<"$OUT"; then
+  fail "typed repairable without managed-by is counted — counters mismatch; got: $(head -c 500 <<<"$OUT")"
+elif ! grep -Fq 'VERDICT=ORPHANS_PRESENT' <<<"$OUT"; then
+  fail "typed repairable without managed-by is counted — missing ORPHANS_PRESENT"
+elif grep -Fq 'VERDICT=CLEAN' <<<"$OUT"; then
+  fail "typed repairable without managed-by is counted — printed CLEAN"
+elif ! grep -Fq $'mcp-server\tctx-gone-allow\tcontext-allow' <<<"$OUT"; then
+  fail "typed repairable without managed-by is counted — TSV line missing; got: $(head -c 500 <<<"$OUT")"
+else
+  pass "typed reserved orphan without managed-by is listed and ORPHANS_PRESENT (RP-495-01)"
 fi
 
 if grep -Eq '(^|[[:space:]])(set|delete|apply|patch|rollout|scale|create|replace|annotate|label|exec|drain|edit|expose)([[:space:]]|$)' "$ALL_LOG"; then
