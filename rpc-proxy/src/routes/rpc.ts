@@ -229,6 +229,14 @@ export function createRpcRouter(): Router {
   // rail as `/rpc/servers`, so it REUSES the `mcp:servers:list` scope (no new
   // scope minted). `userId` is the signed session subject (`auth.sub`), never a
   // body/query param.
+  //
+  // SCOPE NOTE (review R1-SM2, owner decision): `mcp:servers:list` now spans two
+  // result-sets. `/rpc/servers` returns the INVOCABLE set (control-api's
+  // classifier filters via `filterInvocable`); this route returns the CLASSIFIED
+  // set, a strict SUPERSET — it also lists disabled and static-auth servers, with
+  // their authorization state. Not an escalation (the caller's own fleet,
+  // non-secret policy only), but anyone granting this scope should know it now
+  // covers both. See classifyConnector in control-api mcpInvocable.ts.
   router.get(
     '/rpc/connectors',
     requireRpcAuth,

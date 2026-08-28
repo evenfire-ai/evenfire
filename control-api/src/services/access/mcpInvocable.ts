@@ -472,6 +472,21 @@ function deriveNonOauthAuthKind(server: McpServerCR): 'static' | undefined {
  * `no_oauth`, never `authorized`; an OAuth server absent from `grantPresent`
  * (no grant OR a grant-read error, both swallowed fail-closed upstream) is
  * `requires_setup`, never `authorized`.
+ *
+ * SCOPE OF THE TRI-STATE (review R1-SM1/SM2, owner decision): the answer is
+ * "does this connector have a grant?", NOT "can it run right now?". By design
+ * this classifier does NOT apply the viability gates `filterInvocable` uses on
+ * the invocation rail — `spec.enabled === false`, the auth-type allowlist, and
+ * a resolvable transport URL. A disabled or static-auth server stays in the
+ * admin-curated `Context.spec.mcpServers` allowlist (disabling does not prune
+ * it — only deleting does), so it is classified and returned with its real
+ * authorization state rather than dropped. Consequence, accepted here: the
+ * classified set is a strict SUPERSET of `/rpc/servers` (the invocable set), so
+ * the shared `mcp:servers:list` scope now spans two result-sets. This is not a
+ * privilege escalation — it is the caller's own fleet, carrying only non-secret
+ * policy — and the panel exists precisely to show the full fleet with its state
+ * before the user runs anything. A green connector may still be non-invocable;
+ * the panel reports grant state, not runnability.
  */
 function classifyConnector(server: McpServerCR, grantPresent: ReadonlySet<string>): ConnectorEntry {
   const name = String(server.metadata?.name)
