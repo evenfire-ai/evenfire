@@ -333,9 +333,11 @@ export class ResourceService {
     const intent = await persistHostIntent({ plural, action: 'update', namespace: ns, name })
     const readerUid = body.metadata?.uid || undefined
     const readerResourceVersion = body.metadata?.resourceVersion || undefined
-    // With a reader-supplied precondition a retry can never succeed with the
-    // same payload, so the loop collapses to a single attempt.
-    const maxAttempts = readerResourceVersion || readerUid ? 1 : 3
+    // A reader resourceVersion freezes the caller's edit and must not be retried:
+    // re-reading then replaying that stale payload would lose a concurrent update.
+    // A UID alone guards only against same-name delete/recreate, so it keeps the
+    // legacy bounded retry contract while every fresh read revalidates identity.
+    const maxAttempts = readerResourceVersion ? 1 : 3
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const current = (
         attempt === 1 && options?.preReadCurrent
@@ -382,7 +384,7 @@ export class ResourceService {
         metadata: {
           name,
           namespace: ns,
-          ...(readerUid && current.metadata?.uid ? { uid: current.metadata.uid } : {}),
+          ...(readerUid ? { uid: readerUid } : {}),
           ...(current.metadata?.labels && { labels: current.metadata.labels }),
           ...(sanitizedMetadata?.labels && { labels: sanitizedMetadata.labels }),
           ...(annotations && { annotations }),

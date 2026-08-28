@@ -4,7 +4,7 @@ import {
   REGISTRY_SPEC_DIGEST_ANNOTATION,
   type RegistryMutationDesired,
   type RegistryResourceSnapshot,
-  classifyCreatedRegistryMutationReadback,
+  classifyRegistryAssociationReadback,
   classifyRegistryMutationReadback,
   registrySpecDigest,
 } from '../src/services/registryMutation.js'
@@ -57,6 +57,16 @@ describe('registry mutation readback classifier', () => {
         desired,
         current: current({}),
         operationId,
+      })
+    ).toBe('ambiguous')
+  })
+
+  it('keeps a stable unchanged association ambiguous until the caller fences it', () => {
+    expect(
+      classifyRegistryAssociationReadback({
+        before,
+        current: current({}),
+        isCommitted: spec => spec.image === 'plugin:new',
       })
     ).toBe('ambiguous')
   })
@@ -138,57 +148,6 @@ describe('registry mutation readback classifier', () => {
         before,
         desired,
         current: current({ metadata, spec: overrides.spec }),
-        operationId,
-      })
-    ).toBe('ambiguous')
-  })
-})
-
-describe('created resource readback classifier', () => {
-  const desiredSpec = { image: 'example:new', transport: { port: 3000 } }
-  const desired = {
-    spec: desiredSpec,
-    metadata: {
-      labels: { 'clerum.io/managed-by': 'control-api' },
-      annotations: {
-        [REGISTRY_OPERATION_ID_ANNOTATION]: operationId,
-        [REGISTRY_SPEC_DIGEST_ANNOTATION]: registrySpecDigest(desiredSpec),
-      },
-    },
-    specDigest: registrySpecDigest(desiredSpec),
-  }
-
-  it('requires operation identity, exact intent digest, and server identity', () => {
-    expect(
-      classifyCreatedRegistryMutationReadback({
-        current: {
-          metadata: {
-            uid: 'uid-created',
-            resourceVersion: '1',
-            labels: desired.metadata.labels,
-            annotations: desired.metadata.annotations,
-          },
-          spec: desiredSpec,
-        },
-        desired,
-        operationId,
-      })
-    ).toBe('committed')
-    expect(
-      classifyCreatedRegistryMutationReadback({
-        current: {
-          metadata: {
-            uid: 'uid-created',
-            resourceVersion: '1',
-            labels: desired.metadata.labels,
-            annotations: {
-              ...desired.metadata.annotations,
-              [REGISTRY_OPERATION_ID_ANNOTATION]: 'other',
-            },
-          },
-          spec: desiredSpec,
-        },
-        desired,
         operationId,
       })
     ).toBe('ambiguous')

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { MockGateway } from './mockGateway.js'
 
+const b64 = (value: string): string => Buffer.from(value).toString('base64')
+
 describe('MockGateway Kubernetes identity contract', () => {
   it('returns the server-assigned identity from a mutation', async () => {
     const gateway = new MockGateway('mcp-server')
@@ -195,6 +197,210 @@ describe('MockGateway Kubernetes identity contract', () => {
       },
       data: { FIRST: 'after', KEEP: 'untouched' },
     })
+  })
+
+  it('materializes stringData over data as base64 on Secret create', async () => {
+    const gateway = new MockGateway('mcp-server')
+
+    const created = await gateway.createSecret({
+      name: 'credentials',
+      namespace: 'mcp-server',
+      type: 'Opaque',
+      data: { KEEP: b64('encoded'), OVERRIDE: b64('stale') },
+      stringData: { OVERRIDE: 'plain' },
+    })
+
+    expect(created).toMatchObject({
+      data: { KEEP: b64('encoded'), OVERRIDE: b64('plain') },
+    })
+    expect(created).not.toHaveProperty('stringData')
+
+    const stored = await gateway.getSecret('credentials', 'mcp-server')
+    expect(stored).toMatchObject({ data: { KEEP: b64('encoded'), OVERRIDE: b64('plain') } })
+    expect(stored).not.toHaveProperty('stringData')
+  })
+
+  it('materializes stringData over data as base64 on Secret replace', async () => {
+    const gateway = new MockGateway('mcp-server')
+    gateway.seedSecret('credentials', 'mcp-server', {
+      type: 'Opaque',
+      data: { PRIOR: b64('prior') },
+    })
+
+    const updated = await gateway.updateSecret({
+      name: 'credentials',
+      namespace: 'mcp-server',
+      type: 'Opaque',
+      data: { DATA_ONLY: b64('encoded'), OVERRIDE: b64('stale') },
+      stringData: { OVERRIDE: 'plain' },
+    })
+
+    expect(updated).toMatchObject({
+      data: { DATA_ONLY: b64('encoded'), OVERRIDE: b64('plain') },
+    })
+    expect(updated).not.toHaveProperty('stringData')
+  })
+
+  it('applies merge-patch deletions before materializing stringData over data', async () => {
+    const gateway = new MockGateway('mcp-server')
+    gateway.seedSecret('credentials', 'mcp-server', {
+      type: 'Opaque',
+      labels: { keep: 'yes', remove: 'yes' },
+      annotations: { 'safe.example/keep': 'yes', 'safe.example/remove': 'yes' },
+      data: { KEEP: b64('keep'), REMOVE: b64('remove'), OVERRIDE: b64('stale') },
+    })
+
+    const merged = await gateway.mergeSecret({
+      name: 'credentials',
+      namespace: 'mcp-server',
+      labels: { remove: null },
+      annotations: { 'safe.example/remove': null },
+      data: { REMOVE: null, DATA_ONLY: b64('encoded'), OVERRIDE: b64('stale-data') },
+      stringData: { DATA_ONLY: 'plain', OVERRIDE: 'plain-override', UNUSED: null },
+    } as unknown)
+
+    expect(merged).toMatchObject({
+      labels: { keep: 'yes' },
+      annotations: { 'safe.example/keep': 'yes' },
+      data: {
+        KEEP: b64('keep'),
+        DATA_ONLY: b64('plain'),
+        OVERRIDE: b64('plain-override'),
+      },
+    })
+    expect(merged.data).not.toHaveProperty('REMOVE')
+    expect(merged.data).not.toHaveProperty('UNUSED')
+    expect(merged).not.toHaveProperty('stringData')
+
+    const stored = await gateway.getSecret('credentials', 'mcp-server')
+    expect(stored).toMatchObject({
+      metadata: {
+        labels: { keep: 'yes' },
+        annotations: { 'safe.example/keep': 'yes' },
+      },
+      data: {
+        KEEP: b64('keep'),
+        DATA_ONLY: b64('plain'),
+        OVERRIDE: b64('plain-override'),
+      },
+    })
+    expect(stored.data).not.toHaveProperty('REMOVE')
+    expect(stored.data).not.toHaveProperty('UNUSED')
+    expect(stored).not.toHaveProperty('stringData')
+  })
+
+  it('preserves an identical future clerum.io annotation through a Secret merge', async () => {
+    const gateway = new MockGateway('mcp-server')
+    const futureKey = 'clerum.io/future-controller-state'
+    const futureValue = 'opaque-v1'
+    const constraints = { allowExistingPlatformAnnotationKeys: [futureKey] }
+    gateway.seedSecret('credentials', 'mcp-server', {
+      type: 'Opaque',
+      annotations: { [futureKey]: futureValue },
+    })
+
+    await expect(
+      gateway.mergeSecret(
+        {
+          name: 'credentials',
+          namespace: 'mcp-server',
+          annotations: { [futureKey]: futureValue },
+          stringData: { VALUE: 'rotated' },
+        },
+        constraints
+      )
+    ).resolves.toMatchObject({ annotations: { [futureKey]: futureValue } })
+
+    await expect(gateway.getSecret('credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: { annotations: { [futureKey]: futureValue } },
+    })
+  })
+
+  it('rejects changed or injected future clerum.io annotations after reading a Secret', async () => {
+    const gateway = new MockGateway('mcp-server')
+    const futureKey = 'clerum.io/future-controller-state'
+    const constraints = { allowExistingPlatformAnnotationKeys: [futureKey] }
+    gateway.seedSecret('credentials', 'mcp-server', {
+      type: 'Opaque',
+      annotations: { [futureKey]: 'opaque-v1' },
+    })
+
+    await expect(
+      gateway.mergeSecret(
+        {
+          name: 'credentials',
+          namespace: 'mcp-server',
+          annotations: { [futureKey]: 'caller-controlled' },
+        },
+        constraints
+      )
+    ).rejects.toThrow()
+
+    await expect(
+      gateway.mergeSecret(
+        {
+          name: 'credentials',
+          namespace: 'mcp-server',
+          annotations: { [futureKey]: null },
+        } as unknown,
+        constraints
+      )
+    ).rejects.toThrow()
+
+    await expect(
+      gateway.mergeSecret(
+        {
+          name: 'credentials',
+          namespace: 'mcp-server',
+          annotations: { 'clerum.io/another-future-key': 'caller-controlled' },
+        },
+        constraints
+      )
+    ).rejects.toThrow()
+
+    await expect(gateway.getSecret('credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: { annotations: { [futureKey]: 'opaque-v1' } },
+    })
+  })
+
+  it('applies the current type policy when a Secret merge preserves its type', async () => {
+    const gateway = new MockGateway('mcp-server')
+    gateway.seedSecret('credentials', 'mcp-server', {
+      type: 'kubernetes.io/service-account-token',
+    })
+
+    await expect(
+      gateway.mergeSecret({
+        name: 'credentials',
+        namespace: 'mcp-server',
+        stringData: { VALUE: 'rotated' },
+      })
+    ).rejects.toThrow(/Secret type/)
+  })
+
+  it('does not let an explicit safe type mask a controller-managed live type', async () => {
+    const gateway = new MockGateway('mcp-server')
+    gateway.seedSecret('credentials', 'mcp-server', {
+      type: 'kubernetes.io/service-account-token',
+    })
+
+    await expect(
+      gateway.updateSecret({
+        name: 'credentials',
+        namespace: 'mcp-server',
+        type: 'Opaque',
+        stringData: { VALUE: 'rotated' },
+      })
+    ).rejects.toThrow(/managed by Kubernetes/)
+
+    await expect(
+      gateway.mergeSecret({
+        name: 'credentials',
+        namespace: 'mcp-server',
+        type: 'Opaque',
+        stringData: { VALUE: 'rotated' },
+      })
+    ).rejects.toThrow(/managed by Kubernetes/)
   })
 
   it('stores a dynamic map key as data without changing the object prototype', async () => {

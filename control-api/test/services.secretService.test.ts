@@ -555,6 +555,18 @@ const FORBIDDEN_SECRET_TYPES: readonly string[] = [
   'helm.sh/release.v1',
 ]
 
+const NON_MUTABLE_PRESERVED_SECRET_TYPES: readonly string[] = [
+  'kubernetes.io/service-account-token',
+  'bootstrap.kubernetes.io/token',
+  'helm.sh/release.v1',
+]
+
+const MUTABLE_PRESERVED_SECRET_TYPES: readonly string[] = [
+  'kubernetes.io/basic-auth',
+  'kubernetes.io/ssh-auth',
+  'example.com/custom',
+]
+
 // Annotation keys that must be stripped/rejected on write (infra tier — always blocked).
 const DANGEROUS_ANNOTATION_KEYS: readonly string[] = [
   'kubectl.kubernetes.io/last-applied-configuration',
@@ -854,17 +866,66 @@ describe('SecretService — preserved Secret state is constrained before mutatio
     expect(body).not.toHaveProperty('metadata.annotations')
   })
 
-  it('rejects update when an omitted type preserves a forbidden existing type', async () => {
+  it.each(NON_MUTABLE_PRESERVED_SECRET_TYPES)(
+    'rejects update when an omitted type preserves the managed %s type',
+    async type => {
+      coreApi.readNamespacedSecret.mockResolvedValueOnce({
+        metadata: {},
+        type,
+      })
+
+      await expect(
+        svc.updateSecret({ name: 's', namespace: 'test-ns', stringData: { k: 'v' } })
+      ).rejects.toBeInstanceOf(InvalidSecretTypeError)
+      expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    {
+      operation: 'update',
+      call: () =>
+        svc.updateSecret({
+          name: 's',
+          namespace: 'test-ns',
+          type: 'Opaque',
+          stringData: { k: 'v' },
+        }),
+      write: () => coreApi.replaceNamespacedSecret,
+    },
+    {
+      operation: 'merge',
+      call: () =>
+        svc.mergeSecret({
+          name: 's',
+          namespace: 'test-ns',
+          type: 'Opaque',
+          stringData: { k: 'v' },
+        }),
+      write: () => coreApi.patchNamespacedSecret,
+    },
+  ])('rejects $operation when an explicit safe type masks a managed live type', async testCase => {
     coreApi.readNamespacedSecret.mockResolvedValueOnce({
       metadata: {},
       type: 'kubernetes.io/service-account-token',
     })
 
-    await expect(
-      svc.updateSecret({ name: 's', namespace: 'test-ns', stringData: { k: 'v' } })
-    ).rejects.toBeInstanceOf(InvalidSecretTypeError)
-    expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+    await expect(testCase.call()).rejects.toBeInstanceOf(InvalidSecretTypeError)
+    expect(testCase.write()).not.toHaveBeenCalled()
   })
+
+  it.each(MUTABLE_PRESERVED_SECRET_TYPES)(
+    'allows update when an omitted type preserves the non-managed %s type',
+    async type => {
+      coreApi.readNamespacedSecret.mockResolvedValueOnce({ metadata: {}, type })
+
+      await expect(
+        svc.updateSecret({ name: 's', namespace: 'test-ns', stringData: { k: 'v' } })
+      ).resolves.toMatchObject({ name: 's', namespace: 'test-ns' })
+      expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledOnce()
+      expect(coreApi.replaceNamespacedSecret.mock.calls[0][0].body.type).toBe(type)
+    }
+  )
 
   it('allows update when omitted annotations preserve infrastructure metadata', async () => {
     coreApi.readNamespacedSecret.mockResolvedValueOnce({
@@ -878,16 +939,76 @@ describe('SecretService — preserved Secret state is constrained before mutatio
     expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledOnce()
   })
 
-  it('rejects merge when the preserved existing type is forbidden', async () => {
+  it.each(MUTABLE_PRESERVED_SECRET_TYPES)(
+    'allows merge when an omitted type preserves the non-managed %s type',
+    async type => {
+      coreApi.readNamespacedSecret.mockResolvedValueOnce({ metadata: {}, type })
+
+      await expect(
+        svc.mergeSecret({ name: 's', namespace: 'test-ns', stringData: { k: 'v' } })
+      ).resolves.toMatchObject({ name: 's', namespace: 'test-ns' })
+      expect(coreApi.patchNamespacedSecret).toHaveBeenCalledOnce()
+      expect(coreApi.patchNamespacedSecret.mock.calls[0][0].body.type).toBeUndefined()
+    }
+  )
+
+  it.each([
+    { kind: 'infrastructure', key: 'meta.helm.sh/release-name' },
+    { kind: 'platform', key: 'clerum.io/catalog-id' },
+  ])('allows update to preserve an unchanged live $kind annotation', async ({ key }) => {
+    const annotations = { [key]: 'server-owned' }
     coreApi.readNamespacedSecret.mockResolvedValueOnce({
-      metadata: {},
-      type: 'kubernetes.io/ssh-auth',
+      metadata: { annotations, resourceVersion: '15' },
+      type: 'Opaque',
     })
 
     await expect(
-      svc.mergeSecret({ name: 's', namespace: 'test-ns', stringData: { k: 'v' } })
-    ).rejects.toBeInstanceOf(InvalidSecretTypeError)
-    expect(coreApi.patchNamespacedSecret).not.toHaveBeenCalled()
+      svc.updateSecret({
+        name: 's',
+        namespace: 'test-ns',
+        annotations: { ...annotations },
+        stringData: { k: 'v' },
+      })
+    ).resolves.toMatchObject({ name: 's', namespace: 'test-ns' })
+
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalledWith({ namespace: 'test-ns', name: 's' })
+    expect(coreApi.replaceNamespacedSecret.mock.calls[0][0].body.metadata.annotations).toEqual(
+      annotations
+    )
+  })
+
+  it.each([
+    { kind: 'introduces', key: 'meta.helm.sh/release-name', existing: {}, requested: 'release-a' },
+    {
+      kind: 'changes',
+      key: 'meta.helm.sh/release-name',
+      existing: { 'meta.helm.sh/release-name': 'release-a' },
+      requested: 'release-b',
+    },
+    { kind: 'introduces', key: 'clerum.io/catalog-id', existing: {}, requested: 'catalog-a' },
+    {
+      kind: 'changes',
+      key: 'clerum.io/catalog-id',
+      existing: { 'clerum.io/catalog-id': 'catalog-a' },
+      requested: 'catalog-b',
+    },
+  ])('rejects update that $kind a reserved annotation', async ({ key, existing, requested }) => {
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      metadata: { annotations: existing, resourceVersion: '16' },
+      type: 'Opaque',
+    })
+
+    await expect(
+      svc.updateSecret({
+        name: 's',
+        namespace: 'test-ns',
+        annotations: { [key]: requested },
+        stringData: { k: 'v' },
+      })
+    ).rejects.toBeInstanceOf(DangerousAnnotationError)
+
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalledWith({ namespace: 'test-ns', name: 's' })
+    expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
   })
 
   it('preserves unknown platform metadata without locking data-only rotation', async () => {
@@ -939,7 +1060,7 @@ describe('SecretService — forbidden Secret types never reach the apiserver', (
       name: 'updateSecret',
       call: type =>
         svc.updateSecret({ name: 's', namespace: 'test-ns', type, stringData: { k: 'v' } }),
-      apiSurface: ['readNamespacedSecret', 'replaceNamespacedSecret'],
+      apiSurface: ['replaceNamespacedSecret'],
     },
     {
       name: 'mergeSecret',
@@ -983,7 +1104,7 @@ describe('SecretService — forbidden Secret types never reach the apiserver', (
   })
 })
 
-describe('SecretService — dangerous annotations never reach the apiserver', () => {
+describe('SecretService — dangerous annotations never reach a mutation endpoint', () => {
   let coreApi: CoreApiMock
   let svc: SecretService
 
@@ -995,26 +1116,29 @@ describe('SecretService — dangerous annotations never reach the apiserver', ()
   const writeOps: ReadonlyArray<{
     name: string
     call: (annotations: Record<string, string>) => Promise<unknown>
-    apiSurface: (keyof CoreApiMock)[]
+    writeSurface: keyof CoreApiMock
+    readsLiveSecret: boolean
   }> = [
     {
       name: 'createSecret',
       call: annotations =>
         svc.createSecret({ name: 's', namespace: 'test-ns', annotations, stringData: { k: 'v' } }),
-      apiSurface: ['createNamespacedSecret'],
+      writeSurface: 'createNamespacedSecret',
+      readsLiveSecret: false,
     },
     {
       name: 'updateSecret',
       call: annotations =>
         svc.updateSecret({ name: 's', namespace: 'test-ns', annotations, stringData: { k: 'v' } }),
-      apiSurface: ['readNamespacedSecret', 'replaceNamespacedSecret'],
+      writeSurface: 'replaceNamespacedSecret',
+      readsLiveSecret: true,
     },
   ]
 
   for (const op of writeOps) {
     describe(op.name, () => {
       for (const badKey of DANGEROUS_ANNOTATION_KEYS) {
-        it(`rejects annotation "${badKey}" with a 400 and never calls the apiserver`, async () => {
+        it(`rejects annotation "${badKey}" with a 400 and never calls a mutation endpoint`, async () => {
           const err = await op.call({ [badKey]: 'value' }).then(
             () => {
               throw new Error('expected the write to reject')
@@ -1023,17 +1147,15 @@ describe('SecretService — dangerous annotations never reach the apiserver', ()
           )
           expect(err).toBeInstanceOf(DangerousAnnotationError)
           expect((err as DangerousAnnotationError).status).toBe(400)
-          for (const surface of op.apiSurface) {
-            expect(coreApi[surface]).not.toHaveBeenCalled()
-          }
+          expect(coreApi[op.writeSurface]).not.toHaveBeenCalled()
+          if (op.readsLiveSecret) expect(coreApi.readNamespacedSecret).toHaveBeenCalledOnce()
         })
       }
 
       for (const safeKey of SAFE_ANNOTATION_KEYS) {
         it(`lets safe annotation "${safeKey}" through to the apiserver`, async () => {
           await op.call({ [safeKey]: 'value' })
-          const writeSurface = op.apiSurface[op.apiSurface.length - 1]
-          expect(coreApi[writeSurface]).toHaveBeenCalledOnce()
+          expect(coreApi[op.writeSurface]).toHaveBeenCalledOnce()
         })
       }
     })

@@ -253,6 +253,7 @@ describe('ResourceService.updateResource — AP-6 reader-version precondition', 
   function makeCustomApi(
     overrides: {
       currentAnnotations?: Record<string, string>
+      currentUid?: string
       replace?: ReturnType<typeof vi.fn>
     } = {}
   ) {
@@ -263,6 +264,7 @@ describe('ResourceService.updateResource — AP-6 reader-version precondition', 
           namespace: 'mcp-host',
           resourceVersion: '11',
           ...(overrides.currentAnnotations && { annotations: overrides.currentAnnotations }),
+          ...(overrides.currentUid && { uid: overrides.currentUid }),
         },
         spec: { contextRef: 'live' },
       }),
@@ -275,14 +277,14 @@ describe('ResourceService.updateResource — AP-6 reader-version precondition', 
     }
   }
 
-  it('uses the caller-provided resourceVersion as the replace precondition (not the server current one)', async () => {
-    const customApi = makeCustomApi()
+  it('uses the caller-provided identity and resourceVersion in the replacement', async () => {
+    const customApi = makeCustomApi({ currentUid: 'uid-reader' })
     const service = new ResourceService(customApi as never, 'control-plane', { hosts: 'mcp-host' })
 
     await service.updateResource(
       'hosts',
       'host-a',
-      { metadata: { resourceVersion: '10' }, spec: { contextRef: 'edited' } },
+      { metadata: { uid: 'uid-reader', resourceVersion: '10' }, spec: { contextRef: 'edited' } },
       'mcp-host'
     )
 
@@ -291,18 +293,22 @@ describe('ResourceService.updateResource — AP-6 reader-version precondition', 
     // The precondition is the READER's version ('10'), not the fresher
     // server version ('11') harvested by the internal read.
     expect(replaceArgs.body.metadata.resourceVersion).toBe('10')
+    expect(replaceArgs.body.metadata.uid).toBe('uid-reader')
   })
 
   it('surfaces a 409 as K8sConflictError WITHOUT retrying when the reader version is stale', async () => {
     const replace = vi.fn().mockRejectedValue(makeConflictError())
-    const customApi = makeCustomApi({ replace })
+    const customApi = makeCustomApi({ replace, currentUid: 'uid-reader' })
     const service = new ResourceService(customApi as never, 'control-plane', { hosts: 'mcp-host' })
 
     await expect(
       service.updateResource(
         'hosts',
         'host-a',
-        { metadata: { resourceVersion: '10' }, spec: { contextRef: 'stale-edit' } },
+        {
+          metadata: { uid: 'uid-reader', resourceVersion: '10' },
+          spec: { contextRef: 'stale-edit' },
+        },
         'mcp-host'
       )
     ).rejects.toBeInstanceOf(K8sConflictError)
@@ -310,6 +316,78 @@ describe('ResourceService.updateResource — AP-6 reader-version precondition', 
     // No retry loop: exactly one read + one replace attempt. Retrying would
     // re-apply the same stale payload over the concurrent write.
     expect(customApi.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    expect(replace).toHaveBeenCalledTimes(1)
+    expect(replace.mock.calls[0][0].body.metadata).toMatchObject({
+      uid: 'uid-reader',
+      resourceVersion: '10',
+    })
+  })
+
+  it('retries a UID-only legacy write after a 409 while the refetched object keeps that UID', async () => {
+    const customApi = {
+      getNamespacedCustomObject: vi
+        .fn()
+        .mockResolvedValueOnce({
+          metadata: { uid: 'uid-original', resourceVersion: '1' },
+          spec: {},
+        })
+        .mockResolvedValueOnce({
+          metadata: { uid: 'uid-original', resourceVersion: '2' },
+          spec: {},
+        }),
+      replaceNamespacedCustomObject: vi
+        .fn()
+        .mockRejectedValueOnce(makeConflictError())
+        .mockResolvedValueOnce({ metadata: { uid: 'uid-original', resourceVersion: '3' } }),
+      listNamespacedCustomObject: vi.fn(),
+    }
+    const service = new ResourceService(customApi as never, 'control-plane', { hosts: 'mcp-host' })
+
+    await service.updateResource(
+      'hosts',
+      'host-a',
+      { metadata: { uid: 'uid-original' }, spec: { contextRef: 'edited' } },
+      'mcp-host'
+    )
+
+    expect(customApi.getNamespacedCustomObject).toHaveBeenCalledTimes(2)
+    const attempts = customApi.replaceNamespacedCustomObject.mock.calls.map(
+      call => call[0].body.metadata
+    )
+    expect(attempts).toEqual([
+      expect.objectContaining({ uid: 'uid-original', resourceVersion: '1' }),
+      expect.objectContaining({ uid: 'uid-original', resourceVersion: '2' }),
+    ])
+  })
+
+  it('does not write a same-name replacement after a UID-only retry observes a different UID', async () => {
+    const replace = vi.fn().mockRejectedValueOnce(makeConflictError())
+    const customApi = {
+      getNamespacedCustomObject: vi
+        .fn()
+        .mockResolvedValueOnce({
+          metadata: { uid: 'uid-original', resourceVersion: '1' },
+          spec: {},
+        })
+        .mockResolvedValueOnce({
+          metadata: { uid: 'uid-replacement', resourceVersion: '2' },
+          spec: {},
+        }),
+      replaceNamespacedCustomObject: replace,
+      listNamespacedCustomObject: vi.fn(),
+    }
+    const service = new ResourceService(customApi as never, 'control-plane', { hosts: 'mcp-host' })
+
+    await expect(
+      service.updateResource(
+        'hosts',
+        'host-a',
+        { metadata: { uid: 'uid-original' }, spec: { contextRef: 'edited' } },
+        'mcp-host'
+      )
+    ).rejects.toBeInstanceOf(K8sConflictError)
+
+    expect(customApi.getNamespacedCustomObject).toHaveBeenCalledTimes(2)
     expect(replace).toHaveBeenCalledTimes(1)
   })
 

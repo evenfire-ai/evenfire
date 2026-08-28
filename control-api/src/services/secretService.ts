@@ -2,10 +2,10 @@ import * as k8s from '@kubernetes/client-node'
 import { SecretPreconditions, SecretUpsertRequest } from '../types.js'
 import {
   type SecretConstraintOptions,
-  assertValidEffectiveSecretConstraints,
+  assertMutablePreservedSecretType,
+  assertValidSecretAnnotations,
   assertValidSecretConstraints,
   assertValidSecretType,
-  isInfrastructureAnnotationKey,
   resolveSecretAnnotationsForReplace,
 } from './secretConstraints.js'
 import { assertValidSecretDataKey, assertValidSecretWriteKeys } from './secretKeys.js'
@@ -167,19 +167,12 @@ export class SecretService {
     precondition?: SecretPreconditions,
     opts?: SecretConstraintOptions
   ): Promise<unknown> {
-    const hasInfrastructureAnnotations = Object.keys(req.annotations ?? {}).some(
-      isInfrastructureAnnotationKey
-    )
-    const carriesInternalInfrastructure =
-      hasInfrastructureAnnotations && opts?.capability !== undefined
-    if (!carriesInternalInfrastructure) {
-      assertValidSecretConstraints(req, opts)
-    } else if (req.type !== undefined) {
-      assertValidSecretType(req.type)
-    }
+    if (req.type !== undefined) assertValidSecretType(req.type)
     assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
     const existing = await this.coreApi.readNamespacedSecret({ namespace: ns, name: req.name })
+    assertMutablePreservedSecretType(existing.type)
+    assertValidSecretAnnotations(req.annotations, opts, existing.metadata?.annotations)
     const effectiveAnnotations = resolveSecretAnnotationsForReplace(
       existing?.metadata?.annotations,
       req.annotations,
@@ -203,25 +196,14 @@ export class SecretService {
           : {}),
         ...(existing?.metadata?.finalizers ? { finalizers: existing.metadata.finalizers } : {}),
       },
-      type: req.type || existing?.type || 'Opaque',
+      type: req.type ?? existing?.type ?? 'Opaque',
       data: req.data,
       stringData: req.stringData,
       ...(typeof existing?.immutable === 'boolean' ? { immutable: existing.immutable } : {}),
     }
 
-    // Validate the complete replacement state, not only fields explicitly
-    // supplied by the caller. An existing Secret may predate these constraints;
-    // allowing an omitted type/annotation field to preserve a forbidden value
-    // would make updateSecret a write-path bypass.
-    assertValidEffectiveSecretConstraints(
-      {
-        name: req.name,
-        type: body.type,
-        annotations: body.metadata?.annotations,
-      },
-      opts
-    )
-
+    // Explicit types passed the write allowlist above. A preserved type is
+    // mutable unless it belongs to a Kubernetes or Helm-managed Secret.
     const replaced = await this.coreApi.replaceNamespacedSecret({
       namespace: ns,
       name: req.name,
@@ -279,20 +261,11 @@ export class SecretService {
     assertValidSecretWriteKeys(req)
     const ns = req.namespace || this.defaultNamespace
     const existing = await this.coreApi.readNamespacedSecret({ namespace: ns, name: req.name })
+    assertMutablePreservedSecretType(existing.type)
+    assertValidSecretAnnotations(req.annotations, opts, existing.metadata?.annotations)
     const effectiveAnnotations = resolveSecretAnnotationsForReplace(
       existing.metadata?.annotations,
       req.annotations,
-      opts
-    )
-
-    // Merge-patch preserves fields omitted from the patch. Validate those
-    // preserved fields as part of the effective target state before mutating.
-    assertValidEffectiveSecretConstraints(
-      {
-        name: req.name,
-        type: req.type ?? existing.type ?? 'Opaque',
-        annotations: effectiveAnnotations,
-      },
       opts
     )
 
@@ -371,19 +344,10 @@ export class SecretService {
     assertValidSecretDataKey(req.key)
     const ns = req.namespace || this.defaultNamespace
     const existing = await this.coreApi.readNamespacedSecret({ namespace: ns, name: req.name })
-    const effectiveAnnotations = resolveSecretAnnotationsForReplace(
-      existing.metadata?.annotations,
-      undefined
-    )
 
-    // Removing one data key still mutates the Secret. Preserve unchanged
-    // infrastructure metadata while applying the same effective-state checks
-    // as the other mutation paths.
-    assertValidEffectiveSecretConstraints({
-      name: req.name,
-      type: existing.type ?? 'Opaque',
-      annotations: effectiveAnnotations,
-    })
+    // Removing one data key still mutates the Secret, so controller-owned
+    // Secret types remain off limits here too.
+    assertMutablePreservedSecretType(existing.type ?? 'Opaque')
 
     const body = {
       ...(precondition && {

@@ -47,7 +47,6 @@ import {
   REGISTRY_SPEC_DIGEST_ANNOTATION,
   type RegistryMutationOutcome,
   type RegistryResourceSnapshot,
-  classifyCreatedRegistryMutationReadback,
   classifyRegistryAssociationReadback,
   classifyRegistryMutationReadback,
   registrySpecDigest,
@@ -1020,13 +1019,28 @@ async function fenceSecretAtSnapshot(
       snapshot.name,
       snapshot.namespace
     )
-    if (fenced.uid !== snapshot.uid || !fenced.resourceVersion) return 'ambiguous'
+    if (fenced.uid !== snapshot.uid || !fenced.resourceVersion) {
+      logRegistryFenceFailure({
+        resourceKind: 'Secret',
+        resourceName: snapshot.name,
+        namespace: snapshot.namespace,
+        failure: 'identity-mismatch',
+      })
+      return 'ambiguous'
+    }
     // The successful CAS write consumed the exact prior UID/RV. An ambiguous
     // Registry write carrying that same precondition cannot commit afterwards.
     return 'not-committed'
-  } catch {
+  } catch (error) {
     // A rejected fence proves only that the object changed or the fence itself
     // was uncertain. The prior GET state is never promoted to no-commit.
+    logRegistryFenceFailure({
+      resourceKind: 'Secret',
+      resourceName: snapshot.name,
+      namespace: snapshot.namespace,
+      failure: registryFenceFailure(error),
+      error,
+    })
     return 'ambiguous'
   }
 }
@@ -1034,22 +1048,10 @@ async function fenceSecretAtSnapshot(
 async function readSecretMutationOutcome(
   gateway: K8sGateway,
   snapshotBefore: SecretSnapshot | null
-): Promise<{
-  outcome: 'committed' | 'not-committed' | 'ambiguous'
-  snapshot: SecretSnapshot | null
-  identityProven: boolean
-}> {
-  if (snapshotBefore) {
-    const fenceOutcome = await fenceSecretAtSnapshot(gateway, snapshotBefore)
-    if (fenceOutcome === 'not-committed') {
-      return { outcome: fenceOutcome, snapshot: null, identityProven: false }
-    }
-  }
-  // A GET after a failed fence is never a receipt of this write. The observed
-  // resourceVersion may belong to a same-UID writer that raced with us, so do
-  // not adopt it as a compensation precondition. The caller must preserve the
-  // state and surface repair_required.
-  return { outcome: 'ambiguous', snapshot: null, identityProven: false }
+): Promise<'not-committed' | 'ambiguous'> {
+  // A Secret has no immutable request marker that can turn a readback into a
+  // receipt. Only consuming the exact pre-write UID/RV proves no commit.
+  return snapshotBefore ? fenceSecretAtSnapshot(gateway, snapshotBefore) : 'ambiguous'
 }
 
 export type CreatedSecretAfterDeleteFailure =
@@ -1185,45 +1187,6 @@ async function readResourceForRollback(
   }
 }
 
-type CreatedResourceReadbackOutcome = {
-  outcome: 'committed' | 'not-committed' | 'ambiguous'
-  snapshot: RegistryResourceSnapshot | null
-}
-
-async function readCreatedResourceOutcome(
-  gateway: K8sGateway,
-  plural: Parameters<K8sGateway['getResource']>[0],
-  name: string,
-  namespace: string,
-  desired: {
-    spec: Record<string, unknown>
-    metadata: { labels?: Record<string, string>; annotations?: Record<string, string> }
-    specDigest: string
-  },
-  operationId: string
-): Promise<CreatedResourceReadbackOutcome> {
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    try {
-      const current = normalizeRegistryResourceSnapshot(
-        await gateway.getResource(plural, name, namespace),
-        name,
-        namespace
-      )
-      if (
-        classifyCreatedRegistryMutationReadback({ current, desired, operationId }) === 'committed'
-      ) {
-        return { outcome: 'committed', snapshot: current }
-      }
-    } catch {
-      // A failed read cannot prove that a create did not commit. This includes
-      // repeated 404s: the original request may still be in flight or the
-      // read path may be stale, and a create has no pre-write UID/RV fence.
-    }
-    if (attempt < 3) await sleep(UPDATE_CONFLICT_RETRY_DELAY_MS * attempt)
-  }
-  return { outcome: 'ambiguous', snapshot: null }
-}
-
 async function fenceRegistryResourceAtSnapshot(
   gateway: K8sGateway,
   plural: Parameters<K8sGateway['getResource']>[0],
@@ -1233,7 +1196,15 @@ async function fenceRegistryResourceAtSnapshot(
 ): Promise<'not-committed' | 'ambiguous'> {
   const uid = snapshot.metadata?.uid
   const resourceVersion = snapshot.metadata?.resourceVersion
-  if (!uid || !resourceVersion) return 'ambiguous'
+  if (!uid || !resourceVersion) {
+    logRegistryFenceFailure({
+      resourceKind: plural,
+      resourceName: name,
+      namespace,
+      failure: 'identity-unavailable',
+    })
+    return 'ambiguous'
+  }
 
   try {
     const fenced = normalizeRegistryResourceSnapshot(
@@ -1257,15 +1228,28 @@ async function fenceRegistryResourceAtSnapshot(
       namespace
     )
     if (fenced.metadata?.uid !== uid || typeof fenced.metadata?.resourceVersion !== 'string') {
+      logRegistryFenceFailure({
+        resourceKind: plural,
+        resourceName: name,
+        namespace,
+        failure: 'identity-mismatch',
+      })
       return 'ambiguous'
     }
     // A successful replacement fenced the old UID/RV. Any in-flight Registry
     // write carrying that same precondition can no longer commit afterwards.
     return 'not-committed'
-  } catch {
+  } catch (error) {
     // A rejected fence means the object changed, but does not identify whether
     // this operation or another writer won. The caller must read and classify
     // the current state; the prior state alone is never proof of no-commit.
+    logRegistryFenceFailure({
+      resourceKind: plural,
+      resourceName: name,
+      namespace,
+      failure: registryFenceFailure(error),
+      error,
+    })
     return 'ambiguous'
   }
 }
@@ -1542,6 +1526,34 @@ export async function getInstalledRegistryState(gateway?: K8sGateway): Promise<{
 }
 
 const log = rootLogger.child({ module: 'admin-registry' })
+
+type RegistryFenceFailure = 'identity-mismatch' | 'identity-unavailable' | 'rejected' | 'unresolved'
+
+function registryFenceFailure(
+  error: unknown
+): Extract<RegistryFenceFailure, 'rejected' | 'unresolved'> {
+  const status = extractK8sError(error)?.status
+  return status === 409 || isDeterministicRegistryNoCommit(error) ? 'rejected' : 'unresolved'
+}
+
+function logRegistryFenceFailure(input: {
+  resourceKind: string
+  resourceName: string
+  namespace: string
+  failure: RegistryFenceFailure
+  error?: unknown
+}): void {
+  log.warn(
+    {
+      resourceKind: input.resourceKind,
+      resourceName: input.resourceName,
+      namespace: input.namespace,
+      fenceFailure: input.failure,
+      ...(input.error === undefined ? {} : { error: registryErrorLogFields(input.error) }),
+    },
+    'Registry mutation identity fence did not establish no-commit'
+  )
+}
 
 export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
   const router = Router()
@@ -2052,7 +2064,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
 
         // ── Step 3: Create K8s Secret if credentials provided ─────────────
         let createdSecretSnapshot: SecretSnapshot | null = null
-        let createdSecretIdentityProven = false
         if (credRequired) {
           const secretData = credentialPayload.secretData
           if (Object.keys(secretData).length > 0) {
@@ -2068,7 +2079,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               createdSecretSnapshot = await gateway.createSecret(secretReq, {
                 capability: 'registryCredential',
               })
-              createdSecretIdentityProven = true
             } catch (err) {
               const k8sErr = extractK8sError(err)
               if (k8sErr && k8sErr.status < 500) {
@@ -2077,34 +2087,14 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                   .json({ error: `Secret creation failed: ${k8sErr.message}` })
                 return
               }
-              const recovered = await readSecretMutationOutcome(gateway, null)
-              if (recovered.outcome === 'not-committed') {
-                res.status(503).json({
-                  error: 'registry_secret_outcome_not_committed',
-                  outcome: 'not_committed',
-                })
-                return
-              }
-              if (recovered.outcome !== 'committed' || !recovered.snapshot) {
-                res.status(503).json({
-                  error: 'registry_secret_outcome_ambiguous',
-                  outcome: 'repair_required',
-                })
-                return
-              }
-              if (!recovered.identityProven) {
-                // A create has no pre-write UID to compare against. The
-                // readback may be a same-name replacement that copied the
-                // operation marker, so it cannot be reported as this request's
-                // commit or used as a compensation target.
-                res.status(503).json({
-                  error: 'registry_secret_outcome_ambiguous',
-                  outcome: 'repair_required',
-                })
-                return
-              }
-              createdSecretSnapshot = recovered.snapshot
-              createdSecretIdentityProven = recovered.identityProven
+              // A create has no pre-write UID/RV to fence. Its response cannot
+              // be recovered into a compensable success, even if the named
+              // Secret later looks like the requested intent.
+              res.status(503).json({
+                error: 'registry_secret_outcome_ambiguous',
+                outcome: 'repair_required',
+              })
+              return
             }
             auditLog('secret_created', {
               secretName,
@@ -2117,11 +2107,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
 
         // ── Step 4: Create McpServer CRD (rollback by UID on failure) ────
         let createdMcpServerSnapshot: RegistryResourceSnapshot | null = null
-        const desiredMcpServerMutation = {
-          spec: mcpServerSpec,
-          metadata: { labels: registryLabels, annotations: registryAnnotations },
-          specDigest: registrySpecDigest(mcpServerSpec),
-        }
         try {
           const created = await gateway.createResource(
             'mcpservers',
@@ -2148,106 +2133,39 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           }
         } catch (err) {
           const k8sErr = extractK8sError(err)
-          const ambiguousCreate =
-            err instanceof RegistryInstallRollbackError || !k8sErr || k8sErr.status >= 500
-          if (ambiguousCreate) {
-            const recovered = await readCreatedResourceOutcome(
-              gateway,
-              'mcpservers',
-              serverName,
-              targetNs,
-              desiredMcpServerMutation,
-              resourceOperationId
-            )
-            if (recovered.outcome === 'not-committed') {
-              if (createdSecretSnapshot && !createdSecretIdentityProven) {
-                res.status(503).json({
-                  error: 'registry_install_outcome_ambiguous',
-                  outcome: 'repair_required',
-                })
-                return
-              }
-              let rollbackFailed = false
-              if (createdSecretSnapshot) {
-                try {
-                  await rollbackCreatedSecret(gateway, createdSecretSnapshot)
-                } catch {
-                  rollbackFailed = true
-                }
-              }
-              if (rollbackFailed) {
-                res.status(500).json({
-                  error: 'registry_install_rollback_incomplete',
-                  outcome: 'compensation_failed',
-                })
-                return
-              }
-              res.status(k8sErr?.status ?? 503).json({
-                error: 'registry_resource_outcome_not_committed',
-                outcome: 'not_committed',
-              })
-              return
-            }
-            if (recovered.outcome !== 'committed' || !recovered.snapshot) {
-              res.status(503).json({
-                error: 'registry_resource_outcome_ambiguous',
-                outcome: 'repair_required',
-              })
-              return
-            }
-            // A create readback has no pre-write UID to compare with. Even a
-            // perfect operation marker/spec match can belong to a same-name
-            // replacement that copied the mutable intent. It is safe to leave
-            // the observed object for repair, but not to report it as this
-            // request's commit or to make it compensable.
+          if (
+            err instanceof RegistryInstallRollbackError ||
+            !isDeterministicRegistryNoCommit(err)
+          ) {
             res.status(503).json({
               error: 'registry_resource_outcome_ambiguous',
               outcome: 'repair_required',
             })
             return
-          } else {
-            // A conflict, timeout, or throttling response is not a proof that
-            // the named CR is absent. It may identify a live CR or follow an
-            // accepted create, so preserve the Secret for repair instead of
-            // deleting a dependency we cannot disassociate atomically.
-            if (!isDeterministicRegistryNoCommit(err)) {
-              res.status(503).json({
-                error: 'registry_resource_outcome_ambiguous',
-                outcome: 'repair_required',
-              })
-              return
-            }
-
-            // A deterministic create rejection proves there is no CR to
-            // compensate; only the earlier credential object needs rollback.
-            if (createdSecretSnapshot && !createdSecretIdentityProven) {
-              res.status(503).json({
-                error: 'registry_install_outcome_ambiguous',
-                outcome: 'repair_required',
-              })
-              return
-            }
-            let rollbackFailed = false
-            if (createdSecretSnapshot) {
-              try {
-                await rollbackCreatedSecret(gateway, createdSecretSnapshot)
-              } catch {
-                rollbackFailed = true
-              }
-            }
-            if (rollbackFailed) {
-              res.status(500).json({
-                error: 'registry_install_rollback_incomplete',
-                outcome: 'compensation_failed',
-              })
-              return
-            }
-            if (k8sErr) {
-              res.status(k8sErr.status).json({ error: k8sErr.message })
-              return
-            }
-            throw err
           }
+
+          // A deterministic create rejection proves there is no CR to
+          // compensate; only the earlier credential object needs rollback.
+          let rollbackFailed = false
+          if (createdSecretSnapshot) {
+            try {
+              await rollbackCreatedSecret(gateway, createdSecretSnapshot)
+            } catch {
+              rollbackFailed = true
+            }
+          }
+          if (rollbackFailed) {
+            res.status(500).json({
+              error: 'registry_install_rollback_incomplete',
+              outcome: 'compensation_failed',
+            })
+            return
+          }
+          if (k8sErr) {
+            res.status(k8sErr.status).json({ error: k8sErr.message })
+            return
+          }
+          throw err
         }
 
         // ── Step 5: Update Context allowlist ──────────────────────────────
@@ -2311,13 +2229,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             return
           }
           if (associationOutcome !== 'committed') {
-            if (createdSecretSnapshot && !createdSecretIdentityProven) {
-              res.status(503).json({
-                error: 'registry_install_outcome_ambiguous',
-                outcome: 'repair_required',
-              })
-              return
-            }
             let resourceRollbackFailed = false
             try {
               await rollbackCreatedResource(
@@ -2784,7 +2695,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         const credentials = body.credentials ?? {}
         const secretName = `${crName}-creds`
         let secretCreated = false
-        let createdSecretIdentityProven = false
         let createdSecretSnapshot: SecretSnapshot | null = null
         if (Object.keys(credentials).length > 0) {
           const schemaKeys = new Set((credSchema?.keys ?? []).map(k => k.name))
@@ -2809,40 +2719,19 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               },
               REGISTRY_SECRET_WRITE_OPTIONS
             )
-            createdSecretIdentityProven = true
           } catch (err) {
             const k8sErr = extractK8sError(err)
             if (k8sErr && k8sErr.status < 500) {
               res.status(k8sErr.status).json({ error: `Secret creation failed: ${k8sErr.message}` })
               return
             }
-            const recovered = await readSecretMutationOutcome(gateway, null)
-            if (recovered.outcome === 'not-committed') {
-              res.status(503).json({
-                error: 'registry_secret_outcome_not_committed',
-                outcome: 'not_committed',
-              })
-              return
-            }
-            if (recovered.outcome !== 'committed' || !recovered.snapshot) {
-              res.status(503).json({
-                error: 'registry_secret_outcome_ambiguous',
-                outcome: 'repair_required',
-              })
-              return
-            }
-            if (!recovered.identityProven) {
-              // A create readback cannot prove the UID was issued for this
-              // request. Leave the object for repair rather than treating it
-              // as a successful, compensable install.
-              res.status(503).json({
-                error: 'registry_secret_outcome_ambiguous',
-                outcome: 'repair_required',
-              })
-              return
-            }
-            createdSecretSnapshot = recovered.snapshot
-            createdSecretIdentityProven = recovered.identityProven
+            // A create has no pre-write UID/RV to fence. Its response cannot
+            // be recovered into a compensable success.
+            res.status(503).json({
+              error: 'registry_secret_outcome_ambiguous',
+              outcome: 'repair_required',
+            })
+            return
           }
           secretCreated = true
         }
@@ -2858,13 +2747,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           try {
             await ensureRegistryPullSecret(gateway, targetNs)
           } catch (err) {
-            if (secretCreated && !createdSecretIdentityProven) {
-              res.status(503).json({
-                error: 'registry_install_outcome_ambiguous',
-                outcome: 'repair_required',
-              })
-              return
-            }
             if (secretCreated && createdSecretSnapshot) {
               try {
                 await rollbackCreatedSecret(gateway, createdSecretSnapshot)
@@ -2913,11 +2795,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         registryAnnotations[REGISTRY_SPEC_DIGEST_ANNOTATION] = registrySpecDigest(hookSpec)
 
         let createdHookSnapshot: RegistryResourceSnapshot | null = null
-        const desiredHookMutation = {
-          spec: hookSpec,
-          metadata: { labels: registryLabels, annotations: registryAnnotations },
-          specDigest: registrySpecDigest(hookSpec),
-        }
         try {
           const created = await gateway.createResource(
             'llmhooks',
@@ -2933,101 +2810,37 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           }
         } catch (err) {
           const k8sErr = extractK8sError(err)
-          const ambiguousCreate =
-            err instanceof RegistryInstallRollbackError || !k8sErr || k8sErr.status >= 500
-          if (ambiguousCreate) {
-            const recovered = await readCreatedResourceOutcome(
-              gateway,
-              'llmhooks',
-              crName,
-              targetNs,
-              desiredHookMutation,
-              resourceOperationId
-            )
-            if (recovered.outcome === 'not-committed') {
-              if (secretCreated && !createdSecretIdentityProven) {
-                res.status(503).json({
-                  error: 'registry_install_outcome_ambiguous',
-                  outcome: 'repair_required',
-                })
-                return
-              }
-              let rollbackFailed = false
-              if (secretCreated && createdSecretSnapshot) {
-                try {
-                  await rollbackCreatedSecret(gateway, createdSecretSnapshot)
-                } catch {
-                  rollbackFailed = true
-                }
-              }
-              if (rollbackFailed) {
-                res.status(500).json({
-                  error: 'registry_install_rollback_incomplete',
-                  outcome: 'compensation_failed',
-                })
-                return
-              }
-              res.status(k8sErr?.status ?? 503).json({
-                error: 'registry_resource_outcome_not_committed',
-                outcome: 'not_committed',
-              })
-              return
-            }
-            if (recovered.outcome !== 'committed' || !recovered.snapshot) {
-              res.status(503).json({
-                error: 'registry_resource_outcome_ambiguous',
-                outcome: 'repair_required',
-              })
-              return
-            }
-            // A create readback cannot prove that the observed UID was issued
-            // for this request. Do not turn a mutable marker/spec match into a
-            // successful install or a later compensation target.
+          if (
+            err instanceof RegistryInstallRollbackError ||
+            !isDeterministicRegistryNoCommit(err)
+          ) {
             res.status(503).json({
               error: 'registry_resource_outcome_ambiguous',
               outcome: 'repair_required',
             })
             return
-          } else {
-            // A conflict, timeout, or throttling response is not a proof that
-            // the named hook is absent. Preserve its Secret for repair because
-            // no cross-resource transaction can prove dependency safety.
-            if (!isDeterministicRegistryNoCommit(err)) {
-              res.status(503).json({
-                error: 'registry_resource_outcome_ambiguous',
-                outcome: 'repair_required',
-              })
-              return
-            }
-
-            if (secretCreated && !createdSecretIdentityProven) {
-              res.status(503).json({
-                error: 'registry_install_outcome_ambiguous',
-                outcome: 'repair_required',
-              })
-              return
-            }
-            let rollbackFailed = false
-            if (secretCreated && createdSecretSnapshot) {
-              try {
-                await rollbackCreatedSecret(gateway, createdSecretSnapshot)
-              } catch {
-                rollbackFailed = true
-              }
-            }
-            if (rollbackFailed) {
-              res.status(500).json({
-                error: 'registry_install_rollback_incomplete',
-                outcome: 'compensation_failed',
-              })
-              return
-            }
-            if (k8sErr) {
-              res.status(k8sErr.status).json({ error: k8sErr.message })
-              return
-            }
-            throw err
           }
+
+          let rollbackFailed = false
+          if (secretCreated && createdSecretSnapshot) {
+            try {
+              await rollbackCreatedSecret(gateway, createdSecretSnapshot)
+            } catch {
+              rollbackFailed = true
+            }
+          }
+          if (rollbackFailed) {
+            res.status(500).json({
+              error: 'registry_install_rollback_incomplete',
+              outcome: 'compensation_failed',
+            })
+            return
+          }
+          if (k8sErr) {
+            res.status(k8sErr.status).json({ error: k8sErr.message })
+            return
+          }
+          throw err
         }
 
         // Step 10 — reference the hook from Host.spec.guardrails.hooks[phase] as
@@ -3089,13 +2902,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             return
           }
           if (associationOutcome !== 'committed') {
-            if (secretCreated && createdSecretSnapshot && !createdSecretIdentityProven) {
-              res.status(503).json({
-                error: 'registry_install_outcome_ambiguous',
-                outcome: 'repair_required',
-              })
-              return
-            }
             let resourceRollbackFailed = false
             try {
               await rollbackCreatedResource(
@@ -4009,7 +3815,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         // constrained writer, so fail closed before creating side effects.
         let previousSecretSnapshot: SecretSnapshot | null = null
         let secretCreatedDuringUpgrade = false
-        let mutatedSecretIdentityProven = false
         let mutatedSecretPreconditions: SecretPreconditions | null = null
         let mutatedSecretSnapshot: SecretSnapshot | null = null
         const hasCredentialUpdates = Object.keys(credentialPayload.secretData).length > 0
@@ -4087,7 +3892,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                 REGISTRY_SECRET_WRITE_OPTIONS
               )
               mutatedSecretSnapshot = updatedSecret
-              mutatedSecretIdentityProven = true
               mutatedSecretPreconditions = secretPreconditions(updatedSecret)
               auditLog('secret_updated', {
                 secretName,
@@ -4101,7 +3905,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                 REGISTRY_SECRET_WRITE_OPTIONS
               )
               mutatedSecretSnapshot = created
-              mutatedSecretIdentityProven = true
               secretCreatedDuringUpgrade = true
               mutatedSecretPreconditions = secretPreconditions(created)
               auditLog('secret_created', {
@@ -4117,52 +3920,28 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               return
             }
 
-            const recovered = await readSecretMutationOutcome(gateway, previousSecretSnapshot)
-            if (recovered.outcome === 'not-committed') {
+            const secretOutcome = await readSecretMutationOutcome(gateway, previousSecretSnapshot)
+            if (secretOutcome === 'not-committed') {
               res.status(503).json({
                 error: 'registry_secret_outcome_not_committed',
                 outcome: 'not_committed',
               })
               return
             }
-            if (recovered.outcome !== 'committed' || !recovered.snapshot) {
-              log.error(
-                {
-                  serverName: body.serverName,
-                  namespace,
-                  secretName,
-                  error: registryErrorLogFields(err),
-                },
-                'Registry credential write outcome is ambiguous'
-              )
-              res.status(503).json({
-                error: 'registry_secret_outcome_ambiguous',
-                outcome: 'repair_required',
-              })
-              return
-            }
-
-            if (!recovered.identityProven) {
-              // `previousSecretSnapshot === null` means this was a create.
-              // A post-error readback has no pre-write UID proof, so returning
-              // success would allow an old/replaced object to masquerade as
-              // this upgrade's credential commit.
-              res.status(503).json({
-                error: 'registry_secret_outcome_ambiguous',
-                outcome: 'repair_required',
-              })
-              return
-            }
-
-            mutatedSecretSnapshot = recovered.snapshot
-            mutatedSecretIdentityProven = recovered.identityProven
-            secretCreatedDuringUpgrade = previousSecretSnapshot === null
-            mutatedSecretPreconditions = secretPreconditions(recovered.snapshot)
-            auditLog('secret_write_recovered_after_ambiguous_response', {
-              secretName,
-              namespace,
-              registryEntry: body.registryEntryName,
+            log.error(
+              {
+                serverName: body.serverName,
+                namespace,
+                secretName,
+                error: registryErrorLogFields(err),
+              },
+              'Registry credential write outcome is ambiguous'
+            )
+            res.status(503).json({
+              error: 'registry_secret_outcome_ambiguous',
+              outcome: 'repair_required',
             })
+            return
           }
         }
 
@@ -4210,12 +3989,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         )
         if (mutation.outcome !== 'committed') {
           const err = mutation.error
-          const k8sErr = extractK8sError(err)
-          const outcomeIsAmbiguous = mutation.outcome !== 'rejected'
-          const upgradeOutcome: RegistryMutationOutcome | null =
-            mutation.outcome === 'rejected' ? null : mutation.outcome
-
-          if (outcomeIsAmbiguous && upgradeOutcome === 'ambiguous') {
+          if (mutation.outcome === 'ambiguous') {
             log.error(
               {
                 serverName: body.serverName,
@@ -4231,35 +4005,11 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             return
           }
 
-          // An ambiguous CR response is not made safe for cross-resource
-          // compensation merely because the identity fence proves that the
-          // requested CR replace did not commit. The live CR may still depend
-          // on the Secret, and the failed request may have been accepted by a
-          // different apiserver path. Preserve the credential state and make
-          // repair explicit until the caller can reconcile both resources.
-          if (upgradeOutcome === 'ambiguous' && hasCredentialUpdates) {
-            res.status(503).json({
-              error: 'registry_upgrade_outcome_ambiguous',
-              outcome: 'repair_required',
-            })
-            return
-          }
-
-          if (hasCredentialUpdates && mutatedSecretSnapshot && !mutatedSecretIdentityProven) {
-            res.status(503).json({
-              error: 'registry_upgrade_outcome_ambiguous',
-              outcome: 'repair_required',
-            })
-            return
-          }
-
-          if (upgradeOutcome !== 'ambiguous' && hasCredentialUpdates) {
+          // An ambiguous CR response never reaches compensation. The live CR
+          // may still depend on the credential, so repair remains the only
+          // safe outcome until the caller can reconcile both resources.
+          if (hasCredentialUpdates) {
             try {
-              if (!mutatedSecretPreconditions) {
-                throw Object.assign(new Error('mutated Secret identity unavailable'), {
-                  code: 'secret_identity_unavailable',
-                })
-              }
               if (secretCreatedDuringUpgrade) {
                 const createdSecret = mutatedSecretSnapshot
                 if (!createdSecret) {
@@ -4269,6 +4019,11 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                 }
                 await rollbackCreatedSecret(gateway, createdSecret)
               } else if (previousSecretSnapshot) {
+                if (!mutatedSecretPreconditions) {
+                  throw Object.assign(new Error('mutated Secret identity unavailable'), {
+                    code: 'secret_identity_unavailable',
+                  })
+                }
                 await gateway.updateSecret(
                   {
                     name: previousSecretSnapshot.name,
@@ -4302,18 +4057,20 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             }
           }
 
-          if (upgradeOutcome === 'not-committed') {
+          if (mutation.outcome === 'not-committed') {
             res.status(503).json({
               error: 'registry_upgrade_outcome_not_committed',
               outcome: 'not_committed',
             })
             return
-          } else if (k8sErr) {
+          }
+
+          const k8sErr = extractK8sError(err)
+          if (k8sErr) {
             res.status(k8sErr.status).json({ error: k8sErr.message })
             return
-          } else {
-            throw err
           }
+          throw err
         }
         auditLog('upgrade', {
           serverName: body.serverName,

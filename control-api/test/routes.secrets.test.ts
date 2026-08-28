@@ -493,6 +493,18 @@ describe('routes/secrets', () => {
       })
     })
 
+    it('keeps recipe Secret DELETE identity-gated for clients without a body', async () => {
+      const gateway = createRecipeGateway()
+      const app = express()
+      app.use(express.json())
+      app.use(createAdminSecretsRouter(gateway as never))
+
+      const res = await request(app).delete('/admin/recipe-secrets/r1').expect(428)
+
+      expect(res.body).toMatchObject({ error: 'secret_identity_precondition_required' })
+      expect(gateway.deleteSecret).not.toHaveBeenCalled()
+    })
+
     it('deletes a recipe secret from an allowed runtime namespace', async () => {
       const gateway = createRecipeGateway()
       gateway.getSecret.mockImplementation(async (name: string, namespace?: string) => {

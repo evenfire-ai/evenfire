@@ -358,7 +358,12 @@ export function SecretsTable({
   async function deleteRecipeSecretRow(row: RecipeSecretRow) {
     const { name, namespace, uid, resourceVersion } = row
     if (!uid || !resourceVersion) {
-      setRecipeError(`Secret ${name} has no current identity; refresh before deleting it.`)
+      // Existing Secret deletes never use the legacy bodyless path. It is
+      // reserved for the create form's rollback immediately after an older
+      // create endpoint omitted identity fields.
+      setRecipeError(
+        `Secret ${name} has no current identity. Refresh the page and review the latest state before deleting it.`
+      )
       return
     }
     const ok = await confirm({
@@ -841,10 +846,7 @@ export function SecretsTable({
                                     ? 'Deleting…'
                                     : 'Delete',
                                 danger: true,
-                                disabled:
-                                  !row.uid ||
-                                  !row.resourceVersion ||
-                                  recipeDeletingName === `${row.namespace}/${row.name}`,
+                                disabled: recipeDeletingName === `${row.namespace}/${row.name}`,
                                 onClick: () => void deleteRecipeSecretRow(row),
                               },
                             ]}

@@ -1,9 +1,22 @@
 import { SecretUpsertRequest } from '../types.js'
+import { REGISTRY_OPERATION_ID_ANNOTATION } from './registryMutation.js'
 
 export const ALLOWED_SECRET_TYPES: readonly string[] = [
   'Opaque',
   'kubernetes.io/tls',
   'kubernetes.io/dockerconfigjson',
+]
+
+/**
+ * Existing Secret types are normally safe to preserve. These are the narrow
+ * exceptions whose lifecycle is owned by Kubernetes bootstrap controllers or
+ * Helm, so control-api must not mutate their data or metadata. In particular,
+ * basic-auth, ssh-auth, and custom types remain valid preserved state.
+ */
+const NON_MUTABLE_PRESERVED_SECRET_TYPES: readonly string[] = [
+  'kubernetes.io/service-account-token',
+  'bootstrap.kubernetes.io/token',
+  'helm.sh/release.v1',
 ]
 
 const INFRA_ANNOTATION_PREFIXES: readonly string[] = [
@@ -29,7 +42,7 @@ export const REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS = [
 ] as const
 
 /** Operation marker used only by the internal Registry mutation capability. */
-export const REGISTRY_SECRET_OPERATION_ID_ANNOTATION = 'clerum.io/registry-operation-id'
+export const REGISTRY_SECRET_OPERATION_ID_ANNOTATION = REGISTRY_OPERATION_ID_ANNOTATION
 
 /** Platform keys a public Registry credential rotation may preserve, never assign. */
 export const REGISTRY_SECRET_ROTATION_PRESERVED_ANNOTATION_KEYS = [
@@ -84,6 +97,10 @@ function secretTypeErrorMessage(type: string): string {
   return `Secret type "${type}" is not allowed; must be one of: ${ALLOWED_SECRET_TYPES.join(', ')}`
 }
 
+function managedSecretTypeErrorMessage(type: string): string {
+  return `Secret type "${type}" is managed by Kubernetes or Helm and cannot be mutated`
+}
+
 function annotationKeyErrorMessage(key: string, prefixes: readonly string[]): string {
   return `annotation key "${key}" is not allowed: keys starting with ${prefixes.map(p => `"${p}"`).join(' or ')} are reserved`
 }
@@ -91,8 +108,8 @@ function annotationKeyErrorMessage(key: string, prefixes: readonly string[]): st
 export class InvalidSecretTypeError extends Error {
   readonly status = 400
   readonly type: string
-  constructor(type: string) {
-    super(secretTypeErrorMessage(type))
+  constructor(type: string, message = secretTypeErrorMessage(type)) {
+    super(message)
     this.name = 'InvalidSecretTypeError'
     this.type = type
   }
@@ -124,24 +141,15 @@ export function dangerousAnnotationKeyReason(
     : null
 }
 
-/**
- * Existing infrastructure metadata is preserved as an opaque server-owned
- * value. It is not a caller assignment, so it is safe to carry through a
- * mutation; platform metadata remains constrained by capability or an exact
- * preservation allowlist.
- */
-export function existingSecretAnnotationKeyReason(
-  key: string,
-  opts?: SecretConstraintOptions
-): string | null {
-  if (isInfrastructureAnnotationKey(key)) return null
-  if (opts?.allowExistingPlatformAnnotationKeys?.includes(key)) return null
-  return dangerousAnnotationKeyReason(key, opts)
-}
-
 export function assertValidSecretType(type: string): void {
   if (invalidSecretTypeReason(type) !== null) {
     throw new InvalidSecretTypeError(type)
+  }
+}
+
+export function assertMutablePreservedSecretType(type: string | undefined): void {
+  if (type !== undefined && NON_MUTABLE_PRESERVED_SECRET_TYPES.includes(type)) {
+    throw new InvalidSecretTypeError(type, managedSecretTypeErrorMessage(type))
   }
 }
 
@@ -166,55 +174,23 @@ export function assertValidSecretAnnotations(
   }
 }
 
-/**
- * Validate metadata already present on an existing Secret. Public mutation
- * routes may preserve a narrow, verified platform-owned annotation pair, but
- * their request payloads remain subject to assertValidSecretAnnotations().
- */
-export function assertValidExistingSecretAnnotations(
-  annotations: Record<string, string> | undefined,
-  opts?: SecretConstraintOptions
-): void {
-  // Existing platform metadata is opaque state owned by the component that
-  // wrote it. A data-only mutation does not claim or rewrite that metadata, so
-  // an unknown/future `clerum.io/` key must not brick future rotations. The
-  // transition validator above still rejects a caller that introduces or
-  // changes a reserved key; this function intentionally validates no existing
-  // key in isolation.
-  void annotations
-  void opts
-}
-
 export function assertValidSecretConstraints(
   req: SecretUpsertRequest,
   opts?: SecretConstraintOptions,
   existingAnnotations?: Record<string, string>
 ): void {
-  // Type validation fires only on explicit type assignment. When req.type is
-  // undefined, the write method defaults to 'Opaque' (create) or preserves
-  // the existing type (update/merge) — no attacker-controlled type enters.
+  // The allowlist applies only to an explicit caller assignment. A preserved
+  // type is checked separately against the narrow controller-owned denylist.
   if (req.type !== undefined) {
     assertValidSecretType(req.type)
   }
   assertValidSecretAnnotations(req.annotations, opts, existingAnnotations)
 }
 
-/** Validate the complete state that a mutation will leave behind. */
-export function assertValidEffectiveSecretConstraints(
-  req: SecretUpsertRequest,
-  opts?: SecretConstraintOptions
-): void {
-  if (req.type !== undefined) {
-    assertValidSecretType(req.type)
-  }
-  assertValidExistingSecretAnnotations(req.annotations, opts)
-}
-
 /**
  * Resolve the annotation map a full replacement is allowed to leave behind.
- * Caller-owned keys retain full-replace semantics. Infrastructure metadata is
- * transport-only, while platform metadata is either capability-owned or an
- * exact existing-key preservation granted to a narrow partial writer.
+ * Requested reserved keys must match the live value; omitted protected keys
+ * are carried forward. Caller-owned keys retain full-replace semantics.
  */
 export function resolveSecretAnnotationsForReplace(
   existingAnnotations: Record<string, string> | undefined,
@@ -226,7 +202,6 @@ export function resolveSecretAnnotationsForReplace(
   }
 
   assertValidSecretAnnotations(requestedAnnotations, opts, existingAnnotations)
-  assertValidExistingSecretAnnotations(existingAnnotations, opts)
 
   const resolved: Record<string, string> = { ...requestedAnnotations }
   for (const [key, value] of Object.entries(existingAnnotations ?? {})) {

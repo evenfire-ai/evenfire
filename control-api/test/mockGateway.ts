@@ -1,9 +1,8 @@
 import { K8sNotFoundError } from '../src/services/resourceService.js'
 import {
   type SecretConstraintOptions,
-  assertValidEffectiveSecretConstraints,
+  assertMutablePreservedSecretType,
   assertValidSecretConstraints,
-  assertValidSecretType,
   resolveSecretAnnotationsForReplace,
 } from '../src/services/secretConstraints.js'
 import { assertValidSecretDataKey, assertValidSecretWriteKeys } from '../src/services/secretKeys.js'
@@ -85,6 +84,22 @@ function mergePatchMap(
   return Object.fromEntries([...retainedEntries, ...replacementEntries])
 }
 
+/**
+ * Kubernetes materializes write-only stringData into data after applying a
+ * Secret payload or merge patch. The API server returns only the resulting
+ * base64 data map, never stringData.
+ */
+function materializeSecretData(
+  data: Record<string, string> | undefined,
+  stringData: Record<string, unknown> | undefined
+): Record<string, string> | undefined {
+  if (data === undefined && stringData === undefined) return undefined
+  const stringDataEntries = Object.entries(stringData ?? {})
+    .filter(([, value]): value is string => typeof value === 'string')
+    .map(([key, value]) => [key, Buffer.from(value).toString('base64')] as const)
+  return Object.fromEntries([...Object.entries(data ?? {}), ...stringDataEntries])
+}
+
 export type MockGatewaySecretWriteFault = (input: {
   operation: 'create' | 'update' | 'merge'
   snapshot: SecretSnapshot
@@ -121,7 +136,6 @@ export class MockGateway {
       uid: string
       resourceVersion: string
       data?: Record<string, string>
-      stringData?: Record<string, string>
     }
   >
 
@@ -194,8 +208,7 @@ export class MockGateway {
       annotations: options?.annotations,
       uid: options?.uid ?? this.allocateUid('secret', ns, name),
       resourceVersion: options?.resourceVersion ?? '1',
-      data: options?.data,
-      stringData: options?.stringData,
+      data: materializeSecretData(options?.data, options?.stringData),
     })
   }
 
@@ -421,7 +434,6 @@ export class MockGateway {
       },
       type: entry.type || 'Opaque',
       data: entry.data,
-      stringData: entry.stringData,
     }
   }
 
@@ -447,8 +459,7 @@ export class MockGateway {
       annotations: body.annotations,
       uid: this.allocateUid('secret', body.namespace || this.ns, body.name),
       resourceVersion: '1',
-      data: body.data,
-      stringData: body.stringData,
+      data: materializeSecretData(body.data, body.stringData),
     }
     this.secretStore.set(key, entry)
     const snapshot = this.snapshot(entry)
@@ -485,6 +496,7 @@ export class MockGateway {
       err.code = 404
       throw err
     }
+    assertMutablePreservedSecretType(existing.type)
     assertValidSecretConstraints(body, opts, existing.annotations)
     assertValidSecretWriteKeys(body)
     this.assertPrecondition(body.name, existing, precondition)
@@ -494,10 +506,6 @@ export class MockGateway {
       opts
     )
     const effectiveType = body.type ?? existing.type ?? 'Opaque'
-    assertValidEffectiveSecretConstraints(
-      { name: body.name, type: effectiveType, annotations: effectiveAnnotations },
-      opts
-    )
     const updated = {
       name: body.name,
       namespace: body.namespace || this.ns,
@@ -506,8 +514,7 @@ export class MockGateway {
       annotations: effectiveAnnotations,
       uid: existing?.uid,
       resourceVersion: MockGateway.nextResourceVersion(existing?.resourceVersion),
-      data: body.data,
-      stringData: body.stringData,
+      data: materializeSecretData(body.data, body.stringData),
     }
     this.secretStore.set(key, updated)
     const snapshot = this.snapshot(updated)
@@ -534,30 +541,22 @@ export class MockGateway {
       err.code = 404
       throw err
     }
-    this.assertPrecondition(body.name, existing, precondition)
-    if (body.type !== undefined) assertValidSecretType(body.type)
+    assertMutablePreservedSecretType(existing.type)
+    assertValidSecretConstraints(body, opts, existing.annotations)
     assertValidSecretWriteKeys(body)
-    const effectiveAnnotations = resolveSecretAnnotationsForReplace(
+    this.assertPrecondition(body.name, existing, precondition)
+    const effectiveAnnotations = mergePatchMap(
       existing.annotations,
-      body.annotations,
-      opts
+      body.annotations as Record<string, unknown> | undefined
     )
     const effectiveType = body.type ?? existing.type ?? 'Opaque'
-    assertValidEffectiveSecretConstraints(
-      { name: body.name, type: effectiveType, annotations: effectiveAnnotations },
-      opts
-    )
     const updated = {
       ...existing,
       type: effectiveType,
       labels: mergePatchMap(existing.labels, body.labels as Record<string, unknown> | undefined),
-      annotations: mergePatchMap(
-        existing.annotations,
-        body.annotations as Record<string, unknown> | undefined
-      ),
-      data: mergePatchMap(existing.data, body.data as Record<string, unknown> | undefined),
-      stringData: mergePatchMap(
-        existing.stringData,
+      annotations: effectiveAnnotations,
+      data: materializeSecretData(
+        mergePatchMap(existing.data, body.data as Record<string, unknown> | undefined),
         body.stringData as Record<string, unknown> | undefined
       ),
       resourceVersion:
@@ -580,9 +579,8 @@ export class MockGateway {
     uid: string
     resourceVersion: string
     data?: Record<string, string>
-    stringData?: Record<string, string>
   }): SecretSnapshot {
-    return toSecretSnapshot(
+    const snapshot = toSecretSnapshot(
       {
         metadata: {
           name: entry.name,
@@ -594,11 +592,12 @@ export class MockGateway {
         },
         type: entry.type,
         data: entry.data,
-        stringData: entry.stringData,
       },
       entry.name,
       entry.namespace
     )
+    delete (snapshot as { stringData?: unknown }).stringData
+    return snapshot
   }
 
   /**
@@ -692,20 +691,14 @@ export class MockGateway {
     }
     this.assertPrecondition(req.name, existing, precondition)
     const effectiveAnnotations = resolveSecretAnnotationsForReplace(existing.annotations, undefined)
-    assertValidEffectiveSecretConstraints({
-      name: existing.name,
-      type: existing.type ?? 'Opaque',
-      annotations: effectiveAnnotations,
-    })
+    assertMutablePreservedSecretType(existing.type ?? 'Opaque')
     const updated = {
       ...existing,
       ...(existing.data ? { data: { ...existing.data } } : {}),
-      ...(existing.stringData ? { stringData: { ...existing.stringData } } : {}),
       resourceVersion:
         MockGateway.nextResourceVersion(existing.resourceVersion) ?? existing.resourceVersion,
     }
     delete updated.data?.[req.key]
-    delete updated.stringData?.[req.key]
     this.secretStore.set(key, updated)
     return this.snapshot(updated)
   }

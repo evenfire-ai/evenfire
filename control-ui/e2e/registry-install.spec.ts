@@ -47,6 +47,7 @@
  */
 import { type Page, expect, test } from '@playwright/test'
 import { setTimeout as delay } from 'node:timers/promises'
+import { type SecretIdentity, requireSecretIdentity } from '../test-utils/secretIdentity'
 
 const BASE_API = process.env.CONTROL_API_URL || 'http://localhost:8090'
 const REGISTRY_BASE = process.env.REGISTRY_URL || 'http://localhost:8085'
@@ -89,16 +90,6 @@ async function api(
     data = { raw: text }
   }
   return { status: resp.status, data }
-}
-
-type ObjectIdentity = { uid: string; resourceVersion: string }
-
-function requireObjectIdentity(value: unknown, operation: string): ObjectIdentity {
-  const record = value as { uid?: unknown; resourceVersion?: unknown }
-  if (typeof record?.uid !== 'string' || typeof record.resourceVersion !== 'string') {
-    throw new Error(`${operation} did not return a complete object identity`)
-  }
-  return { uid: record.uid, resourceVersion: record.resourceVersion }
 }
 
 async function login(page: Page) {
@@ -1720,9 +1711,9 @@ test.describe('J. Operator Egress Editor Journeys', () => {
   const deferredEnvSecretName = uniqueE2EName('e2e-deferred-creds')
   const deferredSandboxUiEntryName = uniqueE2EName('e2e-sandbox-ui-secret')
   const deferredSandboxUiSecretName = uniqueE2EName('e2e-sandbox-ui-creds')
-  let manualPendingIdentity: ObjectIdentity | null = null
-  let deferredEnvIdentity: ObjectIdentity | null = null
-  let deferredSandboxUiIdentity: ObjectIdentity | null = null
+  let manualPendingIdentity: SecretIdentity | null = null
+  let deferredEnvIdentity: SecretIdentity | null = null
+  let deferredSandboxUiIdentity: SecretIdentity | null = null
   const overLimitEntryName = uniqueE2EName('e2e-overlimit')
   let installedRegistryRecipeName = ''
   let installedDeferredEnvSecretRecipeName = ''
@@ -2010,7 +2001,11 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     const pendingManifestEditor = page.locator('textarea')
     await expect(pendingManifestEditor).toHaveCount(1)
     await pendingManifestEditor.fill(
-      JSON.stringify(manualPendingSecretRecipe(manualPendingRecipeName, manualPendingSecretName), null, 2)
+      JSON.stringify(
+        manualPendingSecretRecipe(manualPendingRecipeName, manualPendingSecretName),
+        null,
+        2
+      )
     )
     await page.getByRole('button', { name: 'Review manifest' }).click()
     await expect(page.getByText(/Manifest review passed/)).toBeVisible()
@@ -2105,7 +2100,7 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     await page.getByRole('button', { name: 'Create secret' }).click()
     const createdManualPending = await createRecipeSecretResponse
     expect(createdManualPending.status()).toBe(201)
-    manualPendingIdentity = requireObjectIdentity(
+    manualPendingIdentity = requireSecretIdentity(
       await createdManualPending.json(),
       'create manual pending recipe credential'
     )
@@ -2471,7 +2466,7 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     await page.getByRole('button', { name: 'Create secret' }).click()
     const createdDeferredEnv = await createRecipeSecretResponse
     expect(createdDeferredEnv.status()).toBe(201)
-    deferredEnvIdentity = requireObjectIdentity(
+    deferredEnvIdentity = requireSecretIdentity(
       await createdDeferredEnv.json(),
       'create deferred recipe credential'
     )
@@ -2603,7 +2598,7 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     await page.getByRole('button', { name: 'Create secret' }).click()
     const createdDeferredSandboxUi = await createRecipeSecretResponse
     expect(createdDeferredSandboxUi.status()).toBe(201)
-    deferredSandboxUiIdentity = requireObjectIdentity(
+    deferredSandboxUiIdentity = requireSecretIdentity(
       await createdDeferredSandboxUi.json(),
       'create sandbox-ui recipe credential'
     )

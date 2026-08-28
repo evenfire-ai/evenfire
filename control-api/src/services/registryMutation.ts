@@ -4,6 +4,7 @@ export const REGISTRY_OPERATION_ID_ANNOTATION = 'clerum.io/registry-operation-id
 export const REGISTRY_SPEC_DIGEST_ANNOTATION = 'clerum.io/registry-spec-sha256'
 
 export type RegistryMutationOutcome = 'committed' | 'not-committed' | 'ambiguous'
+export type RegistryMutationReadbackOutcome = 'committed' | 'ambiguous'
 
 export type RegistryResourceSnapshot = {
   metadata?: {
@@ -48,38 +49,6 @@ export function registrySpecDigest(spec: Record<string, unknown>): string {
   return createHash('sha256').update(canonicalRegistryJson(spec)).digest('hex')
 }
 
-/**
- * Classify a create response that may have been lost after the object committed.
- *
- * `committed` here means that the observed object carries this operation's complete
- * intent. A create readback has no pre-write UID to compare against, so it does NOT
- * prove that the observed UID is the object created by this request. Callers may use
- * the result to finish an idempotent success, but must mark the snapshot as
- * non-compensable until a direct create response supplied its identity.
- */
-export function classifyCreatedRegistryMutationReadback(input: {
-  current: RegistryResourceSnapshot | null
-  desired: RegistryMutationDesired
-  operationId: string
-}): RegistryMutationOutcome {
-  const metadata = input.current?.metadata
-  if (
-    !metadata ||
-    typeof metadata.uid !== 'string' ||
-    typeof metadata.resourceVersion !== 'string'
-  ) {
-    return 'ambiguous'
-  }
-  if (metadata.annotations?.[REGISTRY_OPERATION_ID_ANNOTATION] !== input.operationId) {
-    return 'ambiguous'
-  }
-  if (registrySpecDigest(input.current?.spec ?? {}) !== input.desired.specDigest) {
-    return 'ambiguous'
-  }
-  if (!metadataSubsetMatches(metadata, input.desired.metadata)) return 'ambiguous'
-  return 'committed'
-}
-
 function metadataSubsetMatches(
   current: RegistryResourceSnapshot['metadata'],
   expected: RegistryResourceSnapshot['metadata']
@@ -105,7 +74,7 @@ export function classifyRegistryMutationReadback(input: {
   desired: RegistryMutationDesired
   current: RegistryResourceSnapshot
   operationId: string
-}): RegistryMutationOutcome {
+}): RegistryMutationReadbackOutcome {
   const beforeMeta = input.before.metadata
   const currentMeta = input.current.metadata
   if (!beforeMeta?.uid || !beforeMeta.resourceVersion || !currentMeta?.uid) return 'ambiguous'
@@ -135,7 +104,7 @@ export function classifyRegistryAssociationReadback(input: {
   before: RegistryResourceSnapshot
   current: RegistryResourceSnapshot | null
   isCommitted: (spec: Record<string, unknown>) => boolean
-}): RegistryMutationOutcome {
+}): RegistryMutationReadbackOutcome {
   const beforeMeta = input.before.metadata
   const currentMeta = input.current?.metadata
   if (
@@ -152,12 +121,6 @@ export function classifyRegistryAssociationReadback(input: {
     input.isCommitted(input.current?.spec ?? {})
   ) {
     return 'committed'
-  }
-  if (
-    currentMeta.resourceVersion === beforeMeta.resourceVersion &&
-    registrySpecDigest(input.current?.spec ?? {}) === registrySpecDigest(input.before.spec ?? {})
-  ) {
-    return 'not-committed'
   }
   return 'ambiguous'
 }

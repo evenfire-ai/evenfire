@@ -539,6 +539,76 @@ describe('CreateMcpServerForm — envSecret guardrails', () => {
     })
   })
 
+  it('uses the legacy bodyless rollback when the create API omits identity fields', async () => {
+    ;(api.createMcpSecret as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      name: 'legacy-credentials',
+      namespace: 'mcp-server',
+    })
+    ;(api.createMcpServer as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('Connector create failed')
+    )
+
+    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
+    await fillRequiredBasics()
+    enableEnvSecret('legacy-credentials')
+    fireEvent.click(screen.getByRole('button', { name: 'Add Key Mapping' }))
+    fireEvent.change(screen.getByPlaceholderText('api-key'), {
+      target: { value: 'api-key' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('BRAVE_API_KEY'), {
+      target: { value: 'BRAVE_API_KEY' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('sk-...'), {
+      target: { value: 'test-value' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create connector' }))
+
+    await waitFor(() => {
+      expect(api.deleteMcpSecret).toHaveBeenCalledWith('legacy-credentials', undefined)
+    })
+    expect(screen.getByText('Connector create failed')).toBeInTheDocument()
+  })
+
+  it('preserves the primary error when legacy rollback fails against a newer delete API', async () => {
+    ;(api.createMcpSecret as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      name: 'mixed-version-credentials',
+      namespace: 'mcp-server',
+    })
+    ;(api.createMcpServer as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('Connector create failed')
+    )
+    ;(api.deleteMcpSecret as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('428 Precondition Required - current identity required')
+    )
+
+    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
+    await fillRequiredBasics()
+    enableEnvSecret('mixed-version-credentials')
+    fireEvent.click(screen.getByRole('button', { name: 'Add Key Mapping' }))
+    fireEvent.change(screen.getByPlaceholderText('api-key'), {
+      target: { value: 'api-key' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('BRAVE_API_KEY'), {
+      target: { value: 'BRAVE_API_KEY' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('sk-...'), {
+      target: { value: 'test-value' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create connector' }))
+
+    await waitFor(() => {
+      expect(api.deleteMcpSecret).toHaveBeenCalledWith('mixed-version-credentials', undefined)
+    })
+    expect(screen.getByText(/Connector create failed/)).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        /Cleanup of the created Secret also failed: 428 Precondition Required - current identity required\. Refresh the page and review the Secret before taking further action\./
+      )
+    ).toBeInTheDocument()
+  })
+
   it('happy path: creates Secret then CRD, no rollback', async () => {
     const onCreated = vi.fn()
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={onCreated} />)

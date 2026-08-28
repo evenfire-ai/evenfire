@@ -1,5 +1,4 @@
-import type { SecretPreconditions, SecretUpsertRequest } from '../types.js'
-import type { SecretConstraintOptions } from './secretConstraints.js'
+import type { SecretPreconditions } from '../types.js'
 
 /** The subset of a Kubernetes Secret that callers are allowed to observe. */
 export interface SecretResource {
@@ -33,32 +32,6 @@ export interface SecretSnapshot {
   immutable?: boolean
   data?: Record<string, string>
   stringData?: Record<string, string>
-}
-
-/** Typed boundary for every Secret mutation used by control-api. */
-export interface SecretRepository {
-  listSecrets(namespace?: string): Promise<unknown[]>
-  getSecret(name: string, namespace?: string): Promise<SecretResource>
-  createSecret(req: SecretUpsertRequest, opts?: SecretConstraintOptions): Promise<SecretSnapshot>
-  updateSecret(
-    req: SecretUpsertRequest,
-    precondition?: SecretPreconditions,
-    opts?: SecretConstraintOptions
-  ): Promise<SecretSnapshot>
-  mergeSecret(
-    req: SecretUpsertRequest,
-    opts?: SecretConstraintOptions,
-    precondition?: SecretPreconditions
-  ): Promise<SecretSnapshot>
-  removeSecretKey(
-    req: { name: string; namespace?: string; key: string },
-    precondition?: SecretPreconditions
-  ): Promise<SecretSnapshot>
-  deleteSecret(
-    name: string,
-    namespace?: string,
-    precondition?: SecretPreconditions
-  ): Promise<unknown>
 }
 
 /** Convert an apiserver response into the only mutation result callers may use for CAS. */

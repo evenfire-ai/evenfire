@@ -8,6 +8,15 @@ import { createAdminResourcesRouter } from '../src/routes/admin/resources.js'
 import { K8sConflictError, ResourceService } from '../src/services/resourceService.js'
 import { MockGateway } from './mockGateway.js'
 
+function decodeKubernetesData(snapshot: { data?: Record<string, string> }): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(snapshot.data ?? {}).map(([key, value]) => [
+      key,
+      Buffer.from(value, 'base64').toString('utf8'),
+    ])
+  )
+}
+
 vi.mock('node:dns/promises', () => ({
   lookup: vi.fn(),
 }))
@@ -341,8 +350,10 @@ describe('routes/resources', () => {
       name: 'cc-teams-channel-credentials',
     })
     const secret = (await gateway.getSecret('cc-teams-channel-credentials', 'channels')) as {
+      data?: Record<string, string>
       stringData?: Record<string, string>
     }
+    secret.stringData = decodeKubernetesData(secret)
     expect(secret.stringData?.['teams-app-password']).toBe('secret-value')
   })
 

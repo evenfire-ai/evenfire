@@ -2,6 +2,18 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: communicationchannels.clerum.io
+  annotations:
+    clerum.io/secret-reference-contract: |-
+      {
+        "version": 1,
+        "plural": "communicationchannels",
+        "fields": [
+          {
+            "path": "spec.credentialsSecretRef",
+            "namespaceBinding": "resource"
+          }
+        ]
+      }
   labels:
     app.kubernetes.io/name: communicationchannel
     app.kubernetes.io/part-of: clerum

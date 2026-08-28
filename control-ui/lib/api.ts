@@ -13,8 +13,11 @@ export type SecretIdentity = {
   resourceVersion: string
 }
 
-function requireSecretIdentity(raw: unknown, operation: string): SecretIdentity {
+function readSecretIdentity(raw: unknown, operation: string): SecretIdentity | undefined {
   const value = (raw ?? {}) as { uid?: unknown; resourceVersion?: unknown }
+  const hasUid = value.uid !== undefined
+  const hasResourceVersion = value.resourceVersion !== undefined
+  if (!hasUid && !hasResourceVersion) return undefined
   if (
     typeof value.uid !== 'string' ||
     !value.uid.trim() ||
@@ -24,6 +27,19 @@ function requireSecretIdentity(raw: unknown, operation: string): SecretIdentity 
     throw new Error(`${operation} returned an incomplete Secret identity; repair is required`)
   }
   return { uid: value.uid, resourceVersion: value.resourceVersion }
+}
+
+const SECRET_ERROR_MESSAGES: Record<string, string> = {
+  secret_identity_precondition_required:
+    'A current Secret identity is required before it can be deleted. Refresh the page and review the latest state before taking further action.',
+  secret_identity_unavailable:
+    'The server could not verify the current Secret identity. Refresh the page and review the Secret before taking further action.',
+  secret_identity_changed:
+    'This Secret changed since it was loaded. Refresh the page and review the latest state before taking further action.',
+  mcp_secret_in_use:
+    'This Secret is still in use by one or more connectors. Remove or update its references before deleting it.',
+  mcp_secret_reference_check_unavailable:
+    'The server could not verify whether this Secret is in use. Refresh the page and review its references before taking further action.',
 }
 
 // Global error handler for 401s - managed by AuthContext
@@ -118,8 +134,10 @@ export function formatApiError(res: Response, text: string): Error {
   } catch {
     detail = text
   }
+  const errorCode = typeof parsedBody?.error === 'string' ? parsedBody.error : undefined
   const friendlyDetail =
-    detail === 'duplicate_username'
+    (errorCode ? SECRET_ERROR_MESSAGES[errorCode] : undefined) ??
+    (detail === 'duplicate_username'
       ? 'That username is already taken.'
       : detail === 'duplicate_email'
         ? 'That email is already registered.'
@@ -144,15 +162,14 @@ export function formatApiError(res: Response, text: string): Error {
                       ? "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
                       : detail === 'member_registration_misconfigured'
                         ? 'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
-                        : detail
+                        : detail)
   const error = new Error(`${res.status} ${res.statusText} - ${friendlyDetail}`)
   ;(error as Error & { status?: number }).status = res.status
   // Preserve the machine-readable error code and full JSON body so callers can
   // render structured, actionable errors (e.g. unpriced_models, price_in_use_by_budget)
   // instead of the generic message string.
   if (parsedBody) {
-    ;(error as Error & { code?: string }).code =
-      typeof parsedBody.error === 'string' ? (parsedBody.error as string) : undefined
+    ;(error as Error & { code?: string }).code = errorCode
     ;(error as Error & { body?: Record<string, unknown> }).body = parsedBody
   }
   return error
@@ -1470,25 +1487,41 @@ export async function updateMcpServer(name: string, payload: { spec: Record<stri
   ) as Promise<McpServerResource>
 }
 
-export async function createMcpSecret(name: string, data: Record<string, string>) {
-  const response = await apiSend('POST', '/api/v1/admin/mcp-secrets', { name, data })
-  const identity = requireSecretIdentity(response, 'createMcpSecret')
-  return {
-    ...(response as { name: string; namespace: string }),
-    ...identity,
-  } as {
+export type McpSecretCreateResult =
+  | ({
+      name: string
+      namespace: string
+    } & SecretIdentity)
+  | {
+      name: string
+      namespace: string
+      uid?: undefined
+      resourceVersion?: undefined
+    }
+
+export async function createMcpSecret(
+  name: string,
+  data: Record<string, string>
+): Promise<McpSecretCreateResult> {
+  const response = (await apiSend('POST', '/api/v1/admin/mcp-secrets', { name, data })) as {
     name: string
     namespace: string
-  } & SecretIdentity
+  }
+  const identity = readSecretIdentity(response, 'createMcpSecret')
+  return identity ? { ...response, ...identity } : response
 }
 
 /**
  * Deletes a Secret in the MCP-servers namespace (hardcoded server-side to
  * `config.mcpServersNamespace`). Used by the Create MCP Server flow to roll
- * back a just-created Secret when the subsequent McpServer CRD creation fails,
- * so we never leave orphan Secrets behind.
+ * back a just-created Secret when the subsequent McpServer CRD creation fails.
+ *
+ * Current API versions require the server-issued identity. `undefined` is a
+ * narrow compatibility path for that rollback only: older create endpoints
+ * succeeded without returning identity and accepted the original bodyless
+ * DELETE. Primary delete flows must keep their identity precondition.
  */
-export async function deleteMcpSecret(name: string, identity: SecretIdentity) {
+export async function deleteMcpSecret(name: string, identity: SecretIdentity | undefined) {
   return apiSend(
     'DELETE',
     `/api/v1/admin/mcp-secrets/${encodeURIComponent(name)}`,

@@ -533,11 +533,16 @@ export function CreateMcpServerForm({
     const willCreateSecret =
       useEnvSecret && envSecretName.trim().length > 0 && Object.keys(secretData).length > 0
 
-    let createdSecretIdentity: SecretIdentity | null = null
+    let createdSecretName: string | null = null
+    let createdSecretIdentity: SecretIdentity | undefined
     try {
       if (willCreateSecret) {
-        const created = await createMcpSecret(envSecretName.trim(), secretData)
-        createdSecretIdentity = { uid: created.uid, resourceVersion: created.resourceVersion }
+        const secretName = envSecretName.trim()
+        const created = await createMcpSecret(secretName, secretData)
+        createdSecretName = secretName
+        if (created.uid && created.resourceVersion) {
+          createdSecretIdentity = { uid: created.uid, resourceVersion: created.resourceVersion }
+        }
       }
 
       await createMcpServer({
@@ -576,17 +581,25 @@ export function CreateMcpServerForm({
         onCreated()
       }, 600)
     } catch (submitError) {
-      // Rollback: if we created the Secret but the CRD (or anything after)
-      // failed, the Secret is orphan — best-effort delete.
-      if (createdSecretIdentity) {
+      // Rollback only a Secret this submission created. Legacy create APIs did
+      // not return an identity, so this is the one bounded bodyless-delete
+      // compatibility path; existing Secret deletes remain identity-bound.
+      let cleanupError: unknown
+      if (createdSecretName) {
         try {
-          await deleteMcpSecret(envSecretName.trim(), createdSecretIdentity)
-        } catch {
-          // best-effort rollback; swallow — the operator already sees the
-          // primary error below.
+          await deleteMcpSecret(createdSecretName, createdSecretIdentity)
+        } catch (error) {
+          cleanupError = error
         }
       }
-      setError(formatCreateError(submitError))
+      const primaryError = formatCreateError(submitError)
+      setError(
+        cleanupError
+          ? `${primaryError} Cleanup of the created Secret also failed: ${formatCreateError(
+              cleanupError
+            )}. Refresh the page and review the Secret before taking further action.`
+          : primaryError
+      )
     } finally {
       setSubmitting(false)
     }

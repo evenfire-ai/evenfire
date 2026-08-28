@@ -397,7 +397,13 @@ describe('wire shape (real wrappers, stubbed registry fetch)', () => {
     )
     vi.mocked(createOrgGrant).mockImplementationOnce(real.createOrgGrant)
     real.__resetTokenCacheForTests()
-    stubFetch(() => new Response(JSON.stringify({ error: 'self_grant' }), { status: 400 }))
+    stubFetch(
+      () =>
+        new Response(JSON.stringify({ error: 'self_grant' }), {
+          status: 400,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
     const res = await request(makeApp())
       .post('/admin/registry/grants')
       .send({ pluginName: '@acme/p', granteeOrg: 'acme' })

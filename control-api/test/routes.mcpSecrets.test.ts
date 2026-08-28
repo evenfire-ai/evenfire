@@ -3,6 +3,8 @@ import express from 'express'
 import request from 'supertest'
 import { rootLogger } from '../src/observability/logger.js'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
+import { CONTROL_UI_ADMIN_SESSION_COOKIE } from '../src/utils/auth/sessionCookies.js'
+import { MockGateway } from './mockGateway.js'
 
 /** The write shape the admin routes hand to the gateway. */
 type SecretWrite = {
@@ -102,6 +104,25 @@ function makeApp(gateway: ReturnType<typeof createGateway>) {
     }
   )
   return app
+}
+
+const TEST_CONTROL_UI_SESSION = 'test-control-ui-session'
+
+function createAuthenticatedAgent(app: express.Express) {
+  const agent = request.agent(app)
+  agent.jar.setCookie(
+    `${CONTROL_UI_ADMIN_SESSION_COOKIE}=${TEST_CONTROL_UI_SESSION}; Path=/; HttpOnly`,
+    '127.0.0.1',
+    '/'
+  )
+  return agent
+}
+
+function mcpDeleteProofCookieName(value: unknown): string {
+  const cookies = Array.isArray(value) ? value : typeof value === 'string' ? [value] : []
+  const proofCookie = cookies.find(cookie => cookie.startsWith('mcp_secret_delete_proof_'))
+  if (!proofCookie) throw new Error('Expected MCP Secret delete proof cookie')
+  return proofCookie.slice(0, proofCookie.indexOf('='))
 }
 
 describe('POST /admin/mcp-secrets', () => {
@@ -511,7 +532,7 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
     expect(res.body.resourceVersion).toBe('2')
   })
 
-  it('preserves Registry catalog annotations while rotating managed credentials', async () => {
+  it('does not grant public rotation a registry annotation capability', async () => {
     const gateway = createGateway()
     gateway.getSecret.mockResolvedValueOnce({
       metadata: {
@@ -540,13 +561,7 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
         namespace: 'mcp-server',
         stringData: { LINEAR_API_KEY: 'rotated-value' },
       }),
-      {
-        allowExistingPlatformAnnotationKeys: [
-          'clerum.io/catalog-id',
-          'clerum.io/catalog-version',
-          'clerum.io/registry-operation-id',
-        ],
-      },
+      undefined,
       {
         uid: 'uid-linear-credentials',
       }
@@ -835,16 +850,97 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
 })
 
 describe('DELETE /admin/mcp-secrets/:name (identity and dependency guard)', () => {
-  it('requires both server-issued identity values', async () => {
+  it('requires both server-issued identity values when a client supplies either one', async () => {
     const gateway = createGateway()
     const app = makeApp(gateway)
 
-    await request(app).delete('/admin/mcp-secrets/linear-credentials').send({}).expect(428)
+    for (const body of [{ uid: 'uid-linear-credentials' }, { resourceVersion: '1' }]) {
+      await request(app).delete('/admin/mcp-secrets/linear-credentials').send(body).expect(428)
+    }
 
     expect(gateway.deleteSecret).not.toHaveBeenCalled()
   })
 
-  it('refuses to delete a Secret referenced by a live connector', async () => {
+  it('supports an old UI POST plus bodyless DELETE with a signed create proof', async () => {
+    const gateway = createGateway()
+    const app = makeApp(gateway)
+    const agent = createAuthenticatedAgent(app)
+
+    const created = await agent
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+    const proofCookieName = mcpDeleteProofCookieName(created.headers['set-cookie'])
+    const warnSpy = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+
+    try {
+      const res = await agent.delete('/admin/mcp-secrets/linear-credentials').expect(200)
+
+      expect(res.body).toEqual({
+        name: 'linear-credentials',
+        namespace: 'mcp-server',
+        deleted: true,
+      })
+      expect(res.status).toBe(200)
+      expect(gateway.getSecret).toHaveBeenCalledWith('linear-credentials', 'mcp-server')
+      expect(gateway.deleteSecret).toHaveBeenCalledWith('linear-credentials', 'mcp-server', {
+        uid: 'uid-linear-credentials',
+        resourceVersion: '1',
+      })
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          module: 'admin-secrets',
+          event: 'mcp-secret-delete-legacy-signed-create-proof',
+          name: 'linear-credentials',
+          namespace: 'mcp-server',
+          preconditionSource: 'signed-create-proof',
+        }),
+        'MCP Secret delete used signed create proof'
+      )
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain(TEST_CONTROL_UI_SESSION)
+      expect(res.headers['set-cookie']).toEqual(
+        expect.arrayContaining([expect.stringMatching(new RegExp(`^${proofCookieName}=`))])
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('rejects a bodyless old UI DELETE with no signed create proof', async () => {
+    const gateway = createGateway()
+    const app = makeApp(gateway)
+    const agent = createAuthenticatedAgent(app)
+
+    await agent.delete('/admin/mcp-secrets/linear-credentials').expect(428)
+
+    expect(gateway.getSecret).not.toHaveBeenCalled()
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('rejects a stale supplied identity before delete', async () => {
+    const gateway = createGateway()
+    gateway.getSecret.mockResolvedValueOnce({
+      metadata: {
+        name: 'linear-credentials',
+        namespace: 'mcp-server',
+        uid: 'uid-current',
+        resourceVersion: '2',
+        labels: {},
+      },
+      data: {},
+    })
+    const app = makeApp(gateway)
+
+    const res = await request(app)
+      .delete('/admin/mcp-secrets/linear-credentials')
+      .send({ uid: 'uid-linear-credentials', resourceVersion: '1' })
+      .expect(409)
+
+    expect(res.body).toMatchObject({ error: 'secret_identity_changed', outcome: 'repair_required' })
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('legacy signed proof refuses to delete a Secret referenced by a live connector', async () => {
     const gateway = createGateway()
     gateway.listResource.mockResolvedValueOnce([
       {
@@ -853,13 +949,40 @@ describe('DELETE /admin/mcp-secrets/:name (identity and dependency guard)', () =
       },
     ])
     const app = makeApp(gateway)
+    const agent = createAuthenticatedAgent(app)
 
-    const res = await request(app)
-      .delete('/admin/mcp-secrets/linear-credentials')
-      .send({ uid: 'uid-linear-credentials', resourceVersion: '1' })
-      .expect(409)
+    await agent
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+    const res = await agent.delete('/admin/mcp-secrets/linear-credentials').expect(409)
 
     expect(res.body).toMatchObject({ error: 'mcp_secret_in_use', outcome: 'repair_required' })
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('legacy signed proof refuses to delete a WorkflowRecipe-owned Secret', async () => {
+    const gateway = createGateway()
+    gateway.getSecret.mockResolvedValueOnce({
+      metadata: {
+        name: 'recipe-creds',
+        namespace: 'mcp-server',
+        uid: 'uid-recipe-creds',
+        resourceVersion: '1',
+        labels: { 'clerum.io/recipe-secret': 'true' },
+      },
+      data: {},
+    })
+    const app = makeApp(gateway)
+    const agent = createAuthenticatedAgent(app)
+
+    await agent
+      .post('/admin/mcp-secrets')
+      .send({ name: 'recipe-creds', data: { RECIPE_KEY: 'create-value' } })
+      .expect(201)
+    const res = await agent.delete('/admin/mcp-secrets/recipe-creds').expect(409)
+
+    expect(res.body.error).toContain('WorkflowRecipe')
     expect(gateway.deleteSecret).not.toHaveBeenCalled()
   })
 
@@ -911,6 +1034,130 @@ describe('DELETE /admin/mcp-secrets/:name (identity and dependency guard)', () =
     expect(gateway.deleteSecret).toHaveBeenCalledWith('linear-credentials', 'mcp-server', {
       uid: 'uid-linear-credentials',
       resourceVersion: '1',
+    })
+  })
+
+  it('rejects a malformed fallback body even when a signed proof exists', async () => {
+    const gateway = createGateway()
+    const app = makeApp(gateway)
+    const agent = createAuthenticatedAgent(app)
+
+    await agent
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+    await agent
+      .delete('/admin/mcp-secrets/linear-credentials')
+      .send({ unexpected: true })
+      .expect(428)
+
+    expect(gateway.getSecret).not.toHaveBeenCalled()
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('rejects a tampered signed create proof', async () => {
+    const gateway = createGateway()
+    const app = makeApp(gateway)
+    const agent = createAuthenticatedAgent(app)
+
+    const created = await agent
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+    const proofCookieName = mcpDeleteProofCookieName(created.headers['set-cookie'])
+    agent.jar.setCookie(`${proofCookieName}=tampered; Path=/; HttpOnly`, '127.0.0.1', '/')
+
+    await agent.delete('/admin/mcp-secrets/linear-credentials').expect(428)
+
+    expect(gateway.getSecret).not.toHaveBeenCalled()
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('rejects an expired signed create proof', async () => {
+    const gateway = createGateway()
+    const app = makeApp(gateway)
+    const agent = createAuthenticatedAgent(app)
+
+    await agent
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 121_000)
+    try {
+      await agent.delete('/admin/mcp-secrets/linear-credentials').expect(428)
+    } finally {
+      dateNowSpy.mockRestore()
+    }
+
+    expect(gateway.getSecret).not.toHaveBeenCalled()
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('does not delete a replacement that wins before the legacy proof read', async () => {
+    const gateway = new MockGateway('mcp-server')
+    const name = 'linear-credentials'
+    const app = makeApp(gateway as never)
+    const agent = createAuthenticatedAgent(app)
+
+    const created = await agent
+      .post('/admin/mcp-secrets')
+      .send({ name, data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+    const originalIdentity = {
+      uid: created.body.uid as string,
+      resourceVersion: created.body.resourceVersion as string,
+    }
+    await gateway.deleteSecret(name, 'mcp-server', originalIdentity)
+    gateway.seedSecret(name, 'mcp-server', {
+      uid: 'uid-linear-replacement',
+      resourceVersion: '1',
+    })
+
+    const res = await agent.delete(`/admin/mcp-secrets/${name}`).expect(409)
+
+    expect(res.body).toMatchObject({ error: 'secret_identity_changed', outcome: 'repair_required' })
+    await expect(gateway.getSecret(name, 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: 'uid-linear-replacement', resourceVersion: '1' },
+    })
+  })
+
+  it('does not delete a replacement that wins after the legacy proof read', async () => {
+    const gateway = new MockGateway('mcp-server')
+    const name = 'linear-credentials'
+    const app = makeApp(gateway as never)
+    const agent = createAuthenticatedAgent(app)
+
+    const created = await agent
+      .post('/admin/mcp-secrets')
+      .send({ name, data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+    const originalIdentity = {
+      uid: created.body.uid as string,
+      resourceVersion: created.body.resourceVersion as string,
+    }
+
+    const deleteSpy = vi.spyOn(gateway, 'deleteSecret')
+    const listResources = gateway.listResource.bind(gateway)
+    let replacementCreated = false
+    vi.spyOn(gateway, 'listResource').mockImplementation(async (...args) => {
+      if (!replacementCreated && args[0] === 'mcpservers' && args[1] === 'mcp-server') {
+        replacementCreated = true
+        await gateway.deleteSecret(name, 'mcp-server', originalIdentity)
+        gateway.seedSecret(name, 'mcp-server', {
+          uid: 'uid-linear-replacement',
+          resourceVersion: '1',
+        })
+      }
+      return listResources(...args)
+    })
+
+    const res = await agent.delete(`/admin/mcp-secrets/${name}`).expect(409)
+
+    expect(res.body).toMatchObject({ error: 'secret_identity_changed', outcome: 'repair_required' })
+    expect(replacementCreated).toBe(true)
+    expect(deleteSpy).toHaveBeenLastCalledWith(name, 'mcp-server', originalIdentity)
+    await expect(gateway.getSecret(name, 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: 'uid-linear-replacement', resourceVersion: '1' },
     })
   })
 })

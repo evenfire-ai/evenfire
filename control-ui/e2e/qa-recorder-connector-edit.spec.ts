@@ -5,7 +5,7 @@
 // egress. Guarded by QA_RECORDER_CONFIRM_MUTATIONS; connector then context are
 // deleted via the Control API in a finally.
 import { type Page, expect, test } from '@playwright/test'
-import { requireSecretIdentity, type SecretIdentity } from '../test-utils/secretIdentity'
+import { type SecretIdentity, requireSecretIdentity } from '../test-utils/secretIdentity'
 import {
   CONTROL_API_URL,
   CONTROL_UI_URL,
@@ -28,7 +28,11 @@ const MOCK_MCP_IMAGE = process.env.TEST_MOCK_MCP_IMAGE ?? 'clerum/mock-mcp-serve
 // The connector-form's Transport Type and Managed selects are not label-associated,
 // so use their visible field label as the stable local scope for those controls.
 async function fieldSelect(page: Page, fieldLabelText: string, value: string): Promise<void> {
-  await page.getByText(fieldLabelText, { exact: true }).locator('..').getByRole('combobox').selectOption(value)
+  await page
+    .getByText(fieldLabelText, { exact: true })
+    .locator('..')
+    .getByRole('combobox')
+    .selectOption(value)
 }
 
 async function createEmptyContext(page: Page, contextName: string): Promise<void> {
@@ -78,9 +82,6 @@ async function createDiscoveryConnector(
   await fieldSelect(page, 'Transport Type', 'stdio')
   await expect(page.locator('input[type="number"]')).toHaveCount(0)
   await fieldSelect(page, 'Managed', 'false')
-  await page.getByLabel('Egress mode').selectOption('exact-cidr')
-  await page.getByLabel('Allowed CIDRs/IPs').fill('8.8.8.8/32')
-  await page.getByLabel('Allowed ports').fill('443')
 
   await page.getByRole('button', { name: 'Continue', exact: true }).click()
 
@@ -94,9 +95,9 @@ async function createDiscoveryConnector(
 
   await page.getByRole('button', { name: 'Continue', exact: true }).click()
 
-  await expect(
-    page.getByRole('radio', { name: /^No credentials required/ })
-  ).toBeVisible({ timeout: 20_000 })
+  await expect(page.getByRole('radio', { name: /^No credentials required/ })).toBeVisible({
+    timeout: 20_000,
+  })
   await page.getByRole('radio', { name: /^No credentials required/ }).check()
 
   await page.getByRole('button', { name: 'Create connector', exact: true }).click()
@@ -156,6 +157,10 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       await expect(meta.getByText('qa-recorder/example:dev')).toBeVisible()
       await expect(meta.getByText(contextName)).toBeVisible()
 
+      // The connector starts closed, so the following persistence check proves a
+      // real edit rather than re-reading setup data.
+      await expect(page.getByLabel('Egress mode')).toHaveValue('none')
+
       // External Egress: switch to exact-CIDR mode and add one public CIDR + port.
       // 8.8.8.8/32 is a valid public target; the model rejects private/doc ranges.
       await page.getByLabel('Egress mode').selectOption('exact-cidr')
@@ -166,6 +171,20 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       await expect(
         page.getByText(`Connector ${connectorName} updated.`, { exact: true })
       ).toBeVisible({ timeout: 20_000 })
+
+      await test.step('reopen the connector and read its persisted egress through the UI', async () => {
+        await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
+        await expect(
+          page.getByRole('button', { name: `Expand connector ${connectorName}` })
+        ).toBeVisible({ timeout: 20_000 })
+        await openConnectorEditor(page, connectorName)
+        await expect(
+          page.getByRole('heading', { name: `Edit Connector: ${connectorName}`, exact: true })
+        ).toBeVisible({ timeout: 20_000 })
+        await expect(page.getByLabel('Egress mode')).toHaveValue('exact-cidr')
+        await expect(page.getByLabel('Allowed CIDRs/IPs')).toHaveValue('8.8.8.8/32')
+        await expect(page.getByLabel('Allowed ports')).toHaveValue('443')
+      })
 
       await screenshotAndLog(page, testInfo, 'control-ui-connector-edit')
     } finally {
@@ -263,7 +282,9 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       // The connector edit screen is split into tabs; the rotation flow lives
       // on the Credentials tab — navigate there via the visible tab.
       await page.getByRole('tab', { name: 'Credentials', exact: true }).click()
-      await expect(page.getByRole('heading', { name: 'Update credentials', exact: true })).toBeVisible({
+      await expect(
+        page.getByRole('heading', { name: 'Update credentials', exact: true })
+      ).toBeVisible({
         timeout: 20_000,
       })
 

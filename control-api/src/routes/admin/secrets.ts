@@ -13,15 +13,24 @@ import {
   type SecretOwnership,
   parseSecretOwnership,
 } from '../../secretOwnership.js'
-import {
-  REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS,
-  REGISTRY_SECRET_ROTATION_PRESERVED_ANNOTATION_KEYS,
-} from '../../services/secretConstraints.js'
 import { invalidSecretDataKeyReason } from '../../services/secretKeys.js'
 import { findSecretReferenceState } from '../../services/secretReferenceService.js'
 import { secretIdentityPreconditions } from '../../services/secretRepository.js'
 import { toPublicDeleteSecretSummary, toPublicSecretSummary } from '../../services/secretService.js'
 import { SecretPreconditions, SecretUpsertRequest } from '../../types.js'
+import {
+  MCP_SECRET_DELETE_PROOF_TTL_SECONDS,
+  type McpSecretDeleteProofClaims,
+  createMcpSecretDeleteProof,
+  mcpSecretDeleteProofCookieName,
+  verifyMcpSecretDeleteProof,
+} from '../../utils/auth/mcpSecretDeleteProof.js'
+import {
+  CONTROL_UI_ADMIN_SESSION_COOKIE,
+  clearHttpOnlySessionCookie,
+  readCookie,
+  setHttpOnlySessionCookie,
+} from '../../utils/auth/sessionCookies.js'
 import { listHostSecrets } from './hostSecrets.js'
 import { isLlmHostSecret } from './llmSecretIdentity.js'
 
@@ -74,6 +83,22 @@ function requestSecretPreconditions(raw: unknown): SecretPreconditions | null {
   if (typeof body.uid !== 'string' || !body.uid.trim()) return null
   if (typeof body.resourceVersion !== 'string' || !body.resourceVersion.trim()) return null
   return { uid: body.uid, resourceVersion: body.resourceVersion }
+}
+
+function hasRequestedSecretIdentity(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
+  return (
+    Object.prototype.hasOwnProperty.call(raw, 'uid') ||
+    Object.prototype.hasOwnProperty.call(raw, 'resourceVersion')
+  )
+}
+
+function isLegacyMcpSecretDeleteBody(raw: unknown): boolean {
+  return (
+    raw === undefined ||
+    raw === null ||
+    (typeof raw === 'object' && !Array.isArray(raw) && Object.keys(raw).length === 0)
+  )
 }
 
 // The plaintext data being written, merging base64 `data` and plaintext
@@ -538,15 +563,37 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
 
       const created = await gateway.createSecret(secretReq)
       const identity = secretIdentityPreconditions(created)
-      if (!identity) {
+      const completeIdentity =
+        identity?.uid && identity.resourceVersion
+          ? { uid: identity.uid, resourceVersion: identity.resourceVersion }
+          : null
+      if (!completeIdentity) {
         res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
         return
+      }
+      const sessionToken = readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)
+      if (sessionToken) {
+        setHttpOnlySessionCookie(
+          req,
+          res,
+          mcpSecretDeleteProofCookieName(secretReq.name),
+          createMcpSecretDeleteProof(
+            {
+              name: secretReq.name,
+              namespace: targetNs,
+              uid: completeIdentity.uid,
+              resourceVersion: completeIdentity.resourceVersion,
+            },
+            sessionToken
+          ),
+          MCP_SECRET_DELETE_PROOF_TTL_SECONDS
+        )
       }
       res.status(201).json({
         name: name.trim(),
         namespace: targetNs,
-        uid: identity.uid,
-        resourceVersion: identity.resourceVersion,
+        uid: completeIdentity.uid,
+        resourceVersion: completeIdentity.resourceVersion,
         created: true,
       })
     })
@@ -667,18 +714,11 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
         return
       }
-      const existingAnnotations = existing.metadata?.annotations
-      const isRegistryManaged = REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS.every(
-        key => typeof existingAnnotations?.[key] === 'string'
-      )
-      const preserveRegistryAnnotations = isRegistryManaged
-        ? {
-            allowExistingPlatformAnnotationKeys: REGISTRY_SECRET_ROTATION_PRESERVED_ANNOTATION_KEYS,
-          }
-        : undefined
       const merged = await gateway.mergeSecret(
         { name, namespace: targetNs, stringData: data },
-        preserveRegistryAnnotations,
+        // Public rotation has no metadata capability; the optional constraints
+        // parameter precedes the UID fence in the gateway contract.
+        undefined,
         precondition
       )
 
@@ -758,9 +798,41 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
       }
       const name = req.params.name.trim()
       const requestedPrecondition = requestSecretPreconditions(req.body)
-      if (!requestedPrecondition) {
+      if (hasRequestedSecretIdentity(req.body) && !requestedPrecondition) {
         res.status(428).json({ error: 'secret_identity_precondition_required' })
         return
+      }
+      let deletePrecondition: SecretPreconditions
+      let signedCreateProof: McpSecretDeleteProofClaims | null = null
+      if (requestedPrecondition) {
+        // Current clients send the identity returned by POST and retain the
+        // established compare-and-delete contract.
+        deletePrecondition = requestedPrecondition
+      } else {
+        // Only the historical empty DELETE body can use the stateless rollback
+        // proof minted during this browser session's successful create. Any
+        // other body must use the normal complete identity contract.
+        if (!isLegacyMcpSecretDeleteBody(req.body)) {
+          res.status(428).json({ error: 'secret_identity_precondition_required' })
+          return
+        }
+        const sessionToken = readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)
+        const proofCookieName = mcpSecretDeleteProofCookieName(name)
+        const proofCookie = readCookie(req, proofCookieName)
+        const candidateProof =
+          sessionToken && proofCookie ? verifyMcpSecretDeleteProof(proofCookie, sessionToken) : null
+        signedCreateProof =
+          candidateProof?.name === name && candidateProof.namespace === config.mcpServersNamespace
+            ? candidateProof
+            : null
+        if (!signedCreateProof) {
+          res.status(428).json({ error: 'secret_identity_precondition_required' })
+          return
+        }
+        deletePrecondition = {
+          uid: signedCreateProof.uid,
+          resourceVersion: signedCreateProof.resourceVersion,
+        }
       }
       let existing: {
         metadata?: { labels?: Record<string, string>; uid?: string; resourceVersion?: string }
@@ -784,8 +856,8 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         return
       }
       if (
-        currentPrecondition.uid !== requestedPrecondition.uid ||
-        currentPrecondition.resourceVersion !== requestedPrecondition.resourceVersion
+        currentPrecondition.uid !== deletePrecondition.uid ||
+        currentPrecondition.resourceVersion !== deletePrecondition.resourceVersion
       ) {
         res.status(409).json({ error: 'secret_identity_changed', outcome: 'repair_required' })
         return
@@ -811,12 +883,33 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
           .json({ error: 'mcp_secret_reference_check_unavailable', outcome: 'repair_required' })
         return
       }
-      const deleted = await gateway.deleteSecret(
-        name,
-        config.mcpServersNamespace,
-        requestedPrecondition
-      )
-      res.status(200).json(toPublicDeleteSecretSummary(deleted))
+      if (signedCreateProof) {
+        logger.warn(
+          {
+            module: 'admin-secrets',
+            event: 'mcp-secret-delete-legacy-signed-create-proof',
+            name,
+            namespace: config.mcpServersNamespace,
+            preconditionSource: 'signed-create-proof',
+          },
+          'MCP Secret delete used signed create proof'
+        )
+      }
+      try {
+        const deleted = await gateway.deleteSecret(
+          name,
+          config.mcpServersNamespace,
+          deletePrecondition
+        )
+        clearHttpOnlySessionCookie(req, res, mcpSecretDeleteProofCookieName(name))
+        res.status(200).json(toPublicDeleteSecretSummary(deleted))
+      } catch (err) {
+        if (extractHttpStatus(err) === 409) {
+          res.status(409).json({ error: 'secret_identity_changed', outcome: 'repair_required' })
+          return
+        }
+        throw err
+      }
     })
   )
 

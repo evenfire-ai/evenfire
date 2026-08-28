@@ -4091,7 +4091,7 @@ describe('POST /admin/registry/upgrade', () => {
     }
     expect(current.spec?.image).toBe('test:2.0')
     await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).resolves.toMatchObject({
-      stringData: { [field]: nextValue },
+      data: { [field]: Buffer.from(nextValue).toString('base64') },
     })
   })
 
@@ -4263,7 +4263,7 @@ describe('POST /admin/registry/upgrade', () => {
     })
     const current = await gw.getSecret(secretName, 'mcp-server')
     expect(current.metadata?.uid).toBe('uid-existing-credentials')
-    expect(current.stringData).toEqual({ [field]: concurrentValue })
+    expect(current.data).toEqual({ [field]: Buffer.from(concurrentValue).toString('base64') })
   })
 
   it('does not compensate after a same-UID metadata-only concurrent mutation', async () => {
@@ -4395,7 +4395,9 @@ describe('POST /admin/registry/upgrade', () => {
     const current = await gw.getSecret(secretName, 'mcp-server')
     expect(current.metadata?.uid).toBe('uid-existing-credentials')
     expect(current.metadata?.resourceVersion).not.toBe('1')
-    expect(current.stringData).toEqual({ [field]: ['registry', 'value'].join('-') })
+    expect(current.data).toEqual({
+      [field]: Buffer.from(['registry', 'value'].join('-')).toString('base64'),
+    })
   })
 
   it('requires repair when an upgrade credential create response is lost after commit', async () => {
@@ -4853,6 +4855,62 @@ describe('POST /admin/registry/upgrade', () => {
     await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).resolves.toMatchObject({
       metadata: { annotations: { [futureKey]: futureValue } },
       data: { [key]: 'prior-test-token' },
+    })
+  })
+
+  it('restores a future platform annotation after a not-committed CR fence', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY_V2 as any)
+    const credentialKey = ['API', 'KEY'].join('_')
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce({
+      required: true,
+      authType: 'api-key',
+      keys: [{ name: credentialKey }],
+    })
+    const { app, gw } = makeApp()
+    const futureKey = 'clerum.io/future-controller-state'
+    const priorValue = ['fixture', 'prior'].join('-')
+    gw.seedSecret('my-srv-credentials', 'mcp-server', {
+      type: 'Opaque',
+      uid: 'secret-uid-fenced-future-platform',
+      resourceVersion: '7',
+      annotations: { [futureKey]: 'opaque-v1' },
+      data: { [credentialKey]: priorValue },
+    })
+    const originalUpdate = gw.updateResource.bind(gw)
+    let firstServerUpdate = true
+    vi.spyOn(gw, 'updateResource').mockImplementation(async (...args) => {
+      if (args[0] === 'mcpservers' && firstServerUpdate) {
+        firstServerUpdate = false
+        throw Object.assign(new Error('response lost before CR commit'), {
+          code: 503,
+          statusCode: 503,
+        })
+      }
+      return originalUpdate(...args)
+    })
+    const updateSecretSpy = vi.spyOn(gw, 'updateSecret')
+
+    const res = await request(app)
+      .post('/admin/registry/upgrade')
+      .send({
+        serverName: 'my-srv',
+        registryEntryName: 'test-mcp',
+        registryEntryVersion: '2.0.0',
+        credentials: { [credentialKey]: ['fixture', 'next'].join('-') },
+      })
+      .expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_upgrade_outcome_not_committed',
+      outcome: 'not_committed',
+    })
+    expect(updateSecretSpy).toHaveBeenCalledTimes(2)
+    expect(updateSecretSpy.mock.calls[1][0].annotations).toMatchObject({
+      [futureKey]: 'opaque-v1',
+    })
+    await expect(gw.getSecret('my-srv-credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: { annotations: { [futureKey]: 'opaque-v1' } },
+      data: { [credentialKey]: priorValue },
     })
   })
 
@@ -5935,6 +5993,39 @@ describe('POST /admin/registry/upgrade-recipe', () => {
     expect(recipe.spec).toEqual({ steps: [{ id: 's1', instruction: 'Run step' }] })
   })
 
+  it('requires repair when a recipe write and identity fence remain ambiguous', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce({
+      ...MOCK_RECIPE_ENTRY,
+      recipe_meta: { recipeYaml: JSON.stringify({ spec: { steps: [{ id: 'ambiguous' }] } }) },
+    })
+    const { app, gw } = makeRecipeUpgradeApp()
+    const originalUpdate = gw.updateResource.bind(gw)
+    vi.spyOn(gw, 'updateResource').mockImplementation(async (plural, name, body, namespace) => {
+      if (plural === 'workflowrecipes') {
+        throw Object.assign(new Error('recipe update and fence response lost'), {
+          statusCode: 503,
+          code: 503,
+        })
+      }
+      return originalUpdate(plural, name, body, namespace)
+    })
+
+    const response = await request(app).post('/admin/registry/upgrade-recipe').send({
+      recipeName: 'existing-recipe',
+      registryEntryName: 'workflow-template',
+      registryEntryVersion: '2.0.0',
+    })
+
+    expect(response.status, JSON.stringify(response.body)).toBe(503)
+    expect(response.body).toMatchObject({
+      error: 'registry_upgrade_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    await expect(
+      gw.getResource('workflowrecipes', 'existing-recipe', 'sandbox-recipes')
+    ).resolves.toMatchObject({ spec: { steps: [{ id: 's1', instruction: 'Run step' }] } })
+  })
+
   it('rejects cluster-local sibling egressBindings in another namespace before updating the CRD', async () => {
     vi.mocked(getEntryVersion).mockResolvedValueOnce({
       ...MOCK_RECIPE_ENTRY,
@@ -6489,6 +6580,44 @@ describe('POST /admin/registry/upgrade-hook — gates are not bypassed', () => {
       spec: { target: { image: { ref: string } } }
     }
     expect(hook.spec.target.image.ref).toBe(IMG_A)
+  })
+
+  it('requires repair when a hook write and identity fence remain ambiguous', async () => {
+    const gw = new MockGateway()
+    await seedInstalledImageHook(gw, 'my-hook')
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    vi.mocked(getEntryVersion).mockResolvedValue(
+      hookEntry({
+        name: '@acme/hook',
+        trust_level: 'low',
+        hook_meta: { target: { image: { ref: IMG_B, port: 8080 } }, lifecyclePoints: ['preCall'] },
+      })
+    )
+    const originalUpdate = gw.updateResource.bind(gw)
+    vi.spyOn(gw, 'updateResource').mockImplementation(async (plural, name, body, namespace) => {
+      if (plural === 'llmhooks') {
+        throw Object.assign(new Error('hook update and fence response lost'), {
+          statusCode: 503,
+          code: 503,
+        })
+      }
+      return originalUpdate(plural, name, body, namespace)
+    })
+
+    const response = await request(makeApp(gw))
+      .post('/admin/registry/upgrade-hook')
+      .send({ hookName: 'my-hook', registryEntryName: '@acme/hook', registryEntryVersion: '2.0.0' })
+
+    expect(response.status, JSON.stringify(response.body)).toBe(503)
+    expect(response.body).toMatchObject({
+      error: 'registry_upgrade_outcome_ambiguous',
+      outcome: 'repair_required',
+    })
+    await expect(
+      gw.getResource('llmhooks', 'my-hook', config.llmHooksNamespace)
+    ).resolves.toMatchObject({
+      spec: { target: { image: { ref: IMG_A } } },
+    })
   })
 
   it('refuses an upgrade that names a different entry than the one installed', async () => {
