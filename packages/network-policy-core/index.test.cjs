@@ -490,7 +490,13 @@ const isSortedByStart = ranges => ranges.every((r, i) => i === 0 || startOf(rang
 
 test('CORE-1 (G1) export surface snapshot: exactly the Phase-1 + provider-CIDR names', () => {
   assert.deepEqual(Object.keys(core).sort(), [
-    'BLOCKED_EXTERNAL_EGRESS_CIDRS', 'RESOLVED_AT_ANNOTATION', 'STATE_ANNOTATION',
+    'BLOCKED_EXTERNAL_EGRESS_CIDRS',
+    // Added on dev after this branch forked (WRC↔HCC handshake, #408/#413).
+    // The snapshot exists to notice exactly this, so it is widened deliberately,
+    // never loosened into a subset check.
+    'NETWORK_READY_ANNOTATION', 'NETWORK_READY_GENERATION_ANNOTATION',
+    'PRE_DEPLOY_ANNOTATION',
+    'RESOLVED_AT_ANNOTATION', 'STATE_ANNOTATION',
     'TARGETS_ANNOTATION', 'cidrOverlaps', 'cidrRange', 'classifyDnsError', 'emptyState',
     'isAllowedExternalEgressCidr', 'parseProviderNetblocks', 'parseState',
     'partitionCidrsByFamily', 'partitionIpsByProviderRanges', 'reconcileEgressState',
