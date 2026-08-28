@@ -42,6 +42,8 @@ const PUBLIC_MESSAGE_BY_CODE: Readonly<Record<string, string>> = {
   internal_error: 'The request could not be completed.',
   upstream_unavailable: 'The upstream service is temporarily unavailable.',
   authority_unavailable: 'Authorization is temporarily unavailable.',
+  member_registration_unavailable: 'Member registration is temporarily unavailable.',
+  member_registration_misconfigured: 'Member registration is not configured correctly.',
   upstream_timeout: 'The upstream service timed out.',
   insufficient_storage: 'The requested operation cannot be completed because storage is full.',
 }
@@ -62,7 +64,11 @@ const ALLOWED_CODES_BY_STATUS: Readonly<Record<number, ReadonlySet<string>>> = {
   429: new Set(['rate_limited']),
   500: new Set(['internal_error']),
   502: new Set(['upstream_unavailable']),
-  503: new Set(['authority_unavailable']),
+  503: new Set([
+    'authority_unavailable',
+    'member_registration_unavailable',
+    'member_registration_misconfigured',
+  ]),
   504: new Set(['upstream_timeout']),
   507: new Set(['insufficient_storage']),
 }
@@ -154,7 +160,9 @@ export function sanitizeControlApiPublicError(
   const suppliedCode =
     rawEnvelope && typeof (rawEnvelope as { code?: unknown }).code === 'string'
       ? String((rawEnvelope as { code: string }).code)
-      : ''
+      : error.status === 503 && typeof rawError === 'string'
+        ? rawError
+        : ''
   const fallbackCode = PUBLIC_CODE_BY_STATUS[error.status] || 'internal_error'
   const code = ALLOWED_CODES_BY_STATUS[error.status]?.has(suppliedCode)
     ? suppliedCode

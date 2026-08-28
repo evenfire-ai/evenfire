@@ -144,11 +144,9 @@ export function formatApiError(res: Response, text: string): Error {
                   ? 'Agent access could not be updated because the page did not include its current access state. Reload the page and try again.'
                   : detail === 'deleted_agent_history_limit_exceeded'
                     ? 'Agent access was not updated because the deleted-agent history limit was reached. No existing history was removed. Reload the page, review the current access, and try again.'
-                    : // Exact match is correct HERE: control-ui calls control-api directly,
-                      // so a member-registration 503 arrives as the bare { error: '<code>' }
-                      // body. profile-ui reaches these same codes through external-rest-api,
-                      // whose error middleware wraps any 5xx into { message: '...: <code>' },
-                      // so it must use .includes() instead — the two matchers differ on purpose.
+                    : // Control UI calls Control API directly, so the legacy bare string remains
+                      // its member-registration code source. Profile UI consumes the same safe
+                      // codes from External REST's canonical nested public envelope.
                       detail === 'member_registration_unavailable'
                       ? "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
                       : detail === 'member_registration_misconfigured'

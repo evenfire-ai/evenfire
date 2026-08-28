@@ -103,9 +103,9 @@ export function externalRestPublicErrorHandler(
   res: Response,
   _next: NextFunction
 ): void {
-  const rateLimitError = sanitizeControlApiPublicError(err, new Set([429]))
-  if (rateLimitError) {
-    sendSanitizedControlApiPublicError(res, rateLimitError)
+  const propagatedError = sanitizeControlApiPublicError(err, new Set([429, 503]))
+  if (propagatedError) {
+    sendSanitizedControlApiPublicError(res, propagatedError)
     return
   }
 

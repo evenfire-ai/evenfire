@@ -153,16 +153,12 @@ export async function apiSend(
     if (res.status === 401) handleUnauthorized()
     const publicError = publicErrorFields(text)
     const detail = publicError.detail || res.statusText
-    // Substring match is REQUIRED here (not === like control-ui): profile-ui reaches
-    // control-api through external-rest-api, whose error middleware collapses any 5xx
-    // into { message: "Control API ... failed (503): <code>" }, so the code arrives
-    // embedded in a wrapper string rather than as the bare { error: '<code>' } body.
-    if (detail.includes('member_registration_unavailable')) {
+    if (publicError.code === 'member_registration_unavailable') {
       throw new Error(
         "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
       )
     }
-    if (detail.includes('member_registration_misconfigured')) {
+    if (publicError.code === 'member_registration_misconfigured') {
       throw new Error(
         'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
       )
