@@ -647,7 +647,7 @@ export default function EditCommunicationChannelPage() {
                         </div>
                         <button
                           type="button"
-                          className="cu-btn cu-btn--secondary"
+                          className="cu-btn"
                           onClick={copySlackRequestUrl}
                           disabled={!slackRequestUrl || saving}
                         >
@@ -784,7 +784,7 @@ export default function EditCommunicationChannelPage() {
                         </div>
                         <button
                           type="button"
-                          className="cu-btn cu-btn--secondary"
+                          className="cu-btn"
                           onClick={copyTeamsRequestUrl}
                           disabled={!teamsRequestUrl || saving}
                         >

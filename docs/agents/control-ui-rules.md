@@ -75,9 +75,13 @@ leaning on either behaviour.
 - Keep the table element and its header row mounted through loading, empty, and
   error states. Only the body changes. An empty result renders a full-width row,
   not an unmounted table.
-- Row actions run in a fixed order: utility, then edit, then destructive, then
-  the detail-open chevron. The chevron sits at the right edge and is the only
-  affordance for opening a detail view.
+- Render row actions with `RowActions`. It fixes the order by `kind` (utility,
+  then edit, then destructive, then inspect) regardless of array order, supplies
+  the right-edge chevron for `inspect`, and collapses everything except
+  destructive and inspect into a kebab past `overflowAfter`. Set `hidden` to drop
+  an affordance a row cannot support rather than rendering a disabled one.
+- The chevron is the only affordance for opening a detail view. Do not add a
+  name link, a left-edge chevron, or a row click as a second route.
 - `app/cost-and-usage/llm-prices` is the reference implementation for a route
   table, including state-dependent row affordances.
 
