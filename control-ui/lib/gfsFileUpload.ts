@@ -29,11 +29,16 @@ const GFS_UPLOAD_V2_PART_TIMEOUT_MS = 300_000
 const GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS = 60_000
 const GFS_UPLOAD_V2_RECONCILE_ATTEMPTS = 3
 const MEBIBYTE_BYTES = 1024 * 1024
+const GIBIBYTE_BYTES = 1024 * MEBIBYTE_BYTES
 
-function formatBinaryUploadLimit(byteLength: number): string {
-  return byteLength % MEBIBYTE_BYTES === 0
-    ? `${byteLength / MEBIBYTE_BYTES} MiB`
-    : `${byteLength} bytes`
+/**
+ * Presentation only: GFSC remains the authority for the Upload v2 product policy.
+ */
+export function formatGfsUploadLimit(byteLength: number): string {
+  if (byteLength === 1) return '1 byte'
+  if (byteLength % GIBIBYTE_BYTES === 0) return `${byteLength / GIBIBYTE_BYTES} GiB`
+  if (byteLength % MEBIBYTE_BYTES === 0) return `${byteLength / MEBIBYTE_BYTES} MiB`
+  return `${byteLength} bytes`
 }
 
 export function isRetryableUploadStatus(status: number): boolean {
@@ -1203,7 +1208,7 @@ export class GfsUploadJob {
     const productMaxFileBytes = normalizeUploadProductMaxBytes(resumable.maxFileBytes)
     if (resumable.maxFileBytes === undefined) {
       console.warn(
-        `GFS Upload v2 writer omitted maxFileBytes; using the ${GFS_FILE_UPLOAD_DEFAULT_PRODUCT_MAX_BYTES}-byte compatibility limit.`
+        `GFS Upload v2 writer omitted maxFileBytes; using the ${formatGfsUploadLimit(GFS_FILE_UPLOAD_DEFAULT_PRODUCT_MAX_BYTES)} compatibility limit.`
       )
     }
     const resumeId = this.session?.uploadId ?? this.input.resumeUploadId
@@ -1223,10 +1228,12 @@ export class GfsUploadJob {
     if (this.input.file.size > productMaxFileBytes) {
       if (resumable.maxFileBytes === undefined) {
         throw new Error(
-          `GFS uploads use the ${formatBinaryUploadLimit(GFS_FILE_UPLOAD_DEFAULT_PRODUCT_MAX_BYTES)} compatibility limit because the writer omitted maxFileBytes.`
+          `GFS uploads use the ${formatGfsUploadLimit(GFS_FILE_UPLOAD_DEFAULT_PRODUCT_MAX_BYTES)} compatibility limit because the writer omitted maxFileBytes.`
         )
       }
-      throw new Error(`GFS writer limit is ${productMaxFileBytes} bytes for this upload.`)
+      throw new Error(
+        `GFS writer permits files up to ${formatGfsUploadLimit(productMaxFileBytes)} for this upload.`
+      )
     }
     const createBody = {
       operation: this.input.target.operation,
@@ -1507,7 +1514,7 @@ export async function uploadGfsFileLegacy(input: {
 }): Promise<unknown> {
   if (input.file.size > GFS_LEGACY_UPLOAD_MAX_BYTES) {
     throw new Error(
-      `This writer does not advertise resumable uploads; legacy GFS is limited to ${GFS_LEGACY_UPLOAD_MAX_BYTES} bytes.`
+      `This writer does not advertise resumable uploads; legacy GFS is limited to ${formatGfsUploadLimit(GFS_LEGACY_UPLOAD_MAX_BYTES)}.`
     )
   }
   const contentBase64 = digestBase64(await input.file.arrayBuffer())
