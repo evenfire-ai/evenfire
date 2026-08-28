@@ -1,6 +1,6 @@
 import type { NextFunction, Response } from 'express'
 import { Router } from 'express'
-import { sanitizeControlApiPublicError } from '../http/publicApiError.js'
+import { publicCorrelationId, sanitizeControlApiPublicError } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import {
   confirmWorkflowApprovalMediumChallenge,
@@ -19,7 +19,11 @@ const CODE_RE = /^\d{6}$/
 const DISPLAY_NAME_MAX_LENGTH = 120
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
-  const sanitized = sanitizeControlApiPublicError(error, PROPAGATED_STATUSES)
+  const sanitized = sanitizeControlApiPublicError(
+    error,
+    PROPAGATED_STATUSES,
+    publicCorrelationId(res.req)
+  )
   if (sanitized) {
     res.status(sanitized.status).json(sanitized.body)
     return

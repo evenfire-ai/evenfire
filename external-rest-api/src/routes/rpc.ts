@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { sanitizeControlApiPublicError } from '../http/publicApiError.js'
+import { publicCorrelationId, sanitizeControlApiPublicError } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import { issueRpcAccessToken } from '../services/rpcService.js'
 
@@ -23,7 +23,11 @@ export function createRpcRouter(): Router {
       )
       res.status(200).json(result)
     } catch (error) {
-      const sanitized = sanitizeControlApiPublicError(error, RPC_PUBLIC_STATUSES)
+      const sanitized = sanitizeControlApiPublicError(
+        error,
+        RPC_PUBLIC_STATUSES,
+        publicCorrelationId(req)
+      )
       if (sanitized) {
         res.status(sanitized.status).json(sanitized.body)
         return
