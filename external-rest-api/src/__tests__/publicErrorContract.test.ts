@@ -3,7 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { externalRestPublicErrorHandler } from '../app.js'
 import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
-import { sanitizeControlApiPublicError } from '../http/publicApiError.js'
+import { sanitizeControlApiPublicError, selectPublicCorrelationId } from '../http/publicApiError.js'
 
 function appThrowing(error: Error) {
   const app = express()
@@ -30,6 +30,13 @@ describe('External REST public error contract', () => {
       expect(response.body.error.correlationId).not.toBe(rejected)
       expect(response.body.error.correlationId).toMatch(/^[A-Za-z0-9_-]{1,128}$/)
     }
+  })
+
+  it('requires the supplied correlation value itself to match without whitespace normalization', () => {
+    expect(selectPublicCorrelationId(' upstream_ID-42 ', 'request_ID-42')).toBe('request_ID-42')
+    const generated = selectPublicCorrelationId(' request_ID-42 ')
+    expect(generated).not.toBe('request_ID-42')
+    expect(generated).toMatch(/^[A-Za-z0-9_-]{1,128}$/)
   })
 
   it('never reflects an internal upstream message, path, or secret-like value', async () => {
