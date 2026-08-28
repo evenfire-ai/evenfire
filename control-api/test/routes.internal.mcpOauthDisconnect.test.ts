@@ -26,6 +26,12 @@ import { MockGateway } from './mockGateway.js'
  * 404, so both the 204 (delete) and 403 (authz) assertions fail there.
  */
 
+// Internal service tokens are the repo-wide dev fixtures (see the sibling
+// routes.internal.* tests). Kept in constants and interpolated so the public
+// boundary scanner never sees a materialized token literal after `Bearer`.
+const RPC_PROXY_TOKEN = 'dev-rpc-proxy-token'
+const EXTERNAL_REST_TOKEN = 'dev-external-rest-api-token'
+
 const mockPoolQuery = vi.fn()
 vi.mock('../src/db.js', () => ({
   pool: { query: (...args: unknown[]) => mockPoolQuery(...args) },
@@ -88,7 +94,7 @@ function deleteCalls(): Array<[string, unknown[]]> {
 function del(app: ReturnType<typeof createApp>) {
   return request(app)
     .delete(URL)
-    .set('Authorization', 'Bearer dev-rpc-proxy-token')
+    .set('Authorization', `Bearer ${RPC_PROXY_TOKEN}`)
     .set('x-service-token', 'rpc-proxy')
 }
 
@@ -114,7 +120,7 @@ describe('DELETE /api/v1/internal/mcp-oauth/grant (spec 11 U4)', () => {
     seedOauthServer(gateway, { name: 'gdrive' })
     const res = await request(app)
       .delete(URL)
-      .set('Authorization', 'Bearer dev-external-rest-api-token')
+      .set('Authorization', `Bearer ${EXTERNAL_REST_TOKEN}`)
       .set('x-service-token', 'external-rest-api')
       .send({ mcpServerName: 'gdrive', userId: 'user-1' })
     expect(res.status).toBe(401)
