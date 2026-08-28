@@ -155,6 +155,19 @@ describe('ClientKey — SHARED sentinel never collides with a real userId', () =
     )
   })
 
+  it('sentinel-lookalike userIds never collide with the SHARED key', () => {
+    // fc.string() effectively never emits the values that could plausibly
+    // collide (the 's' discriminator, the 'shared' word, the serverName, or the
+    // serialized shared key itself), so pin them explicitly: the ['u',…] vs
+    // ['s',…] tuple discriminator must keep every real user distinct from SHARED.
+    const serverName = 'srv'
+    const sharedKey = serializeClientKey(serverName, SHARED_PRINCIPAL)
+    const adversarial = ['s', 'shared', 'SHARED', '', ' ', serverName, 'u', sharedKey]
+    for (const userId of adversarial) {
+      expect(serializeClientKey(serverName, userPrincipal(userId))).not.toBe(sharedKey)
+    }
+  })
+
   it('serialization is injective over (serverName, principal) and round-trips serverName', () => {
     fc.assert(
       fc.property(fc.string(), fc.string(), fc.string(), (serverName, a, b) => {
@@ -561,5 +574,117 @@ describe('Reconcile no-change preserves live per-user partitions', () => {
     await manager.callTool('gh__do', {}, { userId: 'alice' })
     expect(sdk.transports.length).toBe(transportsBefore)
     expect(manager.getConnectedServers()).toEqual(['gh'])
+  })
+})
+
+// ─── R4-M3 · detachServer purges the `clients` map for EVERY ClientKey ────────
+//
+// The "detachServer purges every ClientKey" invariant was only pinned via the
+// `byServer` projections (getConnectedServers/getAllTools). Removing
+// `this.clients.delete(key)` from detachServer leaves byServer cleared (so those
+// projections stay green) while stale clients survive in the private `clients`
+// map. The observable of a surviving key: a later admission that SHOULD open a
+// fresh connection instead silently reuses the stale client. Re-admitting the
+// same server + users after a detach must therefore open a FULL set of fresh
+// connections (representative + each per-user partition).
+
+describe('R4-M3 — detachServer purges the clients map for every ClientKey', () => {
+  it('a re-admitted server + users open fresh connections (no stale ClientKey reused)', async () => {
+    const { factory } = recordingFactory()
+    const manager = new McpManager(undefined, undefined, factory)
+    await manager.addServer(oauthUserServer())
+    await manager.callTool('gh__do', {}, { userId: 'alice' })
+    await manager.callTool('gh__do', {}, { userId: 'bob' })
+
+    await manager.detachServer('gh')()
+
+    // Count only connections opened AFTER the detach.
+    sdk.transports = []
+    await manager.addServer(oauthUserServer()) // SHARED representative
+    await manager.callTool('gh__do', {}, { userId: 'alice' }) // per-user partition
+    await manager.callTool('gh__do', {}, { userId: 'bob' }) // per-user partition
+
+    // Exactly 3 fresh connections: representative + alice + bob. If detachServer
+    // left any ClientKey (SHARED or per-user) in `clients`, that partition would
+    // reuse its stale client and open fewer than 3 (removing clients.delete →
+    // representative re-enters via replaceServer + both users reuse stale → 1).
+    expect(sdk.transports.length).toBe(3)
+  })
+})
+
+// ─── R4-M4 · replaceServer keeps the SHARED representative (keepKey) alive ─────
+//
+// evictPartitionsExcept skips `keepKey` (the freshly-installed SHARED
+// representative). Removing `if (key === keepKey) continue` evicts it too, but
+// that mutant is MASKED whenever a per-user partition exists (M2's
+// representativeClient fallback returns the per-user client, so
+// getConnectedServers/getAllTools stay green). This test pins the invariant with
+// ZERO per-user partitions, where nothing can mask an evicted representative.
+//
+// NOTE (interdependence with M2, not fixed here): if a per-user partition were
+// present, the M2 fallback would keep getConnectedServers green even with the
+// representative evicted — this test deliberately holds no per-user partition so
+// it pins keepKey directly given the current code.
+
+describe('R4-M4 — replaceServer keeps the SHARED representative alive', () => {
+  it('the SHARED representative survives the swap (no per-user partitions to mask it)', async () => {
+    const { factory } = recordingFactory()
+    const manager = new McpManager(undefined, undefined, factory)
+    await manager.addServer(oauthUserServer())
+
+    // No per-user calls: the only ClientKey is the SHARED representative.
+    const outcome = await manager.replaceServer(oauthUserServer())
+    expect(outcome).toBe('applied')
+
+    // Representative survived → catalog + connectivity intact. With the keepKey
+    // skip removed, evictPartitionsExcept would delete the SHARED key and both
+    // would be empty.
+    expect(manager.getConnectedServers()).toEqual(['gh'])
+    expect(manager.getAllTools().map(t => t.name)).toEqual(['gh__do'])
+  })
+})
+
+// ─── R4-M5 · a terminal McpAuthError evicts the per-user partition (T5) ────────
+//
+// The PR body states a terminal McpAuthError "then evicts the partition", but no
+// test pinned it: removing `this.evictPartition(key)` from callTool's McpAuthError
+// branch stayed green. The McpAuthError is produced by the REAL client (a 401 that
+// survives its single forced-refresh retry — T1, never hand-minted). Observable of
+// the eviction: the NEXT call by the same user must RE-ADMIT a fresh partition
+// (a fresh factory build), instead of reusing the still-connected stale client.
+
+describe('R4-M5 — a terminal McpAuthError evicts the per-user partition', () => {
+  it('re-admits the per-user partition on the next call after a terminal 401', async () => {
+    const { factory, built } = recordingFactory()
+    const manager = new McpManager(undefined, undefined, factory)
+    await manager.addServer(oauthUserServer())
+
+    // callTool throws a structured 401 on both the initial call and the client's
+    // single forced-refresh retry → the real client raises a terminal
+    // McpAuthError(401), which the manager treats as a terminal auth failure.
+    let phase: '401' | 'ok' = '401'
+    sdk.callToolImpl = async () => {
+      if (phase === '401') {
+        const err = new Error('http 401') as Error & { code: number }
+        err.code = 401
+        throw err
+      }
+      return { content: [{ type: 'text', text: 'ok' }] }
+    }
+
+    const first = await manager.callTool('gh__do', {}, { userId: 'alice' })
+    expect(first.isError).toBe(true)
+    expect(first.connectRequired).toEqual({ mcpServerName: 'gh' })
+    // Alice's partition was admitted exactly once so far (the 401 reconnect reuses
+    // the same tokenProvider — it does NOT rebuild via the manager factory).
+    expect(built.filter(b => b.principal === 'alice')).toHaveLength(1)
+
+    // The partition must have been evicted → the next call RE-ADMITS alice (a
+    // second factory build). Without evictPartition, the still-connected stale
+    // client is reused and no second admission happens.
+    phase = 'ok'
+    const second = await manager.callTool('gh__do', {}, { userId: 'alice' })
+    expect(second.isError).toBe(false)
+    expect(built.filter(b => b.principal === 'alice')).toHaveLength(2)
   })
 })

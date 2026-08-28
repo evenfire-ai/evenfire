@@ -665,24 +665,56 @@ export class HostReconciler {
    * Whether this Host fronts an enabled `auth.type: oauth` mcp-server, gating
    * the derive-only `oauth:user-token` runtime scope. Fails CLOSED (false) when
    * the cross-CRD read throws: an uncertain read must never grant the scope.
-   * Computed ONCE per reconcile and threaded into BOTH the mint-scope derive
-   * and the drift hash so the two never diverge.
+   *
+   * Each call is an INDEPENDENT live point-in-time read (mirrors
+   * `hasChannelIngress`); the value is deliberately not cached across a
+   * reconcile. Callers that need one consistent value within a unit of work
+   * resolve it once and thread the same bool (see the issuance path, which
+   * threads it into the mint-scope derive and the drift hash so they never
+   * diverge); the deployment drift guard re-reads it on purpose to catch a
+   * scope change mid-reconcile.
    */
   private async frontsOAuthServer(host: HostCRD): Promise<boolean> {
-    try {
-      return await this.hostFrontsOAuthServerFn(host)
-    } catch (err) {
-      log.warn(
-        'failed to resolve whether Host fronts an oauth mcp-server; failing closed (no oauth:user-token scope)',
-        {
-          host: host.name,
-          namespace: host.namespace,
-          contextRef: host.spec.contextRef,
-          err: err instanceof Error ? err.message : String(err),
+    // Bounded retry that absorbs a TRANSIENT apiserver blip without touching the
+    // authoritative-`false` path. Contract of the underlying resolver: a real
+    // scope change (the server genuinely stopped fronting an oauth mcp-server)
+    // RETURNS `false` without throwing; only a transient read failure (apiserver
+    // blip) THROWS. So we retry ONLY on throw — any RETURNED value (true or
+    // false) is authoritative and is returned immediately, so a healthy call
+    // resolves on the first attempt with zero added overhead and an authoritative
+    // `false` is never re-tried. Before this retry, a transient throw collapsed
+    // to `false` exactly like an authoritative `false`, dropping the
+    // oauth:user-token scope → runtime-token re-mint + Deployment rollout, then a
+    // flip back on recovery → churn, once per OAuth Host per reconcile.
+    const MAX_ATTEMPTS = 3
+    const BACKOFF_BASE_MS = 50
+    let lastErr: unknown
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        return await this.hostFrontsOAuthServerFn(host)
+      } catch (err) {
+        lastErr = err
+        if (attempt < MAX_ATTEMPTS) {
+          // Small linear backoff (50ms, 100ms) to let a transient blip clear.
+          await new Promise(resolve => setTimeout(resolve, BACKOFF_BASE_MS * attempt))
         }
-      )
-      return false
+      }
     }
+    // All attempts threw. Residual honesty: a SUSTAINED apiserver outage (every
+    // attempt throws) still fails CLOSED here and can flip the scope off. That is
+    // correct — a sustained outage is a genuine "scope unknown" situation, not a
+    // blip — the retry only smooths over transient blips, never a real outage.
+    log.warn(
+      'failed to resolve whether Host fronts an oauth mcp-server after retries; failing closed (no oauth:user-token scope)',
+      {
+        host: host.name,
+        namespace: host.namespace,
+        contextRef: host.spec.contextRef,
+        attempts: MAX_ATTEMPTS,
+        err: lastErr instanceof Error ? lastErr.message : String(lastErr),
+      }
+    )
+    return false
   }
 
   /**
@@ -1038,6 +1070,7 @@ export class HostReconciler {
     // Already exists — replace to pick up rotated secretRef / new resourceNames.
     try {
       const existing = await this.rbacApi.readNamespacedRole({ name, namespace: host.namespace })
+      if (roleMatchesDesired(body, existing)) return
       body.metadata!.resourceVersion = existing.metadata?.resourceVersion
       await this.rbacApi.replaceNamespacedRole({ name, namespace: host.namespace, body })
       console.log(`[HostReconciler] Updated Role "${name}"`)
@@ -2415,6 +2448,10 @@ export class HostReconciler {
         )
         return
       }
+      // The outer read above treats 404 as a transient throw so this Host
+      // reconcile requeues and recreates. The helper read below is the #472
+      // contract: 404 means gone, return, and the next Host reconcile
+      // recreates. Same object, two 404 policies — accepted, not a bug.
       try {
         await replaceWithConflictRetry({
           description: `channel-reader Deployment "${name}"`,
@@ -4776,6 +4813,56 @@ export class HostReconciler {
     })
     return (response.items || []).filter(item => item.metadata?.labels?.[HOST_LABEL])
   }
+}
+
+/**
+ * True when the desired Role matches the live object on the fields HCC authors:
+ * `rbacLabels` and `rules` in author order. Server metadata and annotations are
+ * ignored — the builder does not write annotations, and comparing them would
+ * force a PUT. Label keys are canonicalized. Object keys inside each rule are
+ * also canonicalized: client-node rebuilds V1PolicyRule in attributeTypeMap
+ * order (resourceNames before resources), so a raw JSON.stringify never matches
+ * a live GET (#307). Rule arrays, verbs, and resourceNames stay in author order.
+ * Missing rules or labels, or any compare failure, returns false
+ * (fail-open-to-write).
+ */
+function roleMatchesDesired(desired: k8s.V1Role, existing: k8s.V1Role): boolean {
+  try {
+    if (!desired.rules || !existing.rules) return false
+    if (!desired.metadata?.labels || !existing.metadata?.labels) return false
+    if (
+      JSON.stringify(canonicalizeLabelKeys(desired.metadata.labels)) !==
+      JSON.stringify(canonicalizeLabelKeys(existing.metadata.labels))
+    ) {
+      return false
+    }
+    return (
+      JSON.stringify(canonicalizeRoleValue(desired.rules)) ===
+      JSON.stringify(canonicalizeRoleValue(existing.rules))
+    )
+  } catch {
+    return false
+  }
+}
+
+function canonicalizeLabelKeys(labels: Record<string, string>): Record<string, string> {
+  const canonical: Record<string, string> = {}
+  for (const key of Object.keys(labels).sort()) {
+    canonical[key] = labels[key]
+  }
+  return canonical
+}
+
+/** Sort object keys recursively. Arrays keep author order. */
+function canonicalizeRoleValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeRoleValue)
+  if (typeof value !== 'object' || value === null) return value
+  const canonical: Record<string, unknown> = {}
+  for (const key of Object.keys(value).sort()) {
+    const entry = (value as Record<string, unknown>)[key]
+    if (entry !== undefined) canonical[key] = canonicalizeRoleValue(entry)
+  }
+  return canonical
 }
 
 /**

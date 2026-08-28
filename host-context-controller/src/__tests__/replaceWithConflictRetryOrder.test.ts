@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
+import { ApiException } from '@kubernetes/client-node'
 import type * as k8s from '@kubernetes/client-node'
 import {
   preserveServiceAssignedFields,
   replaceWithConflictRetry,
   serviceMatchesDesired,
 } from '../utils'
+
+function apiException(code: number): ApiException<unknown> {
+  return new ApiException(code, 'test', {}, {})
+}
 
 const desired: k8s.V1Service = {
   apiVersion: 'v1',
@@ -92,6 +97,167 @@ describe('replaceWithConflictRetry order and retry', () => {
     } finally {
       log.mockRestore()
     }
+  })
+
+  it.each([
+    { status: 403, form: 'ApiException', error: apiException(403) },
+    { status: 403, form: 'statusCode', error: { response: { statusCode: 403 } } },
+    { status: 500, form: 'ApiException', error: apiException(500) },
+    { status: 500, form: 'statusCode', error: { response: { statusCode: 500 } } },
+  ])('TOCTOU-NP-2: helper read $status ($form) still throws', async ({ error }) => {
+    const replace = vi.fn()
+    const validateExisting = vi.fn()
+    const read = vi.fn().mockRejectedValue(error)
+
+    await expect(
+      replaceWithConflictRetry({
+        description: 'Service "svc"',
+        logPrefix: '[Test]',
+        body: desired,
+        mergeExisting: preserveServiceAssignedFields,
+        isUpToDate: serviceMatchesDesired,
+        validateExisting,
+        read,
+        replace,
+      })
+    ).rejects.toBe(error)
+
+    expect(read).toHaveBeenCalledOnce()
+    expect(validateExisting).not.toHaveBeenCalled()
+    expect(replace).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { form: 'ApiException', error: apiException(404) },
+    { form: 'statusCode', error: { response: { statusCode: 404 } } },
+  ])(
+    'TOCTOU-NP-3: replace 409 then second read 404 ($form) returns without a third replace',
+    async ({ error }) => {
+      const read = vi.fn().mockResolvedValueOnce(existing).mockRejectedValueOnce(error)
+      const replace = vi.fn().mockRejectedValueOnce({ code: 409 })
+      const validateExisting = vi.fn()
+
+      await expect(
+        replaceWithConflictRetry({
+          description: 'Service "svc"',
+          logPrefix: '[Test]',
+          body: desired,
+          mergeExisting: preserveServiceAssignedFields,
+          isUpToDate: () => false,
+          validateExisting,
+          read,
+          replace,
+        })
+      ).resolves.toBeUndefined()
+
+      expect(read).toHaveBeenCalledTimes(2)
+      expect(validateExisting).toHaveBeenCalledOnce()
+      expect(replace).toHaveBeenCalledOnce()
+      expect(replace.mock.calls[0][0].metadata?.resourceVersion).toBe('9')
+    }
+  )
+
+  it('TOCTOU-NP-4: network Error without code is rethrown', async () => {
+    const networkErr = new Error('socket hang up')
+    const replace = vi.fn()
+    const validateExisting = vi.fn()
+    const read = vi.fn().mockRejectedValue(networkErr)
+
+    await expect(
+      replaceWithConflictRetry({
+        description: 'Service "svc"',
+        logPrefix: '[Test]',
+        body: desired,
+        mergeExisting: preserveServiceAssignedFields,
+        isUpToDate: serviceMatchesDesired,
+        validateExisting,
+        read,
+        replace,
+      })
+    ).rejects.toBe(networkErr)
+
+    expect(read).toHaveBeenCalledOnce()
+    expect(validateExisting).not.toHaveBeenCalled()
+    expect(replace).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { form: 'ApiException', error: apiException(404) },
+    { form: 'statusCode', error: { response: { statusCode: 404 } } },
+  ])('TOCTOU-NP-5: helper replace 404 ($form) still throws', async ({ error }) => {
+    const read = vi.fn().mockResolvedValue(existing)
+    const replace = vi.fn().mockRejectedValue(error)
+
+    await expect(
+      replaceWithConflictRetry({
+        description: 'Service "svc"',
+        logPrefix: '[Test]',
+        body: desired,
+        mergeExisting: preserveServiceAssignedFields,
+        isUpToDate: () => false,
+        read,
+        replace,
+      })
+    ).rejects.toBe(error)
+
+    expect(read).toHaveBeenCalledOnce()
+    expect(replace).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    { status: 403, form: 'ApiException', error: apiException(403) },
+    { status: 403, form: 'statusCode', error: { response: { statusCode: 403 } } },
+    { status: 500, form: 'ApiException', error: apiException(500) },
+    { status: 500, form: 'statusCode', error: { response: { statusCode: 500 } } },
+  ])(
+    'TOCTOU-NP-6: replace 409 then second read $status ($form) still throws',
+    async ({ error }) => {
+      const read = vi.fn().mockResolvedValueOnce(existing).mockRejectedValueOnce(error)
+      const replace = vi.fn().mockRejectedValueOnce({ code: 409 })
+      const validateExisting = vi.fn()
+
+      await expect(
+        replaceWithConflictRetry({
+          description: 'Service "svc"',
+          logPrefix: '[Test]',
+          body: desired,
+          mergeExisting: preserveServiceAssignedFields,
+          isUpToDate: () => false,
+          validateExisting,
+          read,
+          replace,
+        })
+      ).rejects.toBe(error)
+
+      expect(read).toHaveBeenCalledTimes(2)
+      expect(validateExisting).toHaveBeenCalledOnce()
+      expect(replace).toHaveBeenCalledOnce()
+      expect(replace.mock.calls[0][0].metadata?.resourceVersion).toBe('9')
+    }
+  )
+
+  it('TOCTOU-NP-7: replace 409 then second-read network Error is rethrown', async () => {
+    const networkErr = new Error('socket hang up')
+    const read = vi.fn().mockResolvedValueOnce(existing).mockRejectedValueOnce(networkErr)
+    const replace = vi.fn().mockRejectedValueOnce({ code: 409 })
+    const validateExisting = vi.fn()
+
+    await expect(
+      replaceWithConflictRetry({
+        description: 'Service "svc"',
+        logPrefix: '[Test]',
+        body: desired,
+        mergeExisting: preserveServiceAssignedFields,
+        isUpToDate: () => false,
+        validateExisting,
+        read,
+        replace,
+      })
+    ).rejects.toBe(networkErr)
+
+    expect(read).toHaveBeenCalledTimes(2)
+    expect(validateExisting).toHaveBeenCalledOnce()
+    expect(replace).toHaveBeenCalledOnce()
   })
 
   it('RETRY-SVC-2: post-409 re-read that matches skips the second replace', async () => {

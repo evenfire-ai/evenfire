@@ -79,4 +79,47 @@ describe('McpOauthCompletionQueue — U5 cold-start delivery (T5)', () => {
 
     expect(queue.pendingCount()).toBe(1)
   })
+
+  it('L8b: an over-cap drop invokes onCapEvict with the OLDEST completion and the cap', () => {
+    const deliver = vi.fn().mockReturnValue(false) // nothing accepted → everything queues
+    const onCapEvict = vi.fn()
+    const queue = new McpOauthCompletionQueue(deliver, 2, onCapEvict)
+
+    const C = { mcpServerName: 'asana', provider: 'asana' }
+    queue.submit(A) // [A]
+    queue.submit(B) // [A, B]
+    expect(onCapEvict).not.toHaveBeenCalled()
+    queue.submit(C) // push → over cap → drop A (oldest)
+
+    // The drop is now observable — it is NOT silent.
+    expect(onCapEvict).toHaveBeenCalledOnce()
+    expect(onCapEvict).toHaveBeenCalledWith(A, 2)
+    expect(queue.pendingCount()).toBe(2)
+
+    // Policy unchanged: the OLDEST (A) is gone, B and C survive.
+    const delivered: Array<typeof A> = []
+    deliver.mockImplementation(c => {
+      delivered.push(c)
+      return true
+    })
+    queue.drain()
+    expect(delivered).toEqual([B, C])
+  })
+
+  it('L8b: the default cap-evict hook logs a warning (production observability)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const deliver = vi.fn().mockReturnValue(false)
+    // Default onCapEvict (no injection) → must reach console.warn on a drop.
+    const queue = new McpOauthCompletionQueue(deliver, 1)
+
+    queue.submit(A) // [A]
+    queue.submit(B) // over cap → drop A via the default warn hook
+
+    expect(warn).toHaveBeenCalledOnce()
+    const [message, context] = warn.mock.calls[0]!
+    expect(String(message)).toContain('dropping oldest')
+    // Non-sensitive context only: server/provider identity + cap, no URL/token.
+    expect(context).toMatchObject({ mcpServerName: A.mcpServerName, provider: A.provider })
+    warn.mockRestore()
+  })
 })

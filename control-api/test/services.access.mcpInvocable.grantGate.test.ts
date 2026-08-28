@@ -248,12 +248,12 @@ describe('resolveInvocableMcpServersForContexts — fail-closed + non-oauth', ()
       if (input.recipeName === 'broken') throw new Error('db down')
       return true // 'good'
     })
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     const out = await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB)
-    // 'broken' excluded (fail-closed), 'plain' (none) + 'good' survive. Sorted.
+    // Observable outcome (T4): 'broken' excluded (fail-closed on its DB error),
+    // 'plain' (none) + 'good' survive. Sorted. The exclusion is also logged
+    // loudly via the module's pino logger (silent in tests) — an implementation
+    // detail we no longer assert on directly.
     expect(names(out)).toEqual(['good', 'plain'])
-    expect(errSpy).toHaveBeenCalled()
-    errSpy.mockRestore()
   })
 })
