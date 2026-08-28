@@ -24,29 +24,26 @@ function ConnectorRowView({
   onDisconnect: (input: ConnectorActionInput) => void
   onOpenAgent: (agentName: string) => void
 }) {
-  const { connector, contextRef } = row
+  const { connector, contextRef, agentName } = row
   const presentation = statusPresentation(connector.status)
   const caption = scopeCaption(connector)
   // The action IPC needs a hostRef to mint the token; the row is per
-  // (server, context), so we act under the deterministic representative agent.
+  // (connector, agent), so we act under the row's own agent.
   const actionInput: ConnectorActionInput = {
-    agentName: row.representativeAgent,
+    agentName,
     contextRef,
     connector,
   }
 
-  // The whole row deep-links to the representative agent's Connectors tab — but
-  // ONLY when the connector has a mapped context (contexts are 1:1 with agents,
-  // so this is the "has a real mapping" signal). Contextless rows stay
-  // non-interactive (no target).
-  const rowProps = contextRef
-    ? {
-        className: 'da-table__row--clickable',
-        ...clickableRowProps(() => onOpenAgent(row.representativeAgent), {
-          ariaLabel: `Open connectors for agent ${row.representativeAgent}`,
-        }),
-      }
-    : {}
+  // Every row deep-links to ITS agent's Connectors tab. In the agent-centric
+  // model every row has an agent (contextless `oauth-user` rows included), so
+  // every row is clickable.
+  const rowProps = {
+    className: 'da-table__row--clickable',
+    ...clickableRowProps(() => onOpenAgent(agentName), {
+      ariaLabel: `Open connectors for agent ${agentName}`,
+    }),
+  }
 
   return (
     <tr {...rowProps}>
@@ -58,40 +55,11 @@ function ConnectorRowView({
       </td>
 
       <td className="da-table__cell">
-        {contextRef ? (
-          <ReferenceTag kind="context" title={`Context: ${contextRef}`}>
-            {contextRef}
-          </ReferenceTag>
-        ) : (
-          <span className="agent-table-muted">—</span>
-        )}
-      </td>
-
-      <td className="da-table__cell">
-        {row.usedByAgents.length ? (
-          <span className="reference-tag-list">
-            {row.usedByAgents.map(agentName => (
-              <ReferenceTag
-                key={agentName}
-                kind="agent"
-                onClick={event => {
-                  event.stopPropagation()
-                  onOpenAgent(agentName)
-                }}
-                // The row's clickableRowProps installs an Enter/Space onKeyDown
-                // on the <tr>; stop keyboard activation from bubbling so a chip
-                // press opens the agent instead of navigating the row.
-                onKeyDown={event => event.stopPropagation()}
-                title={agentName}
-                aria-label={`Open agent ${agentName}`}
-              >
-                {agentName}
-              </ReferenceTag>
-            ))}
-          </span>
-        ) : (
-          <span className="agent-table-muted">None</span>
-        )}
+        {/* Presentational: the whole row already navigates to this agent, so the
+            tag carries no click/key handlers of its own. */}
+        <ReferenceTag kind="agent" title={agentName} aria-label={`Agent ${agentName}`}>
+          {agentName}
+        </ReferenceTag>
       </td>
 
       <td className="da-table__cell">
@@ -176,10 +144,7 @@ export function McpServersPage() {
                     Connector
                   </th>
                   <th className="da-table__col-header" scope="col">
-                    Context
-                  </th>
-                  <th className="da-table__col-header" scope="col">
-                    Agents
+                    Agent
                   </th>
                   <th className="da-table__col-header" scope="col">
                     Status
@@ -192,9 +157,13 @@ export function McpServersPage() {
               <tbody>
                 {rows.map(row => (
                   <ConnectorRowView
-                    key={row.key}
+                    key={row.renderKey}
                     row={row}
-                    busy={pendingKey === row.key}
+                    // Busy is a property of the GRANT, never the render row:
+                    // authorizing/disconnecting a shared grant must show every
+                    // sibling row busy, so anchor on grantKey (matches the
+                    // controller's pendingKey = connectorRowKey).
+                    busy={pendingKey === row.grantKey}
                     onAuthorize={input => {
                       authorize(input).catch(() => undefined)
                     }}

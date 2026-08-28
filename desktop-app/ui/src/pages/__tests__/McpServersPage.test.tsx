@@ -18,9 +18,10 @@ vi.mock('../../contexts/NavigationContext', () => ({
 /**
  * T1: the fixture is typed as `RpcConnectorsResult` — the exact contract the IPC
  * bridge resolves from rpc-proxy's `GET /api/v1/rpc/connectors` (U1). The
- * payload is grouped BY AGENT; the page dedups it to one row per
- * `(server, context)`. Fixture exercises dedup (two agents, same context, same
- * server), a contextless connector, and the tri-state chip + actionability.
+ * payload is grouped BY AGENT; the page explodes it to one row per
+ * `(connector, agent)` (spec §5.E). Fixture exercises a grant shared by two
+ * agents (two rows, one grantKey), a contextless `oauth-user` connector, and the
+ * tri-state chip + actionability.
  */
 const CONNECTORS: RpcConnectorsResult = {
   userId: 'user-1',
@@ -57,8 +58,9 @@ const CONNECTORS: RpcConnectorsResult = {
       name: 'agent-alpha',
       contextRef: 'ctx-team',
       connectors: [
-        // Same context + server as agent-zeta's monday → dedups to ONE row.
-        // AGENTS = both; representative (for actions) = agent-alpha (alphabetical).
+        // Same context + server as agent-zeta's monday → SAME grant, but the
+        // agent-centric list shows a SEPARATE per-agent row. Each row deep-links
+        // to its own agent and acts under its own agent.
         {
           name: 'monday',
           provider: 'monday',
@@ -113,12 +115,14 @@ const allRows = (container: HTMLElement) =>
   Array.from(container.querySelectorAll<HTMLElement>('.mcp-servers-data-table tbody tr'))
 const rowName = (row: HTMLElement) =>
   row.querySelector('.context-id-cell')?.textContent?.trim() ?? ''
-const contextText = (row: HTMLElement) =>
-  row.querySelector('.reference-tag--context .reference-tag__label')?.textContent?.trim() ?? null
+const agentTag = (row: HTMLElement) =>
+  row.querySelector('.reference-tag--agent .reference-tag__label')?.textContent?.trim() ?? null
 const chipText = (row: HTMLElement) => row.querySelector('.ui-pill')?.textContent?.trim() ?? null
-const rowByName = (rows: HTMLElement[], name: string) => {
-  const row = rows.find(r => rowName(r).startsWith(name))
-  if (!row) throw new Error(`row not found for ${name}`)
+// One row per (connector, agent): identify by BOTH so the two `monday` sibling
+// rows are addressable independently.
+const rowBy = (rows: HTMLElement[], name: string, agent: string) => {
+  const row = rows.find(r => rowName(r).startsWith(name) && agentTag(r) === agent)
+  if (!row) throw new Error(`row not found for ${name} / ${agent}`)
   return row
 }
 
@@ -129,18 +133,22 @@ describe('McpServersPage — da-table layout + navigation', () => {
     delete (window as { clerum?: unknown }).clerum
   })
 
-  it('(a) clicking a row deep-links to the representative agent Connectors tab', async () => {
+  it('(a) a shared grant renders one row per agent, each deep-linking to ITS agent', async () => {
     installClerum(CONNECTORS)
     const { container } = renderPage(CONNECTORS)
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Connectors' })).toBeTruthy())
 
-    const mondayRow = rowByName(allRows(container), 'monday')
-    expect(contextText(mondayRow)).toBe('ctx-team')
-    fireEvent.click(mondayRow)
+    const rows = allRows(container)
+    // monday is granted to agent-alpha AND agent-zeta → TWO rows, one per agent.
+    const alphaRow = rowBy(rows, 'monday', 'agent-alpha')
+    const zetaRow = rowBy(rows, 'monday', 'agent-zeta')
 
-    // monday is mapped by agent-alpha AND agent-zeta; the representative is the
-    // alphabetical first (agent-alpha) — contexts are 1:1 with agents now.
-    expect(navMock.handleOpenAgentWorkspace).toHaveBeenCalledWith('agent-alpha', 'mcp-servers')
+    fireEvent.click(alphaRow)
+    expect(navMock.handleOpenAgentWorkspace).toHaveBeenLastCalledWith('agent-alpha', 'mcp-servers')
+
+    fireEvent.click(zetaRow)
+    expect(navMock.handleOpenAgentWorkspace).toHaveBeenLastCalledWith('agent-zeta', 'mcp-servers')
+    expect(navMock.handleOpenAgentWorkspace).toHaveBeenCalledTimes(2)
   })
 
   it('(b) mouse OR keyboard on Authorize/Disconnect fires the action WITHOUT navigating', () => {
@@ -148,10 +156,10 @@ describe('McpServersPage — da-table layout + navigation', () => {
     const { container } = renderPage(CONNECTORS)
     const rows = allRows(container)
 
-    // Disconnect on the authorized monday row: acts under the representative
-    // (agent-alpha, alphabetical) and does NOT trigger the row navigation.
-    const mondayRow = rowByName(rows, 'monday')
-    const disconnectBtn = within(mondayRow).getByRole('button', { name: 'Disconnect' })
+    // Disconnect on agent-alpha's authorized monday row: acts under agent-alpha
+    // (the row's OWN agent) and does NOT trigger the row navigation.
+    const alphaMonday = rowBy(rows, 'monday', 'agent-alpha')
+    const disconnectBtn = within(alphaMonday).getByRole('button', { name: 'Disconnect' })
     fireEvent.click(disconnectBtn)
     expect(rpc.disconnectMcpServer).toHaveBeenCalledWith('monday', 'agent-alpha', undefined, {
       shared: false,
@@ -159,14 +167,13 @@ describe('McpServersPage — da-table layout + navigation', () => {
     expect(navMock.handleOpenAgentWorkspace).not.toHaveBeenCalled()
 
     // Keyboard regression: Enter/Space on the button must NOT bubble to the
-    // row's clickableRowProps onKeyDown and navigate. (Repro: without the
-    // button's onKeyDown stopPropagation this navigates the row.)
+    // row's clickableRowProps onKeyDown and navigate.
     fireEvent.keyDown(disconnectBtn, { key: 'Enter' })
     fireEvent.keyDown(disconnectBtn, { key: ' ' })
     expect(navMock.handleOpenAgentWorkspace).not.toHaveBeenCalled()
 
-    // Authorize on the requires_setup clickup row.
-    const clickupRow = rowByName(rows, 'clickup')
+    // Authorize on the requires_setup clickup row (agent-zeta) → acts under agent-zeta.
+    const clickupRow = rowBy(rows, 'clickup', 'agent-zeta')
     const authorizeBtn = within(clickupRow).getByRole('button', { name: 'Authorize' })
     fireEvent.click(authorizeBtn)
     expect(rpc.connectMcpServer).toHaveBeenCalledWith('clickup', 'agent-zeta', undefined, {
@@ -176,36 +183,33 @@ describe('McpServersPage — da-table layout + navigation', () => {
     expect(navMock.handleOpenAgentWorkspace).not.toHaveBeenCalled()
   })
 
-  it('(c) mouse OR keyboard on an agent chip opens the agent WITHOUT navigating the row', () => {
+  it('(c) the Agent cell is presentational — no nested interactive control of its own', () => {
     installClerum(CONNECTORS)
     const { container } = renderPage(CONNECTORS)
 
-    const mondayRow = rowByName(allRows(container), 'monday')
-    // monday is listed by agent-alpha AND agent-zeta.
-    const chip = within(mondayRow).getByRole('button', { name: 'Open agent agent-zeta' })
-    fireEvent.click(chip)
-    // Only the chip's agent opens — the row navigation (representative
-    // agent-alpha) must NOT also fire, so exactly one call, for agent-zeta.
-    expect(navMock.handleOpenAgentWorkspace).toHaveBeenCalledWith('agent-zeta', 'mcp-servers')
-    expect(navMock.handleOpenAgentWorkspace).toHaveBeenCalledTimes(1)
-
-    // Keyboard regression: Enter on the chip must not navigate the row. (jsdom
-    // doesn't synthesize a click from keydown, so the positive open-agent path
-    // is covered by the mouse click above; here we assert the navigation guard.)
-    fireEvent.keyDown(chip, { key: 'Enter' })
-    expect(navMock.handleOpenAgentWorkspace).toHaveBeenCalledTimes(1)
+    const alphaMonday = rowBy(allRows(container), 'monday', 'agent-alpha')
+    // The agent tag renders as a plain (non-button) tag: the row already
+    // navigates to that agent, so the tag carries no click/key handlers.
+    const tag = alphaMonday.querySelector('.reference-tag--agent')
+    expect(tag).not.toBeNull()
+    expect(tag?.tagName.toLowerCase()).toBe('span')
+    // The only actionable button in an authorized row is Disconnect.
+    const buttons = within(alphaMonday)
+      .queryAllByRole('button')
+      .map(b => b.textContent?.trim())
+      .filter(label => label === 'Authorize' || label === 'Disconnect')
+    expect(buttons).toEqual(['Disconnect'])
   })
 
-  it('(d) a contextless row is not clickable and never navigates', () => {
+  it('(d) a contextless (oauth-user) row is clickable and deep-links to its agent', () => {
     installClerum(CONNECTORS)
     const { container } = renderPage(CONNECTORS)
 
-    const lonerRow = rowByName(allRows(container), 'loner')
-    expect(contextText(lonerRow)).toBeNull()
-    // No button semantics on the row itself (only the inner action button).
-    expect(lonerRow.getAttribute('role')).toBeNull()
+    const lonerRow = rowBy(allRows(container), 'loner', 'agent-orphan')
+    // Row-level button semantics ARE present now — every row navigates.
+    expect(lonerRow.getAttribute('role')).toBe('button')
     fireEvent.click(lonerRow)
-    expect(navMock.handleOpenAgentWorkspace).not.toHaveBeenCalled()
+    expect(navMock.handleOpenAgentWorkspace).toHaveBeenCalledWith('agent-orphan', 'mcp-servers')
   })
 
   it('(e) distinguishes the 3 statuses and only authorized/requires_setup are actionable', () => {
@@ -220,15 +224,15 @@ describe('McpServersPage — da-table layout + navigation', () => {
         .map(b => b.textContent?.trim())
         .filter(label => label === 'Authorize' || label === 'Disconnect')
 
-    const monday = rowByName(rows, 'monday')
+    const monday = rowBy(rows, 'monday', 'agent-zeta')
     expect(chipText(monday)).toBe('Authorized')
     expect(buttonLabels(monday)).toEqual(['Disconnect'])
 
-    const clickup = rowByName(rows, 'clickup')
+    const clickup = rowBy(rows, 'clickup', 'agent-zeta')
     expect(chipText(clickup)).toBe('Requires setup')
     expect(buttonLabels(clickup)).toEqual(['Authorize'])
 
-    const filesystem = rowByName(rows, 'filesystem')
+    const filesystem = rowBy(rows, 'filesystem', 'agent-zeta')
     expect(chipText(filesystem)).toBe('No OAuth')
     expect(buttonLabels(filesystem)).toEqual([])
 
