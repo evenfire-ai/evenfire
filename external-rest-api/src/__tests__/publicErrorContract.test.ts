@@ -15,6 +15,23 @@ function appThrowing(error: Error) {
 describe('External REST public error contract', () => {
   afterEach(() => vi.unstubAllGlobals())
 
+  it('preserves only bounded public correlation IDs through the mounted global handler', async () => {
+    const valid = await request(
+      appThrowing(new ControlApiError('private', 400, { error: { code: 'invalid_request' } }))
+    )
+      .get('/failure')
+      .set('x-correlation-id', 'request_ID-42')
+    expect(valid.body.error.correlationId).toBe('request_ID-42')
+
+    for (const rejected of ['request/with/delimiters', 'x'.repeat(129)]) {
+      const response = await request(appThrowing(new Error('private')))
+        .get('/failure')
+        .set('x-correlation-id', rejected)
+      expect(response.body.error.correlationId).not.toBe(rejected)
+      expect(response.body.error.correlationId).toMatch(/^[A-Za-z0-9_-]{1,128}$/)
+    }
+  })
+
   it('never reflects an internal upstream message, path, or secret-like value', async () => {
     const sentinel = 'oauth-secret-at-/var/run/internal/provider.json'
     const response = await request(appThrowing(new Error(sentinel))).get('/failure')
