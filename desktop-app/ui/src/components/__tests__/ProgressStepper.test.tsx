@@ -241,6 +241,23 @@ describe('ProgressStepper — suspended status (approval flow)', () => {
     expect(screen.getByText('Waiting for approval...')).toBeDefined()
   })
 
+  it('announces the suspended state to assistive tech via a polite live region (R4-L8c)', () => {
+    // The label that changes when a task parks on approval/connect/OAuth must be a
+    // live region so a screen reader announces the transition without stealing focus.
+    render(
+      <ProgressStepper
+        progress={makeProgress({
+          status: 'suspended',
+          suspendedInfo: { requestId: 'req-1', displayName: 'Tool X' },
+        })}
+      />
+    )
+    const status = screen.getByRole('status')
+    expect(status.textContent).toBe('Tool X requires approval')
+    expect(status.getAttribute('aria-live')).toBe('polite')
+    expect(status.getAttribute('aria-atomic')).toBe('true')
+  })
+
   it('shows tool display name when suspendedInfo is populated', () => {
     render(
       <ProgressStepper

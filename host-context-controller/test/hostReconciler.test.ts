@@ -10,6 +10,7 @@ import {
   resolveWorkflowControlScopes,
 } from '../src/hostReconciler'
 import type { InfrastructureTelemetryReporter } from '../src/infrastructureTelemetryReporter'
+import { HostContextLogger } from '../src/logger'
 import { issueMcpHostRuntimeTokens } from '../src/mcpHostRuntimeTokenIssuerClient'
 import { HostCRD, type HostWorkflowControlScope } from '../src/types'
 import {
@@ -1027,7 +1028,24 @@ describe('HostReconciler — per-Host RBAC scaffolding', () => {
   it('rewrites Role resourceNames when spec.secretRef changes (replace path)', async () => {
     const { reconciler, rbacApi } = createReconciler()
     rbacApi.createNamespacedRole.mockRejectedValueOnce({ code: 409 })
-    rbacApi.readNamespacedRole.mockResolvedValue({ metadata: { resourceVersion: '7' } })
+    rbacApi.readNamespacedRole.mockImplementation(async () => {
+      const desired = rbacApi.createNamespacedRole.mock.calls[0][0].body as {
+        metadata?: { labels?: Record<string, string> }
+        rules?: Array<{ resources?: string[]; verbs?: string[]; resourceNames?: string[] }>
+      }
+      const live = structuredClone(desired)
+      const secretRule = live.rules?.find(
+        rule => rule.resources?.[0] === 'secrets' && rule.verbs?.includes('get')
+      )
+      if (!secretRule?.resourceNames) {
+        throw new Error('expected the created Role to carry a secrets get rule')
+      }
+      secretRule.resourceNames[0] = 'host-secret'
+      return {
+        ...live,
+        metadata: { ...live.metadata, resourceVersion: '7' },
+      }
+    })
 
     await reconciler.reconcile(makeHost({ spec: { secretRef: 'rotated-secret' } } as never))
 
@@ -1045,6 +1063,17 @@ describe('HostReconciler — per-Host RBAC scaffolding', () => {
       'host-alpha-host-mcp-host-runtime-tokens',
     ])
     expect(replaced.metadata.resourceVersion).toBe('7')
+  })
+
+  it('replaces a live Role that has no rules (fail-open-to-write)', async () => {
+    const { reconciler, rbacApi } = createReconciler()
+    rbacApi.createNamespacedRole.mockRejectedValueOnce({ code: 409 })
+    rbacApi.readNamespacedRole.mockResolvedValue({ metadata: { resourceVersion: '7' } })
+
+    await reconciler.reconcile(makeHost({ spec: { secretRef: 'rotated-secret' } } as never))
+
+    expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledTimes(1)
+    expect(rbacApi.replaceNamespacedRole.mock.calls[0][0].body.metadata.resourceVersion).toBe('7')
   })
 
   it('cleans up RBAC on reconcileDelete', async () => {
@@ -2045,5 +2074,75 @@ describe('HostReconciler oauth:user-token runtime scope provisioning', () => {
     ].sort()
     expect(lastIssuedScopes()).toEqual(hashInput)
     expect(hashInput).toContain('oauth:user-token')
+  })
+})
+
+describe('HostReconciler.frontsOAuthServer transient-blip retry (R4-M9)', () => {
+  // The oauth-server probe is exercised through the REAL reconciler built by
+  // createReconciler() and the REAL setHostFrontsOAuthServer setter — no
+  // hand-minted value. We assert on the private method directly (rather than the
+  // full reconcile) on purpose: the deployment drift guard
+  // (ensureCurrentRuntimeTokenScope) re-mints the token when the scope hash
+  // changes mid-reconcile, so a probe that throws once and then returns `true`
+  // would be MASKED at the public issuance observable — the guard would re-mint
+  // with the recovered `true` value, hiding the collapse. The boolean returned by
+  // frontsOAuthServer IS the observable whose flip drives the churn this fixes.
+  const callFronts = (reconciler: HostReconciler, host: HostCRD): Promise<boolean> =>
+    (
+      reconciler as unknown as {
+        frontsOAuthServer(host: HostCRD): Promise<boolean>
+      }
+    ).frontsOAuthServer(host)
+
+  it('absorbs a transient throw: probe throws once then returns true → true (blip smoothed)', async () => {
+    // Regression case (T3): against the pre-fix head the throw collapses to
+    // `false` and this assertion fails. With the bounded retry the second
+    // attempt returns the authoritative `true`.
+    const { reconciler } = createReconciler()
+    let calls = 0
+    reconciler.setHostFrontsOAuthServer(async () => {
+      calls += 1
+      if (calls === 1) throw new Error('transient apiserver read blip')
+      return true
+    })
+
+    await expect(callFronts(reconciler, makeHost())).resolves.toBe(true)
+    expect(calls).toBe(2)
+  })
+
+  it('does NOT retry an authoritative false: probe returns false without throwing → false, called once', async () => {
+    // Control: a real scope change RETURNS false; the retry must not fire, or a
+    // genuine "no longer oauth" would be smeared into a stale `true`.
+    const { reconciler } = createReconciler()
+    let calls = 0
+    reconciler.setHostFrontsOAuthServer(async () => {
+      calls += 1
+      return false
+    })
+
+    await expect(callFronts(reconciler, makeHost())).resolves.toBe(false)
+    expect(calls).toBe(1)
+  })
+
+  it('fails closed after exhausting retries: probe always throws → false, N attempts, warn logged', async () => {
+    const warnSpy = vi.spyOn(HostContextLogger.prototype, 'warn')
+    try {
+      const { reconciler } = createReconciler()
+      let calls = 0
+      reconciler.setHostFrontsOAuthServer(async () => {
+        calls += 1
+        throw new Error('sustained apiserver outage')
+      })
+
+      await expect(callFronts(reconciler, makeHost())).resolves.toBe(false)
+      // Retried up to the bounded ceiling (fix uses 3 total attempts); pre-fix
+      // head would call the probe exactly once.
+      expect(calls).toBe(3)
+      const retryWarn = warnSpy.mock.calls.find(([msg]) => String(msg).includes('after retries'))
+      expect(retryWarn).toBeDefined()
+      expect(retryWarn?.[1]).toMatchObject({ attempts: 3 })
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 })

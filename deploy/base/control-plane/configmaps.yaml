@@ -142,6 +142,21 @@ data:
           proxy_set_header X-Forwarded-Proto $scheme;
         }
 
+        # spec 11 U1: proactive connectors panel — tri-state read model.
+        # rpc-proxy forwards the caller's rpc access token; control-api
+        # authorizes via requireRpcTokenUserMatch. Must be allowlisted here or
+        # rpc-proxy is 403'd at the edge (sibling of mcp-servers above).
+        location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-connectors$ {
+          limit_except GET {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
         location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-hosts/[^/]+$ {
           limit_except GET POST {
             deny all;
@@ -418,6 +433,25 @@ data:
         # (incl. direct :8090) is preserved. mcp-host forwards its control JWT
         # (typ:service, scope oauth:user-token) in Authorization; no x-service-token.
         location = /api/v1/mcp-oauth/user-token {
+          limit_except POST {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
+        # OAuth grant-existence sweep (mcp-host → control-api), spec 06 mini-spec 13.
+        # mcp-host polls whether its live per-user OAuth partitions still have a
+        # grant and evicts the revoked ones. Mirrors the user-token block: same
+        # gateway, POST-only, L7-scoped to this single path (DENY-by-omission of
+        # every other control-api path preserved). Same control JWT
+        # (typ:service, scope oauth:user-token) in Authorization; no x-service-token.
+        # Read-only: control-api answers booleans only, never a token.
+        location = /api/v1/mcp-oauth/grants/exists {
           limit_except POST {
             deny all;
           }

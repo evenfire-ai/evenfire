@@ -92,8 +92,8 @@ describeRealPostgres('mcp-server grant disconnect composition (real Postgres)', 
     }
 
     const keyA = buildMcpServerGrantKey(resolved, {
-      namespace: NS,
-      serverName: 'gdrive',
+      mcpServersNamespace: NS,
+      mcpServerName: 'gdrive',
       userId: 'user-a',
     })
     expect(keyA).not.toBeNull()
@@ -140,8 +140,8 @@ describeRealPostgres('mcp-server grant disconnect composition (real Postgres)', 
 
     // A DIFFERENT member revokes: the key is decoupled from the caller's userId.
     const key = buildMcpServerGrantKey(resolved, {
-      namespace: NS,
-      serverName: 'teamdrive',
+      mcpServersNamespace: NS,
+      mcpServerName: 'teamdrive',
       userId: 'user-b',
     })
     expect(key).not.toBeNull()
@@ -165,8 +165,8 @@ describeRealPostgres('mcp-server grant disconnect composition (real Postgres)', 
     })
     expect(resolved).not.toBeNull()
     const key = buildMcpServerGrantKey(resolved!, {
-      namespace: NS,
-      serverName: 'gdrive',
+      mcpServersNamespace: NS,
+      mcpServerName: 'gdrive',
       userId: 'user-a',
     })
     expect(key).toBeNull()

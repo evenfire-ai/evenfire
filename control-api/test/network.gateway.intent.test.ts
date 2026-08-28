@@ -335,6 +335,14 @@ describe('network/gateway intent (manifest-level)', () => {
     const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
     const gatewayConf = docContaining(yamlDocs(configmaps), 'name: control-api-rpc-gateway')
     expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-servers$')
+    // spec 11 U1: the proactive connectors read-model is gated by an rpc access
+    // token (requireRpcTokenUserMatch), not requireInternalService('rpc-proxy'),
+    // so the derived guard below does not cover it — assert its location here or
+    // rpc-proxy's GET /rpc/connectors 403s at the edge (the shipped regression).
+    expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-connectors$')
+    expect(gatewayConf).toMatch(
+      /location ~ \^\/api\/v1\/rpc\/access\/users\/\[\^\/\]\+\/mcp-connectors\$ \{[\s\S]*?limit_except GET \{/
+    )
     expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-hosts/[^/]+$')
     expect(gatewayConf).toMatch(
       /location ~ \^\/api\/v1\/rpc\/access\/users\/\[\^\/\]\+\/mcp-hosts\/\[\^\/\]\+\$ \{[\s\S]*?limit_except GET POST/

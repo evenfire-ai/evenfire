@@ -358,8 +358,8 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         // Build the flavored delete key from the SAME source of truth the
         // grant-presence gate reads by (D4/F2). null ⇒ fail-closed.
         const key = buildMcpServerGrantKey(resolved, {
-          namespace: config.mcpServersNamespace,
-          serverName: mcpServerName,
+          mcpServersNamespace: config.mcpServersNamespace,
+          mcpServerName,
           userId,
         })
         if (!key) {

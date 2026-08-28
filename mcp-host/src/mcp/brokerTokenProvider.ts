@@ -152,16 +152,51 @@ export function createBrokerTokenProvider(
       if (typeof data.token !== 'string' || data.token.length === 0) {
         throw new Error(`mcp-oauth broker returned malformed 200 body for ${server.name}`)
       }
-      const parsed = typeof data.expiresAt === 'string' ? Date.parse(data.expiresAt) : NaN
+      // Distinguish a legitimately non-expiring token from a malformed one, so a
+      // corrupt expiry never collapses to null (= non-expiring, reusable under the
+      // NULL_EXPIRY_MAX_AGE_MS cap). control-api emits `expiresAt:null` (or omits
+      // it) for upstreams whose token never expires — Notion/ClickUp always — so
+      // absent/explicit-null is a valid non-expiring contract. But an expiresAt
+      // that is PRESENT and non-parseable (a string Date.parse can't read, or any
+      // non-string type) is a defect: fail closed rather than treat it as
+      // non-expiring (R4-L2, composes with R1-M1). server.name is non-PII; never
+      // include the token in the error.
+      let expiresAtMs: number | null
+      if (data.expiresAt === undefined || data.expiresAt === null) {
+        expiresAtMs = null
+      } else if (typeof data.expiresAt === 'string') {
+        const parsed = Date.parse(data.expiresAt)
+        if (Number.isNaN(parsed)) {
+          throw new Error(
+            `mcp-oauth broker returned 200 with an unparseable expiresAt for ${server.name}`
+          )
+        }
+        expiresAtMs = parsed
+      } else {
+        throw new Error(
+          `mcp-oauth broker returned 200 with an invalid expiresAt type for ${server.name}`
+        )
+      }
       cached = {
         token: data.token,
-        expiresAtMs: Number.isNaN(parsed) ? null : parsed,
+        expiresAtMs,
         cachedAtMs: now(),
       }
       return data.token
     }
-    // no_grant / insufficient_scope → fail closed as "no token".
-    if (res.status === 404 || res.status === 403) {
+    // 404 no_grant → normal, expected revocation; fail closed silently.
+    if (res.status === 404) {
+      cached = undefined
+      return undefined
+    }
+    // 403 → control-api rejected the principal (a platform/permission defect,
+    // NOT a normal revocation). Fail closed like 404, but WARN so it is
+    // distinguishable in logs: reconnecting will never fix it. server.name is
+    // non-PII; never log the token, userId, or the control token.
+    if (res.status === 403) {
+      console.warn(
+        `[BrokerTokenProvider] broker returned 403 for ${server.name}; failing closed (platform/permission defect, reconnect will not fix)`
+      )
       cached = undefined
       return undefined
     }

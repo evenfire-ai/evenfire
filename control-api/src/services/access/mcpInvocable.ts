@@ -38,6 +38,7 @@ import {
   buildAgentDirectoryEntry,
 } from '../directory/accessReconciliation.js'
 
+const log = rootLogger.child({ module: 'mcpInvocable' })
 const connectorsLog = rootLogger.child({ module: 'mcp-connectors' })
 
 export interface InvocableMcpServer {
@@ -265,29 +266,25 @@ async function computeGrantPresence(
     if (s.spec?.auth?.type !== 'oauth') continue
     const resolved = resolveServerOAuth(s)
     if (!resolved) continue // fail-closed: no usable oauth id
-
-    // Flavored grant key — the SAME construction the disconnect endpoint deletes
-    // by (D4/F2). null ⇒ fail-closed (context server without contextRef, or an
-    // unknown grantScope): the server is simply not added to the present set.
-    // The shared-identity `context` branch is keyed by the server's AUTHORITATIVE
-    // Context (`spec.contextRef`), decoupled from the caller's userId
-    // (mini-spec 04 §2 3b); exercised end-to-end by U6(api).
+    // Same key derivation (D4) as the mint and the grant-existence sweep. Shared
+    // (`context`) identity is keyed by the server's AUTHORITATIVE `contextRef`,
+    // decoupled from the caller's userId (mini-spec 04 §2 3b; exercised by
+    // U6(api)); a context server without a contextRef yields null → fail-closed.
     const key = buildMcpServerGrantKey(resolved, {
-      namespace: mcpServersNamespace,
-      serverName: name,
+      mcpServerName: name,
+      mcpServersNamespace,
       userId: callerUserId,
     })
-    if (!key) continue
+    if (!key) continue // fail-closed: missing grant coordinate for the flavor
 
     try {
-      const exists = await oauthGrantExists(db, key)
-      if (exists) present.add(name)
+      if (await oauthGrantExists(db, key)) present.add(name)
     } catch (err) {
       // A grant-check DB error excludes THIS server (fail-closed) rather than
       // failing the whole request — loudly, matching the sibling resolver's
       // observable-degradation posture (`resolveMcpServersForAgents`).
-      connectorsLog.error(
-        { err, server: name },
+      log.error(
+        { err, mcpServerName: name },
         'grant-presence check failed; server excluded from rpc-proxy rail'
       )
     }

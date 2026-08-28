@@ -489,7 +489,20 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
             // The deep-link completion resumes the task via the same approval RPC.
             si?.reason === 'connect_required' && si.mcpServerName && selectedAgent
               ? () => {
-                  void window.clerum.rpc.connectMcpServer(si.mcpServerName!, selectedAgent)
+                  // R4-L1: a failed mint (403 membership, rpc-proxy down) must not
+                  // escape as an unhandled rejection. The ProgressStepper's 5s timer
+                  // re-enables the Connect button so the user can retry; log the
+                  // failure so it is observable. (Follow-up: a user-facing error
+                  // indicator on the button — needs pushToast wiring / an
+                  // onConnect→Promise contract in ProgressStepper.)
+                  window.clerum.rpc
+                    .connectMcpServer(si.mcpServerName!, selectedAgent)
+                    .catch(err => {
+                      console.error('[connect] connectMcpServer failed', {
+                        mcpServerName: si.mcpServerName,
+                        error: err instanceof Error ? err.message : String(err),
+                      })
+                    })
                 }
               : undefined
           }
