@@ -7,7 +7,10 @@ import { type DbClient, initDb } from '../src/db.js'
 import { createExternalMembersRouter } from '../src/routes/external/members.js'
 import { createExternalTeamsRouter } from '../src/routes/external/teams.js'
 import { issueExternalUserSession } from '../src/services/auth/externalSessionIssuance.js'
-import { createManagedInvitationForUser } from '../src/services/directory/index.js'
+import {
+  acceptInvitationForEmail,
+  createManagedInvitationForUser,
+} from '../src/services/directory/index.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -448,6 +451,65 @@ describeRealPostgres('external team mutations final source authority on real Pos
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
     })
+  })
+
+  it('denies managed invitation activation when source-session invalidation wins during delivery', async () => {
+    await resetPrincipal('managed-invitation-post-delivery-revoke')
+
+    let markDeliveryStarted!: () => void
+    const deliveryStarted = new Promise<void>(resolve => {
+      markDeliveryStarted = resolve
+    })
+    let releaseDelivery!: () => void
+    const deliveryGate = new Promise<void>(resolve => {
+      releaseDelivery = resolve
+    })
+    invitationDelivery.registerAndSendInvitation.mockImplementationOnce(async () => {
+      markDeliveryStarted()
+      await deliveryGate
+    })
+
+    const pending = request(app())
+      .post('/external/members/invitations')
+      .set('x-user-session-token', token)
+      .send({
+        email: invitationEmail,
+        name: 'Invitee',
+        teams: [{ teamId, role: 'member' }],
+      })
+      .then(response => response)
+
+    await deliveryStarted
+    const draft = await databasePool.query<{ id: string; status: string; token: string }>(
+      `SELECT id::text AS id, status, token
+         FROM invitations
+        WHERE email = $1`,
+      [invitationEmail]
+    )
+    expect(draft.rows[0]?.status).toBe('draft')
+
+    await databasePool.query(
+      `INSERT INTO external_user_session_security_epochs(user_id, valid_after, reason)
+       VALUES ($1, NOW() + INTERVAL '1 second', 'test')
+       ON CONFLICT (user_id) DO UPDATE
+         SET valid_after = EXCLUDED.valid_after, reason = EXCLUDED.reason`,
+      [adminUserId]
+    )
+    releaseDelivery()
+
+    const response = await pending
+    expect(response.status).toBe(403)
+    const finalState = await databasePool.query<{ status: string; command_status: string }>(
+      `SELECT i.status, c.status AS command_status
+         FROM invitations i
+         JOIN invitation_delivery_commands c ON c.invitation_id = i.id
+        WHERE i.id = $1`,
+      [draft.rows[0]!.id]
+    )
+    expect(finalState.rows[0]).toEqual({ status: 'revoked', command_status: 'cancelled' })
+    await expect(
+      acceptInvitationForEmail(invitationEmail, draft.rows[0]!.token, draft.rows[0]!.id)
+    ).resolves.toEqual({ error: 'not_pending' })
   })
 
   for (const mutation of mutations()) {
