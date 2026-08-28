@@ -90,16 +90,43 @@ async function parseJsonResponse(res: Response): Promise<unknown> {
   return JSON.parse(text)
 }
 
-export function formatApiError(res: Response, text: string): Error {
-  let detail = text
-  let parsedBody: Record<string, unknown> | null = null
+function parseApiErrorPayload(text: string): {
+  body?: Record<string, unknown>
+  code?: string
+  message?: string
+} {
   try {
-    const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
-    if (parsed && typeof parsed === 'object') parsedBody = parsed as Record<string, unknown>
-    detail = String(parsed.message || parsed.error || text)
+    const parsed = JSON.parse(text) as unknown
+    if (!parsed || typeof parsed !== 'object') return {}
+    const body = parsed as Record<string, unknown>
+    const envelope =
+      body.error && typeof body.error === 'object'
+        ? (body.error as Record<string, unknown>)
+        : undefined
+    return {
+      body,
+      code:
+        typeof envelope?.code === 'string'
+          ? envelope.code
+          : typeof body.error === 'string'
+            ? body.error
+            : undefined,
+      message:
+        typeof envelope?.message === 'string'
+          ? envelope.message
+          : typeof body.message === 'string'
+            ? body.message
+            : undefined,
+    }
   } catch {
-    detail = text
+    return {}
   }
+}
+
+export function formatApiError(res: Response, text: string): Error {
+  const parsed = parseApiErrorPayload(text)
+  const parsedBody = parsed.body ?? null
+  const detail = parsed.message || parsed.code || (parsedBody ? res.statusText : text)
   const friendlyDetail =
     detail === 'duplicate_username'
       ? 'That username is already taken.'
@@ -133,8 +160,7 @@ export function formatApiError(res: Response, text: string): Error {
   // render structured, actionable errors (e.g. unpriced_models, price_in_use_by_budget)
   // instead of the generic message string.
   if (parsedBody) {
-    ;(error as Error & { code?: string }).code =
-      typeof parsedBody.error === 'string' ? (parsedBody.error as string) : undefined
+    ;(error as Error & { code?: string }).code = parsed.code
     ;(error as Error & { body?: Record<string, unknown> }).body = parsedBody
   }
   return error
@@ -231,18 +257,10 @@ export async function apiGet(
       let message = `${res.status} ${res.statusText}`
       let code: string | undefined
       let body: Record<string, unknown> | undefined
-      try {
-        const parsed = JSON.parse(text) as unknown
-        if (parsed && typeof parsed === 'object') {
-          body = parsed as Record<string, unknown>
-          if (typeof body.message === 'string' && body.message.trim()) {
-            message = body.message
-          }
-          if (typeof body.error === 'string') code = body.error
-        }
-      } catch {
-        /* non-JSON error body: keep the status-text message */
-      }
+      const parsed = parseApiErrorPayload(text)
+      body = parsed.body
+      if (parsed.message?.trim()) message = parsed.message
+      code = parsed.code
       const error = new Error(message) as Error & {
         status?: number
         code?: string
