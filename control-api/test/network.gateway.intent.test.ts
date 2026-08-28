@@ -356,13 +356,13 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(connectorsIdx).toBeLessThan(defaultDenyIdx)
     expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-hosts/[^/]+$')
     expect(gatewayConf).toMatch(
-      /location ~ \^\/api\/v1\/rpc\/access\/users\/\[\^\/\]\+\/mcp-hosts\/\[\^\/\]\+\$ \{[\s\S]*?limit_except GET POST/
+      /location ~ \^\/api\/v1\/rpc\/access\/users\/\[\^\/\]\+\/mcp-hosts\/\[\^\/\]\+\$ \{[^}]*?limit_except GET POST/
     )
     expect(gatewayConf).not.toContain('/api/v1/internal/tracing/direct-run-bindings')
     expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/hosts/[^/]+/wake$')
     expect(gatewayConf).toContain('limit_except GET')
     expect(gatewayConf).toMatch(
-      /location ~ \^\/api\/v1\/rpc\/hosts\/\[\^\/\]\+\/wake\$ \{[\s\S]*?limit_except POST/
+      /location ~ \^\/api\/v1\/rpc\/hosts\/\[\^\/\]\+\/wake\$ \{[^}]*?limit_except POST/
     )
     expect(gatewayConf).toContain('location / {')
     expect(gatewayConf).toContain('return 403;')
@@ -496,7 +496,7 @@ describe('network/gateway intent (manifest-level)', () => {
 
     expect(gatewayConf).toContain('location = /api/v1/mcp-host/hosts/heartbeat')
     expect(gatewayConf).toMatch(
-      /location = \/api\/v1\/mcp-host\/hosts\/heartbeat \{[\s\S]*?limit_except POST/
+      /location = \/api\/v1\/mcp-host\/hosts\/heartbeat \{[^}]*?limit_except POST/
     )
   })
 
@@ -571,7 +571,7 @@ describe('network/gateway intent (manifest-level)', () => {
 
     expect(gatewayConf).toContain('location = /api/v1/internal/tracing/agent-run-events')
     expect(gatewayConf).toMatch(
-      /location = \/api\/v1\/internal\/tracing\/agent-run-events \{[\s\S]*?limit_except POST/
+      /location = \/api\/v1\/internal\/tracing\/agent-run-events \{[^}]*?limit_except POST/
     )
     expect(gatewayConf).toMatch(
       /location = \/api\/v1\/internal\/tracing\/agent-run-events \{[\s\S]*?proxy_set_header Authorization \$http_authorization;/
@@ -584,7 +584,7 @@ describe('network/gateway intent (manifest-level)', () => {
 
     expect(gatewayConf).toContain('location = /api/v1/internal/tracing/approval-prompt-history')
     expect(gatewayConf).toMatch(
-      /location = \/api\/v1\/internal\/tracing\/approval-prompt-history \{[\s\S]*?limit_except POST/
+      /location = \/api\/v1\/internal\/tracing\/approval-prompt-history \{[^}]*?limit_except POST/
     )
     expect(gatewayConf).toMatch(
       /location = \/api\/v1\/internal\/tracing\/approval-prompt-history \{[\s\S]*?proxy_set_header Authorization \$http_authorization;/
