@@ -111,7 +111,7 @@ export function MarketplaceOrgArea({ activeTab }: { activeTab: OrgAreaTab }) {
             )
           ) : null}
 
-          {activeTab === 'credentials' ? <RegistryApiKeysPanel /> : null}
+          {activeTab === 'credentials' ? <RegistryApiKeysPanel embedded /> : null}
 
           {activeTab === 'connection' ? <RegistryConnectPanel /> : null}
         </div>

@@ -237,4 +237,22 @@ describe('RegistryApiKeysPanel', () => {
     expect(cells[0]).toHaveTextContent('efrk_new')
     expect(cells[1]).toHaveTextContent('efrk_old')
   })
+
+  it('owns its card when it is the whole page', async () => {
+    vi.mocked(api.listRegistryApiKeys).mockResolvedValue({ org: 'acme', keys: [] })
+    const view = render(<RegistryApiKeysPanel />)
+    await waitFor(() => expect(api.listRegistryApiKeys).toHaveBeenCalled())
+
+    expect(view.container.querySelector('.cu-card--viewport-fill')).toBeInTheDocument()
+  })
+
+  it('drops its card when embedded, so it does not nest inside the host card', async () => {
+    vi.mocked(api.listRegistryApiKeys).mockResolvedValue({ org: 'acme', keys: [] })
+    const view = render(<RegistryApiKeysPanel embedded />)
+    await waitFor(() => expect(api.listRegistryApiKeys).toHaveBeenCalled())
+
+    // cu-card--viewport-fill means "fill the viewport". Two of them nested
+    // produced the visible card-in-card border on the Marketplace org area.
+    expect(view.container.querySelector('.cu-card--viewport-fill')).not.toBeInTheDocument()
+  })
 })
