@@ -30,7 +30,14 @@
  * backoff; on "too old" the watch falls back to a fresh list and resumes.
  */
 import * as k8s from '@kubernetes/client-node'
-import { CODEX_UNASSIGNED_CONNECTION_KEY, assignedConnectionRef } from '../llm/hostLlmBinding'
+import {
+  CATALOG_REVISION_ANNOTATION,
+  CODEX_CONNECTIONS_ANNOTATION,
+  CONNECTION_REVISION_ANNOTATION,
+  type CodexPolicyBinding,
+  toPolicyBinding,
+} from '@clerum/codex-catalog-projection'
+import { assignedConnectionRef } from '../llm/hostLlmBinding'
 import {
   ALL_PROVIDERS,
   ALL_PROVIDER_SLOT_ENV_NAMES,
@@ -114,16 +121,8 @@ export interface AllowedModelEntry {
  * Codex attempt. Annotation names are a cross-service contract with
  * control-api, HCC, and WRC.
  */
-export type CodexPolicyBinding = {
-  catalogRevision: number
-  credentialRevision: number
-  connectionKey: string
-  models?: string[]
-}
-
-export const CATALOG_REVISION_ANNOTATION = 'clerum.io/catalog-revision'
-export const CONNECTION_REVISION_ANNOTATION = 'clerum.io/connection-revision'
-export const CODEX_CONNECTIONS_ANNOTATION = 'clerum.io/codex-connections'
+export type { CodexPolicyBinding }
+export { CATALOG_REVISION_ANNOTATION, CONNECTION_REVISION_ANNOTATION, CODEX_CONNECTIONS_ANNOTATION }
 
 export type ConfigStoreChangeHandler = (change: ConfigStoreChange) => void
 
@@ -560,10 +559,7 @@ export class ConfigStore {
     data?: Record<string, string>
     metadata?: { annotations?: Record<string, string> }
   }): boolean {
-    const nextBinding = parseCodexPolicyBinding(
-      cm.metadata?.annotations,
-      assignedConnectionRef(this.opts.connectionRef)
-    )
+    const nextBinding = toPolicyBinding(cm, assignedConnectionRef(this.opts.connectionRef))
     const modelsChanged = this.applyAllowlistData(cm.data ?? {}, nextBinding)
     const bindingChanged = !codexBindingsEqual(this.codexBinding, nextBinding)
     this.codexBinding = nextBinding
@@ -924,66 +920,6 @@ export class ConfigStore {
 interface KubeObject {
   metadata?: { name?: string; annotations?: Record<string, string> }
   data?: Record<string, string>
-}
-
-function parseOptionalIntegerAnnotation(
-  annotations: Record<string, string>,
-  key: string
-): number | null | 'invalid' {
-  if (!(key in annotations)) return null
-  const parsed = Number(annotations[key])
-  return Number.isInteger(parsed) ? parsed : 'invalid'
-}
-
-function parseCodexPolicyBinding(
-  annotations: Record<string, string> | undefined,
-  connectionKey: string = CODEX_UNASSIGNED_CONNECTION_KEY
-): CodexPolicyBinding | null {
-  if (!annotations || connectionKey === CODEX_UNASSIGNED_CONNECTION_KEY) return null
-  let catalogRevision = parseOptionalIntegerAnnotation(annotations, CATALOG_REVISION_ANNOTATION)
-  let credentialRevision = parseOptionalIntegerAnnotation(
-    annotations,
-    CONNECTION_REVISION_ANNOTATION
-  )
-  const rawMap = annotations[CODEX_CONNECTIONS_ANNOTATION]
-  if (rawMap) {
-    try {
-      const parsed = JSON.parse(rawMap) as Record<
-        string,
-        { catalogRevision?: number; connectionRevision?: number; models?: string[] }
-      >
-      const assigned = parsed[connectionKey]
-      if (
-        assigned &&
-        Number.isInteger(assigned.catalogRevision) &&
-        Number.isInteger(assigned.connectionRevision)
-      ) {
-        catalogRevision = assigned.catalogRevision as number
-        credentialRevision = assigned.connectionRevision as number
-        return {
-          catalogRevision,
-          credentialRevision,
-          connectionKey,
-          models: Array.isArray(assigned.models) ? assigned.models.filter(Boolean) : [],
-        }
-      }
-      return null
-    } catch {
-      return null
-    }
-  }
-  // No connections map: keep the flat catalog for any assigned grant (legacy
-  // single-grant). Do not invent deployment-default for unassigned — that
-  // already returned null above. Named keys must match HCC/WRC.
-  if (
-    catalogRevision === null ||
-    catalogRevision === 'invalid' ||
-    credentialRevision === null ||
-    credentialRevision === 'invalid'
-  ) {
-    return null
-  }
-  return { catalogRevision, credentialRevision, connectionKey }
 }
 
 function codexBindingsEqual(a: CodexPolicyBinding | null, b: CodexPolicyBinding | null): boolean {

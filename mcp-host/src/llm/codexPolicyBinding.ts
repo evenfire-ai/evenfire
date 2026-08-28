@@ -1,12 +1,9 @@
+import type { CodexPolicyBinding } from '@clerum/codex-catalog-projection'
 import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 
 const POLICY_HASH_RE = /^[a-f0-9]{64}$/
 
-export type CodexPolicyBinding = {
-  catalogRevision: number
-  credentialRevision: number
-  connectionKey?: string
-}
+export type { CodexPolicyBinding }
 
 export type CodexAttemptPolicy = {
   policyRevision: number

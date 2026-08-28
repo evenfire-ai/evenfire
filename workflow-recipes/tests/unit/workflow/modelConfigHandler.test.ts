@@ -19,7 +19,8 @@ import {
 function mockK8s(
   configMap: Record<string, string> | null = null,
   secret: Record<string, string> | null = null,
-  allowlist: Record<string, string> | null = null
+  allowlist: Record<string, string> | null = null,
+  allowlistAnnotations: Record<string, string> = {}
 ): K8sSecretReader {
   return {
     readConfigMap: vi.fn(async (_namespace: string, name: string) =>
@@ -28,7 +29,7 @@ function mockK8s(
     readConfigMapWithPresence: vi.fn(async () =>
       allowlist === null
         ? ({ exists: false } as const)
-        : ({ exists: true, data: allowlist } as const)
+        : ({ exists: true, data: allowlist, annotations: allowlistAnnotations } as const)
     ),
     readSecret: vi.fn().mockResolvedValue(secret),
   }
@@ -447,7 +448,8 @@ describe('POST /configure-model — R3 allowlist gate', () => {
     const result = await handler.handle(
       { stepId: 's1', provider: 'codex-subscription', model: 'gpt-5.3-codex' },
       'http://mcp:8080',
-      'tok'
+      'tok',
+      { codexConnectionKey: 'team-plus' }
     )
 
     expect(result.status).toBe(202)
@@ -474,7 +476,8 @@ describe('POST /configure-model — R3 allowlist gate', () => {
     const result = await handler.handle(
       { stepId: 's1', provider: 'codex-subscription', model: 'gpt-5.3-codex' },
       'http://mcp:8080',
-      'tok'
+      'tok',
+      { codexConnectionKey: 'team-plus' }
     )
 
     expect(result.status).toBe(502)
@@ -695,5 +698,61 @@ describe('POST /configure-model — security invariants', () => {
     const bodyStr = JSON.stringify(result.body)
     expect(bodyStr).not.toContain('apiKey')
     expect(bodyStr).not.toContain('sk-test')
+  })
+
+  it('rejects a Codex model that only another grant offers', async () => {
+    const allowlist = {
+      'codex-subscription': JSON.stringify([{ model: 'gpt-5.3-codex' }, { model: 'gpt-5.1' }]),
+    }
+    const annotations = {
+      'clerum.io/codex-connections': JSON.stringify({
+        'team-plus': {
+          status: 'connected',
+          catalogRevision: 3,
+          connectionRevision: 8,
+          models: ['gpt-5.3-codex'],
+        },
+        'personal-pro': {
+          status: 'connected',
+          catalogRevision: 4,
+          connectionRevision: 2,
+          models: ['gpt-5.1'],
+        },
+      }),
+    }
+    const k8s = mockK8s({}, null, allowlist, annotations)
+    const handler = new ModelConfigHandler(k8s, mockMcpHost())
+    const denied = await handler.handle(
+      { stepId: 's1', provider: 'codex-subscription', model: 'gpt-5.3-codex' },
+      'http://mcp:8080',
+      'tok',
+      { codexConnectionKey: 'personal-pro' }
+    )
+    expect(denied.status).toBe(403)
+    expect(denied.body.code).toBe('model_not_allowed')
+
+    const allowed = await handler.handle(
+      { stepId: 's1', provider: 'codex-subscription', model: 'gpt-5.1' },
+      'http://mcp:8080',
+      'tok',
+      { codexConnectionKey: 'personal-pro' }
+    )
+    expect(allowed.status).toBe(202)
+    expect(allowed.body.configured).toBe(true)
+  })
+
+  it('does not let an unassigned recipe inherit the flat Codex catalog', async () => {
+    const allowlist = {
+      'codex-subscription': JSON.stringify([{ model: 'gpt-5.3-codex' }]),
+    }
+    const k8s = mockK8s({}, null, allowlist)
+    const handler = new ModelConfigHandler(k8s, mockMcpHost())
+    const denied = await handler.handle(
+      { stepId: 's1', provider: 'codex-subscription', model: 'gpt-5.3-codex' },
+      'http://mcp:8080',
+      'tok'
+    )
+    expect(denied.status).toBe(403)
+    expect(denied.body.code).toBe('model_not_allowed')
   })
 })

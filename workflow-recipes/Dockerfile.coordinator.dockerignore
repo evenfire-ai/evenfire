@@ -1,5 +1,7 @@
 **
 !packages/
+!packages/codex-catalog-projection/
+!packages/codex-catalog-projection/**
 !packages/network-policy-core/
 !packages/network-policy-core/**
 !packages/workflow-runtime-core/

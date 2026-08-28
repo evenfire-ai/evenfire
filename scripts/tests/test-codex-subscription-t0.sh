@@ -149,8 +149,10 @@ fi
 
 require_ci_matrix_entry "codex-llm-proxy"
 require_ci_matrix_entry "packages/llm-provider-attempt-contract"
+require_ci_matrix_entry "packages/codex-catalog-projection"
 
 run_group "shared-contract" "packages/llm-provider-attempt-contract" "index.test.cjs"
+run_group "codex-catalog-projection" "packages/codex-catalog-projection" "index.test.cjs"
 
 run_group "control-api" "control-api" \
   "test/codexSubscriptionRedirectUri.test.ts" \
@@ -161,6 +163,7 @@ run_group "control-api" "control-api" \
   "test/routes.adminRecipes.test.ts" \
   "test/routes.adminPluginWorkloadSdk.test.ts" \
   "test/services.recipeCodexGrantIdentity.test.ts" \
+  "test/crd.llmProviderEnums.test.ts" \
   "test/hostSpecValidation.codexSubscription.test.ts" \
   "test/llmProviders.test.ts" \
   "test/services.codexSubscriptionConnection.test.ts" \
@@ -198,7 +201,8 @@ run_group "workflow-recipes" "workflow-recipes" \
   "src/workflow/codexExecutionProjection.test.ts" \
   "src/workflow/workflowReconciler.codexScopeProvenance.test.ts" \
   "src/workflow/llmAllowedModelsSnapshot.test.ts" \
-  "src/workflow/networkPolicyFactory.codex.test.ts"
+  "src/workflow/networkPolicyFactory.codex.test.ts" \
+  "tests/unit/workflow/modelConfigHandler.test.ts"
 
 run_group "control-ui" "control-ui" \
   "components/__tests__/CodexSubscriptionHub.test.tsx" \

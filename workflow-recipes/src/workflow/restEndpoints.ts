@@ -2,6 +2,10 @@
  * WRC REST endpoints for workflow status reporting and management.
  */
 import * as k8s from '@kubernetes/client-node'
+import {
+  CODEX_CONNECTION_REF_ANNOTATION,
+  assignedCodexConnectionKey,
+} from '@clerum/codex-catalog-projection'
 import { loadConfig } from '../config'
 import type {
   GovernedTraceReporter,
@@ -626,6 +630,21 @@ export function createWorkflowEndpointHandlers(
   const statusOutputPreviewMaxChars = loadConfig().workflowStepOutputPreviewMaxChars
   const traceReporter = options.traceReporter ?? null
 
+  async function readRecipe(recipeName: string, namespace: string): Promise<unknown | null> {
+    try {
+      return await customApi.getNamespacedCustomObject({
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: recipeName,
+      })
+    } catch (err) {
+      if (getErrorCode(err) === 404) return null
+      throw err
+    }
+  }
+
   function validateWorkflowClaimBinding(
     recipeName: string,
     claims: AuthenticatedRequest['tokenClaims']
@@ -667,6 +686,15 @@ export function createWorkflowEndpointHandlers(
     )
 
     const mcpHostEndpoint = buildMcpHostUrl(recipeName, sandboxNamespace)
+    const recipe = (await readRecipe(recipeName, recipeNamespaceClaim)) as {
+      metadata?: { annotations?: Record<string, string> }
+    } | null
+    const handleOpts = {
+      ...(validateDegraded ? { validateDegraded } : {}),
+      codexConnectionKey: assignedCodexConnectionKey(
+        recipe?.metadata?.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
+      ),
+    }
     // R5 F6 stop-point: `fallbacks`/`cooldownSeconds`/`triggerOn` are NOT
     // forwarded yet — the broker request carries only the declared step tuple, so
     // the mcp-host handler's fallback path is never reached from the coordinator.
@@ -676,7 +704,7 @@ export function createWorkflowEndpointHandlers(
       { stepId: body.stepId, provider: body.provider, model: body.model },
       mcpHostEndpoint,
       wrcConfigureToken,
-      validateDegraded ? { validateDegraded } : undefined
+      handleOpts
     )
     return { status: result.status, body: result.body }
   }
@@ -1558,18 +1586,7 @@ export function createWorkflowEndpointHandlers(
      * Non-404 lookup errors rethrow.
      */
     async getRecipe(recipeName: string, namespace: string): Promise<unknown | null> {
-      try {
-        return await customApi.getNamespacedCustomObject({
-          group: CRD_GROUP,
-          version: CRD_VERSION,
-          namespace,
-          plural: WORKFLOWRECIPE_PLURAL,
-          name: recipeName,
-        })
-      } catch (err) {
-        if (getErrorCode(err) === 404) return null
-        throw err
-      }
+      return readRecipe(recipeName, namespace)
     },
   }
 }

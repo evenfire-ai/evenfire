@@ -972,8 +972,7 @@ describe('ConfigStore — allowlist tier (R3)', () => {
     })
     store = built.store
     await store.start()
-    expect(store.codexPolicyBinding()?.connectionKey).toBe('personal-pro')
-    expect(store.codexPolicyBinding()?.models).toEqual([])
+    expect(store.codexPolicyBinding()).toBeNull()
     expect(store.allowedModels().get('codex-subscription')).toEqual([])
   })
 })

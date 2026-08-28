@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { LlmProviderId } from '@clerum/llm-providers'
 import {
   type CodexCatalogSnapshot,
   type CodexHostSpec,
-  projectCodexExecution as projectHostCodexExecution,
-} from '../../../host-context-controller/src/codexExecutionProjection'
+  projectCodexExecution as projectSharedCodexExecution,
+} from '@clerum/codex-catalog-projection'
+import type { LlmProviderId } from '@clerum/llm-providers'
 import type { WorkflowRecipeSpec } from '../types'
 import {
   CODEX_EXECUTE_SCOPE,
@@ -69,7 +69,7 @@ describe('projectCodexExecution (WRC)', () => {
   it('keeps HCC/WRC derivedScopes and driftHashInput identical on the shared fixture', () => {
     for (const testCase of fixture.cases) {
       const wrc = projectCodexExecution(testCase.spec, testCase.snapshot)
-      const hcc = projectHostCodexExecution(testCase.spec, testCase.snapshot)
+      const hcc = projectSharedCodexExecution(testCase.spec, testCase.snapshot)
       expect(wrc.derivedScopes, testCase.id).toEqual(hcc.derivedScopes)
       expect(wrc.driftHashInput, testCase.id).toBe(hcc.driftHashInput)
     }

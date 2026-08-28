@@ -8,7 +8,6 @@ import {
   type CodexCatalogSnapshot,
   type CodexExecutionProjection,
   assignedHostCodexConnectionRef,
-  isCodexUnassignedConnectionRef,
   projectCodexExecution,
 } from './codexExecutionProjection'
 import { config } from './config'
@@ -34,6 +33,7 @@ import {
 import {
   ALLOWED_MODELS_CONFIGMAP_NAME,
   parseAllowedModelsSnapshot,
+  snapshotForAssignedCodexGrant,
   snapshotFromConfigMapError,
 } from './llmAllowedModelsSnapshot'
 import { hccLogger } from './logger'
@@ -1381,19 +1381,11 @@ export class HostReconciler {
 
   private projectCodexForHost(host: HostCRD): CodexExecutionProjection {
     const connectionKey = assignedHostCodexConnectionRef(host.spec.model?.connectionRef)
-    if (isCodexUnassignedConnectionRef(connectionKey)) {
-      // Missing/empty is not the reserved grant. Do not project execute scope
-      // or proxy egress from deployment-default just because the field was omitted.
-      return projectCodexExecution(host.spec, {
-        flagEnabled: this.codexSnapshot.flagEnabled,
-        connectionStatus: 'disconnected',
-        enabledModels: [],
-        staleModels: [],
-      })
-    }
-    const snapshot = this.lastCodexConfigMap
-      ? parseAllowedModelsSnapshot(this.lastCodexConfigMap, connectionKey)
-      : this.codexSnapshot
+    const snapshot = snapshotForAssignedCodexGrant(
+      connectionKey,
+      this.lastCodexConfigMap,
+      this.codexSnapshot
+    )
     return projectCodexExecution(host.spec, snapshot)
   }
 
