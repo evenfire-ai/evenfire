@@ -1710,7 +1710,7 @@ describe('NetworkPolicyReconciler', () => {
       const r = makeReconciler(mockApi, undefined, makeMockCustomApi(), mockCore)
       resolve4Mock.mockResolvedValue([{ address: '140.82.121.5', ttl: 60 }]) // covered by the /20
 
-      await r.reconcileExternalEgress(providerServer())
+      await r.reconcileExternalEgress(providerServer(), { isCurrent: () => true })
 
       // PR335-OPS-008: the catalog name is hardcoded to the canonical contract
       // shared with WRC and control-api — no config knob can point HCC elsewhere.
@@ -1755,7 +1755,7 @@ describe('NetworkPolicyReconciler', () => {
       // Phase 1: a successful reconcile creates the policy; capture its full
       // body so the phase-2 live fixture carries a REAL spec.egress — retention
       // must be content-meaningful, not a metadata-only shell.
-      await r.reconcileExternalEgress(providerServer())
+      await r.reconcileExternalEgress(providerServer(), { isCurrent: () => true })
       const createdBody = (
         mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as { body: k8s.V1NetworkPolicy }
       ).body
@@ -1782,7 +1782,9 @@ describe('NetworkPolicyReconciler', () => {
         Object.assign(new Error('not found'), { statusCode: 404 })
       )
 
-      await expect(r.reconcileExternalEgress(providerServer())).rejects.toThrow()
+      await expect(
+        r.reconcileExternalEgress(providerServer(), { isCurrent: () => true })
+      ).rejects.toThrow()
 
       // H3: the live NetworkPolicy is RETAINED — neither deleted nor rewritten.
       expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
@@ -1804,7 +1806,7 @@ describe('NetworkPolicyReconciler', () => {
       resolve4Mock.mockResolvedValue([{ address: '140.82.121.5', ttl: 60 }])
 
       // Phase 1: a successful reconcile creates the live provider policy.
-      await r.reconcileExternalEgress(providerServer())
+      await r.reconcileExternalEgress(providerServer(), { isCurrent: () => true })
       const liveNp = (
         mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as { body: k8s.V1NetworkPolicy }
       ).body
@@ -1817,7 +1819,9 @@ describe('NetworkPolicyReconciler', () => {
       mockCore.readNamespacedConfigMap.mockResolvedValue({ data: {} })
       mockApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [liveNp] })
 
-      await expect(r.reconcileExternalEgress(providerServer())).rejects.toThrow()
+      await expect(
+        r.reconcileExternalEgress(providerServer(), { isCurrent: () => true })
+      ).rejects.toThrow()
 
       expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
       expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
@@ -1842,7 +1846,7 @@ describe('NetworkPolicyReconciler', () => {
       resolve4Mock.mockResolvedValue([{ address: '140.82.121.5', ttl: 60 }])
 
       // Phase 1: a valid provider binding creates the live NP.
-      await r.reconcileExternalEgress(providerServer())
+      await r.reconcileExternalEgress(providerServer(), { isCurrent: () => true })
       const liveNp = (
         mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as { body: k8s.V1NetworkPolicy }
       ).body
@@ -1869,7 +1873,7 @@ describe('NetworkPolicyReconciler', () => {
         },
       }
 
-      await expect(r.reconcileExternalEgress(flipped)).rejects.toThrow()
+      await expect(r.reconcileExternalEgress(flipped, { isCurrent: () => true })).rejects.toThrow()
 
       expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
       expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
@@ -1890,7 +1894,7 @@ describe('NetworkPolicyReconciler', () => {
 
       // Phase 1: a successful reconcile creates the live provider policy;
       // capture its full body so retention is content-meaningful.
-      await r.reconcileExternalEgress(providerServer())
+      await r.reconcileExternalEgress(providerServer(), { isCurrent: () => true })
       const liveNp = (
         mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as { body: k8s.V1NetworkPolicy }
       ).body
@@ -1916,7 +1920,7 @@ describe('NetworkPolicyReconciler', () => {
         resolve4Mock.mockResolvedValue(scenario.answer)
 
         await expect(
-          r.reconcileExternalEgress(providerServer()),
+          r.reconcileExternalEgress(providerServer(), { isCurrent: () => true }),
           `${scenario.label}: reconcile must fail loud`
         ).rejects.toThrow()
 
@@ -1951,7 +1955,9 @@ describe('NetworkPolicyReconciler', () => {
       resolve4Mock.mockResolvedValue(rec('140.82.121.5'))
       mockApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
 
-      await expect(r.reconcileExternalEgress(providerServer())).rejects.toThrow(/catalog malformed/)
+      await expect(
+        r.reconcileExternalEgress(providerServer(), { isCurrent: () => true })
+      ).rejects.toThrow(/catalog malformed/)
 
       const statusJson = JSON.stringify(custom.patchNamespacedCustomObjectStatus.mock.calls)
       expect(statusJson).toContain('ExternalEgressRejected')
@@ -1976,7 +1982,9 @@ describe('NetworkPolicyReconciler', () => {
       mockApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
 
       // H3-by-throw: the reconcile REJECTS instead of shipping a partial policy.
-      await expect(r.reconcileExternalEgress(providerServer())).rejects.toThrow()
+      await expect(
+        r.reconcileExternalEgress(providerServer(), { isCurrent: () => true })
+      ).rejects.toThrow()
 
       // Nothing partial is created; nothing pre-existing is touched.
       expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
@@ -3020,14 +3028,21 @@ describe('NetworkPolicyReconciler', () => {
       // the bug (egress loss on a transient hiccup). Only the genuinely-stale
       // (no-longer-declared) policy is deleted; the reconcile still fails loud.
       expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
-      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
-        name: 'ext-egress-openai-mcp-old-example-com-443',
-        namespace: 'mcp-server',
-      })
-      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
-        name: 'ext-egress-openai-mcp-api.openai.com-443',
-        namespace: 'mcp-server',
-      })
+      // objectContaining, not exact equality: dev's delete now carries a
+      // `body.preconditions` uid/resourceVersion fence. The H3 assertion is
+      // about WHICH policy is deleted, not about the fence's shape.
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'ext-egress-openai-mcp-old-example-com-443',
+          namespace: 'mcp-server',
+        })
+      )
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'ext-egress-openai-mcp-api.openai.com-443',
+          namespace: 'mcp-server',
+        })
+      )
       expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledWith(
         expect.objectContaining({
           body: expect.arrayContaining([
