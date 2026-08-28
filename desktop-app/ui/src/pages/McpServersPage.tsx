@@ -4,6 +4,7 @@ import { scopeCaption, statusPresentation } from '@lib/connectorPresentation'
 import { type ConnectorRow, deriveConnectorRows } from '@lib/connectorRows'
 import { formatMcpServerDisplayName } from '@lib/format'
 import { useNavigationContext } from '../contexts/NavigationContext'
+import { useAgentsDataController } from '../hooks/domain/useAgentsDataController'
 import {
   type ConnectorActionInput,
   isActionableConnector,
@@ -14,6 +15,7 @@ import { clickableRowProps } from '../lib/clickableRowProps'
 function ConnectorRowView({
   row,
   busy,
+  agentDisplayByName,
   onAuthorize,
   onDisconnect,
   onOpenContext,
@@ -21,6 +23,10 @@ function ConnectorRowView({
 }: {
   row: ConnectorRow
   busy: boolean
+  // Visible agent name (spec.host) from the catalog map, as everywhere else in
+  // the app (AppHeader, ContextDetailsPage, TeamsPage). Falls back to the raw
+  // identifier for agents absent from the map (e.g. cross-team), not `|| name`.
+  agentDisplayByName: Record<string, string>
   onAuthorize: (input: ConnectorActionInput) => void
   onDisconnect: (input: ConnectorActionInput) => void
   onOpenContext: (contextRef: string) => void
@@ -82,10 +88,10 @@ function ConnectorRowView({
                 // on the <tr>; stop keyboard activation from bubbling so a chip
                 // press opens the agent instead of navigating the row.
                 onKeyDown={event => event.stopPropagation()}
-                title={agentName}
-                aria-label={`Open agent ${agentName}`}
+                title={agentDisplayByName[agentName] ?? agentName}
+                aria-label={`Open agent ${agentDisplayByName[agentName] ?? agentName}`}
               >
-                {agentName}
+                {agentDisplayByName[agentName] ?? agentName}
               </ReferenceTag>
             ))}
           </span>
@@ -143,6 +149,7 @@ function ConnectorRowView({
 export function McpServersPage() {
   const { loading, error, actionError, agents, pendingKey, authorize, disconnect } =
     useConnectorsController()
+  const { agentDisplayByName } = useAgentsDataController()
   const { handleOpenContextDetails, handleOpenAgentWorkspace } = useNavigationContext()
 
   const rows = useMemo(() => deriveConnectorRows(agents), [agents])
@@ -200,6 +207,7 @@ export function McpServersPage() {
                     key={row.key}
                     row={row}
                     busy={pendingKey === row.key}
+                    agentDisplayByName={agentDisplayByName}
                     onAuthorize={input => {
                       // The hook records any write failure in `actionError` and
                       // never rejects, so the call site no longer swallows it.
