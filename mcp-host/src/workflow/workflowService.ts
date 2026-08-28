@@ -15,7 +15,7 @@ import { FinishReason, type ToolDefinition } from '../core/types'
 import { buildGfsReadTools, buildGfsWriteTools } from '../internalTools/gfs'
 import { createGfscClient, hasGfsRuntimeAccess } from '../internalTools/gfsClient'
 import { SingleTurnProvider, createLLMProvider } from '../llm'
-import { type LlmProvider, descriptorFor, isLlmProvider, primarySlot } from '../llm/registryCore'
+import { type LlmProvider, descriptorFor, isLlmProvider } from '../llm/registryCore'
 import {
   configurePluginWorkloadSdkBootstrapIdentity,
   resolvePluginWorkloadSdkBootstrapCapabilityFamily,
@@ -56,7 +56,62 @@ import { type McpHostRuntimeAuth, gateStep, refreshWithRecovery } from './userAp
  * later phase. `provider` is validated by the caller via `isLlmProvider`.
  */
 function monoCredentialBag(provider: LlmProvider, apiKey: string): ApiKeys {
-  return { [provider]: { [primarySlot(descriptorFor(provider)).dataKey]: apiKey } }
+  // Literal keys only. A computed `[provider]` / `[dataKey]` pair is
+  // `js/remote-property-injection` even after `isLlmProvider` — CodeQL does
+  // not treat that guard as a sanitizer. oauth-broker is keyless.
+  switch (provider) {
+    case 'openai':
+      return { openai: { 'openai-api-key': apiKey } }
+    case 'claude':
+      return { claude: { 'claude-api-key': apiKey } }
+    case 'zai':
+      return { zai: { 'zai-api-key': apiKey } }
+    case 'bailian':
+      return { bailian: { 'bailian-api-key': apiKey } }
+    case 'vertex':
+      return { vertex: { 'vertex-service-account-json': apiKey } }
+    case 'bedrock':
+      return { bedrock: { 'aws-access-key-id': apiKey } }
+    case 'openrouter':
+      return { openrouter: { 'openrouter-api-key': apiKey } }
+    case 'gemini':
+      return { gemini: { 'gemini-api-key': apiKey } }
+    case 'deepseek':
+      return { deepseek: { 'deepseek-api-key': apiKey } }
+    case 'groq':
+      return { groq: { 'groq-api-key': apiKey } }
+    case 'together':
+      return { together: { 'together-api-key': apiKey } }
+    case 'fireworks':
+      return { fireworks: { 'fireworks-api-key': apiKey } }
+    case 'mistral':
+      return { mistral: { 'mistral-api-key': apiKey } }
+    case 'xai':
+      return { xai: { 'xai-api-key': apiKey } }
+    case 'cerebras':
+      return { cerebras: { 'cerebras-api-key': apiKey } }
+    case 'deepinfra':
+      return { deepinfra: { 'deepinfra-api-key': apiKey } }
+    case 'perplexity':
+      return { perplexity: { 'perplexity-api-key': apiKey } }
+    case 'moonshot':
+      return { moonshot: { 'moonshot-api-key': apiKey } }
+    case 'nebius':
+      return { nebius: { 'nebius-api-key': apiKey } }
+    case 'novita':
+      return { novita: { 'novita-api-key': apiKey } }
+    case 'minimax':
+      return { minimax: { 'minimax-api-key': apiKey } }
+    case 'azure':
+      return { azure: { 'azure-openai-api-key': apiKey } }
+    case 'codex-subscription':
+      return {}
+    default: {
+      const _exhaustive: never = provider
+      void _exhaustive
+      return {}
+    }
+  }
 }
 
 function credentialBagForProvider(provider: LlmProvider, apiKey: string): ApiKeys {
@@ -1349,10 +1404,12 @@ export class WorkflowService {
       const errStatus = extractHttpStatus(err)
       const cause =
         err instanceof Error && err.cause instanceof Error ? err.cause.message : undefined
-      console.error(
-        `[WorkflowService] Step "${req.stepId}" caught error: ${rawError}${cause ? ` (cause: ${cause})` : ''}`,
-        { stack: err instanceof Error ? err.stack?.split('\n').slice(0, 3).join(' ') : undefined }
-      )
+      console.error('[WorkflowService] Step caught error', {
+        stepId: req.stepId,
+        error: rawError,
+        cause,
+        stack: err instanceof Error ? err.stack?.split('\n').slice(0, 3).join(' ') : undefined,
+      })
       // F-9 fix: surface timeout errors with canonical error code (matches abort-check at loop top)
       if (rawError === 'step-timeout') {
         return {
