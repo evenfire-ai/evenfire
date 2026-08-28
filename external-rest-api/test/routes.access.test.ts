@@ -109,6 +109,26 @@ describe('public access-contract forwarding', () => {
     })
   })
 
+  it('uses the request correlation when a sanitized upstream error has none', async () => {
+    mocks.controlApiRequest.mockRejectedValue(
+      new ControlApiError('upstream', 503, {
+        error: {
+          code: 'authority_unavailable',
+          message: 'SQL /secret/path',
+          retryable: true,
+        },
+      })
+    )
+
+    const response = await request(app())
+      .get('/me/access/capabilities')
+      .set('authorization', 'Bearer session-token')
+      .set('x-correlation-id', 'access_ID-42')
+      .expect(503)
+
+    expect(response.body.error.correlationId).toBe('access_ID-42')
+  })
+
   it('preserves safe retry guidance for a locally sanitized access limit', async () => {
     mocks.controlApiRequest.mockRejectedValue(
       new ControlApiError(
