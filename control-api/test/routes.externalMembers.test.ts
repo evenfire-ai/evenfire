@@ -87,9 +87,6 @@ describe('external members routes', () => {
 
   it('rejects raw invitation emails longer than 320 characters before directory work', async () => {
     const overlongEmail = `${'a'.repeat(315)}@a.com`
-    directoryMock.createManagedInvitationForUser.mockResolvedValueOnce({
-      invitation: { id: 'inv-overlong', token: 'secret' },
-    })
 
     await request(makeApp())
       .post('/external/members/invitations')
