@@ -972,7 +972,9 @@ function parseCodexPolicyBinding(
       return null
     }
   }
-  if (connectionKey !== 'deployment-default') return null
+  // No connections map: keep the flat catalog for any assigned grant (legacy
+  // single-grant). Do not invent deployment-default for unassigned — that
+  // already returned null above. Named keys must match HCC/WRC.
   if (
     catalogRevision === null ||
     catalogRevision === 'invalid' ||

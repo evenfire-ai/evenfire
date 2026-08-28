@@ -35,6 +35,7 @@ import {
   listCodexConnectionModels,
   listCodexSubscriptionConnections,
 } from '@lib/codexSubscription'
+import { isDisabledCapabilityError } from '@lib/codexSubscriptionFeature'
 import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
 import {
   LLM_PROVIDER_OPTIONS,
@@ -537,10 +538,12 @@ function GrantFormModal({
         if (cancelled) return
         setCodexConnections(connections.filter(isAssignableCodexGrant))
       })
-      .catch(() => {
-        // Fail closed: without a readable connection list no Codex target can
-        // be added; the save endpoint stays the source of truth.
-        if (!cancelled) setCodexConnections([])
+      .catch(err => {
+        if (cancelled) return
+        setCodexConnections([])
+        if (!isDisabledCapabilityError(err)) {
+          setError(err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions')
+        }
       })
     return () => {
       cancelled = true

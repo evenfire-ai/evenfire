@@ -6,6 +6,7 @@ import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
 import { rootLogger } from '../../observability/logger.js'
 import {
   CODEX_CONNECTION_REF_ANNOTATION,
+  CODEX_UNASSIGNED_CONNECTION_KEY,
   readHostCodexConnectionRef,
 } from '../../services/codexSubscriptionConnection.js'
 import {
@@ -31,6 +32,11 @@ const ERROR_STATUS: Record<string, number> = {
   stale_generation: 409,
   idempotency_conflict: 409,
   provider_unavailable: 503,
+}
+
+function recipeHasPluginWorkloadSdk(spec?: Record<string, unknown>): boolean {
+  const sdk = spec?.pluginWorkloadSdk
+  return Boolean(sdk && typeof sdk === 'object' && !Array.isArray(sdk))
 }
 
 function sendAuthorizeError(res: Response, err: unknown): void {
@@ -67,7 +73,7 @@ export async function resolveHostAssignedConnectionKey(
         'workflowrecipes',
         recipeName,
         recipeNamespace
-      )) as { metadata?: { annotations?: Record<string, string> } }
+      )) as { metadata?: { annotations?: Record<string, string> }; spec?: Record<string, unknown> }
       const annotated = readHostCodexConnectionRef(
         recipe?.metadata?.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
       )
@@ -79,6 +85,18 @@ export async function resolveHostAssignedConnectionKey(
               .filter(Boolean)
           ),
         ]
+        // Recipes-only keep the annotation when grantRefs is empty. An SDK
+        // recipe with a leftover named annotation and no grant must not spend.
+        if (
+          recipeHasPluginWorkloadSdk(recipe.spec) &&
+          grantRefs.length === 0 &&
+          annotated !== CODEX_UNASSIGNED_CONNECTION_KEY
+        ) {
+          throw new LlmProviderAttemptAuthorizeError(
+            'host_binding_mismatch',
+            'SDK grant connectionRef does not match the recipe annotation'
+          )
+        }
         if (grantRefs.length > 1 || (grantRefs.length === 1 && grantRefs[0] !== annotated)) {
           throw new LlmProviderAttemptAuthorizeError(
             'host_binding_mismatch',

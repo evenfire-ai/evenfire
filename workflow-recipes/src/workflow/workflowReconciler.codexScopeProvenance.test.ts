@@ -357,6 +357,47 @@ describe('WorkflowReconciler Codex scope provenance', () => {
     expect(createdPolicyNames).toContain('child-run-mcp-host-to-codex-proxy')
   })
 
+  it('keeps recipe A parent grant after recipe B binds on the same reconciler', async () => {
+    const { reconciler } = createHarness()
+    bindNamedGrant(reconciler, 'child-a', {
+      runtimeScopeRecipeName: 'parent-a',
+      claimedParent: true,
+      parentSpec: makeCodexSpec(),
+      connectionKey: 'team-plus',
+    })
+    bindNamedGrant(reconciler, 'child-b', {
+      runtimeScopeRecipeName: 'parent-b',
+      claimedParent: true,
+      parentSpec: makeCodexSpec(),
+      connectionKey: 'personal-pro',
+    })
+
+    await reconcileRecipe(
+      reconciler,
+      makeCodexSpec({ agent: { provider: 'openai', model: 'gpt-5.4-mini' } }),
+      'child-a',
+      'parent-a'
+    )
+    expect(issuedScopes()).toContain('llm:codex:execute')
+
+    await reconcileRecipe(
+      reconciler,
+      makeCodexSpec({ agent: { provider: 'openai', model: 'gpt-5.4-mini' } }),
+      'child-b',
+      'parent-b'
+    )
+    expect(issuedScopes()).toContain('llm:codex:execute')
+
+    runtimeTokenIssuerMocks.issueMcpHostRuntimeTokens.mockClear()
+    await reconcileRecipe(
+      reconciler,
+      makeCodexSpec({ agent: { provider: 'openai', model: 'gpt-5.4-mini' } }),
+      'child-a',
+      'parent-a'
+    )
+    expect(issuedScopes()).toContain('llm:codex:execute')
+  })
+
   it('does not mint Codex when a claimed parent fails provenance', async () => {
     const { reconciler, networkingApi } = createHarness()
     bindNamedGrant(reconciler, 'child-run', {

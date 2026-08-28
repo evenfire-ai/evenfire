@@ -276,6 +276,26 @@ describe('HostReconciler Codex scope provenance', () => {
     expect(proxyPolicyBodies(networkingApi)).toEqual([])
   })
 
+  it('keeps the runtime scope hash when only connectionRevision changes', async () => {
+    const { reconciler, coreApi } = createReconciler()
+    wireAllowlist(coreApi, eligibleCodexConfigMap())
+    await reconciler.reconcile(makeCodexHost())
+    const firstHash = scopeHashFromSecretWrites(coreApi).at(-1)
+    expect(firstHash).toBeTruthy()
+
+    const bumped = eligibleCodexConfigMap()
+    bumped.metadata.annotations['clerum.io/connection-revision'] = '2'
+    const map = JSON.parse(bumped.metadata.annotations['clerum.io/codex-connections']) as Record<
+      string,
+      { connectionRevision: number }
+    >
+    map['deployment-default'].connectionRevision = 2
+    bumped.metadata.annotations['clerum.io/codex-connections'] = JSON.stringify(map)
+    wireAllowlist(coreApi, bumped)
+    await reconciler.reconcile(makeCodexHost())
+    expect(scopeHashFromSecretWrites(coreApi).at(-1)).toBe(firstHash)
+  })
+
   it('keeps a Host on a live grant eligible when another assigned grant is revoked', async () => {
     const { reconciler, coreApi, networkingApi } = createReconciler()
     wireAllowlist(coreApi, eligibleCodexConfigMap())

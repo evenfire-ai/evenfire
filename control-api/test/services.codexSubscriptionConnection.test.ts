@@ -75,6 +75,14 @@ describe('codex subscription connection repository', () => {
     expect(metadata).not.toHaveProperty('accessTokenEncrypted')
     expect(metadata).not.toHaveProperty('refreshToken')
     expect(metadata).not.toHaveProperty('accessToken')
+    expect(String(query.mock.calls[0]?.[0])).toContain('revoked_at IS NULL')
+  })
+
+  it('does not return a revoked tombstone when looking up a reusable connection key', async () => {
+    query.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    await expect(getSafeCodexSubscriptionConnection({ query }, 'team-plus')).resolves.toBeNull()
+    expect(String(query.mock.calls[0]?.[0])).toContain('revoked_at IS NULL')
+    expect(String(query.mock.calls[0]?.[0])).toContain('connection_key = $1')
   })
 
   it('inserts encrypted credentials and never binds plaintext tokens', async () => {

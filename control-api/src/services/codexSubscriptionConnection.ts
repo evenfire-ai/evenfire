@@ -280,7 +280,8 @@ export async function getSafeCodexSubscriptionConnection(
   const result = await db.query(
     `SELECT ${SAFE_CONNECTION_COLUMNS}
        FROM codex_subscription_connections
-      WHERE connection_key = $1`,
+      WHERE connection_key = $1
+        AND revoked_at IS NULL`,
     [normalizeCodexConnectionKey(connectionKey)]
   )
   const row = result.rows[0] as SafeConnectionRow | undefined

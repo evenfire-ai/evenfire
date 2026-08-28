@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import * as api from '../../lib/api'
 import type { WorkflowRecipeResource } from '../../lib/api'
+import { listCodexSubscriptionConnections } from '../../lib/codexSubscription'
 import { validateRecipe } from '../../lib/recipeValidator'
 import { RecipeEditor } from '../RecipeEditor'
 import { ToastProvider } from '../Toast'
@@ -1708,6 +1709,32 @@ describe('RecipeEditor — grants in editor', () => {
     await waitFor(() => expect(screen.getByText(/Edit Plugin: my-recipe/)).toBeInTheDocument())
     // Inline error surfaces in the grants panel.
     expect(screen.getByText(/could not be saved/)).toBeInTheDocument()
+  })
+
+  it('surfaces a non-disabled ChatGPT grant list failure', async () => {
+    vi.mocked(listCodexSubscriptionConnections).mockRejectedValueOnce(
+      Object.assign(new Error('Could not load ChatGPT subscriptions'), { status: 500 })
+    )
+    render(<RecipeEditor onSaved={vi.fn()} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByRole('combobox'), {
+      target: { value: 'Agentic Workflow (Codex Subscription)' },
+    })
+    reviewAndProceedToDeploy()
+    expect(await screen.findByText('Could not load ChatGPT subscriptions')).toBeInTheDocument()
+  })
+
+  it('does not surface a grant-list error when ChatGPT subscriptions are disabled', async () => {
+    vi.mocked(listCodexSubscriptionConnections).mockRejectedValueOnce(
+      Object.assign(new Error('disabled'), { status: 404, code: 'disabled' })
+    )
+    render(<RecipeEditor onSaved={vi.fn()} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByRole('combobox'), {
+      target: { value: 'Agentic Workflow (Codex Subscription)' },
+    })
+    reviewAndProceedToDeploy()
+    await screen.findByTestId('codex-recipe-grant')
+    expect(screen.queryByText('Could not load ChatGPT subscriptions')).not.toBeInTheDocument()
+    expect(screen.queryByText('disabled')).not.toBeInTheDocument()
   })
 
   it('deploys a Codex-only recipe without an LLM secretRef', async () => {

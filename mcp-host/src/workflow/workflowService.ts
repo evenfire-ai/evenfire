@@ -59,6 +59,13 @@ function monoCredentialBag(provider: LlmProvider, apiKey: string): ApiKeys {
   return { [provider]: { [primarySlot(descriptorFor(provider)).dataKey]: apiKey } }
 }
 
+function credentialBagForProvider(provider: LlmProvider, apiKey: string): ApiKeys {
+  // oauth-broker has no static slot. primarySlot → requireStaticCredentialSlot
+  // throws; a keyless Codex configure must not take that path.
+  if (descriptorFor(provider).authMode === 'oauth-broker') return {}
+  return monoCredentialBag(provider, apiKey)
+}
+
 const MAX_SOUL_BYTES = 64 * 1024 // 64KB
 const DEFAULT_TIMEOUT_SECONDS = 300
 const MAX_WORKFLOW_OUTPUT_TOKENS_CEILING = 65_536
@@ -167,7 +174,7 @@ function defaultLlmFactory(
 ): SingleTurnProvider | null {
   // The provider id IS the ApiKeys record key; validate before indexing.
   if (!isLlmProvider(provider)) return null
-  const keys = monoCredentialBag(provider, apiKey)
+  const keys = credentialBagForProvider(provider, apiKey)
   const modelConfig: import('../types').ModelConfig = {
     provider: provider as import('../types').ModelConfig['provider'],
     name: model,
@@ -364,7 +371,7 @@ export class WorkflowService {
     // The provider id IS the ApiKeys record key; validate before indexing.
     if (!isLlmProvider(provider)) return
     this.onLlmConfigured({
-      keys: monoCredentialBag(provider, apiKey),
+      keys: credentialBagForProvider(provider, apiKey),
       provider: provider as import('../types').ModelConfig['provider'],
       defaultModel: model,
     })
@@ -618,16 +625,15 @@ export class WorkflowService {
       return { configured: false, message: 'model is required' }
     }
 
-    // SOUL override
+    let pendingSoul: string | undefined
     if (req.soulContent !== undefined) {
       if (Buffer.byteLength(req.soulContent, 'utf-8') > MAX_SOUL_BYTES) {
         return { configured: false, message: 'soulContent exceeds 64KB limit' }
       }
-      this.stepSoulContent = req.soulContent
-      this.soulOverrideActive = true
+      pendingSoul = req.soulContent
     }
 
-    const model = req.model ?? 'default'
+    const model = brokerBacked ? (req.model ?? '').trim() : (req.model ?? 'default')
     const apiKey = brokerBacked ? '' : (req.apiKey ?? '')
     const llmSecretName = WorkflowService.normalizeLlmSecretName(req.llmSecretName)
     if (req.llmSecretName !== undefined && llmSecretName === null) {
@@ -644,11 +650,22 @@ export class WorkflowService {
       this.configured
     ) {
       this.currentLlmSecretName = llmSecretName
+      if (pendingSoul !== undefined) {
+        this.stepSoulContent = pendingSoul
+        this.soulOverrideActive = true
+      }
       return { configured: true, provider: req.provider, model }
     }
 
-    const provider = this.llmFactory(req.provider, model, apiKey)
+    let provider: SingleTurnProvider | null
+    try {
+      provider = this.llmFactory(req.provider, model, apiKey)
+    } catch {
+      this.clearConfiguredProvider()
+      return { configured: false, message: `Failed to create provider: ${req.provider}` }
+    }
     if (!provider) {
+      this.clearConfiguredProvider()
       return { configured: false, message: `Failed to create provider: ${req.provider}` }
     }
 
@@ -664,9 +681,22 @@ export class WorkflowService {
     this.currentApiKey = apiKey
     this.currentLlmSecretName = llmSecretName
     this.configured = true
+    if (pendingSoul !== undefined) {
+      this.stepSoulContent = pendingSoul
+      this.soulOverrideActive = true
+    }
     this.notifyLlmConfigured(req.provider, model, apiKey)
 
     return { configured: true, provider: req.provider, model }
+  }
+
+  private clearConfiguredProvider(): void {
+    this.currentProvider = null
+    this.currentProviderName = null
+    this.currentModel = null
+    this.currentApiKey = ''
+    this.currentLlmSecretName = null
+    this.configured = false
   }
 
   /**
@@ -858,7 +888,11 @@ export class WorkflowService {
         durationMs: Date.now() - startTime,
       }
     }
-    if (usageReportingEnabled && !this.currentLlmSecretName) {
+    const brokerUsage =
+      Boolean(this.currentProviderName) &&
+      isLlmProvider(this.currentProviderName) &&
+      descriptorFor(this.currentProviderName).authMode === 'oauth-broker'
+    if (usageReportingEnabled && !this.currentLlmSecretName && !brokerUsage) {
       clearTimeout(timeout)
       return {
         stepId: req.stepId,

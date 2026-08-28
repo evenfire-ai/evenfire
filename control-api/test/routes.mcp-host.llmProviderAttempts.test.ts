@@ -267,4 +267,32 @@ describe('resolveHostAssignedConnectionKey', () => {
       })
     ).resolves.toBe('team-plus')
   })
+
+  it('keeps a recipes-only annotation when grant listing is empty', async () => {
+    const gateway = {
+      getResource: vi.fn().mockResolvedValue({
+        metadata: { annotations: { 'clerum.io/codex-connection-ref': 'team-plus' } },
+        spec: { agent: { provider: 'codex-subscription', model: 'gpt-5.3-codex' } },
+      }),
+    }
+    await expect(
+      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/codex-recipe', {
+        listSdkCodexConnectionRefs: async () => [],
+      })
+    ).resolves.toBe('team-plus')
+  })
+
+  it('fails closed when an SDK recipe has a leftover annotation and no grant', async () => {
+    const gateway = {
+      getResource: vi.fn().mockResolvedValue({
+        metadata: { annotations: { 'clerum.io/codex-connection-ref': 'team-plus' } },
+        spec: { pluginWorkloadSdk: { family: 'promptBridge' } },
+      }),
+    }
+    await expect(
+      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/codex-recipe', {
+        listSdkCodexConnectionRefs: async () => [],
+      })
+    ).rejects.toMatchObject({ code: 'host_binding_mismatch' })
+  })
 })

@@ -918,6 +918,34 @@ describe('ConfigStore — allowlist tier (R3)', () => {
     ])
   })
 
+  it('keeps the legacy flat catalog for a named grant when the ConfigMap has no connections map', async () => {
+    const built = build({
+      provider: 'codex-subscription',
+      connectionRef: 'personal-pro',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {
+        [ALLOWLIST_CM]: {
+          'codex-subscription': JSON.stringify([{ model: 'gpt-5.3-codex' }, { model: 'gpt-5.1' }]),
+        },
+      },
+      configMapAnnotations: {
+        [ALLOWLIST_CM]: {
+          'clerum.io/catalog-revision': '4',
+          'clerum.io/connection-revision': '2',
+        },
+      },
+    })
+    store = built.store
+    await store.start()
+    expect(store.codexPolicyBinding()?.connectionKey).toBe('personal-pro')
+    expect(store.codexPolicyBinding()?.models).toBeUndefined()
+    expect(store.allowedModels().get('codex-subscription')).toEqual([
+      { model: 'gpt-5.3-codex' },
+      { model: 'gpt-5.1' },
+    ])
+  })
+
   it('does not inherit the reserved-grant union when a map entry omits models[]', async () => {
     const built = build({
       provider: 'codex-subscription',

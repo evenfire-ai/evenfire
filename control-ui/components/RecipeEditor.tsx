@@ -30,6 +30,7 @@ import {
   isAssignableCodexGrant,
   listCodexSubscriptionConnections,
 } from '../lib/codexSubscription'
+import { isDisabledCapabilityError } from '../lib/codexSubscriptionFeature'
 import { analyzeWorkflowRecipeEgress } from '../lib/egressModel'
 import type { EgressBinding, EgressEditorStatus } from '../lib/egressModel'
 import { OPENAI_SUBSCRIPTION_PROVIDER, brokerBackedRecipeAuthoringError } from '../lib/llm'
@@ -1585,10 +1586,22 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
     let cancelled = false
     void listCodexSubscriptionConnections()
       .then(rows => {
-        if (!cancelled) setCodexConnections(rows)
+        if (!cancelled) {
+          setCodexConnections(rows)
+          setCodexGrantLoadError('')
+        }
       })
-      .catch(() => {
-        if (!cancelled) setCodexConnections([])
+      .catch(err => {
+        if (!cancelled) {
+          setCodexConnections([])
+          if (!isDisabledCapabilityError(err)) {
+            setCodexGrantLoadError(
+              err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions'
+            )
+          } else {
+            setCodexGrantLoadError('')
+          }
+        }
       })
     return () => {
       cancelled = true
@@ -1614,6 +1627,7 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
     return EXAMPLE_JSON
   })
   const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
+  const [codexGrantLoadError, setCodexGrantLoadError] = useState('')
   const [codexConnectionRef, setCodexConnectionRef] = useState(() =>
     readRecipeCodexGrantAnnotation(initial)
   )
@@ -2541,6 +2555,11 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
               options={codexGrantOptions}
               placeholder="Choose a ChatGPT grant"
             />
+            {codexGrantLoadError ? (
+              <div className="cu-banner cu-banner--error" role="alert" style={{ marginTop: 10 }}>
+                {codexGrantLoadError}
+              </div>
+            ) : null}
           </div>
         ) : null}
 

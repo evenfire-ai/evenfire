@@ -94,6 +94,13 @@ describe('Pod Factory — mcpHost Runtime Env Vars', () => {
     )
   })
 
+  it('mcp-host pod enables Codex construction without the Host ConfigMap', () => {
+    expect(envByName(mcpHostPod, 'MCP_HOST_CODEX_SUBSCRIPTION_ENABLED')?.value).toBe('true')
+    expect(envByName(mcpHostPod, 'CODEX_LLM_PROXY_RUNTIME_URL')?.value).toBe(
+      'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+    )
+  })
+
   it('mcp-host pod uses the WorkflowRecipe caller key as runtime edge host name', () => {
     const env = envByName(mcpHostPod, 'CLERUM_HOST_NAME')
     expect(env!.value).toBe('sandbox-recipes/test-recipe')
