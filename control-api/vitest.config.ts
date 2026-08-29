@@ -18,6 +18,10 @@ export default defineConfig({
     // Give the request its execution budget without rerunning assertions or
     // hiding deterministic failures behind retry state.
     testTimeout: 30_000,
+    // Real-Postgres beforeAll runs initDb across the full migration list.
+    // A bounded extra allowance prevents a slow CREATE
+    // DATABASE into skipped tests with an empty JSON reporter message.
+    hookTimeout: process.env.CONTROL_API_REAL_PG_ADMIN_URL ? 60_000 : 30_000,
     sequence: {
       hooks: 'list',
     },

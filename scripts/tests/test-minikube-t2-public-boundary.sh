@@ -166,13 +166,17 @@ for line in diff.splitlines():
     if line.startswith("+++ b/"):
         current = line[6:]
         path = current.lower()
+        path_parts = path.split("/")
         if (
             path == ".env"
             or path.startswith(".env.")
             or path.endswith((".pem", ".key", ".p12", ".pfx", ".log"))
             or path.endswith(("/kubeconfig", "/config"))
             or (
-                any(token in path for token in ("id_rsa", "id_ed25519", "credential", "wallet", "keystore"))
+                (
+                    any(token in path for token in ("id_rsa", "id_ed25519"))
+                    or any(part in {"credential", "credentials", "wallet", "keystore"} for part in path_parts)
+                )
                 and path not in safe_source_paths
             )
             or "screenshot" in path

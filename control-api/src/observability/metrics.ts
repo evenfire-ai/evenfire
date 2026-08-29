@@ -543,9 +543,9 @@ export function recordGovernedTraceOperationalError(
 }
 // ─── LLM allowlist ConfigMap materialization (spec §3-R3.4 / V7) ─────────
 // Increments when the `clerum-llm-allowed-models` ConfigMap write fails after
-// its short retry — either during a CRUD mutation (phase=mutation, the route
-// then answers 503) or during the non-fatal boot reconcile (phase=boot). A
-// rate > 0 means Postgres and the delivered ConfigMap have drifted.
+// its short retry — LLM Models CRUD / Codex grant mutations (phase=mutation)
+// or the non-fatal boot reconcile (phase=boot). A rate > 0 means Postgres and
+// the delivered ConfigMap have drifted.
 export const llmAllowlistConfigMapWriteFailuresTotal = getOrCreateCounter({
   name: 'clerum_llm_allowlist_configmap_write_failures_total',
   help: 'Count of failed clerum-llm-allowed-models ConfigMap writes, labelled by phase.',

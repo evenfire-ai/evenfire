@@ -11,12 +11,26 @@ import {
   applyUserAccessFoundationSchema,
   backfillLegacyPasswordSecurityEpochs,
 } from './services/access/userAccessFoundationSchema.js'
+import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
+import {
+  applyCodexChatgptAccountIdSchema,
+  applyCodexGrantDefaultModelSchema,
+  applyCodexMultiConnectionSchema,
+  applyCodexReusableConnectionKeySchema,
+  applyCodexSubscriptionConnectionSchema,
+} from './services/codexSubscriptionConnection.js'
+import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
 import { applyInvitationDeliveryCommandFoundation } from './services/directory/invitationDeliverySchema.js'
 import {
   applyGfsUploadCleanupSchema,
   applyGfsUploadFinalizingSchema,
   applyGfsUploadSessionSchema,
 } from './services/gfsUploadSchema.js'
+import {
+  applyLlmProviderAttemptConnectionIdSchema,
+  applyLlmProviderAttemptSchema,
+  applyLlmProviderAttemptTicketSchema,
+} from './services/llmProviderAttemptStore.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
 import {
   addPluginWorkloadSdkAttemptLedgerColumns,
@@ -5922,6 +5936,26 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyGfsUploadFinalizingSchema,
   },
   {
+    version: '00a0_codex_subscription_connections',
+    apply: applyCodexSubscriptionConnectionSchema,
+  },
+  {
+    version: '00a1_codex_subscription_oauth_states',
+    apply: applyCodexSubscriptionOAuthStateSchema,
+  },
+  {
+    version: '00a2_llm_provider_attempts',
+    apply: applyLlmProviderAttemptSchema,
+  },
+  {
+    version: '00a3_llm_provider_attempt_tickets',
+    apply: applyLlmProviderAttemptTicketSchema,
+  },
+  {
+    version: '00a4_codex_chatgpt_account_id',
+    apply: applyCodexChatgptAccountIdSchema,
+  },
+  {
     version: '0100_seed_minimax_allowed_model',
     apply: async db => {
       // Seed one sensible default model for the newly added `minimax` provider
@@ -5940,31 +5974,75 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     },
   },
   {
-    version: '0101_user_access_foundation',
+    version: '0101_codex_multi_connection',
+    apply: applyCodexMultiConnectionSchema,
+  },
+  {
+    version: '0102_codex_catalog_models',
+    apply: applyCodexCatalogModelsSchema,
+  },
+  {
+    version: '0103_llm_provider_attempts_connection_id',
+    apply: applyLlmProviderAttemptConnectionIdSchema,
+  },
+  {
+    version: '0104_codex_grant_default_model',
+    apply: applyCodexGrantDefaultModelSchema,
+  },
+  {
+    version: '0105_codex_reusable_connection_key',
+    apply: applyCodexReusableConnectionKeySchema,
+  },
+  {
+    version: '0106_oauth_grants_owner_generalization',
+    // Renamed repeatedly while rebasing onto dev: 0091 -> 0100 -> 0101 -> 0106
+    // (each dev sync collided with a migration dev landed at the same number; the
+    // latest sync brought dev's 0101–0105 codex migrations, so 0101 is now taken
+    // by 0101_codex_multi_connection). Environments where the feature branch
+    // already deployed recorded it under an earlier name (the dev cluster most
+    // likely as 0100_...). legacyVersions lets the runner mark 0106 applied from
+    // that prior row instead of re-running the DDL and leaving an orphan
+    // schema_migrations entry. Every prior name is unique to this migration, so
+    // there is no false-skip.
+    legacyVersions: [
+      '0101_oauth_grants_owner_generalization',
+      '0100_oauth_grants_owner_generalization',
+      '0091_oauth_grants_owner_generalization',
+    ],
+    apply: applyOAuthGrantsOwnerGeneralization,
+  },
+  {
+    version: '0107_user_access_foundation',
+    legacyVersions: ['0101_user_access_foundation'],
     apply: applyUserAccessFoundationSchema,
   },
   {
-    version: '0102_invitation_delivery_commands',
+    version: '0108_invitation_delivery_commands',
+    legacyVersions: ['0102_invitation_delivery_commands'],
     apply: applyInvitationDeliveryCommandFoundation,
   },
   {
-    version: '0103_catalog_utf8_ordering',
+    version: '0109_catalog_utf8_ordering',
+    legacyVersions: ['0103_catalog_utf8_ordering'],
     apply: applyCatalogUtf8OrderingSchema,
   },
   {
-    version: '0104_composable_catalog_revisions',
+    version: '010a_composable_catalog_revisions',
+    legacyVersions: ['0104_composable_catalog_revisions'],
     apply: applyComposableCatalogRevisionSchema,
   },
   {
-    // Fix-forward for databases that recorded the first 0104 body before the
-    // GFS resource-component mapping was completed. The schema function is
-    // intentionally idempotent, so fresh databases and upgraded databases
-    // converge on the same trigger/function/backfill state.
-    version: '0105_gfs_catalog_revision_components',
+    // Fix-forward for databases that recorded the first composable-catalog
+    // body before the GFS resource-component mapping was completed. The
+    // schema function is intentionally idempotent, so fresh and upgraded
+    // databases converge on the same trigger/function/backfill state.
+    version: '010b_gfs_catalog_revision_components',
+    legacyVersions: ['0105_gfs_catalog_revision_components'],
     apply: applyComposableCatalogRevisionSchema,
   },
   {
-    version: '0106_legacy_password_security_epoch_backfill',
+    version: '010c_legacy_password_security_epoch_backfill',
+    legacyVersions: ['0106_legacy_password_security_epoch_backfill'],
     apply: backfillLegacyPasswordSecurityEpochs,
   },
 ]
@@ -6068,6 +6146,80 @@ async function applyOAuthServiceGrants(db: DbClient): Promise<void> {
   `)
 }
 
+async function applyOAuthGrantsOwnerGeneralization(db: DbClient): Promise<void> {
+  // U1 — generalize `oauth_grants` beyond recipe-owned grants so OAuth
+  // mcp-servers can own grants too, and introduce the `shared` (context-scoped)
+  // identity grant. NON-DESTRUCTIVE + idempotent: `recipe_namespace`/`recipe_name`
+  // are NOT renamed (they are reinterpreted as owner coordinates); the rename to
+  // `owner_*` is deferred.
+  //
+  //   - `owner_kind`  — discriminator; DEFAULT 'recipe' so every pre-existing row
+  //                     keeps its meaning and uniqueness.
+  //   - `context_id`  — replaces `user_id` in the key for `shared` grants (the
+  //                     Context the shared identity belongs to).
+  //   - `bootstrapped_by_user_id` — audit: who first authorized a shared identity.
+  //                     OUTSIDE the key and never rewritten on refresh.
+  //
+  // The kind/user_id CHECK is REPLACED (not extended) to admit 'shared': without
+  // this, any `shared` INSERT would violate the old `user`/`service`-only CHECK.
+  await db.query(`
+    ALTER TABLE oauth_grants
+      ADD COLUMN IF NOT EXISTS owner_kind TEXT NOT NULL DEFAULT 'recipe';
+    ALTER TABLE oauth_grants
+      ADD COLUMN IF NOT EXISTS context_id TEXT;
+    ALTER TABLE oauth_grants
+      ADD COLUMN IF NOT EXISTS bootstrapped_by_user_id TEXT;
+
+    ALTER TABLE oauth_grants
+      DROP CONSTRAINT IF EXISTS oauth_grants_kind_userid_check;
+    DO $$ BEGIN
+      ALTER TABLE oauth_grants
+        ADD CONSTRAINT oauth_grants_kind_userid_check
+        CHECK ((grant_kind = 'user' AND user_id IS NOT NULL)
+            OR (grant_kind = 'service' AND user_id IS NULL)
+            OR (grant_kind = 'shared' AND user_id IS NULL
+                AND context_id IS NOT NULL
+                AND bootstrapped_by_user_id IS NOT NULL));
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$;
+
+    -- Recreate oauth_grants_unique as a superset with owner_kind. Existing rows
+    -- are owner_kind='recipe', so the recipe user-grant uniqueness is preserved;
+    -- a McpServer owner (owner_kind='mcpserver') with the same ns/name can now
+    -- coexist. Governs user grants (non-null user_id) across owner domains.
+    ALTER TABLE oauth_grants
+      DROP CONSTRAINT IF EXISTS oauth_grants_unique;
+    DO $$ BEGIN
+      ALTER TABLE oauth_grants
+        ADD CONSTRAINT oauth_grants_unique
+        UNIQUE (owner_kind, recipe_namespace, recipe_name, user_id, oauth_client_id);
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$;
+
+    -- Shared-identity uniqueness: exactly one shared grant per
+    -- (owner, ns, name, context, client). The user/service grants keep their own
+    -- uniqueness (superset constraint + oauth_grants_service_unique). The key
+    -- asymmetry is deliberate: user grants keep user_id (per-user, global across
+    -- contexts), shared grants replace it with context_id (identity scoped to the
+    -- Context, prevents cross-context leakage; sec 5.2/U6).
+    CREATE UNIQUE INDEX IF NOT EXISTS oauth_grants_shared_unique
+      ON oauth_grants (owner_kind, recipe_namespace, recipe_name, context_id, oauth_client_id)
+      WHERE grant_kind = 'shared';
+    -- NOTE (R1-M2): oauth_grants_service_unique (applyOAuthServiceGrants above)
+    -- is DELIBERATELY left owner-blind — it is NOT recreated here with
+    -- owner_kind, unlike its two siblings (oauth_grants_unique,
+    -- oauth_grants_shared_unique). Rationale: service grants are recipe-only.
+    -- OAuth mcp-servers never create them — resolveServerOAuth only ever derives
+    -- grantScope 'user'|'context' (mcpServerOAuthSpec.ts), so an mcp-server's
+    -- grant_kind is never 'service'. Every service row therefore has
+    -- owner_kind='recipe', making (recipe_namespace, recipe_name, oauth_client_id)
+    -- unique without owner_kind in the key. If a future unit lets an
+    -- owner_kind='mcpserver' row take grant_kind='service', this index MUST gain
+    -- owner_kind (else a service INSERT could DO UPDATE a same-key recipe row's
+    -- tokens — silent cross-owner overwrite).
+  `)
+}
+
 async function ensureSchemaMigrationsTable(db: DbClient): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -6146,14 +6298,16 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
 }
 
 export async function assertDbReady(db: DbClient = pool): Promise<void> {
-  const requiredVersion = CONTROL_API_MIGRATIONS.at(-1)?.version
-  if (!requiredVersion) throw new Error('Control API database has no registered migrations')
-  const result = await db.query(
-    'SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1) AS ready',
-    [requiredVersion]
-  )
-  if (!(result.rows[0] as { ready?: boolean } | undefined)?.ready) {
-    throw new Error(`Control API database is not ready: migration ${requiredVersion} is required`)
+  if (!CONTROL_API_MIGRATIONS.length) {
+    throw new Error('Control API database has no registered migrations')
+  }
+  const applied = await loadAppliedMigrationVersions(db)
+  const missing = CONTROL_API_MIGRATIONS.filter(migration => {
+    if (applied.has(migration.version)) return false
+    return !migration.legacyVersions?.some(version => applied.has(version))
+  }).map(migration => migration.version)
+  if (missing.length) {
+    throw new Error(`Control API database is not ready: missing migrations ${missing.join(', ')}`)
   }
 }
 

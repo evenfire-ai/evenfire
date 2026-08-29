@@ -1,6 +1,10 @@
 import { randomUUID } from 'crypto'
 import { extractToolIntent, getDisplayName } from '../../progress/intentExtraction.js'
 import {
+  buildConnectRequiredApproval,
+  extractConnectRequiredMarker,
+} from '../extensions/mcpApprovalGateController'
+import {
   type ToolIdentity,
   recordAndCheck,
   recordDecision,
@@ -396,6 +400,8 @@ export async function executeToolCalls(
     // PostToolUse redaction (spec §6.2 / §10 #3): installed `post_tool_use` hooks
     // may redact the model-visible result `content` (never `is_error`). Only the
     // LLM-message `content` is touched — `rawContent` (UI preview) is left intact.
+    // Applied here — before the abort push, the U5 connect-required suspend, and
+    // the main push below — so every downstream consumer sees the redacted result.
     if (config.guardrails?.transformResult && toolIdentity) {
       const view = await config.guardrails.transformResult(toolIdentity, call.arguments, {
         content: toolResult.content,
@@ -405,11 +411,72 @@ export async function executeToolCalls(
         toolResult = { ...toolResult, content: view.content }
       }
     }
-    toolResults.push(toolResult)
 
     if (config.abortSignal?.aborted) {
+      toolResults.push(toolResult)
       return { toolResults, cancelled: true }
     }
+
+    // U5 — reactive OAuth consent on the inline (auto-approved / cron / no-snapshot
+    // resume) path: a live 401 on an oauth mcp-server surfaces a typed
+    // connect_required marker. Suspend durably instead of feeding the auth error
+    // to the LLM. Mirrors the approval-gate suspend block: the failed connect
+    // `toolResult` is NOT pushed (the same tool re-executes fresh on resume),
+    // remaining batch calls get synthetic not-executed results, and the frozen
+    // context travels on the approval so resume can rebuild the history.
+    const connectMarker = extractConnectRequiredMarker(toolResult.metadata)
+    if (connectMarker) {
+      // Close the tool card BEFORE suspending. `reportToolStart` already fired at
+      // the top of this call (the tool HAD to execute to surface the 401), so
+      // returning without a complete would strand the step card as "running"
+      // until the suspended event lands. This matches the resume path
+      // (taskExecutor emits reportToolComplete before its own connect-marker
+      // check) — both connect paths emit start→complete→suspended. The
+      // approval-gate suspend leaves no start only because it returns BEFORE
+      // execution (a different timing, not an inconsistency).
+      reportToolComplete(
+        config,
+        call,
+        toolResult,
+        progressStart,
+        iteration,
+        i,
+        calls.length,
+        usageEmitted ? undefined : usage
+      )
+      // NOTE: no `usageEmitted = true` here — this branch returns immediately
+      // below (pendingApproval), so the write would be dead. `usage` was already
+      // consumed by the reportToolComplete call above.
+      const approval = buildConnectRequiredApproval(call, connectMarker)
+      approval.intent_summary =
+        extractToolIntent(llmTextContent ?? null, call.name) ??
+        `Using ${getDisplayName(call.name)}...`
+      for (let k = i + 1; k < calls.length; k++) {
+        toolResults.push({
+          tool_call_id: calls[k].id,
+          name: calls[k].name,
+          content: `Not executed — ${call.name} requires connection. Re-request if needed.`,
+          is_error: true,
+        })
+      }
+      if (priorMessages) {
+        approval.context_snapshot = [...priorMessages]
+        approval.completed_results = [...toolResults]
+      }
+      events.emit({
+        type: 'tool:approval_needed',
+        data: {
+          toolName: call.name,
+          requestId: approval.request_id,
+          parameters: call.arguments,
+          iteration,
+        },
+        timestamp: new Date(),
+      })
+      return { toolResults, pendingApproval: approval }
+    }
+
+    toolResults.push(toolResult)
 
     reportToolComplete(
       config,
