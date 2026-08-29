@@ -259,4 +259,41 @@ describe('McpServersPage — da-table layout + navigation', () => {
     expect(within(mondayRow).getByRole('button', { name: 'Open agent Zeta Bot' })).toBeTruthy()
     expect(within(mondayRow).queryByRole('button', { name: 'Open agent agent-alpha' })).toBeNull()
   })
+
+  it('(g) a fresh write error takes precedence over a stale read error in the banner', async () => {
+    // Reviewer follow-up nit: with a failed READ (query error) and a failed WRITE
+    // (actionError) both live, the banner must show the MORE RECENT event — the
+    // write. Old render was `error ? … : actionError`, which pinned the stale read
+    // on top. Repro: 1st disconnect is confirmed → triggers a refresh whose read
+    // throws (sets query.error); 2nd disconnect rejects (sets actionError).
+    const rpc = {
+      listConnectors: vi.fn(async () => {
+        throw new Error('read boom')
+      }),
+      connectMcpServer: vi.fn(async () => undefined),
+      disconnectMcpServer: vi
+        .fn()
+        .mockResolvedValueOnce({ confirmed: true }) // 1st: confirmed → refresh (read fails)
+        .mockRejectedValueOnce(new Error('write boom')), // 2nd: rejects → actionError
+    }
+    Object.defineProperty(window, 'clerum', { configurable: true, value: { rpc } })
+
+    const { container } = renderPage(CONNECTORS)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Connectors' })).toBeTruthy())
+
+    const mondayRow = rowByName(allRows(container), 'monday')
+    const disconnectBtn = within(mondayRow).getByRole('button', { name: 'Disconnect' })
+
+    // 1st disconnect: confirmed → refresh → listConnectors throws → query.error set.
+    fireEvent.click(disconnectBtn)
+    await waitFor(() => expect(screen.getByText('read boom')).toBeTruthy())
+
+    // 2nd disconnect: rejects → actionError set. Both errors now live; the fresh
+    // write message must win, and the stale read message must be gone.
+    fireEvent.click(disconnectBtn)
+    await waitFor(() =>
+      expect(screen.getByText('Couldn\'t disconnect "monday". write boom')).toBeTruthy()
+    )
+    expect(screen.queryByText('read boom')).toBeNull()
+  })
 })

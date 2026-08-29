@@ -166,10 +166,8 @@ export function McpServersPage() {
       </div>
 
       <div className="page-layout">
-        {error ? (
-          <StatusBanner tone="error">{error}</StatusBanner>
-        ) : actionError ? (
-          <StatusBanner tone="error">{actionError}</StatusBanner>
+        {(actionError ?? error) ? (
+          <StatusBanner tone="error">{actionError ?? error}</StatusBanner>
         ) : null}
 
         <section className="page-card mcp-servers-board-card" aria-label="Connectors">
