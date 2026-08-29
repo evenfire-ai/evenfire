@@ -69,7 +69,7 @@ export function getTourStepContent(id: TourStepId, ctx: TourStepContext): TourSt
     case 'apps':
       return {
         title: 'Plugins that bring their own interface',
-        body: 'Some plugins bring their own interface, which you will find in the Apps section. Ask your cluster operator when you want one installed in your Evenfire instance.',
+        body: 'Some plugins bring their own interface, which you will find in the Apps section. Ask your cluster operator when you want one installed in your Evenfire workspace.',
         illustration,
       }
 
