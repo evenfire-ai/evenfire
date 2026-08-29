@@ -378,8 +378,15 @@ describe('replaceWithConflictRetry order and retry', () => {
   })
 
   it('WRITE-4: successful replace without kind increments {kind=unknown}', async () => {
-    const body = { metadata: { name: 'svc', namespace: 'ns' } }
-    const live = { metadata: { name: 'svc', namespace: 'ns', resourceVersion: '9' } }
+    const body: {
+      metadata?: { resourceVersion?: string; name?: string; namespace?: string }
+      kind?: string
+    } = {
+      metadata: { name: 'svc', namespace: 'ns' },
+    }
+    const live: typeof body = {
+      metadata: { name: 'svc', namespace: 'ns', resourceVersion: '9' },
+    }
     const before = await readWritesTotal('unknown')
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})
 
