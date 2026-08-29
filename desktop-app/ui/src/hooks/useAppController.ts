@@ -347,15 +347,6 @@ export function useAppController() {
     catalogSettled: tourCatalogSettled,
     blockedByOtherModal: Boolean(auth.pendingDesktopEnvironmentSetup),
   })
-  // The census the tour describes. Both fields are already fetched by the
-  // authenticated app; the tour issues no request of its own.
-  const tourCensus = useMemo(
-    () => ({
-      agentNames: agentsData.agentNames,
-      mcpServersByAgent: agentsData.mcpServersByAgent,
-    }),
-    [agentsData.agentNames, agentsData.mcpServersByAgent]
-  )
   const tourAgentLabels = useMemo(
     () => agentsData.agentNames.map(name => agentsData.agentDisplayByName[name] || name),
     [agentsData.agentNames, agentsData.agentDisplayByName]
@@ -1175,7 +1166,6 @@ export function useAppController() {
     onboarding,
     unauthenticatedView,
     tour,
-    tourCensus,
     tourAgentLabels,
     tourAppName,
     desktopReleaseStatus: auth.desktopReleaseStatus,

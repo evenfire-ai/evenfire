@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { Button, IconButton } from '@components/Common'
-import { selectTourSteps } from '@hooks/domain/tourDeck'
+import { TOUR_STEPS } from '@hooks/domain/tourDeck'
 import { getTourStepContent } from './steps'
 import type { TourModalProps } from './types'
 
@@ -14,17 +14,17 @@ import type { TourModalProps } from './types'
  * Step position is local state: it is ephemeral and dies with the modal, unlike
  * the seen flag, which the controller owns and persists.
  */
-export function TourModal({ census, context, onDismiss }: TourModalProps) {
+export function TourModal({ context, onDismiss }: TourModalProps) {
   const titleId = useId()
   const bodyId = useId()
   const primaryRef = useRef<HTMLButtonElement | null>(null)
   const cardRef = useRef<HTMLDivElement | null>(null)
   const restoreFocusRef = useRef<Element | null>(null)
 
-  const steps = useMemo(() => selectTourSteps(census), [census])
+  const steps = TOUR_STEPS
   const [index, setIndex] = useState(0)
-  // `selectTourSteps` always returns at least welcome + handoff, so the
-  // fallback is unreachable — it exists to keep the index access total.
+  // The deck is a non-empty constant, so the fallback is unreachable — it
+  // exists to keep the index access total.
   const step = steps[index] ?? 'welcome'
   const content = getTourStepContent(step, context)
 

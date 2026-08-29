@@ -22,16 +22,8 @@ export const TOUR_PREVIEW = /^true$/i.test(
  * How long the tour waits for the access catalog before opening anyway.
  *
  * A floor, not a cap: the tour opens as soon as the catalog settles, and only
- * falls back to this if it does not. Opening early would collapse the deck to
- * the three-step tour designed for a user with no agents, and show it to
- * everyone.
+ * falls back to this if it does not. The deck is fixed, so this no longer
+ * changes which cards appear — it decides whether the agent card can name the
+ * user's agent, or has to open on a blank where the name belongs.
  */
 export const TOUR_CATALOG_GRACE_MS = 2_000
-
-/**
- * Welcome + at most this many middle steps + Handoff.
- *
- * Four of the middle candidates are unconditional, so every tour is exactly six
- * steps long; the census decides which cards fill the middle, not how many.
- */
-export const TOUR_MAX_MIDDLE_STEPS = 4

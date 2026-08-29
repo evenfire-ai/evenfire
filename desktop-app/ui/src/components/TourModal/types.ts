@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import type { TourCensus, TourStepId } from '@hooks/domain/tourDeck'
+import type { TourStepId } from '@hooks/domain/tourDeck'
 
 /**
  * Everything the copy is allowed to name. Kept deliberately small: a step may
@@ -19,9 +19,8 @@ export interface TourStepContent {
 }
 
 export interface TourModalProps {
-  census: TourCensus
   context: TourStepContext
   onDismiss: () => void
 }
 
-export type { TourCensus, TourStepId }
+export type { TourStepId }

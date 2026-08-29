@@ -1,46 +1,30 @@
 import type { TourStepContent, TourStepContext, TourStepId } from './types'
 
 /**
- * A drawn illustration for the cards with no supplied artwork: inline SVG on
- * `currentColor`, so it inherits the theme with no asset pipeline and nothing
- * for the CSP to block.
+ * One illustration per card, in deck order. Every card carries commissioned
+ * artwork, which is why the deck is fixed — see `tourDeck.ts`.
+ *
+ * All decorative: `aria-hidden`, never the only carrier of meaning, because
+ * each card's title already says what the image shows.
  */
-function Glyph({ children }: { children: React.ReactNode }) {
-  return (
-    <svg className="tour-glyph" viewBox="0 0 64 40" aria-hidden="true" focusable="false">
-      {children}
-    </svg>
-  )
-}
-
-const GLYPHS: Record<TourStepId, React.ReactNode> = {
-  // Supplied artwork and the product mark are both decorative, like the drawn
-  // glyphs: each card's title already carries the meaning, so announcing the
-  // image would only repeat it.
+const ILLUSTRATIONS: Record<TourStepId, React.ReactNode> = {
   welcome: <img className="tour-logo" src="./logo.svg" alt="" aria-hidden="true" />,
   agents: <img className="tour-art" src="./tour/your_agent.png" alt="" aria-hidden="true" />,
-  approvals: (
-    <Glyph>
-      <rect x="8" y="10" width="30" height="20" rx="3" />
-      <path d="M16 20l5 5 9-10" />
-      <path d="M46 14v12M52 14v12" />
-    </Glyph>
-  ),
-  apps: <img className="tour-art" src="./tour/apps.png" alt="" aria-hidden="true" />,
-  mcpServers: <img className="tour-art" src="./tour/connectors.png" alt="" aria-hidden="true" />,
   files: <img className="tour-art" src="./tour/global_file_system.png" alt="" aria-hidden="true" />,
-  desktop: (
-    <Glyph>
-      <rect x="8" y="8" width="48" height="22" rx="3" />
-      <path d="M26 34h12" />
-      <path d="M16 16h10" />
-    </Glyph>
-  ),
+  mcpServers: <img className="tour-art" src="./tour/connectors.png" alt="" aria-hidden="true" />,
+  apps: <img className="tour-art" src="./tour/apps.png" alt="" aria-hidden="true" />,
   handoff: <img className="tour-art" src="./tour/start.png" alt="" aria-hidden="true" />,
 }
 
-/** Distinct strings rather than a "(s)" suffix. */
+/**
+ * Distinct strings rather than a "(s)" suffix, and empty when the user has no
+ * agent yet — the fixed deck shows this card to them too, and a dangling
+ * "Yours is" would be worse than saying nothing.
+ */
 function agentSentence(labels: string[]): string {
+  if (labels.length === 0) {
+    return ''
+  }
   if (labels.length === 1) {
     return `Yours is ${labels[0]}.`
   }
@@ -51,7 +35,7 @@ function agentSentence(labels: string[]): string {
 }
 
 export function getTourStepContent(id: TourStepId, ctx: TourStepContext): TourStepContent {
-  const illustration = GLYPHS[id]
+  const illustration = ILLUSTRATIONS[id]
   const hasAgents = ctx.agentLabels.length > 0
 
   switch (id) {
@@ -74,16 +58,11 @@ export function getTourStepContent(id: TourStepId, ctx: TourStepContext): TourSt
           <>
             Your agent does more than answer questions. It works through files and runs code for
             you, with your approval.
-            <span className="tour-body-line">{agentSentence(ctx.agentLabels)}</span>
+            {hasAgents ? (
+              <span className="tour-body-line">{agentSentence(ctx.agentLabels)}</span>
+            ) : null}
           </>
         ),
-        illustration,
-      }
-
-    case 'approvals':
-      return {
-        title: 'Nothing runs without your approval',
-        body: 'You get the speed of automation without handing over the keys. Before an agent touches anything it asks, and you see exactly what it intends to do.',
         illustration,
       }
 
@@ -105,22 +84,6 @@ export function getTourStepContent(id: TourStepId, ctx: TourStepContext): TourSt
       return {
         title: 'One place for your files and your agents',
         body: 'Work on the same files as your teammates and your agents, in one shared place. Nothing on your computer is visible to an agent until you share it.',
-        illustration,
-      }
-
-    case 'desktop':
-      return {
-        title: 'Worth knowing',
-        // Capabilities stated plainly. An earlier draft framed these as things
-        // "a browser would not give you", which argues for the form factor
-        // instead of telling the user what they can now do.
-        body: (
-          <ul className="tour-list">
-            <li>Replies reach you as notifications, even when you are elsewhere</li>
-            <li>The command palette jumps to any agent, chat, or setting</li>
-            <li>Connect to several Evenfire instances and switch between them</li>
-          </ul>
-        ),
         illustration,
       }
 

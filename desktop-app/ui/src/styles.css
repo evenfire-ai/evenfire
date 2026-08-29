@@ -15322,8 +15322,8 @@ pre {
   color: var(--accent);
 }
 
-/* Sized to sit in the same optical space as the drawn glyphs, so the first
-   card does not jump when the user advances to the second. */
+/* The product mark, smaller than the artwork it sits alongside but in the same
+   optical space, so the card does not jump when the user advances. */
 .tour-logo {
   width: 84px;
   height: 84px;
@@ -15348,16 +15348,6 @@ pre {
   background: var(--tour-art-plate);
 }
 
-.tour-glyph {
-  width: 132px;
-  height: 84px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
 .tour-title {
   font-size: var(--font-size-3xl);
   font-weight: var(--font-weight-bold);
@@ -15378,17 +15368,6 @@ pre {
 .tour-body-line {
   display: block;
   margin-top: var(--space-2);
-}
-
-/* Left-aligned inside a centered card: a bulleted list ragged on both edges is
-   harder to scan than the prose around it. */
-.tour-list {
-  display: grid;
-  gap: var(--space-1);
-  margin: var(--space-2) 0 0;
-  padding: 0;
-  list-style: none;
-  text-align: left;
 }
 
 .tour-list li {

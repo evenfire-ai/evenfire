@@ -3,16 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { TourModal } from '../TourModal'
-import type { TourCensus, TourStepContext } from '../TourModal/types'
+import type { TourStepContext } from '../TourModal/types'
 
 afterEach(() => {
   cleanup()
-})
-
-const census = (overrides: Partial<TourCensus> = {}): TourCensus => ({
-  agentNames: [],
-  mcpServersByAgent: {},
-  ...overrides,
 })
 
 const context = (overrides: Partial<TourStepContext> = {}): TourStepContext => ({
@@ -23,15 +17,12 @@ const context = (overrides: Partial<TourStepContext> = {}): TourStepContext => (
 
 function renderTour(
   opts: {
-    census?: Partial<TourCensus>
     context?: Partial<TourStepContext>
     onDismiss?: () => void
   } = {}
 ) {
   const onDismiss = opts.onDismiss ?? vi.fn()
-  render(
-    <TourModal census={census(opts.census)} context={context(opts.context)} onDismiss={onDismiss} />
-  )
+  render(<TourModal context={context(opts.context)} onDismiss={onDismiss} />)
   return { onDismiss }
 }
 
@@ -150,14 +141,32 @@ describe('TourModal', () => {
     expect(onDismiss).toHaveBeenCalledTimes(1)
   })
 
-  it('describes a richer environment with more steps', () => {
-    renderTour({
-      census: { agentNames: ['a'], mcpServersByAgent: { a: ['github'] } },
-      context: { agentLabels: ['Research bot'] },
-    })
-
-    // agents + approvals + connectors + files, plus welcome and handoff.
+  it('runs the same six steps whatever the user has', () => {
+    // The deck is fixed so the artwork can be designed as one piece; only the
+    // copy inside a card adapts.
+    renderTour({ context: { agentLabels: ['Research bot'] } })
     expect(screen.getByText('Step 1 of 6')).toBeTruthy()
+
+    cleanup()
+
+    renderTour({ context: { agentLabels: [] } })
+    expect(screen.getByText('Step 1 of 6')).toBeTruthy()
+  })
+
+  it('names the user\u2019s agent on the agent card, and says nothing when they have none', async () => {
+    const user = userEvent.setup()
+    renderTour({ context: { agentLabels: ['chatllm'] } })
+
+    await user.click(screen.getByRole('button', { name: 'Next' }))
+    expect(screen.getByText('Yours is chatllm.')).toBeTruthy()
+
+    cleanup()
+
+    // Same card, no agent to name: the sentence is dropped rather than left
+    // dangling.
+    renderTour({ context: { agentLabels: [] } })
+    await user.click(screen.getByRole('button', { name: 'Next' }))
+    expect(screen.queryByText(/Yours is/)).toBeNull()
   })
 
   it('tells an unauthorized member what to ask for, with no dead-end button', async () => {
@@ -180,7 +189,6 @@ describe('TourModal', () => {
   it('never says "context" to the user', async () => {
     const user = userEvent.setup()
     renderTour({
-      census: { agentNames: ['a'], mcpServersByAgent: { a: ['github'] } },
       context: { agentLabels: ['Research bot'] },
     })
 
@@ -200,7 +208,6 @@ describe('TourModal', () => {
   it('never names one deployment’s seed or a local address', async () => {
     const user = userEvent.setup()
     renderTour({
-      census: { agentNames: ['a'], mcpServersByAgent: { a: ['github'] } },
       context: { agentLabels: ['chatllm'] },
     })
 
