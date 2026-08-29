@@ -43,6 +43,14 @@ Before running anything, verify ALL of these:
       empty successful `minikube docker-env` result is a hard failure.
 - [ ] Never read `~/.cache/clerum/minikube-profiles/` directly (HARD DENY —
       it holds private profile state). The harness reads it for you.
+- [ ] Hold Control UI / Desktop PFs on the host via the first-hand helper
+      (do not search `.local-notes/` for it):
+      `MINIKUBE_PROFILE=<owned-profile> make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf`
+      then `branch-profile-health`. Implementation:
+      `.local-notes/minikube-profiles/branch-profile.sh`. Do not replace
+      that hold with `make minikube-pf-all-bg`. Do not start UI PFs from a
+      sandboxed agent shell. Do not kill this lane's `branch-profile-pf`.
+      `branch-profile-pf-health` stops PFs on EXIT — not a lasting hold.
 
 Shell contract-test rule: fixtures that exercise Git/lease state must use a
 temporary repository via `scripts/tests/lib/minikube-fixture-repo.sh`. Keep the
@@ -183,7 +191,9 @@ evidence is already green and NP08, health, or Playwright fails, retry with
 observe a newer same-binding access token but must never refresh/reissue or
 consume the Host refresh-token lineage.
 Do not widen the command, switch clusters, reset PVCs, or delete locks with a
-live owner. Code-by-code guidance is in `reference.md`.
+live owner. A T1 `next:` line is not permission to operate Docker
+(`docker run`, `docker desktop restart`, port probes). Code-by-code
+guidance is in `reference.md`.
 
 The active profile lock is `$T2_LOCK_ROOT/<profile>.lock`; stale reclaim uses
 the sibling `$T2_LOCK_ROOT/<profile>.reclaim`. A killed reclaimer can leave the

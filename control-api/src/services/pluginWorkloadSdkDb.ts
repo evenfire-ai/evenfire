@@ -180,8 +180,20 @@ export interface PluginWorkloadSdkPromptTarget {
   targetRef: string
   provider: string
   model: string
-  /** Secret data-key identity only; never its value. */
+  /**
+   * Secret data-key identity only; never its value. Empty for oauth-broker
+   * providers (Codex): no static Secret key exists for a brokered grant.
+   */
   credentialSlot: string
+  /**
+   * Codex subscription grant (connection key) this target executes against.
+   * Required for oauth-broker providers, absent for API-key providers. The
+   * grant is only *chosen* here — it must already exist and be connected.
+   * Control-api stamps the matching `clerum.io/codex-connection-ref`
+   * annotation; authorize attests that annotation and fail-closes if this
+   * field disagrees.
+   */
+  connectionRef?: string
 }
 
 /**
@@ -367,7 +379,8 @@ function promptTargets(value: unknown): PluginWorkloadSdkPromptTarget[] {
       typeof target.targetRef !== 'string' ||
       typeof target.provider !== 'string' ||
       typeof target.model !== 'string' ||
-      typeof target.credentialSlot !== 'string'
+      typeof target.credentialSlot !== 'string' ||
+      (target.connectionRef !== undefined && typeof target.connectionRef !== 'string')
     ) {
       return []
     }
@@ -377,6 +390,9 @@ function promptTargets(value: unknown): PluginWorkloadSdkPromptTarget[] {
         provider: target.provider,
         model: target.model,
         credentialSlot: target.credentialSlot,
+        ...(typeof target.connectionRef === 'string' && target.connectionRef
+          ? { connectionRef: target.connectionRef }
+          : {}),
       },
     ]
   })
@@ -1405,7 +1421,8 @@ export async function reservePluginWorkloadSdkProviderAttempt(input: {
       !currentTarget ||
       currentTarget.provider !== input.target.provider ||
       currentTarget.model !== input.target.model ||
-      currentTarget.credentialSlot !== input.target.credentialSlot
+      currentTarget.credentialSlot !== input.target.credentialSlot ||
+      (currentTarget.connectionRef ?? '') !== (input.target.connectionRef ?? '')
     ) {
       return null
     }

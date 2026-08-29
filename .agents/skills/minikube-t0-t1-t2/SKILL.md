@@ -9,4 +9,5 @@ The canonical copy of this skill lives at
 `.cursor/skills/minikube-t0-t1-t2/SKILL.md` (workflow, checklist, decision
 tree) with `.cursor/skills/minikube-t0-t1-t2/reference.md` (anti-patterns,
 failure codes, recovery). Read and follow those files; do not duplicate their
-content here.
+content here. Control UI / Desktop port-forwards are documented in
+`.cursor/skills/minikube-t0-t1-t2/SKILL.md` Step 0 and `AGENTS.md`.

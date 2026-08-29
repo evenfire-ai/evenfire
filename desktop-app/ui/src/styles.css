@@ -7655,12 +7655,14 @@ h3 {
    remaining page-specific hooks are `context-detail-page` / `team-detail-page`
    (used for scoped token overrides). */
 
+/* Card that frames the connectors `da-table` (which renders frameless + full
+   bleed), mirroring `.contexts-board-card`: the page-card supplies the single
+   frame; the table lays out inside it. */
 .mcp-servers-board-card {
   min-height: 0;
   min-width: 0;
   display: grid;
   align-content: start;
-  gap: var(--space-2-5);
 }
 
 .mcp-servers-board-header {
@@ -8107,12 +8109,6 @@ h3 {
   word-break: break-word;
 }
 
-.context-mcp-url code {
-  font-size: var(--font-size-xs);
-  color: var(--text-muted);
-  word-break: break-all;
-}
-
 .context-mcp-count {
   justify-self: center;
   min-width: 26px;
@@ -8124,11 +8120,6 @@ h3 {
   color: var(--text-muted);
   font-size: var(--font-size-sm);
   word-break: break-word;
-}
-
-.context-mcp-source {
-  color: var(--text-dim);
-  font-size: var(--font-size-sm);
 }
 
 .context-members-name {

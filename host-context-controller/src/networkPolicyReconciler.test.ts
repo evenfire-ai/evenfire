@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { asApiserverNetworkPolicy } from './__tests__/asApiserverNetworkPolicy'
 import { config } from './config'
+import { MANAGED_BY_LABEL, MANAGED_BY_VALUE, MCPSERVER_LABEL, POLICY_TYPE_LABEL } from './constants'
 import { confirmAuthoritativeMcpServerAbsence } from './mcpServerSafety'
 import {
   networkPolicySafetyPassDurationSeconds,
@@ -174,6 +175,15 @@ function makeReconciler(
   ;(reconciler as unknown as { customApi: unknown }).customApi = mockCustomApi
   return reconciler
 }
+
+describe('NetworkPolicyReconciler Codex boundary', () => {
+  it('does not derive Codex scope or proxy egress - that belongs to HostReconciler', () => {
+    const source = readFileSync(join(__dirname, 'networkPolicyReconciler.ts'), 'utf8')
+    expect(source).not.toContain('llm:codex:execute')
+    expect(source).not.toContain('codex-llm-proxy')
+    expect(source).not.toContain('codex-proxy-egress')
+  })
+})
 
 describe('NetworkPolicyReconciler', () => {
   let mockApi: ReturnType<typeof makeMockNetworkingApi>
@@ -5968,6 +5978,117 @@ describe('NetworkPolicyReconciler', () => {
         expect.any(Number)
       )
       expect(networkPolicySafetyPassDurationSeconds.observe).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('defaults-only write set vs typed sweep (#488)', () => {
+    const CONTEXT_LABEL = 'clerum.io/context'
+    const TYPED_SWEEP_TYPES = new Set(['context-allow', 'rpc-proxy-egress', 'external-egress'])
+
+    function policyMatchesLabelSelector(
+      policy: k8s.V1NetworkPolicy,
+      selector: string | undefined
+    ): boolean {
+      if (!selector) return true
+      const labels = policy.metadata?.labels ?? {}
+      return selector.split(',').every(clause => {
+        const trimmed = clause.trim()
+        const eq = trimmed.indexOf('=')
+        if (eq < 0) return false
+        return labels[trimmed.slice(0, eq)] === trimmed.slice(eq + 1)
+      })
+    }
+
+    it('ensureDefaultPolicies writes a {name, policy-type} set the typed sweep does not list or delete', async () => {
+      const store = new Map<string, k8s.V1NetworkPolicy>()
+      const deleted: string[] = []
+
+      mockApi.createNamespacedNetworkPolicy.mockImplementation(
+        async (args: { namespace: string; body: k8s.V1NetworkPolicy }) => {
+          const name = args.body.metadata?.name
+          if (!name) throw new Error('create is missing metadata.name')
+          const key = `${args.namespace}/${name}`
+          const stored: k8s.V1NetworkPolicy = {
+            ...args.body,
+            metadata: {
+              ...args.body.metadata,
+              name,
+              namespace: args.namespace,
+              uid: key,
+              resourceVersion: '1',
+            },
+          }
+          store.set(key, stored)
+          return stored
+        }
+      )
+      mockApi.readNamespacedNetworkPolicy.mockImplementation(
+        async (args: { name: string; namespace: string }) => {
+          const existing = store.get(`${args.namespace}/${args.name}`)
+          if (!existing) {
+            throw Object.assign(new Error('not found'), { code: 404 })
+          }
+          return existing
+        }
+      )
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async (args: { namespace: string; labelSelector?: string }) => ({
+          items: [...store.values()].filter(
+            policy =>
+              policy.metadata?.namespace === args.namespace &&
+              policyMatchesLabelSelector(policy, args.labelSelector)
+          ),
+        })
+      )
+      mockApi.deleteNamespacedNetworkPolicy.mockImplementation(
+        async (args: { name: string; namespace: string }) => {
+          const key = `${args.namespace}/${args.name}`
+          deleted.push(key)
+          store.delete(key)
+          return {}
+        }
+      )
+      mockCustomApi.listNamespacedCustomObject.mockResolvedValue({ items: [] })
+
+      await reconciler.ensureDefaultPolicies()
+      expect(store.size).toBeGreaterThan(0)
+      const written = [...store.values()].map(policy => ({
+        key: `${policy.metadata?.namespace}/${policy.metadata?.name}`,
+        name: policy.metadata?.name ?? '',
+        type: policy.metadata?.labels?.[POLICY_TYPE_LABEL] ?? '',
+      }))
+      expect(written.every(item => !TYPED_SWEEP_TYPES.has(item.type))).toBe(true)
+      expect(new Set(written.map(item => item.type))).toEqual(
+        new Set(['allow-api', 'default-deny', 'infrastructure'])
+      )
+
+      const orphanKey = `${config.namespace}/ctx-gone-allow`
+      store.set(orphanKey, {
+        apiVersion: 'networking.k8s.io/v1',
+        kind: 'NetworkPolicy',
+        metadata: {
+          name: 'ctx-gone-allow',
+          namespace: config.namespace,
+          uid: orphanKey,
+          resourceVersion: '1',
+          labels: {
+            [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+            [POLICY_TYPE_LABEL]: 'context-allow',
+            [CONTEXT_LABEL]: 'ctx-gone',
+            [MCPSERVER_LABEL]: 'srv-gone',
+          },
+        },
+        spec: { podSelector: {}, policyTypes: ['Ingress'] },
+      })
+
+      await reconciler.fullReconcile([], [], { ensureDefaults: false })
+
+      expect(deleted).toContain(orphanKey)
+      expect(deleted.filter(key => written.some(item => item.key === key))).toEqual([])
+      for (const item of written) {
+        expect(store.has(item.key)).toBe(true)
+      }
+      expect(store.has(orphanKey)).toBe(false)
     })
   })
 })

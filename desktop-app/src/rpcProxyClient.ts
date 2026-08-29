@@ -13,6 +13,7 @@ import {
   MessageToolStep,
   PendingApprovalLite,
   RpcAllowedServersResult,
+  RpcConnectorsResult,
   SandboxUiApp,
   SessionLifecycleState,
   SessionMessagesQuery,
@@ -80,9 +81,19 @@ function parseSessionState(value: unknown, label: string): SessionLifecycleState
 function parsePendingApproval(value: unknown, label: string): PendingApprovalLite | undefined {
   if (value === undefined || value === null) return undefined
   const record = wireObject(value, label)
+  // U5 (mcp-oauth reactive consent): `reason`/`mcpServerName` are additive. They
+  // ride the same REST wire as the generic approval descriptor and MUST be
+  // surfaced so the renderer can branch a `connect_required` suspension into an
+  // OAuth "Connect <server>" affordance instead of a generic tool approval. An
+  // absent `reason` (or any value other than `connect_required`) keeps the
+  // byte-identical generic-approval flow.
+  const reason = optionalWireString(record.reason, `${label}.reason`)
+  const mcpServerName = optionalWireString(record.mcpServerName, `${label}.mcpServerName`)
   return {
     requestId: wireString(record.requestId, `${label}.requestId`),
     displayName: wireString(record.displayName, `${label}.displayName`),
+    ...(reason !== undefined ? { reason } : {}),
+    ...(mcpServerName !== undefined ? { mcpServerName } : {}),
   }
 }
 
@@ -412,6 +423,45 @@ export class RpcProxyClient {
     })
   }
 
+  /**
+   * Proactive connectors read-model (spec 11 U2/U1) — the per-agent classified
+   * fleet (`authorized`/`requires_setup`/`no_oauth`). Reuses the `mcp:servers:list`
+   * scope (catalog read), like {@link listServers}; rpc-proxy derives the
+   * `userId` from `auth.sub` and enumerates the agents server-side, so the token
+   * only needs a valid host binding for the scope gate. Throws `ApiError` so
+   * `AppService.shouldRefreshRpcToken` can drive the retry-after-refresh.
+   */
+  async getConnectors(rpcAccessToken: string): Promise<RpcConnectorsResult> {
+    return requestJson<RpcConnectorsResult>('GET', url('/api/v1/rpc/connectors'), {
+      token: rpcAccessToken,
+    })
+  }
+
+  /**
+   * Disconnect (revoke) an mcp-server's OAuth grant (spec 11 U4). Mirrors the
+   * authorize-URL mint route but as a `DELETE`; the `userId` is derived by
+   * rpc-proxy from `auth.sub` and is NEVER sent in the body (invariant 3). The
+   * optional `contextId` is only a hint for the `oauth-context` flavor — control
+   * -api resolves the authoritative Context server-side. Idempotent: a missing
+   * grant answers 204. Throws `ApiError` (401/403-missing-scope → refresh retry).
+   */
+  async deleteMcpOauthGrant(
+    rpcAccessToken: string,
+    mcpServerName: string,
+    contextId?: string
+  ): Promise<void> {
+    await requestJson<unknown>(
+      'DELETE',
+      url(`/api/v1/mcp-oauth/${encodeURIComponent(mcpServerName)}/grant`),
+      {
+        token: rpcAccessToken,
+        // Body is optional; only send `contextId` when present. `userId` is NEVER
+        // sent — rpc-proxy derives it from the JWT sub.
+        body: contextId ? { contextId } : {},
+      }
+    )
+  }
+
   async invokeHostMessage(
     rpcAccessToken: string,
     hostRef: string,
@@ -597,6 +647,55 @@ export class RpcProxyClient {
     const json = (await response.json()) as { authorizeUrl?: unknown }
     if (typeof json?.authorizeUrl !== 'string' || !json.authorizeUrl) {
       throw new Error('sandbox-ui authorize-url response missing authorizeUrl')
+    }
+    return { authorizeUrl: json.authorizeUrl }
+  }
+
+  /**
+   * U5 (mcp-oauth reactive consent) — fetch the provider authorize URL for a
+   * "Connect <server>" flow, initiated when a tool-call against an OAuth
+   * mcp-server suspended with `connect_required`. Mirrors
+   * `requestSandboxUiOauthAuthorizeUrl` but keyed by `mcpServerName` (never a
+   * recipe): rpc-proxy derives the `userId` from `auth.sub` and forwards to
+   * control-api's internal mint. The returned URL is opened via
+   * `shell.openExternal`.
+   *
+   * Throws `ApiError` (not a bare Error) so `AppService.shouldRefreshRpcToken`
+   * can see a 401/403-missing-scope status and drive the retry-after-refresh,
+   * exactly like `approveToolCall`. A legitimate 403 (`context_membership_denied`),
+   * 404 (`server_not_found`), 400 (`not_oauth_server`, …) or 502/503 propagates
+   * verbatim in the message for the renderer to surface.
+   */
+  async requestMcpOauthAuthorizeUrl(
+    rpcAccessToken: string,
+    mcpServerName: string,
+    contextId?: string
+  ): Promise<{ authorizeUrl: string }> {
+    const response = await fetch(
+      url(`/api/v1/mcp-oauth/${encodeURIComponent(mcpServerName)}/authorize-url`),
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${rpcAccessToken}`,
+          'content-type': 'application/json',
+        },
+        // Body is optional; only send `contextId` when present. The `userId` is
+        // NEVER sent — rpc-proxy derives it from the JWT sub (invariant 3).
+        body: JSON.stringify(contextId ? { contextId } : {}),
+        signal: withTimeout(),
+      }
+    )
+    if (!response.ok) {
+      const body = await response.text()
+      throw new ApiError(
+        `mcp-oauth authorize-url request failed (${response.status}): ${body || '<empty>'}`,
+        response.status,
+        body
+      )
+    }
+    const json = (await response.json()) as { authorizeUrl?: unknown }
+    if (typeof json?.authorizeUrl !== 'string' || !json.authorizeUrl) {
+      throw new Error('mcp-oauth authorize-url response missing authorizeUrl')
     }
     return { authorizeUrl: json.authorizeUrl }
   }
