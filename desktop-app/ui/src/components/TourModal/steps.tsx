@@ -42,9 +42,14 @@ export function getTourStepContent(id: TourStepId, ctx: TourStepContext): TourSt
     case 'welcome':
       return {
         title: `Welcome to ${ctx.appName}`,
-        // Opens on what the user gets. An earlier draft led with where agents
-        // run, which is our architecture and not a reason for anyone to care.
-        body: 'This is where you put AI to work. Ask an agent for something and it goes and does it, working through your files and using your connectors.',
+        // Descriptive rather than a pitch: most people meeting this card were
+        // signed up by someone else, and arrive expecting another chatbot. So
+        // it says what the product is, then what they get, and leaves the
+        // specifics of their own agent to the next card.
+        //
+        // Named by `appName` rather than hardcoded, so an environment called
+        // something else does not introduce itself as Evenfire.
+        body: `${ctx.appName} puts AI agents to work alongside you. Each one can reach your files and the systems it has been connected to, so instead of talking you through a task it goes and completes it.`,
         illustration,
       }
 
