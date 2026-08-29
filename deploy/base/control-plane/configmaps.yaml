@@ -263,6 +263,20 @@ data:
           proxy_set_header X-Forwarded-Proto $scheme;
         }
 
+        # spec 11 U4: revoke an OAuth mcp-server grant (desktop "Disconnect").
+        # rpc-proxy is the sole caller; requireInternalService('rpc-proxy') gates
+        # it at control-api.
+        location = /api/v1/internal/mcp-oauth/grant {
+          limit_except DELETE {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
         location / {
           return 403;
         }

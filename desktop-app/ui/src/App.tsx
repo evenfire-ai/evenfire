@@ -1507,6 +1507,7 @@ export function App() {
       selectedAgent: vm.selectedAgent,
       selectedAgentRoute: vm.selectedAgentRoute,
       selectedContext: vm.selectedContext,
+      selectedContextTab: vm.selectedContextTab,
       selectedTeam: vm.selectedTeam,
       handleNavSelect: vm.handleNavSelect,
       handleOpenAgentWorkspace: vm.handleOpenAgentWorkspace,
@@ -1530,6 +1531,7 @@ export function App() {
       vm.selectedAgent,
       vm.selectedAgentRoute,
       vm.selectedContext,
+      vm.selectedContextTab,
       vm.selectedTeam,
     ]
   )

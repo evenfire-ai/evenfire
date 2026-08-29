@@ -104,6 +104,46 @@ export function resolveConnectResumeTargets(
   return targets
 }
 
+/**
+ * U3 (mcp-oauth proactive consent) — the OAuth deep-link return handler.
+ *
+ * A `clerum://oauth-completed?source=mcp&mcpServerName=<X>` arrives in TWO
+ * independent situations, and BOTH must be handled from the single completion:
+ *   - REACTIVE: a turn suspended with `connect_required` is waiting on <X> →
+ *     `resolveConnectResumeTargets` yields its resume target(s) and each is
+ *     driven through the SAME central decider (approve → the tool re-executes).
+ *   - PROACTIVE: the user clicked "Authorize" in the connectors panel with no
+ *     turn in flight → `resolveConnectResumeTargets` yields `[]`.
+ *
+ * In EITHER case the grant store just changed, so the panel's tri-state is now
+ * stale — this ALWAYS refreshes it (the coexistence must-fix: when a suspended
+ * turn AND the panel are both live, resume the turn *and* refresh the panel).
+ * When there is no turn, the refresh is the only effect (the proactive branch).
+ * Pure orchestration over injected deps — no decision logic, no React — so it is
+ * unit-testable and re-reads truth solely from U1 (D4).
+ *
+ * `refreshConnectors` runs exactly once per completion, so the queue's existing
+ * `(server,provider)` dedup keeps a cold-start-replayed completion from firing a
+ * problematic double refresh (a redundant invalidate is idempotent regardless).
+ */
+export interface McpOauthCompletionDeps {
+  getSnapshot: () => Record<string, SessionFsmState>
+  decide: (target: ApprovalDecisionTarget) => void
+  refreshConnectors: () => void
+}
+
+export function handleMcpOauthCompletion(
+  deps: McpOauthCompletionDeps,
+  mcpServerName: string
+): { resumedCount: number; wasProactive: boolean } {
+  const resumeTargets = resolveConnectResumeTargets(deps.getSnapshot(), mcpServerName)
+  for (const target of resumeTargets) {
+    deps.decide(target)
+  }
+  deps.refreshConnectors()
+  return { resumedCount: resumeTargets.length, wasProactive: resumeTargets.length === 0 }
+}
+
 export interface DecideApprovalDeps {
   fsm: SessionFsmStore
   approve: (target: ApprovalDecisionTarget) => Promise<ApprovalDecisionResult>
