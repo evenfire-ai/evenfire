@@ -3,6 +3,7 @@ import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
 import { verifyOAuthStateSignature } from '../src/oauth/state.js'
+import { checkAndIncrement } from '../src/services/rateLimiterService.js'
 import { MockGateway } from './mockGateway.js'
 
 /**
@@ -16,6 +17,21 @@ import { MockGateway } from './mockGateway.js'
 const mockPoolQuery = vi.fn()
 vi.mock('../src/db.js', () => ({
   pool: { query: (...args: unknown[]) => mockPoolQuery(...args) },
+}))
+
+// The route carries the repo's custom `rateLimitMiddleware`, whose real store
+// (`checkAndIncrement`) hits Postgres and would otherwise count across the many
+// same-`userId` requests in this suite. Mock it to always allow (mirrors the
+// sibling routes.mcpOauth.test.ts); the "429 when denied" case below drives a
+// one-shot deny to prove the limiter is actually mounted.
+vi.mock('../src/services/rateLimiterService.js', () => ({
+  checkAndIncrement: vi.fn().mockResolvedValue({
+    allowed: true,
+    remaining: 59,
+    resetMs: Date.now() + 60_000,
+    windowStartMs: Date.now(),
+    count: 1,
+  }),
 }))
 
 const MCP_NS = config.mcpServersNamespace
@@ -256,5 +272,27 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
       .send({ mcpServerName: 'gdrive', userId: 'user-1' })
     expect(res.status).toBe(503)
     expect(res.body.error).toBe('integration_not_configured')
+  })
+
+  // The route is rate-limited (bucket keyed by the forwarded userId). When the
+  // bucket is exhausted the middleware short-circuits with 429 BEFORE the
+  // handler runs — no server read, no state mint.
+  it('429 Too Many Requests when the rate limit is exceeded', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    vi.mocked(checkAndIncrement).mockResolvedValueOnce({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 61,
+    })
+    const res = await post(app)
+      .set('Authorization', 'Bearer dev-rpc-proxy-token')
+      .set('x-service-token', 'rpc-proxy')
+      .send({ mcpServerName: 'gdrive', userId: 'user-1' })
+    expect(res.status).toBe(429)
+    expect(res.body.error).toBe('Too Many Requests')
+    // Denied before the handler — no membership lookup ran.
+    expect(mockPoolQuery).not.toHaveBeenCalled()
   })
 })

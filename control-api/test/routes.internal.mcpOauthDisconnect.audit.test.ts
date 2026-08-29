@@ -23,6 +23,18 @@ vi.mock('../src/db.js', () => ({
   pool: { query: (...args: unknown[]) => mockPoolQuery(...args) },
 }))
 
+// The route carries the repo's custom `rateLimitMiddleware`; mock its store to
+// always allow so the audit assertions here never race a real bucket.
+vi.mock('../src/services/rateLimiterService.js', () => ({
+  checkAndIncrement: vi.fn().mockResolvedValue({
+    allowed: true,
+    remaining: 59,
+    resetMs: Date.now() + 60_000,
+    windowStartMs: Date.now(),
+    count: 1,
+  }),
+}))
+
 // Capture every `req.log.info(...)` call. `req.log` is `rootLogger.child(...)`,
 // created per request AT RUNTIME — so a runtime spy on `rootLogger.child`
 // intercepts it without disturbing the import-time module children.

@@ -3,6 +3,7 @@ import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { K8sGateway } from '../../k8s.js'
 import { requireInternalService } from '../../middleware/internalServiceAuth.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { buildAuthorizeUrl } from '../../oauth/authorizeUrlHelper.js'
 import {
   type McpServerOAuthReader,
@@ -51,6 +52,32 @@ interface McpServerAuthResource extends McpServerOAuthSpecInput {
 export function createInternalOAuthRouter(gateway: K8sGateway): Router {
   const router = Router()
   const encryptionKey = deriveOAuthEncryptionKey(config.oauthEncryptionKey)
+
+  // Rate limiter for the two U5 mcp-oauth internal routes (authorize-url mint +
+  // grant delete). Both sit behind `requireInternalService('rpc-proxy')`, so the
+  // sole caller is the already-trusted rpc-proxy; each request is user-driven (a
+  // Connect / Disconnect click) and carries the initiator `userId`. Key the
+  // bucket by that `userId` so one noisy user does not starve others on the
+  // honest path — rpc-proxy derives `userId` from the session `auth.sub`, so this
+  // is fairness among forwarded users, NOT a hard boundary against a compromised
+  // rpc-proxy (that actor is already trusted by this seam). Fall back to the
+  // service identity when no valid `userId` is present. Mirrors the custom
+  // `rateLimitMiddleware` on the sibling broker routes (routes/mcpOauth.ts) — a
+  // distributed, Postgres-backed limiter. Reuses the `oauthBrokerRlPerMin`
+  // per-minute VALUE (default 60/min) but a SEPARATE bucket (`mcp_oauth_internal`
+  // type + `mcp-oauth-internal:` key prefix), generous for click-driven traffic.
+  const rpcOauthRateLimit = () =>
+    rateLimitMiddleware({
+      bucketType: 'mcp_oauth_internal',
+      maxPerMinute: config.oauthBrokerRlPerMin,
+      getBucketKey: req => {
+        const uid =
+          typeof req.body?.userId === 'string' && req.body.userId.length > 0
+            ? req.body.userId
+            : (req.internalService?.name ?? 'unknown')
+        return `mcp-oauth-internal:${uid}`
+      },
+    })
 
   const recipeReader: RecipeReader = {
     async read(name, namespace): Promise<RecipeWithOAuthClients | null> {
@@ -126,6 +153,7 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
   router.post(
     '/internal/mcp-oauth/authorize-url',
     requireInternalService('rpc-proxy'),
+    rpcOauthRateLimit(),
     async (req, res, next) => {
       try {
         const { mcpServerName, userId, contextId } = (req.body ?? {}) as {
@@ -293,6 +321,7 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
   router.delete(
     '/internal/mcp-oauth/grant',
     requireInternalService('rpc-proxy'),
+    rpcOauthRateLimit(),
     async (req, res, next) => {
       try {
         const { mcpServerName, userId, contextId } = (req.body ?? {}) as {

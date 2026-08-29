@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
+import { checkAndIncrement } from '../src/services/rateLimiterService.js'
 import { MockGateway } from './mockGateway.js'
 
 /**
@@ -35,6 +36,20 @@ const EXTERNAL_REST_TOKEN = 'dev-external-rest-api-token'
 const mockPoolQuery = vi.fn()
 vi.mock('../src/db.js', () => ({
   pool: { query: (...args: unknown[]) => mockPoolQuery(...args) },
+}))
+
+// The route carries the repo's custom `rateLimitMiddleware`. Mock its real store
+// (`checkAndIncrement`, Postgres-backed) to always allow so the many same-userId
+// requests here don't trip a real bucket; the "429 when denied" case below
+// drives a one-shot deny to prove the limiter is mounted.
+vi.mock('../src/services/rateLimiterService.js', () => ({
+  checkAndIncrement: vi.fn().mockResolvedValue({
+    allowed: true,
+    remaining: 59,
+    resetMs: Date.now() + 60_000,
+    windowStartMs: Date.now(),
+    count: 1,
+  }),
 }))
 
 const MCP_NS = config.mcpServersNamespace
@@ -235,5 +250,22 @@ describe('DELETE /api/v1/internal/mcp-oauth/grant (spec 11 U4)', () => {
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('context_mismatch')
     expect(deleteCalls()).toHaveLength(0)
+  })
+
+  // Rate-limited: an exhausted bucket short-circuits with 429 BEFORE the handler
+  // runs — no server read, no grant delete.
+  it('429 Too Many Requests when the rate limit is exceeded', async () => {
+    seedOauthServer(gateway, { name: 'gdrive' })
+    vi.mocked(checkAndIncrement).mockResolvedValueOnce({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 61,
+    })
+    const res = await del(app).send({ mcpServerName: 'gdrive', userId: 'user-1' })
+    expect(res.status).toBe(429)
+    expect(res.body.error).toBe('Too Many Requests')
+    expect(mockPoolQuery).not.toHaveBeenCalled()
   })
 })
