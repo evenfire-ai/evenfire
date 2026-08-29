@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto'
-import type { Conversation, Turn } from '../core/types'
+import type { Conversation, Turn, TurnGuardrailActivity } from '../core/types'
 import { getDisplayName } from '../progress/intentExtraction'
-import type { ContextBreakdownWire, SessionTokensWire, TurnToolStepWire } from './types'
+import type {
+  ContextBreakdownWire,
+  SessionTokensWire,
+  TurnGuardrailsWire,
+  TurnToolStepWire,
+} from './types'
 
 // Wire projections: map a Conversation / Turn to the runtime API shapes served
 // by `/v1/runtime/sessions` and `/messages` (per-session + per-turn token
@@ -176,6 +181,7 @@ export function projectContextBreakdown(
     // emitting 0 here would render a misleading "Average cache hit rate 0.0%".
     if (denom > 0) cacheHitRate = cacheRead / denom
   }
+  const guardrails = projectGuardrailActivity(conversation.guardrailActivity)
   return {
     buckets: { ...breakdown.buckets },
     totalInputTokens: breakdown.totalInputTokens,
@@ -183,7 +189,39 @@ export function projectContextBreakdown(
     fillRatio,
     ...(cacheHitRate !== undefined ? { cacheHitRate } : {}),
     capturedAtTurn: breakdown.capturedAtTurn,
+    ...(guardrails ? { guardrails } : {}),
   }
+}
+
+/** §8 length-cap on the (admin-authored) source id when it crosses the wire. */
+const MAX_SOURCE_ID_LEN = 128
+
+/**
+ * Project a per-turn guardrail-input-transparency record to the wire shape (spec
+ * §5.3/§6). Returns `undefined` when nothing acted, so quiet turns add zero bytes
+ * to the payload. Length-caps `sourceId` (§8); carries counts + ids only.
+ */
+export function projectGuardrailActivity(
+  activity: TurnGuardrailActivity | undefined
+): TurnGuardrailsWire | undefined {
+  if (!activity || activity.changes.length === 0) return undefined
+  return {
+    tokensBefore: activity.tokensBefore,
+    tokensAfter: activity.tokensAfter,
+    llmCalls: activity.llmCalls,
+    changes: activity.changes.map(c => ({
+      sourceId: c.sourceId.slice(0, MAX_SOURCE_ID_LEN),
+      kind: c.kind,
+      deltaTokens: c.deltaTokens,
+      changed: c.changed,
+      calls: c.calls,
+    })),
+  }
+}
+
+/** Per-turn projection for `/messages` (beside `tokens` and `tool_steps`). */
+export function projectTurnGuardrails(turn: Turn): TurnGuardrailsWire | undefined {
+  return projectGuardrailActivity(turn.guardrailActivity)
 }
 
 /**

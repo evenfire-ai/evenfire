@@ -3371,6 +3371,34 @@ h3 {
   padding-top: var(--space-1);
 }
 
+/* Guardrail-input-transparency (spec §7): folded into the input/output token
+   tooltip. A shield stat on the micro row signals a guardrail acted (dim, brightens
+   with the tooltip like the cache glyph); the tooltip carries the net delta + a
+   per-source row list. Counts only, tokens-driven; no hover transform/filter per
+   desktop-app/ui/CLAUDE.md. */
+/* Guardrail stat reads brighter than the dim ↑↓ counts so the shield + net delta
+   is actually noticeable; its icon keeps full opacity (the shared rule dims to .7). */
+.token-usage-stat--guardrail {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.token-usage-stat--guardrail svg {
+  opacity: 1;
+}
+
+.token-usage-tooltip-row--head .token-usage-tooltip-label {
+  color: var(--text);
+}
+
+.token-usage-tooltip-row--sub {
+  padding-left: var(--space-1);
+}
+
+.token-usage-tooltip-row--sub .token-usage-tooltip-label {
+  font-size: var(--font-size-2xs);
+}
+
 .context-window-empty {
   font-size: var(--font-size-xs);
   color: var(--text-dim);

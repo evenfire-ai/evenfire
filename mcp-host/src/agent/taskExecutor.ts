@@ -1125,7 +1125,13 @@ export class TaskExecutor {
     // LLM-lane guardrails (spec §7): wrap ABOVE failover so built-in request
     // shaping fires once per logical request, not per fallback attempt. Inert
     // (returns the port unchanged) when no built-ins are configured (§5).
-    const hookedLlmPort = maybeWrapHookedLlmPort(effectiveLlmPort, this.deps.guardrailsConfig)
+    const hookedLlmPort = maybeWrapHookedLlmPort(effectiveLlmPort, this.deps.guardrailsConfig, {
+      // Guardrail-input-transparency (spec §5.1): per-LLM-call sink bound to the
+      // captured `conversation` (not `this.conversation!`), mirroring the
+      // context-breakdown sink below — it accumulates into the per-turn aggregate.
+      onGuardrailActivity: raw =>
+        this.deps.conversationManager.recordGuardrailActivity(conversation, raw),
+    })
 
     const metadata: Record<string, unknown> = {}
     if (this.task.sourceMessage) {

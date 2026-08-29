@@ -22,6 +22,17 @@ export interface BuiltinItem {
 /** A pure request-shaping function (the composed built-in chain). */
 export type RequestShaper = (request: ToolCompletionRequest) => ToolCompletionRequest
 
+/**
+ * One ordered built-in step, kept individually addressable so the LLM-lane
+ * boundary can measure each built-in's effect on the input for the
+ * guardrail-input-transparency surface (spec §12.1). `sourceId` is the
+ * first-party `builtins[].type`, used as the transparency source id (§4).
+ */
+export interface BuiltinStep {
+  sourceId: 'prompt-shaping' | 'token-trim'
+  shape: RequestShaper
+}
+
 const IDENTITY: RequestShaper = r => r
 
 function isBuiltinItem(v: unknown): v is BuiltinItem {
@@ -29,29 +40,38 @@ function isBuiltinItem(v: unknown): v is BuiltinItem {
 }
 
 /**
- * Compose the configured built-ins into a single ordered request shaper. Returns
- * an identity shaper when none are configured (no-config compatibility, spec §5).
- * Unknown built-in types are skipped (they are validated at admission in prod).
+ * Resolve the configured built-ins into ordered, individually-addressable steps.
+ * Returns `[]` when none are configured (no-config compatibility, spec §5).
+ * Unknown built-in types are skipped (validated at admission in prod).
  */
-export function buildLlmBuiltinChain(builtins: unknown[] | undefined): RequestShaper {
-  if (!builtins || builtins.length === 0) return IDENTITY
+export function buildLlmBuiltinSteps(builtins: unknown[] | undefined): BuiltinStep[] {
+  if (!builtins || builtins.length === 0) return []
 
   const items = builtins
     .filter(isBuiltinItem)
     .slice()
     .sort((a, b) => (a.order ?? 100) - (b.order ?? 100))
 
-  const shapers: RequestShaper[] = []
+  const steps: BuiltinStep[] = []
   for (const item of items) {
     if (item.type === 'prompt-shaping') {
       const cfg = (item.config ?? {}) as PromptShapingConfig
-      shapers.push(req => applyPromptShaping(req, cfg))
+      steps.push({ sourceId: 'prompt-shaping', shape: req => applyPromptShaping(req, cfg) })
     } else if (item.type === 'token-trim') {
       const cfg = (item.config ?? {}) as TokenTrimConfig
-      shapers.push(req => applyTokenTrim(req, cfg))
+      steps.push({ sourceId: 'token-trim', shape: req => applyTokenTrim(req, cfg) })
     }
   }
+  return steps
+}
 
-  if (shapers.length === 0) return IDENTITY
-  return request => shapers.reduce((req, shape) => shape(req), request)
+/**
+ * Compose the configured built-ins into a single ordered request shaper. Returns
+ * an identity shaper when none are configured (no-config compatibility, spec §5).
+ * Equivalent to applying `buildLlmBuiltinSteps` in order.
+ */
+export function buildLlmBuiltinChain(builtins: unknown[] | undefined): RequestShaper {
+  const steps = buildLlmBuiltinSteps(builtins)
+  if (steps.length === 0) return IDENTITY
+  return request => steps.reduce((req, step) => step.shape(req), request)
 }

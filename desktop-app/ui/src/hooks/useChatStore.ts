@@ -15,12 +15,14 @@ import type {
 export type {
   ContextBreakdownLite,
   ContextBreakdownResult,
+  GuardrailInputChangeLite,
   HostModelOption,
   HostModelsResult,
   PendingApprovalLite,
   SessionLifecycleState,
   SessionTokensLite,
   SetHostModelResult,
+  TurnGuardrailsLite,
 } from '../../../src/types'
 
 /**

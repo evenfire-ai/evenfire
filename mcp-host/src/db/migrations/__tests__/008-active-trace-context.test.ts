@@ -74,6 +74,7 @@ describe('migration 008 — active trace context', () => {
         '010-materialized-session-summaries',
         '011-session-summary-user-activity-index',
         '012-session-ownership-backfill',
+        '013-messages-guardrail-activity',
       ],
       pending: [],
     })

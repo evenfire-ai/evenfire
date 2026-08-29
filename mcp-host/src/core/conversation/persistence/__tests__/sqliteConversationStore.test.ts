@@ -182,6 +182,95 @@ describe('SqliteConversationStore — session token counters', () => {
     }
   })
 
+  it('per-turn guardrail activity is stamped and rehydrates on cold-load (spec §5.2)', async () => {
+    const handle = await freshStore()
+    try {
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      await manager.startTurn(conv, 'compress this', 'task-g')
+      // Two LLM calls in the turn, each with a guardrail record — the store must
+      // stamp the AGGREGATE (spec §2.3), not just the last call.
+      manager.recordGuardrailActivity(conv, {
+        tokensBefore: 100,
+        tokensAfter: 80,
+        llmCalls: 1,
+        changes: [
+          { sourceId: 'token-trim', kind: 'builtin', deltaTokens: -20, changed: true, calls: 1 },
+        ],
+      })
+      manager.recordGuardrailActivity(conv, {
+        tokensBefore: 90,
+        tokensAfter: 78,
+        llmCalls: 1,
+        changes: [
+          { sourceId: 'token-trim', kind: 'builtin', deltaTokens: -12, changed: true, calls: 1 },
+        ],
+      })
+      await manager.completeTurn(conv, 'done')
+      await handle.persistQueue.drainSessionKey(SESSION_KEY)
+
+      // Stamped as JSON on the final assistant message.
+      const row = handle.worker.db
+        .prepare(
+          "SELECT guardrail_activity FROM messages WHERE session_id = ? AND role = 'assistant' AND finish_reason = 'stop'"
+        )
+        .get(conv.id) as { guardrail_activity: string | null }
+      expect(JSON.parse(row.guardrail_activity!)).toMatchObject({
+        tokensBefore: 190,
+        tokensAfter: 158,
+        llmCalls: 2,
+        changes: [
+          { sourceId: 'token-trim', kind: 'builtin', deltaTokens: -32, changed: true, calls: 2 },
+        ],
+      })
+      // The user message carries no guardrail column.
+      const userMsg = handle.worker.db
+        .prepare("SELECT guardrail_activity FROM messages WHERE session_id = ? AND role = 'user'")
+        .get(conv.id) as { guardrail_activity: string | null }
+      expect(userMsg.guardrail_activity).toBeNull()
+
+      // Cold-load → reconstruct rehydrates onto Turn.guardrailActivity.
+      handle.store['cache'].delete(SESSION_KEY)
+      handle.store['ordinals'].clear()
+      handle.store['sessionKeyById'].clear()
+      const reloaded = await handle.store.getOrLoad(SESSION_KEY)
+      const turn = reloaded!.turns[reloaded!.turns.length - 1]
+      expect(turn.guardrailActivity).toMatchObject({
+        tokensBefore: 190,
+        tokensAfter: 158,
+        llmCalls: 2,
+      })
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
+  it('a malformed guardrail_activity blob is dropped, not thrown, on cold-load (§5.2)', async () => {
+    const handle = await freshStore()
+    try {
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      await manager.startTurn(conv, 'hi', 'task-m')
+      await manager.completeTurn(conv, 'done')
+      await handle.persistQueue.drainSessionKey(SESSION_KEY)
+      // Corrupt the stamped column directly.
+      handle.worker.db
+        .prepare(
+          "UPDATE messages SET guardrail_activity = '{not json' WHERE session_id = ? AND role = 'assistant' AND finish_reason = 'stop'"
+        )
+        .run(conv.id)
+
+      handle.store['cache'].delete(SESSION_KEY)
+      handle.store['ordinals'].clear()
+      handle.store['sessionKeyById'].clear()
+      const reloaded = await handle.store.getOrLoad(SESSION_KEY) // must not throw
+      const turn = reloaded!.turns[reloaded!.turns.length - 1]
+      expect(turn.guardrailActivity).toBeUndefined()
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
   it('cacheTokensReported survives cold-load for an Anthropic session with zero cache (migration 006)', async () => {
     const handle = await freshStore()
     try {

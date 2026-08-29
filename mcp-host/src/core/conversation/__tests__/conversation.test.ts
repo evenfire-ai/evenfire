@@ -53,6 +53,32 @@ describe('ConversationManager — state machine', () => {
     })
   })
 
+  it('completeTurn copies the guardrail aggregate onto the live turn (cached /messages path)', async () => {
+    const conv = await manager.getOrCreate('user-1')
+    await manager.startTurn(conv, 'paste a big csv', 'test-task')
+    manager.recordGuardrailActivity(conv, {
+      tokensBefore: 68499,
+      tokensAfter: 68196,
+      llmCalls: 1,
+      changes: [
+        {
+          sourceId: 'hook-acme1-token-compactor',
+          kind: 'hook',
+          deltaTokens: -303,
+          changed: true,
+          calls: 1,
+        },
+      ],
+    })
+    await manager.completeTurn(conv, 'done')
+
+    // The live Turn is what the cached (active-session) /messages path serves;
+    // recordGuardrailActivity only sets the conversation-level field, so without
+    // the copy in completeTurn the transparency wire goes dark for live sessions.
+    expect(conv.turns[0].guardrailActivity).toEqual(conv.guardrailActivity)
+    expect(conv.turns[0].guardrailActivity?.changes[0].deltaTokens).toBe(-303)
+  })
+
   it('should throw on startTurn when not Idle (Risk 5.2)', async () => {
     const conv = await manager.getOrCreate('user-1')
     await manager.startTurn(conv, 'First message', 'test-task')

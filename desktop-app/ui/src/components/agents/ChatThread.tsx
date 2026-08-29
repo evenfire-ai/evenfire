@@ -718,7 +718,10 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                   {formatChatTimestamp(message.timestamp || Date.now())}
                                 </span>
                                 {message.role === 'assistant' && message.tokens && (
-                                  <MessageTokens tokens={message.tokens} />
+                                  <MessageTokens
+                                    tokens={message.tokens}
+                                    guardrails={message.guardrails}
+                                  />
                                 )}
                               </div>
                               <IconButton

@@ -79,6 +79,12 @@ export interface MessageRow {
   output_tokens?: number | null
   cache_read_tokens?: number | null
   cache_write_tokens?: number | null
+  /**
+   * Per-turn guardrail-input-transparency JSON (migration 013). Set only on the
+   * final/cancel assistant message of a turn; NULL elsewhere. Counts + source
+   * ids only, never content (spec §8).
+   */
+  guardrail_activity?: string | null
 }
 
 export interface PendingApprovalRow {
