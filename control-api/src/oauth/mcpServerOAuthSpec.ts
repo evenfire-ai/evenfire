@@ -77,7 +77,8 @@ export interface McpServerGrantKeyCoords {
 /**
  * Derive the `oauth_grants` key for an OAuth McpServer by flavor — the SINGLE
  * key derivation shared by the token mint, the rpc-proxy grant-presence gate,
- * and the grant-existence sweep (D4: one authority, no drift). Returns null when
+ * the grant-existence sweep, and the end-user disconnect endpoint
+ * (`internal/oauth.ts`) — delete (D4: one authority, no drift). Returns null when
  * the coordinate the flavor needs is absent, so every caller decides fail-open
  * vs fail-closed for itself:
  *   - `user`    → needs a non-empty `userId`; null otherwise.
