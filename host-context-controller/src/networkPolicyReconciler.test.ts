@@ -3341,7 +3341,7 @@ describe('NetworkPolicyReconciler', () => {
               port: 443,
               egressClass: 'provider',
               provider: { name: 'github', categories: ['api'] },
-            } as EgressBinding,
+            },
           ],
         },
       }
