@@ -12,8 +12,18 @@ import { createRpcAccessUsersRouter } from '../src/routes/rpc-access/users.js'
 // pass-through, so it cannot catch a refactor that removes the guard or makes
 // `userId` client-controlled. Here we keep `requireRpcTokenUserMatch` REAL and
 // stub only token *validation*, injecting `req.rpcAuth` ourselves the way
-// `requireValidRpcAccessToken` would. Deleting the guard from the route, or
-// sourcing `userId` from the query, must turn one of these red.
+// `requireValidRpcAccessToken` would.
+//
+// Two directions matter, and only one is an actual net:
+//   1. Cross-user path (token alice → path bob): the guard 403s BEFORE the
+//      handler, so where the handler sources `userId` is never exercised —
+//      this case is green with and without a client-controlled-source mutation.
+//   2. The real attack direction (token alice → path alice, override = victim):
+//      the guard passes, the handler runs, and the effective subject must stay
+//      the path/token subject. Sourcing `userId` from `?userId=` or the body
+//      must turn one of these red — that is the mutation this test exists to
+//      catch (M13/M13b). We assert both the directory lookup (`getUserAgents`)
+//      and the grant-key path (`resolveConnectorsForAgents`) key off `alice`.
 
 const svc = vi.hoisted(() => ({
   getUserAgents: vi.fn(),
@@ -96,5 +106,35 @@ describe('GET /rpc/access/users/:userId/mcp-connectors — token-subject binding
     )
     expect(res.status).toBe(403)
     expect(svc.getUserAgents).not.toHaveBeenCalled()
+  })
+
+  // The real attack direction: path = the token's OWN subject (to pass the
+  // guard), override = the victim. The handler must ignore the override and key
+  // off the authoritative path subject on BOTH the directory lookup and the
+  // grant-presence key. Sourcing `userId` from the query/body turns these red.
+  it('a ?userId= override does not change the effective subject', async () => {
+    const res = await request(buildApp('alice')).get(
+      '/rpc/access/users/alice/mcp-connectors?userId=bob'
+    )
+    expect(res.status).toBe(200)
+    expect(svc.getUserAgents).toHaveBeenCalledWith('alice')
+    expect(resolvers.resolveConnectorsForAgents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userId: 'alice' }),
+      expect.anything()
+    )
+  })
+
+  it('a body userId does not change the effective subject', async () => {
+    const res = await request(buildApp('alice'))
+      .get('/rpc/access/users/alice/mcp-connectors')
+      .send({ userId: 'bob' })
+    expect(res.status).toBe(200)
+    expect(svc.getUserAgents).toHaveBeenCalledWith('alice')
+    expect(resolvers.resolveConnectorsForAgents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userId: 'alice' }),
+      expect.anything()
+    )
   })
 })
