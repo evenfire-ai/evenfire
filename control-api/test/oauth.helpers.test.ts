@@ -331,11 +331,12 @@ describe('getAccessToken (O5.1)', () => {
     )
 
     expect(result).toMatchObject({ kind: 'ok', accessToken: 'AT_REFRESHED' })
-    // SELECT + INSERT (upsert).
+    // SELECT + UPDATE-by-key (R1-B1: refresh never re-inserts, so a concurrently
+    // deleted grant is not resurrected).
     expect(db.query).toHaveBeenCalledTimes(2)
-    expect((db.query.mock.calls[1] as unknown as [string, unknown[]])[0]).toContain(
-      'INSERT INTO oauth_grants'
-    )
+    const refreshSql = (db.query.mock.calls[1] as unknown as [string, unknown[]])[0]
+    expect(refreshSql).toContain('UPDATE oauth_grants')
+    expect(refreshSql).not.toContain('INSERT INTO oauth_grants')
   })
 
   it('returns no_grant when the access token is expired and there is no refresh token', async () => {
@@ -550,13 +551,17 @@ describe('getAccessToken (O5.1)', () => {
       }
     )
     expect(result).toMatchObject({ kind: 'ok', accessToken: 'AT_REFRESHED' })
-    const [upsertSql, upsertParams] = db.query.mock.calls[1] as unknown as [string, unknown[]]
-    expect(upsertSql).toContain(
-      "ON CONFLICT (recipe_namespace, recipe_name, oauth_client_id) WHERE grant_kind = 'service'"
-    )
-    // Service INSERT carries 8 params (owner_kind, ns, name, oauthClientId,
+    const [refreshSql, refreshParams] = db.query.mock.calls[1] as unknown as [string, unknown[]]
+    // R1-B1: service refresh is an UPDATE by key (user_id IS NULL, grant_kind
+    // 'service'), never an INSERT/ON CONFLICT — a deleted service grant is not
+    // resurrected.
+    expect(refreshSql).toContain('UPDATE oauth_grants')
+    expect(refreshSql).toContain('user_id IS NULL')
+    expect(refreshSql).toContain("grant_kind = 'service'")
+    expect(refreshSql).not.toContain('ON CONFLICT')
+    // Service refresh carries 8 params (owner_kind, ns, name, oauthClientId,
     // provider, accessToken, refreshToken, expiresAt) — no user_id.
-    expect(upsertParams).toHaveLength(8)
+    expect(refreshParams).toHaveLength(8)
   })
 
   // Suppresses unused-import warnings for helpers we kept exported
