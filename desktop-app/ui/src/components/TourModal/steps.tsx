@@ -1,9 +1,9 @@
 import type { TourStepContent, TourStepContext, TourStepId } from './types'
 
 /**
- * Illustrations are inline SVG drawn with `currentColor`, so they inherit the
- * theme with no asset pipeline and nothing for the CSP to block. All are
- * decorative — `aria-hidden`, never the only carrier of meaning.
+ * A drawn illustration for the cards with no supplied artwork: inline SVG on
+ * `currentColor`, so it inherits the theme with no asset pipeline and nothing
+ * for the CSP to block.
  */
 function Glyph({ children }: { children: React.ReactNode }) {
   return (
@@ -26,22 +26,7 @@ const GLYPHS: Record<TourStepId, React.ReactNode> = {
       <path d="M46 14v12M52 14v12" />
     </Glyph>
   ),
-  scope: (
-    <Glyph>
-      <circle cx="32" cy="20" r="13" />
-      <circle cx="32" cy="20" r="6" />
-      <path d="M32 2v6M32 32v6M13 20h6M45 20h6" />
-    </Glyph>
-  ),
   apps: <img className="tour-art" src="./tour/apps.png" alt="" aria-hidden="true" />,
-  plugins: (
-    <Glyph>
-      <rect x="12" y="12" width="16" height="16" rx="2" />
-      <rect x="36" y="12" width="16" height="16" rx="2" />
-      <path d="M28 20h8" />
-      <path d="M20 12V6M44 28v6" />
-    </Glyph>
-  ),
   mcpServers: <img className="tour-art" src="./tour/connectors.png" alt="" aria-hidden="true" />,
   files: <img className="tour-art" src="./tour/global_file_system.png" alt="" aria-hidden="true" />,
   desktop: (
@@ -102,24 +87,10 @@ export function getTourStepContent(id: TourStepId, ctx: TourStepContext): TourSt
         illustration,
       }
 
-    case 'scope':
-      return {
-        title: 'No surprises about what it can see',
-        body: 'An agent reaches only what you have given it. Everything else stays out of view.',
-        illustration,
-      }
-
     case 'apps':
       return {
         title: 'Plugins that bring their own interface',
         body: 'Some plugins bring their own interface, which you will find in the Apps section. Ask your cluster operator when you want one installed in your Evenfire instance.',
-        illustration,
-      }
-
-    case 'plugins':
-      return {
-        title: 'Repeat the work you do often',
-        body: 'Turn work you repeat into a recipe and run it on demand. Every run keeps its results and files, so you can come back to them.',
         illustration,
       }
 

@@ -11,7 +11,6 @@ afterEach(() => {
 
 const census = (overrides: Partial<TourCensus> = {}): TourCensus => ({
   agentNames: [],
-  contextIds: [],
   mcpServersByAgent: {},
   ...overrides,
 })
@@ -153,11 +152,11 @@ describe('TourModal', () => {
 
   it('describes a richer environment with more steps', () => {
     renderTour({
-      census: { agentNames: ['a'], contextIds: ['c'], mcpServersByAgent: { a: ['github'] } },
+      census: { agentNames: ['a'], mcpServersByAgent: { a: ['github'] } },
       context: { agentLabels: ['Research bot'] },
     })
 
-    // agents + approvals + scope + desktop, plus welcome and handoff.
+    // agents + approvals + connectors + files, plus welcome and handoff.
     expect(screen.getByText('Step 1 of 6')).toBeTruthy()
   })
 
@@ -181,13 +180,12 @@ describe('TourModal', () => {
   it('never says "context" to the user', async () => {
     const user = userEvent.setup()
     renderTour({
-      census: { agentNames: ['a'], contextIds: ['c'], mcpServersByAgent: { a: ['github'] } },
+      census: { agentNames: ['a'], mcpServersByAgent: { a: ['github'] } },
       context: { agentLabels: ['Research bot'] },
     })
 
     // "Context" is a term users find confusing; the product speaks about
-    // knowledge and connected systems instead. The predicates still read
-    // contextIds — this is about what the copy says, not what it checks.
+    // knowledge and connected systems instead.
     let copy = document.body.textContent ?? ''
     for (let i = 0; i < 5; i++) {
       const nextButton = screen.queryByRole('button', { name: 'Next' })
@@ -202,7 +200,7 @@ describe('TourModal', () => {
   it('never names one deployment’s seed or a local address', async () => {
     const user = userEvent.setup()
     renderTour({
-      census: { agentNames: ['a'], contextIds: ['c'], mcpServersByAgent: { a: ['github'] } },
+      census: { agentNames: ['a'], mcpServersByAgent: { a: ['github'] } },
       context: { agentLabels: ['chatllm'] },
     })
 

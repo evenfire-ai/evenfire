@@ -1947,10 +1947,7 @@ export function App() {
                         !pluginConsentPrompt &&
                         !pendingSandboxUiConfirmation ? (
                           <TourModal
-                            census={{
-                              ...vm.tourCensus,
-                              sandboxUiAppCount: availableSandboxUiApps.length,
-                            }}
+                            census={vm.tourCensus}
                             context={{ appName: vm.tourAppName, agentLabels: vm.tourAgentLabels }}
                             onDismiss={vm.tour.dismiss}
                           />

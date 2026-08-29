@@ -3,7 +3,6 @@ import { type TourCensus, selectTourSteps } from '../tourDeck'
 
 const census = (overrides: Partial<TourCensus> = {}): TourCensus => ({
   agentNames: [],
-  contextIds: [],
   mcpServersByAgent: {},
   ...overrides,
 })
@@ -30,7 +29,7 @@ describe('selectTourSteps', () => {
   })
 
   it('gives a seeded install its agent plus the always-available capabilities', () => {
-    const steps = selectTourSteps(census({ agentNames: ['chatllm'], contextIds: ['context1'] }))
+    const steps = selectTourSteps(census({ agentNames: ['chatllm'] }))
 
     expect(steps).toEqual(['welcome', 'agents', 'mcpServers', 'files', 'apps', 'handoff'])
     // No connectors means the agent never asks for approval.
@@ -47,40 +46,61 @@ describe('selectTourSteps', () => {
 
   it('caps a rich environment at six steps, keeping the highest-priority four', () => {
     const steps = selectTourSteps(
-      census({
-        agentNames: ['a'],
-        contextIds: ['c'],
-        mcpServersByAgent: { a: ['github'] },
-        sandboxUiAppCount: 3,
-        workflowCount: 4,
-        gfsRootCount: 2,
-      })
+      census({ agentNames: ['a'], mcpServersByAgent: { a: ['github'] } })
     )
 
-    // Everything qualifies; Desktop, Scope, Apps and Plugins lose their slots.
+    // Everything qualifies; Apps and Desktop lose their slots.
     expect(steps).toEqual(['welcome', 'agents', 'approvals', 'mcpServers', 'files', 'handoff'])
     expect(steps).toHaveLength(6)
   })
 
-  it('treats an unresolved app, plugin, or GFS source as absent', () => {
-    // Undefined means "the query has not resolved". The tour shows fewer steps
-    // rather than waiting on it.
-    const unresolved = selectTourSteps(census({ agentNames: ['a'] }))
-    const resolvedEmpty = selectTourSteps(
-      census({ agentNames: ['a'], sandboxUiAppCount: 0, workflowCount: 0, gfsRootCount: 0 })
+  it('runs to the same length whatever the census says', () => {
+    // Four middle candidates are unconditional, so the census can only change
+    // which cards appear. A deck that came back shorter would mean a candidate
+    // had silently become conditional.
+    const censuses = [
+      census(),
+      census({ agentNames: ['a'] }),
+      census({ mcpServersByAgent: { a: ['github'] } }),
+      census({ agentNames: ['a'], mcpServersByAgent: { a: ['github'] } }),
+    ]
+
+    for (const c of censuses) {
+      expect(selectTourSteps(c)).toHaveLength(6)
+    }
+  })
+
+  it('leaves no candidate unreachable', () => {
+    // Scope and Plugins were dead for exactly this reason: they were ranked
+    // below four unconditional candidates, so the slots always ran out first
+    // and their copy shipped to nobody. Every id the deck knows about has to
+    // appear for some census.
+    const reachable = new Set(
+      [
+        census(),
+        census({ agentNames: ['a'] }),
+        census({ mcpServersByAgent: { a: ['github'] } }),
+        census({ agentNames: ['a'], mcpServersByAgent: { a: ['github'] } }),
+      ].flatMap(selectTourSteps)
     )
 
-    expect(unresolved).toEqual(resolvedEmpty)
-    expect(unresolved).not.toContain('plugins')
+    expect([...reachable].sort()).toEqual([
+      'agents',
+      'approvals',
+      'apps',
+      'desktop',
+      'files',
+      'handoff',
+      'mcpServers',
+      'welcome',
+    ])
   })
 
   it('keeps canonical order regardless of which steps qualify', () => {
-    const steps = selectTourSteps(
-      census({ sandboxUiAppCount: 1, workflowCount: 1, gfsRootCount: 1 })
-    )
+    const steps = selectTourSteps(census())
 
-    // No agents and no contexts, so the four always-available cards take the
-    // middle slots — in table order, not census order.
+    // No agents and no connectors, so the four always-available cards take the
+    // middle slots — in table order.
     expect(steps).toEqual(['welcome', 'mcpServers', 'files', 'apps', 'desktop', 'handoff'])
   })
 })

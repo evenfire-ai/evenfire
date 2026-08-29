@@ -29,7 +29,9 @@ export const TOUR_PREVIEW = /^true$/i.test(
 export const TOUR_CATALOG_GRACE_MS = 2_000
 
 /**
- * Welcome + at most this many middle steps + Handoff, so a tour runs between
- * three steps (nothing qualifies but Desktop) and six.
+ * Welcome + at most this many middle steps + Handoff.
+ *
+ * Four of the middle candidates are unconditional, so every tour is exactly six
+ * steps long; the census decides which cards fill the middle, not how many.
  */
 export const TOUR_MAX_MIDDLE_STEPS = 4

@@ -347,16 +347,14 @@ export function useAppController() {
     catalogSettled: tourCatalogSettled,
     blockedByOtherModal: Boolean(auth.pendingDesktopEnvironmentSetup),
   })
-  // The census the tour describes. Everything here is already fetched by the
-  // authenticated app; the tour issues no request of its own. Sandbox apps are
-  // owned by App.tsx and merged in there.
+  // The census the tour describes. Both fields are already fetched by the
+  // authenticated app; the tour issues no request of its own.
   const tourCensus = useMemo(
     () => ({
       agentNames: agentsData.agentNames,
-      contextIds: contextsData.contextIds,
       mcpServersByAgent: agentsData.mcpServersByAgent,
     }),
-    [agentsData.agentNames, agentsData.mcpServersByAgent, contextsData.contextIds]
+    [agentsData.agentNames, agentsData.mcpServersByAgent]
   )
   const tourAgentLabels = useMemo(
     () => agentsData.agentNames.map(name => agentsData.agentDisplayByName[name] || name),

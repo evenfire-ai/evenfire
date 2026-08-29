@@ -5,9 +5,7 @@ export type TourStepId =
   | 'agents'
   | 'approvals'
   | 'mcpServers'
-  | 'scope'
   | 'apps'
-  | 'plugins'
   | 'files'
   | 'desktop'
   | 'handoff'
@@ -15,21 +13,15 @@ export type TourStepId =
 /**
  * What this user actually has in this environment.
  *
- * Every field comes from data the authenticated app already fetched. A source
- * that has not resolved is `undefined`, which reads as absent — the tour shows
- * fewer steps rather than waiting, because a thin honest tour beats a spinner.
+ * Both fields come from data the authenticated app already fetched, so the tour
+ * issues no request of its own. An unresolved source arrives empty, which reads
+ * as absent — the tour describes less rather than waiting, because a thin
+ * honest tour beats a spinner.
  */
 export interface TourCensus {
   agentNames: string[]
-  contextIds: string[]
   /** Connector (MCP server) names per agent, from the access catalog. */
   mcpServersByAgent: Record<string, string[]>
-  /** Undefined until the sandbox-UI app list resolves. */
-  sandboxUiAppCount?: number
-  /** Undefined until the workflow list resolves. */
-  workflowCount?: number
-  /** Undefined until an accessible-roots read resolves. */
-  gfsRootCount?: number
 }
 
 function hasAnyConnector(census: TourCensus): boolean {
@@ -37,9 +29,14 @@ function hasAnyConnector(census: TourCensus): boolean {
 }
 
 /**
- * Middle-step candidates in canonical priority order. The first eligible three
- * are rendered, so the order here is the product decision about what matters
- * most when an environment qualifies for more steps than the tour will show.
+ * Middle-step candidates in canonical priority order. The first
+ * `TOUR_MAX_MIDDLE_STEPS` eligible entries are rendered, so the order here is
+ * the product decision about which cards a user should see when more qualify
+ * than the tour will show.
+ *
+ * Four entries are unconditional, so the census never changes how long the tour
+ * is — only which cards fill the middle. Any candidate added below `desktop`
+ * would be unreachable without also raising the cap.
  */
 const MIDDLE_STEPS: ReadonlyArray<{ id: TourStepId; eligible: (census: TourCensus) => boolean }> = [
   { id: 'agents', eligible: c => c.agentNames.length > 0 },
@@ -56,13 +53,11 @@ const MIDDLE_STEPS: ReadonlyArray<{ id: TourStepId; eligible: (census: TourCensu
   // Falls to whoever has slots left — in practice a user with no agents, who
   // has fewer cards competing for the middle.
   { id: 'desktop', eligible: () => true },
-  { id: 'scope', eligible: c => c.contextIds.length > 0 || hasAnyConnector(c) },
-  { id: 'plugins', eligible: c => (c.workflowCount ?? 0) > 0 },
 ]
 
 /**
- * Pick the tour for this environment: Welcome, the first eligible middle steps,
- * then Handoff — between three and six steps.
+ * Pick the tour for this environment: Welcome, the highest-priority eligible
+ * middle steps, then Handoff.
  *
  * Pure: no I/O, no hooks, no fetching. The caller passes what it already has.
  */
