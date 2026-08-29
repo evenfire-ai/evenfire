@@ -444,7 +444,9 @@ export async function executeToolCalls(
         calls.length,
         usageEmitted ? undefined : usage
       )
-      usageEmitted = true
+      // NOTE: no `usageEmitted = true` here — this branch returns immediately
+      // below (pendingApproval), so the write would be dead. `usage` was already
+      // consumed by the reportToolComplete call above.
       const approval = buildConnectRequiredApproval(call, connectMarker)
       approval.intent_summary =
         extractToolIntent(llmTextContent ?? null, call.name) ??
