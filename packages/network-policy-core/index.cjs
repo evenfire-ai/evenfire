@@ -649,7 +649,7 @@ function parseProviderNetblocks(cmData) {
 // registry row is INJECTED data (from providerRegistry.cjs) so this stays
 // provider-blind. See Part A.9.
 function resolveProviderRanges(input) {
-  const { fqdn, declaredName, declaredCategories, registryLookup, cmCategories, bounds } = input
+  const { fqdn, declaredName, declaredCategories, registryLookup, cmCategories, bounds, curatedProviders } = input
 
   // Step 1: effective categories (+ hostname-suffix-never-classifies guard).
   let categories
@@ -683,6 +683,24 @@ function resolveProviderRanges(input) {
             `declared categories [${declaredCategories.join(', ')}] exceed registry row categories [${rowCategories.join(', ')}] for provider "${declaredName}"`,
           ],
         }
+      }
+    }
+    // REG-6 residual, closed. The unknown-FQDN escape hatch below is deliberate —
+    // adding a NEW provider must stay pure data (a CM key + a declaration), which
+    // is the generality invariant. But a CURATED provider is a different claim: if
+    // the registry knows "acme" and deliberately has no row for this host, letting
+    // the declaration name "acme" anyway hands an arbitrary FQDN that provider's
+    // whole pool — a SUPERSET of what any curated host can obtain, since the pool
+    // may hold categories no row exposes. The registry is the authority on curated
+    // names; a genuinely new name is still accepted as data.
+    // Provider-blind by construction: the curated set arrives as an INPUT from the
+    // registry, never named here (scripts/ci/check-provider-generality.sh).
+    if (!registryLookup && Array.isArray(curatedProviders) && curatedProviders.includes(declaredName)) {
+      return {
+        kind: 'invalid',
+        reasons: [
+          `provider "${declaredName}" is curated in the registry, which has no row for "${fqdn}" — a curated provider cannot be claimed on an unmapped host`,
+        ],
       }
     }
     categories = declaredCategories

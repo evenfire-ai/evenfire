@@ -461,16 +461,32 @@ function summarizeBindings(bindings: unknown): {
   if (!Array.isArray(bindings) || bindings.length === 0) {
     return { mode: 'none', bindingCount: 0, targets: [], ports: [], providers: [] }
   }
-  if (bindings.some(binding => (binding as EgressBinding)?.egressClass === 'public-web')) {
+  const typed = bindings as EgressBinding[]
+  const providerIntents = unique(
+    typed
+      .filter(binding => binding?.egressClass === 'provider')
+      .flatMap(binding => formatProviderIntent(binding.provider))
+  )
+  if (typed.some(binding => binding?.egressClass === 'public-web')) {
+    // public-web is the widest class, so it keeps the mode. But a mixed array is
+    // admissible — the CRD and WRC validate PER BINDING, nothing rejects
+    // public-web + provider together — and returning `providers: []` here made the
+    // provider grant vanish from the approval view. The approver would consent to
+    // "TCP 80/443" while a catalog-wide range was additionally granted on some
+    // other port. Carry both; never summarise away the narrower-looking half.
     return {
       mode: 'public-web',
-      bindingCount: bindings.length,
+      bindingCount: typed.length,
       targets: [],
-      ports: [...PUBLIC_WEB_PORTS],
-      providers: [],
+      ports: unique([
+        ...PUBLIC_WEB_PORTS,
+        ...typed
+          .filter(binding => binding?.egressClass === 'provider')
+          .flatMap(binding => (typeof binding.port === 'number' ? [binding.port] : [])),
+      ]),
+      providers: providerIntents,
     }
   }
-  const typed = bindings as EgressBinding[]
   const targets = unique(
     typed.flatMap(binding => (binding.dns ? [binding.dns] : binding.cidr ? [binding.cidr] : []))
   )
@@ -486,9 +502,7 @@ function summarizeBindings(bindings: unknown): {
       bindingCount: typed.length,
       targets,
       ports,
-      providers: unique(
-        providerBindings.flatMap(binding => formatProviderIntent(binding.provider))
-      ),
+      providers: providerIntents,
     }
   }
   return {
@@ -529,7 +543,7 @@ export function analyzeWorkflowRecipeEgress(
         bindingCount: 0,
         severity: 'info',
         message:
-          'External internet egress is closed by default. Add exact-host or public-web egressBindings if this workload must call public APIs.',
+          'External internet egress is closed by default. Add exact-host, provider or public-web egressBindings if this workload must call public APIs.',
       })
       return
     }
@@ -554,13 +568,20 @@ export function analyzeWorkflowRecipeEgress(
       severity: summary.mode === 'public-web' || summary.mode === 'provider' ? 'warning' : 'info',
       message:
         summary.mode === 'public-web'
-          ? 'Public web egress is explicitly enabled for TCP 80/443; private, metadata, cluster-internal, link-local, multicast, and reserved ranges remain blocked.'
+          ? `Public web egress is explicitly enabled for TCP 80/443; private, metadata, cluster-internal, link-local, multicast, and reserved ranges remain blocked.${
+              summary.providers.length > 0
+                ? ` This workload ALSO declares provider-netblock egress for ${summary.providers.join(', ')} — catalog-rendered CIDR ranges, on the port(s) shown, beyond the 80/443 above.`
+                : ''
+            }`
           : summary.mode === 'provider'
             ? `Provider-netblock egress declares ${summary.bindingCount} binding(s)${summary.providers.length > 0 ? ` for ${summary.providers.join(', ')}` : ''}. Rendered CIDRs come from the cluster provider-netblocks catalog and can span wide ranges — not a single-host /32. FQDNs missing from the registry fall back to their explicitly declared categories; review those especially.`
             : `Exact-host egress declares ${summary.bindingCount} binding(s).`,
       targets: summary.targets,
       ports: summary.ports,
-      ...(summary.mode === 'provider' ? { providers: summary.providers } : {}),
+      // Carry providers on ANY mode that has them: a mixed public-web + provider
+      // workload keeps public-web as its mode (it is the widest), and gating this
+      // on mode === 'provider' made the provider grant invisible to the approver.
+      ...(summary.providers.length > 0 ? { providers: summary.providers } : {}),
     })
   })
 

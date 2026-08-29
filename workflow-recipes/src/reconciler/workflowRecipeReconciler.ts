@@ -19,7 +19,11 @@ import {
   parseProviderNetblocks,
   resolveProviderRanges,
 } from '@clerum/network-policy-core'
-import { lookupFqdnProvider, providerBounds } from '@clerum/network-policy-core/providerRegistry'
+import {
+  lookupFqdnProvider,
+  providerBounds,
+  providerNames,
+} from '@clerum/network-policy-core/providerRegistry'
 import { OperatorConfig, loadConfig } from '../config'
 import { getPool } from '../db'
 import {
@@ -4105,6 +4109,7 @@ export class WorkflowRecipeReconciler {
         fqdn: d.fqdn,
         declaredName: d.provider!.name,
         declaredCategories: d.provider!.categories,
+        curatedProviders: providerNames,
         registryLookup: lookupFqdnProvider(d.fqdn),
         cmCategories: parsed.categories,
         bounds: providerBounds(d.provider!.name),

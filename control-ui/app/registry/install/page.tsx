@@ -477,8 +477,8 @@ function RegistryRecipeInstallPreview({
                 <div className="cu-form-section__header">
                   <h3 className="cu-form-section__title">External Egress Review</h3>
                   <p className="cu-form-section__description">
-                    Default-deny is valid, but workloads that need internet must declare exact-host
-                    or public-web egress explicitly.
+                    Default-deny is valid, but workloads that need internet must declare exact-host,
+                    provider or public-web egress explicitly.
                   </p>
                 </div>
                 {egressFindings.map(finding => (

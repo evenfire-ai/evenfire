@@ -778,3 +778,34 @@ test('CORE-19 (F1) declared categories must be a SUBSET of a mapped registry row
   assert.equal(hatch.kind, 'ok')
   assert.deepEqual(hatch.categories, ['api'])
 })
+
+// REG-6 residual (found by the PR #335 review fan-out, closed here). The escape
+// hatch for a genuinely NEW provider is deliberate and stays; claiming a CURATED
+// provider on a host the registry has no row for is not — it granted an arbitrary
+// FQDN that provider's whole pool, a SUPERSET of what any curated host obtains.
+test('CORE-20 (REG-6 residual): a CURATED provider cannot be claimed on an unmapped FQDN', () => {
+  const cm = { 'acme.api': ['93.184.216.0/24'] }
+  const bounds = { minPrefixLength: 16, maxRanges: 256, maxSpanAddresses: 2 ** 22 }
+  const args = {
+    fqdn: 'attacker-controlled.example.com',
+    declaredName: 'acme',
+    declaredCategories: ['api'],
+    registryLookup: undefined,
+    cmCategories: cm,
+    bounds,
+  }
+
+  // Without the curated set the hatch is open — this is the pre-fix behaviour and
+  // the reason every render path must pass `curatedProviders`.
+  assert.equal(core.resolveProviderRanges(args).kind, 'ok')
+
+  // Named as curated -> rejected, fail-closed, with a reason that says why.
+  const denied = core.resolveProviderRanges({ ...args, curatedProviders: ['acme'] })
+  assert.equal(denied.kind, 'invalid')
+  assert.match(denied.reasons[0], /curated in the registry/)
+
+  // A genuinely NEW provider is still pure data — the generality invariant holds.
+  const allowed = core.resolveProviderRanges({ ...args, curatedProviders: ['other'] })
+  assert.equal(allowed.kind, 'ok')
+  assert.deepEqual(allowed.ranges, ['93.184.216.0/24'])
+})

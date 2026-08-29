@@ -8,6 +8,7 @@ import { asApiserverNetworkPolicy } from './__tests__/asApiserverNetworkPolicy'
 import { config } from './config'
 import { MANAGED_BY_LABEL, MANAGED_BY_VALUE, MCPSERVER_LABEL, POLICY_TYPE_LABEL } from './constants'
 import { confirmAuthoritativeMcpServerAbsence } from './mcpServerSafety'
+import { externalEgressProviderDriftTotal } from './metrics'
 import {
   networkPolicySafetyPassDurationSeconds,
   networkPolicySafetyPassPoliciesTotal,
@@ -82,6 +83,11 @@ vi.mock('./metrics', () => ({
   networkPolicySafetyPassPoliciesTotal: { inc: vi.fn() },
   netPolOrphansDeletedTotal: { inc: vi.fn() },
   netPolOrphanSweepCappedTotal: { inc: vi.fn() },
+  // issue #299 Phase 2 (H7) — omitting this export made the drift branch THROW
+  // when exercised, and the throw was swallowed by the DNS catch below it, so a
+  // test that reached the drift path still printed green while the counter was
+  // blowing up. A missing mock export must not be the reason a branch looks covered.
+  externalEgressProviderDriftTotal: { inc: vi.fn() },
 }))
 
 function makeMockNetworkingApi() {
@@ -1743,6 +1749,53 @@ describe('NetworkPolicyReconciler', () => {
       )
     })
 
+    // issue #299 Phase 2 (H7) — the drift canary had no reconciler-level test at
+    // all: the metrics mock omitted the counter, so any test that reached this
+    // branch made `inc` throw, the DNS catch below swallowed it, and the reconcile
+    // still reported success. A counter nobody asserts is a counter that can be
+    // deleted without anything going red.
+    it('H7: a fresh IP outside the declared ranges increments the drift counter and still renders', async () => {
+      const mockCore = makeMockCoreApi()
+      mockCore.readNamespacedConfigMap.mockResolvedValue({
+        data: { 'github.api.ipv4': PROVIDER_API_24 },
+      })
+      const r = makeReconciler(mockApi, undefined, makeMockCustomApi(), mockCore)
+      // 8.8.8.8 is public and allowed, but sits OUTSIDE every catalog range —
+      // exactly the "declared ranges are stale or the host is mis-mapped" case.
+      resolve4Mock.mockResolvedValue([{ address: '8.8.8.8', ttl: 60 }])
+
+      await r.reconcileExternalEgress(providerServer(), { isCurrent: () => true })
+
+      expect(externalEgressProviderDriftTotal.inc).toHaveBeenCalledWith({
+        server: 'gh-mcp',
+        dns: 'api.github.com',
+      })
+
+      // Availability is preserved: the uncovered IP enters the /32 window ON TOP
+      // of the catalog ranges, so the render is 24 + 1. Drift is loud, never a
+      // silent narrowing of what the workload can reach.
+      expect(mockApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      const body = mockApi.createNamespacedNetworkPolicy.mock.calls[0][0].body
+      const rendered = (
+        body.spec.egress as Array<{ to: Array<{ ipBlock: { cidr: string } }> }>
+      ).flatMap(rule => rule.to.map(t => t.ipBlock.cidr))
+      expect(rendered).toContain('8.8.8.8/32')
+      expect(rendered).toEqual(expect.arrayContaining(PROVIDER_API_24.split('\n')))
+    })
+
+    it('H7: a fully covered answer does NOT increment the drift counter', async () => {
+      const mockCore = makeMockCoreApi()
+      mockCore.readNamespacedConfigMap.mockResolvedValue({
+        data: { 'github.api.ipv4': PROVIDER_API_24 },
+      })
+      const r = makeReconciler(mockApi, undefined, makeMockCustomApi(), mockCore)
+      resolve4Mock.mockResolvedValue([{ address: '140.82.121.5', ttl: 60 }]) // inside the /20
+
+      await r.reconcileExternalEgress(providerServer(), { isCurrent: () => true })
+
+      expect(externalEgressProviderDriftTotal.inc).not.toHaveBeenCalled()
+    })
+
     it('HCC-9 (H3): a catalog read failure RETAINS the live policy (LKG, never egress loss)', async () => {
       const mockCore = makeMockCoreApi()
       mockCore.readNamespacedConfigMap.mockResolvedValue({
@@ -3265,6 +3318,51 @@ describe('NetworkPolicyReconciler', () => {
         })
       )
     }
+
+    // issue #299 Phase 2 — regression guard for the second GC lane. The reviewer
+    // audited reconcileExternalEgress and its three H3 retains were fixed there;
+    // this lane was never looked at. `5d2ea4c7` (Reapply PR #205, 2026-08-18)
+    // reintroduced it four days AFTER provider mode landed, without teaching it
+    // the new class, so a healthy provider binding matched no branch, fell to
+    // `stale`, and had its live NetworkPolicy deleted. No DNS failure and no
+    // catalog outage required. Remove the `egressClass === 'provider'` arm in
+    // reconcileExternalEgressSafety and this test goes red.
+    it('(g) retains a live provider NetworkPolicy — the safety lane must not GC what it cannot prove', async () => {
+      const server: McpServerCRD = {
+        name: 'gh-mcp',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'dev',
+          image: 'gh:latest',
+          transport: { type: 'streamableHttp', port: 3000 },
+          egressBindings: [
+            {
+              dns: 'api.github.com',
+              port: 443,
+              egressClass: 'provider',
+              provider: { name: 'github', categories: ['api'] },
+            } as EgressBinding,
+          ],
+        },
+      }
+      const binding = server.spec.egressBindings![0]
+      const name = (reconciler as any).externalEgressPolicyName(server.name, binding) as string
+      const live = (reconciler as any).buildExactHostEgressPolicy(server, name, binding, [
+        '140.82.112.0/20',
+      ]) as k8s.V1NetworkPolicy
+      live.metadata!.labels!['clerum.io/egress-class'] = 'provider'
+      live.metadata!.uid = 'live-provider-uid'
+      live.metadata!.resourceVersion = '19'
+
+      const certified = await ((reconciler as any).reconcileExternalEgressSafety(
+        server,
+        [live],
+        () => true
+      ) as Promise<boolean>)
+
+      expect(certified).toBe(true)
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
 
     it('(a) retains an unchanged DNS-derived allow — no revocation', async () => {
       const { server, live } = makeDnsFixture()

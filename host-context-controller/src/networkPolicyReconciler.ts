@@ -22,7 +22,11 @@ import {
   parseProviderNetblocks,
   resolveProviderRanges,
 } from '@clerum/network-policy-core'
-import { lookupFqdnProvider, providerBounds } from '@clerum/network-policy-core/providerRegistry'
+import {
+  lookupFqdnProvider,
+  providerBounds,
+  providerNames,
+} from '@clerum/network-policy-core/providerRegistry'
 import { config } from './config'
 import {
   EXTERNAL_EGRESS_POLICY_TYPE,
@@ -1928,6 +1932,26 @@ export class NetworkPolicyReconciler {
         binding.port <= 65535
       ) {
         desired.set(name, { binding })
+      } else if (
+        // issue #299 Phase 2 — provider bindings belong in the identity-only
+        // arm, NOT in a policy-proving arm: their CIDRs come from the netblocks
+        // catalog, which this lane deliberately does not read. Without this
+        // branch a healthy provider binding matches nothing, falls to `stale`
+        // below, and its LIVE NetworkPolicy is deleted by cleanupExternalEgress
+        // — egress loss on a cluster that enforces NetworkPolicy, with no DNS
+        // failure and no catalog outage required. The additive lane
+        // (reconcileExternalEgress) never runs in the same pass, so the policy
+        // is not recreated until the next event-driven reconcile.
+        egressClass === 'provider' &&
+        binding.dns &&
+        !binding.cidr &&
+        isPublicDnsHostname(binding.dns) &&
+        binding.port !== undefined &&
+        Number.isInteger(binding.port) &&
+        binding.port >= 1 &&
+        binding.port <= 65535
+      ) {
+        desired.set(name, { binding })
       }
     }
 
@@ -2264,6 +2288,7 @@ export class NetworkPolicyReconciler {
           fqdn: binding.dns,
           declaredName: binding.provider?.name ?? '',
           declaredCategories: binding.provider?.categories,
+          curatedProviders: providerNames,
           registryLookup: lookupFqdnProvider(binding.dns),
           cmCategories: netblocksCm.categories,
           bounds: providerBounds(binding.provider?.name ?? ''),

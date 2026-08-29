@@ -365,3 +365,38 @@ describe('egressModel', () => {
     )
   })
 })
+
+// PR #335 review (Md-4): a mixed public-web + provider array is admissible — the
+// CRD and WRC validate PER BINDING, nothing rejects the combination — and the
+// public-web early return dropped the provider half, so the approver was shown
+// "TCP 80/443" while a catalog-wide range was additionally granted on another port.
+describe('mixed public-web + provider (PR335 review)', () => {
+  it('keeps public-web as the mode but never drops the provider grant', () => {
+    const findings = analyzeWorkflowRecipeEgress({
+      spec: {
+        workloads: [
+          {
+            id: 'mixed',
+            type: 'deployment',
+            egressBindings: [
+              { egressClass: 'public-web' },
+              {
+                egressClass: 'provider',
+                dns: 'codeload.github.com',
+                port: 9418,
+                provider: { name: 'github', categories: ['git'] },
+              },
+            ],
+          },
+        ],
+      },
+    } as never)
+
+    const egress = findings.find(f => f.mode === 'public-web')
+    expect(egress).toBeDefined()
+    // the provider grant must survive the public-web summary
+    expect(egress!.providers.join(' ')).toContain('github')
+    expect(egress!.ports).toContain(9418)
+    expect(egress!.ports).toEqual(expect.arrayContaining([80, 443]))
+  })
+})

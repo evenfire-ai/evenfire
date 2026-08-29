@@ -231,4 +231,12 @@ export declare function resolveProviderRanges(input: {
   registryLookup: ProviderRegistryLookup
   cmCategories: Record<string, string[]>
   bounds: ProviderRangeBounds
+  /**
+   * Curated provider names, supplied by the caller from the registry's
+   * `providerNames`. When present, a declaration naming a curated provider on an
+   * FQDN the registry has no row for is REJECTED — otherwise any host could claim
+   * a curated provider's whole pool. Omitting this keeps the pre-REG-6 behaviour,
+   * so every render path should pass it.
+   */
+  curatedProviders?: readonly string[]
 }): { kind: 'ok'; ranges: string[]; categories: string[] } | { kind: 'invalid'; reasons: string[] }

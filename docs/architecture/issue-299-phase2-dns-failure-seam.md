@@ -18,7 +18,7 @@ There is *also* a per-binding DNS resolution feeding a residual `/32` sliding wi
 On a `provider` binding whose FQDN gives a **permanent, non-blocked** DNS answer
 (NXDOMAIN / ENOTFOUND / ENODATA / empty) at cold start (no prior NetworkPolicy):
 
-- **HCC renders the catalog.** The catch at `host-context-controller/src/networkPolicyReconciler.ts:1225-1271`
+- **HCC renders the catalog.** The catch at `host-context-controller/src/networkPolicyReconciler.ts (the `reconcileExternalEgress` DNS catch; line numbers intentionally omitted — they drifted once already)`
   accumulates with `providerRanges`; the core composes `cidrs = providerRanges ∪ residual`
   unconditionally (`host-context-controller/src/externalEgressAccumulator.ts:138`), so
   `cidrs = providerRanges` (non-empty) → NP rendered, `console.warn` only.
