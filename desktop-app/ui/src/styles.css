@@ -15272,7 +15272,7 @@ pre {
 .tour-card {
   position: relative;
   width: min(560px, 94vw);
-  height: min(460px, 86vh);
+  height: min(500px, 86vh);
   display: grid;
   /* content, position, dots, actions — the content block takes the slack and
      centres itself in it, so the card holds one height while short steps stay
@@ -15280,7 +15280,7 @@ pre {
   grid-template-rows: 1fr auto auto auto;
   justify-items: center;
   gap: var(--space-3);
-  padding: var(--space-5) var(--space-4) var(--space-4);
+  padding: var(--space-5) var(--space-4) 0;
   text-align: center;
 }
 
@@ -15325,14 +15325,32 @@ pre {
 /* Sized to sit in the same optical space as the drawn glyphs, so the first
    card does not jump when the user advances to the second. */
 .tour-logo {
-  width: 60px;
-  height: 60px;
+  width: 84px;
+  height: 84px;
   object-fit: contain;
 }
 
+/* Supplied artwork ships on an opaque near-white background rather than
+   transparent. In light theme that already matches the card, so the image sits
+   directly on it with no plate. */
+.tour-art {
+  width: 100%;
+  max-width: 300px;
+  max-height: 150px;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+}
+
+/* In dark theme the same opaque background would read as a white rectangle
+   punched into the card, so it gets a plate that makes it a deliberate
+   illustration panel instead. Remove this once the artwork ships transparent. */
+:root[data-theme='dark'] .tour-art {
+  background: var(--tour-art-plate);
+}
+
 .tour-glyph {
-  width: 96px;
-  height: 60px;
+  width: 132px;
+  height: 84px;
   fill: none;
   stroke: currentColor;
   stroke-width: 2;
@@ -15341,8 +15359,8 @@ pre {
 }
 
 .tour-title {
-  font-size: var(--font-size-2xl);
-  font-weight: var(--font-weight-semibold);
+  font-size: var(--font-size-3xl);
+  font-weight: var(--font-weight-bold);
   line-height: var(--line-height-tight);
   color: var(--text);
 }
@@ -15352,6 +15370,14 @@ pre {
   font-size: var(--font-size-lg);
   line-height: 1.5;
   color: var(--text-muted);
+}
+
+/* A clause that deserves its own line: the agent's name, or the invitation to
+   send a first message. Kept in the same block as the prose above it so the
+   body stays one described region for assistive tech. */
+.tour-body-line {
+  display: block;
+  margin-top: var(--space-2);
 }
 
 /* Left-aligned inside a centered card: a bulleted list ragged on both edges is
@@ -15383,28 +15409,32 @@ pre {
 
 .tour-dots {
   display: flex;
-  gap: var(--space-1);
+  gap: var(--space-2);
 }
 
 .tour-dot {
-  width: 6px;
-  height: 6px;
+  width: 9px;
+  height: 9px;
+  border: 1px solid rgba(var(--edge-rgb), 0.7);
   border-radius: 50%;
-  background: rgba(var(--edge-rgb), 0.5);
   transition: background var(--motion-fast);
 }
 
 .tour-dot.is-current {
+  border-color: var(--accent);
   background: var(--accent);
 }
 
 .tour-actions {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: var(--space-2);
-  width: 100%;
-  justify-content: center;
-  padding-top: var(--space-1);
+  /* Pulled out to the card's edges so the rule spans it fully. */
+  width: calc(100% + 2 * var(--space-4));
+  margin: 0 calc(-1 * var(--space-4));
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid rgba(var(--edge-rgb), 0.3);
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -14,18 +14,11 @@ function Glyph({ children }: { children: React.ReactNode }) {
 }
 
 const GLYPHS: Record<TourStepId, React.ReactNode> = {
-  // The real mark rather than a drawn glyph: this is the one card where the
-  // product introduces itself. Decorative — the title already names it, so
-  // announcing the logo too would just repeat that.
+  // Supplied artwork and the product mark are both decorative, like the drawn
+  // glyphs: each card's title already carries the meaning, so announcing the
+  // image would only repeat it.
   welcome: <img className="tour-logo" src="./logo.svg" alt="" aria-hidden="true" />,
-  agents: (
-    <Glyph>
-      <circle cx="20" cy="20" r="8" />
-      <rect x="36" y="10" width="22" height="8" rx="2" />
-      <rect x="36" y="22" width="22" height="8" rx="2" />
-      <path d="M28 20h8" />
-    </Glyph>
-  ),
+  agents: <img className="tour-art" src="./tour/your_agent.png" alt="" aria-hidden="true" />,
   approvals: (
     <Glyph>
       <rect x="8" y="10" width="30" height="20" rx="3" />
@@ -40,13 +33,7 @@ const GLYPHS: Record<TourStepId, React.ReactNode> = {
       <path d="M32 2v6M32 32v6M13 20h6M45 20h6" />
     </Glyph>
   ),
-  apps: (
-    <Glyph>
-      <rect x="10" y="8" width="20" height="24" rx="3" />
-      <rect x="36" y="8" width="18" height="11" rx="2" />
-      <rect x="36" y="21" width="18" height="11" rx="2" />
-    </Glyph>
-  ),
+  apps: <img className="tour-art" src="./tour/apps.png" alt="" aria-hidden="true" />,
   plugins: (
     <Glyph>
       <rect x="12" y="12" width="16" height="16" rx="2" />
@@ -55,20 +42,8 @@ const GLYPHS: Record<TourStepId, React.ReactNode> = {
       <path d="M20 12V6M44 28v6" />
     </Glyph>
   ),
-  mcpServers: (
-    <Glyph>
-      <rect x="8" y="12" width="18" height="16" rx="2" />
-      <path d="M26 20h12" />
-      <circle cx="46" cy="20" r="8" />
-      <path d="M46 16v8M42 20h8" />
-    </Glyph>
-  ),
-  files: (
-    <Glyph>
-      <path d="M8 12h16l4 5h28v15H8z" />
-      <path d="M20 24h24" />
-    </Glyph>
-  ),
+  mcpServers: <img className="tour-art" src="./tour/connectors.png" alt="" aria-hidden="true" />,
+  files: <img className="tour-art" src="./tour/global_file_system.png" alt="" aria-hidden="true" />,
   desktop: (
     <Glyph>
       <rect x="8" y="8" width="48" height="22" rx="3" />
@@ -76,13 +51,7 @@ const GLYPHS: Record<TourStepId, React.ReactNode> = {
       <path d="M16 16h10" />
     </Glyph>
   ),
-  handoff: (
-    <Glyph>
-      <rect x="8" y="10" width="34" height="22" rx="4" />
-      <path d="M16 18h16M16 24h10" />
-      <path d="M46 21h10M52 17l4 4-4 4" />
-    </Glyph>
-  ),
+  handoff: <img className="tour-art" src="./tour/start.png" alt="" aria-hidden="true" />,
 }
 
 /** Distinct strings rather than a "(s)" suffix. */
@@ -106,21 +75,23 @@ export function getTourStepContent(id: TourStepId, ctx: TourStepContext): TourSt
         title: `Welcome to ${ctx.appName}`,
         // Opens on what the user gets. An earlier draft led with where agents
         // run, which is our architecture and not a reason for anyone to care.
-        body: 'This is where you put AI to work. Ask an agent for something and it goes and does it, working through your files and using your plugins, with your approval at every step.',
+        body: 'This is where you put AI to work. Ask an agent for something and it goes and does it, working through your files and using your connectors.',
         illustration,
       }
 
     case 'agents':
       return {
         title: hasAgents && ctx.agentLabels.length > 1 ? 'Your agents' : 'Your agent',
-        // An agent is not pinned to one model: it can draw on several
-        // providers, and the composer's ModelSelector switches between them.
-        // "when you approve" keeps the tools honest — shell_exec and its
+        // "with your approval" keeps the tools honest: shell_exec and its
         // siblings are approval-gated, and whether a given agent holds them
         // depends on how it was set up.
-        body: `Your agent does more than answer questions. It works through files and runs code for you, with your approval. Pick whichever model suits the task, since it is not tied to one provider. ${agentSentence(
-          ctx.agentLabels
-        )}`,
+        body: (
+          <>
+            Your agent does more than answer questions. It works through files and runs code for
+            you, with your approval.
+            <span className="tour-body-line">{agentSentence(ctx.agentLabels)}</span>
+          </>
+        ),
         illustration,
       }
 
@@ -188,7 +159,12 @@ export function getTourStepContent(id: TourStepId, ctx: TourStepContext): TourSt
             title: 'Say hi',
             // No "check that it works" framing: whether the chain is wired up
             // is our problem, not something to hand the user as a task.
-            body: `${ctx.agentLabels[0]} is ready. Ask it anything to get started.`,
+            body: (
+              <>
+                {`${ctx.agentLabels[0]} is ready.`}
+                <span className="tour-body-line">Ask it anything to get started.</span>
+              </>
+            ),
             illustration,
           }
         : {

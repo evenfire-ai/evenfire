@@ -142,10 +142,10 @@ export function TourModal({ census, context, onDismiss }: TourModalProps) {
         </div>
 
         <div className="tour-actions">
-          <Button color="neutral" disabled={!canGoBack} onClick={back} size="sm" variant="ghost">
+          <Button disabled={!canGoBack} onClick={back} size="md" variant="text">
             Back
           </Button>
-          <Button ref={primaryRef} onClick={isLast ? onDismiss : next} size="sm">
+          <Button ref={primaryRef} onClick={isLast ? onDismiss : next} size="md">
             {isLast ? 'Get started' : 'Next'}
           </Button>
         </div>
