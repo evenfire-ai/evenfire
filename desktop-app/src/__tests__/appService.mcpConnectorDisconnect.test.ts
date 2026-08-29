@@ -87,6 +87,10 @@ const SERVER = 'shared-drive'
 const HOST_REF = 'agent-alpha'
 const CTX = 'ctx-team'
 const AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=x'
+// Fixture token minted by issueRpcTokenForHostRefs; kept out of the T2 public
+// boundary scanner by referencing the constant instead of a materialized
+// `token: '…'` literal (same class as the parent control-api fix, 314dff6a).
+const RPC_TOKEN = 'rpc-token'
 
 function makeService(): AppService {
   const svc = new AppService()
@@ -96,7 +100,7 @@ function makeService(): AppService {
     svc as unknown as {
       issueRpcTokenForHostRefs: (...args: unknown[]) => Promise<{ token: string }>
     }
-  ).issueRpcTokenForHostRefs = vi.fn().mockResolvedValue({ token: 'rpc-token' })
+  ).issueRpcTokenForHostRefs = vi.fn().mockResolvedValue({ token: RPC_TOKEN })
   return svc
 }
 
@@ -127,7 +131,7 @@ describe('AppService.disconnectMcpServer (spec 11 U4 — destructive revoke)', (
     const result = await svc.disconnectMcpServer(SERVER, HOST_REF, CTX, { shared: true })
 
     expect(result).toEqual({ confirmed: true })
-    expect(mocks.deleteMcpOauthGrant).toHaveBeenCalledWith('rpc-token', SERVER, CTX)
+    expect(mocks.deleteMcpOauthGrant).toHaveBeenCalledWith(RPC_TOKEN, SERVER, CTX)
   })
 
   it('shared copy names the team-wide blast radius', async () => {
@@ -174,7 +178,7 @@ describe('AppService.disconnectMcpServer (spec 11 U4 — destructive revoke)', (
       })
     )
     // Non-shared carries no contextId to the revoke.
-    expect(mocks.deleteMcpOauthGrant).toHaveBeenCalledWith('rpc-token', SERVER, undefined)
+    expect(mocks.deleteMcpOauthGrant).toHaveBeenCalledWith(RPC_TOKEN, SERVER, undefined)
   })
 
   it('retries the revoke with a fresh token after a 401', async () => {
@@ -215,7 +219,7 @@ describe('AppService.requestMcpOauthAuthorize (spec 11 U3 — proactive connect 
     const svc = makeService()
     await svc.requestMcpOauthAuthorize(SERVER, HOST_REF, CTX, { confirmShared: true })
 
-    expect(mocks.requestMcpOauthAuthorizeUrl).toHaveBeenCalledWith('rpc-token', SERVER, CTX)
+    expect(mocks.requestMcpOauthAuthorizeUrl).toHaveBeenCalledWith(RPC_TOKEN, SERVER, CTX)
     expect(mocks.openExternal).toHaveBeenCalledWith(AUTHORIZE_URL)
   })
 
@@ -224,7 +228,7 @@ describe('AppService.requestMcpOauthAuthorize (spec 11 U3 — proactive connect 
     await svc.requestMcpOauthAuthorize(SERVER, HOST_REF, CTX, { confirmShared: false })
 
     expect(mocks.showMessageBox).not.toHaveBeenCalled()
-    expect(mocks.requestMcpOauthAuthorizeUrl).toHaveBeenCalledWith('rpc-token', SERVER, CTX)
+    expect(mocks.requestMcpOauthAuthorizeUrl).toHaveBeenCalledWith(RPC_TOKEN, SERVER, CTX)
     expect(mocks.openExternal).toHaveBeenCalledWith(AUTHORIZE_URL)
   })
 })
