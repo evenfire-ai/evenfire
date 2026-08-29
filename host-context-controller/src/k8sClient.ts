@@ -64,6 +64,8 @@ import {
   initialConvergencePassResultsTotal,
   initialConvergenceRetriesTotal,
   initialConvergenceSwallowedTotal,
+  netPolDefaultsOnlyTickDurationSeconds,
+  netPolDefaultsOnlyTicksTotal,
   netPolResyncTicksSkippedTotal,
 } from './metrics'
 import {
@@ -894,6 +896,13 @@ export class McpServerWatcher implements McpServerProvider {
   // single-flight pass. Disabled by default (interval <= 0); startup still
   // runs one convergence. Never call netPolReconciler.fullReconcile from here.
   private netPolResyncTimer: ReturnType<typeof setInterval> | null = null
+  // Periodic L0/L1 defaults-only tick (#488). Disabled by default
+  // (interval <= 0). Never shares the full-pass in-flight skip; write sets
+  // are disjoint from the typed sweep.
+  private netPolDefaultsResyncTimer: ReturnType<typeof setInterval> | null = null
+  // Serializes overlapping defaults-only ticks. Distinct from
+  // initialConvergenceRuns.get('NetworkPolicy').
+  private netPolDefaultsOnlyRun: Promise<void> | null = null
   // Set by a timer tick so the next coordinated NetworkPolicy pass re-applies
   // L0/L1 defaults (class D). Startup and event-driven entry leave this false
   // — start() already ran ensureDefaultPolicies as a bootstrap barrier.
@@ -2899,6 +2908,19 @@ export class McpServerWatcher implements McpServerProvider {
       )
     }
 
+    // Class-D cheap path (#488). Interval > 0 is an ops enable, not a merge
+    // default. This timer never consults initialConvergenceRuns and never
+    // calls runInitialNetworkPolicyConvergence / fullReconcile.
+    const netPolDefaultsResyncSec = config.netPolDefaultsResyncIntervalSec
+    if (netPolDefaultsResyncSec > 0) {
+      this.netPolDefaultsResyncTimer = setInterval(() => {
+        void this.runNetworkPolicyDefaultsOnly()
+      }, netPolDefaultsResyncSec * 1000)
+      console.log(
+        `[K8s] NetworkPolicy defaults-only resync enabled (every ${netPolDefaultsResyncSec}s)`
+      )
+    }
+
     const externalEgressResyncSec = config.externalEgressResyncIntervalSec
     // #205 delegates external-egress periodic resync to the convergence
     // coordinator. Its runResyncCore drives reconcileExternalEgress, so the
@@ -3078,6 +3100,51 @@ export class McpServerWatcher implements McpServerProvider {
       this.netPolConvergenceEnsureDefaults = true
     }
     return this.runInitialConvergence('NetworkPolicy')
+  }
+
+  /**
+   * Class-D defaults-only tick (#488).
+   *
+   * `ensureDefaultPolicies` writes only L0/L1: `ensureDefaultDeny`,
+   * `ensureInfrastructurePolicies`, `ensureAllowContextMapperApi`, and the
+   * two `deleteLegacyStaticPolicy` calls. The fleet sweep lists typed
+   * `policy-type ∈ {context-allow, rpc-proxy-egress, external-egress}`.
+   * Baseline never appears in that list, so a concurrent full NetPol pass
+   * is safe. Do not re-apply HARD REQUIREMENT 2 here and do not share
+   * `initialConvergenceRuns.has('NetworkPolicy')`.
+   *
+   * Overlapping defaults-only ticks serialize: a second tick increments
+   * `netPolResyncTicksSkippedTotal{reason="defaults-only-in-flight"}` and
+   * joins the in-flight run. Never increment `pass-in-flight` from here.
+   * Each executed tick records `netPolDefaultsOnlyTicksTotal` and
+   * `netPolDefaultsOnlyTickDurationSeconds` with result success|error.
+   */
+  private runNetworkPolicyDefaultsOnly(): Promise<void> {
+    if (this.netPolDefaultsOnlyRun) {
+      netPolResyncTicksSkippedTotal.inc({ reason: 'defaults-only-in-flight' })
+      return this.netPolDefaultsOnlyRun
+    }
+    const run = (async () => {
+      const startedAtMs = Date.now()
+      let result: 'success' | 'error' = 'success'
+      try {
+        await this.netPolReconciler.ensureDefaultPolicies()
+      } catch (error) {
+        result = 'error'
+        console.error('[K8s] NetworkPolicy defaults-only tick failed:', error)
+      } finally {
+        const seconds = Math.max(0, (Date.now() - startedAtMs) / 1000)
+        netPolDefaultsOnlyTicksTotal.inc({ result })
+        netPolDefaultsOnlyTickDurationSeconds.observe({ result }, seconds)
+      }
+    })()
+    this.netPolDefaultsOnlyRun = run
+    void run.finally(() => {
+      if (this.netPolDefaultsOnlyRun === run) {
+        this.netPolDefaultsOnlyRun = null
+      }
+    })
+    return run
   }
 
   private runInitialConvergence(lane: InitialConvergenceLane): Promise<void> {
@@ -4611,6 +4678,11 @@ export class McpServerWatcher implements McpServerProvider {
       clearInterval(this.netPolResyncTimer)
       this.netPolResyncTimer = null
     }
+    if (this.netPolDefaultsResyncTimer) {
+      clearInterval(this.netPolDefaultsResyncTimer)
+      this.netPolDefaultsResyncTimer = null
+    }
+    this.netPolDefaultsOnlyRun = null
     this.netPolConvergenceEnsureDefaults = false
     for (const timer of this.initialConvergenceRetryTimers.values()) {
       clearTimeout(timer)

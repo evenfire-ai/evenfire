@@ -11,10 +11,11 @@ import { IconChevronRight } from '@/components/icons'
 import { Button, Field, TextAreaInput, TextInput } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import {
-  LLM_PROVIDER_OPTIONS,
   type LlmCredentialField,
   type LlmCredentialGroup,
   type LlmProvider,
+  OPENAI_SUBSCRIPTION_PROVIDER,
+  OPERATOR_PROVIDER_OPTIONS,
   allowedModelsForProvider,
   constrainModelOptions,
   describeLlmCompleteness,
@@ -22,6 +23,7 @@ import {
   getModelOptions,
   getProviderLabel,
   getProviderSlotKeys,
+  isOpenAiFamily,
   isProviderAllowUnrestricted,
   mintFallbackSlot,
   normalizeProvider,
@@ -123,14 +125,16 @@ export function LlmProviderConfig({
     [catalog, allowedModels, provider]
   )
   const primaryModelOutOfAllowlist = Boolean(model) && !primaryModelOptions.includes(model)
+  const pickerOptions = OPERATOR_PROVIDER_OPTIONS
   const primaryProviderOptions = useMemo(
     () =>
-      LLM_PROVIDER_OPTIONS.map(option => ({
+      pickerOptions.map(option => ({
         ...option,
         icon: <LlmProviderIcon provider={option.value} label={option.label} />,
       })),
-    []
+    [pickerOptions]
   )
+  const providerPickerValue = isOpenAiFamily(provider) ? 'openai' : provider
   const primaryModelSelectOptions = useMemo(() => {
     const options: SelectionDropdownOption[] = primaryModelOptions.map(option => ({
       value: option,
@@ -138,15 +142,16 @@ export function LlmProviderConfig({
       icon: <LlmProviderIcon provider={provider} label={getProviderLabel(provider)} />,
     }))
     if (primaryModelOutOfAllowlist) {
+      const saved = catalog.find(entry => entry.provider === provider && entry.model === model)
       options.push({
         value: model,
         label: model,
         icon: <LlmProviderIcon provider={provider} label={getProviderLabel(provider)} />,
-        badge: 'out of allowlist',
+        badge: saved?.stale ? 'stale' : saved && !saved.enabled ? 'disabled' : 'out of allowlist',
       })
     }
     return options
-  }, [model, primaryModelOptions, primaryModelOutOfAllowlist, provider])
+  }, [catalog, model, primaryModelOptions, primaryModelOutOfAllowlist, provider])
 
   // Replace every entry for one provider with the operator's new selection,
   // leaving the other providers' subsets untouched. Selecting none removes the
@@ -237,7 +242,7 @@ export function LlmProviderConfig({
             <SelectionDropdown
               id="llm-primary-provider"
               className="cu-llm-config__primary-select cu-llm-config__provider-select"
-              value={[provider]}
+              value={[providerPickerValue]}
               options={primaryProviderOptions}
               placeholder="Select provider…"
               searchPlaceholder="Search providers…"
@@ -249,9 +254,6 @@ export function LlmProviderConfig({
                 const nextProviderValue = next[0]
                 if (!nextProviderValue) return
                 const nextProvider = normalizeProvider(nextProviderValue)
-                // Default within this provider's per-host subset when it has one
-                // (matches the fallback rows), so switching to a provider that is
-                // already restricted never auto-selects an out-of-subset model.
                 onPrimaryChange({
                   provider: nextProvider,
                   model: resolveDefaultModel(
@@ -262,7 +264,6 @@ export function LlmProviderConfig({
               }}
             />
           </Field>
-
           {replacePrimaryModelWithAllowedModels && showAllowedModels ? (
             <AllowedModelsField
               provider={provider}
@@ -301,7 +302,9 @@ export function LlmProviderConfig({
           <p className="cu-field__error">Couldn&apos;t load the model allowlist: {catalogError}</p>
         ) : !catalogLoading && primaryModelOptions.length === 0 ? (
           <p className="cu-field__error">
-            No enabled models for this provider. Add one under LLM Models first.
+            {provider === OPENAI_SUBSCRIPTION_PROVIDER
+              ? 'No enabled models for this subscription. Connect and sync the grant first.'
+              : 'No enabled models for this provider. Add one under LLM Models first.'}
           </p>
         ) : null}
 

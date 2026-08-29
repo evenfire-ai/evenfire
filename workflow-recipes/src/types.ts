@@ -623,6 +623,10 @@ export interface WorkflowRecipeSpec {
   agent?: {
     model: string
     provider: LlmProviderId
+    /**
+     * Optional static-credential Secret. Omitted for oauth-broker providers
+     * such as `codex-subscription`; Control API remains the OAuth custodian.
+     */
     secretRef?: { name: string; namespace?: string }
     soulRef?: {
       storageRef: {

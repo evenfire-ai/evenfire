@@ -4,6 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import HostDetailsPage from '../../app/hosts/[name]/page'
 import * as api from '../../lib/api'
+import {
+  listCodexConnectionModels,
+  listCodexSubscriptionConnections,
+} from '../../lib/codexSubscription'
 import { ToastProvider } from '../Toast'
 
 const replaceMock = vi.fn()
@@ -36,6 +40,15 @@ vi.mock('../HostAccessTab', () => ({
     <div data-testid="access-tab">Access editor for {hostName}</div>
   ),
 }))
+
+vi.mock('../../lib/codexSubscription', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../lib/codexSubscription')>()
+  return {
+    ...actual,
+    listCodexSubscriptionConnections: vi.fn().mockResolvedValue([]),
+    listCodexConnectionModels: vi.fn().mockResolvedValue([]),
+  }
+})
 
 vi.mock('../../lib/api', () => ({
   apiGet: vi.fn(),
@@ -178,12 +191,14 @@ describe('HostDetailsPage identity integration', () => {
 
     const picker = await screen.findByRole('button', { name: 'LLM Secret' })
     expect(picker).toHaveTextContent('openai-secret')
+    expect(picker).toBeDisabled()
     expect(picker.querySelectorAll('img')).toHaveLength(2)
     expect(picker.querySelector('img')).toHaveAttribute('src', '/provider-icons/openai.svg')
     expect(picker.querySelectorAll('img')[1]).toHaveAttribute('src', '/provider-icons/claude.svg')
     expect(screen.queryByRole('combobox')).toBeNull()
 
-    fireEvent.click(picker)
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    fireEvent.click(screen.getByRole('button', { name: 'LLM Secret' }))
 
     const zaiOption = screen.getByRole('option', { name: /zai-secret/ })
     expect(zaiOption).toHaveTextContent('Providers: Z.AI')
@@ -207,6 +222,64 @@ describe('HostDetailsPage identity integration', () => {
       screen.getByText('Anthropic', { selector: '.cu-llm-cred-group__title' })
     ).toBeInTheDocument()
     expect(screen.getByLabelText(/Claude API key/i)).toBeInTheDocument()
+  })
+
+  it('shows a complete ChatGPT assignment without requiring Edit', async () => {
+    mockParams = { name: 'foo', tab: 'model' }
+    vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
+      {
+        connectionKey: 'codex-aaa',
+        displayName: 'Team A',
+        status: 'connected',
+        credentialRevision: 1,
+        catalogRevision: 1,
+        accountFingerprint: 'fp',
+        catalogStatus: 'ready',
+        catalogSyncedAt: '2026-08-20T00:00:00.000Z',
+        lastRefreshAt: '2026-08-20T00:00:00.000Z',
+        lastAuthAt: '2026-08-20T00:00:00.000Z',
+        refreshLockHeld: false,
+        defaultModel: 'gpt-5.1',
+      },
+    ])
+    vi.mocked(listCodexConnectionModels).mockResolvedValue([
+      { model: 'gpt-5.1', enabled: true, stale: false },
+    ])
+    const codexHost = {
+      ...host,
+      spec: {
+        ...host.spec,
+        secretRef: undefined,
+        model: {
+          provider: 'codex-subscription',
+          name: 'gpt-5.1',
+          connectionRef: 'codex-aaa',
+        },
+      },
+    }
+    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      host: codexHost,
+      contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
+      secrets: [],
+      users: [],
+      teams: [],
+      agentUsers: [],
+      agentTeams: [],
+    })
+    render(<HostDetailsPage />)
+
+    const summary = await screen.findByRole('region', { name: 'LLM configuration summary' })
+    expect(summary).toHaveTextContent('Current model')
+    expect(summary).toHaveTextContent('gpt-5.1')
+    expect(screen.getByText('Team A')).toBeInTheDocument()
+    expect(screen.queryByText('codex-aaa')).not.toBeInTheDocument()
+    expect(screen.getByText('Credential')).toBeInTheDocument()
+    expect(screen.queryByText('Secret reference')).not.toBeInTheDocument()
+    expect(screen.queryByText('Broker-backed — no LLM secret required')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Save model configuration' })
+    ).not.toBeInTheDocument()
   })
 
   it('opens Advanced on the Hooks sub-tab', async () => {
@@ -288,5 +361,129 @@ describe('HostDetailsPage identity integration', () => {
     expect(screen.getByText('foo-display')).toBeInTheDocument()
     expect(screen.queryByText('Discarded Draft')).not.toBeInTheDocument()
     expect(api.apiSend).not.toHaveBeenCalled()
+  })
+
+  it('saves a Codex-only Host without secretRef and keeps metadata.name as identity', async () => {
+    const { secretRef: _omit, ...specWithoutSecret } = host.spec
+    void _omit
+    const codexHost = {
+      ...host,
+      spec: {
+        ...specWithoutSecret,
+        model: { provider: 'codex-subscription', name: 'gpt-5.1' },
+      },
+    }
+    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      host: codexHost,
+      contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
+      secrets: [{ name: 'openai-secret' }],
+      users: [],
+      teams: [],
+      agentUsers: [],
+      agentTeams: [],
+    })
+    ;(api.getHost as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(codexHost)
+    ;(api.getLlmModels as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      rows: [
+        {
+          id: 'm-codex',
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          vendor: 'OpenAI',
+          display_name: null,
+          context_window_tokens: null,
+          enabled: true,
+          stale: false,
+          created_at: '',
+          updated_at: '',
+        },
+      ],
+    })
+    mockParams = { name: 'foo', tab: 'model' }
+    render(<HostDetailsPage />)
+
+    expect(await screen.findByText('No credential assigned')).toBeInTheDocument()
+    expect(screen.getByText('Credential')).toBeInTheDocument()
+    expect(screen.queryByText('Secret reference')).not.toBeInTheDocument()
+    expect(screen.queryByText('OpenAI Codex Subscription')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(screen.getByLabelText('Credential')).toBeInTheDocument()
+    expect(screen.queryByRole('radio', { name: /ChatGPT subscription/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save model configuration' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Save model configuration' }))
+    expect(api.apiSend).not.toHaveBeenCalledWith(
+      'PUT',
+      '/api/v1/admin/hosts/foo',
+      expect.objectContaining({
+        spec: expect.objectContaining({
+          model: expect.objectContaining({ connectionRef: 'unassigned' }),
+        }),
+      })
+    )
+    expect(screen.queryByText('OpenAI Codex Subscription')).not.toBeInTheDocument()
+  })
+
+  it('does not surface a page error when ChatGPT subscriptions are disabled', async () => {
+    mockParams = { name: 'foo', tab: 'model' }
+    const err = Object.assign(new Error('disabled'), { status: 404, code: 'disabled' })
+    vi.mocked(listCodexSubscriptionConnections).mockRejectedValue(err)
+    render(<HostDetailsPage />)
+
+    await screen.findByRole('region', { name: 'LLM configuration summary' })
+    expect(screen.queryByText('Could not load ChatGPT subscriptions')).not.toBeInTheDocument()
+    expect(screen.queryByText('disabled')).not.toBeInTheDocument()
+  })
+
+  it('keeps a second LLM Secret field in existing control-ui styles when Codex has a static fallback', async () => {
+    mockParams = { name: 'foo', tab: 'model' }
+    vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
+      {
+        connectionKey: 'codex-aaa',
+        displayName: 'Team A',
+        status: 'connected',
+        credentialRevision: 1,
+        catalogRevision: 1,
+        accountFingerprint: 'fp',
+        catalogStatus: 'ready',
+        catalogSyncedAt: '2026-08-20T00:00:00.000Z',
+        lastRefreshAt: '2026-08-20T00:00:00.000Z',
+        lastAuthAt: '2026-08-20T00:00:00.000Z',
+        refreshLockHeld: false,
+        defaultModel: 'gpt-5.1',
+      },
+    ])
+    vi.mocked(listCodexConnectionModels).mockResolvedValue([
+      { model: 'gpt-5.1', enabled: true, stale: false },
+    ])
+    const fallbackHost = {
+      ...host,
+      spec: {
+        ...host.spec,
+        secretRef: 'openai-secret',
+        model: {
+          provider: 'codex-subscription',
+          name: 'gpt-5.1',
+          connectionRef: 'codex-aaa',
+        },
+        llmPolicy: { fallbacks: [{ provider: 'openai', model: 'gpt-4o' }] },
+      },
+    }
+    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      host: fallbackHost,
+      contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
+      secrets: [{ name: 'openai-secret', keys: ['openai-api-key'] }],
+      users: [],
+      teams: [],
+      agentUsers: [],
+      agentTeams: [],
+    })
+    const { container } = render(<HostDetailsPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    expect(screen.getByLabelText('Credential')).toBeInTheDocument()
+    expect(screen.getByLabelText('LLM Secret')).toBeInTheDocument()
+    expect(container.querySelectorAll('.cu-llm-secret-control')).toHaveLength(2)
+    expect(container.querySelectorAll('.cu-field__hint').length).toBeGreaterThanOrEqual(2)
+    expect(screen.getByRole('button', { name: 'Edit LLM Secret credentials' })).toBeInTheDocument()
   })
 })

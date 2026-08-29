@@ -1,0 +1,248 @@
+<!-- Generated with Fireworks Tech Graph, Style 1 (Flat Icon), for PR #439. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1180" width="1400" height="1180" role="img" aria-labelledby="diagram-title diagram-desc">
+  <title id="diagram-title">Evenfire Codex subscription - grant, assign, project, spend</title>
+  <desc id="diagram-desc">Secrets create named ChatGPT grants. Agents only choose a connectionRef. Empty Hosts persist unassigned and must not spend. Control API is the only OAuth custodian. Completions stream Host to proxy to chatgpt.com and never transit Control API.</desc>
+  <style>
+    text { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; }
+    .title { font-size: 24px; font-weight: 700; fill: #111827; }
+    .subtitle { font-size: 13px; fill: #4b5563; }
+    .section { font-size: 12px; font-weight: 700; letter-spacing: 1.1px; fill: #374151; }
+    .node-title { font-size: 14px; font-weight: 700; fill: #111827; }
+    .node-sub { font-size: 11px; fill: #6b7280; }
+    .tiny { font-size: 11px; fill: #6b7280; }
+    .chip { font-size: 11px; font-weight: 700; fill: #1f2937; }
+  </style>
+  <defs>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#2563eb"/></marker>
+    <marker id="arrow-orange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#ea580c"/></marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#059669"/></marker>
+    <marker id="arrow-purple" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#7c3aed"/></marker>
+    <marker id="arrow-gray" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#6b7280"/></marker>
+    <marker id="arrow-red" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#dc2626"/></marker>
+  </defs>
+
+  <rect width="1400" height="1180" fill="#ffffff"/>
+  <text x="40" y="40" class="title">Evenfire Codex subscription - grant, assign, project, spend</text>
+  <text x="40" y="64" class="subtitle">Provider codex-subscription | transport.v1 | Secrets create grants | Agents only choose | empty Hosts persist unassigned and never invent deployment-default</text>
+
+  <rect x="28" y="86" width="1344" height="168" rx="10" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="44" y="110" class="section">1  OPERATOR SURFACES</text>
+
+  <rect x="48" y="128" width="300" height="104" rx="8" fill="#ffffff" stroke="#93c5fd" stroke-width="1.5"/>
+  <text x="198" y="154" text-anchor="middle" class="node-title">Secrets / LLM Subscriptions</text>
+  <text x="198" y="176" text-anchor="middle" class="node-sub">Creates named grants only</text>
+  <text x="198" y="194" text-anchor="middle" class="node-sub">Connect / catalog / enable / revoke</text>
+  <text x="198" y="212" text-anchor="middle" class="node-sub">/secrets/llm/subscriptions</text>
+
+  <rect x="388" y="128" width="300" height="104" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="538" y="154" text-anchor="middle" class="node-title">Agents / Host wizard</text>
+  <text x="538" y="176" text-anchor="middle" class="node-sub">Chooses only - never creates</text>
+  <text x="538" y="194" text-anchor="middle" class="node-sub">provider + connectionRef</text>
+  <text x="538" y="212" text-anchor="middle" class="node-sub">Live persist: Host PUT / Next</text>
+
+  <rect x="728" y="128" width="300" height="104" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="878" y="154" text-anchor="middle" class="node-title">Desktop / Chat</text>
+  <text x="878" y="176" text-anchor="middle" class="node-sub">Spends the assigned grant</text>
+  <text x="878" y="194" text-anchor="middle" class="node-sub">No OAuth tokens in renderer</text>
+  <text x="878" y="212" text-anchor="middle" class="node-sub">Model must be on that grant</text>
+
+  <rect x="1068" y="128" width="280" height="104" rx="8" fill="#fff7ed" stroke="#fdba74" stroke-width="1.5"/>
+  <text x="1208" y="154" text-anchor="middle" class="node-title">Credential mix</text>
+  <text x="1208" y="176" text-anchor="middle" class="node-sub">API-KEY tab vs Subscriptions</text>
+  <text x="1208" y="194" text-anchor="middle" class="node-sub">sub: prefix on subscription</text>
+  <text x="1208" y="212" text-anchor="middle" class="node-sub">Recipes: no new CRD field</text>
+
+  <rect x="28" y="274" width="1344" height="210" rx="10" fill="#fff7ed" stroke="#fed7aa" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="44" y="298" class="section">2  CONTROL API - ONLY OAUTH CUSTODIAN</text>
+
+  <polygon points="198,324 248,348 248,412 198,436 148,412 148,348" fill="#ffffff" stroke="#fdba74" stroke-width="1.5"/>
+  <text x="198" y="372" text-anchor="middle" class="node-title">Control API</text>
+  <text x="198" y="392" text-anchor="middle" class="node-sub">admin + auth routes</text>
+  <text x="198" y="456" text-anchor="middle" class="node-sub">ciphertext never leaves API</text>
+
+  <rect x="300" y="324" width="240" height="112" rx="8" fill="#ffffff" stroke="#fdba74" stroke-width="1.5"/>
+  <text x="420" y="350" text-anchor="middle" class="node-title">OAuth connect</text>
+  <text x="420" y="370" text-anchor="middle" class="node-sub">browser + device</text>
+  <text x="420" y="388" text-anchor="middle" class="node-sub">scopes openid profile</text>
+  <text x="420" y="406" text-anchor="middle" class="node-sub">email offline_access</text>
+  <text x="420" y="424" text-anchor="middle" class="node-sub">fingerprint unique per account</text>
+
+  <rect x="564" y="324" width="240" height="112" rx="8" fill="#ffffff" stroke="#fdba74" stroke-width="1.5"/>
+  <text x="684" y="350" text-anchor="middle" class="node-title">Catalog + metadata</text>
+  <text x="684" y="370" text-anchor="middle" class="node-sub">sync - models[] + revision</text>
+  <text x="684" y="388" text-anchor="middle" class="node-sub">PATCH enable republishes CM</text>
+  <text x="684" y="406" text-anchor="middle" class="node-sub">PATCH display/default does not</text>
+  <text x="684" y="424" text-anchor="middle" class="node-sub">disable clears grant default</text>
+
+  <rect x="828" y="324" width="240" height="112" rx="8" fill="#ffffff" stroke="#fdba74" stroke-width="1.5"/>
+  <text x="948" y="350" text-anchor="middle" class="node-title">Host writer</text>
+  <text x="948" y="370" text-anchor="middle" class="node-sub">empty - persist unassigned</text>
+  <text x="948" y="388" text-anchor="middle" class="node-sub">skip allowlist / no rematch</text>
+  <text x="948" y="406" text-anchor="middle" class="node-sub">bound grant must be live</text>
+  <text x="948" y="424" text-anchor="middle" class="node-sub">never invent reserved grant</text>
+
+  <rect x="1092" y="324" width="256" height="112" rx="8" fill="#ffffff" stroke="#fdba74" stroke-width="1.5"/>
+  <text x="1220" y="350" text-anchor="middle" class="node-title">Publish policy</text>
+  <text x="1220" y="370" text-anchor="middle" class="node-sub">publish on connect / revoke</text>
+  <text x="1220" y="388" text-anchor="middle" class="node-sub">catalog ready + model enable</text>
+  <text x="1220" y="406" text-anchor="middle" class="node-sub">refresh: rotate ciphertext only</text>
+  <text x="1220" y="424" text-anchor="middle" class="node-sub">fail - 503, no silent skip</text>
+
+  <path d="M248 380 H300" stroke="#ea580c" stroke-width="1.8" fill="none" marker-end="url(#arrow-orange)"/>
+  <path d="M540 380 H564" stroke="#ea580c" stroke-width="1.8" fill="none" marker-end="url(#arrow-orange)"/>
+  <path d="M804 380 H828" stroke="#ea580c" stroke-width="1.8" fill="none" marker-end="url(#arrow-orange)"/>
+  <path d="M1068 380 H1092" stroke="#ea580c" stroke-width="1.8" fill="none" marker-end="url(#arrow-orange)"/>
+
+  <rect x="28" y="506" width="1344" height="168" rx="10" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="44" y="530" class="section">3  DURABLE STATE</text>
+
+  <rect x="48" y="548" width="400" height="104" rx="8" fill="#ffffff" stroke="#86efac" stroke-width="1.5"/>
+  <text x="248" y="574" text-anchor="middle" class="node-title">Postgres grant row</text>
+  <text x="248" y="596" text-anchor="middle" class="node-sub">connection_key, ciphertext, revision</text>
+  <text x="248" y="614" text-anchor="middle" class="node-sub">status connected / reauth / revoked</text>
+  <text x="248" y="632" text-anchor="middle" class="node-sub">catalog_status + offered models[]</text>
+
+  <rect x="488" y="548" width="400" height="104" rx="8" fill="#ffffff" stroke="#86efac" stroke-width="1.5"/>
+  <text x="688" y="574" text-anchor="middle" class="node-title">Host CR</text>
+  <text x="688" y="596" text-anchor="middle" class="node-sub">spec.model.provider = codex-subscription</text>
+  <text x="688" y="614" text-anchor="middle" class="node-sub">spec.model.connectionRef = named key</text>
+  <text x="688" y="632" text-anchor="middle" class="node-sub">or persisted sentinel unassigned</text>
+
+  <rect x="928" y="548" width="420" height="104" rx="8" fill="#ffffff" stroke="#86efac" stroke-width="1.5"/>
+  <text x="1138" y="574" text-anchor="middle" class="node-title">Runtime allowlist ConfigMap</text>
+  <text x="1138" y="596" text-anchor="middle" class="node-sub">clerum.io/codex-connections map</text>
+  <text x="1138" y="614" text-anchor="middle" class="node-sub">legacy: no map keeps flat catalog</text>
+  <text x="1138" y="632" text-anchor="middle" class="node-sub">map + missing key fail-closes</text>
+
+  <rect x="28" y="694" width="1344" height="210" rx="10" fill="#faf5ff" stroke="#d8b4fe" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="44" y="718" class="section">4  CLUSTER PROJECTION AND SPEND - LLM STREAM NEVER TRANSITS CONTROL API</text>
+
+  <rect x="48" y="736" width="250" height="140" rx="8" fill="#ffffff" stroke="#d8b4fe" stroke-width="1.5"/>
+  <text x="173" y="764" text-anchor="middle" class="node-title">HCC</text>
+  <text x="173" y="786" text-anchor="middle" class="node-sub">unassigned - disconnected</text>
+  <text x="173" y="804" text-anchor="middle" class="node-sub">does not spend reserved grant</text>
+  <text x="173" y="822" text-anchor="middle" class="node-sub">projects Host + allowlist</text>
+  <text x="173" y="840" text-anchor="middle" class="node-sub">llm:codex:execute from CM</text>
+  <text x="173" y="858" text-anchor="middle" class="node-sub">binding hash includes key</text>
+
+  <rect x="338" y="736" width="270" height="140" rx="8" fill="#ffffff" stroke="#d8b4fe" stroke-width="1.5"/>
+  <text x="473" y="764" text-anchor="middle" class="node-title">mcp-host</text>
+  <text x="473" y="786" text-anchor="middle" class="node-sub">authorizes physical attempt</text>
+  <text x="473" y="804" text-anchor="middle" class="node-sub">no map - keep Phase-1 catalog</text>
+  <text x="473" y="822" text-anchor="middle" class="node-sub">map omit models[] - empty list</text>
+  <text x="473" y="840" text-anchor="middle" class="node-sub">missing map key - empty Codex</text>
+  <text x="473" y="858" text-anchor="middle" class="node-sub">1 ticket = 1 physical try</text>
+
+  <rect x="648" y="736" width="300" height="140" rx="8" fill="#ffffff" stroke="#d8b4fe" stroke-width="1.5"/>
+  <text x="798" y="764" text-anchor="middle" class="node-title">codex-llm-proxy</text>
+  <text x="798" y="786" text-anchor="middle" class="node-sub">platform JWT + single-use ticket</text>
+  <text x="798" y="804" text-anchor="middle" class="node-sub">admin permit separate audience</text>
+  <text x="798" y="822" text-anchor="middle" class="node-sub">numeric exp required on all 3</text>
+  <text x="798" y="840" text-anchor="middle" class="node-sub">access token in RAM only</text>
+  <text x="798" y="858" text-anchor="middle" class="node-sub">frozen HTTPS origins only</text>
+
+  <rect x="988" y="736" width="360" height="140" rx="8" fill="#ffffff" stroke="#93c5fd" stroke-width="1.5"/>
+  <text x="1168" y="764" text-anchor="middle" class="node-title">Frozen OpenAI origins</text>
+  <text x="1168" y="786" text-anchor="middle" class="node-sub">auth.openai.com - OAuth only</text>
+  <text x="1168" y="804" text-anchor="middle" class="node-sub">chatgpt.com/backend-api/codex</text>
+  <text x="1168" y="822" text-anchor="middle" class="node-sub">models + responses, not api.openai.com</text>
+  <text x="1168" y="840" text-anchor="middle" class="node-sub">HTTPS same-origin redirects only</text>
+  <text x="1168" y="858" text-anchor="middle" class="node-sub">no caller-supplied URL or header</text>
+
+  <path d="M198 232 V274" stroke="#2563eb" stroke-width="2" fill="none" marker-end="url(#arrow-blue)"/>
+  <rect x="156" y="244" width="84" height="16" rx="3" fill="#ffffff" opacity="0.96"/>
+  <text x="198" y="256" text-anchor="middle" class="tiny">create grant</text>
+
+  <path d="M538 232 V324" stroke="#2563eb" stroke-width="2" fill="none" marker-end="url(#arrow-blue)"/>
+  <rect x="488" y="268" width="100" height="16" rx="3" fill="#fff7ed" opacity="0.96"/>
+  <text x="538" y="280" text-anchor="middle" class="tiny">choose grant</text>
+
+  <path d="M878 232 C878 250 798 260 798 324" stroke="#7c3aed" stroke-width="2" fill="none" marker-end="url(#arrow-purple)"/>
+  <rect x="820" y="268" width="88" height="16" rx="3" fill="#ffffff" opacity="0.96"/>
+  <text x="864" y="280" text-anchor="middle" class="tiny">spend later</text>
+
+  <path d="M420 436 V548" stroke="#059669" stroke-width="2" fill="none" marker-end="url(#arrow-green)"/>
+  <rect x="372" y="486" width="96" height="16" rx="3" fill="#ffffff" opacity="0.96"/>
+  <text x="420" y="498" text-anchor="middle" class="tiny">encrypt grant</text>
+
+  <path d="M948 436 V548" stroke="#059669" stroke-width="2" fill="none" marker-end="url(#arrow-green)"/>
+  <rect x="900" y="486" width="96" height="16" rx="3" fill="#ffffff" opacity="0.96"/>
+  <text x="948" y="498" text-anchor="middle" class="tiny">write Host CR</text>
+
+  <path d="M1220 436 V548" stroke="#059669" stroke-width="2" fill="none" marker-end="url(#arrow-green)"/>
+  <rect x="1164" y="486" width="112" height="16" rx="3" fill="#ffffff" opacity="0.96"/>
+  <text x="1220" y="498" text-anchor="middle" class="tiny">republish CM</text>
+
+  <path d="M688 652 V736" stroke="#ea580c" stroke-width="1.8" fill="none" marker-end="url(#arrow-orange)"/>
+  <rect x="652" y="678" width="72" height="16" rx="3" fill="#ffffff" opacity="0.96"/>
+  <text x="688" y="690" text-anchor="middle" class="tiny">reconcile</text>
+
+  <path d="M1138 652 V736" stroke="#ea580c" stroke-width="1.8" fill="none" marker-end="url(#arrow-orange)"/>
+  <rect x="1094" y="678" width="88" height="16" rx="3" fill="#ffffff" opacity="0.96"/>
+  <text x="1138" y="690" text-anchor="middle" class="tiny">watch CM</text>
+
+  <path d="M298 806 H338" stroke="#7c3aed" stroke-width="2" fill="none" marker-end="url(#arrow-purple)"/>
+  <path d="M608 806 H648" stroke="#7c3aed" stroke-width="2.4" fill="none" marker-end="url(#arrow-purple)"/>
+  <rect x="608" y="780" width="40" height="16" rx="3" fill="#ffffff" opacity="0.96"/>
+  <text x="628" y="792" text-anchor="middle" class="tiny">ticket</text>
+  <path d="M948 806 H988" stroke="#7c3aed" stroke-width="2.4" fill="none" marker-end="url(#arrow-purple)"/>
+  <rect x="948" y="780" width="44" height="16" rx="3" fill="#ffffff" opacity="0.96"/>
+  <text x="970" y="792" text-anchor="middle" class="tiny">stream</text>
+
+  <path d="M1220 324 C1288 324 1320 280 1220 232" stroke="#6b7280" stroke-width="1.5" fill="none" stroke-dasharray="4,2" marker-end="url(#arrow-gray)"/>
+  <rect x="1264" y="268" width="88" height="16" rx="3" fill="#ffffff" opacity="0.96"/>
+  <text x="1308" y="280" text-anchor="middle" class="tiny">OAuth only</text>
+
+  <rect x="28" y="924" width="1344" height="168" rx="10" fill="#fef2f2" stroke="#fecaca" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="44" y="948" class="section">5  FAIL-CLOSE LOCKS</text>
+
+  <rect x="48" y="964" width="250" height="108" rx="8" fill="#ffffff" stroke="#fecaca" stroke-width="1.5"/>
+  <text x="173" y="990" text-anchor="middle" class="node-title">Empty Host</text>
+  <text x="173" y="1012" text-anchor="middle" class="node-sub">persist unassigned</text>
+  <text x="173" y="1030" text-anchor="middle" class="node-sub">must not spend a grant</text>
+  <text x="173" y="1048" text-anchor="middle" class="node-sub">no deployment-default</text>
+
+  <rect x="318" y="964" width="250" height="108" rx="8" fill="#ffffff" stroke="#fecaca" stroke-width="1.5"/>
+  <text x="443" y="990" text-anchor="middle" class="node-title">Unknown map key</text>
+  <text x="443" y="1012" text-anchor="middle" class="node-sub">Codex models become empty</text>
+  <text x="443" y="1030" text-anchor="middle" class="node-sub">authorizer: no_grant</text>
+  <text x="443" y="1048" text-anchor="middle" class="node-sub">revoke isolates that key</text>
+
+  <rect x="588" y="964" width="250" height="108" rx="8" fill="#ffffff" stroke="#fecaca" stroke-width="1.5"/>
+  <text x="713" y="990" text-anchor="middle" class="node-title">Ticket / permit JWT</text>
+  <text x="713" y="1012" text-anchor="middle" class="node-sub">RS256 + issuer + audience</text>
+  <text x="713" y="1030" text-anchor="middle" class="node-sub">numeric exp required</text>
+  <text x="713" y="1048" text-anchor="middle" class="node-sub">replay and hash checked</text>
+
+  <rect x="858" y="964" width="240" height="108" rx="8" fill="#ffffff" stroke="#fecaca" stroke-width="1.5"/>
+  <text x="978" y="990" text-anchor="middle" class="node-title">Origin / billing</text>
+  <text x="978" y="1012" text-anchor="middle" class="node-sub">origin_denied if drifted</text>
+  <text x="978" y="1030" text-anchor="middle" class="node-sub">never api.openai.com v1</text>
+  <text x="978" y="1048" text-anchor="middle" class="node-sub">not API-key billing</text>
+
+  <rect x="1118" y="964" width="230" height="108" rx="8" fill="#ffffff" stroke="#fecaca" stroke-width="1.5"/>
+  <text x="1233" y="990" text-anchor="middle" class="node-title">Stable errors</text>
+  <text x="1233" y="1012" text-anchor="middle" class="node-sub">no_grant / ticket_invalid</text>
+  <text x="1233" y="1030" text-anchor="middle" class="node-sub">model_not_allowed</text>
+  <text x="1233" y="1048" text-anchor="middle" class="node-sub">ticket_replayed / hash</text>
+
+  <path d="M173 876 V964" stroke="#dc2626" stroke-width="1.6" fill="none" stroke-dasharray="5,3" marker-end="url(#arrow-red)"/>
+  <path d="M473 876 V964" stroke="#dc2626" stroke-width="1.6" fill="none" stroke-dasharray="5,3" marker-end="url(#arrow-red)"/>
+  <path d="M798 876 V964" stroke="#dc2626" stroke-width="1.6" fill="none" stroke-dasharray="5,3" marker-end="url(#arrow-red)"/>
+
+  <g transform="translate(40,1124)">
+    <line x1="0" y1="8" x2="28" y2="8" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
+    <text x="34" y="12" class="tiny">create / choose</text>
+    <line x1="150" y1="8" x2="178" y2="8" stroke="#ea580c" stroke-width="1.8" marker-end="url(#arrow-orange)"/>
+    <text x="184" y="12" class="tiny">control / project</text>
+    <line x1="310" y1="8" x2="338" y2="8" stroke="#059669" stroke-width="2" marker-end="url(#arrow-green)"/>
+    <text x="344" y="12" class="tiny">persist</text>
+    <line x1="410" y1="8" x2="438" y2="8" stroke="#7c3aed" stroke-width="2.2" marker-end="url(#arrow-purple)"/>
+    <text x="444" y="12" class="tiny">ticket + stream (not via Control API)</text>
+    <line x1="700" y1="8" x2="728" y2="8" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arrow-gray)"/>
+    <text x="734" y="12" class="tiny">OAuth to auth.openai.com</text>
+    <line x1="920" y1="8" x2="948" y2="8" stroke="#dc2626" stroke-width="1.6" stroke-dasharray="5,3" marker-end="url(#arrow-red)"/>
+    <text x="954" y="12" class="tiny">fail-close</text>
+    <text x="1040" y="12" class="tiny">PR #439 | codex-subscription-transport.v1</text>
+  </g>
+</svg>

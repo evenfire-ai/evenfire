@@ -127,7 +127,7 @@ export function GrantsView({
                 grant.capabilityFamily === 'promptBridge'
                   ? (grant.promptTargets ?? []).map(
                       (target, index) =>
-                        `${index === 0 ? 'default' : `fallback ${index}`}: ${target.provider}/${target.model} (${target.credentialSlot})`
+                        `${index === 0 ? 'default' : `fallback ${index}`}: ${target.provider}/${target.model} (${target.connectionRef ? `sub:${target.connectionRef}` : target.credentialSlot})`
                     )
                   : grant.allowedEventTypes
               const quotaParts: string[] = []

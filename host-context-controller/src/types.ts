@@ -401,6 +401,22 @@ export interface ContextCRD {
 export interface HostModelSpec {
   provider?: LlmProviderId
   name?: string
+  connectionRef?: string
+}
+
+export interface HostAllowedModel {
+  provider?: string
+  model?: string
+}
+
+export interface HostLlmPolicyFallback {
+  provider?: string
+  model?: string
+  credentialSlot?: string
+}
+
+export interface HostLlmPolicySpec {
+  fallbacks?: HostLlmPolicyFallback[]
 }
 
 export interface HostDesktopSpec {
@@ -423,6 +439,14 @@ export type HostWorkflowControlScope =
   | 'workflow:trigger'
   | 'workflow:approval:resolve'
   | 'workflow:approval:decide'
+
+export type DerivedPlatformScope = 'llm:codex:execute'
+// The full effective runtime control scope set minted into an mcp-host control
+// JWT: the user-declarable workflow-control scopes PLUS every HCC-derived scope
+// — `oauth:user-token` (see {@link HostRuntimeControlScope}) and the codex
+// `llm:codex:execute` derive. Both derives can co-occur on one Host, so this
+// must be their union, not either alone.
+export type EffectiveMcpHostControlScope = HostRuntimeControlScope | DerivedPlatformScope
 
 export interface HostWorkflowControlSpec {
   scopes?: HostWorkflowControlScope[]
@@ -485,9 +509,11 @@ export interface HostGuardrailsSpec {
 export interface HostSpec {
   host: string
   contextRef: string
-  secretRef: string
+  secretRef?: string
   channels?: string[]
   model?: HostModelSpec
+  allowedModels?: HostAllowedModel[]
+  llmPolicy?: HostLlmPolicySpec
   approval?: Record<string, unknown>
   desktop?: HostDesktopSpec
   lifecycle?: HostLifecycleSpec

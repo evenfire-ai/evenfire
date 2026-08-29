@@ -20,20 +20,23 @@ describe('0101 oauth_grants owner generalization migration', () => {
   it('is registered last in the migration array, after 0100_seed_minimax', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const versions = CONTROL_API_MIGRATIONS.map(m => m.version)
-    expect(versions.at(-1)).toBe('0101_oauth_grants_owner_generalization')
+    expect(versions.at(-1)).toBe('0106_oauth_grants_owner_generalization')
     expect(versions).toContain('0099_gfs_upload_finalizing_recovery')
     expect(versions).toContain('0100_seed_minimax_allowed_model')
   })
 
   it('carries its prior names as legacyVersions so a deploy that already ran it is not re-executed', async () => {
-    // Renamed 0091 -> 0100 -> 0101 across dev syncs. Environments that recorded an
-    // earlier name (the dev cluster) must mark 0101 applied from that row instead
-    // of re-running the DDL. See applyPendingMigrations' legacyVersions branch.
+    // Renamed 0091 -> 0100 -> 0101 -> 0106 across dev syncs (the last sync brought
+    // dev's 0101-0105 codex migrations, taking the 0101 slot). Environments that
+    // recorded an earlier name (the dev cluster) must mark 0106 applied from that
+    // row instead of re-running the DDL. See applyPendingMigrations' legacyVersions
+    // branch.
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      m => m.version === '0101_oauth_grants_owner_generalization'
+      m => m.version === '0106_oauth_grants_owner_generalization'
     )
     expect(migration?.legacyVersions).toEqual([
+      '0101_oauth_grants_owner_generalization',
       '0100_oauth_grants_owner_generalization',
       '0091_oauth_grants_owner_generalization',
     ])
