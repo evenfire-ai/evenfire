@@ -484,6 +484,32 @@ export type RpcAllowedServersResult = {
   servers: RpcMcpServer[]
 }
 
+/**
+ * Proactive connectors read-model (spec 11 U2), projected verbatim from
+ * rpc-proxy's `GET /api/v1/rpc/connectors` (U1). NON-SECRET policy only —
+ * `authKind`/`provider`/`grantScope` — never `auth`/`secretRef`/tokens.
+ * The tri-state `status` is derived server-side from the authoritative grant
+ * store (`oauthGrantExists`, D4); the desktop never recomputes "connected".
+ */
+export type RpcConnector = {
+  name: string
+  provider?: string
+  authKind?: 'static' | 'oauth-user' | 'oauth-context'
+  grantScope?: 'user' | 'context'
+  status: 'authorized' | 'requires_setup' | 'no_oauth'
+}
+
+export type RpcAgentConnectors = {
+  name: string
+  contextRef: string | null
+  connectors: RpcConnector[]
+}
+
+export type RpcConnectorsResult = {
+  userId: string
+  agents: RpcAgentConnectors[]
+}
+
 export type RpcTokenResult = {
   token: string
   accessScope: RpcAccessScope
@@ -807,6 +833,12 @@ export type TaskProgressStreamEvent =
         requestId: string
         displayName: string
         reason: string
+        // U5 (mcp-oauth reactive consent): present ONLY when
+        // `reason === 'connect_required'` — the mcp-host emitter attaches this so
+        // the desktop renders a "Connect <server>" prompt (not the generic
+        // approval prompt) and correlates the later deep-link completion back to
+        // this suspension by `mcpServerName`. Absent for `approval_required`.
+        mcpServerName?: string
       }
     }
   | { type: 'cancelled'; data: { taskId: string; reason: string } }
@@ -875,6 +907,13 @@ export type SessionLifecycleState = 'idle' | 'processing' | 'awaiting_approval'
 export interface PendingApprovalLite {
   requestId: string
   displayName: string
+  // U5 (mcp-oauth reactive consent): additive. `reason === 'connect_required'`
+  // marks a suspension that needs an OAuth "Connect <server>" flow rather than a
+  // generic tool approval; `mcpServerName` identifies the server to connect and
+  // correlates the deep-link completion back to this suspension.
+  // Absent on ordinary `approval_required` suspensions (byte-identical there).
+  reason?: string
+  mcpServerName?: string
 }
 
 /**

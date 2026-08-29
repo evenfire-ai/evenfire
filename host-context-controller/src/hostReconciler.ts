@@ -49,6 +49,7 @@ import {
   CommunicationChannelCRD,
   HostCRD,
   HostChannelReaderStatus,
+  HostRuntimeControlScope,
   HostRuntimeStatus,
   HostWorkflowControlScope,
   HostWorkflowControlSpec,
@@ -248,6 +249,40 @@ export function resolveWorkflowControlScopes(
 }
 
 /**
+ * The scope HCC appends for a Host runtime that fronts an enabled
+ * `auth.type: oauth` mcp-server. control-api's OAuth user-token broker
+ * (`POST /api/v1/mcp-oauth/user-token`) requires the caller's mcp-host control
+ * JWT to carry this scope; it is derive-only (never user-declarable) — see
+ * {@link HostRuntimeControlScope}.
+ */
+export const OAUTH_USER_TOKEN_SCOPE = 'oauth:user-token' as const
+
+/**
+ * Resolve the EFFECTIVE runtime control scopes minted into the mcp-host control
+ * JWT: the declarable workflow-control scopes plus the derive-only
+ * `oauth:user-token` when the Host fronts an enabled oauth mcp-server.
+ *
+ * This is the SINGLE source of truth shared by BOTH the mint path
+ * (`resolveWorkflowControlScopesForHost`) and the drift hash
+ * (`runtimeTokenScopeHash`), so the scopes carried by the token and the scopes
+ * hashed for change-detection can never diverge.
+ */
+export function resolveRuntimeControlScopes(
+  workflowControl: HostWorkflowControlSpec | undefined,
+  options: { hasChannelIngress?: boolean; frontsOAuthServer?: boolean } = {}
+): HostRuntimeControlScope[] {
+  const scopes: HostRuntimeControlScope[] = [
+    ...resolveWorkflowControlScopes(workflowControl, {
+      hasChannelIngress: options.hasChannelIngress,
+    }),
+  ]
+  if (options.frontsOAuthServer === true) {
+    scopes.push(OAUTH_USER_TOKEN_SCOPE)
+  }
+  return scopes
+}
+
+/**
  * One SharedFileSystem mount injected into a Host's mcp-host Deployment.
  * The PVC is mounted RO at the requested path; mcp-host's built-in
  * clerum__context_files_* tools read CLERUM_CONTEXT_FILES_MOUNTS to learn
@@ -265,6 +300,15 @@ export interface ResolvedSfsMount {
 }
 
 export type ResolveContextMountsFn = (host: HostCRD) => Promise<ResolvedSfsMount[]>
+
+/**
+ * Resolve whether a Host's referenced Context fronts at least one ENABLED
+ * `auth.type: oauth` mcp-server. Wired in production from the McpServerWatcher
+ * (which owns the Context + McpServer caches) so HCC can decide whether to
+ * request the derive-only `oauth:user-token` scope without HostReconciler
+ * needing direct K8s access to non-Host CRDs. Default (unwired) returns false.
+ */
+export type HostFrontsOAuthServerFn = (host: HostCRD) => Promise<boolean>
 
 const CONTEXT_LABEL = 'clerum.io/context'
 const CONTEXT_MOUNT_PATH_PATTERN = /^\/[a-zA-Z0-9_.][a-zA-Z0-9_.\/-]*$/
@@ -378,6 +422,13 @@ type HostReconcilerDeps = {
    */
   resolveContextMounts?: ResolveContextMountsFn
   /**
+   * Resolve whether the Host fronts an enabled `auth.type: oauth` mcp-server,
+   * gating the derive-only `oauth:user-token` runtime scope. Wired in
+   * production by `McpServerWatcher` over `getServerInfosByContext`. Default
+   * (no override) returns false — fail closed: no oauth scope until wired.
+   */
+  hostFrontsOAuthServer?: HostFrontsOAuthServerFn
+  /**
    * Count CommunicationChannels referencing this Host. Used by
    * `buildChannelReaderDeployment` to compute `spec.replicas`
    * (0 when no CCs, 1 when 1+). Wired by `McpServerWatcher` from
@@ -468,6 +519,7 @@ export class HostReconciler {
    */
   private readonly lifecycle: StatelessLifecycleExecutor
   private resolveContextMounts: ResolveContextMountsFn
+  private hostFrontsOAuthServerFn: HostFrontsOAuthServerFn
   private countCommunicationChannels: (hostName: string) => number
   private findCommunicationChannelsByHostRef: (host: string) => CommunicationChannelCRD[]
   private findCommunicationChannelsByCredentialsSecretName: (
@@ -543,6 +595,7 @@ export class HostReconciler {
     this.now = deps?.now ?? (() => new Date())
     this.newTelemetryOccurrenceId = deps?.newTelemetryOccurrenceId ?? randomUUID
     this.resolveContextMounts = deps?.resolveContextMounts ?? (async () => [])
+    this.hostFrontsOAuthServerFn = deps?.hostFrontsOAuthServer ?? (async () => false)
     this.countCommunicationChannels = deps?.countCommunicationChannels ?? (() => 0)
     this.findCommunicationChannelsByHostRef = deps?.findCommunicationChannelsByHostRef ?? (() => [])
     this.findCommunicationChannelsByCredentialsSecretName =
@@ -598,6 +651,71 @@ export class HostReconciler {
    */
   setResolveContextMounts(fn: ResolveContextMountsFn): void {
     this.resolveContextMounts = fn
+  }
+
+  /**
+   * Late-bound setter so the McpServerWatcher (which owns the Context and
+   * McpServer caches) can wire up the oauth-server resolver after this
+   * reconciler is constructed. Pattern mirrors setResolveContextMounts.
+   */
+  setHostFrontsOAuthServer(fn: HostFrontsOAuthServerFn): void {
+    this.hostFrontsOAuthServerFn = fn
+  }
+
+  /**
+   * Whether this Host fronts an enabled `auth.type: oauth` mcp-server, gating
+   * the derive-only `oauth:user-token` runtime scope. Fails CLOSED (false) when
+   * the cross-CRD read throws: an uncertain read must never grant the scope.
+   *
+   * Each call is an INDEPENDENT live point-in-time read (mirrors
+   * `hasChannelIngress`); the value is deliberately not cached across a
+   * reconcile. Callers that need one consistent value within a unit of work
+   * resolve it once and thread the same bool (see the issuance path, which
+   * threads it into the mint-scope derive and the drift hash so they never
+   * diverge); the deployment drift guard re-reads it on purpose to catch a
+   * scope change mid-reconcile.
+   */
+  private async frontsOAuthServer(host: HostCRD): Promise<boolean> {
+    // Bounded retry that absorbs a TRANSIENT apiserver blip without touching the
+    // authoritative-`false` path. Contract of the underlying resolver: a real
+    // scope change (the server genuinely stopped fronting an oauth mcp-server)
+    // RETURNS `false` without throwing; only a transient read failure (apiserver
+    // blip) THROWS. So we retry ONLY on throw — any RETURNED value (true or
+    // false) is authoritative and is returned immediately, so a healthy call
+    // resolves on the first attempt with zero added overhead and an authoritative
+    // `false` is never re-tried. Before this retry, a transient throw collapsed
+    // to `false` exactly like an authoritative `false`, dropping the
+    // oauth:user-token scope → runtime-token re-mint + Deployment rollout, then a
+    // flip back on recovery → churn, once per OAuth Host per reconcile.
+    const MAX_ATTEMPTS = 3
+    const BACKOFF_BASE_MS = 50
+    let lastErr: unknown
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        return await this.hostFrontsOAuthServerFn(host)
+      } catch (err) {
+        lastErr = err
+        if (attempt < MAX_ATTEMPTS) {
+          // Small linear backoff (50ms, 100ms) to let a transient blip clear.
+          await new Promise(resolve => setTimeout(resolve, BACKOFF_BASE_MS * attempt))
+        }
+      }
+    }
+    // All attempts threw. Residual honesty: a SUSTAINED apiserver outage (every
+    // attempt throws) still fails CLOSED here and can flip the scope off. That is
+    // correct — a sustained outage is a genuine "scope unknown" situation, not a
+    // blip — the retry only smooths over transient blips, never a real outage.
+    log.warn(
+      'failed to resolve whether Host fronts an oauth mcp-server after retries; failing closed (no oauth:user-token scope)',
+      {
+        host: host.name,
+        namespace: host.namespace,
+        contextRef: host.spec.contextRef,
+        attempts: MAX_ATTEMPTS,
+        err: lastErr instanceof Error ? lastErr.message : String(lastErr),
+      }
+    )
+    return false
   }
 
   /**
@@ -1046,13 +1164,25 @@ export class HostReconciler {
     return HostReconciler.shortHash({ namespace: host.namespace, host: host.name })
   }
 
-  private static runtimeTokenScopeHash(host: HostCRD, hasChannelIngress = false): string {
+  private static runtimeTokenScopeHash(
+    host: HostCRD,
+    hasChannelIngress = false,
+    frontsOAuthServer = false
+  ): string {
     // Hash the EFFECTIVE (resolved) scopes — what actually gets minted into the
     // control token — so change-detection matches the default-fallback applied
     // at issuance (otherwise a null workflowControl hashes as [] while the token
-    // carries the first-party defaults, and the two drift).
+    // carries the first-party defaults, and the two drift). Uses the SAME
+    // `resolveRuntimeControlScopes` as the mint path (see
+    // `resolveWorkflowControlScopesForHost`) so the hashed set and the minted
+    // set — including the derive-only `oauth:user-token` — can never diverge.
     return HostReconciler.shortHash(
-      [...resolveWorkflowControlScopes(host.spec.workflowControl, { hasChannelIngress })].sort()
+      [
+        ...resolveRuntimeControlScopes(host.spec.workflowControl, {
+          hasChannelIngress,
+          frontsOAuthServer,
+        }),
+      ].sort()
     )
   }
 
@@ -1079,6 +1209,7 @@ export class HostReconciler {
     nowMs: number,
     gfsTokenTtlSec: number,
     hasChannelIngress = false,
+    frontsOAuthServer = false,
     preservedHostUid?: string
   ): Record<string, string> {
     const refreshTtlSec = Number.isFinite(tokens.refreshExpiresInSeconds)
@@ -1096,7 +1227,8 @@ export class HostReconciler {
         HostReconciler.runtimeTokenHostBindingHash(host),
       [RUNTIME_TOKEN_SCOPE_HASH_ANNOTATION]: HostReconciler.runtimeTokenScopeHash(
         host,
-        hasChannelIngress
+        hasChannelIngress,
+        frontsOAuthServer
       ),
       [RUNTIME_TOKEN_ISSUER_ANNOTATION]: RUNTIME_TOKEN_ISSUER,
       [RUNTIME_TOKEN_AUDIENCE_ANNOTATION]: RUNTIME_TOKEN_AUDIENCE,
@@ -1126,7 +1258,8 @@ export class HostReconciler {
     host: HostCRD,
     secret: k8s.V1Secret,
     nowMs: number,
-    hasChannelIngress = false
+    hasChannelIngress = false,
+    frontsOAuthServer = false
   ): { refresh: boolean; rolloutRequired: boolean; reason: string; refreshTokenExpMs?: number } {
     const labels = secret.metadata?.labels ?? {}
     if (labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE || labels[HOST_LABEL] !== host.name) {
@@ -1141,7 +1274,11 @@ export class HostReconciler {
 
     const annotations = secret.metadata?.annotations ?? {}
     const expectedHostBindingHash = HostReconciler.runtimeTokenHostBindingHash(host)
-    const expectedScopeHash = HostReconciler.runtimeTokenScopeHash(host, hasChannelIngress)
+    const expectedScopeHash = HostReconciler.runtimeTokenScopeHash(
+      host,
+      hasChannelIngress,
+      frontsOAuthServer
+    )
     const hasContractMetadata =
       RUNTIME_TOKEN_HOST_BINDING_HASH_ANNOTATION in annotations ||
       RUNTIME_TOKEN_SCOPE_HASH_ANNOTATION in annotations ||
@@ -1331,10 +1468,18 @@ export class HostReconciler {
 
   private resolveWorkflowControlScopesForHost(
     host: HostCRD,
-    hasChannelIngress = this.hasChannelIngress(host)
-  ): HostWorkflowControlScope[] {
-    const scopes = resolveWorkflowControlScopes(host.spec.workflowControl, { hasChannelIngress })
-    if (hasChannelIngress && scopes.length === 0) {
+    hasChannelIngress = this.hasChannelIngress(host),
+    frontsOAuthServer = false
+  ): HostRuntimeControlScope[] {
+    // Delegate to the SAME resolver the drift hash uses so the minted scope set
+    // and the hashed scope set can never diverge (a divergence re-issues the
+    // token every reconcile).
+    const scopes = resolveRuntimeControlScopes(host.spec.workflowControl, {
+      hasChannelIngress,
+      frontsOAuthServer,
+    })
+    const hasWorkflowScope = scopes.some(scope => scope !== OAUTH_USER_TOKEN_SCOPE)
+    if (hasChannelIngress && !hasWorkflowScope) {
       log.warn('channel-bearing Host resolved with no workflow-control scopes', {
         host: host.name,
         namespace: host.namespace,
@@ -1370,14 +1515,28 @@ export class HostReconciler {
           RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH
         const nowMs = Date.now()
         const hasChannelIngress = this.hasChannelIngress(host)
-        const scopeHash = HostReconciler.runtimeTokenScopeHash(host, hasChannelIngress)
+        // Resolve ONCE per issuance and thread the SAME bool into the mint-scope
+        // derive, the refresh decision, the scope hash and the stored
+        // annotation, so the minted token and the drift hash never diverge.
+        const frontsOAuthServer = await this.frontsOAuthServer(host)
+        const scopeHash = HostReconciler.runtimeTokenScopeHash(
+          host,
+          hasChannelIngress,
+          frontsOAuthServer
+        )
         let decision: {
           refresh: boolean
           rolloutRequired: boolean
           reason: string
           refreshTokenExpMs?: number
         } = existing
-          ? HostReconciler.runtimeTokenRefreshDecision(host, existing, nowMs, hasChannelIngress)
+          ? HostReconciler.runtimeTokenRefreshDecision(
+              host,
+              existing,
+              nowMs,
+              hasChannelIngress,
+              frontsOAuthServer
+            )
           : { refresh: true, rolloutRequired: false, reason: 'missing_secret' }
         if (
           existing &&
@@ -1518,7 +1677,7 @@ export class HostReconciler {
         const tokens = await issueMcpHostRuntimeTokens(
           host.name,
           host.uid ?? '',
-          this.resolveWorkflowControlScopesForHost(host, hasChannelIngress)
+          this.resolveWorkflowControlScopesForHost(host, hasChannelIngress, frontsOAuthServer)
         )
         const gfs = await mintHostGfsToken({ name: host.name, namespace: host.namespace })
         const body = buildMcpHostRuntimeTokenSecret(
@@ -1546,6 +1705,7 @@ export class HostReconciler {
               nowMs,
               gfs.expiresInSeconds,
               hasChannelIngress,
+              frontsOAuthServer,
               existing?.metadata?.annotations?.[GFS_TOKEN_HOST_UID_ANNOTATION]
             ),
             [RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION]: RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH,
@@ -4105,7 +4265,8 @@ export class HostReconciler {
         revalidateHostMutationBoundary()
         const currentScopeHash = HostReconciler.runtimeTokenScopeHash(
           host,
-          this.hasChannelIngress(host)
+          this.hasChannelIngress(host),
+          await this.frontsOAuthServer(host)
         )
         if (runtimeTokenProvision.scopeHash === currentScopeHash) return
 
@@ -4117,7 +4278,8 @@ export class HostReconciler {
         revalidateHostMutationBoundary()
         const postProvisionScopeHash = HostReconciler.runtimeTokenScopeHash(
           host,
-          this.hasChannelIngress(host)
+          this.hasChannelIngress(host),
+          await this.frontsOAuthServer(host)
         )
         if (runtimeTokenProvision.scopeHash === postProvisionScopeHash) return
 
@@ -4140,7 +4302,8 @@ export class HostReconciler {
         const effective = await resolveDeploymentLifecycle()
         const currentScopeHash = HostReconciler.runtimeTokenScopeHash(
           host,
-          this.hasChannelIngress(host)
+          this.hasChannelIngress(host),
+          await this.frontsOAuthServer(host)
         )
         if (runtimeTokenProvision.scopeHash === currentScopeHash) {
           revalidateHostMutationBoundary()

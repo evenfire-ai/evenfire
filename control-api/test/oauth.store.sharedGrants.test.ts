@@ -7,6 +7,7 @@ import {
   deleteOAuthGrant,
   getOAuthGrant,
   oauthGrantExists,
+  refreshOAuthGrantTokens,
   upsertOAuthGrant,
 } from '../src/oauth/store.js'
 
@@ -77,16 +78,21 @@ describe('oauth store — shared (context-identity) grants', () => {
     expect(out.inserted).toBe(false)
   })
 
-  it('upsertOAuthGrant(shared) is a plain UPDATE by key and never touches bootstrapped_by_user_id', async () => {
-    const { db, calls } = fakeDb()
-    await upsertOAuthGrant(db, KEY, {
+  it('refreshOAuthGrantTokens(shared) is a plain UPDATE by key and never touches bootstrapped_by_user_id', async () => {
+    // R1-B1: the shared "Refresh path ONLY" UPDATE now lives in
+    // refreshOAuthGrantTokens (folded out of upsertOAuthGrant); upsertOAuthGrant
+    // rejects shared grants (asserted below).
+    const { db, calls } = fakeDb([{ id: 1 }], 1)
+    const out = await refreshOAuthGrantTokens(db, KEY, {
       ...SHARED_KEY,
       provider: 'google',
       accessToken: 'A2',
       refreshToken: 'R2',
       accessTokenExpiresInSec: 3600,
     })
+    expect(out.updated).toBe(true)
     expect(calls[0].text).toContain('UPDATE oauth_grants')
+    expect(calls[0].text).toContain('RETURNING id')
     expect(calls[0].text).not.toContain('INSERT INTO oauth_grants')
     expect(calls[0].text).not.toContain('bootstrapped_by_user_id')
     expect(calls[0].text).toContain("grant_kind = 'shared'")
@@ -97,6 +103,23 @@ describe('oauth store — shared (context-identity) grants', () => {
       'ctx-9',
       'google-drive',
     ])
+  })
+
+  it('refreshOAuthGrantTokens returns updated=false when no row matched (grant deleted mid-refresh)', async () => {
+    const { db } = fakeDb([], 0)
+    const out = await refreshOAuthGrantTokens(db, KEY, {
+      ...SHARED_KEY,
+      provider: 'google',
+      accessToken: 'A2',
+    })
+    expect(out.updated).toBe(false)
+  })
+
+  it('upsertOAuthGrant rejects a shared grant (consent uses bootstrapSharedOAuthGrant)', async () => {
+    const { db } = fakeDb()
+    await expect(
+      upsertOAuthGrant(db, KEY, { ...SHARED_KEY, provider: 'google', accessToken: 'A2' })
+    ).rejects.toThrow('does not handle shared grants')
   })
 
   it('getOAuthGrant(shared) filters owner_kind + context_id + grant_kind=shared and maps audit columns', async () => {

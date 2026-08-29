@@ -949,6 +949,11 @@ export class McpServerWatcher implements McpServerProvider {
     // Wire the cross-CRD lookup the HostReconciler needs to mount each
     // referenced SharedFileSystem RO into the per-Host mcp-host pod.
     this.hostReconciler.setResolveContextMounts(host => this.resolveContextMounts(host))
+    // Wire the oauth-server probe the HostReconciler uses to gate the
+    // derive-only `oauth:user-token` runtime scope: true iff the Host's Context
+    // fronts an enabled `auth.type: oauth` mcp-server. Reuses the same
+    // Context-scoped allow-list projection as mcp-host discovery.
+    this.hostReconciler.setHostFrontsOAuthServer(host => this.hostFrontsOAuthServer(host))
     // #281: HostReconciler drives channel-reader Deployment replicas from
     // the CC count below, populated by the CommunicationChannel watch
     // (see startCommunicationChannelWatch).
@@ -2427,6 +2432,20 @@ export class McpServerWatcher implements McpServerProvider {
    * no matching SharedFileSystem CRD are skipped (and logged) so the pod
    * can still come up while the operator catches up.
    */
+  /**
+   * True iff the Host's referenced Context fronts at least one ENABLED
+   * `auth.type: oauth` mcp-server. HostReconciler uses this to gate the
+   * derive-only `oauth:user-token` runtime scope. Reads the same
+   * Context-scoped allow-list projection (`getServerInfosByContext`, which
+   * already filters to enabled + allowed servers) that mcp-host discovery uses,
+   * so HCC does not need a second cross-CRD read path. HostReconciler wraps this
+   * call in a fail-closed guard, so a thrown read there yields no oauth scope.
+   */
+  private async hostFrontsOAuthServer(host: HostCRD): Promise<boolean> {
+    const servers = await this.getServerInfosByContext(host.spec.contextRef)
+    return servers.some(server => server.enabled && server.auth?.type === 'oauth')
+  }
+
   private async resolveContextMounts(host: HostCRD): Promise<ResolvedSfsMount[]> {
     const context = this.contexts.get(host.spec.contextRef)
     const refs = context?.spec.sharedFileSystems ?? []
@@ -2619,6 +2638,11 @@ export class McpServerWatcher implements McpServerProvider {
       contextRef: server.spec.contextRef,
       transport,
       auth: server.spec.auth,
+      // Discovery metadata only: the OAuth block is projected verbatim, but
+      // mcp-host does NOT read it — per-connection partition dispatch is driven
+      // by `authKind` (derived separately from the AuthorityMcpServer store),
+      // so this field currently has no consumer. Token is NEVER mounted (O4).
+      oauth: server.spec.oauth,
       enabled: server.spec.enabled !== false,
       status: this.reconciler.getStatus(server),
     }
@@ -4911,6 +4935,8 @@ export function createMcpAuthorizationStore(provider: McpServerProvider): McpAut
           description: object.spec.description,
           transport: { ...object.spec.transport },
           auth: object.spec.auth ? { ...object.spec.auth } : undefined,
+          // grantScope drives the inventory authKind derivation (mini-spec 10 §3.1).
+          oauth: object.spec.oauth ? { ...object.spec.oauth } : undefined,
           enabled: object.spec.enabled !== false,
           status,
         }

@@ -18,6 +18,19 @@ vi.mock('../src/oauth/store.js', async importActual => {
   }
 })
 
+// The resolver logs the fail-closed exclusion through the pino child logger
+// (`rootLogger.child({ module: 'mcpInvocable' })` — see mcpInvocable.ts:41,286),
+// not console.*. Capture the child's `.error` so the fail-closed-logging
+// assertion is real (the mock's child ignores its bindings, so every module
+// child shares this one `error` spy).
+const loggerMock = vi.hoisted(() => {
+  const error = vi.fn()
+  const noop = vi.fn()
+  const child = () => ({ error, info: noop, warn: noop, debug: noop, trace: noop, fatal: noop })
+  return { error, rootLogger: { child, error, info: noop, warn: noop, debug: noop } }
+})
+vi.mock('../src/observability/logger.js', () => ({ rootLogger: loggerMock.rootLogger }))
+
 const { resolveInvocableMcpServersForContexts } =
   await import('../src/services/access/mcpInvocable.js')
 
@@ -248,12 +261,18 @@ describe('resolveInvocableMcpServersForContexts — fail-closed + non-oauth', ()
       if (input.recipeName === 'broken') throw new Error('db down')
       return true // 'good'
     })
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     const out = await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], CALLER, DB)
-    // 'broken' excluded (fail-closed), 'plain' (none) + 'good' survive. Sorted.
+    // Observable outcome (T4): 'broken' excluded (fail-closed on its DB error),
+    // 'plain' (none) + 'good' survive. Sorted.
     expect(names(out)).toEqual(['good', 'plain'])
-    expect(errSpy).toHaveBeenCalled()
-    errSpy.mockRestore()
+    // Fail-closed exclusions must be LOUD: the DB error on 'broken' is logged
+    // via the module's pino child `log.error` (mcpInvocable.ts:286). Assert it
+    // fires with the offending server + err, so a silent-swallow regression
+    // (dropping the log.error) turns this test red.
+    expect(loggerMock.error).toHaveBeenCalledWith(
+      expect.objectContaining({ mcpServerName: 'broken', err: expect.any(Error) }),
+      expect.stringContaining('grant-presence check failed')
+    )
   })
 })

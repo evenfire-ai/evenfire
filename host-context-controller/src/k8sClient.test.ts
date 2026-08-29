@@ -374,6 +374,7 @@ vi.mock('./hostReconciler', () => ({
     reconcile = vi.fn()
     reconcileDelete = vi.fn()
     setResolveContextMounts = vi.fn()
+    setHostFrontsOAuthServer = vi.fn()
     // §10.4/§10.5 wiring: McpServerWatcher injects the live Host-cache resolver
     // and the watch-authority snapshot into HostReconciler at construction.
     setResolveCurrentHost = vi.fn()
@@ -10298,6 +10299,76 @@ describe('externalEgressResyncDelayMs (issue #299 H2)', () => {
   })
 })
 
+describe('McpServerWatcher.hostFrontsOAuthServer (oauth:user-token scope probe)', () => {
+  const hostFor = (contextRef: string): HostCRD =>
+    ({
+      name: 'h',
+      namespace: 'mcp-host',
+      spec: { host: 'h', contextRef, secretRef: 's' },
+    }) as HostCRD
+
+  // Build a REAL McpServerCRD (the shape held in the watcher's server cache),
+  // so the fixture flows through the REAL getServerInfosByContext filter +
+  // toServerInfo projection — not a hand-written McpServerInfo (R1-L6, T1).
+  const serverCRD = (over: { name?: string; auth?: { type: string }; enabled?: boolean }): any => ({
+    name: over.name ?? 'notion',
+    namespace: 'mcp-server',
+    spec: {
+      contextRef: 'ctx',
+      transport: { type: 'streamableHttp', url: 'http://notion/mcp', port: 8080 },
+      auth: over.auth ?? { type: 'oauth' },
+      enabled: over.enabled ?? true,
+    },
+  })
+
+  /** Drive the REAL getServerInfosByContext: populate the server cache and answer
+   *  the Context read the producer makes with an allow-list of those servers. */
+  const withServers = (watcher: McpServerWatcher, servers: any[]): void => {
+    for (const s of servers) (watcher as any).servers.set(s.name, s)
+    mocks.getNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) =>
+      plural === 'contexts'
+        ? {
+            metadata: { name: 'ctx', namespace: 'mcp-server' },
+            spec: { contextId: 'ctx', mcpServers: servers.map(s => s.name) },
+          }
+        : undefined
+    )
+  }
+
+  it('returns true when the Context fronts an enabled auth.type=oauth mcp-server', async () => {
+    const watcher = new McpServerWatcher()
+    withServers(watcher, [serverCRD({ name: 'notion', auth: { type: 'oauth' }, enabled: true })])
+    await expect((watcher as any).hostFrontsOAuthServer(hostFor('ctx'))).resolves.toBe(true)
+    watcher.stop()
+  })
+
+  it('returns false for a non-oauth mcp-server', async () => {
+    const watcher = new McpServerWatcher()
+    withServers(watcher, [serverCRD({ name: 'redis', auth: { type: 'bearer' }, enabled: true })])
+    await expect((watcher as any).hostFrontsOAuthServer(hostFor('ctx'))).resolves.toBe(false)
+    watcher.stop()
+  })
+
+  it('returns false for a disabled oauth mcp-server (filtered by the real producer)', async () => {
+    // The disabled server is dropped by getServerInfosByContext's own
+    // `enabled !== false` filter BEFORE it reaches hostFrontsOAuthServer — so the
+    // producer never emits it. The prior test hand-built an enabled:false
+    // McpServerInfo the producer cannot emit, exercising a dead guard instead of
+    // the real filter (R1-L6).
+    const watcher = new McpServerWatcher()
+    withServers(watcher, [serverCRD({ name: 'notion', auth: { type: 'oauth' }, enabled: false })])
+    await expect((watcher as any).getServerInfosByContext('ctx')).resolves.toEqual([])
+    await expect((watcher as any).hostFrontsOAuthServer(hostFor('ctx'))).resolves.toBe(false)
+    watcher.stop()
+  })
+
+  it('returns false when the Context fronts no servers', async () => {
+    const watcher = new McpServerWatcher()
+    withServers(watcher, [])
+    await expect((watcher as any).hostFrontsOAuthServer(hostFor('ctx'))).resolves.toBe(false)
+    watcher.stop()
+  })
+})
 describe('McpServerWatcher readiness under sustained watch churn (GKE Premature-close regime)', () => {
   // Regression for the clerum-dev livelock. PR #205 coupled /ready to a safety
   // certificate whose validity was pinned to the watch GENERATION. On GKE the

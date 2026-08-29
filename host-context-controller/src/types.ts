@@ -429,6 +429,21 @@ export interface HostWorkflowControlSpec {
 }
 
 /**
+ * Runtime control scopes minted into an mcp-host's control JWT. This is the
+ * DERIVED superset of the user-declarable {@link HostWorkflowControlScope}:
+ * HCC appends `oauth:user-token` for a Host runtime that fronts an enabled
+ * `auth.type: oauth` mcp-server, so the mcp-host can call control-api's OAuth
+ * user-token broker on that connection's behalf.
+ *
+ * `oauth:user-token` is HCC-derived and MUST NEVER be user-declarable: it is
+ * deliberately absent from {@link HostWorkflowControlScope} and from the Host
+ * CRD `spec.workflowControl.scopes` enum. HCC computes it per reconcile from
+ * the referenced Context's McpServer allow-list; nothing writes it back to the
+ * Host CR.
+ */
+export type HostRuntimeControlScope = HostWorkflowControlScope | 'oauth:user-token'
+
+/**
  * A single installed-hook reference inside Host.spec.guardrails.hooks[phase].
  * `id` is the LlmHook CR name (llm-hooks namespace); `digest` is the expected
  * image digest mcp-host binds against status.observedDigest (§8.2).
@@ -612,6 +627,11 @@ export interface McpServerInfo {
   contextRef: string
   transport: McpServerTransport
   auth?: McpServerAuth
+  // OAuth broker config; present iff auth.type === 'oauth'. Discovery metadata
+  // only — mcp-host dispatches the per-connection partition from `authKind`
+  // (derived separately), not from this field, which currently has no consumer.
+  // HCC does NOT mount the resolved token as env (O4 stays intact).
+  oauth?: McpServerOAuth
   enabled: boolean
   status: McpServerStatus
 }

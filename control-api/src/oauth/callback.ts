@@ -6,8 +6,9 @@ import {
   getOAuthProviderAdapter,
   isKnownOAuthProvider,
 } from './providers.js'
+import type { OAuthMcpStateClaims } from './state.js'
 import { signOAuthState, verifyOAuthStateSignature } from './state.js'
-import { setUserGrantBackground, upsertOAuthGrant } from './store.js'
+import { bootstrapSharedOAuthGrant, setUserGrantBackground, upsertOAuthGrant } from './store.js'
 
 /**
  * End-to-end handler for the auth-code OAuth callback. Independent of Express
@@ -64,6 +65,35 @@ export interface RecipeReader {
  */
 export type OwnerDeclReader = RecipeReader
 
+/**
+ * An OAuth McpServer subject, resolved for the U5 callback / authorize-URL
+ * paths. Unlike {@link OwnerDeclReader} (which flattens a server to the
+ * owner-agnostic `oauthClients` shape for the refresh path), this carries the
+ * extra routing the consent flow needs:
+ *   - `namespace` — the mcp-servers namespace the server + its Secrets live in;
+ *     also the grant owner coordinate. Kept on the subject so the pure callback
+ *     never imports config.
+ *   - `grantScope` — `'user'` → per-user grant `(server, userId)`;
+ *     `'context'` → shared grant `(server, contextRef)` (U6 governance).
+ *   - `contextRef` — the AUTHORITATIVE Context (`spec.contextRef`), the shared
+ *     grant coordinate. NEVER taken from the state or a body param.
+ */
+export interface McpServerOAuthSubject {
+  namespace: string
+  decl: OAuthClientDecl
+  grantScope: 'user' | 'context'
+  contextRef?: string
+}
+
+export interface McpServerOAuthReader {
+  /**
+   * Resolve an OAuth McpServer by name from the mcp-servers namespace. Returns
+   * null when the server does not exist or is not a usable OAuth server, so
+   * callers fail closed. May throw {@link RecipeNotFoundError} for a hard 404.
+   */
+  read(mcpServerName: string): Promise<McpServerOAuthSubject | null>
+}
+
 export class SecretNotFoundError extends Error {}
 export class RecipeNotFoundError extends Error {}
 
@@ -87,6 +117,22 @@ export interface CallbackDeps {
   db: DbClient
   recipeReader: RecipeReader
   secretReader: SecretReader
+  /**
+   * Resolver for OAuth McpServer subjects (U5). Required to process an
+   * mcp-subject state; when absent, an mcp state fails closed
+   * (`server_not_found`). Recipe callbacks never touch it.
+   */
+  mcpServerReader?: McpServerOAuthReader
+  /**
+   * Resolve the Contexts a user is a member of (via `user_contexts`). Required
+   * ONLY for the shared-identity mcp bootstrap (`grantScope='context'`): a
+   * shared grant plants a team credential for everyone in the Context, so the
+   * consenting user MUST be a member first. Injected so the pure callback stays
+   * testable; the route wires the real `getUserContexts`. When absent on a
+   * shared-context path, that path fails closed (`context_membership_denied`).
+   * The per-user path never touches it (its key IS the user).
+   */
+  userContextsReader?: (userId: string) => Promise<{ contextIds: string[] }>
   /** Injectable for tests; defaults to globalThis.fetch in production wiring. */
   fetchFn: typeof fetch
   /** HMAC secret used to sign / verify state. */
@@ -113,10 +159,40 @@ export type CallbackResult =
        * established.
        */
       backgroundEnabled: boolean
+      /**
+       * Subject that consented. Absent (undefined) for the recipe subject — the
+       * recipe deep-link is FROZEN and carries no `source`. Set to `'mcp'` for an
+       * OAuth McpServer subject so the route appends `&source=mcp` to the return
+       * deep-link (U5).
+       */
+      source?: 'mcp'
+      /**
+       * The consented mcp-server's name — present only on the `source:'mcp'`
+       * path. Comes from the signed state (authoritative), never a body param.
+       * The route forwards it into the deep-link (`&mcpServerName=…`) so the
+       * desktop can correlate which suspended task to resume under concurrent
+       * suspensions.
+       */
+      mcpServerName?: string
     }
   | { kind: 'invalid_state'; reason: string }
   | { kind: 'unknown_oauth_client' }
   | { kind: 'recipe_not_found' }
+  /** mcp subject: the McpServer named in the signed state does not exist / is not OAuth. */
+  | { kind: 'server_not_found' }
+  /**
+   * mcp subject with `grantScope='context'` but no authoritative `spec.contextRef`
+   * — the shared grant coordinate is unresolvable, so there is nothing safe to
+   * persist. Fail closed (mini-spec 05 §2).
+   */
+  | { kind: 'server_missing_context' }
+  /**
+   * mcp subject with `grantScope='context'` where the consenting (signed) user
+   * is NOT a member of the server's Context. A shared grant lends a team-wide
+   * credential, so a non-member must not be able to bootstrap it. Fail closed →
+   * 403, no persist.
+   */
+  | { kind: 'context_membership_denied' }
   | { kind: 'secret_missing'; secret: string }
   | { kind: 'unsupported_provider'; provider: string }
   | { kind: 'provider_token_exchange_failed'; status: number; body: string }
@@ -131,11 +207,11 @@ export async function handleOAuthCallback(
   deps: CallbackDeps
 ): Promise<CallbackResult> {
   // ─── 1. Verify state signature, recover binding from the claims ───────
-  // The callback URL no longer carries (recipeNamespace, recipeName) — they are
+  // The callback URL no longer carries the subject coordinates — they are
   // recovered from the signed, unforgeable state. The oauthClientId still rides
   // the stable URL path, so cross-check it against the claims for defence in
-  // depth. The recipe identity itself needs no such check: the HMAC guarantees
-  // it, and both authorize-url minters only ever sign sandbox-namespace states.
+  // depth. The subject identity itself needs no such check: the HMAC guarantees
+  // it, and every authorize-url minter only signs its own namespace's states.
   const verified = verifyOAuthStateSignature(deps.stateSecret, input.state)
   if (verified.kind !== 'ok') {
     return { kind: 'invalid_state', reason: verified.kind }
@@ -144,6 +220,13 @@ export async function handleOAuthCallback(
   if (claims.oauthClientId !== input.oauthClientId) {
     return { kind: 'invalid_state', reason: 'binding_mismatch' }
   }
+
+  // Dispatch by the signed subject. mcp subjects go to their own handler; the
+  // recipe path below is unchanged (byte-identical grant persistence).
+  if (claims.subjectKind === 'mcp') {
+    return handleMcpOAuthCallback(claims, input, deps)
+  }
+
   const recipeNamespace = claims.recipeNamespace
   const recipeName = claims.recipeName
   const oauthClientId = claims.oauthClientId
@@ -166,83 +249,10 @@ export async function handleOAuthCallback(
   const clientDecl = recipe.spec?.oauthClients?.find(c => c.id === oauthClientId)
   if (!clientDecl) return { kind: 'unknown_oauth_client' }
 
-  // ─── 3. Read clientId + clientSecret from K8s Secrets ─────────────────
-  let clientIdSecret: Record<string, string>
-  try {
-    clientIdSecret = await deps.secretReader.read(clientDecl.clientIdRef.name, recipeNamespace)
-  } catch (err) {
-    if (err instanceof SecretNotFoundError) {
-      return { kind: 'secret_missing', secret: clientDecl.clientIdRef.name }
-    }
-    throw err
-  }
-  const clientId = clientIdSecret[clientDecl.clientIdRef.key]
-  if (!clientId)
-    return {
-      kind: 'secret_missing',
-      secret: `${clientDecl.clientIdRef.name}/${clientDecl.clientIdRef.key}`,
-    }
-
-  let clientSecretSecret: Record<string, string>
-  try {
-    clientSecretSecret = await deps.secretReader.read(
-      clientDecl.clientSecretRef.name,
-      recipeNamespace
-    )
-  } catch (err) {
-    if (err instanceof SecretNotFoundError) {
-      return { kind: 'secret_missing', secret: clientDecl.clientSecretRef.name }
-    }
-    throw err
-  }
-  const clientSecret = clientSecretSecret[clientDecl.clientSecretRef.key]
-  if (!clientSecret) {
-    return {
-      kind: 'secret_missing',
-      secret: `${clientDecl.clientSecretRef.name}/${clientDecl.clientSecretRef.key}`,
-    }
-  }
-
-  // ─── 4. Exchange code with provider ───────────────────────────────────
-  const provider = clientDecl.provider
-  if (!isKnownOAuthProvider(provider)) {
-    return { kind: 'unsupported_provider', provider }
-  }
-  const adapter = getOAuthProviderAdapter(provider)
-  // PKCE (DEC-1): re-derive the verifier from the EXACT round-tripped state
-  // string — the same signed value the authorize URL derived its challenge from.
-  const codeVerifier = adapter.usesPkce
-    ? deriveCodeVerifier(deps.stateSecret, input.state)
-    : undefined
-  const tokenRequest = adapter.buildTokenRequest({
-    code: input.code,
-    clientId,
-    clientSecret,
-    redirectUri: input.redirectUri,
-    codeVerifier,
-  })
-
-  let parsed: ParsedTokenResponse
-  try {
-    const response = await deps.fetchFn(tokenRequest.url, {
-      method: tokenRequest.method,
-      headers: tokenRequest.headers,
-      body: tokenRequest.body,
-      signal: AbortSignal.timeout(deps.tokenRequestTimeoutMs ?? 15_000),
-    })
-    if (!response.ok) {
-      const body = await safeReadText(response)
-      return {
-        kind: 'provider_token_exchange_failed',
-        status: response.status,
-        body,
-      }
-    }
-    const responseJson = await response.json()
-    parsed = adapter.parseTokenResponse(responseJson)
-  } catch (err) {
-    return { kind: 'provider_response_invalid', detail: (err as Error).message }
-  }
+  // ─── 3-4. Read secrets + exchange code ────────────────────────────────
+  const exchanged = await exchangeAuthCode(clientDecl, recipeNamespace, input, deps)
+  if (exchanged.kind !== 'ok') return exchanged
+  const { provider, parsed } = exchanged
 
   // ─── 5. Encrypt + persist ─────────────────────────────────────────────
   // A `service` grant is recipe-owned: no `userId` column. A `user` grant
@@ -298,6 +308,210 @@ export async function handleOAuthCallback(
   }
 
   return { kind: 'ok', provider, userId, grantKind, backgroundRequested, backgroundEnabled }
+}
+
+/**
+ * mcp-subject callback (U5). The signed state binds the initiating `userId` and
+ * the `mcpServerName`; the server's OAuth declaration + grant-scope routing are
+ * recovered fresh from the CR (authoritative), NOT from the state or any body.
+ *
+ * Persistence connects to the U1 store primitives (no reimplementation):
+ *   - `grantScope='user'`    → `upsertOAuthGrant` `(mcpserver, ns, name, userId)`.
+ *   - `grantScope='context'` → `bootstrapSharedOAuthGrant` `(mcpserver, ns, name,
+ *     spec.contextRef)`, bootstrapper = the signed `userId` (first-consent wins;
+ *     U6 governance). The Context comes from the AUTHORITATIVE `spec.contextRef`,
+ *     never the state — so no context field is (or needs to be) bound into the
+ *     mcp state in v1.
+ */
+async function handleMcpOAuthCallback(
+  claims: OAuthMcpStateClaims,
+  input: CallbackInput,
+  deps: CallbackDeps
+): Promise<CallbackResult> {
+  // Fail closed: an mcp state cannot be processed without an mcp reader wired.
+  if (!deps.mcpServerReader) return { kind: 'server_not_found' }
+
+  let subject: McpServerOAuthSubject | null
+  try {
+    subject = await deps.mcpServerReader.read(claims.mcpServerName)
+  } catch (err) {
+    if (err instanceof RecipeNotFoundError) return { kind: 'server_not_found' }
+    throw err
+  }
+  if (!subject) return { kind: 'server_not_found' }
+
+  // Defence in depth: the resolved server's declared oauthClient must match the
+  // one bound in the (already-cross-checked) signed state + callback path.
+  if (subject.decl.id !== input.oauthClientId) {
+    return { kind: 'invalid_state', reason: 'binding_mismatch' }
+  }
+
+  // ─── Membership guards run BEFORE the token exchange (R3-L1) ──────────────
+  // These guards depend only on the signed claims + the resolved subject
+  // (`subject.contextRef`, `deps.userContextsReader`, `claims.userId`) — never
+  // on the token. Running them first means a user removed from the Context
+  // during the ~600s mint→callback window fails here instead of first driving
+  // `exchangeAuthCode`, which burns the single-use auth-code against the
+  // provider and yields a real token only to discard it at a 403. The mint is
+  // still the primary gate, so this is not exploitable head-on; it just avoids
+  // the pointless exchange + code burn. Persistence (below) stays after the
+  // exchange, unchanged.
+  //
+  // `contextRef` is set iff this is a context-scoped grant that passed the
+  // membership guard; the persistence dispatch below keys off it (non-undefined
+  // ⇒ shared bootstrap), which also re-narrows it to `string` without a `!`.
+  let contextRef: string | undefined
+  if (subject.grantScope === 'context') {
+    // Shared identity — the coordinate is the server's authoritative contextRef.
+    // Without it there is nothing safe to key the grant on: fail closed.
+    if (!subject.contextRef) return { kind: 'server_missing_context' }
+    // Defence in depth: a shared grant lends a team-wide credential to every
+    // member of the Context, so the consenting (signed) user must be a member
+    // of that Context before we let them bootstrap it. Fail closed when the
+    // membership reader is unwired or the user is not a member — NEVER persist.
+    if (!deps.userContextsReader) return { kind: 'context_membership_denied' }
+    const { contextIds } = await deps.userContextsReader(claims.userId)
+    if (!contextIds.includes(subject.contextRef)) {
+      return { kind: 'context_membership_denied' }
+    }
+    contextRef = subject.contextRef
+  }
+
+  const exchanged = await exchangeAuthCode(subject.decl, subject.namespace, input, deps)
+  if (exchanged.kind !== 'ok') return exchanged
+  const { provider, parsed } = exchanged
+
+  if (contextRef !== undefined) {
+    // Context-scoped grant, membership already verified above.
+    await bootstrapSharedOAuthGrant(deps.db, deps.encryptionKey, {
+      ownerKind: 'mcpserver',
+      recipeNamespace: subject.namespace,
+      recipeName: claims.mcpServerName,
+      contextId: contextRef,
+      oauthClientId: input.oauthClientId,
+      // Bootstrapper = the signed initiator. Audit-only, first-wins on conflict.
+      bootstrappedByUserId: claims.userId,
+      provider,
+      accessToken: parsed.accessToken,
+      refreshToken: parsed.refreshToken,
+      accessTokenExpiresInSec: parsed.expiresIn,
+    })
+  } else {
+    await upsertOAuthGrant(deps.db, deps.encryptionKey, {
+      grantKind: 'user',
+      ownerKind: 'mcpserver',
+      recipeNamespace: subject.namespace,
+      recipeName: claims.mcpServerName,
+      userId: claims.userId,
+      oauthClientId: input.oauthClientId,
+      provider,
+      accessToken: parsed.accessToken,
+      refreshToken: parsed.refreshToken,
+      accessTokenExpiresInSec: parsed.expiresIn,
+    })
+  }
+
+  return {
+    kind: 'ok',
+    provider,
+    userId: claims.userId,
+    grantKind: claims.grantKind,
+    // mcp interactive consent never captures background; the broker resolves
+    // tokens JIT against a live session.
+    backgroundRequested: false,
+    backgroundEnabled: false,
+    source: 'mcp',
+    // Authoritative — from the signed state, never a body param. Lets the
+    // desktop correlate which suspended task to resume.
+    mcpServerName: claims.mcpServerName,
+  }
+}
+
+type ExchangeAuthCodeResult =
+  | { kind: 'ok'; provider: OAuthProvider; parsed: ParsedTokenResponse }
+  | { kind: 'unknown_oauth_client' }
+  | { kind: 'secret_missing'; secret: string }
+  | { kind: 'unsupported_provider'; provider: string }
+  | { kind: 'provider_token_exchange_failed'; status: number; body: string }
+  | { kind: 'provider_response_invalid'; detail: string }
+
+/**
+ * Read the (clientId, clientSecret) Secrets for a declaration, then exchange the
+ * auth code with the provider. Shared verbatim by the recipe and mcp callbacks
+ * so the token-exchange rule lives once (D4). The recipe path's observable
+ * result kinds and ordering are unchanged.
+ */
+async function exchangeAuthCode(
+  decl: OAuthClientDecl,
+  secretNamespace: string,
+  input: CallbackInput,
+  deps: CallbackDeps
+): Promise<ExchangeAuthCodeResult> {
+  let clientIdSecret: Record<string, string>
+  try {
+    clientIdSecret = await deps.secretReader.read(decl.clientIdRef.name, secretNamespace)
+  } catch (err) {
+    if (err instanceof SecretNotFoundError) {
+      return { kind: 'secret_missing', secret: decl.clientIdRef.name }
+    }
+    throw err
+  }
+  const clientId = clientIdSecret[decl.clientIdRef.key]
+  if (!clientId) {
+    return { kind: 'secret_missing', secret: `${decl.clientIdRef.name}/${decl.clientIdRef.key}` }
+  }
+
+  let clientSecretSecret: Record<string, string>
+  try {
+    clientSecretSecret = await deps.secretReader.read(decl.clientSecretRef.name, secretNamespace)
+  } catch (err) {
+    if (err instanceof SecretNotFoundError) {
+      return { kind: 'secret_missing', secret: decl.clientSecretRef.name }
+    }
+    throw err
+  }
+  const clientSecret = clientSecretSecret[decl.clientSecretRef.key]
+  if (!clientSecret) {
+    return {
+      kind: 'secret_missing',
+      secret: `${decl.clientSecretRef.name}/${decl.clientSecretRef.key}`,
+    }
+  }
+
+  const provider = decl.provider
+  if (!isKnownOAuthProvider(provider)) {
+    return { kind: 'unsupported_provider', provider }
+  }
+  const adapter = getOAuthProviderAdapter(provider)
+  // PKCE (DEC-1): re-derive the verifier from the EXACT round-tripped state
+  // string — the same signed value the authorize URL derived its challenge from.
+  const codeVerifier = adapter.usesPkce
+    ? deriveCodeVerifier(deps.stateSecret, input.state)
+    : undefined
+  const tokenRequest = adapter.buildTokenRequest({
+    code: input.code,
+    clientId,
+    clientSecret,
+    redirectUri: input.redirectUri,
+    codeVerifier,
+  })
+
+  try {
+    const response = await deps.fetchFn(tokenRequest.url, {
+      method: tokenRequest.method,
+      headers: tokenRequest.headers,
+      body: tokenRequest.body,
+      signal: AbortSignal.timeout(deps.tokenRequestTimeoutMs ?? 15_000),
+    })
+    if (!response.ok) {
+      const body = await safeReadText(response)
+      return { kind: 'provider_token_exchange_failed', status: response.status, body }
+    }
+    const responseJson = await response.json()
+    return { kind: 'ok', provider, parsed: adapter.parseTokenResponse(responseJson) }
+  } catch (err) {
+    return { kind: 'provider_response_invalid', detail: (err as Error).message }
+  }
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────

@@ -501,6 +501,16 @@ export interface PendingApproval {
   intent_summary?: string
   /** Exact active-turn context retained while this approval is pending. */
   traceContext?: TraceContextV1 | null
+  /**
+   * U5 — suspension reason. Absent / 'approval_required' is the default HITL
+   * gate (back-compat). 'connect_required' is a REACTIVE OAuth-consent
+   * suspension: the live tool call surfaced a 401 on an oauth mcp-server and the
+   * user must (re)connect before the tool can run. Persisted durably so a cold
+   * restart rehydrates the right kind of suspension — never a generic approval.
+   */
+  reason?: 'approval_required' | 'connect_required'
+  /** U5 — the oauth mcp-server to connect. Set iff reason==='connect_required'. */
+  mcpServerName?: string
 }
 
 // ─── Loop Types ─────────────────────────────────────────────
