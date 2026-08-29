@@ -14,6 +14,7 @@ import {
   type WebhookVerificationScheme,
   type WorkflowRecipeCRD,
   type WorkflowRecipePolicySpec,
+  type WorkflowRecipeSpec,
   type WorkflowRecipeStatus,
   type WorkloadDef,
   type WorkloadStatus,
@@ -577,5 +578,18 @@ describe('OAuthClientDef shape (O1.1)', () => {
     }
     expect(crd.spec.oauthClients).toHaveLength(2)
     expect(crd.spec.oauthClients?.[0].provider).toBe('salesforce')
+  })
+})
+
+describe('codex-subscription agent', () => {
+  it('allows a Codex-only agent without secretRef', () => {
+    const spec: WorkflowRecipeSpec = {
+      agent: {
+        model: 'gpt-5.1',
+        provider: 'codex-subscription',
+      },
+    }
+    expect(spec.agent?.secretRef).toBeUndefined()
+    expect(spec.agent?.provider).toBe('codex-subscription')
   })
 })

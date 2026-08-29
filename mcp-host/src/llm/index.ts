@@ -1,9 +1,14 @@
 /**
  * LLM Provider factory.
  */
+import { config } from '../config'
 import { ApiKeys, ModelConfig } from '../types'
 import { ClaudeProvider } from './claude'
+import { CodexLlmProxyClient, resolveCodexProxyRuntimeUrl } from './codexLlmProxyClient'
+import { readCodexPlatformJwt, refreshCodexPlatformJwt } from './codexPlatformJwt'
+import { readLiveCodexPolicyBinding, resolveCodexAttemptPolicy } from './codexPolicyBinding'
 import { OpenAIProvider } from './openai'
+import { ProviderAttemptAuthorizer, resolveCodexAuthorizeUrl } from './providerAttemptAuthorizer'
 import { makeProvider } from './registry'
 import { ALL_PROVIDERS, descriptorFor, isLlmProvider } from './registryCore'
 // Re-export the transport interfaces (moved to ./types to break the registry
@@ -12,6 +17,40 @@ import { ALL_PROVIDERS, descriptorFor, isLlmProvider } from './registryCore'
 import type { ClassifiedError, SingleTurnProvider } from './types'
 
 export type { ClassifiedError, SingleTurnProvider } from './types'
+
+const DEFAULT_CODEX_AUTHORIZE_GATEWAY =
+  'http://nginx-workflow-approval-gateway.control-plane.svc.cluster.local:8092'
+
+function createCodexRuntimeDeps() {
+  const gateway = (config.mcpHostGatewayUrl ?? '').trim() || DEFAULT_CODEX_AUTHORIZE_GATEWAY
+  return {
+    authorizer: new ProviderAttemptAuthorizer({
+      authorizeUrl: resolveCodexAuthorizeUrl(gateway),
+      readPlatformJwt: readCodexPlatformJwt,
+      refreshOnUnauthorized: refreshCodexPlatformJwt,
+    }),
+    proxy: new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(config.codexProxyRuntimeBaseUrl),
+      readPlatformJwt: readCodexPlatformJwt,
+      refreshOnUnauthorized: refreshCodexPlatformJwt,
+    }),
+    attemptContext: ({ model }: { model: string }) => {
+      const resolved = resolveCodexAttemptPolicy({
+        model,
+        envRevision: config.codexPolicyRevision,
+        envHash: config.codexPolicyHash,
+        binding: readLiveCodexPolicyBinding(),
+      })
+      if (!resolved) {
+        return { policyRevision: 0, policyHash: '' }
+      }
+      return {
+        ...resolved,
+        hostRef: config.hostName,
+      }
+    },
+  }
+}
 
 /**
  * Create an LLM provider based on configuration.
@@ -24,7 +63,7 @@ export function createLLMProvider(
   const modelName = modelConfig?.name
 
   if (!isLlmProvider(provider)) {
-    console.error(`[LLM] Unknown provider: ${provider}`)
+    console.error('[LLM] Unknown provider')
     return null
   }
 
@@ -35,7 +74,7 @@ export function createLLMProvider(
   const credentials = keys[provider] ?? {}
   for (const slot of descriptorFor(provider).credentialSlots) {
     if (slot.required && !credentials[slot.dataKey]) {
-      console.error(`[LLM] ${provider} credential '${slot.dataKey}' not found in secrets`)
+      console.error('[LLM] required credential missing from secrets')
       return null
     }
   }
@@ -47,12 +86,14 @@ export function createLLMProvider(
   // never throw here (their empty-key case is already handled above), so their
   // behaviour is byte-identical.
   try {
-    return makeProvider(provider, credentials, modelName)
-  } catch (err) {
-    console.error(
-      `[LLM] failed to construct ${provider}:`,
-      err instanceof Error ? err.message : String(err)
+    return makeProvider(
+      provider,
+      credentials,
+      modelName,
+      provider === 'codex-subscription' ? { codex: createCodexRuntimeDeps() } : undefined
     )
+  } catch (err) {
+    console.error('[LLM] failed to construct provider')
     return null
   }
 }
@@ -67,6 +108,7 @@ export function createLLMProvider(
 export function apiKeysFromEnv(env: NodeJS.ProcessEnv = process.env): ApiKeys {
   const keys: ApiKeys = {}
   for (const p of ALL_PROVIDERS) {
+    if (descriptorFor(p).authMode !== 'static-credentials') continue
     const slots = descriptorFor(p).credentialSlots
     const bag: Record<string, string> = {}
     for (const slot of slots) {

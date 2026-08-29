@@ -22,6 +22,7 @@ import { createInternalAdministrativeEventsRouter } from './routes/internal/admi
 import { createInternalAgentRunEventsRouter } from './routes/internal/agentRunEvents.js'
 import { createInternalBudgetsCheckRouter } from './routes/internal/budgetsCheck.js'
 import { createInternalInfrastructureTelemetryEventsRouter } from './routes/internal/infrastructureTelemetryEvents.js'
+import { createInternalLlmProviderAttemptRoutes } from './routes/internal/llmProviderAttempts.js'
 import { createInternalOAuthRouter } from './routes/internal/oauth.js'
 import { createInternalPluginWorkloadSdkRouter } from './routes/internal/pluginWorkloadSdk.js'
 import { createInternalSandboxUiRouter } from './routes/internal/sandboxUi.js'
@@ -241,6 +242,7 @@ export function createApp(gateway: K8sGateway) {
   // gates the boundary; the public-facing cookie-authed endpoints live in
   // rpc-proxy and forward here with the user identity asserted in the body.
   api.use(createInternalOAuthRouter(gateway))
+  api.use(createInternalLlmProviderAttemptRoutes())
   app.use('/api/v1', api)
 
   app.use((_req, res) => {

@@ -22,6 +22,13 @@ describe('token-leak redaction', () => {
     expect(TOKEN_LEAK_REDACT_PATHS).toContain('refreshToken')
   })
 
+  it('redacts ChatGPT account identifiers', () => {
+    expect(TOKEN_LEAK_REDACT_PATHS).toContain('chatgptAccountId')
+    expect(TOKEN_LEAK_REDACT_PATHS).toContain('accountId')
+    expect(REQUIRED_REDACT_PATHS).toContain('chatgptAccountId')
+    expect(REQUIRED_REDACT_PATHS).toContain('accountId')
+  })
+
   it('redacts the registry voucher field (defense-in-depth)', () => {
     expect(TOKEN_LEAK_REDACT_PATHS).toContain('voucher')
   })

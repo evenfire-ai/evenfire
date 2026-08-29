@@ -35,6 +35,9 @@ data:
   # Self-hosted-only GFS operator parity. Managed/base deployments remain
   # fail-closed because this narrow elevation flag is absent there.
   CONTROL_API_DESKTOP_GFS_OPERATOR_LINKING_ENABLED: 'true'
+  # Branch profiles use profile-owned random port-forwards; run
+  # `make minikube-sync-codex-subscription-url` after pf-all-stack to align
+  # Codex subscription browser OAuth redirect_uri with the live Control UI origin.
   CONTROL_API_CONTROL_UI_BASE_URL: 'http://127.0.0.1:3000'
   CONTROL_API_CONTROL_UI_APP_NAME: 'Evenfire'
   CONTROL_API_POLICY_AUTH_AUDIENCE: 'control-api'
@@ -99,3 +102,10 @@ data:
   # it. Set the line below to 'false' to hide it explicitly.
   # CONTROL_API_PUBLISHER_UI_ENABLED: 'false'
   CLERUM_ATTACHMENT_MAX_BYTES: '52428800'
+  CONTROL_API_CODEX_SUBSCRIPTION_ENABLED: 'true'
+  CODEX_LLM_PROXY_EXECUTION_ENABLED: 'true'
+  # Codex browser OAuth redirect_uri derives from this control-ui origin plus
+  # /control-api/api/v1/auth/codex-subscription/callback. Loopback profiles may
+  # override via the browser Origin header when both sides are 127.0.0.1/localhost.
+  # Browser connect requires CONTROL_API_CODEX_OAUTH_CLIENT_ID registered with OpenAI
+  # for that exact callback URL; the default CLI client supports device code only.

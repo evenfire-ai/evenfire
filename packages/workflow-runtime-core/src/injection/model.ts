@@ -1,4 +1,4 @@
-import type { LlmProviderId } from '@clerum/llm-providers'
+import { PROVIDER_AUTH_MODE, isLlmProviderId, type LlmProviderId } from '@clerum/llm-providers'
 import type { RuntimeTokenProvider } from '../runtime-token-provider/provider'
 import { requireRuntimeToken } from '../runtime-token-provider/provider'
 import { sendWithAuthRetryOn401 } from '../status-reporter/authRetry'
@@ -49,6 +49,22 @@ export async function requestModelInjection(
   )
   if (!resp.ok) {
     const msg = `Model injection failed: ${resp.status} ${resp.statusText}`
+    emitLog('error', msg, { stepId: req.stepId })
+    throw new Error(msg)
+  }
+  let payload: Record<string, unknown> = {}
+  try {
+    const parsed: unknown = await resp.json()
+    if (parsed && typeof parsed === 'object') payload = parsed as Record<string, unknown>
+  } catch {
+    payload = {}
+  }
+  if (
+    isLlmProviderId(req.provider) &&
+    PROVIDER_AUTH_MODE[req.provider] === 'oauth-broker' &&
+    payload.grantRedeemable !== true
+  ) {
+    const msg = 'Model injection refused: Codex grant is not redeemable'
     emitLog('error', msg, { stepId: req.stepId })
     throw new Error(msg)
   }

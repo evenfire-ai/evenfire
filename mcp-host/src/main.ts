@@ -28,7 +28,6 @@ import { ConfigStore } from './config/configStore'
 import {
   contextWindowForModel,
   hostSubsetAllowlistView,
-  isModelAllowed,
   projectModels,
   resolveSessionModel,
 } from './config/modelResolution'
@@ -61,10 +60,13 @@ import { TaskLifecycle } from './lifecycle/taskLifecycle'
 import { isTerminal } from './lifecycle/types'
 import type { TransitionEvent } from './lifecycle/types'
 import { SingleTurnProvider, apiKeysFromEnv, createLLMProvider } from './llm'
+import { setCodexPlatformJwtReader, setCodexPlatformJwtRefresh } from './llm/codexPlatformJwt'
+import { setCodexPolicyBindingReader } from './llm/codexPolicyBinding'
 import { FailoverEngine } from './llm/failover/engine'
 import { llmFallbackTotal } from './llm/failover/metrics'
 import { parseLlmPolicy } from './llm/failover/policy'
 import type { FailoverSwitchEvent, FallbackEntry, LlmPolicy } from './llm/failover/types'
+import { hostPrimaryLlmBindingChanged } from './llm/hostLlmBinding'
 import { PromptCache } from './llm/promptCache'
 import { clerumPromptCacheInvalidationsTotal } from './llm/promptCacheMetrics'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
@@ -95,9 +97,9 @@ import {
 import { PluginWorkloadSdkBootstrapServer } from './pluginWorkloadSdk/bootstrapServer'
 import { maybeCreatePluginWorkloadSdkServer } from './pluginWorkloadSdk/server'
 import type { PluginWorkloadSdkServer } from './pluginWorkloadSdk/server/sdkServer'
-import { getDisplayName, sanitizeError } from './progress/intentExtraction'
+import { sanitizeError } from './progress/intentExtraction'
 import { progressReporterRegistry } from './progress/sseProgressReporter'
-import { MessageQueue, Task, TaskResponsePayload } from './queue'
+import { MessageQueue, Task } from './queue'
 import { ResultStore } from './resultStore'
 import { markFileAttachmentsDelivered } from './runtime/fileAttachmentDelivery'
 import { isUndeliveredResult, markResultDelivered } from './runtime/resultDelivery'
@@ -166,6 +168,7 @@ setOutputDirHostAccessor(() => currentHost)
 let currentKeys: ApiKeys = {}
 let currentProvider: SingleTurnProvider | null = null
 let configStore: ConfigStore | null = null
+setCodexPolicyBindingReader(() => configStore?.codexPolicyBinding() ?? null)
 // R5 — provider-fallback. `currentPolicy` is the normalized `spec.llmPolicy`
 // (null = no failover); `failoverEngine` holds the Host-wide sticky state
 // (cooldown + served pair) and is (re)built only when the policy changes.
@@ -213,6 +216,14 @@ let statelessHeartbeat: StatelessHeartbeat | null = null
 // consumer (UsageReporter, WorkflowService) so refresh-on-401 propagates.
 // Null when env is absent (dev mode without HCC/WRC).
 let runtimeAuth: McpHostRuntimeAuth | null = null
+setCodexPlatformJwtReader(() =>
+  (runtimeAuth?.accessToken || config.mcpHostRuntimeAccessToken || '').trim()
+)
+setCodexPlatformJwtRefresh(async () => {
+  if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
+  if (!runtimeAuth) return
+  await refreshWithRecovery(runtimeAuth)
+})
 let pluginWorkloadSdkServer: PluginWorkloadSdkServer | null = null
 let pluginWorkloadSdkBootstrapServer: PluginWorkloadSdkBootstrapServer | null = null
 let usageReporter: UsageReporter | null = null
@@ -618,8 +629,9 @@ async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
   const store = new ConfigStore({
     namespace: config.namespace,
     hostRef: host.name,
-    llmSecretRef: host.spec.secretRef,
+    llmSecretRef: host.spec.secretRef ?? null,
     provider,
+    connectionRef: host.spec.model?.connectionRef ?? null,
     allowlistConfigMapName: config.llmAllowlistConfigMapName,
     // R5 — load the failover policy's referenced credential slots from the same
     // LLM Secret (kept out of the effective env; read via fallbackSlotValue).
@@ -1145,9 +1157,23 @@ async function onHostChange(host: HostCRD): Promise<void> {
 
   const contextChanged =
     currentHost !== null && currentHost.spec.contextRef !== host.spec.contextRef
-  const providerChanged = currentHost?.spec.model?.provider !== host.spec.model?.provider
-  const secretRefChanged = currentHost?.spec.secretRef !== host.spec.secretRef
-  const modelChanged = currentHost?.spec.model?.name !== host.spec.model?.name
+  const { providerChanged, secretRefChanged, modelChanged, connectionRefChanged } =
+    hostPrimaryLlmBindingChanged(
+      currentHost
+        ? {
+            provider: currentHost.spec.model?.provider,
+            name: currentHost.spec.model?.name,
+            connectionRef: currentHost.spec.model?.connectionRef,
+            secretRef: currentHost.spec.secretRef,
+          }
+        : null,
+      {
+        provider: host.spec.model?.provider,
+        name: host.spec.model?.name,
+        connectionRef: host.spec.model?.connectionRef,
+        secretRef: host.spec.secretRef,
+      }
+    )
 
   if (contextChanged) {
     // The old Context's authority must disappear before any asynchronous Host
@@ -1168,17 +1194,25 @@ async function onHostChange(host: HostCRD): Promise<void> {
   refreshFailoverPolicy(host)
   const fallbackSlotsChanged =
     JSON.stringify(prevFallbackSlots) !== JSON.stringify(fallbackCredentialSlotsFor(currentPolicy))
-  if (!configStore || providerChanged || secretRefChanged || fallbackSlotsChanged) {
-    console.log('[Main] Rebuilding ConfigStore (provider/secretRef/failover slots changed)')
+  if (
+    !configStore ||
+    providerChanged ||
+    secretRefChanged ||
+    connectionRefChanged ||
+    fallbackSlotsChanged
+  ) {
+    console.log(
+      '[Main] Rebuilding ConfigStore (provider/secretRef/connectionRef/failover slots changed)'
+    )
     await ensureConfigStore(host)
   }
   currentKeys = apiKeysFromConfigStore(configStore!)
-  // R5.10 — only a primary credential-surface change (secretRef/provider) may
-  // clear a sticky runtime cooldown; unrelated CR edits must not (see
+  // R5.10 — only a primary credential-surface change (secretRef/provider/grant)
+  // may clear a sticky runtime cooldown; unrelated CR edits must not (see
   // initializeProvider). A `secretRefChanged` rebuilds the ConfigStore fresh, so
   // the store.onChange clearCooldown path never fires for it — this covers it.
   await initializeProvider(host, currentKeys, {
-    llmConfigChanged: secretRefChanged || providerChanged,
+    llmConfigChanged: secretRefChanged || providerChanged || connectionRefChanged,
   })
 
   // PMC-2 — the cached `stable` tier embeds the model+provider runtime line
@@ -1187,7 +1221,7 @@ async function onHostChange(host: HostCRD): Promise<void> {
   // keeps serving the OLD model:/provider: line until eviction (generation is
   // correct — it uses the live provider — but the system prompt mislabels the
   // model). This is deliberately OUTSIDE the personalization branch below.
-  if (providerChanged || secretRefChanged || modelChanged) {
+  if (providerChanged || secretRefChanged || modelChanged || connectionRefChanged) {
     promptCache?.invalidateAll('model_change')
   }
 
@@ -2785,9 +2819,13 @@ async function startDevMode(): Promise<void> {
     // Safe `!`: the `ALL_PROVIDERS.every(p => !keys[p])` throw-guard above
     // already proved at least one key is present.
     const provider = ALL_PROVIDERS.find(p => keys[p])!
+    const defaultModel = descriptorFor(provider).defaultModel
+    if (!defaultModel) {
+      throw new Error(`[Main] auto-detected provider '${provider}' requires an explicit model`)
+    }
     hostSpec = {
       ...hostSpec,
-      model: { provider, name: descriptorFor(provider).defaultModel },
+      model: { provider, name: defaultModel },
     }
     console.log(`[Main] Auto-detected provider: ${provider} (based on available API key)`)
   }

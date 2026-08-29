@@ -5,11 +5,25 @@ import {
   createBoundedPgPoolForConnection,
 } from './boundedPgPool.js'
 import { config } from './config.js'
+import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
+import {
+  applyCodexChatgptAccountIdSchema,
+  applyCodexGrantDefaultModelSchema,
+  applyCodexMultiConnectionSchema,
+  applyCodexReusableConnectionKeySchema,
+  applyCodexSubscriptionConnectionSchema,
+} from './services/codexSubscriptionConnection.js'
+import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
 import {
   applyGfsUploadCleanupSchema,
   applyGfsUploadFinalizingSchema,
   applyGfsUploadSessionSchema,
 } from './services/gfsUploadSchema.js'
+import {
+  applyLlmProviderAttemptConnectionIdSchema,
+  applyLlmProviderAttemptSchema,
+  applyLlmProviderAttemptTicketSchema,
+} from './services/llmProviderAttemptStore.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
 import {
   addPluginWorkloadSdkAttemptLedgerColumns,
@@ -5915,6 +5929,26 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyGfsUploadFinalizingSchema,
   },
   {
+    version: '00a0_codex_subscription_connections',
+    apply: applyCodexSubscriptionConnectionSchema,
+  },
+  {
+    version: '00a1_codex_subscription_oauth_states',
+    apply: applyCodexSubscriptionOAuthStateSchema,
+  },
+  {
+    version: '00a2_llm_provider_attempts',
+    apply: applyLlmProviderAttemptSchema,
+  },
+  {
+    version: '00a3_llm_provider_attempt_tickets',
+    apply: applyLlmProviderAttemptTicketSchema,
+  },
+  {
+    version: '00a4_codex_chatgpt_account_id',
+    apply: applyCodexChatgptAccountIdSchema,
+  },
+  {
     version: '0100_seed_minimax_allowed_model',
     apply: async db => {
       // Seed one sensible default model for the newly added `minimax` provider
@@ -5931,6 +5965,26 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
         ON CONFLICT DO NOTHING;
       `)
     },
+  },
+  {
+    version: '0101_codex_multi_connection',
+    apply: applyCodexMultiConnectionSchema,
+  },
+  {
+    version: '0102_codex_catalog_models',
+    apply: applyCodexCatalogModelsSchema,
+  },
+  {
+    version: '0103_llm_provider_attempts_connection_id',
+    apply: applyLlmProviderAttemptConnectionIdSchema,
+  },
+  {
+    version: '0104_codex_grant_default_model',
+    apply: applyCodexGrantDefaultModelSchema,
+  },
+  {
+    version: '0105_codex_reusable_connection_key',
+    apply: applyCodexReusableConnectionKeySchema,
   },
 ]
 
@@ -6111,14 +6165,16 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
 }
 
 export async function assertDbReady(db: DbClient = pool): Promise<void> {
-  const requiredVersion = CONTROL_API_MIGRATIONS.at(-1)?.version
-  if (!requiredVersion) throw new Error('Control API database has no registered migrations')
-  const result = await db.query(
-    'SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1) AS ready',
-    [requiredVersion]
-  )
-  if (!(result.rows[0] as { ready?: boolean } | undefined)?.ready) {
-    throw new Error(`Control API database is not ready: migration ${requiredVersion} is required`)
+  if (!CONTROL_API_MIGRATIONS.length) {
+    throw new Error('Control API database has no registered migrations')
+  }
+  const applied = await loadAppliedMigrationVersions(db)
+  const missing = CONTROL_API_MIGRATIONS.filter(migration => {
+    if (applied.has(migration.version)) return false
+    return !migration.legacyVersions?.some(version => applied.has(version))
+  }).map(migration => migration.version)
+  if (missing.length) {
+    throw new Error(`Control API database is not ready: missing migrations ${missing.join(', ')}`)
   }
 }
 

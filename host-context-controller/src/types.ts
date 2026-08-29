@@ -361,6 +361,22 @@ export interface ContextCRD {
 export interface HostModelSpec {
   provider?: LlmProviderId
   name?: string
+  connectionRef?: string
+}
+
+export interface HostAllowedModel {
+  provider?: string
+  model?: string
+}
+
+export interface HostLlmPolicyFallback {
+  provider?: string
+  model?: string
+  credentialSlot?: string
+}
+
+export interface HostLlmPolicySpec {
+  fallbacks?: HostLlmPolicyFallback[]
 }
 
 export interface HostDesktopSpec {
@@ -383,6 +399,9 @@ export type HostWorkflowControlScope =
   | 'workflow:trigger'
   | 'workflow:approval:resolve'
   | 'workflow:approval:decide'
+
+export type DerivedPlatformScope = 'llm:codex:execute'
+export type EffectiveMcpHostControlScope = HostWorkflowControlScope | DerivedPlatformScope
 
 export interface HostWorkflowControlSpec {
   scopes?: HostWorkflowControlScope[]
@@ -430,9 +449,11 @@ export interface HostGuardrailsSpec {
 export interface HostSpec {
   host: string
   contextRef: string
-  secretRef: string
+  secretRef?: string
   channels?: string[]
   model?: HostModelSpec
+  allowedModels?: HostAllowedModel[]
+  llmPolicy?: HostLlmPolicySpec
   approval?: Record<string, unknown>
   desktop?: HostDesktopSpec
   lifecycle?: HostLifecycleSpec

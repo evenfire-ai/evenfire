@@ -272,6 +272,9 @@ spec:
                     Default agent configuration for workflow execution, or the
                     provider/model bootstrap binding for a stepless
                     spec.pluginWorkloadSdk.promptBridge runtime.
+                  x-kubernetes-validations:
+                    - rule: "!has(self.provider) || self.provider != 'codex-subscription' || !has(self.secretRef)"
+                      message: spec.agent.secretRef is not allowed for oauth-broker providers
                   properties:
                     model:
                       type: string
@@ -284,7 +287,7 @@ spec:
                       # transport is mono-credential and cannot deliver Bedrock's key
                       # pair nor azure's required non-secret AZURE_OPENAI_ENDPOINT —
                       # fail at admission, not mid-workflow (see workflowService).
-                      enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax]
+                      enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax, codex-subscription]
                       description: LLM provider.
                     secretRef:
                       type: object
@@ -558,7 +561,7 @@ spec:
                             # bedrock AND azure intentionally absent (mono-credential
                             # WRC transport; see the comment on the first llm provider
                             # enum above).
-                            enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax]
+                            enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax, codex-subscription]
                           soul:
                             type: string
                             description: Per-step SOUL content override.

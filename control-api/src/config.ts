@@ -110,6 +110,12 @@ type Config = {
   // llmCatalogSyncIntervalMs (default 24h), cross-replica-deduped by a session
   // advisory lock inside the cron.
   llmCatalogSyncCronEnabled: boolean
+  // Default OFF. Codex subscription management/admission stays dark until
+  // CONTROL_API_CODEX_SUBSCRIPTION_ENABLED=true.
+  codexSubscriptionEnabled: boolean
+  // Public Codex CLI OAuth client id. Not a secret; PKCE/device flow protect the
+  // grant. Override only to pin a documented registration.
+  codexOAuthClientId: string
   llmCatalogSyncIntervalMs: number
   // §4.5 sanity guard, layer 3: absolute plausibility floor. If a LIVE run's
   // TOTAL mapped model count is below this, the whole run SKIPS stale-marking
@@ -634,7 +640,7 @@ export const config: Config = {
   ),
   internalServiceTokens: parseInternalServiceTokens(
     process.env.CONTROL_API_INTERNAL_SERVICE_TOKENS ||
-      'external-rest-api=dev-external-rest-api-token,rpc-proxy=dev-rpc-proxy-token,webhook-proxy=dev-webhook-proxy-token,workflow-approval-reader=dev-wa-reader-token'
+      'external-rest-api=dev-external-rest-api-token,rpc-proxy=dev-rpc-proxy-token,webhook-proxy=dev-webhook-proxy-token,workflow-approval-reader=dev-wa-reader-token,codex-llm-proxy=dev-codex-llm-proxy-token'
   ),
   internalControlJwtWrcHmacSecret: requiredOrDevDefault(
     'INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET',
@@ -773,6 +779,14 @@ export const config: Config = {
   // idiom used by the other crons. This one stays dark until an operator turns
   // it on deliberately.
   llmCatalogSyncCronEnabled: process.env.LLM_CATALOG_SYNC_CRON_ENABLED === 'true',
+  // Default OFF. Absent or any value other than the exact token `true` keeps
+  // Codex subscription management and admission dark.
+  codexSubscriptionEnabled: process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED === 'true',
+  // Public native client used by the Codex CLI ChatGPT login. This is not a
+  // confidential client secret. Browser OAuth requires a deployment-registered
+  // client id; the default CLI client supports device-code connect only.
+  codexOAuthClientId:
+    process.env.CONTROL_API_CODEX_OAUTH_CLIENT_ID || 'app_EMoamEEZ73f0CkXaXp7hrann',
   // Default 24h. Validated (not merely parsed): the value goes straight into
   // setInterval and each tick opens a Postgres transaction + advisory lock. A
   // 60s floor is orders of magnitude below the default and far above a hot loop.
