@@ -166,6 +166,24 @@ describe('mcpHostRuntimeTokenIssuerClient (HCC)', () => {
     expect(claims.jti).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
   })
 
+  it('serializes the derive-only oauth:user-token scope into the request body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => canonicalIssueResponse(),
+    } as Response)
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
+
+    const issueMcpHostRuntimeTokens = await loadIssuer()
+    await issueMcpHostRuntimeTokens('chatllm', 'host-uid', ['workflow:read', 'oauth:user-token'])
+
+    const [, init] = fetchMock.mock.calls[0]
+    // The scope must survive verbatim into the wire body control-api reads —
+    // proving the broker actually receives `oauth:user-token`.
+    expect((init as RequestInit).body).toBe(
+      '{"includeMcpHostControlToken":true,"host":"chatllm","hostUid":"host-uid","workflowControlScopes":["workflow:read","oauth:user-token"]}'
+    )
+  })
+
   it('forwards derived llm:codex:execute in the issuance body', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

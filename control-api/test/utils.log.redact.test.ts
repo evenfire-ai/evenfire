@@ -39,4 +39,11 @@ describe('token-leak redaction', () => {
       expect(REQUIRED_REDACT_PATHS).toContain(p)
     }
   })
+
+  it('redacts the PKCE code_verifier (U2) in both snake and camel case', () => {
+    for (const p of ['code_verifier', 'codeVerifier']) {
+      expect(TOKEN_LEAK_REDACT_PATHS).toContain(p)
+      expect(REQUIRED_REDACT_PATHS).toContain(p)
+    }
+  })
 })

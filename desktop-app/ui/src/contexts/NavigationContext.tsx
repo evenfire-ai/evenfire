@@ -1,4 +1,5 @@
 import { createContext, useContext } from 'react'
+import type { ContextTab } from '../pages/ContextDetailsPage.types'
 import type { AgentWorkspaceRoute, NavItem } from '../uiTypes'
 
 export interface NavigationContextValue {
@@ -6,6 +7,7 @@ export interface NavigationContextValue {
   selectedAgent: string | null
   selectedAgentRoute: AgentWorkspaceRoute
   selectedContext: string | null
+  selectedContextTab: ContextTab
   selectedTeam: string | null
   handleNavSelect: (item: NavItem) => void
   handleOpenAgentWorkspace: (agentName: string, route?: AgentWorkspaceRoute) => void
@@ -14,7 +16,7 @@ export interface NavigationContextValue {
     options?: { selectLatest?: boolean; chatId?: string; isRemote?: boolean; title?: string }
   ) => void
   handleBackToAgents: () => void
-  handleOpenContextDetails: (contextId: string) => void
+  handleOpenContextDetails: (contextId: string, tab?: ContextTab) => void
   handleBackToContexts: () => void
   handleOpenTeamDetails: (teamId: string) => void
   handleBackToTeams: () => void

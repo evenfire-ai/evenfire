@@ -18,7 +18,11 @@ import { LlmError, LlmErrorCode } from '../core/errors'
 import { ApprovalController } from '../core/extensions/approvalController'
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import { PressureContextManager } from '../core/extensions/contextManager'
-import { UnifiedApprovalGateController } from '../core/extensions/mcpApprovalGateController'
+import {
+  UnifiedApprovalGateController,
+  buildConnectRequiredApproval,
+  extractConnectRequiredMarker,
+} from '../core/extensions/mcpApprovalGateController'
 import { type GuardrailsConfig, buildToolLaneGuardrail } from '../core/guardrails'
 import type { AgentEventEmitter, LlmPort, LoopController, ToolRegistry } from '../core/interfaces'
 import { DeferrableToolController } from '../core/orchestration/deferrableToolController'
@@ -612,6 +616,39 @@ export class TaskExecutor {
         })
       }
 
+      // U5 — the re-executed tool surfaced a 401 on an oauth mcp-server. Suspend
+      // durably for reactive OAuth consent INSTEAD of feeding the auth error to
+      // the LLM. The connect suspension inherits the SAME tool coordinates
+      // (via `suspendedCall`) + the frozen `context_snapshot`/`completed_results`
+      // so the NEXT resume (after the user connects) re-executes the SAME tool.
+      // The failed connect `toolResult` is intentionally dropped — it never
+      // enters the reconstructed message history. No machine loop: each resume is
+      // human-gated (approve/connect), and the client already exhausted its
+      // single 401 refresh-retry before throwing (McpAuthError).
+      const connectMarker = extractConnectRequiredMarker(toolResult.metadata)
+      if (connectMarker) {
+        const connectApproval = buildConnectRequiredApproval(suspendedCall, connectMarker)
+        connectApproval.context_snapshot = approval.context_snapshot
+        connectApproval.completed_results = approval.completed_results
+        connectApproval.intent_summary = approval.intent_summary
+        connectApproval.attachments = approval.attachments
+        connectApproval.traceContext = approval.traceContext ?? this.task.traceContext ?? null
+        await this.handleLoopResult({ type: 'need_approval', approval: connectApproval })
+        if (
+          (this.state as ExecutorState) !== 'waiting_approval' &&
+          !this.abortController.signal.aborted
+        ) {
+          this.state = 'completed'
+          this.turnTiming?.emit(this.taskId)
+          this.deps.onComplete(this.task)
+          this.resolveCompletion?.()
+        } else if (this.abortController.signal.aborted) {
+          console.log(`[TaskExecutor:${this.taskId}] Cancelled`)
+          this.resolveCompletion?.()
+        }
+        return
+      }
+
       // Reconstruct messages using the resolved completed_results.
       // `resolvedCompletedResults` is `approval.completed_results` with any
       // spillover refs swapped in for their blob bodies (invariant #2).
@@ -941,9 +978,16 @@ export class TaskExecutor {
         }
         const reporter = progressReporterRegistry.get(this.taskId)
         if (reporter) {
+          // U5 — carry the reason (+ mcpServerName for connect_required)
+          // so the desktop distinguishes an OAuth-consent suspension from the
+          // default HITL gate. Absent reason → 'approval_required' (back-compat).
           reporter.emitSuspended(
             getDisplayName(result.approval.tool_name),
-            result.approval.request_id
+            result.approval.request_id,
+            {
+              reason: result.approval.reason ?? 'approval_required',
+              mcpServerName: result.approval.mcpServerName,
+            }
           )
         }
         this.state = 'waiting_approval'
@@ -1660,7 +1704,13 @@ export class TaskExecutor {
     )
     await registerDesktopTools(nativeRegistry)
     const mcpRegistry = this.deps.mcpManager
-      ? new McpToolRegistryAdapter(this.deps.mcpManager)
+      ? // Thread the authenticated caller identity so oauth grantScope='user'
+        // tools dispatch to the caller's per-user partition (fail-closed when
+        // absent). buildToolRegistry runs per turn, so one userId per adapter.
+        new McpToolRegistryAdapter(
+          this.deps.mcpManager,
+          this.task.sourceMessage?.sender ?? undefined
+        )
       : nativeRegistry
     const compositeRegistry = this.deps.mcpManager
       ? new CompositeToolRegistry(nativeRegistry, mcpRegistry)

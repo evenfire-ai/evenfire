@@ -1615,6 +1615,10 @@ spec:
                         # O2: known-shape adapters baked into control-api.
                         # Adding a provider is a control-api change — recipes
                         # cannot speak OAuth to arbitrary endpoints.
+                        # U2 (spec 06) scopes monday/clickup/vercel to McpServers
+                        # ONLY — they are deliberately NOT added here. The
+                        # asymmetry is fail-closed: a recipe declaring one is
+                        # rejected at admission, which is the intended behavior.
                         enum:
                           - salesforce
                           - slack

@@ -96,6 +96,13 @@ type Config = {
   mcpHostJwtMaxHostRefs: number
   mcpHostJwtMaxHostRefLength: number
   oauthBrokerJwtTtlSec: number
+  // OAuth mcp-server broker (POST /api/v1/mcp-oauth/user-token) kill-switch.
+  // DEFAULT OFF (fail-closed): the endpoint must look absent in production
+  // until the U4 mcp-host runtime lands, honoring the PR promise "do not enable
+  // OAuth mcp-servers in production until U4 lands". When off the route returns
+  // 404 not_found before any auth/token work. MCP_OAUTH_BROKER_ENABLED=true
+  // opts a deploy in deliberately.
+  mcpOauthBrokerEnabled: boolean
   userApprovalRequestDefaultTtlSec: number
   userApprovalRequestMaxTtlSec: number
   userApprovalRequestExpiryIntervalMs: number
@@ -760,6 +767,9 @@ export const config: Config = {
     DEFAULT_MCP_HOST_JWT_MAX_HOST_REF_LENGTH
   ),
   oauthBrokerJwtTtlSec: Number(process.env.CONTROL_API_OAUTH_BROKER_JWT_TTL_SEC || 600),
+  // Fail-closed kill-switch: same default-OFF idiom as
+  // desktopGfsOperatorLinkingEnabled. Missing/'false' → OFF; only 'true' enables.
+  mcpOauthBrokerEnabled: failClosedBooleanFromEnv('MCP_OAUTH_BROKER_ENABLED'),
   userApprovalRequestDefaultTtlSec: Number(process.env.WORKFLOW_APPROVAL_DEFAULT_TTL_SEC || 86400),
   userApprovalRequestMaxTtlSec: Number(process.env.WORKFLOW_APPROVAL_MAX_TTL_SEC || 604800),
   userApprovalRequestExpiryIntervalMs: Number(

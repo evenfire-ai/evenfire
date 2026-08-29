@@ -32,6 +32,26 @@ data:
   CONTROL_API_DESKTOP_RPC_PROXY_BASE_URL: 'http://127.0.0.1:8094'
   CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL: 'http://127.0.0.1:3001'
   CONTROL_API_DESKTOP_APP_NAME: 'Evenfire'
+  # minikube-only: base URL control-api uses to build the OAuth `redirect_uri`
+  # for the mcp-server per-user flow (control-api/src/routes/external/oauthCallback.ts).
+  # Without it, control-api falls back to the request Host — which, behind the
+  # rpc-proxy → gateway chain, is the internal svc hostname
+  # (control-api-rpc-gateway.control-plane.svc.cluster.local:8090), NOT reachable
+  # by the user's browser and NOT matching the provider's registered redirect URI.
+  # Locally the user consents in their own browser, so the callback must land on
+  # the port-forwarded loopback. Register this EXACT literal as the redirect URI
+  # in each provider's OAuth app: the CONTROL_API_OAUTH_CALLBACK_BASE_URL value
+  # below, suffixed with /api/v1/oauth-callback/<oauth.id>.
+  # (Distinct from RPC_PROXY_OAUTH_CALLBACK_BASE_URL, which is the legacy
+  # recipe/embed flow and uses `localhost` — do not conflate them.)
+  CONTROL_API_OAUTH_CALLBACK_BASE_URL: 'http://127.0.0.1:8090'
+  # Enable the mcp-server per-user OAuth broker (control-api/src/routes/mcpOauth.ts).
+  # `MCP_OAUTH_BROKER_ENABLED` is fail-closed OFF by default: without it every
+  # POST /api/v1/mcp-oauth/user-token returns 404 not_found (requireBrokerEnabled),
+  # which mcp-host reads as `no_grant` — so a per-user oauth mcp-server suspends
+  # for consent forever and NEVER resolves a token even after the grant exists.
+  # Required for the U1–U6 reactive-consent flow to work end to end.
+  MCP_OAUTH_BROKER_ENABLED: 'true'
   # Self-hosted-only GFS operator parity. Managed/base deployments remain
   # fail-closed because this narrow elevation flag is absent there.
   CONTROL_API_DESKTOP_GFS_OPERATOR_LINKING_ENABLED: 'true'
