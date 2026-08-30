@@ -78,6 +78,7 @@ jobs:
           "$CODEQL" pack install \
             --additional-packs=.github/codeql/queries \
             .github/codeql/queries/test
+          .github/codeql/queries/test/verify-security-and-quality-suite.sh "$CODEQL"
           "$CODEQL" test run \
             --additional-packs=.github/codeql/queries \
             .github/codeql/queries/test
