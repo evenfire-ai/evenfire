@@ -4,11 +4,11 @@ vi.mock('../src/config.js', () => ({
   config: { databaseUrl: 'postgresql://test' },
 }))
 
-describe('0104 composable catalog revisions migration', () => {
+describe('010a composable catalog revisions migration', () => {
   it('replaces the singleton trigger class with scoped transactional writers', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0104_composable_catalog_revisions'
+      candidate => candidate.version === '010a_composable_catalog_revisions'
     )
     expect(migration).toBeDefined()
 
