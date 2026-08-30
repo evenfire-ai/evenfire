@@ -104,7 +104,7 @@ describeRealPostgres('legacy password epoch backfill on real PostgreSQL', () => 
 
     await databasePool.query(
       `DELETE FROM schema_migrations
-        WHERE version = '0106_legacy_password_security_epoch_backfill'`
+        WHERE version = '010c_legacy_password_security_epoch_backfill'`
     )
     await initDb({ connect: () => databasePool.connect() })
 
@@ -124,7 +124,7 @@ describeRealPostgres('legacy password epoch backfill on real PostgreSQL', () => 
     const recorded = await databasePool.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count
          FROM schema_migrations
-        WHERE version = '0106_legacy_password_security_epoch_backfill'`
+        WHERE version = '010c_legacy_password_security_epoch_backfill'`
     )
     expect(recorded.rows[0]?.count).toBe('1')
   })
@@ -157,12 +157,12 @@ describeRealPostgres('legacy password epoch backfill on real PostgreSQL', () => 
     )
     await databasePool.query(
       `DELETE FROM schema_migrations
-        WHERE version = '0106_legacy_password_security_epoch_backfill'`
+        WHERE version = '010c_legacy_password_security_epoch_backfill'`
     )
     await initDb({ connect: () => databasePool.connect() })
     await databasePool.query(
       `DELETE FROM schema_migrations
-        WHERE version = '0106_legacy_password_security_epoch_backfill'`
+        WHERE version = '010c_legacy_password_security_epoch_backfill'`
     )
     await initDb({ connect: () => databasePool.connect() })
 
