@@ -1,8 +1,6 @@
 - import: codeql-suites/javascript-security-and-quality.qls
   from: codeql/javascript-queries
 - exclude:
-    id: js/system-prompt-injection
-- exclude:
     id: js/missing-rate-limiting
 - query: EvenfireMissingRateLimiting.ql
 - exclude:
