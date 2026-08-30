@@ -60,7 +60,7 @@ safe_source_paths = {
     "deploy/scripts/reconcile-gfs-deploy-credentials.sh",
 }
 source_fixture_path = re.compile(
-    r"(?i)(?:^|/)(?:test|__tests__)/|(?:\.test|\.spec|\.integration\.test)\.(?:cjs|cts|js|jsx|mjs|mts|ts|tsx)$"
+    r"(?i)(?:^|/)(?:tests?|__tests__)/|(?:\.test|\.spec|\.integration\.test)\.(?:cjs|cts|js|jsx|mjs|mts|ts|tsx)$"
 )
 safe_fixture_literals = {
     "body-user-token",
@@ -145,8 +145,13 @@ def safe_contract_control_value(path: str, reason: str, value: str) -> bool:
 def safe_source_fixture_value(path: str, reason: str, value: str, match: re.Match[str]) -> bool:
     if not is_source_fixture(path):
         return False
-    if reason in {"credentialed PostgreSQL URL", "private key", "bearer token", "private runtime URL"}:
+    if reason in {"credentialed PostgreSQL URL", "private key", "bearer token"}:
         return False
+    if reason == "private runtime URL":
+        # Loopback/private URLs in source fixtures describe synthetic test
+        # topology. The same literal in a materialized public artifact remains
+        # rejected because only recognized source/test paths reach this branch.
+        return True
     if reason == "private PostgreSQL URL":
         matched_url = match.group(0)
         if is_credentialed_postgres_url(matched_url):

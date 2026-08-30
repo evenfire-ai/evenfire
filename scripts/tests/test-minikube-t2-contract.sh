@@ -633,6 +633,7 @@ fixture_base="$(git -C "$fixture_repo" rev-parse HEAD)"
 {
   printf '%s\n' "const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL ?? 'postgresql://postgres@127.0.0.1/postgres'"
   printf '%s\n' "const issued = { token: 'replacement-token', password: 'valid-password' }"
+  printf '%s\n' "const callbackUrl = 'http://127.0.0.1:36148/callback'"
 } >"$fixture_repo/control-api/test/example.realPostgres.integration.test.ts"
 printf '%s\n' "const sentinel = 'postgres://secret@internal/var/run/service.sock'" \
   >"$fixture_repo/external-rest-api/src/__tests__/publicErrorContract.test.ts"
