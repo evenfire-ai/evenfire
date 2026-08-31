@@ -165,6 +165,27 @@ describe('RecipeIntegrationsPanel — per-user grants subsection', () => {
     expect(screen.getByRole('dialog', { name: 'Per-user connections' })).toBeInTheDocument()
   })
 
+  it('traps modal focus, closes with Escape, and restores the opener', async () => {
+    const { user } = renderPanel()
+    await screen.findByText('Not connected')
+
+    const opener = screen.getByRole('button', { name: 'Actions for salesforce' })
+    await user.click(opener)
+    await user.click(screen.getByRole('menuitem', { name: 'Manage user grants' }))
+
+    const close = await screen.findByRole('button', { name: 'Close user grants' })
+    const refresh = screen.getByRole('button', { name: 'Refresh' })
+    expect(close).toHaveFocus()
+    fireEvent.keyDown(window, { key: 'Tab', shiftKey: true })
+    expect(refresh).toHaveFocus()
+    fireEvent.keyDown(window, { key: 'Tab' })
+    expect(close).toHaveFocus()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'Per-user connections' })).toBeNull()
+    expect(opener).toHaveFocus()
+  })
+
   it('renders the user row after adminListUserGrants resolves', async () => {
     await renderAndExpandGrants()
 

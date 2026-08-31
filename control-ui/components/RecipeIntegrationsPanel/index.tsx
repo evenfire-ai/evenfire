@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { DataTable } from '@clerum/frontend-table-system'
 import {
   type UserGrant,
@@ -80,6 +80,43 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
   // Per-client user-grants state, keyed by client.id
   const [userGrantsMap, setUserGrantsMap] = useState<Record<string, UserGrantsRowState>>({})
   const [activeGrantsClientId, setActiveGrantsClientId] = useState<string | null>(null)
+  const grantsDialogRef = useRef<HTMLElement>(null)
+  const grantsCloseButtonRef = useRef<HTMLButtonElement>(null)
+  const grantsOpenerRef = useRef<HTMLElement | null>(null)
+
+  useEffect(() => {
+    if (!activeGrantsClientId) return
+    grantsCloseButtonRef.current?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setActiveGrantsClientId(null)
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = Array.from(
+        grantsDialogRef.current?.querySelectorAll<HTMLElement>(
+          'a[href], button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])'
+        ) ?? []
+      )
+      const first = focusable[0]
+      const last = focusable.at(-1)
+      if (!first || !last) return
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    const opener = grantsOpenerRef.current
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      opener?.focus()
+    }
+  }, [activeGrantsClientId])
 
   const loadStatuses = useCallback(async () => {
     if (!recipeName || clients.length === 0) {
@@ -279,31 +316,37 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
                       </span>
                     </td>
                     <td style={{ textAlign: 'right' }}>
-                      <RowActionsMenu
-                        ariaLabel={`Actions for ${client.id}`}
-                        actions={[
-                          {
-                            key: 'user-grants',
-                            label: 'Manage user grants',
-                            disabled: !recipeName,
-                            onClick: () => void loadUserGrants(client),
-                          },
-                          state === 'connected'
-                            ? {
-                                key: 'disconnect',
-                                label: busy ? 'Working…' : 'Disconnect',
-                                danger: true,
-                                disabled: busy,
-                                onClick: () => void handleDisconnect(client),
-                              }
-                            : {
-                                key: 'connect',
-                                label: busy ? 'Working…' : `Connect ${client.provider}`,
-                                disabled: busy || !recipeName,
-                                onClick: () => void handleConnect(client),
-                              },
-                        ]}
-                      />
+                      <span
+                        onFocusCapture={event => {
+                          grantsOpenerRef.current = event.target as HTMLElement
+                        }}
+                      >
+                        <RowActionsMenu
+                          ariaLabel={`Actions for ${client.id}`}
+                          actions={[
+                            {
+                              key: 'user-grants',
+                              label: 'Manage user grants',
+                              disabled: !recipeName,
+                              onClick: () => void loadUserGrants(client),
+                            },
+                            state === 'connected'
+                              ? {
+                                  key: 'disconnect',
+                                  label: busy ? 'Working…' : 'Disconnect',
+                                  danger: true,
+                                  disabled: busy,
+                                  onClick: () => void handleDisconnect(client),
+                                }
+                              : {
+                                  key: 'connect',
+                                  label: busy ? 'Working…' : `Connect ${client.provider}`,
+                                  disabled: busy || !recipeName,
+                                  onClick: () => void handleConnect(client),
+                                },
+                          ]}
+                        />
+                      </span>
                     </td>
                   </tr>
                 )
@@ -331,6 +374,7 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
                   aria-labelledby="recipe-user-grants-title"
                   aria-modal="true"
                   className="cu-modal-panel cu-modal-panel--selection"
+                  ref={grantsDialogRef}
                   role="dialog"
                 >
                   <div className="cu-modal-panel__head">
@@ -347,6 +391,7 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
                       className="cu-btn cu-btn--ghost cu-btn--sm"
                       disabled={Boolean(grants.busyUserId)}
                       onClick={() => setActiveGrantsClientId(null)}
+                      ref={grantsCloseButtonRef}
                       type="button"
                     >
                       Close
