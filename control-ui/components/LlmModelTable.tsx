@@ -195,17 +195,19 @@ export function LlmModelTable({
     setProviderFilter(nextProvider)
   }
 
-  const modelColumns: TableHeaderColumn[] = [
-    { key: 'provider', label: 'Provider', minWidth: '9rem' },
-    { key: 'model', label: 'Model', minWidth: '15rem' },
-    { key: 'credential', label: 'Credential', width: '11rem' },
-    { key: 'vendor', label: 'Vendor', width: '10rem' },
-    { key: 'displayName', label: 'Display name', minWidth: '10rem' },
-    { key: 'contextWindow', label: 'Context window', align: 'right', width: '9rem' },
-    { key: 'enabled', label: 'Enabled', width: '6rem' },
-    { key: 'source', label: 'Source', width: '7rem' },
-    { key: 'actions', width: '5rem', align: 'right', ariaLabel: 'Actions' },
-  ].map(column =>
+  const modelColumns: TableHeaderColumn[] = (
+    [
+      { key: 'provider', label: 'Provider', minWidth: '9rem' },
+      { key: 'model', label: 'Model', minWidth: '15rem' },
+      { key: 'credential', label: 'Credential', width: '11rem' },
+      { key: 'vendor', label: 'Vendor', width: '10rem' },
+      { key: 'displayName', label: 'Display name', minWidth: '10rem' },
+      { key: 'contextWindow', label: 'Context window', align: 'right', width: '9rem' },
+      { key: 'enabled', label: 'Enabled', width: '6rem' },
+      { key: 'source', label: 'Source', width: '7rem' },
+      { key: 'actions', width: '5rem', align: 'right', ariaLabel: 'Actions' },
+    ] satisfies TableHeaderColumn[]
+  ).map(column =>
     column.key === 'actions'
       ? column
       : {

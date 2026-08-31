@@ -75,7 +75,7 @@ export default function RegistryCatalog() {
   const connectionState = capability?.connectionState ?? null
   // Curators administer the shared catalog, so they keep inline edit/remove;
   // everyone else manages their own entries from the ownership area (§5.4).
-  const columns = REGISTRY_COLUMNS.map(column => {
+  const columns: TableHeaderColumn[] = REGISTRY_COLUMNS.map(column => {
     if (
       column.key === 'name' ||
       column.key === 'description' ||

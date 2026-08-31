@@ -233,34 +233,36 @@ export function LlmDiscoveryPanel({
     showToast(message, { tone: 'error' })
   }
 
-  const reviewColumns: TableHeaderColumn[] = [
-    {
-      key: 'select',
-      width: '2.75rem',
-      label: (
-        <input
-          type="checkbox"
-          checked={allSelected}
-          ref={element => {
-            if (element) element.indeterminate = selectedCount > 0 && !allSelected
-          }}
-          onChange={toggleAll}
-          disabled={reviewQueue.length === 0 || bulkEnabling}
-          aria-label={allSelected ? 'Deselect all review models' : 'Select all review models'}
-        />
-      ),
-    },
-    { key: 'provider', label: 'Provider', minWidth: '9rem' },
-    { key: 'model', label: 'Model', minWidth: '12rem' },
-    { key: 'vendor', label: 'Vendor', width: '10rem' },
-    {
-      key: 'contextWindow',
-      label: 'Context window',
-      align: 'right',
-      width: '9rem',
-    },
-    { key: 'actions', width: '7rem', align: 'right', ariaLabel: 'Actions' },
-  ].map(column =>
+  const reviewColumns: TableHeaderColumn[] = (
+    [
+      {
+        key: 'select',
+        width: '2.75rem',
+        label: (
+          <input
+            type="checkbox"
+            checked={allSelected}
+            ref={element => {
+              if (element) element.indeterminate = selectedCount > 0 && !allSelected
+            }}
+            onChange={toggleAll}
+            disabled={reviewQueue.length === 0 || bulkEnabling}
+            aria-label={allSelected ? 'Deselect all review models' : 'Select all review models'}
+          />
+        ),
+      },
+      { key: 'provider', label: 'Provider', minWidth: '9rem' },
+      { key: 'model', label: 'Model', minWidth: '12rem' },
+      { key: 'vendor', label: 'Vendor', width: '10rem' },
+      {
+        key: 'contextWindow',
+        label: 'Context window',
+        align: 'right',
+        width: '9rem',
+      },
+      { key: 'actions', width: '7rem', align: 'right', ariaLabel: 'Actions' },
+    ] satisfies TableHeaderColumn[]
+  ).map(column =>
     column.key === 'select' || column.key === 'actions'
       ? column
       : {

@@ -210,13 +210,15 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
       ? `Members (${visibleUsers.length}${pendingInvitations.length ? `, ${pendingInvitations.length} pending` : ''})`
       : 'Members'
   const teamsTabLabel = activeTab === 'teams' ? `Teams (${teams.length})` : 'Teams'
-  const teamColumns: TableHeaderColumn[] = [
-    { key: 'name', label: 'Team name' },
-    { key: 'members', label: 'Members', width: '5rem', align: 'right' },
-    { key: 'agents', label: 'Agents', width: '5rem', align: 'right' },
-    { key: 'contexts', label: 'Contexts', width: '5rem', align: 'right' },
-    { key: 'actions', width: '4.5rem', align: 'right', ariaLabel: 'Actions' },
-  ].map(column =>
+  const teamColumns: TableHeaderColumn[] = (
+    [
+      { key: 'name', label: 'Team name' },
+      { key: 'members', label: 'Members', width: '5rem', align: 'right' },
+      { key: 'agents', label: 'Agents', width: '5rem', align: 'right' },
+      { key: 'contexts', label: 'Contexts', width: '5rem', align: 'right' },
+      { key: 'actions', width: '4.5rem', align: 'right', ariaLabel: 'Actions' },
+    ] satisfies TableHeaderColumn[]
+  ).map(column =>
     column.key === 'actions'
       ? column
       : {
@@ -226,12 +228,14 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
           onSort: () => teamSort.sortBy(column.key as TeamSortKey),
         }
   )
-  const memberColumns: TableHeaderColumn[] = [
-    { key: 'name', label: 'Name' },
-    { key: 'email', label: 'Email' },
-    { key: 'teams', label: 'Teams', width: '7rem', align: 'right' },
-    { key: 'actions', width: '4.5rem', align: 'right', ariaLabel: 'Actions' },
-  ].map(column =>
+  const memberColumns: TableHeaderColumn[] = (
+    [
+      { key: 'name', label: 'Name' },
+      { key: 'email', label: 'Email' },
+      { key: 'teams', label: 'Teams', width: '7rem', align: 'right' },
+      { key: 'actions', width: '4.5rem', align: 'right', ariaLabel: 'Actions' },
+    ] satisfies TableHeaderColumn[]
+  ).map(column =>
     column.key === 'actions'
       ? column
       : {
