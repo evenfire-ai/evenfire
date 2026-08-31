@@ -264,6 +264,52 @@ describe('CodexSubscriptionHub', () => {
     expect(syncCodexSubscriptionCatalog).not.toHaveBeenCalled()
   })
 
+  it('does not toast Connected after Cancel during the post-connect catalog load', async () => {
+    let resolveModels!: (value: Array<{ model: string; enabled: boolean; stale: boolean }>) => void
+    vi.mocked(listCodexConnectionModels).mockImplementation(
+      () =>
+        new Promise(resolve => {
+          resolveModels = resolve
+        })
+    )
+    vi.mocked(createCodexSubscriptionConnection).mockResolvedValue(
+      connection({
+        connectionKey: 'codex-bbb',
+        displayName: 'New team',
+        status: 'disconnected',
+        catalogStatus: 'never_synced',
+      })
+    )
+    vi.mocked(pollCodexDevice).mockResolvedValue({
+      status: 'connected',
+      connection: connection({
+        connectionKey: 'codex-bbb',
+        displayName: 'New team',
+        catalogStatus: 'ready',
+      }),
+    })
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Add subscription' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), {
+      target: { value: 'New team' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+    await waitFor(() => {
+      expect(listCodexConnectionModels).toHaveBeenCalledWith('codex-bbb')
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+    resolveModels([{ model: 'gpt-5.1', enabled: true, stale: false }])
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(screen.queryByText('Connected — catalog synced')).not.toBeInTheDocument()
+  })
+
   it('keeps the sync modal open with Sign in when device/start fails after Create', async () => {
     vi.mocked(createCodexSubscriptionConnection).mockResolvedValue(
       connection({

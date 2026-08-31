@@ -220,8 +220,10 @@ export function CodexSubscriptionHub() {
           const latest = polled.connection
           setEditing(latest)
           const models = await listCodexConnectionModels(latest.connectionKey)
+          if (epoch !== connectEpoch.current) return
           setEditModels(models)
           await load()
+          if (epoch !== connectEpoch.current) return
           if (latest.catalogStatus === 'ready') {
             showToast('Connected — catalog synced', { tone: 'success' })
           } else {
@@ -238,6 +240,7 @@ export function CodexSubscriptionHub() {
           return
         }
       }
+      if (epoch !== connectEpoch.current) return
       setUserCode(null)
       setVerificationUri(null)
       setError('ChatGPT sign-in timed out. Try again.')
