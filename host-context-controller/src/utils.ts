@@ -1,4 +1,5 @@
 import * as k8s from '@kubernetes/client-node'
+import { writesTotal } from './metrics'
 
 /** Extract HTTP status code from a K8s client error (handles both error formats). */
 export function getErrorCode(error: unknown): number | undefined {
@@ -19,7 +20,7 @@ export function getErrorCode(error: unknown): number | undefined {
  * simultaneously, repeat — amplifying API load instead of converging.
  */
 export async function replaceWithConflictRetry<
-  T extends { metadata?: { resourceVersion?: string } },
+  T extends { metadata?: { resourceVersion?: string }; kind?: string },
 >(opts: {
   description: string
   logPrefix: string
@@ -74,6 +75,7 @@ export async function replaceWithConflictRetry<
     if (mutationAllowed && !mutationAllowed()) return
     try {
       await replace(next)
+      writesTotal.inc({ kind: next.kind ?? 'unknown' })
       const suffix = attempt > 1 ? ` (after ${attempt} attempts)` : ''
       console.log(`${logPrefix} Updated ${description}${suffix}`)
       return
