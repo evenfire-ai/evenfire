@@ -101,13 +101,83 @@ assert_dockerignore_allows() {
 assert_dockerignore_excludes_generated_dependencies() {
   local file="$1"
   local package="$2"
-  local ignore="$REPO_ROOT/$file"
+  local ignore="$file"
   local allow_line exclude_line
-  allow_line="$(line_of_last "$ignore" "!packages/$package/**")"
-  exclude_line="$(line_of_last "$ignore" "packages/$package/node_modules/")"
+  if [[ "$ignore" != /* ]]; then
+    ignore="$REPO_ROOT/$file"
+  fi
+  allow_line="$(
+    awk -v pattern="!packages/$package/" \
+      '$0 == pattern { line=NR } END { if (line) print line }' "$ignore"
+  )"
+  exclude_line="$(
+    awk -v pattern="packages/$package/node_modules/" \
+      '$0 == pattern { line=NR } END { if (line) print line }' "$ignore"
+  )"
   if [[ -z "$allow_line" || -z "$exclude_line" || "$exclude_line" -le "$allow_line" ]]; then
     fail "$file must exclude packages/$package/node_modules from its Docker context"
   fi
+}
+
+assert_dockerignore_narrow_package() {
+  local file="$1"
+  local package="$2"
+  local ignore="$file"
+  local expected actual
+  if [[ "$ignore" != /* ]]; then
+    ignore="$REPO_ROOT/$file"
+  fi
+  expected="$(printf '%s\n' \
+    "!packages/$package/" \
+    "!packages/$package/package.json" \
+    "!packages/$package/src/" \
+    "!packages/$package/src/index.tsx" \
+    "!packages/$package/styles.css")"
+  actual="$(awk -v prefix="!packages/$package/" 'index($0, prefix) == 1 { print }' "$ignore")"
+  if [[ "$actual" != "$expected" ]]; then
+    fail "$file must allow exactly the tracked packages/$package build files"
+  fi
+}
+
+assert_dockerignore_mutations_rejected() {
+  local fixture_dir negated_node_modules extra_secret
+  fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/evenfire-dockerignore-contract.XXXXXX")"
+  negated_node_modules="$fixture_dir/negated-node-modules"
+  extra_secret="$fixture_dir/extra-secret"
+
+  printf '%s\n' \
+    '!packages/frontend-table-system/' \
+    '!packages/frontend-table-system/package.json' \
+    '!packages/frontend-table-system/src/' \
+    '!packages/frontend-table-system/src/index.tsx' \
+    '!packages/frontend-table-system/styles.css' \
+    '!packages/frontend-table-system/node_modules/' > "$negated_node_modules"
+  local before="$failures"
+  assert_dockerignore_excludes_generated_dependencies \
+    "$negated_node_modules" frontend-table-system 2>/dev/null
+  if [[ "$failures" -eq "$before" ]]; then
+    fail 'Docker context contract must reject a negated node_modules rule'
+  else
+    failures="$before"
+  fi
+
+  printf '%s\n' \
+    '!packages/frontend-table-system/' \
+    '!packages/frontend-table-system/package.json' \
+    '!packages/frontend-table-system/src/' \
+    '!packages/frontend-table-system/src/index.tsx' \
+    '!packages/frontend-table-system/styles.css' \
+    '!packages/frontend-table-system/.env' \
+    'packages/frontend-table-system/node_modules/' > "$extra_secret"
+  before="$failures"
+  assert_dockerignore_narrow_package "$extra_secret" frontend-table-system 2>/dev/null
+  if [[ "$failures" -eq "$before" ]]; then
+    fail 'Docker context contract must reject an extra package-scoped allow rule'
+  else
+    failures="$before"
+  fi
+
+  rm -rf -- "$fixture_dir"
 }
 
 # Direct consumers.  The first four are Node services; profile-ui and
@@ -144,10 +214,11 @@ assert_materialized profile-ui/Dockerfile frontend-table-system
 assert_dockerignore_allows control-api/Dockerfile.dockerignore display-field
 assert_dockerignore_allows control-api/Dockerfile.dockerignore llm-providers
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore display-field
-assert_dockerignore_allows control-ui/Dockerfile.dockerignore frontend-table-system
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore llm-providers
+assert_dockerignore_narrow_package control-ui/Dockerfile.dockerignore frontend-table-system
 assert_dockerignore_excludes_generated_dependencies \
   control-ui/Dockerfile.dockerignore frontend-table-system
+assert_dockerignore_mutations_rejected
 
 if (( failures > 0 )); then
   echo "$failures Docker local-package contract failure(s)" >&2

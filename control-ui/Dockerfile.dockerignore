@@ -5,7 +5,10 @@
 !packages/display-field/
 !packages/display-field/**
 !packages/frontend-table-system/
-!packages/frontend-table-system/**
+!packages/frontend-table-system/package.json
+!packages/frontend-table-system/src/
+!packages/frontend-table-system/src/index.tsx
+!packages/frontend-table-system/styles.css
 packages/frontend-table-system/node_modules/
 !packages/llm-providers/
 !packages/llm-providers/**
