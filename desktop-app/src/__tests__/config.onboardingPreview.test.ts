@@ -132,7 +132,10 @@ describe('EVENFIRE_ONBOARDING_PREVIEW', () => {
     // activeProfileId into the preview's own directory, so the NEXT launch
     // came up configured and went to sign-in. The switch showed onboarding
     // once and then quietly stopped working.
-    const previewDir = path.join(testUserDataDir, 'runtime-configs-onboarding-preview')
+    const previewDir = path.join(
+      testUserDataDir,
+      'runtime-configs-onboarding-preview'
+    )
     fs.mkdirSync(previewDir, { recursive: true })
     fs.writeFileSync(
       path.join(previewDir, 'index.json'),
