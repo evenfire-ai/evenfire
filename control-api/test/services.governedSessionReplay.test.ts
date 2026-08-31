@@ -73,7 +73,12 @@ describe('GovernedSessionReplayService', () => {
     expect(list.mock.calls[1][0]).toMatchObject({
       highWatermark: '42',
       after: { occurredAt: '2026-07-01T02:00:00.000Z', hostRef: 'host-a', sessionId: 'session-2' },
+      order: 'latest',
     })
+
+    await expect(
+      service.list({ filters: FILTERS, limit: 1, order: 'oldest', cursor: first.nextCursor! })
+    ).rejects.toBeInstanceOf(GovernedSessionReplayInvalidQueryError)
 
     await expect(
       service.list({

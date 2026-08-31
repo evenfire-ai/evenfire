@@ -12,6 +12,8 @@ export function TableHeaderRow({ columns }: { columns: TableHeaderColumn[] }) {
           aria-label={column.ariaLabel}
           title={column.title}
           label={column.label}
+          activeDirection={column.activeDirection}
+          onSort={column.onSort}
           style={{
             ...(column.width ? { width: column.width } : {}),
             ...(column.minWidth ? { minWidth: column.minWidth } : {}),

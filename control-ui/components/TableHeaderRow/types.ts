@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import type { SortDirection } from '@clerum/frontend-table-system'
 
 export type TableHeaderColumn = {
   align?: 'left' | 'right' | 'center'
@@ -8,4 +9,6 @@ export type TableHeaderColumn = {
   minWidth?: string
   title?: string
   width?: string
+  activeDirection?: SortDirection | null
+  onSort?: () => void
 }

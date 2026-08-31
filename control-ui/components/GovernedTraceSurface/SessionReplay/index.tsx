@@ -46,11 +46,18 @@ export function SessionReplay({
   const [loadingMore, setLoadingMore] = useState(false)
   const [openFilterId, setOpenFilterId] = useState<string | null>(null)
   const [copiedSessionKey, setCopiedSessionKey] = useState<string | null>(null)
+  const [order, setOrder] = useState<'oldest' | 'latest'>('latest')
 
   const columns = useMemo<TableHeaderColumn[]>(
     () =>
       SESSION_COLUMN_LAYOUT.map(column => ({
         ...column,
+        ...(column.key === 'activity'
+          ? {
+              activeDirection: order === 'latest' ? ('desc' as const) : ('asc' as const),
+              onSort: () => setOrder(current => (current === 'latest' ? 'oldest' : 'latest')),
+            }
+          : {}),
         label: (
           <TraceFilterHeaderLabel
             activeCount={filterCountForColumn(column.key, state.filters)}
@@ -59,7 +66,7 @@ export function SessionReplay({
           />
         ),
       })),
-    [state.filters]
+    [order, state.filters]
   )
 
   useEffect(() => {
@@ -69,7 +76,7 @@ export function SessionReplay({
     if (!apiQuery) return
     const controller = new AbortController()
     setLoading(true)
-    void getGovernedTraceSessions(apiQuery, controller.signal)
+    void getGovernedTraceSessions({ ...apiQuery, order }, controller.signal)
       .then(next => {
         setPage(next)
         setSessions(next.sessions)
@@ -83,14 +90,18 @@ export function SessionReplay({
         if (!controller.signal.aborted) setLoading(false)
       })
     return () => controller.abort()
-  }, [apiQuery, boundaryEpoch, stateKey])
+  }, [apiQuery, boundaryEpoch, order, stateKey])
 
   async function loadMore() {
     if (!apiQuery || !page?.nextCursor) return
     setLoadingMore(true)
     setError(null)
     try {
-      const next = await getGovernedTraceSessions({ ...apiQuery, cursor: page.nextCursor })
+      const next = await getGovernedTraceSessions({
+        ...apiQuery,
+        cursor: page.nextCursor,
+        order,
+      })
       setPage(next)
       setSessions(current => [...current, ...next.sessions])
     } catch (readError) {

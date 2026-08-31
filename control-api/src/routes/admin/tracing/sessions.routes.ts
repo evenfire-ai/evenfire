@@ -30,6 +30,7 @@ export interface GovernedSessionReplayReader {
     filters: SessionReplayFilters
     cursor?: string
     limit: number
+    order?: 'oldest' | 'latest'
   }): Promise<GovernedTraceSessionPageV1>
   detail(input: {
     hostRef: string
@@ -84,6 +85,7 @@ function parseFilters(req: Request): SessionReplayFilters {
     'origin',
     'toolName',
     'approvalState',
+    'order',
   ])
   const unexpected = Object.keys(req.query).find(key => !allowed.has(key))
   if (unexpected) throw new Error(`unsupported query parameter: ${unexpected}`)
@@ -141,7 +143,17 @@ export function createAdminTracingSessionsRouter(reader: GovernedSessionReplayRe
   router.get('/admin/tracing/sessions', async (req, res, next) => {
     try {
       const page = paging(req)
-      res.status(200).json(await reader.list({ ...page, filters: parseFilters(req) }))
+      const order = one(req, 'order')
+      if (order !== undefined && order !== 'oldest' && order !== 'latest') {
+        throw new Error('order must be oldest or latest')
+      }
+      res.status(200).json(
+        await reader.list({
+          ...page,
+          filters: parseFilters(req),
+          ...(order ? { order } : {}),
+        })
+      )
     } catch (error) {
       if (error instanceof Error && !('status' in error)) {
         res.status(400).json({ error: 'invalid_query', detail: error.message })

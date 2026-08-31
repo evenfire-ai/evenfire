@@ -40,6 +40,7 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [openFilterId, setOpenFilterId] = useState<string | null>(null)
+  const [order, setOrder] = useState<'oldest' | 'latest'>('latest')
 
   const columns = useMemo<TableHeaderColumn[]>(
     () =>
@@ -49,6 +50,12 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
           definition?.fields.filter(field => state.filters[field.key]?.length).length ?? 0
         return {
           ...column,
+          ...(column.key === 'occurred'
+            ? {
+                activeDirection: order === 'latest' ? ('desc' as const) : ('asc' as const),
+                onSort: () => setOrder(current => (current === 'latest' ? 'oldest' : 'latest')),
+              }
+            : {}),
           label: definition ? (
             <TraceFilterHeaderLabel
               activeCount={activeCount}
@@ -60,7 +67,7 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
           ),
         }
       }),
-    [columnLayout, definitions, state.filters]
+    [columnLayout, definitions, order, state.filters]
   )
 
   useEffect(() => {
@@ -72,7 +79,7 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
     setLoading(true)
     void getGovernedTraceEvents(
       '/api/v1/admin/tracing/events',
-      { ...apiQuery, families: [family], order: 'latest' },
+      { ...apiQuery, families: [family], order },
       controller.signal
     )
       .then(next => {
@@ -90,7 +97,7 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
         if (!controller.signal.aborted) setLoading(false)
       })
     return () => controller.abort()
-  }, [apiQuery, boundaryEpoch, family, stateKey])
+  }, [apiQuery, boundaryEpoch, family, order, stateKey])
 
   async function loadMore() {
     if (!apiQuery || !page?.nextCursor) return
@@ -101,7 +108,7 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
         ...apiQuery,
         cursor: page.nextCursor,
         families: [family],
-        order: 'latest',
+        order,
       })
       setPage(next)
       setEvents(current => [...current, ...next.events])

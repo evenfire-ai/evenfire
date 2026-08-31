@@ -56,8 +56,10 @@ export class GovernedSessionReplayService {
     filters: SessionReplayFilters
     cursor?: string
     limit: number
+    order?: 'oldest' | 'latest'
   }): Promise<GovernedTraceSessionPageV1> {
-    const queryHash = canonicalPayloadSha256({ filters: input.filters })
+    const order = input.order ?? 'latest'
+    const queryHash = canonicalPayloadSha256({ filters: input.filters, order })
     const cursor = input.cursor ? decodeCursor(input.cursor) : null
     if (
       cursor &&
@@ -76,6 +78,7 @@ export class GovernedSessionReplayService {
       after: cursor?.after as SessionPageAnchor | null,
       limit: input.limit + 1,
       promptState: promptState(),
+      order,
     })
     const hasMore = page.summaries.length > input.limit
     const sessions = page.summaries.slice(0, input.limit)
@@ -138,6 +141,7 @@ export class GovernedSessionReplayService {
           after: null,
           limit: 1,
           promptState: promptState(),
+          order: 'latest',
         }),
         this.repository.readRuns(input.hostRef, input.sessionId, highWatermark),
         this.repository.readTools(input.hostRef, input.sessionId, highWatermark),
