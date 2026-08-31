@@ -88,6 +88,10 @@ vi.mock('./metrics', () => ({
   // test that reached the drift path still printed green while the counter was
   // blowing up. A missing mock export must not be the reason a branch looks covered.
   externalEgressProviderDriftTotal: { inc: vi.fn() },
+  // #493 / PR #508 — arrived on dev while this branch was open. Both entries are
+  // required: this mock replaces the whole module, so a metric missing here throws
+  // at the call site, and the H7 comment above is the record of what that costs.
+  writesTotal: { inc: vi.fn() },
 }))
 
 function makeMockNetworkingApi() {
