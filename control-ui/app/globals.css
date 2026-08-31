@@ -8617,6 +8617,31 @@ textarea.cu-input {
   font-size: 0.75rem;
 }
 
+/* Pre-create state of the subscription dialog: instead of a lone name input,
+   spell out what the flow will do once the grant exists. */
+.cu-modal-steps {
+  display: grid;
+  gap: var(--cu-space-2);
+  padding: var(--cu-space-3) var(--cu-space-4);
+  border: 1px dashed var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+}
+
+.cu-modal-steps__title {
+  color: var(--cu-text);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.cu-modal-steps__list {
+  display: grid;
+  gap: var(--cu-space-1);
+  margin: 0;
+  padding-left: var(--cu-space-5);
+  color: var(--cu-text-soft);
+  font-size: 0.8125rem;
+}
+
 /* Read-only model configuration summary. It mirrors the editor's provider
    blocks so operators can understand the configured model surface without
    opening edit mode. */
