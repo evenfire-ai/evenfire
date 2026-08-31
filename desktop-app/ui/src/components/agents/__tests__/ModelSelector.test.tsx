@@ -136,6 +136,48 @@ describe('ModelSelector', () => {
     expect(root?.classList.contains('model-selector--up')).toBe(true)
   })
 
+  it('does not invent a Codex default when the session has no selected model', () => {
+    setHook({
+      data: baseData({
+        provider: 'codex-subscription',
+        hostDefault: '',
+        sessionModel: null,
+        models: [
+          { name: 'gpt-5.3', displayName: 'GPT-5.3' },
+          { name: 'gpt-5.2', displayName: 'GPT-5.2' },
+        ],
+      }),
+    })
+    renderSelector()
+    expect(screen.getByRole('button', { name: /Model — Select model/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /GPT-5\.3/ })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /Model —/ }))
+    expect(
+      screen.getByRole('menuitemradio', { name: /GPT-5\.3/ }).getAttribute('aria-checked')
+    ).toBe('false')
+    expect(screen.queryByText('default')).toBeNull()
+  })
+
+  it('hides stale and disabled Codex models from new picks, keeping a saved selection', () => {
+    setHook({
+      data: baseData({
+        provider: 'codex-subscription',
+        hostDefault: '',
+        sessionModel: 'gpt-5.2-stale',
+        models: [
+          { name: 'gpt-5.3', displayName: 'GPT-5.3' },
+          { name: 'gpt-5.2-stale', displayName: 'GPT-5.2', stale: true },
+          { name: 'gpt-5.1-off', displayName: 'GPT-5.1', disabled: true },
+        ],
+      }),
+    })
+    renderSelector()
+    fireEvent.click(screen.getByRole('button', { name: /Model — GPT-5\.2/ }))
+    expect(screen.getByRole('menuitemradio', { name: /GPT-5\.3/ })).toBeTruthy()
+    expect(screen.getByRole('menuitemradio', { name: /GPT-5\.2/ })).toBeTruthy()
+    expect(screen.queryByRole('menuitemradio', { name: /GPT-5\.1/ })).toBeNull()
+  })
+
   it('surfaces the inline error from a rejected switch without changing selection', () => {
     setHook({
       data: baseData(),

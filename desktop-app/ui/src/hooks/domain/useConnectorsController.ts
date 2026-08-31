@@ -1,8 +1,14 @@
 import { useCallback, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type { RpcAgentConnectors, RpcConnector } from '../../../../src/types'
-import { connectorRowKey } from '../../lib/connectorRows'
+import { connectorRowKey, isActionableConnector, isSharedConnector } from '../../lib/connectorRows'
+import { formatMcpServerDisplayName } from '../../lib/format'
 import { desktopQueryKeys } from './queryKeys'
+
+// Re-exported from their new home in `lib/` so existing importers (the pages)
+// keep their `from '.../useConnectorsController'` path. The layering rule is that
+// `lib/` never imports from `hooks/` — these pure predicates belong in `lib/`.
+export { isActionableConnector, isSharedConnector }
 
 const EMPTY_AGENTS: RpcAgentConnectors[] = []
 
@@ -11,21 +17,19 @@ function toErrorMessage(error: unknown): string {
 }
 
 /**
- * A connector is "shared by the team" when its grant is keyed by Context, not by
- * user (spec §1.3). Authorizing/disconnecting it affects EVERYONE in the
- * Context, so both the confirm-dialog copy and the panel warning key off this.
+ * User-facing copy for a connect/disconnect WRITE failure. The action call
+ * sites used to swallow the rejection (`.catch(() => undefined)`), so a 403 /
+ * 502 / network drop looked identical to a cancelled dialog: the grant stayed
+ * live and the user believed they had changed it. The hook now records the
+ * outcome and both pages render it in the error banner they already mount.
  */
-export function isSharedConnector(
-  connector: Pick<RpcConnector, 'authKind' | 'grantScope'>
-): boolean {
-  return connector.grantScope === 'context' || connector.authKind === 'oauth-context'
-}
-
-/** A connector row is actionable from THIS rail only when it is OAuth-governed:
- *  `authorized` → disconnect, `requires_setup` → authorize. `no_oauth` (static /
- *  none) is managed by Secret, out of scope — no button. */
-export function isActionableConnector(connector: Pick<RpcConnector, 'status'>): boolean {
-  return connector.status === 'authorized' || connector.status === 'requires_setup'
+function toActionErrorMessage(
+  verb: 'connect' | 'disconnect',
+  connector: Pick<RpcConnector, 'name'>,
+  error: unknown
+): string {
+  const name = formatMcpServerDisplayName(connector.name)
+  return `Couldn't ${verb} "${name}". ${toErrorMessage(error)}`
 }
 
 export type ConnectorActionInput = {
@@ -37,6 +41,11 @@ export type ConnectorActionInput = {
 export function useConnectorsController() {
   const queryClient = useQueryClient()
   const [pendingKey, setPendingKey] = useState<string | null>(null)
+  // The OUTCOME of the last write (connect/disconnect). The hook owns the action
+  // lifecycle (`pendingKey` start / `finally` end); it must also own the error,
+  // because neither page imports `pushToast` and the query `error` below only
+  // ever reflects the READ (`listConnectors`), never a write.
+  const [actionError, setActionError] = useState<string | null>(null)
 
   // Mirrors the sibling data-controllers (useMcpServersDataController /
   // useContextsDataController): the query is app-coordinated, never
@@ -80,6 +89,7 @@ export function useConnectorsController() {
       // Anchor the busy state to the VISIBLE (context, server) row, not to the
       // representative agent, so the spinner tracks the row the user clicked.
       const key = connectorRowKey(contextRef, connector.name)
+      setActionError(null)
       setPendingKey(key)
       try {
         // The grant becomes present only after the OAuth deep-link returns; U3's
@@ -88,6 +98,8 @@ export function useConnectorsController() {
         await window.clerum.rpc.connectMcpServer(connector.name, agentName, contextId, {
           confirmShared: shared,
         })
+      } catch (error) {
+        setActionError(toActionErrorMessage('connect', connector, error))
       } finally {
         setPendingKey(current => (current === key ? null : current))
       }
@@ -102,6 +114,7 @@ export function useConnectorsController() {
       // Anchor the busy state to the VISIBLE (context, server) row, not to the
       // representative agent, so the spinner tracks the row the user clicked.
       const key = connectorRowKey(contextRef, connector.name)
+      setActionError(null)
       setPendingKey(key)
       try {
         const result = await window.clerum.rpc.disconnectMcpServer(
@@ -116,6 +129,12 @@ export function useConnectorsController() {
           await refresh()
         }
         return result
+      } catch (error) {
+        // A rejected DELETE (403 context_membership_denied, 502, network) leaves
+        // the grant LIVE; surface it so the final screen is not identical to a
+        // cancelled dialog. Returns undefined (no confirmed revoke) after that.
+        setActionError(toActionErrorMessage('disconnect', connector, error))
+        return undefined
       } finally {
         setPendingKey(current => (current === key ? null : current))
       }
@@ -129,6 +148,7 @@ export function useConnectorsController() {
     () => ({
       loading: query.status === 'pending' || query.fetchStatus === 'fetching',
       error: query.error ? toErrorMessage(query.error) : null,
+      actionError,
       agents,
       pendingKey,
       refresh,
@@ -137,6 +157,7 @@ export function useConnectorsController() {
       disconnect,
     }),
     [
+      actionError,
       agents,
       authorize,
       disconnect,

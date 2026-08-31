@@ -4,6 +4,7 @@ import { scopeCaption, statusPresentation } from '@lib/connectorPresentation'
 import { type ConnectorRow, deriveConnectorRows } from '@lib/connectorRows'
 import { formatMcpServerDisplayName } from '@lib/format'
 import { useNavigationContext } from '../contexts/NavigationContext'
+import { useAgentsDataController } from '../hooks/domain/useAgentsDataController'
 import {
   type ConnectorActionInput,
   isActionableConnector,
@@ -14,12 +15,17 @@ import { clickableRowProps } from '../lib/clickableRowProps'
 function ConnectorRowView({
   row,
   busy,
+  agentDisplayByName,
   onAuthorize,
   onDisconnect,
   onOpenAgent,
 }: {
   row: ConnectorRow
   busy: boolean
+  // Visible agent name (spec.host) from the catalog map, as everywhere else in
+  // the app (AppHeader, ContextDetailsPage, TeamsPage). Falls back to the raw
+  // identifier for agents absent from the map (e.g. cross-team), not `|| name`.
+  agentDisplayByName: Record<string, string>
   onAuthorize: (input: ConnectorActionInput) => void
   onDisconnect: (input: ConnectorActionInput) => void
   onOpenAgent: (agentName: string) => void
@@ -56,9 +62,16 @@ function ConnectorRowView({
 
       <td className="da-table__cell">
         {/* Presentational: the whole row already navigates to this agent, so the
-            tag carries no click/key handlers of its own. */}
-        <ReferenceTag kind="agent" title={agentName} aria-label={`Agent ${agentName}`}>
-          {agentName}
+            tag carries no click/key handlers of its own. Visible display name
+            (spec.host) from the catalog map, as everywhere else in the app;
+            falls back to the raw identifier for agents absent from the map
+            (e.g. cross-team), not `|| name`. */}
+        <ReferenceTag
+          kind="agent"
+          title={agentDisplayByName[agentName] ?? agentName}
+          aria-label={`Agent ${agentDisplayByName[agentName] ?? agentName}`}
+        >
+          {agentDisplayByName[agentName] ?? agentName}
         </ReferenceTag>
       </td>
 
@@ -109,7 +122,9 @@ function ConnectorRowView({
 }
 
 export function McpServersPage() {
-  const { loading, error, agents, pendingKey, authorize, disconnect } = useConnectorsController()
+  const { loading, error, actionError, agents, pendingKey, authorize, disconnect } =
+    useConnectorsController()
+  const { agentDisplayByName } = useAgentsDataController()
   const { handleOpenAgentWorkspace } = useNavigationContext()
 
   const rows = useMemo(() => deriveConnectorRows(agents), [agents])
@@ -126,7 +141,9 @@ export function McpServersPage() {
       </div>
 
       <div className="page-layout">
-        {error ? <StatusBanner tone="error">{error}</StatusBanner> : null}
+        {(actionError ?? error) ? (
+          <StatusBanner tone="error">{actionError ?? error}</StatusBanner>
+        ) : null}
 
         <section className="page-card mcp-servers-board-card" aria-label="Connectors">
           {loading && !hasRows ? (
@@ -164,11 +181,14 @@ export function McpServersPage() {
                     // sibling row busy, so anchor on grantKey (matches the
                     // controller's pendingKey = connectorRowKey).
                     busy={pendingKey === row.grantKey}
+                    agentDisplayByName={agentDisplayByName}
                     onAuthorize={input => {
-                      authorize(input).catch(() => undefined)
+                      // The hook records any write failure in `actionError` and
+                      // never rejects, so the call site no longer swallows it.
+                      void authorize(input)
                     }}
                     onDisconnect={input => {
-                      disconnect(input).catch(() => undefined)
+                      void disconnect(input)
                     }}
                     onOpenAgent={agentName => handleOpenAgentWorkspace(agentName, 'mcp-servers')}
                   />

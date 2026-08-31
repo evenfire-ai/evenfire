@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import type { RpcConnectorsResult } from '../../../../src/types'
+import type { AccessCatalog, RpcConnectorsResult } from '../../../../src/types'
 import { desktopQueryKeys } from '../../hooks/domain/queryKeys'
 import { McpServersPage } from '../McpServersPage'
 
@@ -240,5 +240,67 @@ describe('McpServersPage — da-table layout + navigation', () => {
     expect(monday.querySelector('.ui-pill')?.getAttribute('title')).toMatch(
       /Affects all your agents/i
     )
+  })
+
+  it('(f) shows agent DISPLAY names from the catalog map, not the raw host id (R1-M12)', async () => {
+    installClerum(CONNECTORS)
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    // Seed both the connectors read-model and the access catalog the way the
+    // bootstrap would; the catalog carries host→display, exactly as AppHeader /
+    // ContextDetailsPage / TeamsPage resolve visible agent names.
+    client.setQueryData(desktopQueryKeys.connectors, CONNECTORS)
+    client.setQueryData(desktopQueryKeys.accessCatalog, {
+      agentDisplayByName: { 'agent-alpha': 'Alpha Bot', 'agent-zeta': 'Zeta Bot' },
+    } as unknown as AccessCatalog)
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <McpServersPage />
+      </QueryClientProvider>
+    )
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Connectors' })).toBeTruthy())
+
+    // The monday row is listed by agent-alpha AND agent-zeta: both chips show the
+    // catalog display name, and the raw host id is no longer surfaced there.
+    const mondayRow = rowByName(allRows(container), 'monday')
+    expect(within(mondayRow).getByRole('button', { name: 'Open agent Alpha Bot' })).toBeTruthy()
+    expect(within(mondayRow).getByRole('button', { name: 'Open agent Zeta Bot' })).toBeTruthy()
+    expect(within(mondayRow).queryByRole('button', { name: 'Open agent agent-alpha' })).toBeNull()
+  })
+
+  it('(g) a fresh write error takes precedence over a stale read error in the banner', async () => {
+    // Reviewer follow-up nit: with a failed READ (query error) and a failed WRITE
+    // (actionError) both live, the banner must show the MORE RECENT event — the
+    // write. Old render was `error ? … : actionError`, which pinned the stale read
+    // on top. Repro: 1st disconnect is confirmed → triggers a refresh whose read
+    // throws (sets query.error); 2nd disconnect rejects (sets actionError).
+    const rpc = {
+      listConnectors: vi.fn(async () => {
+        throw new Error('read boom')
+      }),
+      connectMcpServer: vi.fn(async () => undefined),
+      disconnectMcpServer: vi
+        .fn()
+        .mockResolvedValueOnce({ confirmed: true }) // 1st: confirmed → refresh (read fails)
+        .mockRejectedValueOnce(new Error('write boom')), // 2nd: rejects → actionError
+    }
+    Object.defineProperty(window, 'clerum', { configurable: true, value: { rpc } })
+
+    const { container } = renderPage(CONNECTORS)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Connectors' })).toBeTruthy())
+
+    const mondayRow = rowByName(allRows(container), 'monday')
+    const disconnectBtn = within(mondayRow).getByRole('button', { name: 'Disconnect' })
+
+    // 1st disconnect: confirmed → refresh → listConnectors throws → query.error set.
+    fireEvent.click(disconnectBtn)
+    await waitFor(() => expect(screen.getByText('read boom')).toBeTruthy())
+
+    // 2nd disconnect: rejects → actionError set. Both errors now live; the fresh
+    // write message must win, and the stale read message must be gone.
+    fireEvent.click(disconnectBtn)
+    await waitFor(() =>
+      expect(screen.getByText('Couldn\'t disconnect "monday". write boom')).toBeTruthy()
+    )
+    expect(screen.queryByText('read boom')).toBeNull()
   })
 })

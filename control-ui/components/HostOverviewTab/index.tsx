@@ -95,14 +95,17 @@ export function HostOverviewTab({
   lifecycleReason,
   statelessRejectionMessage,
   accessSummary,
+  editingName,
+  nameDraft,
+  onCancelNameEdit,
+  onNameDraftChange,
   onNavigate,
   onSaveDisplayName,
   onSaveLifecycle,
+  onStartNameEdit,
   createdAt,
 }: HostOverviewTabProps) {
   const shownName = displayName.trim() || hostName
-  const [editingName, setEditingName] = React.useState(false)
-  const [nameDraft, setNameDraft] = React.useState(shownName)
   const [savingName, setSavingName] = React.useState(false)
   const [editingLifecycle, setEditingLifecycle] = React.useState(false)
   const [lifecycleDraft, setLifecycleDraft] = React.useState(stateless)
@@ -112,22 +115,8 @@ export function HostOverviewTab({
   const shownDescription = truncateDescription(trimmedDescription) || 'No description provided.'
 
   React.useEffect(() => {
-    if (!editingName) setNameDraft(shownName)
-  }, [editingName, shownName])
-
-  React.useEffect(() => {
     if (!editingLifecycle) setLifecycleDraft(stateless)
   }, [editingLifecycle, stateless])
-
-  function startNameEdit() {
-    setNameDraft(shownName)
-    setEditingName(true)
-  }
-
-  function cancelNameEdit() {
-    setNameDraft(shownName)
-    setEditingName(false)
-  }
 
   async function saveName() {
     const nextName = nameDraft.trim()
@@ -135,7 +124,7 @@ export function HostOverviewTab({
 
     setSavingName(true)
     try {
-      if (await onSaveDisplayName(nextName)) setEditingName(false)
+      await onSaveDisplayName(nextName)
     } finally {
       setSavingName(false)
     }
@@ -175,10 +164,10 @@ export function HostOverviewTab({
                 <input
                   className="cu-input cu-host-overview-identity__name-input"
                   value={nameDraft}
-                  onChange={event => setNameDraft(event.target.value)}
+                  onChange={event => onNameDraftChange(event.target.value)}
                   onKeyDown={event => {
                     if (event.key === 'Enter') void saveName()
-                    if (event.key === 'Escape') cancelNameEdit()
+                    if (event.key === 'Escape') onCancelNameEdit()
                   }}
                   aria-label="Agent name"
                   disabled={savingName}
@@ -197,7 +186,7 @@ export function HostOverviewTab({
                 <button
                   type="button"
                   className="cu-btn cu-btn--icon cu-btn--ghost"
-                  onClick={cancelNameEdit}
+                  onClick={onCancelNameEdit}
                   disabled={savingName}
                   aria-label="Cancel editing agent name"
                   title="Cancel editing agent name"
@@ -216,7 +205,7 @@ export function HostOverviewTab({
                 <button
                   type="button"
                   className="cu-btn cu-btn--icon cu-btn--ghost cu-host-overview-identity__edit"
-                  onClick={startNameEdit}
+                  onClick={onStartNameEdit}
                   disabled={savingName}
                   aria-label="Edit agent name"
                   title="Edit agent name"

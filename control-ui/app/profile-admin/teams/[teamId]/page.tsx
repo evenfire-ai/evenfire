@@ -831,7 +831,7 @@ export default function TeamDetailsPage() {
                                       >
                                         <button
                                           type="button"
-                                          className="cu-btn cu-btn--secondary cu-btn--sm"
+                                          className="cu-btn cu-btn--sm"
                                           onClick={() => void resendPendingInvitation(inv)}
                                           disabled={
                                             busy ||

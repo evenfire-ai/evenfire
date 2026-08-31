@@ -5,7 +5,12 @@ import { config } from '../src/config.js'
 import type { DbClient } from '../src/db.js'
 import { initDb } from '../src/db.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
-import { bootstrapSharedOAuthGrant, getOAuthGrant, upsertOAuthGrant } from '../src/oauth/store.js'
+import {
+  bootstrapSharedOAuthGrant,
+  getOAuthGrant,
+  refreshOAuthGrantTokens,
+  upsertOAuthGrant,
+} from '../src/oauth/store.js'
 
 // T1/T5 — shared-identity grant semantics derived from the REAL producer
 // (real ON CONFLICT DO NOTHING + CHECK constraints), not a hand-built fixture.
@@ -88,15 +93,17 @@ describeRealPostgres('oauth store — shared grants (real Postgres)', () => {
     expect(afterBootstrap?.accessToken).toBe('ACCESS-1')
     expect(afterBootstrap?.bootstrappedByUserId).toBe('user-1')
 
-    // Token refresh (upsert by key) rotates the tokens but MUST NOT rewrite the
-    // audit column or the shared identity.
-    await upsertOAuthGrant(db, KEY, {
+    // Token refresh (UPDATE by key, R1-B1) rotates the tokens but MUST NOT
+    // rewrite the audit column or the shared identity, and reports it touched a
+    // row.
+    const refreshed = await refreshOAuthGrantTokens(db, KEY, {
       ...sharedKey(server, 'ctx-1'),
       provider: 'google',
       accessToken: 'ACCESS-3',
       refreshToken: 'REFRESH-3',
       accessTokenExpiresInSec: 3600,
     })
+    expect(refreshed.updated).toBe(true)
     const afterRefresh = await getOAuthGrant(db, KEY, sharedKey(server, 'ctx-1'))
     expect(afterRefresh?.accessToken).toBe('ACCESS-3')
     expect(afterRefresh?.refreshToken).toBe('REFRESH-3')

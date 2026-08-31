@@ -74,14 +74,15 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
       return { rows: out, rowCount: out.length }
     }
 
-    // Materializer read (enabled rows only, stale IGNORED).
+    // Materializer read (enabled rows). Static stale+enabled still
+    // materializes; Codex stale targets stay visible in DB but are not executable.
     if (
       /SELECT provider, model, vendor, display_name, context_window_tokens\s+FROM llm_allowed_models\s+WHERE enabled/.test(
         sql
       )
     ) {
       const out = rows
-        .filter(r => r.enabled)
+        .filter(r => r.enabled && !(r.provider === 'codex-subscription' && r.stale))
         .sort((a, b) => a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model))
         .map(r => ({
           provider: r.provider,

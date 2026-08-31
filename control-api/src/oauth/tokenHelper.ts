@@ -11,7 +11,7 @@ import {
   getOAuthProviderAdapter,
   isKnownOAuthProvider,
 } from './providers.js'
-import { type OAuthGrantKey, getOAuthGrant, upsertOAuthGrant } from './store.js'
+import { type OAuthGrantKey, getOAuthGrant, refreshOAuthGrantTokens } from './store.js'
 
 /**
  * Fetch the current access token for a grant (user or service), refreshing on
@@ -153,19 +153,24 @@ export async function getAccessToken(
   }
 
   // Some providers omit refresh_token on refresh — keep the previous one.
-  // Spread `...input` so the grant key (grantKind + owner/identifiers) is carried
-  // through verbatim — the refresh re-upserts the SAME row. For `user`/`service`
-  // this is ON CONFLICT DO UPDATE (identity columns excluded); for `shared` it
-  // is a plain UPDATE by key (see store.ts) that never rewrites
-  // `bootstrapped_by_user_id` or the shared identity. Columns outside the key
-  // are preserved either way.
-  await upsertOAuthGrant(deps.db, deps.encryptionKey, {
+  // Persist via `refreshOAuthGrantTokens` (UPDATE by key), NOT an upsert. The
+  // grant row was read above, but a concurrent disconnect (DELETE) can land
+  // between that read and this write; an `INSERT … ON CONFLICT` would RESURRECT
+  // the deleted grant with fresh tokens (R1-B1), whereas an UPDATE touches 0
+  // rows once the row is gone. Spread `...input` so the grant key
+  // (grantKind + owner/identifiers) targets the SAME row verbatim; for `shared`
+  // the UPDATE never rewrites `bootstrapped_by_user_id` or the shared identity.
+  const refreshed = await refreshOAuthGrantTokens(deps.db, deps.encryptionKey, {
     ...input,
     provider: decl.provider,
     accessToken: parsed.accessToken,
     refreshToken: parsed.refreshToken ?? grant.refreshToken,
     accessTokenExpiresInSec: parsed.expiresIn,
   })
+  // 0 rows ⇒ the grant was deleted during the refresh window. Surface it as
+  // "needs reauth" (no_grant) rather than return a token for a revoked grant —
+  // and crucially do NOT recreate the row.
+  if (!refreshed.updated) return { kind: 'no_grant' }
 
   const expiresAt =
     typeof parsed.expiresIn === 'number'

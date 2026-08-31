@@ -172,7 +172,23 @@ export function createMcpOauthRouter(): Router {
           }),
           signal: AbortSignal.timeout(config.upstreamTimeoutMs),
         })
-      } catch {
+      } catch (err) {
+        // Distinguish a timeout from a genuine connect failure. `AbortSignal.
+        // timeout()` rejects fetch with a `TimeoutError`; a manual abort would
+        // be `AbortError`. A timeout means control-api was reachable but slow →
+        // 504 (gateway timeout); anything else → 502 (unreachable). Bind + log
+        // the error either way (it was silently swallowed before).
+        const name = err instanceof Error ? err.name : ''
+        if (name === 'TimeoutError' || name === 'AbortError') {
+          console.warn(`[RPC_PROXY] control-api disconnect timed out server=${mcpServerName}`)
+          res.status(504).json({ error: 'control_api_timeout' })
+          return
+        }
+        console.warn(
+          `[RPC_PROXY] control-api disconnect fetch failed server=${mcpServerName} error=${
+            err instanceof Error ? err.message : String(err)
+          }`
+        )
         res.status(502).json({ error: 'control_api_unreachable' })
         return
       }
@@ -184,18 +200,37 @@ export function createMcpOauthRouter(): Router {
         return
       }
 
-      // Success: control-api answers 204 (no body). Forward it verbatim.
+      // Success is EXACTLY 204 (no body) per the internal contract. Any OTHER
+      // 2xx is an unexpected shape from control-api — coerce it to 502 rather
+      // than forwarding an ambiguous "success" the desktop can't interpret.
+      if (upstream.status === 204) {
+        res.status(204).end()
+        return
+      }
       if (upstream.ok) {
-        res.status(upstream.status).end()
+        console.warn(
+          `[RPC_PROXY] control-api disconnect unexpected 2xx status=${upstream.status} server=${mcpServerName}`
+        )
+        res.status(502).json({ error: 'control_api_invalid_response' })
         return
       }
 
-      // Forward the upstream JSON error verbatim.
+      // Forward the upstream error, but ALWAYS as application/json with a
+      // structured body, preserving the upstream STATUS. control-api answers
+      // JSON errors, but an intermediary (nginx, an ingress) can interpose an
+      // HTML error page; reflecting its `content-type`/body would hand the
+      // desktop `text/html` it can't parse. Parse the body as JSON when
+      // possible; otherwise synthesize a structured error.
       const upstreamText = await upstream.text().catch(() => '')
+      let parsed: unknown
+      try {
+        parsed = upstreamText ? JSON.parse(upstreamText) : null
+      } catch {
+        parsed = null
+      }
       res
         .status(upstream.status)
-        .type(upstream.headers.get('content-type') ?? 'application/json')
-        .send(upstreamText)
+        .json(parsed && typeof parsed === 'object' ? parsed : { error: 'control_api_error' })
     }
   )
 

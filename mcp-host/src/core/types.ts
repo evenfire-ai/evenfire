@@ -129,6 +129,12 @@ export interface CompletionResponse {
   /** True only when the provider response carried authoritative token counters. */
   usage_reported?: boolean
   finish_reason: FinishReason
+  /**
+   * Physical ledger identity when the provider authorized a spend (Codex).
+   * Absent for static-credential providers that use a separate ticket issuer.
+   */
+  providerAttemptId?: string
+  providerAttemptIndex?: number
 }
 
 export interface ToolCompletionRequest {

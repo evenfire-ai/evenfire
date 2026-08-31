@@ -144,10 +144,12 @@ export class ClaudeProvider implements SingleTurnProvider {
       {
         model: this.defaultModel,
         system: systemPrompt || undefined,
-        messages: claudeMessages.map(m => ({
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
-        })),
+        messages: claudeMessages.map(m => {
+          return {
+            role: m.role as 'user' | 'assistant',
+            content: m.content,
+          }
+        }),
         max_tokens: options?.max_tokens ?? 4096,
         temperature: options?.temperature,
       },

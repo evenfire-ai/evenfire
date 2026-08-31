@@ -107,8 +107,13 @@ export type UpsertOAuthGrantInput = OAuthGrantKey & {
 }
 
 /**
- * Insert or update an oauth_grants row, encrypting access + refresh tokens
- * at rest with the supplied AES-256-GCM key.
+ * Insert (or replace) an oauth_grants row for the ALTA/CONSENT path only —
+ * `user` and `service` grants, encrypting access + refresh tokens at rest with
+ * the supplied AES-256-GCM key. This is an `INSERT … ON CONFLICT DO UPDATE`, so
+ * it MAY create the row. Token refresh must NOT go through here (it would
+ * resurrect a concurrently-deleted grant, R1-B1) — use
+ * {@link refreshOAuthGrantTokens}. Shared grants are bootstrapped via
+ * {@link bootstrapSharedOAuthGrant} and never inserted here.
  */
 export async function upsertOAuthGrant(
   db: DbClient,
@@ -156,35 +161,13 @@ export async function upsertOAuthGrant(
   }
 
   if (input.grantKind === 'shared') {
-    // Refresh path ONLY. A shared grant is bootstrapped once via
-    // `bootstrapSharedOAuthGrant` (INSERT … ON CONFLICT DO NOTHING, first-wins
-    // tokens AND bootstrapper). Token refresh is a plain UPDATE by key so it
-    // never rewrites the team identity or the `bootstrapped_by_user_id` audit
-    // column (mini-spec 05 §3: conflating the two would let "the last bootstrap
-    // silently steal the identity"). The row is guaranteed to exist here because
-    // refresh only runs after a successful `getOAuthGrant`.
-    await db.query(
-      `UPDATE oauth_grants
-          SET provider = $6,
-              access_token_encrypted = $7,
-              refresh_token_encrypted = $8,
-              access_token_expires_at = $9,
-              updated_at = NOW()
-        WHERE owner_kind = $1 AND recipe_namespace = $2 AND recipe_name = $3
-          AND context_id = $4 AND oauth_client_id = $5 AND grant_kind = 'shared'`,
-      [
-        ownerKind,
-        input.recipeNamespace,
-        input.recipeName,
-        input.contextId,
-        input.oauthClientId,
-        input.provider,
-        accessTokenEncrypted,
-        refreshTokenEncrypted,
-        accessTokenExpiresAt,
-      ]
-    )
-    return
+    // A shared grant is NEVER inserted through this path: first consent goes
+    // through `bootstrapSharedOAuthGrant` (first-wins tokens AND bootstrapper),
+    // and token refresh goes through `refreshOAuthGrantTokens` (UPDATE by key).
+    // Reaching here means a caller mis-routed a shared grant into the
+    // consent/insert path — fail loudly rather than mint one against the
+    // service INSERT below.
+    throw new Error('upsertOAuthGrant does not handle shared grants')
   }
 
   await db.query(
@@ -211,6 +194,127 @@ export async function upsertOAuthGrant(
       accessTokenExpiresAt,
     ]
   )
+}
+
+export type RefreshOAuthGrantTokensInput = OAuthGrantKey & {
+  provider: string
+  accessToken: string
+  refreshToken?: string
+  /** Seconds until access token expires; null if provider didn't supply expires_in. */
+  accessTokenExpiresInSec?: number
+}
+
+/**
+ * Persist refreshed tokens onto an EXISTING grant row — an UPDATE keyed by the
+ * grant's own coordinates, for every flavor (`user`/`service`/`shared`) — and
+ * report whether a row was actually touched.
+ *
+ * Distinct from {@link upsertOAuthGrant} on purpose (R1-B1). The consent/alta
+ * path inserts, but refresh must NEVER resurrect a row that was concurrently
+ * deleted: a disconnect (DELETE) can land between the token read
+ * (`getOAuthGrant`) and this write. An `INSERT … ON CONFLICT` would recreate the
+ * deleted grant with fresh tokens; an UPDATE by key touches 0 rows once the row
+ * is gone, and the caller surfaces that as "needs reauth" rather than silently
+ * re-granting.
+ *
+ * The `shared` branch is the former `upsertOAuthGrant` "Refresh path ONLY"
+ * UPDATE, folded here (D4) so the refresh UPDATE lives in exactly one place: a
+ * plain UPDATE by key that never rewrites the team identity or the
+ * `bootstrapped_by_user_id` audit column (mini-spec 05 §3).
+ *
+ * Returns `{ updated }` — `false` when no row matched (the grant was deleted in
+ * the refresh window).
+ */
+export async function refreshOAuthGrantTokens(
+  db: DbClient,
+  encryptionKey: Buffer,
+  input: RefreshOAuthGrantTokensInput
+): Promise<{ updated: boolean }> {
+  const accessTokenEncrypted = encryptOAuthSecret(encryptionKey, input.accessToken)
+  const refreshTokenEncrypted = input.refreshToken
+    ? encryptOAuthSecret(encryptionKey, input.refreshToken)
+    : null
+  const accessTokenExpiresAt =
+    typeof input.accessTokenExpiresInSec === 'number'
+      ? new Date(Date.now() + input.accessTokenExpiresInSec * 1000)
+      : null
+
+  const ownerKind = resolveOwnerKind(input)
+
+  if (input.grantKind === 'user') {
+    const result = await db.query(
+      `UPDATE oauth_grants
+          SET provider = $6,
+              access_token_encrypted = $7,
+              refresh_token_encrypted = $8,
+              access_token_expires_at = $9,
+              updated_at = NOW()
+        WHERE owner_kind = $1 AND recipe_namespace = $2 AND recipe_name = $3
+          AND user_id = $4 AND oauth_client_id = $5 AND grant_kind = 'user'
+        RETURNING id`,
+      [
+        ownerKind,
+        input.recipeNamespace,
+        input.recipeName,
+        input.userId,
+        input.oauthClientId,
+        input.provider,
+        accessTokenEncrypted,
+        refreshTokenEncrypted,
+        accessTokenExpiresAt,
+      ]
+    )
+    return { updated: (result.rowCount ?? 0) > 0 }
+  }
+
+  if (input.grantKind === 'shared') {
+    const result = await db.query(
+      `UPDATE oauth_grants
+          SET provider = $6,
+              access_token_encrypted = $7,
+              refresh_token_encrypted = $8,
+              access_token_expires_at = $9,
+              updated_at = NOW()
+        WHERE owner_kind = $1 AND recipe_namespace = $2 AND recipe_name = $3
+          AND context_id = $4 AND oauth_client_id = $5 AND grant_kind = 'shared'
+        RETURNING id`,
+      [
+        ownerKind,
+        input.recipeNamespace,
+        input.recipeName,
+        input.contextId,
+        input.oauthClientId,
+        input.provider,
+        accessTokenEncrypted,
+        refreshTokenEncrypted,
+        accessTokenExpiresAt,
+      ]
+    )
+    return { updated: (result.rowCount ?? 0) > 0 }
+  }
+
+  const result = await db.query(
+    `UPDATE oauth_grants
+        SET provider = $5,
+            access_token_encrypted = $6,
+            refresh_token_encrypted = $7,
+            access_token_expires_at = $8,
+            updated_at = NOW()
+      WHERE owner_kind = $1 AND recipe_namespace = $2 AND recipe_name = $3
+        AND user_id IS NULL AND oauth_client_id = $4 AND grant_kind = 'service'
+      RETURNING id`,
+    [
+      ownerKind,
+      input.recipeNamespace,
+      input.recipeName,
+      input.oauthClientId,
+      input.provider,
+      accessTokenEncrypted,
+      refreshTokenEncrypted,
+      accessTokenExpiresAt,
+    ]
+  )
+  return { updated: (result.rowCount ?? 0) > 0 }
 }
 
 /**
@@ -417,32 +521,38 @@ export async function oauthGrantExists(db: DbClient, input: GetOAuthGrantInput):
   return result.rows.length > 0
 }
 
-export async function deleteOAuthGrant(db: DbClient, input: GetOAuthGrantInput): Promise<void> {
+/**
+ * Delete a grant row by its flavored key. Returns the number of rows deleted so
+ * callers can audit "did this actually revoke something" (0 ⇒ the grant was
+ * already gone; the endpoint stays idempotent either way).
+ */
+export async function deleteOAuthGrant(db: DbClient, input: GetOAuthGrantInput): Promise<number> {
   const ownerKind = resolveOwnerKind(input)
   if (input.grantKind === 'user') {
-    await db.query(
+    const result = await db.query(
       `DELETE FROM oauth_grants
        WHERE owner_kind = $1 AND recipe_namespace = $2 AND recipe_name = $3
          AND user_id = $4 AND oauth_client_id = $5 AND grant_kind = 'user'`,
       [ownerKind, input.recipeNamespace, input.recipeName, input.userId, input.oauthClientId]
     )
-    return
+    return result.rowCount ?? 0
   }
   if (input.grantKind === 'shared') {
-    await db.query(
+    const result = await db.query(
       `DELETE FROM oauth_grants
        WHERE owner_kind = $1 AND recipe_namespace = $2 AND recipe_name = $3
          AND user_id IS NULL AND context_id = $4 AND oauth_client_id = $5 AND grant_kind = 'shared'`,
       [ownerKind, input.recipeNamespace, input.recipeName, input.contextId, input.oauthClientId]
     )
-    return
+    return result.rowCount ?? 0
   }
-  await db.query(
+  const result = await db.query(
     `DELETE FROM oauth_grants
      WHERE owner_kind = $1 AND recipe_namespace = $2 AND recipe_name = $3
        AND user_id IS NULL AND oauth_client_id = $4 AND grant_kind = 'service'`,
     [ownerKind, input.recipeNamespace, input.recipeName, input.oauthClientId]
   )
+  return result.rowCount ?? 0
 }
 
 /**

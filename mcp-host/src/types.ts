@@ -11,6 +11,7 @@ import type { LlmProvider } from './llm/registryCore'
 export interface ModelConfig {
   provider: LlmProvider
   name: string
+  connectionRef?: string
 }
 
 /** Phase 7–8: Workspace memory configuration. */
@@ -44,7 +45,7 @@ export interface HeartbeatConfig {
 export interface HostSpec {
   host: string
   contextRef: string
-  secretRef: string
+  secretRef?: string
   channels?: string[]
   model?: ModelConfig
   /** Phase 6: Tool approval configuration. */

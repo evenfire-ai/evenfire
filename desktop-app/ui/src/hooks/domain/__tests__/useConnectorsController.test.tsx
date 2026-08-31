@@ -131,6 +131,56 @@ describe('useConnectorsController — click→IPC invariants (T5, T4)', () => {
     await waitFor(() => expect(connectorNames(result)).toEqual(['monday']))
   })
 
+  it('surfaces an action error when a disconnect WRITE fails, without changing the list (B-1)', async () => {
+    const rpc = installClerum()
+    const { result } = renderController()
+
+    await act(async () => {
+      await result.current.refresh()
+    })
+    await waitFor(() => expect(connectorNames(result)).toEqual(['shared-drive', 'monday']))
+
+    // The revoke rejects (403 context_membership_denied / 502 / network). Pre-B-1
+    // the rejection was swallowed and the screen matched a cancelled dialog.
+    rpc.disconnectMcpServer.mockRejectedValueOnce(new Error('context_membership_denied'))
+    await act(async () => {
+      // The hook no longer rejects; guard anyway so a regression (re-throw)
+      // surfaces as a failed assertion below, not an unhandled rejection.
+      await result.current
+        .disconnect({ agentName: AGENT, contextRef: CTX, connector: SHARED })
+        .catch(() => undefined)
+    })
+
+    // Observable: an error is surfaced, the grant is still listed (nothing was
+    // revoked), and the row is no longer busy.
+    await waitFor(() =>
+      expect(result.current.actionError).toEqual(
+        expect.stringContaining('context_membership_denied')
+      )
+    )
+    expect(connectorNames(result)).toEqual(['shared-drive', 'monday'])
+    expect(result.current.pendingKey).toBeNull()
+  })
+
+  it('clears a prior action error when the next action starts (B-1)', async () => {
+    const rpc = installClerum()
+    const { result } = renderController()
+
+    rpc.disconnectMcpServer.mockRejectedValueOnce(new Error('boom'))
+    await act(async () => {
+      await result.current
+        .disconnect({ agentName: AGENT, contextRef: CTX, connector: SHARED })
+        .catch(() => undefined)
+    })
+    await waitFor(() => expect(result.current.actionError).toContain('boom'))
+
+    // A fresh action resets the banner before it runs.
+    await act(async () => {
+      await result.current.authorize({ agentName: AGENT, contextRef: CTX, connector: USER })
+    })
+    expect(result.current.actionError).toBeNull()
+  })
+
   it('disconnect does NOT refresh the panel when the confirm dialog is cancelled', async () => {
     const rpc = installClerum()
     const { result } = renderController()

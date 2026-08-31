@@ -31,6 +31,11 @@ export function isTerminalStepPhase(phase: StepPhase): boolean {
 export interface AgentSpec {
   model: string
   provider: LlmProviderId
+  /**
+   * Optional static-credential Secret. Omitted for oauth-broker providers
+   * such as `codex-subscription`; Control API remains the OAuth custodian.
+   * `llm:codex:execute` is never a recipe-declared scope.
+   */
   secretRef?: {
     name: string
     namespace?: string // default: control-plane

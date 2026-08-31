@@ -137,4 +137,62 @@ describe('DELETE /api/v1/mcp-oauth/:mcpServerName/grant (spec 11 U4 disconnect)'
     expect(res.status).toBe(502)
     expect(res.body.error).toBe('control_api_unreachable')
   })
+
+  it('returns 504 (not 502) when the control-api call times out, and logs it (R1-L1)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // AbortSignal.timeout() rejects fetch with a TimeoutError.
+    fetchSpy.mockRejectedValue(
+      Object.assign(new Error('The operation timed out'), {
+        name: 'TimeoutError',
+      })
+    )
+    const res = await request(makeApp()).delete(PATH).set('Authorization', 'Bearer t').send({})
+    expect(res.status).toBe(504)
+    expect(res.body.error).toBe('control_api_timeout')
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[RPC_PROXY]'))
+    warnSpy.mockRestore()
+  })
+
+  it('also treats a manual AbortError as a 504 timeout (R1-L1)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    fetchSpy.mockRejectedValue(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+    const res = await request(makeApp()).delete(PATH).set('Authorization', 'Bearer t').send({})
+    expect(res.status).toBe(504)
+    expect(res.body.error).toBe('control_api_timeout')
+    warnSpy.mockRestore()
+  })
+
+  it('coerces an unexpected 2xx (e.g. 200) from control-api to 502 (R1-L2)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // The internal contract is 204-on-success; a 200 is off-contract.
+    fetchSpy.mockResolvedValue(jsonResponse(200, { ok: true }))
+    const res = await request(makeApp()).delete(PATH).set('Authorization', 'Bearer t').send({})
+    expect(res.status).toBe(502)
+    expect(res.body.error).toBe('control_api_invalid_response')
+    warnSpy.mockRestore()
+  })
+
+  it('rewrites an upstream HTML error page to structured JSON, preserving status (R1-L3)', async () => {
+    // An ingress/nginx can interpose a text/html 403 page; the desktop must
+    // never receive reflected HTML.
+    fetchSpy.mockResolvedValue(
+      new Response('<html><body>403 Forbidden</body></html>', {
+        status: 403,
+        headers: { 'content-type': 'text/html' },
+      })
+    )
+    const res = await request(makeApp()).delete(PATH).set('Authorization', 'Bearer t').send({})
+    expect(res.status).toBe(403)
+    expect(res.headers['content-type']).toMatch(/application\/json/)
+    expect(res.body.error).toBe('control_api_error')
+    expect(JSON.stringify(res.body)).not.toContain('<html')
+  })
+
+  it('preserves a structured JSON error body from control-api as JSON (R1-L3)', async () => {
+    fetchSpy.mockResolvedValue(jsonResponse(400, { error: 'not_oauth_server' }))
+    const res = await request(makeApp()).delete(PATH).set('Authorization', 'Bearer t').send({})
+    expect(res.status).toBe(400)
+    expect(res.headers['content-type']).toMatch(/application\/json/)
+    expect(res.body.error).toBe('not_oauth_server')
+  })
 })

@@ -4678,8 +4678,14 @@ export class AppService {
     const { dialog, BrowserWindow } = await import('electron')
     const win = BrowserWindow.getFocusedWindow() ?? undefined
     const verb = action === 'connect' ? 'Connect' : 'Disconnect'
+    // Revocation is NOT immediate and — critically — has no fixed upper bound for
+    // the shared (oauth-context) flavor: SHARED partitions are exempt from the
+    // 15-min idle eviction (mcp-host), so a live session ends only on the next
+    // grant-revocation sweep, which is fail-open. Don't promise "a few minutes".
     const latencyNote =
-      action === 'disconnect' ? ' It can take a few minutes to cut active sessions.' : ''
+      action === 'disconnect'
+        ? ' It is not immediate — active sessions end on the next revocation sweep.'
+        : ''
     const message = shared ? `${verb} "${server}" for the whole team?` : `${verb} "${server}"?`
     const detail = shared
       ? action === 'connect'
@@ -4689,7 +4695,9 @@ export class AppService {
     const opts = {
       type: (action === 'disconnect' ? 'warning' : 'question') as 'warning' | 'question',
       buttons: ['Cancel', verb],
-      defaultId: 1,
+      // Disconnect is destructive: default to Cancel (0) so a stray Enter does
+      // NOT revoke. Connect is additive, so its default stays on the action (1).
+      defaultId: action === 'disconnect' ? 0 : 1,
       cancelId: 0,
       message,
       detail,
