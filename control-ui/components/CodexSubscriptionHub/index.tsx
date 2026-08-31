@@ -570,16 +570,20 @@ export function CodexSubscriptionHub() {
                   </p>
                   <div className="cu-form-inline">
                     <span
-                      title={editing ? undefined : 'Create the subscription first'}
+                      title={editing || editName.trim() ? undefined : 'Type a name to get started'}
                       className="cu-hover-hint"
                     >
                       <button
                         type="button"
                         className="cu-btn cu-btn--ghost cu-btn--sm"
                         onClick={() => {
+                          // Before the grant exists this creates it (with the
+                          // typed name) and chains straight into sign-in, so
+                          // the button never sits there dead.
                           if (editing) void handleConnect(editing)
+                          else void handleCreate()
                         }}
-                        disabled={Boolean(busyKey) || !editing}
+                        disabled={Boolean(busyKey)}
                       >
                         Sign in with ChatGPT
                       </button>

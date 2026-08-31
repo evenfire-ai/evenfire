@@ -114,20 +114,15 @@ describe('CodexSubscriptionHub', () => {
     expect(await screen.findByText('Team A')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Add subscription' }))
 
-    // Before creating, the full form is shown but sign-in is gated and
-    // nothing has been created yet.
+    // Before creating, the full form is shown and sign-in is live: clicking it
+    // creates the grant with the typed name and chains into sign-in.
     expect(createCodexSubscriptionConnection).not.toHaveBeenCalled()
     const nameInput = screen.getByRole('textbox', { name: 'Name' })
     const signIn = screen.getByRole('button', { name: 'Sign in with ChatGPT' })
-    expect(signIn).toBeDisabled()
-    expect(signIn.closest('.cu-hover-hint')).toHaveAttribute(
-      'title',
-      'Create the subscription first'
-    )
+    expect(signIn).toBeEnabled()
 
-    // Creating the grant starts the device sign-in right away.
     fireEvent.change(nameInput, { target: { value: 'New team' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Create and set up' }))
+    fireEvent.click(signIn)
     await waitFor(() => {
       expect(createCodexSubscriptionConnection).toHaveBeenCalledWith({ displayName: 'New team' })
     })
