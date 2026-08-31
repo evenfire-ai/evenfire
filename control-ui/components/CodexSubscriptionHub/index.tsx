@@ -1,8 +1,9 @@
 'use client'
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { copyTextToClipboard } from '@lib/clipboard'
 import {
+  CODEX_DEVICE_VERIFICATION_URI,
   type CodexSubscriptionConnectionView,
   createCodexSubscriptionConnection,
   listCodexConnectionModels,
@@ -79,6 +80,10 @@ export function CodexSubscriptionHub() {
   // True when the browser blocked the automatic ChatGPT tab, so the card tells
   // the operator to use the manual link instead of assuming the tab opened.
   const [deviceTabBlocked, setDeviceTabBlocked] = useState(false)
+  // Ported from dev: bumps whenever the dialog closes/reopens or a new connect
+  // starts, so a stale device-poll loop (closed dialog, switched row) can no
+  // longer touch state after it was abandoned.
+  const connectEpoch = useRef(0)
   const enabled = isCodexSubscriptionUiEnabled(capability)
 
   useEffect(() => {
@@ -111,6 +116,12 @@ export function CodexSubscriptionHub() {
       })
       .finally(() => setLoading(false))
   }, [capability, enabled, load])
+
+  useEffect(() => {
+    return () => {
+      connectEpoch.current += 1
+    }
+  }, [])
 
   const filtered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase()
@@ -159,6 +170,7 @@ export function CodexSubscriptionHub() {
   }
 
   async function openEdit(row: CodexSubscriptionConnectionView) {
+    connectEpoch.current += 1
     setEditing(row)
     setEditName(grantLabel(row))
     setEditDefault(row.defaultModel ?? '')
@@ -181,6 +193,7 @@ export function CodexSubscriptionHub() {
   }
 
   function closeEdit() {
+    connectEpoch.current += 1
     setEditing(null)
     setEditName('')
     setEditDefault('')
@@ -189,6 +202,9 @@ export function CodexSubscriptionHub() {
     setUserCode(null)
     setVerificationUri(null)
     setDeviceTabBlocked(false)
+    void load().catch(err => {
+      setError(err instanceof Error ? err.message : 'Failed to load ChatGPT subscriptions')
+    })
   }
 
   async function handleSaveEdit() {
@@ -220,12 +236,14 @@ export function CodexSubscriptionHub() {
   }
 
   async function handleConnect(row: CodexSubscriptionConnectionView) {
+    const epoch = ++connectEpoch.current
     setBusyKey(row.connectionKey)
     try {
       const started = await startCodexDeviceConnect(
         row.status === 'connected' ? 'reconnect' : 'connect',
         row.connectionKey
       )
+      if (epoch !== connectEpoch.current) return
       setUserCode(started.userCode)
       setVerificationUri(started.verificationUri)
       // Open the verification page straight away so the operator never has to
@@ -237,19 +255,32 @@ export function CodexSubscriptionHub() {
       } catch {
         opened = null
       }
+      if (epoch !== connectEpoch.current) return
       setDeviceTabBlocked(!opened)
       const deadline = Date.now() + started.intervalSeconds * 1000 * 40
       while (Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, started.intervalSeconds * 1000))
+        if (epoch !== connectEpoch.current) return
         const polled = await pollCodexDevice(started.state, row.connectionKey)
+        if (epoch !== connectEpoch.current) return
         if (polled.status === 'connected') {
           setUserCode(null)
           setVerificationUri(null)
           const latest = polled.connection
           setEditing(latest)
           const models = await listCodexConnectionModels(latest.connectionKey)
+          if (epoch !== connectEpoch.current) return
           setEditModels(models)
           await load()
+          if (epoch !== connectEpoch.current) return
+          // The backend syncs the catalog during connect — surface the outcome.
+          if (latest.catalogStatus === 'ready') {
+            showToast('Connected — catalog synced', { tone: 'success' })
+          } else {
+            showToast('Connected, but catalog sync failed. Sign in again to retry.', {
+              tone: 'error',
+            })
+          }
           return
         }
         if (polled.status === 'expired' || polled.status === 'denied') {
@@ -259,15 +290,19 @@ export function CodexSubscriptionHub() {
           return
         }
       }
+      if (epoch !== connectEpoch.current) return
       setUserCode(null)
       setVerificationUri(null)
       setError('ChatGPT sign-in timed out. Try again.')
     } catch (err) {
+      if (epoch !== connectEpoch.current) return
       setUserCode(null)
       setVerificationUri(null)
       setError(err instanceof Error ? err.message : 'ChatGPT sign-in failed')
     } finally {
-      setBusyKey(null)
+      if (epoch === connectEpoch.current) {
+        setBusyKey(null)
+      }
     }
   }
 
@@ -631,29 +666,34 @@ export function CodexSubscriptionHub() {
                           ? '1. Your browser blocked the pop-up — open ChatGPT with this link:'
                           : '1. ChatGPT opened in a new tab. If it did not, use this link:'}
                       </p>
-                      {verificationUri ? (
-                        <div className="cu-copy-field">
-                          <a
-                            className="cu-readonly-field cu-copy-field__value cu-device-setup__link"
-                            href={verificationUri}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            {verificationUri}
-                          </a>
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--ghost"
-                            onClick={() =>
-                              void copyDeviceValue(verificationUri, 'Sign-in link', showToast)
-                            }
-                            aria-label="Copy sign-in link"
-                            title="Copy sign-in link"
-                          >
-                            <IconCopy width={14} height={14} />
-                          </button>
-                        </div>
-                      ) : null}
+                      {(() => {
+                        // Locked fallback (from dev): even if the backend
+                        // omits the verification URI, the card keeps a link.
+                        const deviceUri = verificationUri ?? CODEX_DEVICE_VERIFICATION_URI
+                        return (
+                          <div className="cu-copy-field">
+                            <a
+                              className="cu-readonly-field cu-copy-field__value cu-device-setup__link"
+                              href={deviceUri}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              {deviceUri}
+                            </a>
+                            <button
+                              type="button"
+                              className="cu-btn cu-btn--icon cu-btn--ghost"
+                              onClick={() =>
+                                void copyDeviceValue(deviceUri, 'Sign-in link', showToast)
+                              }
+                              aria-label="Copy sign-in link"
+                              title="Copy sign-in link"
+                            >
+                              <IconCopy width={14} height={14} />
+                            </button>
+                          </div>
+                        )
+                      })()}
                       <p className="cu-device-setup__step">2. Enter this code:</p>
                       <div className="cu-copy-field">
                         <div className="cu-readonly-field cu-copy-field__value cu-device-setup__code">

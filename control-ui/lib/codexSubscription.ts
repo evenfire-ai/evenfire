@@ -2,12 +2,11 @@ import { apiGet, apiSend } from './api'
 
 export const CODEX_SUBSCRIPTION_API_BASE = '/api/v1/admin/llm/providers/codex-subscription'
 
+/** Canonical ChatGPT device verification page. Reject any other href from device/start. */
+export const CODEX_DEVICE_VERIFICATION_URI = 'https://auth.openai.com/codex/device'
+
 export type CodexConnectionStatus =
-  | 'disconnected'
-  | 'connecting'
-  | 'connected'
-  | 'reauth_required'
-  | 'revoked'
+  'disconnected' | 'connecting' | 'connected' | 'reauth_required' | 'revoked'
 
 export type CodexCatalogStatus = 'never_synced' | 'ready' | 'auth-rejected' | 'unavailable'
 
@@ -195,6 +194,9 @@ export function sanitizeCodexDeviceStart(raw: unknown): CodexDeviceStartView {
   const intent = raw.intent
   if (!userCode || !verificationUri || !state) {
     throw new Error('Codex device start is incomplete')
+  }
+  if (verificationUri !== CODEX_DEVICE_VERIFICATION_URI) {
+    throw new Error('Codex device start verification URI is not allowed')
   }
   return {
     userCode,

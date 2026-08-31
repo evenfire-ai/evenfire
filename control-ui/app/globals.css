@@ -11343,6 +11343,30 @@ textarea.cu-input {
   gap: var(--cu-space-2);
 }
 
+.cu-codex-device-code {
+  display: grid;
+  gap: var(--cu-space-2);
+}
+
+.cu-codex-device-code a {
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+}
+
+.cu-codex-device-code__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--cu-space-2);
+}
+
+.cu-codex-device-code__value {
+  font-family: var(--cu-font-mono);
+  font-size: var(--cu-font-size-lg);
+  font-weight: var(--cu-font-weight-semibold);
+  letter-spacing: 0.04em;
+}
+
 .cu-agent-select.cu-llm-provider-filter {
   width: 12rem;
   flex: 0 0 12rem;
