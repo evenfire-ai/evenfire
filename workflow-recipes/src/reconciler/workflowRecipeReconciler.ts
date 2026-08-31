@@ -388,17 +388,21 @@ function validateWorkloadEgressBindings(
     //
     // Placed AFTER the port range check so `binding.port` is a valid integer,
     // and BEFORE any catalog read so the ceiling holds even when the netblocks
-    // ConfigMap is missing or stale. Transport workloads are not capped — the
-    // error below names that escape hatch deliberately.
-    if (
-      egressClass === 'provider' &&
-      !workload.transport &&
-      !isProviderNonTransportPortAllowed(binding.port)
-    ) {
+    // ConfigMap is missing or stale.
+    //
+    // Applies to transport workloads too. The core's transport exemption exists
+    // for platform-authored McpServers, which "pay for their width with the MCP
+    // runtime's supervision"; a recipe workload buys no supervision by declaring
+    // `transport`, and `mcpDelegation.sanitizeEgressBindings` forwards its
+    // bindings verbatim into a generated McpServer that the McpServer lane then
+    // treats as transport and leaves uncapped. Keying on `!workload.transport`
+    // therefore made `transport` a one-field escape out of the ceiling, onto a
+    // provider range that may contain rentable cloud infrastructure.
+    if (egressClass === 'provider' && !isProviderNonTransportPortAllowed(binding.port)) {
       throw new Error(
-        `${prefix}: egressClass "provider" on a non-transport workload is limited to port ` +
+        `${prefix}: egressClass "provider" is limited to port ` +
           `${PROVIDER_NON_TRANSPORT_ALLOWED_PORTS.join(' or ')} (got ${binding.port}); ` +
-          `move the workload to an MCP transport to reach other ports`
+          `use egressClass "exact-host" with an explicit dns to reach other ports`
       )
     }
 

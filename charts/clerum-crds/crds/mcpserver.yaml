@@ -519,8 +519,12 @@ spec:
                   message: "spec.managed is immutable; delete and recreate the McpServer to change runtime ownership"
                 - rule: "!has(self.remote) || (has(self.egressBindings) && size(self.egressBindings) > 0)"
                   message: "Remote servers must declare at least one egressBinding for egress NetworkPolicy"
-                - rule: "!has(self.egressBindings) || self.egressBindings.all(b, !has(b.dns) || !has(b.port) || self.egressBindings.exists_one(o, has(o.dns) && has(o.port) && o.dns == b.dns && o.port == b.port))"
-                  message: "egressBindings must not declare the same (dns, port) twice — NetworkPolicy names would collide"
+                # A duplicate (dns, port) collides on the (server,dns,port)-derived
+                # NetworkPolicy name. That defect predates this PR and the runtime
+                # already fails loud on it (H4, networkPolicyReconciler.ts), so the
+                # admission-side rule ships separately: it is the only rule here
+                # that could reject an object a cluster accepts today, and it must
+                # be reviewed on that risk alone rather than bundled with egress.
                 # OAuth coupling: auth.type=='oauth' iff spec.oauth is present.
                 # grantScope ⇒ oauth is structural (grantScope nests under oauth).
                 - rule: "((has(self.auth) && has(self.auth.type) && self.auth.type == 'oauth') == has(self.oauth))"

@@ -18,15 +18,19 @@ type WorkflowLimitConfig = Pick<
 const MAX_EGRESS_BINDINGS = 20
 const NON_TRANSPORT_PUBLIC_WEB_MESSAGE =
   'public-web is only supported on MCP transport workloads; non-transport workloads must use exact-host egressBindings'
-// issue #510 — the invariant: on a non-transport surface a binding may be wide
-// in addresses or wide in ports, never both. Same ceiling the WRC reconciler
-// and the CRD CEL enforce, from the one shared constant so the three layers
-// cannot drift apart. 80/443 is the platform's default web pair, not a protocol
-// claim — a NetworkPolicy filters port numbers and never inspects traffic.
-const NON_TRANSPORT_PROVIDER_PORT_MESSAGE =
-  `egressClass "provider" on a non-transport workload is limited to port ` +
+// issue #510 — the invariant: a binding may be wide in addresses or wide in
+// ports, never both. Same ceiling the WRC reconciler and the CRD CEL enforce,
+// from the one shared constant so the three layers cannot drift apart. 80/443 is
+// the platform's default web pair, not a protocol claim — a NetworkPolicy
+// filters port numbers and never inspects traffic.
+//
+// The remedy names `exact-host` on purpose. Declaring `transport` used to lift
+// this ceiling and no longer does (see rejectRecipeProviderPorts), so pointing
+// the author there would be advice that fails on the next apply.
+const RECIPE_PROVIDER_PORT_MESSAGE =
+  `egressClass "provider" is limited to port ` +
   `${PROVIDER_NON_TRANSPORT_ALLOWED_PORTS.join(' or ')}; ` +
-  `move the workload to an MCP transport to reach other ports`
+  `use egressClass "exact-host" with an explicit dns to reach other ports`
 const TRANSPORT_CLUSTER_LOCAL_MESSAGE =
   'cluster-local egressBindings are only supported on non-transport workloads'
 const CLUSTER_DNS_SUFFIX = '.svc.cluster.local'
@@ -81,11 +85,22 @@ function rejectNonTransportPublicWebBindings(
   })
 }
 
-// issue #510 — the admission-side half of the provider port ceiling. Call ONLY
-// for bindings on a non-transport surface: workloads without `transport`, and
-// `ui.egress.external`, whose workload is non-transport by CRD construction
-// (CEL R16). A transport workload keeps the full port range.
-function rejectNonTransportProviderPorts(
+// issue #510 — the admission-side half of the provider port ceiling. Applies to
+// EVERY recipe-authored binding, transport or not.
+//
+// Why transport is NOT exempt here, while it is for platform McpServers
+// (network-policy-core: "Transport workloads are deliberately NOT capped"):
+// that exemption reasons that transport workloads "pay for their width with the
+// MCP runtime's supervision". A recipe workload gains no supervision by
+// declaring `transport` — the author is the same third party either way, and
+// `mcpDelegation.sanitizeEgressBindings` propagates its bindings verbatim into
+// a generated McpServer, which the McpServer lane then treats as transport and
+// leaves uncapped. Keying on `!transport` therefore let a recipe reach a
+// provider's whole published range on any port by adding one field. That range
+// can include rentable cloud infrastructure, so `transport` must not be an
+// escape hatch for `provider` the way it legitimately is for `exact-host`,
+// where the destination is a single declared host.
+function rejectRecipeProviderPorts(
   egressBindings: unknown,
   fieldPrefix: string,
   errors: WorkflowRecipeLimitError[]
@@ -110,7 +125,7 @@ function rejectNonTransportProviderPorts(
     if (isProviderNonTransportPortAllowed(binding.port)) return
     errors.push({
       field: `${fieldPrefix}[${bindingIndex}].port`,
-      message: NON_TRANSPORT_PROVIDER_PORT_MESSAGE,
+      message: RECIPE_PROVIDER_PORT_MESSAGE,
     })
   })
 }
@@ -166,12 +181,12 @@ function validateEgressLimits(spec: Record<string, unknown>, errors: WorkflowRec
           `spec.workloads[${index}].egressBindings`,
           errors
         )
-        rejectNonTransportProviderPorts(
-          egressBindings,
-          `spec.workloads[${index}].egressBindings`,
-          errors
-        )
       }
+      // Outside the `!transport` guard on purpose — see the note on
+      // rejectRecipeProviderPorts. `public-web` above stays non-transport-only;
+      // the provider ceiling does not, because `transport` would otherwise be a
+      // one-field escape hatch out of it.
+      rejectRecipeProviderPorts(egressBindings, `spec.workloads[${index}].egressBindings`, errors)
       if (Array.isArray(egressBindings) && egressBindings.length > MAX_EGRESS_BINDINGS) {
         errors.push(maxItemsError(`spec.workloads[${index}].egressBindings`, MAX_EGRESS_BINDINGS))
       }
@@ -185,7 +200,7 @@ function validateEgressLimits(spec: Record<string, unknown>, errors: WorkflowRec
   const uiSpec = spec.ui
   const uiEgressExternal =
     isPlainObject(uiSpec) && isPlainObject(uiSpec.egress) ? uiSpec.egress.external : undefined
-  rejectNonTransportProviderPorts(uiEgressExternal, 'spec.ui.egress.external', errors)
+  rejectRecipeProviderPorts(uiEgressExternal, 'spec.ui.egress.external', errors)
 
   const runtimeEgress = spec.runtimeEgress
   if (isPlainObject(runtimeEgress) && isPlainObject(runtimeEgress.http)) {

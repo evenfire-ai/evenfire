@@ -2344,12 +2344,14 @@ describe('WorkflowRecipeReconciler', () => {
     const result = await reconciler.reconcile(recipe)
 
     expect(result.phase).toBe('failed')
-    expect(result.message).toContain(
-      'egressClass "provider" on a non-transport workload is limited to port 80 or 443'
-    )
+    expect(result.message).toContain('egressClass "provider" is limited to port 80 or 443')
+    // The remedy must name exact-host, not transport: transport no longer lifts
+    // the ceiling, so the old advice would fail on the next apply.
+    expect(result.message).toContain('exact-host')
+    expect(result.message ?? '').not.toContain('move the workload to an MCP transport')
   })
 
-  it('does not apply the provider port ceiling to a transport workload', async () => {
+  it('applies the provider port ceiling to a transport workload too', async () => {
     const recipe = makeRecipe({
       spec: {
         contextRef: 'default',
@@ -2375,9 +2377,14 @@ describe('WorkflowRecipeReconciler', () => {
 
     const result = await reconciler.reconcile(recipe)
 
-    // It may still fail for catalog reasons in this fixture; what must NOT
-    // happen is a rejection by the non-transport ceiling.
-    expect(result.message ?? '').not.toContain('is limited to port 80 or 443')
+    // #510 D-A: the ceiling now applies here too. WRC forwards these bindings
+    // verbatim into a generated McpServer (mcpDelegation.sanitizeEgressBindings)
+    // that the McpServer lane treats as transport and leaves uncapped, so
+    // `transport` was a one-field escape onto a provider range that may contain
+    // rentable cloud infrastructure. The core's transport exemption remains — it
+    // is for PLATFORM-authored McpServers, not for recipe authors.
+    expect(result.phase).toBe('failed')
+    expect(result.message).toContain('egressClass "provider" is limited to port 80 or 443')
   })
 
   it('accepts provider egress on 443 for a non-transport workload', async () => {

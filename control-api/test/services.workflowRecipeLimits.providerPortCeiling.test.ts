@@ -62,13 +62,47 @@ describe('issue #510 — provider port ceiling on non-transport surfaces', () =>
     ).toHaveLength(0)
   })
 
-  it('does not cap a transport workload — that class may reach any port', () => {
+  // #510 D-A: `transport` is NOT an escape from the provider ceiling on a recipe
+  // surface. WRC forwards these bindings verbatim into a generated McpServer
+  // (mcpDelegation.sanitizeEgressBindings) that the McpServer lane treats as
+  // transport and leaves uncapped, so keying on `!transport` let a recipe reach a
+  // provider's whole published range — rentable cloud infrastructure included —
+  // on any port, by adding one field. The core's transport exemption stays, but
+  // it is for PLATFORM-authored McpServers, not for recipe authors.
+  it('caps a transport workload too — transport is not an escape hatch', () => {
+    const errors = ceilingErrors(
+      recipeWithWorkload({
+        port: 3000,
+        transport: { type: 'streamableHttp' },
+        egressBindings: [providerBinding(22)],
+      })
+    )
+    expect(errors).toHaveLength(1)
+    expect(errors[0].field).toBe('spec.workloads[0].egressBindings[0].port')
+    // The remedy must not point at `transport`, which no longer lifts the ceiling.
+    expect(errors[0].message).toContain('exact-host')
+    expect(errors[0].message).not.toContain('MCP transport')
+  })
+
+  it('still accepts a transport workload on an allowed port', () => {
     expect(
       ceilingErrors(
         recipeWithWorkload({
           port: 3000,
           transport: { type: 'streamableHttp' },
-          egressBindings: [providerBinding(22)],
+          egressBindings: [providerBinding(443)],
+        })
+      )
+    ).toHaveLength(0)
+  })
+
+  it('leaves a transport exact-host binding uncapped on any port', () => {
+    expect(
+      ceilingErrors(
+        recipeWithWorkload({
+          port: 3000,
+          transport: { type: 'streamableHttp' },
+          egressBindings: [{ dns: 'whois.iana.org', port: 43 }],
         })
       )
     ).toHaveLength(0)

@@ -1006,8 +1006,16 @@ spec:
                       # The literal mirrors PROVIDER_NON_TRANSPORT_ALLOWED_PORTS
                       # in packages/network-policy-core/index.cjs; a parity test
                       # pins the two together.
-                      - rule: "has(self.transport) || !has(self.egressBindings) || self.egressBindings.all(b, !has(b.egressClass) || b.egressClass != 'provider' || b.port in [80, 443])"
-                        message: "egressClass 'provider' on a non-transport workload is limited to port 80 or 443; move the workload to an MCP transport to reach other ports"
+                      # No `has(self.transport)` escape: a recipe workload does
+                      # not earn the core's transport exemption, whose rationale
+                      # is MCP-runtime supervision of PLATFORM-authored servers.
+                      # WRC forwards these bindings verbatim into a generated
+                      # McpServer that the McpServer lane treats as transport and
+                      # leaves uncapped, so `transport` would be a one-field
+                      # escape onto a provider range that may contain rentable
+                      # cloud infrastructure.
+                      - rule: "!has(self.egressBindings) || self.egressBindings.all(b, !has(b.egressClass) || b.egressClass != 'provider' || b.port in [80, 443])"
+                        message: "egressClass 'provider' is limited to port 80 or 443; use egressClass 'exact-host' with an explicit dns to reach other ports"
                     properties:
                       id:
                         type: string
