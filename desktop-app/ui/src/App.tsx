@@ -523,8 +523,8 @@ export function App() {
   const chatDrawerVisible = chatDrawerAvailable && chatDrawerOpen
   chatDrawerVisibleRef.current = chatDrawerVisible
   chatDrawerAvailableRef.current = chatDrawerAvailable
-  // Session-only drawer sizing + docked/overlay policy. Width is not persisted
-  // by design; it resets to the default each launch.
+  // Session-only drawer sizing (always docked beside the native embed). Width is
+  // not persisted by design; it resets to the default each launch.
   const chatDrawerResize = useChatDrawerResize(contentPanelRef, chatDrawerVisible)
   // The notification tray's drawer form occupies the same fixed right-rail rect
   // as the chat drawer, so it only takes drawer form when the chat drawer is NOT
@@ -2000,11 +2000,7 @@ export function App() {
                                 appNotificationDrawerOpen
                                   ? ' content-panel--app-notification-drawer-open'
                                   : ''
-                              }${chatDrawerVisible ? ' content-panel--chat-drawer-open' : ''}${
-                                chatDrawerVisible && chatDrawerResize.isOverlay
-                                  ? ' content-panel--chat-drawer-overlay'
-                                  : ''
-                              }`}
+                              }${chatDrawerVisible ? ' content-panel--chat-drawer-open' : ''}`}
                               style={
                                 chatDrawerVisible
                                   ? { '--chat-drawer-width': `${chatDrawerResize.width}px` }

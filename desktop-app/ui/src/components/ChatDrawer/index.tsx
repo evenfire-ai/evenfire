@@ -5,8 +5,10 @@ import type { ChatDrawerProps } from './types'
 
 /**
  * Cursor-style chat drawer that coexists with the live sandbox-ui embed on the
- * `apps` route. It is a `position: fixed` right column; the embed slot is
- * shrunk with `padding-right` so the native WebContentsView never overlaps it.
+ * `apps` route. It is a `position: fixed` right column; the drawer and the embed
+ * are always docked side by side — the embed slot is permanently shrunk with
+ * `padding-right` so the native WebContentsView (which paints over the DOM
+ * regardless of z-index) never overlaps the drawer.
  *
  * The drawer mounts a single <ChatPage> (passed as children) driven by the same
  * global `chatViewTabs` state as the full-screen chat route — no duplicated tab

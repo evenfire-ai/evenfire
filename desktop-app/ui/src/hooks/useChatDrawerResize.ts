@@ -2,17 +2,27 @@ import * as React from 'react'
 import type { RefObject } from 'react'
 
 /**
- * Session-only sizing + overlay policy for the Cursor-style chat drawer.
+ * Session-only sizing for the Cursor-style chat drawer. The drawer and the app
+ * embed are ALWAYS docked side by side — there is no overlay/float mode.
+ *
+ * The app embed is a native Electron `WebContentsView`: it paints on top of the
+ * whole renderer DOM regardless of z-index. A "float the drawer over the embed"
+ * mode is therefore physically impossible — the native view would simply cover
+ * the drawer. So the drawer stays docked at all times, the embed lives in its
+ * own column shrunk by `padding-right`, and when the embed's column gets too
+ * narrow the embed scrolls horizontally within it (its own `overflow-x`) rather
+ * than ever overlapping the drawer.
  *
  * The width is deliberately NOT persisted (no localStorage): it resets to the
  * default on every launch by design. The drawer is right-docked at
  * `right: var(--space-4)` with a fixed right edge, so a leftward drag widens it
  * (`newWidth = drawerRightEdge - cursorX`) and a rightward drag narrows it.
  *
- * When the app embed's remaining column would be squeezed below
- * `OVERLAY_EMBED_MIN`, the drawer stops pushing the embed and floats over it —
- * the caller drops the embed gutter and the drawer's own `position: fixed`
- * z-index does the rest.
+ * Docked sizing reserves a legible floor for the embed: the dynamic max width
+ * is `panelWidth - EMBED_FLOOR - GUTTER_EXTRA`, so as the window narrows the
+ * drawer auto-shrinks (via the ResizeObserver `sync` re-clamp) down to its own
+ * minimum while keeping ~`EMBED_FLOOR`px of embed. Once the drawer hits its
+ * minimum and the panel keeps shrinking, the embed simply scrolls.
  */
 
 /** Hard floor — below this the drawer's own chrome (composer, header, switcher)
@@ -24,15 +34,16 @@ export const CHAT_DRAWER_DEFAULT_WIDTH = 420
 export const CHAT_DRAWER_MAX_ABSOLUTE = 820
 /** Width step for arrow-key resize (WAI-ARIA window-splitter pattern). */
 const CHAT_DRAWER_KEY_STEP = 24
-/** Always leave at least this much of the content panel for the app embed, so
- *  even at the widest drag the embed never collapses to nothing. */
-const CHAT_DRAWER_VIEWPORT_MARGIN = 80
+/** Legible floor reserved for the app embed's column while docked. The drawer's
+ *  dynamic max width is capped so at least this much embed remains; once the
+ *  window is too narrow for both this floor AND the drawer's own minimum, the
+ *  embed keeps shrinking and scrolls via its own `overflow-x` (never overlaps
+ *  the drawer). Reuses the value of the removed overlay threshold. */
+const CHAT_DRAWER_EMBED_FLOOR = 460
 /** Fixed term added beside `--chat-drawer-width` in the embed gutter, mirroring
  *  the CSS `--app-header-utilities-width` term `var(--space-2) + 36px`
  *  (space-2 = 10px). Kept in sync with styles.css by hand. */
 const CHAT_DRAWER_GUTTER_EXTRA = 46
-/** Flip to overlay once the app embed column would drop below this width. */
-const CHAT_DRAWER_OVERLAY_EMBED_MIN = 460
 /** Fallback for the drawer's fixed right edge if the element can't be measured
  *  (`--space-4` = 18px). */
 const CHAT_DRAWER_RIGHT_INSET = 18
@@ -41,25 +52,21 @@ function readPanelWidth(ref: RefObject<HTMLElement | null>): number {
   return ref.current?.clientWidth ?? 0
 }
 
-/** Clamp a requested width to [MIN, dynamicMax], rounded to a whole pixel. */
+/** Clamp a requested width to [MIN, dynamicMax], rounded to a whole pixel. The
+ *  dynamic max reserves `EMBED_FLOOR + GUTTER_EXTRA` for the docked embed so a
+ *  narrowing window shrinks the drawer instead of collapsing the embed. */
 export function clampWidth(requested: number, panelWidth: number): number {
   const dynamicMax =
     panelWidth > 0
       ? Math.max(
           CHAT_DRAWER_MIN_WIDTH,
-          Math.min(CHAT_DRAWER_MAX_ABSOLUTE, panelWidth - CHAT_DRAWER_VIEWPORT_MARGIN)
+          Math.min(
+            CHAT_DRAWER_MAX_ABSOLUTE,
+            panelWidth - CHAT_DRAWER_EMBED_FLOOR - CHAT_DRAWER_GUTTER_EXTRA
+          )
         )
       : CHAT_DRAWER_MAX_ABSOLUTE
   return Math.round(Math.max(CHAT_DRAWER_MIN_WIDTH, Math.min(dynamicMax, requested)))
-}
-
-/** True when the app embed column would fall below the overlay threshold at the
- *  given content-panel and drawer widths — the drawer then floats over the embed
- *  instead of pushing it. Pure decision extracted from `recomputeOverlay` so the
- *  `< OVERLAY_EMBED_MIN` flip is unit-testable at the boundary. */
-export function computeChatDrawerOverlay(panelWidth: number, drawerWidth: number): boolean {
-  const embedWidth = panelWidth - drawerWidth - CHAT_DRAWER_GUTTER_EXTRA
-  return embedWidth < CHAT_DRAWER_OVERLAY_EMBED_MIN
 }
 
 /** Width the drawer should take for a cursor at `pointerX`, given the drawer's
@@ -73,8 +80,6 @@ export function widthForCursor(rightEdge: number, pointerX: number, panelWidth: 
 export type ChatDrawerResize = {
   /** Current drawer width in px (session-only state). */
   width: number
-  /** True while the drawer should float over the embed instead of pushing it. */
-  isOverlay: boolean
   /** True while a drag is in progress (for handle feedback). */
   isResizing: boolean
   /** mousedown handler for the drag handle on the drawer's left edge. */
@@ -88,7 +93,6 @@ export function useChatDrawerResize(
   active: boolean
 ): ChatDrawerResize {
   const [width, setWidth] = React.useState(CHAT_DRAWER_DEFAULT_WIDTH)
-  const [isOverlay, setIsOverlay] = React.useState(false)
   const [isResizing, setIsResizing] = React.useState(false)
   const widthRef = React.useRef(width)
   widthRef.current = width
@@ -96,23 +100,10 @@ export function useChatDrawerResize(
   // if the drawer hides or the hook unmounts mid-drag (see below).
   const endDragRef = React.useRef<(() => void) | null>(null)
 
-  // `overrideWidth` lets callers decide overlay from the width they just set
-  // this tick instead of `widthRef.current`, which still holds the previous
-  // render's value (avoids a one-frame-stale overlay flip during a drag).
-  const recomputeOverlay = React.useCallback(
-    (overrideWidth?: number) => {
-      const panelWidth = readPanelWidth(contentPanelRef)
-      if (panelWidth <= 0) return
-      const nextWidth = overrideWidth ?? widthRef.current
-      setIsOverlay(computeChatDrawerOverlay(panelWidth, nextWidth))
-    },
-    [contentPanelRef]
-  )
-
-  // Keep the width inside the dynamic clamp as the content panel resizes, and
-  // refresh the overlay decision. A ResizeObserver on the content panel also
-  // fires on window resize (the panel is full-height flex), so no separate
-  // window listener is needed.
+  // Keep the width inside the dynamic clamp as the content panel resizes. A
+  // ResizeObserver on the content panel also fires on window resize (the panel
+  // is full-height flex), so no separate window listener is needed. As the
+  // panel narrows this re-clamp shrinks the drawer to preserve the embed floor.
   React.useEffect(() => {
     if (!active) return
     const panel = contentPanelRef.current
@@ -121,14 +112,13 @@ export function useChatDrawerResize(
       const panelWidth = readPanelWidth(contentPanelRef)
       const clamped = clampWidth(widthRef.current, panelWidth)
       setWidth(prev => (clamped === prev ? prev : clamped))
-      recomputeOverlay(clamped)
     }
     sync()
     if (typeof ResizeObserver === 'undefined') return
     const observer = new ResizeObserver(sync)
     observer.observe(panel)
     return () => observer.disconnect()
-  }, [active, contentPanelRef, recomputeOverlay])
+  }, [active, contentPanelRef])
 
   const onResizeHandleMouseDown = React.useCallback(
     (event: React.MouseEvent<HTMLElement>) => {
@@ -148,7 +138,6 @@ export function useChatDrawerResize(
         const panelWidth = readPanelWidth(contentPanelRef)
         const next = widthForCursor(rightEdge, pointerX, panelWidth)
         setWidth(next)
-        recomputeOverlay(next)
       }
       const onMove = (moveEvent: MouseEvent) => {
         pointerX = moveEvent.clientX
@@ -175,7 +164,7 @@ export function useChatDrawerResize(
       window.addEventListener('mouseup', endDrag)
       window.addEventListener('blur', endDrag)
     },
-    [contentPanelRef, recomputeOverlay]
+    [contentPanelRef]
   )
 
   // Keyboard resize for the focusable separator handle (WAI-ARIA window-splitter
@@ -205,9 +194,8 @@ export function useChatDrawerResize(
       const panelWidth = readPanelWidth(contentPanelRef)
       const next = clampWidth(requested, panelWidth)
       setWidth(next)
-      recomputeOverlay(next)
     },
-    [contentPanelRef, recomputeOverlay]
+    [contentPanelRef]
   )
 
   // If the drawer hides or the hook unmounts while a drag is live, tear it down
@@ -218,5 +206,5 @@ export function useChatDrawerResize(
   }, [active])
   React.useEffect(() => () => endDragRef.current?.(), [])
 
-  return { width, isOverlay, isResizing, onResizeHandleMouseDown, onResizeHandleKeyDown }
+  return { width, isResizing, onResizeHandleMouseDown, onResizeHandleKeyDown }
 }
