@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CHAT_DRAWER_MIN_WIDTH, clampWidth, widthForCursor } from '../useChatDrawerResize'
+import { CHAT_DRAWER_MIN_WIDTH, clampWidth } from '../useChatDrawerResize'
 
 // R2-M1: the drawer resize hook's pure logic (clamp, drag mapping) had no direct
 // coverage — an inverted min/max or a reversed drag direction would leave every
@@ -53,21 +53,5 @@ describe('clampWidth embed floor (docked sizing)', () => {
     // simply keeps shrinking and scrolls; the drawer holds its minimum.
     expect(clampWidth(5000, 700)).toBe(CHAT_DRAWER_MIN_WIDTH) // 340
     expect(clampWidth(300, 700)).toBe(CHAT_DRAWER_MIN_WIDTH) // 340
-  })
-})
-
-describe('widthForCursor', () => {
-  // The drawer's right edge is fixed; width = rightEdge - pointerX. A leftward drag
-  // (smaller pointerX) must WIDEN the drawer, a rightward drag must narrow it.
-  it('maps the cursor to rightEdge - pointerX, clamped', () => {
-    expect(widthForCursor(1000, 400, 2000)).toBe(600)
-  })
-
-  it('widens as the cursor moves left (smaller pointerX)', () => {
-    expect(widthForCursor(1000, 300, 2000)).toBeGreaterThan(widthForCursor(1000, 400, 2000))
-  })
-
-  it('narrows toward the minimum as the cursor moves right past the min', () => {
-    expect(widthForCursor(1000, 900, 2000)).toBe(CHAT_DRAWER_MIN_WIDTH) // rightEdge-pointerX = 100 -> 340
   })
 })

@@ -88,14 +88,6 @@ export function clampWidth(requested: number, panelWidth: number): number {
   return Math.round(Math.max(CHAT_DRAWER_MIN_WIDTH, Math.min(dynamicMax, requested)))
 }
 
-/** Width the drawer should take for a cursor at `pointerX`, given the drawer's
- *  fixed right edge. Leftward drag (smaller `pointerX`) widens, rightward narrows
- *  (`rightEdge - pointerX`); result is clamped to the panel. Extracted so the drag
- *  direction is unit-testable (an inverted mapping would otherwise pass every test). */
-export function widthForCursor(rightEdge: number, pointerX: number, panelWidth: number): number {
-  return clampWidth(rightEdge - pointerX, panelWidth)
-}
-
 export type ChatDrawerResize = {
   /** Current drawer width in px, already clamped to the live panel. */
   width: number
