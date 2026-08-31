@@ -393,15 +393,23 @@ export function LlmModelTable({
                         </span>
                       </td>
                       <td>
-                        <span
-                          className={
-                            model.source === 'discovery'
-                              ? 'cu-px-badge cu-px-badge--info'
-                              : 'cu-px-badge cu-px-badge--off'
-                          }
-                        >
-                          {model.source === 'discovery' ? 'Discovered' : 'Manual'}
-                        </span>
+                        <>
+                          <span
+                            className={
+                              model.source === 'discovery'
+                                ? 'cu-px-badge cu-px-badge--info'
+                                : 'cu-px-badge cu-px-badge--off'
+                            }
+                          >
+                            {model.source === 'discovery' ? 'Discovered' : 'Manual'}
+                          </span>
+                          {model.stale ? (
+                            <>
+                              {' '}
+                              <span className="cu-px-badge cu-px-badge--warn">Stale</span>
+                            </>
+                          ) : null}
+                        </>
                       </td>
                       <td className="cu-px-actions">
                         <RowActionsMenu

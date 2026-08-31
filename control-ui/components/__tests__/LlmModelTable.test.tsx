@@ -47,10 +47,10 @@ describe('LlmModelTable catalog-lifecycle columns', () => {
     expect(screen.queryByText('Manual')).not.toBeInTheDocument()
   })
 
-  it('does not render the removed Catalog status column', () => {
+  it('keeps stale status on its record without restoring the removed Catalog status column', () => {
     renderTable([{ ...baseModel, id: 'm-stale', source: 'discovery', stale: true }, baseModel])
     expandAnthropicModels()
-    expect(screen.queryByText('Stale', { selector: '.cu-px-badge--warn' })).toBeNull()
+    expect(screen.getByText('Stale', { selector: '.cu-px-badge--warn' })).toBeVisible()
     expect(screen.queryByRole('columnheader', { name: 'Catalog status' })).toBeNull()
   })
 
@@ -304,6 +304,7 @@ describe('LlmModelTable provider columns', () => {
     renderTable([{ ...baseModel, source: 'discovery', stale: true }])
 
     expect(screen.getByText('claude-sonnet-4-6')).toBeInTheDocument()
+    expect(screen.getByText('Stale')).toBeVisible()
   })
 
   it('filters first-class rows without provider disclosure state', () => {
