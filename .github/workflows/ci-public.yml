@@ -95,6 +95,15 @@ jobs:
         working-directory: packages/workflow-runtime-core
         run: npm run build
 
+      # profile-ui consumes the source-only frontend table package through a file
+      # link. Install the package's own React type dependencies before Next follows
+      # that link to its real path; a consumer-only install cannot resolve them from
+      # the sibling package directory on a clean runner.
+      - name: Install frontend-table-system dependencies
+        if: matrix.service == 'profile-ui'
+        working-directory: packages/frontend-table-system
+        run: npm ci
+
       - name: Install dependencies
         working-directory: ${{ matrix.service }}
         run: npm ci
@@ -284,6 +293,9 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: control-ui/package-lock.json
+      - name: Install frontend-table-system dependencies
+        working-directory: packages/frontend-table-system
+        run: npm ci
       - name: Install dependencies
         working-directory: control-ui
         run: npm ci
