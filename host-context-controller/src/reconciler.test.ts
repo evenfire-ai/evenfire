@@ -935,7 +935,7 @@ describe('PR-B B1 — writeStatusCondition', () => {
         reason: 'ok',
         message: 'ok',
       })
-    ).resolves.toBeUndefined()
+    ).resolves.toBe(false)
 
     expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
   })
@@ -1868,6 +1868,43 @@ describe('updateStatusConditions', () => {
     expect(types).toContain('SecretResolved')
     expect(types).toContain('NetworkReady')
     expect(types).toContain('DeploymentReady')
+  })
+
+  it('does not log Updated status conditions when both writes were skipped', async () => {
+    const server = makeServer({ name: 'pg' })
+    const identical = {
+      status: {
+        conditions: [
+          {
+            type: 'NetworkReady',
+            status: 'True',
+            reason: 'NetworkPoliciesApplied',
+            message: 'NetworkPolicies and Service created',
+            lastTransitionTime: '2020-01-02T00:00:00.000Z',
+          },
+          {
+            type: 'DeploymentReady',
+            status: 'True',
+            reason: 'ReplicasAvailable',
+            message: 'Deployment has ready replicas',
+            lastTransitionTime: '2020-01-02T00:00:00.000Z',
+          },
+        ],
+      },
+    }
+    customApi.getNamespacedCustomObjectStatus.mockResolvedValue(identical)
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await (
+        reconciler as unknown as {
+          updateStatusConditions(server: McpServerCRD, deploymentReady: boolean): Promise<void>
+        }
+      ).updateStatusConditions(server, true)
+      expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+      expect(log.mock.calls.flat().join('\n')).not.toContain('Updated status conditions')
+    } finally {
+      log.mockRestore()
+    }
   })
 })
 
