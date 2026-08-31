@@ -8,9 +8,15 @@ import type * as k8s from '@kubernetes/client-node'
  * a field, refresh this blob so the suite goes red until the comparator or
  * builder learns that default (PR G §8).
  *
- * Container `imagePullPolicy` is filled after overlay from kube
- * `DefaultImagePullPolicy` (Always for `:latest` / untagged; IfNotPresent
- * otherwise) because recorded containers are replaced by the desired list.
+ * Desired containers replace the recorded list (arrays overlay by clone).
+ * Top-level omitted container defaults are then copied from the recorded
+ * container — one list, not a hand-written twin of
+ * `normalizeContainerDefaults`. `imagePullPolicy` stays content-dependent
+ * (`DefaultImagePullPolicy`: Always for `:latest` / untagged; IfNotPresent
+ * otherwise). Nested defaults (ports, probes, env.fieldRef) only exist when
+ * those child objects are present and stay synthesized. Refresh the recorded
+ * container from a live GET so a new apiserver default turns the suite red
+ * (PR G §8 / #530).
  */
 const SERVER_TIME = new Date('2026-04-01T00:00:00.000Z')
 const SERVER_UID = '11111111-2222-3333-4444-555555555555'
@@ -70,6 +76,7 @@ export const RECORDED_APPSV1_DEPLOYMENT: k8s.V1Deployment = {
             name: 'recorded',
             image: 'recorded:1',
             imagePullPolicy: 'IfNotPresent',
+            resources: {},
             terminationMessagePath: '/dev/termination-log',
             terminationMessagePolicy: 'File',
           },
@@ -178,16 +185,33 @@ function applyPodSpecDefaults(podSpec: k8s.V1PodSpec | undefined): void {
   for (const volume of podSpec.volumes ?? []) applyVolumeDefaults(volume)
 }
 
+const RECORDED_CONTAINER_AUTHORING = new Set(['name', 'image'])
+const RECORDED_CONTAINER_CONTENT_DEPENDENT = new Set(['imagePullPolicy'])
+
+function recordedContainer(): k8s.V1Container {
+  const container = RECORDED_APPSV1_DEPLOYMENT.spec?.template?.spec?.containers?.[0]
+  if (!container) {
+    throw new Error('RECORDED_APPSV1_DEPLOYMENT is missing a recorded container')
+  }
+  return container
+}
+
 function applyContainerDefaults(container: k8s.V1Container): void {
-  if (container.resources === undefined) container.resources = {}
+  // Top-level omitted keys come from the recorded container so a refreshed
+  // blob (new apiserver default) fills without a parallel if-chain.
+  for (const [key, value] of Object.entries(recordedContainer()) as Array<
+    [keyof k8s.V1Container, unknown]
+  >) {
+    if (RECORDED_CONTAINER_AUTHORING.has(key) || RECORDED_CONTAINER_CONTENT_DEPENDENT.has(key)) {
+      continue
+    }
+    if (value === undefined) continue
+    if (container[key] === undefined) {
+      ;(container as unknown as Record<string, unknown>)[key] = structuredClone(value)
+    }
+  }
   if (container.imagePullPolicy === undefined) {
     container.imagePullPolicy = defaultImagePullPolicy(container.image)
-  }
-  if (container.terminationMessagePath === undefined) {
-    container.terminationMessagePath = '/dev/termination-log'
-  }
-  if (container.terminationMessagePolicy === undefined) {
-    container.terminationMessagePolicy = 'File'
   }
   for (const port of container.ports ?? []) {
     if (port.protocol === undefined) port.protocol = 'TCP'

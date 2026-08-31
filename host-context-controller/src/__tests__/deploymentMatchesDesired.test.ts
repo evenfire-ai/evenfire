@@ -17,7 +17,7 @@ import {
   normalizeDeploymentForComparison,
   preserveDeploymentAnnotations,
 } from '../utils'
-import { asApiserverDeployment } from './asApiserverDeployment'
+import { RECORDED_APPSV1_DEPLOYMENT, asApiserverDeployment } from './asApiserverDeployment'
 import {
   cloneAndMutateLeaf,
   collectLeafPaths,
@@ -176,6 +176,45 @@ describe('asApiserverDeployment', () => {
     expect(existing.spec?.template?.spec?.restartPolicy).toBe('Always')
   })
 
+  it('FIXTURE-1: top-level container defaults come from the recorded container', () => {
+    const recorded = RECORDED_APPSV1_DEPLOYMENT.spec?.template?.spec?.containers?.[0]
+    expect(recorded).toBeDefined()
+    const desired = sparseDeployment()
+    delete desired.spec!.template.spec!.containers![0].ports
+    const synthesized = asApiserverDeployment(desired).spec?.template?.spec?.containers?.[0]
+    expect(synthesized).toBeDefined()
+
+    const topLevelDefaults = (container: k8s.V1Container) => {
+      const rest: Record<string, unknown> = { ...container }
+      delete rest.name
+      delete rest.image
+      delete rest.imagePullPolicy
+      return rest
+    }
+    expect(topLevelDefaults(synthesized!)).toEqual(topLevelDefaults(recorded!))
+    expect(recorded?.resources).toEqual({})
+    expect(synthesized?.resources).toEqual({})
+  })
+
+  it('FIXTURE-1: recorded container defaults that the lemma strips still strip; IPP does not', () => {
+    const recorded = RECORDED_APPSV1_DEPLOYMENT.spec?.template?.spec?.containers?.[0]
+    expect(recorded).toBeDefined()
+    const desired = sparseDeployment()
+    desired.spec!.template.spec!.containers![0] = {
+      name: 'c',
+      image: 'img:1',
+      imagePullPolicy: recorded!.imagePullPolicy,
+      resources: structuredClone(recorded!.resources),
+      terminationMessagePath: recorded!.terminationMessagePath,
+      terminationMessagePolicy: recorded!.terminationMessagePolicy,
+    }
+    const container = canonicalPodSpec(normalizeDeploymentForComparison(desired))?.containers?.[0]
+    expect(container?.resources).toBeUndefined()
+    expect(container?.terminationMessagePath).toBeUndefined()
+    expect(container?.terminationMessagePolicy).toBeUndefined()
+    expect(container?.imagePullPolicy).toBe('IfNotPresent')
+  })
+
   it('FIXTURE-1: fills omitted imagePullPolicy the way apps/v1 defaults it', () => {
     const containerOf = (desired: k8s.V1Deployment) =>
       asApiserverDeployment(desired).spec?.template?.spec?.containers?.[0]
@@ -204,6 +243,9 @@ type CanonicalPodSpec = {
   serviceAccountName?: string
   containers?: Array<{
     resources?: unknown
+    imagePullPolicy?: string
+    terminationMessagePath?: string
+    terminationMessagePolicy?: string
     livenessProbe?: { timeoutSeconds?: number; failureThreshold?: number }
   }>
 }
