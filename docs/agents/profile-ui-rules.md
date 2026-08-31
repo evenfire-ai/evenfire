@@ -14,8 +14,24 @@ These provider-neutral rules apply only to `profile-ui/**`. Combine them with
   folders with `index.tsx` and colocated support such as `types.ts`. Do not
   migrate Profile UI to Control UI's `components/ui/` structure.
 - Reusable configuration constants live under `app/constants/`.
-- Reuse Profile UI's existing primitives, including `Button`, `TextInput`,
-  `SelectControl`, `FormField`, and `EditableList`.
+- Reuse Profile UI's existing form primitives, including `Button`, `TextInput`,
+  `SelectControl`, and `FormField`. Use `@clerum/frontend-table-system` for
+  tables and repeated record lists; the obsolete local `EditableList` has been
+  removed.
+
+## Tables and record lists
+
+- Use the shared `DataTable`/`TableHeaderCell` contract for member, invitation,
+  and permission matrices. Use `RecordList`/`RecordListRow` for settings and
+  connected-account rows that do not need comparable column headers.
+- Ordinary member rows navigate to `PROFILE_ROUTES` detail destinations and
+  place every record-specific operation in the shared `RowActionMenu`.
+- Preserve permission checkboxes and invitation selection as specialized table
+  interactions. They remain explicit controls and must not trigger row
+  navigation.
+- Do not recreate `.members-table` styling or a Profile-only table primitive;
+  use shared modifiers such as `eft-table--wide` and keep only genuine
+  Profile-specific presentation in `app/globals.css`.
 
 ## Routing
 

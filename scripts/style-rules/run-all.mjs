@@ -3,8 +3,8 @@
  * Manual / CI entry: run style-rules across the full repo tree (all files
  * the rules in rules.mjs claim to cover via `applies()`).
  *
- * Currently scoped to desktop-app/ui — extend rules.mjs to add coverage
- * for control-ui / profile-ui when their patterns consolidate.
+ * Covers Desktop renderer style invariants plus the shared Control/Profile
+ * table-system boundary.
  */
 import { spawnSync } from 'node:child_process'
 import { dirname, resolve } from 'node:path'

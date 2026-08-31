@@ -80,6 +80,66 @@ application guidance that must be combined with this shared document.
   brightness-filter controls. Use background, border, text color, and shadow
   tokens instead of `transform`, `translate`, `top`, `margin`, or `filter`.
 
+## Tables and record lists
+
+- `packages/frontend-table-system` is the shared semantic and visual boundary
+  for Control UI and Profile UI tables and table-like record lists. Import its
+  `DataViewHeader`, `TableSearch`, `TableViewport`, `DataTable`, `TableRow`,
+  table cells/state rows, `RecordList`, `RecordListRow`, `RowActionMenu`, and
+  sorting helpers instead of creating an application-local table system.
+- Use a semantic `DataTable` for comparable columns and `RecordList` for a
+  repeated record layout that does not need column headers. Do not write raw
+  production `<table>` markup in either web application. Choose the standard,
+  navigable, selection/permission, hierarchy/file, or embedded/diagnostic
+  behavior deliberately; do not encode variants as a growing set of unrelated
+  boolean props.
+- Keep the title, description, search, refresh, and primary CTA in one
+  `DataViewHeader`-based toolbar. Loading, empty, and error states belong in the
+  table/list content area and must not remove the toolbar. Use the established
+  search input and at most the application's primary, secondary, and
+  tertiary/ghost page-action variants. Place route-backed tabs below the page
+  identity and toolbar, and flatten category-wrapper plus child-list double
+  tabs into sibling destinations when no information-architecture decision is
+  required.
+- Fill the available content width. Keep fixed widths for genuinely compact
+  numeric, status, selection, icon, and action cells; allow ordinary text
+  columns to size flexibly. Put secondary metadata such as descriptions,
+  emails, providers, aliases, or namespaces in accurately named columns rather
+  than stacking it under a primary label. Truncate bounded, non-critical text
+  only when its complete value remains accessibly available.
+- Make ordinary record rows navigate to their dedicated detail route. Do not
+  use inline master/detail expansion for normal record tables; reserve
+  expansion or hierarchy for a genuinely specialized tree, file, permission,
+  or selection workflow. Child links, buttons, checkboxes, and menus keep their
+  own destinations/actions and must not activate the row. Remove redundant
+  same-destination inspect links and chevrons.
+- Put every record-specific operation in the shared, accessible three-dot
+  `RowActionMenu` at the far right. The menu includes the detail action when the
+  row itself navigates and has other actions; put that detail action first and
+  keep destructive actions clearly labelled.
+- Use stable sorting with a deterministic default and `aria-sort` for every
+  meaningful data column. Fully loaded collections sort locally without a
+  refetch. Producer-backed paginated data must sort at the producer/API
+  boundary before cursor slicing, bind cursor continuation to the selected
+  order, and reset pagination when ordering changes; sorting only the loaded
+  page is not authoritative.
+- Keep standard rows compact and consistent. Use `TableViewport` for horizontal
+  overflow and for long-list body scrolling so the page title, toolbar, tabs,
+  and semantic sticky table header remain visible. Embedded/diagnostic views
+  may use the less restrictive viewport mode when page-level scrolling is the
+  appropriate contract.
+- Inline record expansion is not a storage location for data. Promote small
+  facts to columns, expose bounded text with an accessible full-value
+  affordance, and move large structured content to the canonical detail route.
+- Preserve specialized selection, permission, file, and tree semantics as
+  explicit variants. Sharing the foundation does not make those workflows
+  ordinary navigable record tables. Embedded diagnostic tables share the
+  structure and typography but may retain product-defined chronological order
+  or local toolbar placement.
+- After migrating a family, prove the superseded component, selector, helper,
+  expansion state, and tests have zero production consumers before deleting
+  them. Do not create a parallel app-local table shell for convenience.
+
 ## Utilities
 
 - Search the target application's `lib/` before adding string helpers such as

@@ -19,6 +19,38 @@ const STYLE_PROP_OPEN = /\bstyle=\{\{/
 const MOTIONLESS_HOVER_PROPS = new Set(['filter', 'transform'])
 
 const DESKTOP_UI_PREFIX = 'desktop-app/ui/'
+const WEB_APP_PREFIXES = ['control-ui/', 'profile-ui/']
+const WEB_APP_SOURCE_EXTENSIONS = ['.js', '.jsx', '.ts', '.tsx']
+const WEB_APP_NON_PRODUCTION_SEGMENTS = [
+  '/__tests__/',
+  '/e2e/',
+  '/fixtures/',
+  '/mocks/',
+  '/test/',
+  '/tests/',
+]
+const WEB_LEGACY_TABLE_PATTERNS = [
+  {
+    pattern: /\bcu-expandable-table\b|\bcu-expandable-row__[^\s'"`}]*/,
+    message: 'retired Control UI expandable-table class',
+  },
+  {
+    pattern: /\bmembers-table(?:__[a-z0-9-]+)?\b/,
+    message: 'retired Profile UI members-table class',
+  },
+  {
+    pattern: /(?:\b|\/)EditableList(?:\b|\/)/,
+    message: 'retired Profile UI EditableList component',
+  },
+  {
+    pattern: /(?:\b|\/)LlmSecretsSubTabs(?:\b|\/)/,
+    message: 'retired Control UI LlmSecretsSubTabs component',
+  },
+  {
+    pattern: /(?:from\s+['"][^'"]*\/RowActions['"]|<RowActions(?:\s|\/|>))/,
+    message: 'retired Control UI RowActions component',
+  },
+]
 
 // Files where defining hex color tokens is the whole point.
 const TOKEN_FILES = ['desktop-app/ui/src/styles/tokens.css']
@@ -67,6 +99,13 @@ function isTsxTarget(file) {
   return file.endsWith('.tsx') || file.endsWith('.ts')
 }
 
+function isWebProductionSource(file) {
+  if (!WEB_APP_PREFIXES.some(prefix => file.startsWith(prefix))) return false
+  if (!WEB_APP_SOURCE_EXTENSIONS.some(extension => file.endsWith(extension))) return false
+  if (file.endsWith('.d.ts')) return false
+  return !WEB_APP_NON_PRODUCTION_SEGMENTS.some(segment => file.includes(segment))
+}
+
 function collectHoverMotionViolations(line, lineNumber) {
   const violations = []
   for (const declarationText of line.split(';')) {
@@ -84,6 +123,51 @@ function collectHoverMotionViolations(line, lineNumber) {
 }
 
 export const rules = [
+  {
+    id: 'web-no-app-local-table',
+    severity: 'error',
+    description:
+      'Control UI and Profile UI production views must use @clerum/frontend-table-system instead of raw app-local table markup.',
+    applies(file) {
+      return isWebProductionSource(file)
+    },
+    check({ lines }) {
+      const violations = []
+      lines.forEach((line, i) => {
+        if (/<table(?:\s|>)/.test(line)) {
+          violations.push({
+            line: i + 1,
+            message:
+              'raw <table> creates a parallel table shell — compose @clerum/frontend-table-system DataTable primitives',
+          })
+        }
+      })
+      return violations
+    },
+  },
+  {
+    id: 'web-no-retired-table-pattern',
+    severity: 'error',
+    description:
+      'Retired Control/Profile table wrappers and inline-expansion families must not regain production consumers.',
+    applies(file) {
+      return isWebProductionSource(file)
+    },
+    check({ lines }) {
+      const violations = []
+      lines.forEach((line, i) => {
+        for (const legacy of WEB_LEGACY_TABLE_PATTERNS) {
+          if (legacy.pattern.test(line)) {
+            violations.push({
+              line: i + 1,
+              message: `${legacy.message} — use @clerum/frontend-table-system`,
+            })
+          }
+        }
+      })
+      return violations
+    },
+  },
   {
     id: 'da-no-hex-in-css',
     severity: 'error',
