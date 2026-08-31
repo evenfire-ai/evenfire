@@ -10,10 +10,12 @@ import type { DesktopCommandId } from '../../../src/desktopCommands'
 
 const confirmDialogHarness = vi.hoisted(() => ({
   rendered: vi.fn(),
-  // Tracks whether a deep-link ConfirmDialog is actually on screen right now,
+  // Counts how many ConfirmDialogs are actually on screen right now,
   // independently of the overlay signal, so the signal<->dialog invariant can
-  // be asserted without reading a stale `props` snapshot after unmount.
-  mounted: false,
+  // be asserted without reading a stale `props` snapshot after unmount. A count
+  // (not a boolean) so a second concurrent dialog's cleanup cannot falsely mark
+  // the surface empty while the first is still mounted.
+  mountedCount: 0,
   props: null as null | {
     title: string
     onCancel: () => void
@@ -97,9 +99,9 @@ vi.mock('@components/ConfirmDialog', () => ({
     confirmDialogHarness.rendered(props)
     confirmDialogHarness.props = props
     useEffect(() => {
-      confirmDialogHarness.mounted = true
+      confirmDialogHarness.mountedCount += 1
       return () => {
-        confirmDialogHarness.mounted = false
+        confirmDialogHarness.mountedCount -= 1
       }
     }, [])
     return null
@@ -236,7 +238,7 @@ describe('App deep-link orchestration', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     confirmDialogHarness.props = null
-    confirmDialogHarness.mounted = false
+    confirmDialogHarness.mountedCount = 0
     appHeaderHarness.props = null
     chatLocalSearchHarness.rendered.mockReset()
     commandPaletteHarness.props = null
@@ -738,7 +740,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() =>
       expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
     )
-    expect(confirmDialogHarness.mounted).toBe(true)
+    expect(confirmDialogHarness.mountedCount).toBeGreaterThan(0)
     expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(true)
 
     const ensureCallsBeforeRetry = ensureTeamContext.mock.calls.length
@@ -754,7 +756,7 @@ describe('App deep-link orchestration', () => {
     // no frame with a dialog mounted and the embed shown, and none with the
     // embed hidden and no dialog. Retry never acknowledges (that is Dismiss).
     await waitFor(() => expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(false))
-    expect(confirmDialogHarness.mounted).toBe(false)
+    expect(confirmDialogHarness.mountedCount).toBe(0)
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
     // The retry actually re-attempted the open (handleRetryFailedSandboxUiDeepLink
     // ran), rather than just tearing the dialog down.
