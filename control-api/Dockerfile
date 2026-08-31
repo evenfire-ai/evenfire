@@ -16,6 +16,7 @@ COPY packages/network-policy-core ./packages/network-policy-core
 # before control-api's npm ci so its file: dependency resolves; resourceFieldValidation
 # imports validateDisplayField from it.
 COPY packages/display-field ./packages/display-field
+COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 
 # Build the shared @clerum/workflow-runtime-core package (TS → dist) BEFORE
 # control-api's npm ci, so its file: dependency on it resolves with the compiled

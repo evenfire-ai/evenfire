@@ -22,6 +22,7 @@ resources:
   # would avoid the snap-back but requires wiring seed creation into every
   # fresh-cluster path (minikube + GKE) — tracked as a follow-up.
   - provider-netblocks-configmap.yaml
+  - codex-llm-proxy.yaml
   # Empty-by-design Secrets. Populated out-of-band by
   # `deploy/scripts/apply-inter-service-tokens.sh` (kubectl patch) BEFORE
   # `kubectl apply -k` runs. Declared in base so every overlay gets the

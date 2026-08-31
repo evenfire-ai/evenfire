@@ -91,7 +91,7 @@ async function parseJsonResponse(res: Response): Promise<unknown> {
 }
 
 export function formatApiError(res: Response, text: string): Error {
-  let detail = text
+  let detail: string
   let parsedBody: Record<string, unknown> | null = null
   try {
     const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
@@ -1367,7 +1367,7 @@ export async function sfsUpload(
       handler?.()
       throw new Error('401 Unauthorized - session expired, please sign in again')
     }
-    let detail = text
+    let detail: string
     try {
       const parsed = JSON.parse(text) as { error?: { message?: string; code?: string } }
       detail = parsed.error?.message || parsed.error?.code || text
@@ -2471,6 +2471,7 @@ export type WorkflowRecipeResource = {
     namespace?: string
     creationTimestamp?: string
     labels?: Record<string, string>
+    annotations?: Record<string, string>
   }
   spec?: Record<string, unknown>
   status?: WorkflowRecipeStatus
@@ -2502,7 +2503,7 @@ export async function getRecipe(name: string) {
 }
 
 export async function createRecipe(payload: {
-  metadata: { name: string; namespace?: string }
+  metadata: { name: string; namespace?: string; annotations?: Record<string, string> }
   spec: Record<string, unknown>
 }) {
   return apiSend(
@@ -2537,7 +2538,7 @@ export type ServerValidationResult =
 // let the reconciler catch at L4.
 export async function validateRecipeServer(
   recipe: {
-    metadata: { name: string; namespace?: string }
+    metadata: { name: string; namespace?: string; annotations?: Record<string, string> }
     spec: Record<string, unknown>
   },
   opts: { mode?: 'create' | 'edit' } = {}
@@ -2560,7 +2561,13 @@ export async function validateRecipeServer(
   throw new Error(`${res.status} ${res.statusText} - ${text}`)
 }
 
-export async function updateRecipe(name: string, payload: { spec: Record<string, unknown> }) {
+export async function updateRecipe(
+  name: string,
+  payload: {
+    spec: Record<string, unknown>
+    metadata?: { annotations?: Record<string, string> }
+  }
+) {
   return apiSend(
     'PUT',
     `/api/v1/admin/recipes/${encodeURIComponent(name)}`,
@@ -3632,7 +3639,12 @@ export type PluginWorkloadSdkPromptTarget = {
   provider: string
   model: string
   // Identity of a provider-owned secret data key; never a secret value.
+  // Empty for oauth-broker (Codex) targets, which have no static Secret key.
   credentialSlot: string
+  // Codex subscription connection key the target executes against. Only set
+  // for oauth-broker providers; the grant must already exist (choose, don't
+  // create) and offer the selected model.
+  connectionRef?: string
 }
 
 export type PluginWorkloadSdkQuotaLimits = {

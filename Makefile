@@ -39,6 +39,7 @@ SERVICES := \
 	rpc-proxy \
 	mcp-proxy \
 	webhook-proxy \
+	codex-llm-proxy \
 	webhook-gateway \
 	stdio-bridge \
 	profile-ui \
@@ -47,7 +48,8 @@ SERVICES := \
 	mcp-servers \
 	packages/desktop-app-links \
 	packages/workflow-runtime-core \
-	packages/workflow-sdk
+	packages/workflow-sdk \
+	packages/llm-provider-attempt-contract
 
 # Services that have unit tests
 TEST_SERVICES := \
@@ -60,6 +62,7 @@ TEST_SERVICES := \
 	rpc-proxy \
 	mcp-proxy \
 	webhook-proxy \
+	codex-llm-proxy \
 	webhook-gateway \
 	stdio-bridge \
 	profile-ui \
@@ -68,7 +71,8 @@ TEST_SERVICES := \
 	packages/desktop-app-links \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk \
-	packages/network-policy-core
+	packages/network-policy-core \
+	packages/llm-provider-attempt-contract
 
 # ── Optional private infra (gcp-*, promotion) ──────────────────────────────
 -include Makefile.infra
@@ -115,6 +119,10 @@ test-unit-all: ## Run unit tests across all services
 		echo "FAILED:$$failed"; exit 1; \
 	fi
 	@echo "All unit tests passed."
+
+.PHONY: test-codex-subscription-t0
+test-codex-subscription-t0: ## Run the Codex subscription T0 aggregator (counts, no skips)
+	@bash scripts/tests/test-codex-subscription-t0.sh
 
 # ── Build Preflight ──────────────────────────────────────────────────
 .PHONY: build-preflight
@@ -598,6 +606,10 @@ minikube-sync-auth-key-if-present: ## Sync JWT public key only when minikube aut
 	else \
 	  $(MAKE) --no-print-directory minikube-sync-auth-key; \
 	fi
+
+.PHONY: minikube-sync-codex-subscription-url
+minikube-sync-codex-subscription-url: ## Resolve branch Control UI URL and sync CONTROL_API_CONTROL_UI_BASE_URL for Codex OAuth
+	@bash scripts/minikube/sync-codex-subscription-control-ui-url.sh --context=$(MINIKUBE_PROFILE)
 
 # ── Minikube Port Forwards ──────────────────────────────────────────
 .PHONY: minikube-pf-control-ui
@@ -1087,6 +1099,24 @@ test-e2e-wrc-internal-dependency-networkpolicy: ## Run issue #485 WRC internal-d
 test-e2e-provider-cidr-egress: ## Run issue #299 Phase 2 provider-CIDR egress render + admission + H3 + drift E2E gate (minikube; Calico)
 	@echo "Running provider-CIDR egress E2E gate (issue #299 Phase 2)..."
 	CONTEXT=$(MINIKUBE_PROFILE) MINIKUBE_PROFILE=$(MINIKUBE_PROFILE) bash scripts/e2e/e2e-provider-cidr-egress.sh
+.PHONY: test-e2e-codex-subscription-network-boundary
+test-e2e-codex-subscription-network-boundary: ## Codex LLM proxy NetworkPolicy boundary (exit 3 before deploy)
+	@echo "Running Codex subscription network-boundary gate..."
+	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-codex-subscription-network-boundary.sh
+
+.PHONY: test-e2e-codex-subscription-runtime
+test-e2e-codex-subscription-runtime: ## Codex subscription runtime acceptance (RED until HCC/WRC/mcp-host wiring)
+	@echo "Running Codex subscription runtime acceptance..."
+	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-codex-subscription-runtime.sh
+
+.PHONY: test-e2e-codex-subscription-playwright
+test-e2e-codex-subscription-playwright: ## Codex subscription Control UI guardians (5 tests; Desktop deferred until connected subscription)
+	@echo "Running Codex subscription Control UI Playwright guardians..."
+	@if [ -z "$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" ]; then \
+		echo "Refusing Codex subscription Playwright: explicit Kubernetes context is required" >&2; \
+		exit 1; \
+	fi
+	MINIKUBE_PROFILE="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" KUBECONTEXT="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" bash scripts/e2e/e2e-codex-subscription-playwright.sh
 
 .PHONY: test-e2e-plugin-workload-sdk
 test-e2e-plugin-workload-sdk: ## Run Plugin Workload SDK E2E gate (minikube only; requires E2E_PLUGIN_SDK_WRITE_CONFIRM=1)

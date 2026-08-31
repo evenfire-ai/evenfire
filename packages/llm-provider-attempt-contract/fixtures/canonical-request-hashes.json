@@ -1,0 +1,229 @@
+{
+  "schemaVersion": "codex-completion-request.v1",
+  "notes": "SHA-256 over the validated V1 projection using lexicographic stableStringify. Nested object key insertion order must not change the digest. Array order is significant. Omitted optional fields are absent from the projection. Non-finite numbers are rejected before hashing.",
+  "cases": [
+    {
+      "name": "minimal",
+      "request": {
+        "schemaVersion": "codex-completion-request.v1",
+        "requestId": "req-001",
+        "idempotencyKey": "idem-001",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [{ "role": "user", "content": "hello" }]
+      },
+      "sha256": "d4223ad1422010cd31644e42181d83a07269f8d5740ae18c11cad3b56e5b4b97"
+    },
+    {
+      "name": "nested-tool-schema-key-ordering",
+      "request": {
+        "schemaVersion": "codex-completion-request.v1",
+        "requestId": "req-tools",
+        "idempotencyKey": "idem-tools",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [{ "role": "user", "content": "use the tool" }],
+        "tools": [
+          {
+            "name": "lookup",
+            "description": "Look up a record",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "zebra": { "type": "string" },
+                "alpha": { "type": "number" }
+              },
+              "required": ["alpha"]
+            }
+          }
+        ]
+      },
+      "equivalentRequest": {
+        "schemaVersion": "codex-completion-request.v1",
+        "requestId": "req-tools",
+        "idempotencyKey": "idem-tools",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [{ "role": "user", "content": "use the tool" }],
+        "tools": [
+          {
+            "description": "Look up a record",
+            "name": "lookup",
+            "parameters": {
+              "required": ["alpha"],
+              "type": "object",
+              "properties": {
+                "alpha": { "type": "number" },
+                "zebra": { "type": "string" }
+              }
+            }
+          }
+        ]
+      },
+      "sha256": "3c8b16dad6803bcc60afbfe1ba410f4cb23d10300834642fd39a24ffe6beac50"
+    },
+    {
+      "name": "unicode",
+      "request": {
+        "schemaVersion": "codex-completion-request.v1",
+        "requestId": "req-unicode",
+        "idempotencyKey": "idem-unicode",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [{ "role": "user", "content": "café 漢字 🎵" }]
+      },
+      "sha256": "f1860990cf74a162bea4c9eff8e98a132003f4c2a2fe779925ceccfbc00c8afb"
+    },
+    {
+      "name": "omitted-optional-fields",
+      "request": {
+        "schemaVersion": "codex-completion-request.v1",
+        "requestId": "req-omit",
+        "idempotencyKey": "idem-omit",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [{ "role": "user", "content": "omit" }],
+        "tools": [],
+        "generation": {},
+        "transportHints": {}
+      },
+      "equivalentRequest": {
+        "schemaVersion": "codex-completion-request.v1",
+        "requestId": "req-omit",
+        "idempotencyKey": "idem-omit",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [{ "role": "user", "content": "omit" }]
+      },
+      "sha256": "71f6567f5f379fb3eb599d3f7a350517a99a679a11a6c56fc9ccce5606d2f10b"
+    },
+    {
+      "name": "arrays-are-order-significant",
+      "request": {
+        "schemaVersion": "codex-completion-request.v1",
+        "requestId": "req-array",
+        "idempotencyKey": "idem-array",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          { "role": "user", "content": "first" },
+          { "role": "assistant", "content": "second" }
+        ]
+      },
+      "distinctRequest": {
+        "schemaVersion": "codex-completion-request.v1",
+        "requestId": "req-array",
+        "idempotencyKey": "idem-array",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          { "role": "assistant", "content": "second" },
+          { "role": "user", "content": "first" }
+        ]
+      },
+      "sha256": "0279883698794791c7af625a9496d85e0245b664eed1c5d48e5febaaa75a07fe"
+    },
+    {
+      "name": "generation-and-deadline-and-hint",
+      "request": {
+        "schemaVersion": "codex-completion-request.v1",
+        "requestId": "req-gen",
+        "idempotencyKey": "idem-gen",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [{ "role": "user", "content": "bounded" }],
+        "generation": {
+          "temperature": 0.2,
+          "maxOutputTokens": 256,
+          "toolChoice": "auto"
+        },
+        "deadlineMs": 15000,
+        "transportHints": { "promptCacheKey": "evenfire-owned-hint" }
+      },
+      "sha256": "61dbf3ac37f60f656990476511716bef19fc2c55acb3c8a5cd4d1779b217a420"
+    }
+  ],
+  "rejects": [
+    { "name": "unknown-header-field", "reason": "unknown-field", "request": {
+      "schemaVersion": "codex-completion-request.v1",
+      "requestId": "req-hdr",
+      "idempotencyKey": "idem-hdr",
+      "provider": "codex-subscription",
+      "model": "gpt-5.1",
+      "messages": [{ "role": "user", "content": "x" }],
+      "headers": { "Authorization": "Bearer nope" }
+    } },
+    { "name": "oauth-access-token", "reason": "forbidden-field", "request": {
+      "schemaVersion": "codex-completion-request.v1",
+      "requestId": "req-oauth",
+      "idempotencyKey": "idem-oauth",
+      "provider": "codex-subscription",
+      "model": "gpt-5.1",
+      "messages": [{ "role": "user", "content": "x" }],
+      "accessToken": "sk-forbidden"
+    } },
+    { "name": "account-selector", "reason": "forbidden-field", "request": {
+      "schemaVersion": "codex-completion-request.v1",
+      "requestId": "req-acct",
+      "idempotencyKey": "idem-acct",
+      "provider": "codex-subscription",
+      "model": "gpt-5.1",
+      "messages": [{ "role": "user", "content": "x" }],
+      "accountSelector": "acct-1"
+    } },
+    { "name": "arbitrary-url", "reason": "forbidden-field", "request": {
+      "schemaVersion": "codex-completion-request.v1",
+      "requestId": "req-url",
+      "idempotencyKey": "idem-url",
+      "provider": "codex-subscription",
+      "model": "gpt-5.1",
+      "messages": [{ "role": "user", "content": "x" }],
+      "url": "https://api.openai.com/v1/chat/completions"
+    } },
+    { "name": "mcp-capability", "reason": "forbidden-field", "request": {
+      "schemaVersion": "codex-completion-request.v1",
+      "requestId": "req-mcp",
+      "idempotencyKey": "idem-mcp",
+      "provider": "codex-subscription",
+      "model": "gpt-5.1",
+      "messages": [{ "role": "user", "content": "x" }],
+      "mcp": { "server": "filesystem" }
+    } },
+    { "name": "shell-capability", "reason": "forbidden-field", "request": {
+      "schemaVersion": "codex-completion-request.v1",
+      "requestId": "req-shell",
+      "idempotencyKey": "idem-shell",
+      "provider": "codex-subscription",
+      "model": "gpt-5.1",
+      "messages": [{ "role": "user", "content": "x" }],
+      "shell": true
+    } },
+    { "name": "browser-capability", "reason": "forbidden-field", "request": {
+      "schemaVersion": "codex-completion-request.v1",
+      "requestId": "req-browser",
+      "idempotencyKey": "idem-browser",
+      "provider": "codex-subscription",
+      "model": "gpt-5.1",
+      "messages": [{ "role": "user", "content": "x" }],
+      "browser": true
+    } },
+    { "name": "cookie-field", "reason": "forbidden-field", "request": {
+      "schemaVersion": "codex-completion-request.v1",
+      "requestId": "req-cookie",
+      "idempotencyKey": "idem-cookie",
+      "provider": "codex-subscription",
+      "model": "gpt-5.1",
+      "messages": [{ "role": "user", "content": "x" }],
+      "cookie": "sid=1"
+    } },
+    { "name": "filesystem-path", "reason": "forbidden-field", "request": {
+      "schemaVersion": "codex-completion-request.v1",
+      "requestId": "req-path",
+      "idempotencyKey": "idem-path",
+      "provider": "codex-subscription",
+      "model": "gpt-5.1",
+      "messages": [{ "role": "user", "content": "x" }],
+      "path": "/etc/passwd"
+    } }
+  ]
+}

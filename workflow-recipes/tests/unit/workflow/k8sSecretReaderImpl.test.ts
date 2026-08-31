@@ -72,7 +72,11 @@ describe('K8sSecretReaderImpl', () => {
       })
       const reader = new K8sSecretReaderImpl(api)
       const result = await reader.readConfigMapWithPresence('mcp-host', 'clerum-llm-allowed-models')
-      expect(result).toEqual({ exists: true, data: { openai: '[{"model":"gpt-4"}]' } })
+      expect(result).toEqual({
+        exists: true,
+        data: { openai: '[{"model":"gpt-4"}]' },
+        annotations: {},
+      })
     })
 
     it('returns { exists: true, data: {} } when the CM exists but data is omitted', async () => {
@@ -83,7 +87,7 @@ describe('K8sSecretReaderImpl', () => {
       })
       const reader = new K8sSecretReaderImpl(api)
       const result = await reader.readConfigMapWithPresence('mcp-host', 'clerum-llm-allowed-models')
-      expect(result).toEqual({ exists: true, data: {} })
+      expect(result).toEqual({ exists: true, data: {}, annotations: {} })
     })
 
     it('returns { exists: false } on a real 404', async () => {

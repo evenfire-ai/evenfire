@@ -25,6 +25,8 @@
         "packages/image-policy/**",
         "packages/network-policy-core/**",
         "packages/display-field/**"
+        "packages/display-field/**",
+        "packages/llm-provider-attempt-contract/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -65,7 +67,7 @@
       "name": "mcp-host",
       "path": "mcp-host",
       "rooted": true,
-      "source_paths": ["mcp-host/**"],
+      "source_paths": ["mcp-host/**", "packages/llm-provider-attempt-contract/**"],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -74,7 +76,7 @@
       "path": "mcp-host",
       "dockerfile": "Dockerfile.slim",
       "rooted": true,
-      "source_paths": ["mcp-host/**"],
+      "source_paths": ["mcp-host/**", "packages/llm-provider-attempt-contract/**"],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -83,7 +85,7 @@
       "path": "mcp-host",
       "dockerfile": "Dockerfile.full",
       "rooted": true,
-      "source_paths": ["mcp-host/**"],
+      "source_paths": ["mcp-host/**", "packages/llm-provider-attempt-contract/**"],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -92,7 +94,7 @@
       "path": "mcp-host",
       "dockerfile": "Dockerfile.desktop",
       "rooted": true,
-      "source_paths": ["mcp-host/**"],
+      "source_paths": ["mcp-host/**", "packages/llm-provider-attempt-contract/**"],
       "published": true,
       "deployed_to_minikube": false
     },
@@ -264,6 +266,17 @@
       "name": "webhook-proxy",
       "path": "webhook-proxy",
       "source_paths": ["webhook-proxy/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "codex-llm-proxy",
+      "path": "codex-llm-proxy",
+      "rooted": true,
+      "source_paths": [
+        "codex-llm-proxy/**",
+        "packages/llm-provider-attempt-contract/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },

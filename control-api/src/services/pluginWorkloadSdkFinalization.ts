@@ -345,7 +345,7 @@ export async function finalizePromptBridgeInTransaction(
     [input.invocationId, expectedStatus, input.attemptGeneration]
   )
 
-  if (input.status === 'complete') {
+  if (input.status === 'complete' && input.target.provider !== 'codex-subscription') {
     const usage = input.usage!
     const event = {
       request_id: input.providerAttemptId,

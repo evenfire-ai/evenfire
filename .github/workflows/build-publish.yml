@@ -83,6 +83,7 @@ jobs:
       mock-stdio-mcp-server: ${{ steps.filter.outputs.mock-stdio-mcp-server }}
       webhook-gateway: ${{ steps.filter.outputs.webhook-gateway }}
       webhook-proxy: ${{ steps.filter.outputs.webhook-proxy }}
+      codex-llm-proxy: ${{ steps.filter.outputs.codex-llm-proxy }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -124,6 +125,7 @@ jobs:
               - 'packages/image-policy/**'
               - 'packages/network-policy-core/**'
               - 'packages/display-field/**'
+              - 'packages/llm-provider-attempt-contract/**'
             control-ui:
               - 'control-ui/**'
               - 'packages/workflow-recipe-capability-policy/**'
@@ -137,6 +139,7 @@ jobs:
               - 'packages/network-policy-core/**'
             mcp-host:
               - 'mcp-host/**'
+              - 'packages/llm-provider-attempt-contract/**'
             mcp-proxy:
               - 'mcp-proxy/**'
             gfs-controller:
@@ -175,6 +178,9 @@ jobs:
               - 'webhook-gateway/**'
             webhook-proxy:
               - 'webhook-proxy/**'
+            codex-llm-proxy:
+              - 'codex-llm-proxy/**'
+              - 'packages/llm-provider-attempt-contract/**'
 
   build-push:
     name: Build & push (${{ matrix.image }}-${{ matrix.arch }})
@@ -229,6 +235,7 @@ jobs:
           - mock-stdio-mcp-server
           - webhook-gateway
           - webhook-proxy
+          - codex-llm-proxy
         include:
           - image: channel-reader
             path: channel-reader
@@ -331,6 +338,10 @@ jobs:
           - image: webhook-proxy
             path: webhook-proxy
             changed: ${{ needs.detect.outputs.webhook-proxy }}
+          - image: codex-llm-proxy
+            path: codex-llm-proxy
+            rooted: true
+            changed: ${{ needs.detect.outputs.codex-llm-proxy }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
@@ -502,6 +513,8 @@ jobs:
             changed: ${{ needs.detect.outputs.webhook-gateway }}
           - image: webhook-proxy
             changed: ${{ needs.detect.outputs.webhook-proxy }}
+          - image: codex-llm-proxy
+            changed: ${{ needs.detect.outputs.codex-llm-proxy }}
     steps:
       - name: Set up Docker Buildx
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
