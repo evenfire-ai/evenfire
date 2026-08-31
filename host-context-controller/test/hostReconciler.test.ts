@@ -4,6 +4,7 @@ import type { AdministrativeOutcomeReporter } from '../src/administrativeOutcome
 import { mintHostGfsToken } from '../src/gfsHostBinding'
 import {
   DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES,
+  HostFleetReconcileError,
   HostReconciler,
   OAUTH_USER_TOKEN_SCOPE,
   resolveRuntimeControlScopes,
@@ -12,6 +13,7 @@ import {
 import type { InfrastructureTelemetryReporter } from '../src/infrastructureTelemetryReporter'
 import { HostContextLogger } from '../src/logger'
 import { issueMcpHostRuntimeTokens } from '../src/mcpHostRuntimeTokenIssuerClient'
+import { registry } from '../src/metrics'
 import { HostCRD, type HostWorkflowControlScope } from '../src/types'
 import {
   asAppsApi,
@@ -1971,6 +1973,88 @@ describe('reconcileChannelReaderDeployment — B2: preserve replicas on unsynced
     const replaceBody = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
       .body as k8s.V1Deployment
     expect(replaceBody.spec?.replicas).toBe(1)
+  })
+})
+
+async function readFleetBenignSupersessions(errorName: string): Promise<number> {
+  const metric = registry.getSingleMetric('clerum_hcc_host_fleet_benign_supersessions_total')
+  if (!metric) throw new Error('clerum_hcc_host_fleet_benign_supersessions_total is not registered')
+  const snapshot = await metric.get()
+  return snapshot.values.find(entry => entry.labels.error === errorName)?.value ?? 0
+}
+
+describe('collectHostReconcileFailures benign supersession (#490)', () => {
+  function nameEquivalent(name: string, message: string): Error {
+    const error = new Error(message)
+    error.name = name
+    return error
+  }
+
+  it.each([
+    'HostInventoryAuthorityUnavailableError',
+    'HostMutationIdentityChangedError',
+    'HostMutationSpecRevisionChangedError',
+    'HostMutationDependencyChangedError',
+  ] as const)(
+    'resolves reconcileHosts when every fleet error is name-equivalent %s',
+    async errorName => {
+      const { reconciler } = createReconciler()
+      const withdrawn = nameEquivalent(
+        errorName,
+        `Host "${errorName}" superseded before Host "alpha-host" reconcile admission`
+      )
+      vi.spyOn(reconciler, 'reconcile').mockRejectedValue(withdrawn)
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const before = await readFleetBenignSupersessions(errorName)
+
+      await expect(reconciler.reconcileHosts([makeHost()])).resolves.toBeUndefined()
+
+      expect(await readFleetBenignSupersessions(errorName)).toBe(before + 1)
+      expect(
+        errorSpy.mock.calls.some(call => String(call[0]).includes('Fleet reconcile failed'))
+      ).toBe(false)
+      errorSpy.mockRestore()
+    }
+  )
+
+  it('still rejects a lookalike error name that is not in the benign set', async () => {
+    const { reconciler } = createReconciler()
+    vi.spyOn(reconciler, 'reconcile').mockRejectedValue(
+      nameEquivalent('HostMutationSpecRevisionChanged', 'almost the withdrawn name')
+    )
+
+    await expect(reconciler.reconcileHosts([makeHost()])).rejects.toBeInstanceOf(
+      HostFleetReconcileError
+    )
+  })
+
+  it('still rejects HostFleetReconcileError for a non-benign fleet error', async () => {
+    const { reconciler } = createReconciler()
+    vi.spyOn(reconciler, 'reconcile').mockRejectedValue(new Error('boom'))
+
+    await expect(reconciler.reconcileHosts([makeHost()])).rejects.toBeInstanceOf(
+      HostFleetReconcileError
+    )
+  })
+
+  it('still rejects when a mixed pass has at least one genuine host failure', async () => {
+    const { reconciler } = createReconciler()
+    vi.spyOn(reconciler, 'reconcile').mockImplementation(async host => {
+      if (host.name === 'alpha-host') {
+        throw nameEquivalent(
+          'HostMutationSpecRevisionChangedError',
+          'Host spec generation changed before Host "alpha-host" reconcile admission'
+        )
+      }
+      throw new Error('boom')
+    })
+
+    await expect(
+      reconciler.reconcileHosts([makeHost(), makeHost({ name: 'beta-host' })])
+    ).rejects.toMatchObject({
+      name: 'HostFleetReconcileError',
+      hostFailures: [expect.objectContaining({ message: 'boom' })],
+    })
   })
 })
 
