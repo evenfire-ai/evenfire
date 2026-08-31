@@ -114,6 +114,9 @@
   table-layout: auto;
   width: 100%;
 }
+.eft-table--wide {
+  min-width: 42rem;
+}
 .eft-table thead th {
   background: var(--eft-surface-muted);
   border-bottom: 1px solid var(--eft-border);

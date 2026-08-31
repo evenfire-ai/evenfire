@@ -283,7 +283,7 @@ export function HostTable({
                     aria-label={`Open agent ${name}`}
                   >
                     <td>
-                      <span className="cu-expandable-row__name">{displayName}</span>
+                      <span className="cu-table__cell-name">{displayName}</span>
                     </td>
                     <td className="cu-table__cell-subtle">{name}</td>
                     <td>

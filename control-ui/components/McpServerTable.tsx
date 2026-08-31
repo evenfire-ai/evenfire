@@ -336,7 +336,7 @@ export function McpServerTable({
       {detailContent ? <div className="cu-card__body">{detailContent}</div> : null}
       {isInitialLoad ? (
         <div className="eft-table-viewport cu-table-wrap cu-connectors-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band cu-expandable-table cu-connectors-table">
+          <DataTable className="eft-table cu-table cu-table--header-band cu-connectors-table">
             <thead>
               <TableHeaderRow columns={columns} />
             </thead>
@@ -351,7 +351,7 @@ export function McpServerTable({
         </div>
       ) : (
         <div className="eft-table-viewport cu-table-wrap cu-connectors-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band cu-expandable-table cu-connectors-table">
+          <DataTable className="eft-table cu-table cu-table--header-band cu-connectors-table">
             <thead>
               <TableHeaderRow columns={columns} />
             </thead>

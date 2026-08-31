@@ -221,8 +221,8 @@ export default function MemberDetailsPage() {
                   </p>
                 </div>
               </div>
-              <div className="eft-table-viewport members-table-wrap">
-                <DataTable className="eft-table members-table">
+              <div className="eft-table-viewport">
+                <DataTable className="eft-table eft-table--wide">
                   <thead>
                     <tr>
                       <th>Team</th>

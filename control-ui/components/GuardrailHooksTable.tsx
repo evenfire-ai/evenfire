@@ -219,7 +219,7 @@ export function GuardrailHooksTable({
                     aria-label={`View guardrail ${name}`}
                   >
                     <td>
-                      <span className="cu-expandable-row__name">{name}</span>
+                      <span className="cu-table__cell-name">{name}</span>
                     </td>
                     <td>{lifecycle ? lifecycle : <span className="cu-muted">—</span>}</td>
                     <td>

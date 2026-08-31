@@ -50,7 +50,7 @@ describe('ContextTable', () => {
       />
     )
 
-    expect(screen.getAllByText('business')[0]).toHaveClass('cu-expandable-row__name')
+    expect(screen.getAllByText('business')[0]).toHaveClass('cu-table__cell-name')
     expect(screen.getByText('Business context')).toHaveClass('cu-registry-description')
     expect(container.querySelectorAll('thead th')).toHaveLength(5)
     expect(screen.queryByRole('button', { name: 'business' })).not.toBeInTheDocument()
@@ -59,7 +59,7 @@ describe('ContextTable', () => {
   it('renders the identifier (metadata.name) when displayName is blank/whitespace (R4-M1 / R1-L4)', () => {
     // A displayName written out-of-band as whitespace ('   ') must fall back to
     // the identifier, not render a blank label. dev restructured the cell to a
-    // non-link span (cu-expandable-row__name), so assert the observable rendered
+    // non-link span, so assert the observable rendered
     // name text (T4), not a button role and not the intermediate spec value.
     render(
       <ContextTable
@@ -80,7 +80,7 @@ describe('ContextTable', () => {
     )
 
     // The visible name span renders the identifier, not a blank/whitespace label.
-    expect(screen.getAllByText('business')[0]).toHaveClass('cu-expandable-row__name')
+    expect(screen.getAllByText('business')[0]).toHaveClass('cu-table__cell-name')
   })
 
   it('does not open a context from the row actions kebab', () => {

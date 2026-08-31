@@ -62,7 +62,7 @@
   --cu-create-action-min-width: 8.5rem;
   --cu-create-flow-min-height: calc(100vh - 7rem);
   --cu-toast-top-offset: calc(var(--cu-space-5) * 3.5);
-  --cu-expandable-body-bg: #000000;
+  --cu-preview-body-bg: #000000;
 
   /* ---- Typography ---------------------------------------------------- */
   /* Derived from control-ui's own de-facto usage, so adopting the scale is
@@ -163,7 +163,7 @@
   --cu-auth-bg-edge: rgba(var(--cu-edge-rgb), 0.28);
   --cu-selection-bg: rgba(var(--cu-accent-rgb), 0.3);
   --cu-selection-text: var(--cu-brand-dark-blue);
-  --cu-expandable-body-bg: var(--cu-bg);
+  --cu-preview-body-bg: var(--cu-bg);
 }
 
 *,
@@ -2005,50 +2005,59 @@ textarea.cu-input {
   margin-bottom: var(--cu-space-5);
 }
 
-.cu-expandable-table {
-  table-layout: fixed;
-}
-
 .cu-connectors-table-wrap,
 .cu-marketplace-table-wrap {
   container-type: inline-size;
 }
 
 .cu-connectors-table {
-  min-width: 48rem;
-  --cu-expandable-inset-left: calc(3rem + 0.85rem);
-  --cu-expandable-inset-right: max(7rem, calc(55% - 21rem));
+  min-width: 88rem;
 }
 
 .cu-connectors-table th:nth-child(1),
 .cu-connectors-table td:nth-child(1) {
-  width: 3rem;
+  width: 12rem;
 }
 
 .cu-connectors-table th:nth-child(2),
 .cu-connectors-table td:nth-child(2) {
-  width: 45%;
-  max-width: 45%;
+  width: 18rem;
+  max-width: 18rem;
 }
 
 .cu-connectors-table th:nth-child(3),
 .cu-connectors-table td:nth-child(3) {
-  width: 8rem;
+  width: 7rem;
 }
 
 .cu-connectors-table th:nth-child(4),
 .cu-connectors-table td:nth-child(4) {
-  width: 10rem;
+  width: 15rem;
 }
 
 .cu-connectors-table th:nth-child(5),
 .cu-connectors-table td:nth-child(5) {
-  width: max(7rem, calc(55% - 21rem));
-  text-align: right;
+  width: 15rem;
 }
 
-.cu-connectors-table td:nth-child(5) .cu-table-actions {
-  justify-content: flex-end;
+.cu-connectors-table th:nth-child(6),
+.cu-connectors-table td:nth-child(6) {
+  width: 10rem;
+}
+
+.cu-connectors-table th:nth-child(7),
+.cu-connectors-table td:nth-child(7),
+.cu-connectors-table th:nth-child(8),
+.cu-connectors-table td:nth-child(8),
+.cu-connectors-table th:nth-child(9),
+.cu-connectors-table td:nth-child(9) {
+  width: 7rem;
+}
+
+.cu-connectors-table th:nth-child(10),
+.cu-connectors-table td:nth-child(10) {
+  width: 4rem;
+  text-align: right;
 }
 
 .cu-guardrails-table-wrap {
@@ -2100,133 +2109,19 @@ textarea.cu-input {
   width: 3rem;
 }
 
-.cu-expandable-row__name,
+.cu-table__cell-name,
 .cu-installed-plugin__name {
   color: var(--cu-text);
   font-weight: 600;
 }
 
-.cu-expandable-row__chevron {
-  color: var(--cu-text-muted);
-  text-align: center;
-}
-
-.cu-expandable-row__chevron svg {
-  display: block;
-  margin: auto;
-  transition: transform var(--cu-control-transition);
-  transform: rotate(0deg);
-}
-
-.cu-expandable-row__chevron svg.is-expanded {
-  transform: rotate(90deg);
-}
-
-.cu-expandable-detail-row > td {
-  padding: 0;
-  background: var(--cu-expandable-body-bg);
-}
-
-.cu-table tbody .cu-expandable-detail-row:hover > td {
-  background: var(--cu-expandable-body-bg);
-}
-
-.cu-expandable-detail {
+.cu-detail-summary {
   display: flex;
   gap: var(--cu-space-5);
-  padding: var(--cu-space-4) var(--cu-expandable-inset-right, var(--cu-space-5)) var(--cu-space-4)
-    var(--cu-expandable-inset-left, var(--cu-space-5));
+  padding: var(--cu-space-4) var(--cu-space-5);
 }
 
-.cu-connector-detail .cu-expandable-detail__fields {
-  flex: 1 1 auto;
-  width: 100%;
-  max-width: none;
-}
-
-.cu-connector-detail .cu-expandable-detail__description {
-  flex: 0 0 100%;
-  width: 100%;
-  max-width: none;
-  margin-bottom: 0;
-}
-
-.cu-connector-detail .cu-expandable-field,
-.cu-connector-detail .cu-expandable-field > .cu-link {
-  text-align: left;
-}
-
-.cu-connector-detail .cu-expandable-field > .cu-link {
-  max-width: 100%;
-}
-
-.cu-connector-detail__metadata {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
-  flex: 0 0 100%;
-  gap: var(--cu-space-4);
-  min-width: 0;
-}
-
-.cu-connector-copyable-value {
-  display: flex;
-  align-items: center;
-  gap: var(--cu-space-1);
-  width: 100%;
-  min-width: 0;
-}
-
-.cu-connector-copyable-value > .cu-expandable-field__code {
-  display: block;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cu-connector-copyable-value__button {
-  width: 1.75rem;
-  height: 1.75rem;
-  flex: 0 0 auto;
-}
-
-.cu-connector-access-field {
-  gap: var(--cu-space-2);
-}
-
-.cu-connector-access-grid {
-  width: 100%;
-  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
-}
-
-.cu-connector-context-access__list li {
-  align-items: center;
-}
-
-.cu-connector-context-access__name {
-  flex: 1 1 auto;
-}
-
-.cu-connector-context-access__name > .cu-link {
-  display: block;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cu-connector-context-access__remove {
-  width: var(--cu-space-5);
-  height: var(--cu-space-5);
-  flex: 0 0 auto;
-}
-
-.cu-connector-context-access__add {
-  width: 100%;
-  margin-top: auto;
-}
-
-.cu-expandable-detail__fields {
+.cu-detail-summary__fields {
   display: flex;
   flex: 1 1 50%;
   flex-wrap: wrap;
@@ -2235,7 +2130,7 @@ textarea.cu-input {
   min-width: 0;
 }
 
-.cu-expandable-field {
+.cu-detail-field {
   display: flex;
   flex: 1 1 10rem;
   min-width: 0;
@@ -2244,21 +2139,19 @@ textarea.cu-input {
   gap: var(--cu-space-1);
 }
 
-.cu-expandable-field--wide {
+.cu-detail-field--wide {
   flex-basis: 100%;
 }
 
-.cu-marketplace-detail .cu-expandable-field,
-.cu-marketplace-row-detail .cu-expandable-field {
+.cu-marketplace-detail .cu-detail-field {
   flex: 0 0 auto;
 }
 
-.cu-marketplace-detail .cu-expandable-detail__fields,
-.cu-marketplace-row-detail .cu-expandable-detail__fields {
+.cu-marketplace-detail .cu-detail-summary__fields {
   gap: var(--cu-space-4);
 }
 
-.cu-expandable-field__label {
+.cu-detail-field__label {
   color: var(--cu-text-muted);
   font-size: 0.7rem;
   font-weight: 600;
@@ -2266,30 +2159,14 @@ textarea.cu-input {
   text-transform: uppercase;
 }
 
-/* Previous-versions list inside an expanded owned-entry row: keep the label and
-   each version/Install line spaced so adjacent Install buttons don't touch. */
-.cu-marketplace-versions {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: var(--cu-space-3);
-  min-width: 0;
-  max-width: 28rem;
-}
-
-.cu-marketplace-versions .cu-table-actions {
-  align-items: center;
-  gap: var(--cu-space-4);
-}
-
-.cu-expandable-field__code,
+.cu-detail-field__code,
 .cu-code-text {
   color: var(--cu-text-soft);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   overflow-wrap: anywhere;
 }
 
-.cu-expandable-detail__description {
+.cu-detail-summary__description {
   flex: 1 1 50%;
   max-width: 50%;
   margin: 0;
@@ -2298,7 +2175,7 @@ textarea.cu-input {
   white-space: pre-wrap;
 }
 
-.cu-expandable-tags {
+.cu-detail-tags {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -2435,11 +2312,11 @@ textarea.cu-input {
 }
 
 @media (max-width: 768px) {
-  .cu-expandable-detail {
+  .cu-detail-summary {
     flex-direction: column;
   }
 
-  .cu-expandable-detail__description {
+  .cu-detail-summary__description {
     order: -1;
     width: 100%;
     max-width: none;
@@ -2447,15 +2324,12 @@ textarea.cu-input {
 }
 
 @container (max-width: 48rem) {
-  .cu-connector-detail .cu-expandable-detail__fields,
-  .cu-marketplace-row-detail .cu-expandable-detail__fields {
+  .cu-marketplace-detail .cu-detail-summary__fields {
     flex-direction: column;
     flex-wrap: nowrap;
   }
 
-  .cu-connector-detail .cu-expandable-detail__description,
-  .cu-connector-detail .cu-expandable-field,
-  .cu-marketplace-row-detail .cu-expandable-field {
+  .cu-marketplace-detail .cu-detail-field {
     flex: 0 0 auto;
     width: 100%;
   }
@@ -2640,60 +2514,49 @@ textarea.cu-input {
 }
 
 .cu-marketplace-table {
-  min-width: 52rem;
-  --cu-expandable-inset-left: calc(3rem + 0.85rem);
-  --cu-expandable-inset-right: 4.75rem;
+  min-width: 74rem;
 }
 
 .cu-marketplace-table th:nth-child(1),
 .cu-marketplace-table td:nth-child(1) {
-  width: 3rem;
+  width: 14rem;
+}
+
+.cu-marketplace-table th:nth-child(2),
+.cu-marketplace-table td:nth-child(2) {
+  width: 18rem;
+  max-width: 18rem;
 }
 
 .cu-marketplace-table th:nth-child(3),
 .cu-marketplace-table td:nth-child(3) {
-  width: 7rem;
+  width: 8rem;
 }
 
 .cu-marketplace-table th:nth-child(4),
 .cu-marketplace-table td:nth-child(4) {
-  width: 7rem;
+  width: 12rem;
 }
 
 .cu-marketplace-table th:nth-child(5),
 .cu-marketplace-table td:nth-child(5) {
-  width: 4.75rem;
+  width: 7rem;
 }
 
-.cu-marketplace-actions {
-  flex-wrap: nowrap;
-  justify-content: flex-start;
+.cu-marketplace-table th:nth-child(6),
+.cu-marketplace-table td:nth-child(6) {
+  width: 9rem;
 }
 
-.cu-marketplace-action-cell {
-  padding-inline: var(--cu-space-1);
-  white-space: nowrap;
+.cu-marketplace-table th:nth-child(7),
+.cu-marketplace-table td:nth-child(7) {
+  width: 7rem;
 }
 
-.cu-marketplace-table td.cu-marketplace-action-cell:nth-last-child(2) {
-  padding-right: 0.15rem;
-}
-
-.cu-marketplace-table td.cu-marketplace-action-cell:last-child {
-  padding-left: 0.15rem;
-}
-
-.cu-marketplace-table td:nth-child(4) {
-  text-align: center;
-}
-
-.cu-marketplace-table td:nth-child(4) .cu-btn {
-  max-width: 100%;
-  padding-inline: var(--cu-space-1);
-}
-
-.cu-marketplace-table td:nth-child(5) {
-  text-align: left;
+.cu-marketplace-table th:nth-child(8),
+.cu-marketplace-table td:nth-child(8) {
+  width: 4rem;
+  text-align: right;
 }
 
 .cu-marketplace-detail__overview {
@@ -2710,12 +2573,12 @@ textarea.cu-input {
   width: 100%;
 }
 
-.cu-marketplace-detail__overview > .cu-expandable-detail__fields {
+.cu-marketplace-detail__overview > .cu-detail-summary__fields {
   flex: 0 0 auto;
   width: 100%;
 }
 
-.cu-marketplace-detail__description-block > .cu-expandable-detail__description {
+.cu-marketplace-detail__description-block > .cu-detail-summary__description {
   order: 0;
   width: 100%;
   max-width: none;
@@ -9607,20 +9470,6 @@ textarea.cu-input {
   font-weight: var(--cu-font-weight-bold);
 }
 
-.cu-row-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 0.15rem;
-}
-
-.cu-row-actions--wrap {
-  flex-wrap: wrap;
-}
-
-.cu-row-actions--nowrap {
-  flex-wrap: nowrap;
-}
-
 .cu-nowrap {
   white-space: nowrap;
 }
@@ -12605,7 +12454,7 @@ button.cu-gfs-tree__button:focus-visible,
   max-height: 100%;
   display: block;
   border-radius: var(--cu-radius-sm);
-  background: var(--cu-expandable-body-bg);
+  background: var(--cu-preview-body-bg);
 }
 
 .cu-gfs-markdown-preview-dialog__body {

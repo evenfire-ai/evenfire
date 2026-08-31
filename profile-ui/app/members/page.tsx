@@ -195,8 +195,8 @@ export default function MembersPage() {
                   <h2 className="section-title">Pending invitations</h2>
                 </div>
               </div>
-              <div className="eft-table-viewport members-table-wrap">
-                <DataTable className="eft-table members-table">
+              <div className="eft-table-viewport">
+                <DataTable className="eft-table eft-table--wide">
                   <thead>
                     <tr>
                       <TableHeaderCell
@@ -259,8 +259,8 @@ export default function MembersPage() {
 
           {state !== 'loading' ? (
             <section className="section members-section">
-              <div className="eft-table-viewport members-table-wrap">
-                <DataTable className="eft-table members-table">
+              <div className="eft-table-viewport">
+                <DataTable className="eft-table eft-table--wide">
                   <thead>
                     <tr>
                       <TableHeaderCell

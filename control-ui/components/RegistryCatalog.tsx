@@ -326,7 +326,7 @@ export default function RegistryCatalog() {
         />
         <MarketplaceTabs active="connectors" />
         <div className="eft-table-viewport cu-table-wrap cu-marketplace-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band cu-expandable-table cu-marketplace-table">
+          <DataTable className="eft-table cu-table cu-table--header-band cu-marketplace-table">
             <thead>
               <TableHeaderRow columns={columns} />
             </thead>
