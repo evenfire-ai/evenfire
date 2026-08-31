@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-table-system'
 import { AuthGate } from '@components/AuthGate'
 import { Button } from '@components/Button'
 import { ProfileBodySkeleton } from '@components/ProfileBodySkeleton'
@@ -81,11 +82,11 @@ function ConnectedAccountsContent() {
             {accounts.length === 0 ? (
               <div className="muted">No connected accounts.</div>
             ) : (
-              <div className="stack">
+              <RecordList className="stack">
                 {accounts.map(a => {
                   const key = `${a.recipeName}/${a.oauthClientId}`
                   return (
-                    <div key={key} className="member-row">
+                    <RecordListRow key={key} className="member-row">
                       <div className="member-summary">
                         <div>
                           <div>
@@ -96,18 +97,23 @@ function ConnectedAccountsContent() {
                             {a.background ? ' · background access' : ''}
                           </div>
                         </div>
-                        <Button
-                          variant="danger"
-                          disabled={busy === key}
-                          onClick={() => void revoke(a)}
-                        >
-                          {busy === key ? 'Revoking…' : 'Revoke'}
-                        </Button>
+                        <RowActionMenu
+                          ariaLabel={`Actions for ${a.recipeName}`}
+                          actions={[
+                            {
+                              key: 'revoke',
+                              label: busy === key ? 'Revoking…' : 'Revoke',
+                              danger: true,
+                              disabled: busy === key,
+                              onSelect: () => void revoke(a),
+                            },
+                          ]}
+                        />
                       </div>
-                    </div>
+                    </RecordListRow>
                   )
                 })}
-              </div>
+              </RecordList>
             )}
           </section>
         )}

@@ -1,3 +1,4 @@
+import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-table-system'
 import { Button } from '@components/Button'
 import { TextInput } from '@components/TextInput'
 import type {
@@ -36,10 +37,10 @@ export function SettingsChannelSection({
         <h3 className="settings-subtitle">{section.title}</h3>
         <p className="settings-help">{section.description}</p>
       </div>
-      <div className="settings-channel-rows">
+      <RecordList className="settings-channel-rows">
         {!hasValues && <div className="small muted">No values added.</div>}
         {readonlyValues.map(row => (
-          <div className="settings-channel-readonly-row" key={row.id}>
+          <RecordListRow className="settings-channel-readonly-row" key={row.id}>
             <div className="settings-channel-readonly-content">
               <div className="settings-channel-readonly-value">{row.value}</div>
               <div className="settings-channel-readonly-caption">{row.caption}</div>
@@ -53,10 +54,10 @@ export function SettingsChannelSection({
                 {row.actionLabel}
               </Button>
             )}
-          </div>
+          </RecordListRow>
         ))}
         {rows.map(row => (
-          <div className="settings-channel-row" key={row.id}>
+          <RecordListRow className="settings-channel-row" key={row.id}>
             <TextInput
               className="fluid-control"
               value={row.value}
@@ -65,19 +66,24 @@ export function SettingsChannelSection({
               aria-label={section.title}
               disabled={disabled}
             />
-            <Button
-              variant="ghost"
-              onClick={() => void onRemove(section.key, row.id)}
-              disabled={disabled}
-            >
-              Remove
-            </Button>
-          </div>
+            <RowActionMenu
+              ariaLabel={`Actions for ${row.value || section.title}`}
+              actions={[
+                {
+                  key: 'remove',
+                  label: 'Remove',
+                  danger: true,
+                  disabled,
+                  onSelect: () => void onRemove(section.key, row.id),
+                },
+              ]}
+            />
+          </RecordListRow>
         ))}
         <Button variant="secondary" onClick={() => onAdd(section.key)} disabled={disabled}>
           {section.addLabel}
         </Button>
-      </div>
+      </RecordList>
     </div>
   )
 }

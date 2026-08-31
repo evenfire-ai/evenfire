@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, RowActionMenu } from '@clerum/frontend-table-system'
 import { AuthGate } from '@components/AuthGate'
 import { Button } from '@components/Button'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
@@ -311,16 +311,19 @@ function PermissionTable({
                     aria-label={`Can delete members for ${team.name}`}
                   />
                 </td>
-                <td>
-                  <button
-                    type="button"
-                    className="icon-button icon-button--danger"
-                    onClick={() => onRemove(team)}
-                    disabled={busy}
-                    aria-label={`Remove ${team.name}`}
-                  >
-                    <IconTrash />
-                  </button>
+                <td className="eft-table__cell--actions">
+                  <RowActionMenu
+                    ariaLabel={`Actions for ${team.name}`}
+                    actions={[
+                      {
+                        key: 'remove',
+                        label: 'Remove team',
+                        danger: true,
+                        disabled: busy,
+                        onSelect: () => onRemove(team),
+                      },
+                    ]}
+                  />
                 </td>
               </tr>
             )

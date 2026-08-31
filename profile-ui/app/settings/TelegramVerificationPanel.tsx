@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
+import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-table-system'
 import { Button } from '@components/Button'
 import { CheckboxField } from '@components/CheckboxField'
 import { FormField } from '@components/FormField'
@@ -211,9 +212,9 @@ export function TelegramVerificationPanel({
       )}
 
       {accounts.length > 0 ? (
-        <div className="settings-target-list">
+        <RecordList className="settings-target-list">
           {accounts.map(account => (
-            <div className="settings-target-row" key={account.id}>
+            <RecordListRow className="settings-target-row" key={account.id}>
               <div>
                 <div className="settings-target-title">{approvalAccountDisplayName(account)}</div>
                 <div className="settings-target-meta">
@@ -223,35 +224,27 @@ export function TelegramVerificationPanel({
                   ))}
                 </div>
               </div>
-              <div className="settings-target-actions">
-                <Button
-                  variant="secondary"
-                  className="cu-btn--icon cu-btn--toolbar"
-                  onClick={() => openDisplayNameModal(account)}
-                  disabled={disabled}
-                  aria-label={`Edit ${approvalAccountDisplayName(account)} display name`}
-                  title={`Edit ${approvalAccountDisplayName(account)} display name`}
-                >
-                  <IconPencil />
-                </Button>
-                <Button
-                  variant="secondary"
-                  className="cu-btn--icon cu-btn--danger-icon"
-                  onClick={() => onRemoveAccount(account.id, Boolean(account.disabledAt))}
-                  disabled={disabled}
-                  aria-label={
-                    account.disabledAt
-                      ? `Remove ${approvalAccountDisplayName(account)} record`
-                      : `Delete ${approvalAccountDisplayName(account)} connection`
-                  }
-                  title={account.disabledAt ? 'Remove record' : 'Delete connection'}
-                >
-                  <IconTrash />
-                </Button>
-              </div>
-            </div>
+              <RowActionMenu
+                ariaLabel={`Actions for ${approvalAccountDisplayName(account)}`}
+                actions={[
+                  {
+                    key: 'edit',
+                    label: 'Edit display name',
+                    disabled,
+                    onSelect: () => openDisplayNameModal(account),
+                  },
+                  {
+                    key: 'delete',
+                    label: account.disabledAt ? 'Remove record' : 'Delete connection',
+                    danger: true,
+                    disabled,
+                    onSelect: () => onRemoveAccount(account.id, Boolean(account.disabledAt)),
+                  },
+                ]}
+              />
+            </RecordListRow>
           ))}
-        </div>
+        </RecordList>
       ) : null}
 
       {modalOpen ? (
