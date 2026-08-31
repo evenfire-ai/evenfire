@@ -259,12 +259,16 @@ describe('McpServersPage — da-table layout + navigation', () => {
     )
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Connectors' })).toBeTruthy())
 
-    // The monday row is listed by agent-alpha AND agent-zeta: both chips show the
-    // catalog display name, and the raw host id is no longer surfaced there.
-    const mondayRow = rowByName(allRows(container), 'monday')
-    expect(within(mondayRow).getByRole('button', { name: 'Open agent Alpha Bot' })).toBeTruthy()
-    expect(within(mondayRow).getByRole('button', { name: 'Open agent Zeta Bot' })).toBeTruthy()
-    expect(within(mondayRow).queryByRole('button', { name: 'Open agent agent-alpha' })).toBeNull()
+    // monday is granted to agent-alpha AND agent-zeta → TWO per-agent rows. Each
+    // row's presentational agent tag shows the catalog DISPLAY name, and the raw
+    // host id is no longer surfaced there.
+    const mondayTags = allRows(container)
+      .filter(row => rowName(row).startsWith('monday'))
+      .map(agentTag)
+    expect(mondayTags).toContain('Alpha Bot')
+    expect(mondayTags).toContain('Zeta Bot')
+    expect(mondayTags).not.toContain('agent-alpha')
+    expect(mondayTags).not.toContain('agent-zeta')
   })
 
   it('(g) a fresh write error takes precedence over a stale read error in the banner', async () => {
@@ -288,7 +292,8 @@ describe('McpServersPage — da-table layout + navigation', () => {
     const { container } = renderPage(CONNECTORS)
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Connectors' })).toBeTruthy())
 
-    const mondayRow = rowByName(allRows(container), 'monday')
+    // Either monday row acts on the same grant; use agent-zeta's authorized row.
+    const mondayRow = rowBy(allRows(container), 'monday', 'agent-zeta')
     const disconnectBtn = within(mondayRow).getByRole('button', { name: 'Disconnect' })
 
     // 1st disconnect: confirmed → refresh → listConnectors throws → query.error set.
