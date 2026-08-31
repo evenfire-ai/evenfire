@@ -9,11 +9,13 @@ import {
   getRecipe,
   getRecipeSecrets,
 } from '../../lib/api'
+import { llmChainRequiresSecret } from '../../lib/llm'
 import { collectWorkflowRecipeSecretRefs } from '../../lib/workflowRecipeSecretRefs'
 import { useConfirmDialog } from '../ConfirmDialog'
+import { RowActionsMenu } from '../RowActionsMenu'
 import { TablePanelHeader } from '../TablePanelHeader'
 import { useToast } from '../Toast'
-import { IconPencil, IconRefresh, IconX } from '../icons'
+import { IconRefresh } from '../icons'
 
 type RecipeSecretStatus = 'provisioned' | 'missing'
 
@@ -54,6 +56,7 @@ export function RecipeSecretsPanel({
 }) {
   const router = useRouter()
   const [rows, setRows] = useState<Row[]>([])
+  const [brokerBackedAgent, setBrokerBackedAgent] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [deletingName, setDeletingName] = useState<string | null>(null)
@@ -72,6 +75,10 @@ export function RecipeSecretsPanel({
 
       const spec = (recipe.spec ?? {}) as Record<string, unknown>
       const refs = collectWorkflowRecipeSecretRefs(spec)
+      const agent = (spec.agent ?? {}) as { provider?: string }
+      setBrokerBackedAgent(
+        typeof agent.provider === 'string' && !llmChainRequiresSecret(agent.provider)
+      )
 
       const next: Row[] = []
       for (const ref of refs.values()) {
@@ -199,7 +206,11 @@ export function RecipeSecretsPanel({
           <span className="cu-muted">Loading secrets…</span>
         </div>
       ) : rows.length === 0 ? (
-        <div className="cu-empty">This recipe declares no API-key Secret references.</div>
+        <div className="cu-empty">
+          {brokerBackedAgent
+            ? 'This recipe uses a broker-backed agent and does not require an LLM secret.'
+            : 'This recipe declares no API-key Secret references.'}
+        </div>
       ) : (
         <div className="cu-table-wrap">
           <table className="cu-table">
@@ -275,29 +286,27 @@ export function RecipeSecretsPanel({
                         Add
                       </button>
                     ) : (
-                      <div style={{ display: 'inline-flex', gap: '0.35rem' }}>
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--icon cu-btn--toolbar"
-                          onClick={() => navigateToEdit(row.name, row.namespace)}
-                          aria-label={`Update recipe secret ${row.name}`}
-                        >
-                          <IconPencil width={16} height={16} />
-                        </button>
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                          onClick={() => void deleteRow(row.name, row.namespace)}
-                          disabled={deletingName === `${row.namespace}/${row.name}`}
-                          aria-label={
-                            deletingName === `${row.namespace}/${row.name}`
-                              ? 'Deleting…'
-                              : `Delete recipe secret ${row.name}`
-                          }
-                        >
-                          <IconX width={16} height={16} />
-                        </button>
-                      </div>
+                      <RowActionsMenu
+                        ariaLabel={`Actions for recipe secret ${row.name}`}
+                        horizontalTrigger
+                        actions={[
+                          {
+                            key: 'edit',
+                            label: 'Update',
+                            onClick: () => navigateToEdit(row.name, row.namespace),
+                          },
+                          {
+                            key: 'delete',
+                            label:
+                              deletingName === `${row.namespace}/${row.name}`
+                                ? 'Deleting…'
+                                : 'Delete',
+                            danger: true,
+                            disabled: deletingName === `${row.namespace}/${row.name}`,
+                            onClick: () => void deleteRow(row.name, row.namespace),
+                          },
+                        ]}
+                      />
                     )}
                   </td>
                 </tr>

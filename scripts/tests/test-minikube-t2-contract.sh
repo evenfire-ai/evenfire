@@ -7,6 +7,7 @@ set +u
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 MINIKUBE_DIR="$ROOT/scripts/minikube"
 T1="$ROOT/scripts/e2e/minikube-real-postgres.sh"
+T1_LOCAL_PREFLIGHT="$ROOT/scripts/e2e/real-postgres-local-preflight.sh"
 PREFLIGHT="$MINIKUBE_DIR/t2-preflight.sh"
 T2="$MINIKUBE_DIR/t2.sh"
 T0="$MINIKUBE_DIR/t0.sh"
@@ -17,10 +18,12 @@ if [ -z "$TMP_ROOT" ]; then TMP_ROOT=/tmp; fi
 set -u
 
 for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minikube-profile-readiness.sh" "$COMMON" "$PREFLIGHT" "$T2" "$T1" "$T0" \
+  "$ROOT/scripts/e2e/real-postgres-local-preflight.sh" \
   "$ROOT/scripts/e2e/e2e-np08-hcc-authorization.sh" \
   "$ROOT/scripts/minikube/settle-gfs-reader-rollout.sh" \
   "$ROOT/scripts/minikube/wait-gfs-reader-ready.sh" \
   "$ROOT/scripts/minikube/gfs-rollout-shim/kubectl" \
+  "$ROOT/scripts/tests/lib/minikube-fixture-repo.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh" \
   "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh" \
@@ -33,10 +36,34 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/tests/test-minikube-mutation-boundary.sh" \
   "$ROOT/scripts/tests/test-minikube-targeted-gfs-sync.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-lock-race.sh" \
-  "$ROOT/scripts/tests/test-minikube-t1-gfs-restore.sh"; do
+  "$ROOT/scripts/tests/test-minikube-t1-gfs-restore.sh" \
+  "$ROOT/scripts/tests/test-real-postgres-local-preflight.sh" \
+  "$ROOT/scripts/tests/test-minikube-t1-docker-boundary.sh" \
+  "$ROOT/scripts/tests/test-minikube-t1-port-forward-owner.sh" \
+  "$ROOT/scripts/tests/test-minikube-port-forward-owner.sh" \
+  "$ROOT/scripts/tests/test-minikube-docker-cli-env.sh" \
+  "$ROOT/scripts/tests/test-minikube-build-images-hardening.sh" \
+  "$ROOT/scripts/tests/test-minikube-pull-images.sh" \
+  "$ROOT/scripts/tests/test-minikube-build-section-headers.sh" \
+  "$ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh" \
+  "$ROOT/scripts/tests/test-minikube-fenced-recovery-render.sh" \
+  "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh" \
+  "$ROOT/scripts/tests/test-minikube-explicit-context.sh" \
+  "$ROOT/scripts/tests/test-minikube-t2-evidence.sh" \
+  "$ROOT/scripts/tests/test-minikube-targeted-health.sh"; do
   bash -n "$file"
 done
+"$ROOT/scripts/tests/test-minikube-t1-port-forward-owner.sh"
+"$ROOT/scripts/tests/test-minikube-t2-process-owner.sh"
+"$ROOT/scripts/tests/test-minikube-explicit-context.sh"
+"$ROOT/scripts/tests/test-minikube-t2-evidence.sh"
+"$ROOT/scripts/tests/test-minikube-targeted-health.sh"
 "$ROOT/scripts/tests/test-minikube-filter-gfs-resources.sh"
+"$ROOT/scripts/tests/test-minikube-t1-docker-boundary.sh"
+"$ROOT/scripts/tests/test-minikube-pull-images.sh"
+"$ROOT/scripts/tests/test-minikube-k8s-api-egress-policy.sh"
+"$ROOT/scripts/tests/test-minikube-writer-recovery-state.sh"
+"$ROOT/scripts/tests/test-minikube-fenced-recovery-render.sh"
 python3 - "$GFS_FILTER" "$TMP_ROOT" <<'PY'
 import os
 import py_compile
@@ -67,27 +94,24 @@ for identity_file in "$COMMON" "$ROOT/scripts/minikube/sync-auth-key.sh" "$ROOT/
 done
 grep -Fq 'bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-contract.sh"' "$T2"
 
-required_codes="DEVELOPMENT_SCOPE_REQUIRED PROFILE_OWNERSHIP_MISMATCH PROFILE_BUSY PROFILE_LOCK_REQUIRED HEAD_MARKER_MISMATCH IMAGE_MANIFEST_MISMATCH BOOTSTRAP_REQUIRED CERTIFICATION_REQUIRED SECRET_MISSING CONFIGMAP_MISSING POSTGRES_NOT_READY REAL_PG_REQUIRED_BUT_UNAVAILABLE REAL_PG_SUITE_FAILED ZERO_TESTS_EXECUTED PORT_FORWARD_CONFLICT NP08_HCC_AUTHORIZATION_FAILED"
+required_codes="DEVELOPMENT_SCOPE_REQUIRED PROFILE_OWNERSHIP_MISMATCH PROFILE_BUSY PROFILE_LOCK_REQUIRED HEAD_MARKER_MISMATCH IMAGE_MANIFEST_MISMATCH BOOTSTRAP_REQUIRED CERTIFICATION_REQUIRED SECRET_MISSING CONFIGMAP_MISSING POSTGRES_NOT_READY REAL_PG_REQUIRED_BUT_UNAVAILABLE REAL_PG_SUITE_FAILED REAL_PG_REPORT_INCOMPLETE UNSUPPORTED_T1_CONCURRENCY ZERO_TESTS_EXECUTED PORT_FORWARD_CONFLICT NP08_HCC_AUTHORIZATION_FAILED PLAYWRIGHT_FAILED"
 for code in $required_codes; do
-  grep -Fq "$code" "$COMMON" "$PREFLIGHT" "$T2" "$T1"
+  grep -Fq "$code" "$COMMON" "$PREFLIGHT" "$T2" "$T1" "$T1_LOCAL_PREFLIGHT"
 done
 
 grep -Fq 'kubectl --context=' "$COMMON"
-if grep -Eq 'while IFS= read -r uid pid ppid rest' "$COMMON"; then
-  echo 'FAIL: t2_process_check IFS= prevents UID/PID split' >&2
-  exit 1
-fi
-grep -Fq 'while read -r uid pid ppid rest' "$COMMON"
-if grep -Fq '[0-9]+:[0-9]+(:[0-9]+)?(\.[0-9]+)?' "$COMMON"; then
-  echo 'FAIL: t2_process_check awk still anchors on a TIME-column regex' >&2
-  exit 1
-fi
-if grep -Fq 'kubectl[[:space:]]+port-forward' "$COMMON"; then
-  echo 'FAIL: t2_process_check awk still requires kubectl/port-forward adjacency' >&2
-  exit 1
-fi
-grep -Fq '([^[:space:]]*\/)?kubectl([[:space:]]|$)' "$COMMON"
-grep -Fq '[[:space:]]port-forward([[:space:]]|$)' "$COMMON"
+grep -Fq 't2_bounded_command' "$COMMON"
+grep -Fq 'T2_RUNTIME_TIMEOUT_SECONDS' "$COMMON"
+grep -Fq 'T2_RUNTIME_KILL_GRACE_SECONDS' "$COMMON"
+grep -Fq 'port-forward-owner.sh' "$COMMON"
+grep -Fq 't2_port_forward_targets_context' "$COMMON"
+grep -Fq 'matching_records' "$COMMON"
+grep -Fq 'pf_owner_record_process_matches' "$COMMON"
+grep -Fq 'pf_owner_command_matches' "$ROOT/scripts/minikube/port-forward-owner.sh"
+grep -Fq 'T2_MARKER_IMAGES_GENERATED_AT' "$COMMON"
+grep -Fq 'image acquisition changed since the pre-gate marker' "$COMMON"
+grep -Fq 'trace-maintenance-worker' "$ROOT/scripts/minikube/full-setup.sh"
+grep -Fq 'pf_owner_record_process_matches' "$ROOT/scripts/minikube/port-forward-owner.sh"
 grep -Fq 'CONTROL_API_REAL_PG_CONTEXT' "$T1"
 grep -Fq 'T2_REQUIRED_DEPLOYMENTS' "$COMMON"
 grep -Fq 'CONTROL_API_REAL_PG_ADMIN_URL=' "$T1"
@@ -119,6 +143,41 @@ grep -Fq 'pending_tests' "$T1"
 grep -Fq 'numTotalTests' "$T1"
 grep -Fq 'numTotalTestSuites' "$T1"
 grep -Fq 'passed_suites' "$T1"
+grep -Fq 'testResults' "$T1"
+grep -Fq 'T1_EXPECTED_FILES' "$T1"
+grep -Fq 'T1_REPORTED_FILES' "$T1"
+grep -Fq -- '--maxWorkers=1' "$T1"
+grep -Fq 'run_t1_local_preflight' "$T2"
+grep -Fq 'T2_SETUP_HANDOFF_REQUIRED=true' "$T2"
+grep -Fq 't2-setup-handoff.sh" consume --' "$ROOT/scripts/minikube/pre-gate-sync.sh"
+grep -Fq 'minikube-verify-images' "$ROOT/scripts/minikube/pre-gate-sync.sh"
+grep -Fq 'with-t2-mutation-lock.sh' "$ROOT/scripts/minikube/setup.sh"
+grep -Fq 'T2_MUTATION_LOCK_WRAPPED' "$ROOT/scripts/minikube/setup.sh"
+grep -Fq 'require-t2-mutation-lock.sh' "$ROOT/scripts/minikube/setup.sh"
+grep -Fq 'PROFILE_LOCK_REQUIRED: setup.sh requires matching' "$ROOT/scripts/minikube/setup.sh"
+grep -Fq 'PROFILE="${MINIKUBE_PROFILE:-${T2_PROFILE:-}}"' "$ROOT/scripts/minikube/setup.sh"
+if grep -Fq 'PROFILE="clerum-test"' "$ROOT/scripts/minikube/setup.sh"; then
+  echo 'FAIL: legacy setup still defaults to the shared clerum-test profile' >&2
+  exit 1
+fi
+setup_guard_line="$(grep -nF 'if [ "${T2_MUTATION_LOCK_WRAPPED:-false}" != true ]; then' "$ROOT/scripts/minikube/setup.sh" | cut -d: -f1)"
+setup_cluster_line="$(grep -nF 'cluster-info' "$ROOT/scripts/minikube/setup.sh" | head -1 | cut -d: -f1)"
+if [[ -z "$setup_guard_line" || -z "$setup_cluster_line" || "$setup_guard_line" -ge "$setup_cluster_line" ]]; then
+  echo 'FAIL: legacy setup can mutate or probe the cluster before the lease wrapper' >&2
+  exit 1
+fi
+full_setup_lock_line="$(grep -nF 't2_mutation_lock' "$ROOT/scripts/minikube/full-setup.sh" | head -1 | cut -d: -f1)"
+full_setup_status_line="$(grep -nF 'CLUSTER_STATUS="$(minikube_status_snapshot)"' "$ROOT/scripts/minikube/full-setup.sh" | head -1 | cut -d: -f1)"
+if [[ -z "$full_setup_lock_line" || -z "$full_setup_status_line" || "$full_setup_lock_line" -ge "$full_setup_status_line" ]]; then
+  echo 'FAIL: full-setup can probe or mutate the profile before the lease wrapper' >&2
+  exit 1
+fi
+for timed_phase in 't2_evidence_write planner PASS' 't2_evidence_write transition PASS' \
+  't2_evidence_write pre-gate-sync PASS' 't2_evidence_write T1 PASS' \
+  't2_evidence_write T2 PASS' 't2_evidence_write NP08_HCC_AUTHORIZATION PASS'; do
+  grep -Fq "$timed_phase" "$T2"
+done
+grep -Fq 'duration=' "$T2"
 grep -Fq 'GFS_RESTORE_ACTIVE_NOLOGIN=true' "$T1"
 grep -Fq 'reconcile-gfs-deploy-credentials.sh' "$T1"
 if grep -Fq "[ \"\$passed_files\" -ne \"\$expected\" ]" "$T1"; then
@@ -134,6 +193,10 @@ if grep -Eq 't2_kc[^|]*port-forward' "$T1"; then
   exit 1
 fi
 grep -Fq 'kubectl --context="$T2_CONTEXT" -n "$PG_NAMESPACE" port-forward' "$T1"
+grep -Fq 'pf_owner_record_process "$PORT_FORWARD_RECORD" "$PORT_FORWARD_PID"' "$T1"
+grep -Fq 'pf_owner_cleanup_record "$PORT_FORWARD_RECORD"' "$T1"
+grep -Fq 'T1_PORT_FORWARD_CLEANUP_OK=false' "$T1"
+grep -Fq 'preserving T1 temp directory because port-forward ownership cleanup was not proven' "$T1"
 grep -Fq 'set +x' "$T1" "$PREFLIGHT" "$T2"
 
 # T1 must restore the branch-profile GFS credentials on the way out with the
@@ -257,6 +320,10 @@ grep -Fq 'T2_NP08_HCC_AUTHORIZATION_STATUS=NOT_RUN' "$T2"
 grep -Fq 't2_lane_completed "$T2_T0_STATUS"' "$T2"
 grep -Fq 't2_lane_completed "$T2_T1_STATUS"' "$T2"
 grep -Fq 'T2_HEALTHCHECK_COMMAND' "$T2"
+grep -Fq 'validate_healthcheck_contract' "$T2"
+grep -Fq 'T2_HEALTHCHECK_REQUIRED=true' "$T2"
+grep -Fq -- '--label t2-user-facing-health' "$T2"
+grep -Fq 'Health=$T2_HEALTH_STATUS' "$T2"
 grep -Fq 'run_np08_hcc_authorization' "$T2"
 grep -Fq "CLERUM_PROFILE_PORTS_ENV=\"\$T2_PORTS_ENV\"" "$T2"
 grep -Fq 'NP08_HCC_AUTHORIZATION PASS' "$T2"
@@ -275,6 +342,13 @@ grep -Fq 'T2_T0_STATUS=NOT_RUN' "$T2"
 grep -Fq 'T2_T1_STATUS=NOT_RUN' "$T2"
 grep -Fq 'T2_HEALTHCHECK_COMMAND' "$T2"
 grep -Fq 'minikube-t2-runtime' "$ROOT/Makefile"
+post_runtime_process_check_line="$(grep -nF 'if ! t2_process_check; then' "$T2" | tail -1 | cut -d: -f1)"
+complete_pass_line="$(grep -nF 't2_evidence_write complete PASS' "$T2" | tail -1 | cut -d: -f1)"
+if [ -z "$post_runtime_process_check_line" ] || [ -z "$complete_pass_line" ] ||
+   [ "$post_runtime_process_check_line" -ge "$complete_pass_line" ]; then
+  echo 'FAIL: T2 does not revalidate port-forward ownership before complete PASS' >&2
+  exit 1
+fi
 if ! grep -Fq 'instead of already-synced' "$T2"; then
   echo 'FAIL: final T2 preflight does not require already-synced' >&2
   exit 1
@@ -527,16 +601,17 @@ for exit_code in 1 2 7 126 137; do
         esac
         shift
       done
-      printf "%s\\n" '\''{"success":true,"testResults":[{"status":"passed"}],"numPassedTests":1,"numFailedTests":0,"numPendingTestSuites":0,"numPendingTests":0,"numTotalTests":1}'\'' >"$output_file"
+      printf '\''{"success":true,"testResults":[{"name":"%s","status":"passed"}],"numTotalTestSuites":1,"numPassedTestSuites":1,"numFailedTestSuites":0,"numPassedTests":1,"numFailedTests":0,"numPendingTestSuites":0,"numPendingTests":0,"numTotalTests":1}\n'\'' \
+        "$T1_EXIT_ROOT/control-api/test/fake.realPostgres.test.ts" >"$output_file"
       return "$EXIT_CODE"
     }
-    if run_suite control-api isolated postgresql://isolated; then
-      exit 1
-    fi
-  ' bash "$T1"; then
+    run_suite control-api isolated postgresql://isolated
+    exit 0
+  ' bash "$T1" 2>"$tmp/t1-exit-$exit_code.err"; then
     echo "FAIL: T1 accepted a green reporter after npm exit $exit_code" >&2
     exit 1
   fi
+  grep -Fq "Vitest process exited $exit_code" "$tmp/t1-exit-$exit_code.err"
 done
 
 bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh"
@@ -575,5 +650,11 @@ bash "$ROOT/scripts/tests/test-minikube-mutation-boundary.sh"
 bash "$ROOT/scripts/tests/test-minikube-targeted-gfs-sync.sh"
 bash "$ROOT/scripts/tests/test-minikube-t2-lock-race.sh"
 bash "$ROOT/scripts/tests/test-minikube-t1-gfs-restore.sh"
+bash "$ROOT/scripts/tests/test-real-postgres-local-preflight.sh"
+bash "$ROOT/scripts/tests/test-minikube-port-forward-owner.sh"
+bash "$ROOT/scripts/tests/test-minikube-docker-cli-env.sh"
+bash "$ROOT/scripts/tests/test-minikube-build-images-hardening.sh"
+bash "$ROOT/scripts/tests/test-minikube-build-section-headers.sh"
+bash "$ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh"
 
 printf 'PASS: local Minikube T0/T1/T2 contract checks\n'

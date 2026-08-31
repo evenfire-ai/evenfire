@@ -170,6 +170,27 @@ export const controlApi = {
     }
   },
 
+  async listCodexConnections(): Promise<
+    Array<{
+      connectionKey: string
+      displayName?: string
+      status: string
+      catalogRevision: number
+      assignedHosts?: Array<{ name: string }>
+    }>
+  > {
+    const body = await apiFetch<{
+      connections?: Array<{
+        connectionKey: string
+        displayName?: string
+        status: string
+        catalogRevision: number
+        assignedHosts?: Array<{ name: string }>
+      }>
+    }>('GET', '/api/v1/admin/llm/providers/codex-subscription/connections')
+    return body.connections ?? []
+  },
+
   async createCommunicationChannel(channel: unknown): Promise<unknown> {
     return apiFetch<unknown>('POST', '/api/v1/admin/communication-channels', channel)
   },

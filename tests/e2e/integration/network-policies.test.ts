@@ -10,6 +10,7 @@
  */
 import { beforeAll, describe, expect, it } from 'vitest'
 import { execFileSync } from 'child_process'
+import { readFileSync } from 'node:fs'
 
 // Short timeout for negative tests — we expect these to time out
 const NP_TIMEOUT = 3
@@ -178,6 +179,38 @@ function testConnectivity(
   }
 }
 
+describe('Codex LLM proxy NetworkPolicy contract (static)', () => {
+  const policyPath = new URL(
+    '../../../deploy/base/control-plane/networkpolicies.yaml',
+    import.meta.url
+  )
+  const rendered = readFileSync(policyPath, 'utf8')
+
+  it('allows runtime ingress only from eligible mcp-host pods and admin only from Control API', () => {
+    expect(rendered).toContain('name: codex-llm-proxy-ingress')
+    expect(rendered).toContain('name: codex-llm-proxy-egress')
+    expect(rendered).toMatch(/port: 8080[\s\S]*clerum.io\/managed-by: host-context-controller/)
+    expect(rendered).toMatch(
+      /kubernetes.io\/metadata.name: sandbox-recipes[\s\S]*clerum.io\/component: workflow-mcp-host/
+    )
+    expect(rendered).toMatch(/app: control-api[\s\S]*port: 8081/)
+    expect(rendered).toContain('kubernetes.io/metadata.name: monitoring')
+    expect(rendered).not.toMatch(/codex-llm-proxy-ingress[\s\S]*namespaceSelector: \{\}/)
+  })
+
+  it('allows gateway and public HTTPS egress while omitting private and sibling hops', () => {
+    const egress = rendered.slice(rendered.indexOf('name: codex-llm-proxy-egress'))
+    expect(egress).toContain('app: control-api-rpc-gateway')
+    expect(egress).toContain('cidr: 0.0.0.0/0')
+    expect(egress).toContain('except: []')
+    expect(egress).not.toContain('app: control-api\n')
+    expect(egress).not.toContain('app: control-postgres')
+    expect(egress).not.toContain('app: host-context-controller')
+    expect(egress).not.toContain('app: workflow-recipes')
+    expect(egress).not.toContain('app: mcp-host')
+  })
+})
+
 describe('NetworkPolicy Enforcement (Calico)', () => {
   beforeAll(() => {
     clusterReachable = probeClusterReachable()
@@ -211,6 +244,18 @@ describe('NetworkPolicy Enforcement (Calico)', () => {
       { encoding: 'utf-8' }
     )
     expect(pods).toContain('Running')
+  })
+
+  it('codex-llm-proxy ingress and egress policies exist', ctx => {
+    if (!clusterReachable) ctx.skip()
+    const nps = execFileSync(
+      'kubectl',
+      ['get', 'networkpolicy', '-n', 'control-plane', '--no-headers'],
+      { encoding: 'utf-8' }
+    )
+    expect(nps).toContain('codex-llm-proxy-ingress')
+    expect(nps).toContain('codex-llm-proxy-egress')
+    expect(nps).toContain('control-api-to-codex-llm-proxy')
   })
 
   it('deny-all policies exist in secured namespaces', ctx => {

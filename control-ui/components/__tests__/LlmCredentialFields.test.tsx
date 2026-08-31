@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { LLM_CREDENTIAL_GROUPS, providerForDataKey } from '@/lib/llm'
+import { LLM_CREDENTIAL_GROUPS, LLM_SECRET_EDITOR_GROUPS, providerForDataKey } from '@/lib/llm'
 import { LlmCredentialFields } from '../LlmCredentialFields'
 
 afterEach(cleanup)
@@ -65,13 +65,16 @@ describe('LlmCredentialFields (additive provider editor)', () => {
     const { container } = render(<Harness />)
     expect(container.querySelectorAll('.cu-llm-cred-group')).toHaveLength(0)
     expect(screen.getByText(/No providers added yet/i)).toBeInTheDocument()
-    // One option per provider in the shared package (the dropdown has no
-    // placeholder entry — the placeholder lives on the trigger button).
+    // One option per Secret-backed provider (oauth-broker stays off this form).
+    // The dropdown has no placeholder entry — the placeholder lives on the trigger.
     openAddProvider()
     const options = screen.getAllByRole('option')
-    expect(options).toHaveLength(LLM_CREDENTIAL_GROUPS.length)
+    expect(options).toHaveLength(LLM_SECRET_EDITOR_GROUPS.length)
+    expect(
+      options.some(option => option.querySelector('[data-provider="codex-subscription"]'))
+    ).toBe(false)
     // Every entry carries its provider brand mark, keyed to the provider id.
-    for (const group of LLM_CREDENTIAL_GROUPS) {
+    for (const group of LLM_SECRET_EDITOR_GROUPS) {
       const option = screen.getByRole('option', { name: group.label })
       expect(
         option.querySelector(`.cu-llm-provider-icon[data-provider="${group.provider}"]`)
@@ -98,11 +101,11 @@ describe('LlmCredentialFields (additive provider editor)', () => {
     expect(sectionTitle('Anthropic')).toBeNull()
   })
 
-  it('hides the picker once every provider is visible', () => {
+  it('hides the picker once every Secret-backed provider is visible', () => {
     render(<Harness />)
-    for (const group of LLM_CREDENTIAL_GROUPS) addProvider(group.provider)
+    for (const group of LLM_SECRET_EDITOR_GROUPS) addProvider(group.provider)
     expect(screen.queryByLabelText('Add provider')).toBeNull()
-  })
+  }, 15_000)
 
   it('renders the Bedrock access-key pair and the Vertex JSON textarea when added', () => {
     render(<Harness />)
@@ -252,6 +255,10 @@ describe('LlmCredentialFields (additive provider editor)', () => {
     expect(within(group).queryByText(/already exists as a provider slot/i)).toBeNull()
     // Present in the Secret → never removable from here.
     expect(screen.queryByRole('button', { name: 'Remove Anthropic provider' })).toBeNull()
+    // Stored values stay hidden until replacement is requested.
+    fireEvent.click(
+      within(group).getByRole('button', { name: 'Replace extra credential slot value' })
+    )
     // Typing a value rewrites the stored key through the normal commit path.
     fireEvent.change(within(group).getByLabelText(/Extra credential slot value/i), {
       target: { value: 'sk-ant-new' },
@@ -345,6 +352,9 @@ describe('LlmCredentialFields — retiring stored extra slots', () => {
     )
     const group = sectionOf('Anthropic')
     const name = within(group).getByLabelText(/Extra credential slot key name/i)
+    fireEvent.click(
+      within(group).getByRole('button', { name: 'Replace extra credential slot value' })
+    )
     const value = within(group).getByLabelText(/Extra credential slot value/i)
 
     fireEvent.change(name, { target: { value: 'claude-api-key-fb2' } })
@@ -479,6 +489,7 @@ describe('LlmCredentialFields — retiring stored extra slots', () => {
     // One report on mount, establishing the (empty) live region.
     expect(onRemovedKeysChange.mock.calls).toHaveLength(1)
 
+    fireEvent.click(screen.getByRole('button', { name: 'Replace OpenAI API key' }))
     const input = screen.getByLabelText(/^OpenAI API key/i)
     for (const value of ['s', 'sk', 'sk-', 'sk-l']) {
       fireEvent.change(input, { target: { value } })

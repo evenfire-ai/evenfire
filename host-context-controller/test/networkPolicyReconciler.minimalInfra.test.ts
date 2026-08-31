@@ -16,10 +16,13 @@ vi.mock('../src/config', () => ({
   },
 }))
 
-vi.mock('../src/utils', () => ({
-  getErrorCode: (err: { code?: number }) => err?.code,
-  applyNetworkPolicy: vi.fn().mockResolvedValue(undefined),
-}))
+vi.mock('../src/utils', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/utils')>()
+  return {
+    ...actual,
+    applyNetworkPolicy: vi.fn().mockResolvedValue(undefined),
+  }
+})
 
 const mockApply = vi.mocked(applyNetworkPolicy)
 

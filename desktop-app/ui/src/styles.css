@@ -3567,7 +3567,7 @@ h3 {
 
 /* Interactive hover/focus mirrors the ghost trigger's affordance — background,
  * border, text-color and shadow only, never transform/scale/filter (control
- * rules, desktop-app/ui/CLAUDE.md). */
+ * rules, docs/agents/frontend-style-rules.md). */
 .composer-actions-right .model-selector-chip.ui-pill--interactive:hover,
 .composer-actions-right .model-selector-chip.ui-pill--interactive:focus-visible {
   background: var(--surface-hover);
@@ -7655,12 +7655,14 @@ h3 {
    remaining page-specific hooks are `context-detail-page` / `team-detail-page`
    (used for scoped token overrides). */
 
+/* Card that frames the connectors `da-table` (which renders frameless + full
+   bleed), mirroring `.contexts-board-card`: the page-card supplies the single
+   frame; the table lays out inside it. */
 .mcp-servers-board-card {
   min-height: 0;
   min-width: 0;
   display: grid;
   align-content: start;
-  gap: var(--space-2-5);
 }
 
 .mcp-servers-board-header {
@@ -8107,12 +8109,6 @@ h3 {
   word-break: break-word;
 }
 
-.context-mcp-url code {
-  font-size: var(--font-size-xs);
-  color: var(--text-muted);
-  word-break: break-all;
-}
-
 .context-mcp-count {
   justify-self: center;
   min-width: 26px;
@@ -8124,11 +8120,6 @@ h3 {
   color: var(--text-muted);
   font-size: var(--font-size-sm);
   word-break: break-word;
-}
-
-.context-mcp-source {
-  color: var(--text-dim);
-  font-size: var(--font-size-sm);
 }
 
 .context-members-name {
@@ -13568,16 +13559,15 @@ pre {
 .da-gfs-list__icon {
   display: grid;
   place-items: center;
-  width: calc(var(--space-5) + var(--space-1));
-  height: calc(var(--space-5) + var(--space-1));
-  border-radius: var(--radius-sm);
-  background: var(--surface-soft);
+  width: var(--space-5);
+  height: var(--space-5);
   color: var(--text-muted);
+  overflow: hidden;
 }
 
 .da-gfs-list__icon svg {
-  width: var(--space-4);
-  height: var(--space-4);
+  width: 100%;
+  height: 100%;
 }
 
 .da-gfs-list__identity {
@@ -13591,14 +13581,6 @@ pre {
   min-width: 0;
   color: var(--text);
   font-weight: 700;
-}
-
-.da-gfs-list__meta {
-  color: var(--text-muted);
-  font-size: var(--font-size-xs);
-  font-weight: 700;
-  letter-spacing: 0;
-  text-transform: uppercase;
 }
 
 .da-gfs-list__actions {
@@ -13848,6 +13830,16 @@ pre {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
+  justify-content: flex-end;
+  margin-left: auto;
+}
+
+.da-gfs-delegation__scope-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 
 .da-gfs-footer-actions {
@@ -13892,6 +13884,13 @@ pre {
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
   border-bottom: 0;
+}
+
+.da-gfs-drive__title-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-0-5);
 }
 
 .da-gfs-drive__breadcrumbs {
@@ -14040,12 +14039,35 @@ pre {
   flex: 1 1 auto;
   width: auto;
   align-content: start;
-  margin: var(--space-2) var(--space-3) var(--space-3);
+  gap: 0;
+  margin: var(--space-2) 0 var(--space-3);
   overflow: visible;
 }
 
 .da-gfs-drive__grid .da-grid__head {
   padding-inline: calc(var(--table-cell-padding-x) + var(--grid-row-gap));
+  border-radius: 0;
+  border-bottom: 1px solid var(--grid-card-border);
+  background: var(--table-header-bg);
+}
+
+.da-gfs-drive__grid .da-grid__row {
+  width: 100%;
+  font-size: var(--font-size-md);
+  border-radius: 0;
+  border: 0;
+  border-bottom: 1px solid var(--grid-card-border);
+  background: transparent;
+  transition: background-color var(--motion-fast);
+}
+
+.da-gfs-drive__grid .da-grid__row:last-child {
+  border-bottom: 0;
+}
+
+.da-gfs-drive__grid .da-grid__row--clickable:hover:enabled {
+  background: var(--grid-card-bg-hover);
+  border-color: var(--grid-card-border);
 }
 
 .da-gfs-current-file {
@@ -14109,12 +14131,12 @@ pre {
   font-size: var(--font-size-sm);
 }
 
-.da-gfs-drive__type,
-.da-gfs-drive__source {
+.da-gfs-drive__size {
   min-width: 0;
   overflow: hidden;
   color: var(--text-muted);
   font-size: var(--font-size-sm);
+  text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -14251,7 +14273,8 @@ pre {
 }
 
 .da-gfs-image-preview-modal,
-.da-gfs-markdown-preview-modal {
+.da-gfs-markdown-preview-modal,
+.da-gfs-video-preview-modal {
   position: fixed;
   inset: 0;
   z-index: calc(var(--layer-chat-overlay) + 3);
@@ -14263,7 +14286,8 @@ pre {
 }
 
 .da-gfs-image-preview-dialog,
-.da-gfs-markdown-preview-dialog {
+.da-gfs-markdown-preview-dialog,
+.da-gfs-video-preview-dialog {
   width: min(960px, 96vw);
   height: min(760px, 92vh);
   display: grid;
@@ -14276,7 +14300,8 @@ pre {
 }
 
 .da-gfs-image-preview-dialog__header,
-.da-gfs-markdown-preview-dialog__header {
+.da-gfs-markdown-preview-dialog__header,
+.da-gfs-video-preview-dialog__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -14286,8 +14311,39 @@ pre {
   background: rgba(var(--panel-rgb), 0.48);
 }
 
+.da-gfs-image-preview-dialog__header-actions,
+.da-gfs-markdown-preview-dialog__header-actions,
+.da-gfs-video-preview-dialog__header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.da-gfs-text-preview__content {
+  min-width: 0;
+  min-height: 0;
+  padding: var(--space-5);
+}
+
+.da-gfs-text-preview__body {
+  max-width: 60rem;
+  margin: 0;
+  padding: var(--space-4);
+  border: 1px solid rgba(var(--edge-rgb), 0.24);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .da-gfs-image-preview-dialog__header h3,
-.da-gfs-markdown-preview-dialog__header h3 {
+.da-gfs-markdown-preview-dialog__header h3,
+.da-gfs-video-preview-dialog__header h3 {
   min-width: 0;
   overflow: hidden;
   margin: 0;
@@ -14299,7 +14355,8 @@ pre {
   white-space: nowrap;
 }
 
-.da-gfs-image-preview-dialog__body {
+.da-gfs-image-preview-dialog__body,
+.da-gfs-video-preview-dialog__body {
   min-width: 0;
   min-height: 0;
   display: grid;
@@ -14322,12 +14379,26 @@ pre {
   object-fit: contain;
 }
 
+.da-gfs-video-preview-dialog__loading {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.da-gfs-video-preview-dialog__video {
+  width: 100%;
+  max-width: min(920px, calc(96vw - var(--space-5) * 2));
+  max-height: 100%;
+  display: block;
+  border-radius: var(--radius-sm);
+  background: var(--media-surface);
+}
+
 .da-gfs-markdown-preview-dialog__body {
   min-width: 0;
   min-height: 0;
   overflow: auto;
   padding: var(--space-5);
-  background: rgba(var(--overlay-rgb), 0.32);
+  background: var(--panel);
 }
 
 .da-gfs-markdown-preview-dialog__loading {
@@ -14427,7 +14498,7 @@ pre {
 }
 
 .da-gfs-manage-dialog__icon--folder {
-  color: var(--warning);
+  color: var(--text-muted);
 }
 
 .da-gfs-manage-dialog__icon svg {
@@ -14661,6 +14732,62 @@ pre {
   background: var(--surface-soft);
 }
 
+/* Page-level rename confirmation (row/header menus): a narrow dialog over the
+   manage-modal overlay, so a row rename never needs the manage dialog. */
+.da-gfs-manage-dialog--confirm {
+  width: min(440px, 94vw);
+  max-height: none;
+  padding: var(--space-4) var(--space-5);
+}
+
+.da-gfs-manage-dialog--confirm .da-gfs-manage-dialog__body {
+  padding: 0;
+}
+
+/* Move-to-folder picker: full-width dialog with a scrollable folder list. */
+.da-gfs-move-dialog__list {
+  min-height: var(--space-8);
+  max-height: min(320px, 40vh);
+  display: grid;
+  align-content: start;
+  gap: var(--space-1);
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  background: var(--surface-soft);
+}
+
+.da-gfs-move-dialog__row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.da-gfs-move-dialog__more {
+  display: flex;
+  justify-content: center;
+  padding-top: var(--space-1);
+}
+
+.da-gfs-move-dialog__row-icon {
+  display: grid;
+  place-items: center;
+  color: var(--warning);
+}
+
+.da-gfs-move-dialog__row-icon svg {
+  width: var(--font-size-lg);
+  height: var(--font-size-lg);
+}
+
+.da-gfs-move-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
 .da-gfs-manage-section--actions .da-gfs-inline-form__field {
   min-width: 0;
 }
@@ -14720,9 +14847,12 @@ pre {
 .da-gfs-grant-list {
   display: grid;
   gap: var(--space-1);
+  max-height: calc(((var(--space-5) + var(--space-4) + var(--space-2)) * 3) + (var(--space-1) * 2));
   margin: 0;
+  overflow-y: auto;
   padding: 0;
   list-style: none;
+  scrollbar-width: thin;
 }
 
 .da-gfs-grant-list__row {
@@ -14771,6 +14901,21 @@ pre {
   gap: var(--space-1);
 }
 
+.da-gfs-grant-list__revoke.ui-icon-button {
+  color: var(--danger);
+  border-color: transparent;
+  background: transparent;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.da-gfs-grant-list__revoke.ui-icon-button:hover:enabled,
+.da-gfs-grant-list__revoke.ui-icon-button:focus-visible {
+  border-color: transparent;
+  background: transparent;
+  color: var(--danger);
+}
+
 @media (max-width: 940px) {
   .da-gfs-manage-dialog__body {
     padding: var(--space-4);
@@ -14816,10 +14961,8 @@ pre {
     grid-template-columns: calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) 4.5rem;
   }
 
-  .da-gfs-drive__type-column,
-  .da-gfs-drive__source-column,
-  .da-gfs-drive__type,
-  .da-gfs-drive__source {
+  .da-gfs-drive__size-column,
+  .da-gfs-drive__size {
     display: none;
   }
 
@@ -14835,18 +14978,21 @@ pre {
 
 @media (max-width: 560px) {
   .da-gfs-image-preview-modal,
-  .da-gfs-markdown-preview-modal {
+  .da-gfs-markdown-preview-modal,
+  .da-gfs-video-preview-modal {
     padding: var(--space-2);
   }
 
   .da-gfs-image-preview-dialog,
-  .da-gfs-markdown-preview-dialog {
+  .da-gfs-markdown-preview-dialog,
+  .da-gfs-video-preview-dialog {
     width: 100%;
     height: 96vh;
   }
 
   .da-gfs-image-preview-dialog__body,
-  .da-gfs-markdown-preview-dialog__body {
+  .da-gfs-markdown-preview-dialog__body,
+  .da-gfs-video-preview-dialog__body {
     padding: var(--space-2);
   }
 
@@ -14954,39 +15100,26 @@ pre {
   z-index: 1;
 }
 
-.chat-view-tabs__list {
-  display: flex;
-  gap: var(--space-1);
+.chat-view-tabs__scroller {
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
+  transform: rotateX(180deg);
   width: 100%;
 }
 
-.chat-view-tab {
-  align-items: center;
-  background: var(--surface-soft);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+.chat-view-tabs__list {
   display: flex;
-  flex: 0 0 auto;
-  max-width: 220px;
-  min-width: 0;
-  transition: background var(--motion-fast);
-}
-
-.chat-view-tab.is-active {
-  background: var(--surface-strong);
-  border-color: var(--chat-view-selected-border);
-  border-bottom: 0;
-  margin-bottom: -1px;
+  gap: var(--space-1);
+  min-width: 100%;
   position: relative;
-  z-index: 1;
+  transform: rotateX(180deg);
+  width: max-content;
 }
 
-.chat-view-tab.is-active::after {
-  background: inherit;
-  bottom: -1px;
+.chat-view-tabs__list::after {
+  background: var(--chat-view-selected-border);
+  bottom: 0;
   content: '';
   height: 1px;
   left: 0;
@@ -14995,8 +15128,37 @@ pre {
   right: 0;
 }
 
+.chat-view-tab {
+  align-items: center;
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  display: flex;
+  flex: 0 0 220px;
+  min-width: 0;
+  transition: background var(--motion-fast);
+  width: 220px;
+}
+
+.chat-view-tab:not(.is-active) {
+  border-bottom: 0;
+  border-color: color-mix(in srgb, var(--border-soft) 25%, transparent);
+}
+
+.chat-view-tab.is-active {
+  background: linear-gradient(var(--surface-strong), var(--surface-strong)), var(--panel);
+  border-color: var(--chat-view-selected-border);
+  border-bottom: 0;
+  position: relative;
+  z-index: 1;
+}
+
 .chat-view-tab:hover {
   background: var(--surface-hover);
+}
+
+.chat-view-tab.is-active:hover {
+  background: linear-gradient(var(--surface-hover), var(--surface-hover)), var(--panel);
 }
 
 .chat-view-tab .chat-view-tab__select.ui-button:hover:enabled,
@@ -15039,7 +15201,7 @@ pre {
   background: var(--surface-strong);
   border-color: var(--chat-view-selected-border);
   border-style: solid;
-  border-width: 1px;
+  border-width: 0 1px 1px;
   border-radius: 0 var(--radius-sm) 0 0;
   display: flex;
   flex: 1 1 0;

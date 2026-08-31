@@ -32,6 +32,7 @@ import {
   ProfileSettingsOpenOptions,
   ReplaceChatMessagesOptions,
   RpcAllowedServersResult,
+  RpcConnectorsResult,
   SandboxUiApp,
   SandboxUiDeepLinkEnvelope,
   SessionLifecycleState,
@@ -336,6 +337,12 @@ declare global {
           drive?: string,
           ifMatch?: number
         ) => Promise<{ resourceId: string; version: number }>
+        moveResource: (
+          resourceId: string,
+          destinationId: string,
+          drive?: string,
+          ifMatch?: number
+        ) => Promise<{ resourceId: string; version: number }>
         deleteResource: (
           resourceId: string,
           drive?: string,
@@ -563,6 +570,30 @@ declare global {
           hostRefs?: string[]
         ) => Promise<SetHostModelResult>
         getTokenMetadata: () => Promise<TokenMetadata>
+        // U5 (mcp-oauth reactive consent): "Connect <server>" for a task
+        // suspended with `connect_required`. Host-bound to that conversation.
+        connectMcpServer: (
+          mcpServerName: string,
+          hostRef: string,
+          contextId?: string,
+          options?: { confirmShared?: boolean }
+        ) => Promise<void>
+        // Proactive connectors panel (spec 11 U2): the classified per-agent fleet.
+        listConnectors: () => Promise<RpcConnectorsResult>
+        // Proactive disconnect (spec 11 U4): revoke an mcp-server's OAuth grant.
+        // Main shows a native confirm dialog first; resolves `{ confirmed:false }`
+        // when the user cancels. `options.shared` drives only the confirm copy.
+        disconnectMcpServer: (
+          mcpServerName: string,
+          hostRef: string,
+          contextId?: string,
+          options?: { shared?: boolean }
+        ) => Promise<{ confirmed: boolean }>
+        // Push fired when the OAuth deep-link returns with `source=mcp`; the
+        // renderer correlates `mcpServerName` and resumes the suspended task.
+        onMcpOauthCompleted: (
+          callback: (args: { mcpServerName: string; provider: string }) => void
+        ) => () => void
       }
       app: {
         openUrl: (url: string) => Promise<void>

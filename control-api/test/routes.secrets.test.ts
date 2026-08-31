@@ -1,7 +1,25 @@
 import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { rootLogger } from '../src/observability/logger.js'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
+import { MockGateway } from './mockGateway.js'
+
+function writeSummary(body: unknown) {
+  const write = body as {
+    name: string
+    namespace?: string
+    data?: Record<string, string>
+    stringData?: Record<string, string>
+  }
+  return {
+    name: write.name,
+    namespace: write.namespace || 'default',
+    keys: [
+      ...new Set([...Object.keys(write.data ?? {}), ...Object.keys(write.stringData ?? {})]),
+    ].sort((a, b) => a.localeCompare(b)),
+  }
+}
 
 function createGateway() {
   return {
@@ -14,15 +32,16 @@ function createGateway() {
       { metadata: { name: 's3', namespace: 'ns1', labels: { 'clerum.io/host-secret': 'false' } } },
     ]),
     getSecret: vi.fn(async (_name: string, _namespace?: string): Promise<unknown> => {
-      throw new Error('not found')
+      throw Object.assign(new Error('not found'), { statusCode: 404 })
     }),
-    createSecret: vi.fn(async (body: unknown) => body),
-    updateSecret: vi.fn(async (body: unknown) => body),
+    createSecret: vi.fn(async (body: unknown) => writeSummary(body)),
+    updateSecret: vi.fn(async (body: unknown) => writeSummary(body)),
     deleteSecret: vi.fn(async (name: string, namespace?: string) => ({
       deleted: true,
       name,
       namespace: namespace || 'default',
     })),
+    listResource: vi.fn(async () => [] as unknown[]),
   }
 }
 
@@ -131,8 +150,8 @@ describe('routes/secrets', () => {
             data: entry.data,
           }
         }),
-        createSecret: vi.fn(async (body: unknown) => body),
-        updateSecret: vi.fn(async (body: unknown) => body),
+        createSecret: vi.fn(async (body: unknown) => writeSummary(body)),
+        updateSecret: vi.fn(async (body: unknown) => writeSummary(body)),
         deleteSecret: vi.fn(async (name: string, namespace?: string) => ({
           deleted: true,
           name,
@@ -181,7 +200,7 @@ describe('routes/secrets', () => {
             ]
           : []
       })
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const warnSpy = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
       const app = express()
       app.use(express.json())
       app.use(createAdminSecretsRouter(gateway as never))
@@ -191,9 +210,12 @@ describe('routes/secrets', () => {
       expect(res.body.items).toHaveLength(1)
       expect(res.body.items[0]).toMatchObject({ name: 'r1', namespace: 'sandbox-recipes' })
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('"event":"recipe-secret-namespace-list-degraded"')
+        expect.objectContaining({
+          event: 'recipe-secret-namespace-list-degraded',
+          namespace: 'sandbox-ui',
+        }),
+        'Recipe Secret namespace listing degraded'
       )
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('"namespace":"sandbox-ui"'))
       warnSpy.mockRestore()
     })
 
@@ -966,5 +988,89 @@ describe('routes/secrets — PUT merge semantics', () => {
       .expect(200)
     const call = (gateway.updateSecret as any).mock.calls[0][0]
     expect(Object.keys(call.data)).toEqual(['b'])
+  })
+})
+
+describe('routes/secrets — fallback credential protection', () => {
+  const secretName = 'shared-llm'
+  const fallbackSlot = 'claude-api-key-fb1'
+  const b64 = (value: string): string => Buffer.from(value, 'utf8').toString('base64')
+
+  async function makeFallbackProtectedApp() {
+    const gateway = new MockGateway('mcp-host')
+    await gateway.createResource(
+      'hosts',
+      {
+        metadata: { name: 'agent-a' },
+        spec: {
+          secretRef: secretName,
+          model: { provider: 'openai', name: 'gpt-5.4-mini' },
+          llmPolicy: {
+            fallbacks: [
+              {
+                provider: 'claude',
+                model: 'claude-sonnet-4-6',
+                credentialSlot: fallbackSlot,
+              },
+            ],
+          },
+        },
+      },
+      'mcp-host'
+    )
+    gateway.seedSecret(secretName, 'mcp-host', {
+      labels: { 'clerum.io/host-secret': 'true' },
+      data: {
+        'openai-api-key': b64('openai-secret'),
+        [fallbackSlot]: b64('claude-secret'),
+      },
+    })
+
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminSecretsRouter(gateway as never))
+    return { app, gateway }
+  }
+
+  it('blocks merge removeKeys for a slot used by a producer-created Host fallback', async () => {
+    const { app, gateway } = await makeFallbackProtectedApp()
+    vi.spyOn(gateway, 'updateSecret')
+
+    const res = await request(app)
+      .put('/admin/secrets')
+      .send({ name: secretName, merge: true, removeKeys: [fallbackSlot] })
+      .expect(409)
+
+    expect(res.body.error).toContain(fallbackSlot)
+    expect(res.body.error).toContain('active fallback')
+    expect(res.body.error).toContain('agent-a')
+    expect(gateway.updateSecret).not.toHaveBeenCalled()
+  })
+
+  it('blocks full replacement when it omits a slot used by a producer-created Host fallback', async () => {
+    const { app, gateway } = await makeFallbackProtectedApp()
+    vi.spyOn(gateway, 'updateSecret')
+
+    const res = await request(app)
+      .put('/admin/secrets')
+      .send({ name: secretName, stringData: { 'openai-api-key': 'replacement' } })
+      .expect(409)
+
+    expect(res.body.error).toContain(fallbackSlot)
+    expect(res.body.error).toContain('active fallback')
+    expect(res.body.error).toContain('agent-a')
+    expect(gateway.updateSecret).not.toHaveBeenCalled()
+  })
+
+  it('blocks deleting a Secret referenced by a producer-created Host fallback', async () => {
+    const { app, gateway } = await makeFallbackProtectedApp()
+    vi.spyOn(gateway, 'deleteSecret')
+
+    const res = await request(app).delete(`/admin/secrets/${secretName}`).expect(409)
+
+    expect(res.body.error).toContain(fallbackSlot)
+    expect(res.body.error).toContain('active fallback')
+    expect(res.body.error).toContain('agent-a')
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
   })
 })
