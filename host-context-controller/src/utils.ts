@@ -245,6 +245,33 @@ function normalizeServiceForComparison(service: k8s.V1Service): unknown {
 }
 
 /**
+ * True when the merged desired ConfigMap is equivalent to the live object.
+ * ConfigMaps have no apps/v1-style spec defaulting, so comparison is the
+ * whole object after stripping server-owned metadata. Doubt or a malformed
+ * object returns false (fail-open-to-write).
+ */
+export function configMapMatchesDesired(
+  desired: k8s.V1ConfigMap | undefined,
+  existing: k8s.V1ConfigMap | undefined
+): boolean {
+  try {
+    if (!desired || !existing) return false
+    return (
+      JSON.stringify(normalizeConfigMapForComparison(desired)) ===
+      JSON.stringify(normalizeConfigMapForComparison(existing))
+    )
+  } catch {
+    return false
+  }
+}
+
+function normalizeConfigMapForComparison(configMap: k8s.V1ConfigMap): unknown {
+  const normalized = structuredClone(configMap)
+  stripServerOwnedMetadata(normalized)
+  return canonicalizeValue(normalized)
+}
+
+/**
  * True when the desired NetworkPolicy is equivalent to the live object, so a
  * replace would be a no-op. Canonicalize first: the apiserver default-fills
  * policyTypes and ports[].protocol=TCP, and key order is not stable (#307).

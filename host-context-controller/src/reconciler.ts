@@ -29,6 +29,7 @@ import { mcpserverMissingSecret } from './metrics'
 import { McpServerCRD, McpServerStatus } from './types'
 import {
   canonicalStringify,
+  configMapMatchesDesired,
   deploymentMatchesDesired,
   getErrorCode,
   preserveDeploymentAnnotations,
@@ -947,39 +948,28 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   ): Promise<void> {
     const cm = this.buildNginxConfigMap(server)
     if (!isCurrent()) return
+    const name = `${server.name}-nginx-conf`
+    const namespace = server.namespace
     try {
       await this.coreApi.createNamespacedConfigMap({
-        namespace: server.namespace,
+        namespace,
         body: cm,
       })
-      console.log(`[Reconciler] Created nginx ConfigMap "${server.name}-nginx-conf"`)
+      console.log(`[Reconciler] Created nginx ConfigMap "${name}"`)
     } catch (error: unknown) {
-      if (getErrorCode(error) === 409) {
-        const existing = await this.coreApi.readNamespacedConfigMap({
-          name: `${server.name}-nginx-conf`,
-          namespace: server.namespace,
-        })
-        if (!isCurrent()) return
-        const next = preserveObjectAnnotations(
-          {
-            ...cm,
-            metadata: {
-              ...cm.metadata,
-              resourceVersion: existing.metadata?.resourceVersion,
-            },
-          },
-          existing
-        )
-        if (!isCurrent()) return
-        await this.coreApi.replaceNamespacedConfigMap({
-          name: `${server.name}-nginx-conf`,
-          namespace: server.namespace,
-          body: next,
-        })
-        console.log(`[Reconciler] Updated nginx ConfigMap "${server.name}-nginx-conf"`)
-      } else {
+      if (getErrorCode(error) !== 409) {
         throw error
       }
+      await replaceWithConflictRetry({
+        description: `nginx ConfigMap "${name}"`,
+        logPrefix: '[Reconciler]',
+        body: cm,
+        mergeExisting: preserveObjectAnnotations,
+        isUpToDate: configMapMatchesDesired,
+        mutationAllowed: isCurrent,
+        read: () => this.coreApi.readNamespacedConfigMap({ name, namespace }),
+        replace: body => this.coreApi.replaceNamespacedConfigMap({ name, namespace, body }),
+      })
     }
   }
 
