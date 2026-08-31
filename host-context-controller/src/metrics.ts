@@ -301,6 +301,15 @@ export const writesTotal = counter({
   labelNames: ['kind'] as const,
 })
 
+// Twin of writesTotal. Incremented when isUpToDate returns true, before the
+// helper returns without replace(). Label set is {kind} only — policy_type
+// belongs to #526.
+export const writeSkipsTotal = counter({
+  name: 'clerum_hcc_write_skips_total',
+  help: 'No-op Kubernetes replaces skipped by replaceWithConflictRetry because the merged object was already up to date, by object kind.',
+  labelNames: ['kind'] as const,
+})
+
 export const hostCleanupDeferredTotal = counter({
   name: 'clerum_hcc_host_cleanup_deferred_total',
   help: 'Orphan Host cleanup deferrals by bounded reason.',

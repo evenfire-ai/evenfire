@@ -92,6 +92,7 @@ vi.mock('./metrics', () => ({
   // required: this mock replaces the whole module, so a metric missing here throws
   // at the call site, and the H7 comment above is the record of what that costs.
   writesTotal: { inc: vi.fn() },
+  writeSkipsTotal: { inc: vi.fn() },
 }))
 
 function makeMockNetworkingApi() {
