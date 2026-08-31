@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { AppService } from '../../../../src/appService'
 import type {
   AccessCatalog,
+  RpcAgentConnectors,
   SessionMe,
   TeamDirectoryEntry,
   TeamMember,
@@ -14,9 +15,11 @@ import { AuthContext } from '../../contexts/AuthContext'
 import type { AuthContextValue } from '../../contexts/AuthContext'
 import { NavigationContext } from '../../contexts/NavigationContext'
 import type { NavigationContextValue } from '../../contexts/NavigationContext'
+import { useConnectorsController } from '../../hooks/domain/useConnectorsController'
 import { useContextsDataController } from '../../hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '../../hooks/domain/useMcpServersDataController'
 import { useTeamsDataController } from '../../hooks/domain/useTeamsDataController'
+import type { ContextMcpServerDetail } from '../../uiTypes'
 import { ContextDetailsPage } from '../ContextDetailsPage'
 
 vi.mock('../../hooks/domain/useContextsDataController', () => ({
@@ -30,6 +33,13 @@ vi.mock('../../hooks/domain/useMcpServersDataController', () => ({
 vi.mock('../../hooks/domain/useTeamsDataController', () => ({
   useTeamsDataController: vi.fn(),
 }))
+
+// Stub only the hook; keep the pure helpers (isSharedConnector /
+// isActionableConnector, which the page and connectorPresentation import) real.
+vi.mock('../../hooks/domain/useConnectorsController', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../hooks/domain/useConnectorsController')>()
+  return { ...actual, useConnectorsController: vi.fn() }
+})
 
 // AppService (imported only to derive a real AccessCatalog fixture from the
 // producer — see deriveAccessCatalog) transitively imports electron at module
@@ -52,6 +62,7 @@ vi.mock('electron', () => ({
 const useContextsDataControllerMock = vi.mocked(useContextsDataController)
 const useMcpServersDataControllerMock = vi.mocked(useMcpServersDataController)
 const useTeamsDataControllerMock = vi.mocked(useTeamsDataController)
+const useConnectorsControllerMock = vi.mocked(useConnectorsController)
 
 const ME: SessionMe = {
   id: 'user-1',
@@ -94,6 +105,7 @@ type DataOverrides = {
   contexts?: Partial<ReturnType<typeof useContextsDataController>>
   mcpServers?: Partial<ReturnType<typeof useMcpServersDataController>>
   teams?: Partial<ReturnType<typeof useTeamsDataController>>
+  connectors?: Partial<ReturnType<typeof useConnectorsController>>
 }
 
 const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextValue => ({
@@ -197,6 +209,21 @@ const makeMcpServersDataValue = (
   ...overrides,
 })
 
+const makeConnectorsValue = (
+  overrides: Partial<ReturnType<typeof useConnectorsController>> = {}
+): ReturnType<typeof useConnectorsController> => ({
+  loading: false,
+  error: null,
+  actionError: null,
+  agents: [],
+  pendingKey: null,
+  refresh: vi.fn(),
+  reset: vi.fn(),
+  authorize: vi.fn(async () => undefined),
+  disconnect: vi.fn(async () => ({ confirmed: true })),
+  ...overrides,
+})
+
 const makeTeamsDataValue = (
   overrides: Partial<ReturnType<typeof useTeamsDataController>> = {}
 ): ReturnType<typeof useTeamsDataController> => ({
@@ -221,6 +248,7 @@ const makeNavValue = (overrides: Partial<NavigationContextValue> = {}): Navigati
   selectedAgent: null,
   selectedAgentRoute: 'details',
   selectedContext: 'ctx-alpha',
+  selectedContextTab: 'agents',
   selectedTeam: null,
   handleNavSelect: vi.fn(),
   handleOpenAgentWorkspace: vi.fn(),
@@ -246,6 +274,7 @@ function buildTree(
     makeMcpServersDataValue(accessCatalog, dataOverrides.mcpServers)
   )
   useTeamsDataControllerMock.mockReturnValue(makeTeamsDataValue(dataOverrides.teams))
+  useConnectorsControllerMock.mockReturnValue(makeConnectorsValue(dataOverrides.connectors))
 
   return (
     <AuthContext.Provider value={makeAuthValue(dataOverrides.auth)}>
@@ -344,6 +373,194 @@ describe('ContextDetailsPage', () => {
     expect(screen.getByRole('button', { name: 'Open agent gamma' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Open agent beta' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Open agent delta' })).toBeNull()
+  })
+})
+
+// Part 3: the context detail's Connectors tab overlays the SHARED read-model +
+// Authorize/Disconnect (one controller, one action/confirmation path — D4).
+describe('ContextDetailsPage — Connectors tab actions', () => {
+  const CONTEXT_SERVERS: ContextMcpServerDetail[] = [
+    { name: 'monday', mappedAgentCount: 1, mappedAgents: ['alpha'], mappingSource: 'context-map' },
+    { name: 'jira', mappedAgentCount: 1, mappedAgents: ['alpha'], mappingSource: 'context-map' },
+    {
+      name: 'filesystem',
+      mappedAgentCount: 1,
+      mappedAgents: ['alpha'],
+      mappingSource: 'context-map',
+    },
+  ]
+
+  // Read-model grouped by agent for ctx-alpha; deriveConnectorRows keys it by
+  // server so the table can overlay status/actions. representativeAgent = alpha.
+  const CONNECTOR_AGENTS: RpcAgentConnectors[] = [
+    {
+      name: 'alpha',
+      contextRef: 'ctx-alpha',
+      connectors: [
+        {
+          name: 'monday',
+          provider: 'monday',
+          authKind: 'oauth-user',
+          grantScope: 'user',
+          status: 'requires_setup',
+        },
+        {
+          name: 'jira',
+          provider: 'jira',
+          authKind: 'oauth-user',
+          grantScope: 'user',
+          status: 'authorized',
+        },
+        { name: 'filesystem', authKind: 'static', status: 'no_oauth' },
+      ],
+    },
+  ]
+
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+  })
+
+  const openConnectorsTab = () =>
+    fireEvent.click(screen.getByRole('button', { name: 'Connectors' }))
+  const connectorRow = (container: HTMLElement, name: string) => {
+    const rows = Array.from(
+      container.querySelectorAll<HTMLElement>('.context-mcp-servers-data-table tbody tr')
+    )
+    const row = rows.find(
+      r => r.querySelector('.context-mcp-server-name')?.textContent?.trim() === name
+    )
+    if (!row) throw new Error(`connector row ${name} not found`)
+    return row
+  }
+
+  it('(a) drops the URL and Source columns, adds Status + Actions', () => {
+    renderWithContexts(
+      {},
+      {
+        mcpServers: { selectedContextMcpServerDetails: CONTEXT_SERVERS },
+        connectors: { agents: CONNECTOR_AGENTS },
+      }
+    )
+    openConnectorsTab()
+
+    expect(screen.queryByRole('columnheader', { name: 'URL' })).toBeNull()
+    expect(screen.queryByRole('columnheader', { name: 'Source' })).toBeNull()
+    expect(screen.getByRole('columnheader', { name: 'Status' })).toBeTruthy()
+    expect(screen.getByRole('columnheader', { name: 'Actions' })).toBeTruthy()
+  })
+
+  it('(b) Authorize for requires_setup, Disconnect for authorized, neither for no_oauth', () => {
+    const { container } = renderWithContexts(
+      {},
+      {
+        mcpServers: { selectedContextMcpServerDetails: CONTEXT_SERVERS },
+        connectors: { agents: CONNECTOR_AGENTS },
+      }
+    )
+    openConnectorsTab()
+
+    expect(
+      within(connectorRow(container, 'monday')).getByRole('button', { name: 'Authorize' })
+    ).toBeTruthy()
+    expect(
+      within(connectorRow(container, 'jira')).getByRole('button', { name: 'Disconnect' })
+    ).toBeTruthy()
+    const filesystem = connectorRow(container, 'filesystem')
+    expect(within(filesystem).queryByRole('button', { name: 'Authorize' })).toBeNull()
+    expect(within(filesystem).queryByRole('button', { name: 'Disconnect' })).toBeNull()
+  })
+
+  it('(c) actions invoke the shared controller with the representative agent + context', () => {
+    const authorize = vi.fn(async () => undefined)
+    const disconnect = vi.fn(async () => ({ confirmed: true }))
+    const { container } = renderWithContexts(
+      {},
+      {
+        mcpServers: { selectedContextMcpServerDetails: CONTEXT_SERVERS },
+        connectors: { agents: CONNECTOR_AGENTS, authorize, disconnect },
+      }
+    )
+    openConnectorsTab()
+
+    fireEvent.click(
+      within(connectorRow(container, 'monday')).getByRole('button', { name: 'Authorize' })
+    )
+    expect(authorize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentName: 'alpha',
+        contextRef: 'ctx-alpha',
+        connector: expect.objectContaining({ name: 'monday' }),
+      })
+    )
+
+    fireEvent.click(
+      within(connectorRow(container, 'jira')).getByRole('button', { name: 'Disconnect' })
+    )
+    expect(disconnect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentName: 'alpha',
+        contextRef: 'ctx-alpha',
+        connector: expect.objectContaining({ name: 'jira' }),
+      })
+    )
+  })
+
+  it('(d) mapped-agent chip uses the display name in text, title AND aria-label (R1-M12)', () => {
+    const { container } = renderWithContexts(
+      {},
+      {
+        // Seed a host→display mapping for the mapped agent.
+        accessCatalog: { ...ACCESS_CATALOG, agentDisplayByName: { alpha: 'Alpha Bot' } },
+        mcpServers: { selectedContextMcpServerDetails: CONTEXT_SERVERS },
+        connectors: { agents: CONNECTOR_AGENTS },
+      }
+    )
+    openConnectorsTab()
+
+    // Screen readers must announce the same name the chip shows — not the raw id.
+    const chip = within(connectorRow(container, 'monday')).getByRole('button', {
+      name: 'Open connectors for agent Alpha Bot',
+    })
+    expect(chip.getAttribute('title')).toBe('Alpha Bot')
+    expect(chip.textContent).toContain('Alpha Bot')
+    expect(
+      within(connectorRow(container, 'monday')).queryByRole('button', {
+        name: 'Open connectors for agent alpha',
+      })
+    ).toBeNull()
+  })
+
+  it('(d) the status pill reflects each connector state', () => {
+    const { container } = renderWithContexts(
+      {},
+      {
+        mcpServers: { selectedContextMcpServerDetails: CONTEXT_SERVERS },
+        connectors: { agents: CONNECTOR_AGENTS },
+      }
+    )
+    openConnectorsTab()
+
+    const pill = (name: string) =>
+      connectorRow(container, name).querySelector('.ui-pill')?.textContent?.trim()
+    expect(pill('monday')).toBe('Requires setup')
+    expect(pill('jira')).toBe('Authorized')
+    expect(pill('filesystem')).toBe('No OAuth')
+  })
+
+  it('degrades gracefully (no status/actions) when the read-model is not cached', () => {
+    const { container } = renderWithContexts(
+      {},
+      {
+        mcpServers: { selectedContextMcpServerDetails: CONTEXT_SERVERS },
+        connectors: { agents: [] },
+      }
+    )
+    openConnectorsTab()
+
+    const monday = connectorRow(container, 'monday')
+    expect(monday.querySelector('.ui-pill')).toBeNull()
+    expect(within(monday).queryByRole('button', { name: 'Authorize' })).toBeNull()
   })
 })
 

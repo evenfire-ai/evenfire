@@ -61,6 +61,7 @@ import {
   PrewarmHostResult,
   ProfileSettingsOpenOptions,
   RpcAllowedServersResult,
+  RpcConnectorsResult,
   RpcScope,
   SessionLifecycleState,
   SessionMe,
@@ -126,6 +127,40 @@ function requireProfileUiBaseUrlForBrowserAction(): string {
 }
 
 /**
+ * Guarded wrapper around `shell.openExternal` for URLs that originate in data
+ * (server responses, config, deep-links) rather than fixed constants. Electron
+ * hands a non-web scheme (`file:`, `javascript:`, `data:`, a custom protocol
+ * such as `clerum://`) straight to the OS protocol handler, so every
+ * data-derived URL is scheme-checked before it can reach the browser.
+ *
+ * `requireHttps` pins OAuth authorize URLs to `https:` — real providers never
+ * issue a plaintext authorize endpoint. The default also permits `http:` for
+ * profile-ui links, which legitimately run on `http://localhost` in local dev
+ * (see `normalizeExplicitProfileUiBaseUrl`, which accepts both schemes).
+ *
+ * On rejection only the offending scheme is surfaced — never the full URL,
+ * whose query string may carry tokens or other secrets.
+ */
+async function openExternalDataUrl(
+  rawUrl: string,
+  options: { requireHttps?: boolean } = {}
+): Promise<void> {
+  const value = String(rawUrl ?? '')
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new Error('Refusing to open a malformed external URL')
+  }
+  const allowedProtocols = options.requireHttps ? ['https:'] : ['https:', 'http:']
+  if (!allowedProtocols.includes(parsed.protocol)) {
+    throw new Error(`Refusing to open external URL with unsupported scheme "${parsed.protocol}"`)
+  }
+  const { shell } = await import('electron')
+  await shell.openExternal(value)
+}
+
+/**
  * Finite-operation scope matrix — the single source of truth for the exact
  * scope array each finite (single request/response) Host RPC operation requests,
  * keyed by operation family (plan §11.4). EVERY entry carries HOST_WAKE_SCOPE:
@@ -178,6 +213,12 @@ const HOST_MODEL_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.model
 const HOST_ARTIFACT_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.artifact
 const HOST_APPROVAL_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.approval
 const MCP_SERVERS_LIST_SCOPES: RpcScope[] = ['mcp:servers:list']
+// U5 (mcp-oauth reactive consent): "Connect <server>" reuses the SAME capability
+// the desktop already holds to invoke mcp tools — connecting is a precondition of
+// invoking, so rpc-proxy gates the authorize-url route on this scope (no new
+// scope is minted). The token is host-bound to the suspended conversation's
+// hostRef, which the user demonstrably has access to.
+const MCP_SERVER_INVOKE_SCOPES: RpcScope[] = ['mcp:server:invoke']
 const DESKTOP_VIEW_SCOPES: RpcScope[] = ['desktop:view']
 const SANDBOX_UI_VIEW_SCOPES: RpcScope[] = ['sandbox:ui:view']
 // hostRefs is required by control-api's RPC token issuance (see
@@ -1584,8 +1625,7 @@ export class AppService {
         `${activation.profileUiBaseUrl.replace(/\/+$/, '')}/`
       )
       profileUiUrl.searchParams.set('email', activation.email)
-      const { shell } = await import('electron')
-      await shell.openExternal(profileUiUrl.toString())
+      await openExternalDataUrl(profileUiUrl.toString())
       return {
         profileUiUrl: profileUiUrl.toString(),
         appName: activation.appName,
@@ -1614,8 +1654,7 @@ export class AppService {
     const profileUiBaseUrl = requireProfileUiBaseUrlForBrowserAction()
     const profileUiUrl = new URL('/forgot-password', `${profileUiBaseUrl.replace(/\/+$/, '')}/`)
     if (normalizedEmail) profileUiUrl.searchParams.set('email', normalizedEmail)
-    const { shell } = await import('electron')
-    await shell.openExternal(profileUiUrl.toString())
+    await openExternalDataUrl(profileUiUrl.toString())
     return { profileUiUrl: profileUiUrl.toString() }
   }
 
@@ -1635,8 +1674,7 @@ export class AppService {
         : '/settings/profile'
     const profileUiUrl = new URL(socialPath, `${profileUiBaseUrl.replace(/\/+$/, '')}/`)
     if (options.action === 'password') profileUiUrl.searchParams.set('action', 'password')
-    const { shell } = await import('electron')
-    await shell.openExternal(profileUiUrl.toString())
+    await openExternalDataUrl(profileUiUrl.toString())
     return { profileUiUrl: profileUiUrl.toString() }
   }
 
@@ -4491,8 +4529,181 @@ export class AppService {
         : await dialog.showMessageBox(opts)
       if (result.response !== 1) return
     }
-    const { shell } = await import('electron')
-    await shell.openExternal(result.authorizeUrl)
+    await openExternalDataUrl(result.authorizeUrl, { requireHttps: true })
+  }
+
+  /**
+   * U5 (mcp-oauth reactive consent) — the renderer's "Connect <server>" button.
+   * A tool-call against an OAuth mcp-server suspended the task with
+   * `connect_required`; this fetches a fresh provider authorize URL via rpc-proxy
+   * and `shell.openExternal`s it. The rest of the flow runs in the OS browser;
+   * control-api's callback stores the grant and bounces back to
+   * `clerum://oauth-completed?…&source=mcp`, which `main.ts` routes to the
+   * renderer to resume the suspended task (NOT the sandbox-ui embed).
+   *
+   * Analogous to `requestSandboxUiOauthAuthorize`, but keyed by `mcpServerName`
+   * (never a recipe) and host-bound to the suspended conversation's `hostRef`
+   * (RPC tokens require ≥1 hostRef; the user has access to the host they are
+   * chatting in). `userId` is derived by rpc-proxy from `auth.sub`, never sent.
+   */
+  async requestMcpOauthAuthorize(
+    mcpServerName: string,
+    hostRef: string,
+    contextId?: string,
+    // Proactive panel (spec 11 U3/D-4): when the connector is `oauth-context`
+    // ("shared by the team"), authorizing affects the WHOLE Context, so the
+    // panel asks main to show an explicit confirm dialog first. The reactive
+    // U5 path never sets this, so its behavior is byte-identical.
+    options?: { confirmShared?: boolean }
+  ): Promise<void> {
+    const server = String(mcpServerName || '').trim()
+    const targetHostRef = String(hostRef || '').trim()
+    if (!server) throw new Error('mcpServerName is required')
+    if (!targetHostRef) throw new Error('hostRef is required')
+    const ctx = contextId ? String(contextId).trim() || undefined : undefined
+    if (options?.confirmShared) {
+      const confirmed = await this.confirmSharedConnectorAction('connect', server)
+      if (!confirmed) return
+    }
+    let rpc = await this.issueRpcTokenForHostRefs(MCP_SERVER_INVOKE_SCOPES, [targetHostRef])
+    let result: { authorizeUrl: string }
+    try {
+      result = await this.rpcClient.requestMcpOauthAuthorizeUrl(rpc.token, server, ctx)
+    } catch (error) {
+      // §4.5-7: a 401/expired-scope means the 300s RPC token lapsed; clear the
+      // cache, re-mint (same hostRef) and retry once. Every 401/403-missing-scope
+      // on this route is emitted by rpc-proxy's auth middleware BEFORE any grant
+      // mutation, so a retried error is always a pre-effect rejection — the
+      // authorize-url mint is idempotent regardless.
+      if (AppService.shouldRefreshRpcToken(error)) {
+        this.rpcTokenManager.clear()
+        rpc = await this.issueRpcTokenForHostRefs(MCP_SERVER_INVOKE_SCOPES, [targetHostRef])
+        result = await this.rpcClient.requestMcpOauthAuthorizeUrl(rpc.token, server, ctx)
+      } else {
+        throw error
+      }
+    }
+    await openExternalDataUrl(result.authorizeUrl, { requireHttps: true })
+  }
+
+  /**
+   * Proactive connectors read-model (spec 11 U2). Returns the user's agent fleet
+   * with each connector classified tri-state (`authorized`/`requires_setup`/
+   * `no_oauth`). Host refs come from the access catalog purely to mint the
+   * `mcp:servers:list` RPC token (rpc-proxy derives the userId from `auth.sub`
+   * and enumerates agents server-side). Retry-after-refresh mirrors
+   * {@link listAccessibleMcpServers}.
+   */
+  async getConnectors(): Promise<RpcConnectorsResult> {
+    const token = this.requireSessionToken()
+    const catalog = await this.getAccessCatalog()
+    const hostRefs = AppService.dedupe(
+      (catalog.agentNames || []).map(name => String(name || '').trim()).filter(Boolean)
+    )
+    if (!hostRefs.length) {
+      const me = this.me ?? (await this.authClient.getMe(token))
+      this.me = me
+      return { userId: me.id, agents: [] }
+    }
+    const rpc = await this.issueRpcTokenForHostRefs(MCP_SERVERS_LIST_SCOPES, hostRefs)
+    try {
+      return await this.rpcClient.getConnectors(rpc.token)
+    } catch (error) {
+      if (AppService.shouldRefreshRpcToken(error)) {
+        this.rpcTokenManager.clear()
+        const retried = await this.issueRpcTokenForHostRefs(MCP_SERVERS_LIST_SCOPES, hostRefs)
+        return this.rpcClient.getConnectors(retried.token)
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Disconnect (revoke) an mcp-server's OAuth grant from the proactive panel
+   * (spec 11 U4). Host-bound to the agent whose row triggered it (RPC tokens
+   * require ≥1 hostRef; `mcp:server:invoke`, same as connect). Disconnect is
+   * destructive, so it ALWAYS asks for explicit confirmation via a native
+   * dialog (D-4); for an `oauth-context` connector the copy names the team-wide
+   * blast radius. `userId` is derived by rpc-proxy from `auth.sub`, never sent.
+   * Resolves `{ confirmed:false }` when the user cancels (nothing was revoked).
+   */
+  async disconnectMcpServer(
+    mcpServerName: string,
+    hostRef: string,
+    contextId?: string,
+    options?: { shared?: boolean }
+  ): Promise<{ confirmed: boolean }> {
+    const server = String(mcpServerName || '').trim()
+    const targetHostRef = String(hostRef || '').trim()
+    if (!server) throw new Error('mcpServerName is required')
+    if (!targetHostRef) throw new Error('hostRef is required')
+    const ctx = contextId ? String(contextId).trim() || undefined : undefined
+    const confirmed = await this.confirmSharedConnectorAction(
+      'disconnect',
+      server,
+      Boolean(options?.shared)
+    )
+    if (!confirmed) return { confirmed: false }
+    let rpc = await this.issueRpcTokenForHostRefs(MCP_SERVER_INVOKE_SCOPES, [targetHostRef])
+    try {
+      await this.rpcClient.deleteMcpOauthGrant(rpc.token, server, ctx)
+    } catch (error) {
+      // The DELETE is idempotent and rpc-proxy emits every 401/403-missing-scope
+      // from its auth middleware BEFORE the upstream call, so a retried error is
+      // always a pre-effect rejection — safe to re-mint (same hostRef) and retry.
+      if (AppService.shouldRefreshRpcToken(error)) {
+        this.rpcTokenManager.clear()
+        rpc = await this.issueRpcTokenForHostRefs(MCP_SERVER_INVOKE_SCOPES, [targetHostRef])
+        await this.rpcClient.deleteMcpOauthGrant(rpc.token, server, ctx)
+      } else {
+        throw error
+      }
+    }
+    return { confirmed: true }
+  }
+
+  /**
+   * Native confirmation dialog for a connector action whose effect is either
+   * destructive (any disconnect) or team-wide (`oauth-context`). Mirrors the
+   * background-consent dialog of {@link requestSandboxUiOauthAuthorize}. The
+   * `shared` copy names the Context blast radius; every disconnect carries the
+   * revocation-latency note (D-5 — no immediate push; eviction is by idle
+   * timeout). Returns true iff the user confirmed.
+   */
+  private async confirmSharedConnectorAction(
+    action: 'connect' | 'disconnect',
+    server: string,
+    shared = true
+  ): Promise<boolean> {
+    const { dialog, BrowserWindow } = await import('electron')
+    const win = BrowserWindow.getFocusedWindow() ?? undefined
+    const verb = action === 'connect' ? 'Connect' : 'Disconnect'
+    // Revocation is NOT immediate and — critically — has no fixed upper bound for
+    // the shared (oauth-context) flavor: SHARED partitions are exempt from the
+    // 15-min idle eviction (mcp-host), so a live session ends only on the next
+    // grant-revocation sweep, which is fail-open. Don't promise "a few minutes".
+    const latencyNote =
+      action === 'disconnect'
+        ? ' It is not immediate — active sessions end on the next revocation sweep.'
+        : ''
+    const message = shared ? `${verb} "${server}" for the whole team?` : `${verb} "${server}"?`
+    const detail = shared
+      ? action === 'connect'
+        ? `This connector is shared by the team. Authorizing it connects every agent in this context on your behalf.${latencyNote}`
+        : `This connector is shared by the team. Disconnecting removes access for every agent in this context.${latencyNote}`
+      : `This removes your authorization for this connector.${latencyNote}`
+    const opts = {
+      type: (action === 'disconnect' ? 'warning' : 'question') as 'warning' | 'question',
+      buttons: ['Cancel', verb],
+      // Disconnect is destructive: default to Cancel (0) so a stray Enter does
+      // NOT revoke. Connect is additive, so its default stays on the action (1).
+      defaultId: action === 'disconnect' ? 0 : 1,
+      cancelId: 0,
+      message,
+      detail,
+    }
+    const result = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts)
+    return result.response === 1
   }
 
   /**

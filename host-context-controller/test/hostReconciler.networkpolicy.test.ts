@@ -299,7 +299,7 @@ describe('HostReconciler.deleteHostNetworkPolicies', () => {
 
     await (reconciler as any).deleteHostNetworkPolicies('chatllm', 'mcp-host')
 
-    expect(mocks.networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(5)
+    expect(mocks.networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(6)
     const calls = (mocks.networkingApi.deleteNamespacedNetworkPolicy as any).mock.calls
     expect(calls).toContainEqual([
       { name: 'mcp-host-chatllm-ingress-channel-reader', namespace: 'mcp-host' },
@@ -308,7 +308,9 @@ describe('HostReconciler.deleteHostNetworkPolicies', () => {
       { name: 'mcp-host-chatllm-ingress-rpc-proxy', namespace: 'mcp-host' },
     ])
     expect(calls).toContainEqual([{ name: 'mcp-host-chatllm-egress-gfs', namespace: 'mcp-host' }])
-    expect(calls).toContainEqual([{ name: 'mcp-host-chatllm-egress-gfs', namespace: 'mcp-host' }])
+    expect(calls).toContainEqual([
+      { name: 'mcp-host-chatllm-egress-codex-proxy', namespace: 'mcp-host' },
+    ])
     expect(calls).toContainEqual([{ name: 'channel-reader-chatllm-egress', namespace: 'channels' }])
     expect(calls).toContainEqual([
       { name: 'rpc-proxy-chatllm-egress-mcp-host', namespace: 'rpc-proxy' },

@@ -173,6 +173,14 @@ export const ALL_MCP_HOST_CONTROL_SCOPES = [
   // (status.pluginWorkloadSdk) declares the SDK; SDK routes reject access
   // tokens without it via scope_denied.
   'plugin-workload-sdk',
+  // OAuth mcp-server broker (U1). Lets mcp-host exchange its control JWT for a
+  // per-connection provider access token at POST /api/v1/mcp-oauth/user-token.
+  // Provisioners request it only for hosts that front OAuth mcp-servers; the
+  // route rejects control tokens lacking it with 403 insufficient_scope.
+  'oauth:user-token',
+  // Derive-only Codex execution. HCC/WRC may request this after projecting an
+  // eligible broker target. Never add it to user-declarable Host/Recipe CRD fields.
+  'llm:codex:execute',
 ] as const
 
 export type McpHostControlScope = (typeof ALL_MCP_HOST_CONTROL_SCOPES)[number]

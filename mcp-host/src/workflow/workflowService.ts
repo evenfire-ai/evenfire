@@ -15,7 +15,7 @@ import { FinishReason, type ToolDefinition } from '../core/types'
 import { buildGfsReadTools, buildGfsWriteTools } from '../internalTools/gfs'
 import { createGfscClient, hasGfsRuntimeAccess } from '../internalTools/gfsClient'
 import { SingleTurnProvider, createLLMProvider } from '../llm'
-import { type LlmProvider, descriptorFor, isLlmProvider, primarySlot } from '../llm/registryCore'
+import { type LlmProvider, descriptorFor, isLlmProvider } from '../llm/registryCore'
 import {
   configurePluginWorkloadSdkBootstrapIdentity,
   resolvePluginWorkloadSdkBootstrapCapabilityFamily,
@@ -56,7 +56,69 @@ import { type McpHostRuntimeAuth, gateStep, refreshWithRecovery } from './userAp
  * later phase. `provider` is validated by the caller via `isLlmProvider`.
  */
 function monoCredentialBag(provider: LlmProvider, apiKey: string): ApiKeys {
-  return { [provider]: { [primarySlot(descriptorFor(provider)).dataKey]: apiKey } }
+  // Literal keys only. A computed `[provider]` / `[dataKey]` pair is
+  // `js/remote-property-injection` even after `isLlmProvider` — CodeQL does
+  // not treat that guard as a sanitizer. oauth-broker is keyless.
+  switch (provider) {
+    case 'openai':
+      return { openai: { 'openai-api-key': apiKey } }
+    case 'claude':
+      return { claude: { 'claude-api-key': apiKey } }
+    case 'zai':
+      return { zai: { 'zai-api-key': apiKey } }
+    case 'bailian':
+      return { bailian: { 'bailian-api-key': apiKey } }
+    case 'vertex':
+      return { vertex: { 'vertex-service-account-json': apiKey } }
+    case 'bedrock':
+      return { bedrock: { 'aws-access-key-id': apiKey } }
+    case 'openrouter':
+      return { openrouter: { 'openrouter-api-key': apiKey } }
+    case 'gemini':
+      return { gemini: { 'gemini-api-key': apiKey } }
+    case 'deepseek':
+      return { deepseek: { 'deepseek-api-key': apiKey } }
+    case 'groq':
+      return { groq: { 'groq-api-key': apiKey } }
+    case 'together':
+      return { together: { 'together-api-key': apiKey } }
+    case 'fireworks':
+      return { fireworks: { 'fireworks-api-key': apiKey } }
+    case 'mistral':
+      return { mistral: { 'mistral-api-key': apiKey } }
+    case 'xai':
+      return { xai: { 'xai-api-key': apiKey } }
+    case 'cerebras':
+      return { cerebras: { 'cerebras-api-key': apiKey } }
+    case 'deepinfra':
+      return { deepinfra: { 'deepinfra-api-key': apiKey } }
+    case 'perplexity':
+      return { perplexity: { 'perplexity-api-key': apiKey } }
+    case 'moonshot':
+      return { moonshot: { 'moonshot-api-key': apiKey } }
+    case 'nebius':
+      return { nebius: { 'nebius-api-key': apiKey } }
+    case 'novita':
+      return { novita: { 'novita-api-key': apiKey } }
+    case 'minimax':
+      return { minimax: { 'minimax-api-key': apiKey } }
+    case 'azure':
+      return { azure: { 'azure-openai-api-key': apiKey } }
+    case 'codex-subscription':
+      return {}
+    default: {
+      const _exhaustive: never = provider
+      void _exhaustive
+      return {}
+    }
+  }
+}
+
+function credentialBagForProvider(provider: LlmProvider, apiKey: string): ApiKeys {
+  // oauth-broker has no static slot. primarySlot → requireStaticCredentialSlot
+  // throws; a keyless Codex configure must not take that path.
+  if (descriptorFor(provider).authMode === 'oauth-broker') return {}
+  return monoCredentialBag(provider, apiKey)
 }
 
 const MAX_SOUL_BYTES = 64 * 1024 // 64KB
@@ -167,7 +229,7 @@ function defaultLlmFactory(
 ): SingleTurnProvider | null {
   // The provider id IS the ApiKeys record key; validate before indexing.
   if (!isLlmProvider(provider)) return null
-  const keys = monoCredentialBag(provider, apiKey)
+  const keys = credentialBagForProvider(provider, apiKey)
   const modelConfig: import('../types').ModelConfig = {
     provider: provider as import('../types').ModelConfig['provider'],
     name: model,
@@ -364,7 +426,7 @@ export class WorkflowService {
     // The provider id IS the ApiKeys record key; validate before indexing.
     if (!isLlmProvider(provider)) return
     this.onLlmConfigured({
-      keys: monoCredentialBag(provider, apiKey),
+      keys: credentialBagForProvider(provider, apiKey),
       provider: provider as import('../types').ModelConfig['provider'],
       defaultModel: model,
     })
@@ -562,6 +624,7 @@ export class WorkflowService {
       input_tokens: usage?.input_tokens ?? 0,
       output_tokens: usage?.output_tokens ?? 0,
     }
+    if (served.provider === 'codex-subscription') return
     this.usageReporter.enqueue(event)
   }
 
@@ -602,24 +665,32 @@ export class WorkflowService {
     if (!req.provider) {
       return { configured: false, message: 'provider is required' }
     }
-    if (!req.apiKey) {
-      return { configured: false, message: 'apiKey is required' }
-    }
 
     if (!isLlmProvider(req.provider)) {
       return { configured: false, message: `Unknown provider: ${req.provider}` }
     }
 
-    // SOUL override
+    // oauth-broker (Codex) binds provider/model only. Control API remains the
+    // OAuth custodian; a keyless configure must still swap the in-memory
+    // provider so the next step does not inherit the previous credential.
+    const brokerBacked = descriptorFor(req.provider).authMode === 'oauth-broker'
+    if (!brokerBacked && !req.apiKey) {
+      return { configured: false, message: 'apiKey is required' }
+    }
+    if (brokerBacked && !req.model?.trim()) {
+      return { configured: false, message: 'model is required' }
+    }
+
+    let pendingSoul: string | undefined
     if (req.soulContent !== undefined) {
       if (Buffer.byteLength(req.soulContent, 'utf-8') > MAX_SOUL_BYTES) {
         return { configured: false, message: 'soulContent exceeds 64KB limit' }
       }
-      this.stepSoulContent = req.soulContent
-      this.soulOverrideActive = true
+      pendingSoul = req.soulContent
     }
 
-    const model = req.model ?? 'default'
+    const model = brokerBacked ? (req.model ?? '').trim() : (req.model ?? 'default')
+    const apiKey = brokerBacked ? '' : (req.apiKey ?? '')
     const llmSecretName = WorkflowService.normalizeLlmSecretName(req.llmSecretName)
     if (req.llmSecretName !== undefined && llmSecretName === null) {
       return { configured: false, message: 'llmSecretName must be a valid Kubernetes Secret name' }
@@ -631,15 +702,31 @@ export class WorkflowService {
     if (
       this.currentProviderName === req.provider &&
       this.currentModel === model &&
-      this.currentApiKey === req.apiKey &&
+      this.currentApiKey === apiKey &&
       this.configured
     ) {
       this.currentLlmSecretName = llmSecretName
-      return { configured: true, provider: req.provider, model }
+      if (pendingSoul !== undefined) {
+        this.stepSoulContent = pendingSoul
+        this.soulOverrideActive = true
+      }
+      return {
+        configured: true,
+        provider: req.provider,
+        model,
+        ...oauthIdentityReadiness(req.provider),
+      }
     }
 
-    const provider = this.llmFactory(req.provider, model, req.apiKey)
+    let provider: SingleTurnProvider | null
+    try {
+      provider = this.llmFactory(req.provider, model, apiKey)
+    } catch {
+      this.clearConfiguredProvider()
+      return { configured: false, message: `Failed to create provider: ${req.provider}` }
+    }
     if (!provider) {
+      this.clearConfiguredProvider()
       return { configured: false, message: `Failed to create provider: ${req.provider}` }
     }
 
@@ -652,12 +739,30 @@ export class WorkflowService {
     this.currentProvider = effectiveProvider
     this.currentProviderName = req.provider
     this.currentModel = model
-    this.currentApiKey = req.apiKey
+    this.currentApiKey = apiKey
     this.currentLlmSecretName = llmSecretName
     this.configured = true
-    this.notifyLlmConfigured(req.provider, model, req.apiKey)
+    if (pendingSoul !== undefined) {
+      this.stepSoulContent = pendingSoul
+      this.soulOverrideActive = true
+    }
+    this.notifyLlmConfigured(req.provider, model, apiKey)
 
-    return { configured: true, provider: req.provider, model }
+    return {
+      configured: true,
+      provider: req.provider,
+      model,
+      ...oauthIdentityReadiness(req.provider),
+    }
+  }
+
+  private clearConfiguredProvider(): void {
+    this.currentProvider = null
+    this.currentProviderName = null
+    this.currentModel = null
+    this.currentApiKey = ''
+    this.currentLlmSecretName = null
+    this.configured = false
   }
 
   /**
@@ -849,7 +954,11 @@ export class WorkflowService {
         durationMs: Date.now() - startTime,
       }
     }
-    if (usageReportingEnabled && !this.currentLlmSecretName) {
+    const brokerUsage =
+      Boolean(this.currentProviderName) &&
+      isLlmProvider(this.currentProviderName) &&
+      descriptorFor(this.currentProviderName).authMode === 'oauth-broker'
+    if (usageReportingEnabled && !this.currentLlmSecretName && !brokerUsage) {
       clearTimeout(timeout)
       return {
         stepId: req.stepId,
@@ -1295,10 +1404,12 @@ export class WorkflowService {
       const errStatus = extractHttpStatus(err)
       const cause =
         err instanceof Error && err.cause instanceof Error ? err.cause.message : undefined
-      console.error(
-        `[WorkflowService] Step "${req.stepId}" caught error: ${rawError}${cause ? ` (cause: ${cause})` : ''}`,
-        { stack: err instanceof Error ? err.stack?.split('\n').slice(0, 3).join(' ') : undefined }
-      )
+      console.error('[WorkflowService] Step caught error', {
+        stepId: req.stepId,
+        error: rawError,
+        cause,
+        stack: err instanceof Error ? err.stack?.split('\n').slice(0, 3).join(' ') : undefined,
+      })
       // F-9 fix: surface timeout errors with canonical error code (matches abort-check at loop top)
       if (rawError === 'step-timeout') {
         return {
@@ -1434,4 +1545,10 @@ function extractHttpStatus(err: unknown): number | undefined {
   const msg = err instanceof Error ? err.message : String(err)
   const match = msg.match(/\b(4\d{2}|5\d{2})\b/)
   return match ? parseInt(match[1], 10) : undefined
+}
+
+function oauthIdentityReadiness(provider: string): { identityBound: true } | Record<string, never> {
+  return isLlmProvider(provider) && descriptorFor(provider).authMode === 'oauth-broker'
+    ? { identityBound: true }
+    : {}
 }

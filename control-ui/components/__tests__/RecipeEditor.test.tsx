@@ -4,11 +4,34 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import * as api from '../../lib/api'
 import type { WorkflowRecipeResource } from '../../lib/api'
+import { listCodexSubscriptionConnections } from '../../lib/codexSubscription'
 import { validateRecipe } from '../../lib/recipeValidator'
 import { RecipeEditor } from '../RecipeEditor'
 import { ToastProvider } from '../Toast'
 
 // vi.mock is hoisted before imports, factory runs lazily
+vi.mock('../../lib/codexSubscription', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../lib/codexSubscription')>()
+  return {
+    ...actual,
+    listCodexSubscriptionConnections: vi.fn().mockResolvedValue([
+      {
+        connectionKey: 'team-plus',
+        displayName: 'Team Plus',
+        status: 'connected',
+        catalogStatus: 'ready',
+        credentialRevision: 1,
+        catalogRevision: 1,
+        accountFingerprint: 'fp',
+        catalogSyncedAt: '2026-08-01T00:00:00.000Z',
+        lastRefreshAt: null,
+        lastAuthAt: '2026-08-01T00:00:00.000Z',
+        refreshLockHeld: false,
+      },
+    ]),
+  }
+})
+
 vi.mock('../../lib/api', () => ({
   createRecipe: vi
     .fn()
@@ -863,14 +886,20 @@ describe('RecipeEditor — deploy flow', () => {
     await waitFor(() => expect(api.createRecipe).toHaveBeenCalled())
 
     const validationPayload = vi.mocked(api.validateRecipeServer).mock.calls[0][0]
-    expect(validationPayload.metadata).toEqual({ name: 'namespace-ignored' })
+    expect(validationPayload.metadata).toEqual({
+      name: 'namespace-ignored',
+      annotations: { 'clerum.io/codex-connection-ref': '' },
+    })
     expect(validationPayload.spec.workloads[0]).toEqual(
       expect.objectContaining({ id: 'api', type: 'deployment' })
     )
     expect(api.validateRecipeServer).toHaveBeenCalledWith(validationPayload, { mode: 'create' })
 
     const createPayload = vi.mocked(api.createRecipe).mock.calls[0][0]
-    expect(createPayload.metadata).toEqual({ name: 'namespace-ignored' })
+    expect(createPayload.metadata).toEqual({
+      name: 'namespace-ignored',
+      annotations: { 'clerum.io/codex-connection-ref': '' },
+    })
     expect(createPayload.spec.workloads[0]).toEqual(
       expect.objectContaining({ id: 'api', type: 'deployment' })
     )
@@ -1680,5 +1709,102 @@ describe('RecipeEditor — grants in editor', () => {
     await waitFor(() => expect(screen.getByText(/Edit Plugin: my-recipe/)).toBeInTheDocument())
     // Inline error surfaces in the grants panel.
     expect(screen.getByText(/could not be saved/)).toBeInTheDocument()
+  })
+
+  it('surfaces a non-disabled ChatGPT grant list failure', async () => {
+    vi.mocked(listCodexSubscriptionConnections).mockRejectedValueOnce(
+      Object.assign(new Error('Could not load ChatGPT subscriptions'), { status: 500 })
+    )
+    render(<RecipeEditor onSaved={vi.fn()} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByRole('combobox'), {
+      target: { value: 'Agentic Workflow (Codex Subscription)' },
+    })
+    reviewAndProceedToDeploy()
+    expect(await screen.findByText('Could not load ChatGPT subscriptions')).toBeInTheDocument()
+  })
+
+  it('does not surface a grant-list error when ChatGPT subscriptions are disabled', async () => {
+    vi.mocked(listCodexSubscriptionConnections).mockRejectedValueOnce(
+      Object.assign(new Error('disabled'), { status: 404, code: 'disabled' })
+    )
+    render(<RecipeEditor onSaved={vi.fn()} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByRole('combobox'), {
+      target: { value: 'Agentic Workflow (Codex Subscription)' },
+    })
+    reviewAndProceedToDeploy()
+    await screen.findByTestId('codex-recipe-grant')
+    expect(screen.queryByText('Could not load ChatGPT subscriptions')).not.toBeInTheDocument()
+    expect(screen.queryByText('disabled')).not.toBeInTheDocument()
+  })
+
+  it('deploys a Codex-only recipe without an LLM secretRef', async () => {
+    const onSaved = vi.fn()
+    render(<RecipeEditor onSaved={onSaved} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByRole('combobox'), {
+      target: { value: 'Agentic Workflow (Codex Subscription)' },
+    })
+    reviewAndProceedToDeploy()
+    fireEvent.click(await screen.findByRole('button', { name: 'ChatGPT grant' }))
+    fireEvent.click(await screen.findByRole('option', { name: /Team Plus/ }))
+    fireEvent.click(await screen.findByText('Deploy plugin'))
+    await waitFor(() => expect(api.createRecipe).toHaveBeenCalled())
+    const createPayload = vi.mocked(api.createRecipe).mock.calls[0][0] as {
+      metadata?: { annotations?: Record<string, string> }
+      spec: { agent?: { provider?: string; model?: string; secretRef?: unknown } }
+    }
+    expect(createPayload.spec.agent).toEqual({
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+    })
+    expect(createPayload.spec.agent?.secretRef).toBeUndefined()
+    expect(createPayload.metadata?.annotations).toEqual({
+      'clerum.io/codex-connection-ref': 'team-plus',
+    })
+    expect(onSaved).toHaveBeenCalled()
+  })
+
+  it('blocks a Codex recipe that has not chosen a ChatGPT grant', async () => {
+    render(<RecipeEditor onSaved={vi.fn()} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByRole('combobox'), {
+      target: { value: 'Agentic Workflow (Codex Subscription)' },
+    })
+    reviewAndProceedToDeploy()
+    fireEvent.click(await screen.findByText('Deploy plugin'))
+    await waitFor(() => {
+      expect(screen.getByText(/must choose an existing ChatGPT grant/i)).toBeInTheDocument()
+    })
+    expect(api.createRecipe).not.toHaveBeenCalled()
+  })
+
+  it('blocks a Codex recipe that still declares an LLM secretRef', async () => {
+    render(<RecipeEditor onSaved={vi.fn()} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: {
+        value: JSON.stringify(
+          {
+            apiVersion: 'clerum.io/v1alpha1',
+            kind: 'WorkflowRecipe',
+            metadata: { name: 'codex-with-secret' },
+            spec: {
+              agent: {
+                provider: 'codex-subscription',
+                model: 'gpt-5.1',
+                secretRef: { name: 'codex-oauth', key: 'refreshToken' },
+              },
+              triggers: { onDemand: { allowedActors: ['user'] } },
+              steps: [{ id: 'draft', instruction: 'Write', timeoutSeconds: 600 }],
+            },
+          },
+          null,
+          2
+        ),
+      },
+    })
+    reviewAndProceedToDeploy()
+    fireEvent.click(await screen.findByText('Deploy plugin'))
+    await waitFor(() => {
+      expect(screen.getByText(/must not declare an LLM secretRef/i)).toBeInTheDocument()
+    })
+    expect(api.createRecipe).not.toHaveBeenCalled()
   })
 })

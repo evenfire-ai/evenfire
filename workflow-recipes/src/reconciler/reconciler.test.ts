@@ -272,12 +272,14 @@ describe('WorkflowRecipeReconciler', () => {
       },
     })
     const workflowReconcile = vi.fn()
+    const setCodexReconcileContext = vi.fn()
     ;(
       reconciler as unknown as {
         config: { pluginWorkloadSdkEnabled: boolean }
         workflowReconciler: {
           reconcile: typeof workflowReconcile
           reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+          setCodexReconcileContext: typeof setCodexReconcileContext
         }
       }
     ).config.pluginWorkloadSdkEnabled = true
@@ -286,9 +288,14 @@ describe('WorkflowRecipeReconciler', () => {
         workflowReconciler: {
           reconcile: typeof workflowReconcile
           reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+          setCodexReconcileContext: typeof setCodexReconcileContext
         }
       }
-    ).workflowReconciler = { reconcile: workflowReconcile, reconcilePluginWorkloadSdkOnly }
+    ).workflowReconciler = {
+      reconcile: workflowReconcile,
+      reconcilePluginWorkloadSdkOnly,
+      setCodexReconcileContext,
+    }
 
     const recipe = makeRecipe({
       spec: {
@@ -301,11 +308,18 @@ describe('WorkflowRecipeReconciler', () => {
     const result = await reconciler.reconcile(recipe)
 
     expect(result.phase).toBe('active')
+    expect(setCodexReconcileContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recipeName: 'test-recipe',
+        runtimeScopeRecipeName: 'test-recipe',
+      })
+    )
     expect(reconcilePluginWorkloadSdkOnly).toHaveBeenCalledWith(
       'test-recipe',
       'uid-123',
       'sandbox-recipes',
-      recipe.spec
+      recipe.spec,
+      'test-recipe'
     )
     expect(workflowReconcile).not.toHaveBeenCalled()
   })
@@ -5871,7 +5885,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'parent-recipe'
+      'parent-recipe',
+      'uid-child'
     )
     expect(mockVerifyWorkflowRunProvenance).toHaveBeenCalledWith({
       runId: 'run-child',
@@ -6156,7 +6171,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'parent-recipe'
+      'parent-recipe',
+      'uid-child'
     )
   })
 
@@ -6200,7 +6216,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
   })
 
@@ -6526,7 +6543,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
   })
 
@@ -6578,7 +6596,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
   })
 
@@ -6638,7 +6657,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
   })
 
@@ -6678,7 +6698,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
   })
 
@@ -6716,8 +6737,171 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
+  })
+
+  it('binds Codex context as uncertain when parent labels are claimed without provenance', async () => {
+    const setCodexReconcileContext = vi.fn()
+    const ensureMcpHostRuntimeCredentials = vi.fn().mockResolvedValue(undefined)
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          setCodexReconcileContext: typeof setCodexReconcileContext
+          ensureMcpHostRuntimeCredentials: typeof ensureMcpHostRuntimeCredentials
+        }
+      }
+    ).workflowReconciler = { setCodexReconcileContext, ensureMcpHostRuntimeCredentials }
+
+    const recipe = makeRecipe({
+      metadata: {
+        name: 'child-run',
+        namespace: 'sandbox-recipes',
+        uid: 'uid-child',
+        labels: {
+          'clerum.io/parent-recipe': 'victim-recipe',
+          'clerum.io/workflow-run-id': 'run-child',
+        },
+      },
+      spec: {
+        agent: { provider: 'codex-subscription', model: 'gpt-5.3-codex' },
+        steps: [{ id: 'research', instruction: 'run' }],
+      },
+      status: {
+        phase: 'active',
+      } as WorkflowRecipeCRD['status'],
+    })
+
+    await reconciler.reconcile(recipe)
+
+    expect(setCodexReconcileContext).toHaveBeenCalledWith({
+      recipeUid: 'uid-child',
+      recipeName: 'child-run',
+      runtimeScopeRecipeName: 'child-run',
+      claimedParent: true,
+      parentSpec: null,
+      connectionKey: 'unassigned',
+    })
+  })
+
+  it('binds the inherited parent Codex spec when child provenance is verified', async () => {
+    const parentSpec = {
+      agent: { provider: 'codex-subscription' as const, model: 'gpt-5.3-codex' },
+      steps: [{ id: 'research', instruction: 'parent target' }],
+    }
+    mockCustomApi.getNamespacedCustomObject.mockImplementation(({ name }: { name?: string }) =>
+      Promise.resolve({
+        metadata: {
+          uid: liveWorkflowRecipeUid(name),
+          resourceVersion: '1',
+        },
+        spec: name === 'parent-recipe' ? parentSpec : { mcpServers: [] },
+      })
+    )
+    const setCodexReconcileContext = vi.fn()
+    const ensureMcpHostRuntimeCredentials = vi.fn().mockResolvedValue(undefined)
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          setCodexReconcileContext: typeof setCodexReconcileContext
+          ensureMcpHostRuntimeCredentials: typeof ensureMcpHostRuntimeCredentials
+        }
+      }
+    ).workflowReconciler = { setCodexReconcileContext, ensureMcpHostRuntimeCredentials }
+
+    const recipe = makeRecipe({
+      metadata: {
+        name: 'child-run',
+        namespace: 'sandbox-recipes',
+        uid: 'uid-child',
+        annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
+        labels: {
+          'clerum.io/parent-recipe': 'parent-recipe',
+          'clerum.io/workflow-run-id': 'run-child',
+        },
+        ownerReferences: [workflowRecipeOwnerRef('parent-recipe')],
+      },
+      spec: {
+        agent: { provider: 'openai', model: 'gpt-5.4-mini' },
+        steps: [{ id: 'research', instruction: 'child body must not win' }],
+      },
+      status: {
+        phase: 'active',
+      } as WorkflowRecipeCRD['status'],
+    })
+
+    await reconciler.reconcile(recipe)
+
+    expect(setCodexReconcileContext).toHaveBeenCalledWith({
+      recipeUid: 'uid-child',
+      recipeName: 'child-run',
+      runtimeScopeRecipeName: 'parent-recipe',
+      claimedParent: true,
+      parentSpec,
+      connectionKey: 'unassigned',
+    })
+  })
+
+  it('binds the inherited parent Codex grant annotation to the reconcile context', async () => {
+    const parentSpec = {
+      agent: { provider: 'codex-subscription' as const, model: 'gpt-5.3-codex' },
+      steps: [{ id: 'research', instruction: 'parent target' }],
+    }
+    mockCustomApi.getNamespacedCustomObject.mockImplementation(({ name }: { name?: string }) =>
+      Promise.resolve({
+        metadata: {
+          uid: liveWorkflowRecipeUid(name),
+          resourceVersion: '1',
+          ...(name === 'parent-recipe'
+            ? { annotations: { 'clerum.io/codex-connection-ref': 'team-plus' } }
+            : {}),
+        },
+        spec: name === 'parent-recipe' ? parentSpec : { mcpServers: [] },
+      })
+    )
+    const setCodexReconcileContext = vi.fn()
+    const ensureMcpHostRuntimeCredentials = vi.fn().mockResolvedValue(undefined)
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          setCodexReconcileContext: typeof setCodexReconcileContext
+          ensureMcpHostRuntimeCredentials: typeof ensureMcpHostRuntimeCredentials
+        }
+      }
+    ).workflowReconciler = { setCodexReconcileContext, ensureMcpHostRuntimeCredentials }
+
+    const recipe = makeRecipe({
+      metadata: {
+        name: 'child-run',
+        namespace: 'sandbox-recipes',
+        uid: 'uid-child',
+        annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
+        labels: {
+          'clerum.io/parent-recipe': 'parent-recipe',
+          'clerum.io/workflow-run-id': 'run-child',
+        },
+        ownerReferences: [workflowRecipeOwnerRef('parent-recipe')],
+      },
+      spec: {
+        agent: { provider: 'openai', model: 'gpt-5.4-mini' },
+        steps: [{ id: 'research', instruction: 'child body must not win' }],
+      },
+      status: {
+        phase: 'active',
+      } as WorkflowRecipeCRD['status'],
+    })
+
+    await reconciler.reconcile(recipe)
+
+    expect(setCodexReconcileContext).toHaveBeenCalledWith({
+      recipeUid: 'uid-child',
+      recipeName: 'child-run',
+      runtimeScopeRecipeName: 'parent-recipe',
+      claimedParent: true,
+      parentSpec,
+      connectionKey: 'team-plus',
+    })
   })
 
   it('does not inherit a parent scope on first reconcile without DB-run metadata', async () => {
@@ -6971,7 +7155,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'test-recipe',
       recipe.spec,
-      'test-recipe'
+      'test-recipe',
+      'uid-123'
     )
   })
 
@@ -7020,7 +7205,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'test-recipe',
       recipe.spec,
-      'test-recipe'
+      'test-recipe',
+      'uid-123'
     )
   })
 
