@@ -25,7 +25,6 @@ import {
 } from '../CodexSubscriptionConnection/types'
 import { useConfirmDialog } from '../ConfirmDialog'
 import { LlmProviderIcon } from '../LlmProviderIcon'
-import { LlmSecretsSubTabs } from '../LlmSecretsSubTabs'
 import { RowActionsMenu } from '../RowActionsMenu'
 import { SecretsScopeTabs } from '../SecretsScopeTabs'
 import { SectionSearchInput } from '../SectionSearchInput'
@@ -301,8 +300,7 @@ export function CodexSubscriptionHub() {
           subtitle="Manage LLM, connector, and recipe credentials in one place."
         />
         <div className="cu-card__body cu-card__body--auto cu-secrets-strip">
-          <SecretsScopeTabs activeValue="llm" />
-          <LlmSecretsSubTabs activeValue="subscriptions" />
+          <SecretsScopeTabs activeValue="llm-subscriptions" />
         </div>
         <div className="cu-empty">
           {capability.error || error || 'ChatGPT subscriptions are disabled.'}
@@ -363,8 +361,7 @@ export function CodexSubscriptionHub() {
         />
 
         <div className="cu-card__body cu-card__body--auto cu-secrets-strip">
-          <SecretsScopeTabs activeValue="llm" />
-          <LlmSecretsSubTabs activeValue="subscriptions" />
+          <SecretsScopeTabs activeValue="llm-subscriptions" />
         </div>
 
         {error && !creating && !editing ? (

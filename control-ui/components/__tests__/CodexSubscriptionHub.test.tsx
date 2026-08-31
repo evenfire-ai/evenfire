@@ -115,8 +115,11 @@ describe('CodexSubscriptionHub', () => {
     expect(await screen.findByText('Team A')).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'Name' })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'Status' })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: 'API-KEY' })).toHaveAttribute('href', '/secrets/llm')
-    expect(screen.getByRole('tab', { name: 'Subscriptions' })).toHaveAttribute(
+    expect(screen.getByRole('tab', { name: 'LLM API Keys' })).toHaveAttribute(
+      'href',
+      '/secrets/llm'
+    )
+    expect(screen.getByRole('tab', { name: 'LLM Subscriptions' })).toHaveAttribute(
       'href',
       '/secrets/llm/subscriptions'
     )
