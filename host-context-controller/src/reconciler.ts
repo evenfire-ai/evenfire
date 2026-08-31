@@ -29,6 +29,7 @@ import { mcpserverMissingSecret } from './metrics'
 import { McpServerCRD, McpServerStatus } from './types'
 import {
   canonicalStringify,
+  deploymentMatchesDesired,
   getErrorCode,
   preserveDeploymentAnnotations,
   preserveObjectAnnotations,
@@ -1510,6 +1511,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         logPrefix: '[Reconciler]',
         body: deployment,
         mergeExisting: preserveDeploymentAnnotations,
+        isUpToDate: deploymentMatchesDesired,
         read: () =>
           this.appsApi.readNamespacedDeployment({
             name: server.name,
