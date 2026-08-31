@@ -269,7 +269,7 @@ describe('HostWizard — credential draft is projected onto the active provider 
     fireEvent.click(screen.getByRole('button', { name: /Select LLM Secret/i }))
 
     const option = screen.getByRole('option', { name: /shared-llm-keys/ })
-    expect(option).toHaveTextContent(/Providers: OpenAI, Amazon Bedrock/)
+    expect(option).toHaveTextContent(/OpenAI, Amazon Bedrock/)
   })
 
   it('matches the primary provider to the selected credential', async () => {

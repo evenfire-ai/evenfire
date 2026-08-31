@@ -87,15 +87,6 @@ function parseHostTab(value: string | undefined): HostTab {
   return HOST_TABS.find(tab => TAB_SLUGS[tab] === value) ?? HOST_DEFAULT_TAB
 }
 
-// Cron×stateless: map the machine-readable suspend-blocked reason to
-// operator-friendly text. Every other reason renders verbatim.
-function friendlyLifecycleReason(reason: string): string {
-  if (reason === 'SuspendBlocked: activeCronSchedules') {
-    return 'Not suspending: active scheduled tasks keep this agent awake'
-  }
-  return reason
-}
-
 function contextResourceName(context: ContextResource | null): string {
   return String(context?.metadata?.name || context?.spec?.contextId || '').trim()
 }
@@ -281,11 +272,6 @@ export default function HostDetailsPage() {
     memberNames: string[]
     teamNames: string[]
   }>({ memberCount: 0, teamCount: 0, memberNames: [], teamNames: [] })
-  const [statelessDraft, setStatelessDraft] = useState(false)
-  const [savedStateless, setSavedStateless] = useState(false)
-  const [lifecycleState, setLifecycleState] = useState('')
-  const [lifecycleReason, setLifecycleReason] = useState('')
-  const [statelessRejectionMessage, setStatelessRejectionMessage] = useState('')
 
   const providerModelOptions = useMemo(
     () => getModelOptions(catalogForEditor, providerDraft),
@@ -434,7 +420,6 @@ export default function HostDetailsPage() {
           hostDisplay: String(spec.host || host.metadata?.name || routeName),
           contextRef: String(spec.contextRef || ''),
           channels: Array.isArray(spec.channels) ? spec.channels.map(String).filter(Boolean) : [],
-          stateless: spec.lifecycle?.stateless === true,
         }
         setHostNameDraft(overview.hostName)
         setHostDisplayDraft(overview.hostDisplay)
@@ -443,7 +428,6 @@ export default function HostDetailsPage() {
         setHostDescription(String(spec.description || '').trim())
         setContextRefDraft(overview.contextRef)
         setChannelsDraft(overview.channels)
-        setStatelessDraft(overview.stateless)
         // Overview read-only summary: linked context's MCP servers + access counts.
         const ref = overview.contextRef.trim()
         const matched = (contextsList || []).find(
@@ -525,22 +509,6 @@ export default function HostDetailsPage() {
       const rawGuardrails = spec.guardrails as HostGuardrails | undefined
       setGuardrailsData(
         rawGuardrails && typeof rawGuardrails === 'object' ? rawGuardrails : undefined
-      )
-      const specStateless = spec.lifecycle?.stateless === true
-      setSavedStateless(specStateless)
-      setLifecycleState(String(host.status?.lifecycle?.state ?? ''))
-      setLifecycleReason(String(host.status?.lifecycle?.reason ?? ''))
-      const rejection = (host.status?.conditions ?? []).find(
-        condition => condition.type === 'StatelessEnableRejected' && condition.status === 'True'
-      )
-      setStatelessRejectionMessage(
-        rejection
-          ? String(
-              rejection.message ||
-                rejection.reason ||
-                'Stateless mode was rejected by the platform.'
-            )
-          : ''
       )
 
       // Map each Secret to its data-key NAMES (never values), already carried by
@@ -668,6 +636,7 @@ export default function HostDetailsPage() {
     const toOption = (name: string, keys: string[]): LlmSecretSelectOption => {
       const providers = getProvidersWithCompleteCredentials(keys)
       return {
+        group: 'API keys',
         value: name,
         label: name,
         meta:
@@ -693,7 +662,7 @@ export default function HostDetailsPage() {
         value: credentialSelectValue('', row.connectionKey),
         label: row.displayName || row.connectionKey,
         meta: 'ChatGPT subscription',
-        providers: [{ id: 'codex-subscription', label: 'ChatGPT' }],
+        providers: [{ id: 'codex-subscription', label: 'ChatGPT Subscription' }],
       })
     }
     if (
@@ -708,7 +677,7 @@ export default function HostDetailsPage() {
         value: credentialSelectValue('', connectionRefDraft),
         label: `${connectionRefDraft} (unavailable)`,
         meta: 'ChatGPT subscription',
-        providers: [{ id: 'codex-subscription', label: 'ChatGPT' }],
+        providers: [{ id: 'codex-subscription', label: 'ChatGPT Subscription' }],
       })
     }
     return options
@@ -753,10 +722,7 @@ export default function HostDetailsPage() {
     [availableConnectorNames, contextMcpServers]
   )
 
-  async function saveHost(
-    nextDisplayName = hostDisplayDraft,
-    nextStateless = statelessDraft
-  ): Promise<boolean> {
+  async function saveHost(nextDisplayName = hostDisplayDraft): Promise<boolean> {
     const nextHostName = hostNameDraft.trim()
     if (!nextHostName) return false
 
@@ -766,23 +732,18 @@ export default function HostDetailsPage() {
       // Re-fetch to preserve fields that aren't editable in this form. K8s
       // replaceNamespacedCustomObject is a full replace, not a merge.
       const currentHost = await getHost(routeName)
-      const currentLifecycle = currentHost.spec?.lifecycle
       const currentWorkflowControl = currentHost.spec?.workflowControl
       // Overview owns only identity/shape fields (name, display, context,
-      // channels, lifecycle). Model, secret, fallback policy and the per-host
+      // channels). Model, secret, fallback policy and the per-host
       // model allowlist are owned by the "Model & credentials" tab and are
       // preserved here via the `...currentHost.spec` spread (full-replace
-      // semantics — omitting them is what keeps them intact).
+      // semantics — omitting them is what keeps them intact). spec.lifecycle
+      // is not editable here and passes through the spread unchanged.
       const nextSpec: Record<string, unknown> = {
         ...currentHost.spec,
         host: nextDisplayName.trim() || nextHostName,
         contextRef: contextRefDraft.trim(),
         channels: channelsDraft,
-        // Echo spec.lifecycle explicitly: the admin facade full-replaces the
-        // spec, so leaving lifecycle implicit would strip the stateless flag.
-        ...(nextStateless || currentLifecycle
-          ? { lifecycle: { ...currentLifecycle, stateless: nextStateless } }
-          : {}),
         ...(channelsDraft.length > 0 && currentWorkflowControl === undefined
           ? { workflowControl: { scopes: [...FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES] } }
           : {}),
@@ -1132,17 +1093,9 @@ export default function HostDetailsPage() {
             modelProviderLine={
               modelNameDraft ? `${getProviderLabel(providerDraft)} · ${modelNameDraft}` : ''
             }
-            stateless={statelessDraft}
-            lifecycleState={lifecycleState}
-            lifecycleReason={friendlyLifecycleReason(lifecycleReason)}
-            statelessRejectionMessage={statelessRejectionMessage}
             accessSummary={accessSummary}
             onNavigate={tab => selectTab(tab)}
             onSaveDisplayName={nextDisplayName => saveHost(nextDisplayName)}
-            onSaveLifecycle={nextStateless => {
-              setStatelessDraft(nextStateless)
-              return saveHost(hostDisplaySaved, nextStateless)
-            }}
             createdAt={hostCreatedAt}
           />
         )}
@@ -1171,7 +1124,7 @@ export default function HostDetailsPage() {
               </div>
             </div>
 
-            <div className="cu-form-stack">
+            <div className="cu-form-stack cu-form-stack--wide">
               <div className="cu-field">
                 <label htmlFor="model-secret">{credentialFieldLabel}</label>
                 <div className="cu-llm-secret-control">
@@ -1296,7 +1249,7 @@ export default function HostDetailsPage() {
                       onClick={() => void cancelModelEdit()}
                       disabled={busy}
                     >
-                      Cancel model changes
+                      Cancel
                     </button>
                     <button
                       type="button"
@@ -1311,7 +1264,7 @@ export default function HostDetailsPage() {
                             !codexModels.includes(modelNameDraft.trim())))
                       }
                     >
-                      {busy ? 'Saving…' : 'Save model configuration'}
+                      {busy ? 'Saving…' : 'Save'}
                     </button>
                   </div>
                 </>

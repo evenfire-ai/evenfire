@@ -12,11 +12,11 @@ export function SecretsScopeTabs({ activeValue }: { activeValue: SecretsTabScope
       activeValue={activeValue}
       className="cu-tabs--flush"
       options={[
-        { value: 'llm', href: CONTROL_ROUTES.secrets.llm, label: 'LLM API keys' },
+        { value: 'llm', href: CONTROL_ROUTES.secrets.llm, label: 'LLM API Keys' },
         {
           value: 'llm-subscriptions',
           href: CONTROL_ROUTES.secrets.llmSubscriptions,
-          label: 'LLM subscriptions',
+          label: 'LLM Subscriptions',
         },
         { value: 'mcp', href: CONTROL_ROUTES.secrets.connector, label: 'Connector' },
         { value: 'recipe', href: CONTROL_ROUTES.secrets.recipe, label: 'Recipe' },
