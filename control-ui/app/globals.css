@@ -1820,10 +1820,6 @@ textarea.cu-input {
   margin: 0;
 }
 
-.cu-tabs--nested {
-  margin-top: var(--cu-space-4);
-}
-
 .cu-tabs--tight {
   margin: 0 0 1rem;
 }
