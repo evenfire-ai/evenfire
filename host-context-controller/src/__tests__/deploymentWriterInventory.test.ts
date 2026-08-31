@@ -78,7 +78,10 @@ function enclosingReplaceRetryBlock(source: string, callIndex: number): string |
 }
 
 function isDeploymentGated(block: string): boolean {
-  return /isUpToDate:/.test(block) && /deploymentMatchesDesired/.test(block)
+  return (
+    /isUpToDate:\s*deploymentMatchesDesired\b/.test(block) ||
+    /return deploymentMatchesDesired\s*\(/.test(block)
+  )
 }
 
 describe('Deployment writer inventory', () => {
@@ -127,5 +130,44 @@ describe('Deployment writer inventory', () => {
         .map(h => h.rel)
         .sort()
     ).toEqual([...GATED].sort())
+  })
+
+  it('every replaceNamespacedConfigMap call is gated per call-site', () => {
+    const CONFIGMAP_GATED = new Set(['reconciler.ts'])
+    const CONFIGMAP_CALL = /replaceNamespacedConfigMap\s*\(/g
+    const hits: Array<{ rel: string; count: number }> = []
+
+    for (const file of productionTsFiles(SRC_ROOT)) {
+      const rel = relative(SRC_ROOT, file).replaceAll('\\', '/')
+      const source = readFileSync(file, 'utf8')
+      const sites: number[] = []
+      for (const match of source.matchAll(CONFIGMAP_CALL)) {
+        if (match.index === undefined) continue
+        if (isCommentLine(lineAt(source, match.index))) continue
+        sites.push(match.index)
+      }
+      if (sites.length === 0) continue
+
+      expect(
+        CONFIGMAP_GATED.has(rel),
+        `${rel} calls replaceNamespacedConfigMap ${sites.length} time(s) but is not on the ConfigMap gated list`
+      ).toBe(true)
+
+      for (const index of sites) {
+        const block = enclosingReplaceRetryBlock(source, index)
+        expect(
+          block,
+          `${rel} ConfigMap call at index ${index} is not inside replaceWithConflictRetry`
+        ).not.toBeNull()
+        expect(
+          /isUpToDate:\s*configMapMatchesDesired\b/.test(block ?? ''),
+          `${rel} ConfigMap call at index ${index} is missing isUpToDate: configMapMatchesDesired`
+        ).toBe(true)
+      }
+      hits.push({ rel, count: sites.length })
+    }
+
+    expect(hits.map(h => h.rel).sort()).toEqual([...CONFIGMAP_GATED].sort())
+    expect(hits.reduce((sum, h) => sum + h.count, 0)).toBe(1)
   })
 })
