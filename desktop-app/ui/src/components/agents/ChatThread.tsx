@@ -15,14 +15,10 @@ import { useNavigationContext } from '@contexts/NavigationContext'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
 import { Button, IconButton, MenuItem } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
+import { GfsFileIcon } from '@components/GfsFileIcon'
 import { MessageArtifactActions } from '@components/MessageArtifactActions'
 import { SecureHtmlPreview } from '@components/SecureHtmlPreview'
-import {
-  IconAttachFile,
-  IconConnectors,
-  IconContexts,
-  IconWorkflows,
-} from '@components/SidebarNav/icons'
+import { IconConnectors, IconContexts, IconWorkflows } from '@components/SidebarNav/icons'
 import { WorkflowRunArtifactActions } from '@components/WorkflowRunArtifactActions'
 import {
   AGENT_ERROR_CODE_LABELS,
@@ -134,12 +130,11 @@ function extractWorkflowArtifactScopeFromProgress(
   }
 }
 
-function getChatMessageAttachmentIcon(type: ChatMessageAttachment['type']) {
-  if (type === 'plugin') return <IconWorkflows />
-  if (type === 'connector') return <IconConnectors />
-  if (type === 'agent_file') return <IconContexts />
-  if (type === 'global_file') return <IconAttachFile />
-  return <IconAttachFile />
+function getChatMessageAttachmentIcon(attachment: ChatMessageAttachment) {
+  if (attachment.type === 'plugin') return <IconWorkflows />
+  if (attachment.type === 'connector') return <IconConnectors />
+  if (attachment.type === 'agent_file') return <IconContexts />
+  return <GfsFileIcon name={attachment.filename || attachment.label} />
 }
 
 function canDownloadResponseFileAttachment(attachment: ChatMessageAttachment): boolean {
@@ -191,7 +186,7 @@ function MessageAttachmentList({ attachments }: { attachments: ChatMessageAttach
               className={`composer-reference-icon message-attachment-icon composer-reference-icon--${iconTypeClass}`}
               aria-hidden="true"
             >
-              {getChatMessageAttachmentIcon(attachment.type)}
+              {getChatMessageAttachmentIcon(attachment)}
             </span>
             {isResponseFile ? (
               <span className="message-attachment-type-label">Generated file</span>
@@ -488,6 +483,29 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
               : undefined
           }
           onCancel={canCancel ? () => onCancelTask!(taskId!) : undefined}
+          onConnect={
+            // U5: a connect_required suspension opens the provider OAuth flow,
+            // host-bound to this conversation's agent (hostRef ≡ selectedAgent).
+            // The deep-link completion resumes the task via the same approval RPC.
+            si?.reason === 'connect_required' && si.mcpServerName && selectedAgent
+              ? () => {
+                  // R4-L1: a failed mint (403 membership, rpc-proxy down) must not
+                  // escape as an unhandled rejection. The ProgressStepper's 5s timer
+                  // re-enables the Connect button so the user can retry; log the
+                  // failure so it is observable. (Follow-up: a user-facing error
+                  // indicator on the button — needs pushToast wiring / an
+                  // onConnect→Promise contract in ProgressStepper.)
+                  window.clerum.rpc
+                    .connectMcpServer(si.mcpServerName!, selectedAgent)
+                    .catch(err => {
+                      console.error('[connect] connectMcpServer failed', {
+                        mcpServerName: si.mcpServerName,
+                        error: err instanceof Error ? err.message : String(err),
+                      })
+                    })
+                }
+              : undefined
+          }
         />
       )
     },

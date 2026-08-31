@@ -58,6 +58,9 @@ const workflowHostSubject = {
 } as const
 const operatorSubject = { type: 'operator' } as const
 
+let createShareAction: (() => void) | null = null
+let createShareDisabled = true
+
 function successfulMutation(...updated: GfsSubjectInput[]): GfsMutationResponse {
   return { ok: true, resourceId: resource.resourceId, updated, count: updated.length }
 }
@@ -65,7 +68,13 @@ function successfulMutation(...updated: GfsSubjectInput[]): GfsMutationResponse 
 function renderPanel(target = resource) {
   return render(
     <ToastProvider>
-      <GfsGrantPanel resource={target} />
+      <GfsGrantPanel
+        resource={target}
+        onCreateShareActionChange={(action, disabled) => {
+          createShareAction = action
+          createShareDisabled = disabled
+        }}
+      />
     </ToastProvider>
   )
 }
@@ -102,7 +111,15 @@ function selectPermission(name: string) {
 }
 
 async function submit(action: 'Grant access' | 'Create share') {
-  fireEvent.click(screen.getByRole('button', { name: action }))
+  if (action === 'Create share') {
+    await waitFor(() => {
+      expect(createShareAction).not.toBeNull()
+      expect(createShareDisabled).toBe(false)
+    })
+    createShareAction?.()
+  } else {
+    fireEvent.click(screen.getByRole('button', { name: action }))
+  }
   const dialog = await screen.findByRole('alertdialog')
   fireEvent.click(within(dialog).getByRole('button', { name: action }))
 }
@@ -110,6 +127,8 @@ async function submit(action: 'Grant access' | 'Create share') {
 describe('GfsGrantPanel bulk access', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    createShareAction = null
+    createShareDisabled = true
     mockGetAdminUsers.mockResolvedValue({
       items: [
         {
@@ -160,9 +179,16 @@ describe('GfsGrantPanel bulk access', () => {
       .mockResolvedValueOnce({ items: [] })
     renderPanel()
 
-    const existing = await screen.findByRole('region', { name: 'Existing access' })
+    const existing = await screen.findByRole('region', { name: 'Who has access' })
     expect(within(existing).getByText('Ada Lovelace')).toBeTruthy()
-    expect(within(existing).getByText('Grant · read, write · resource only')).toBeTruthy()
+    expect(within(existing).getByText('Direct grant · user')).toBeTruthy()
+    expect(within(existing).getByText('Read')).toBeTruthy()
+    expect(within(existing).getByText('Write')).toBeTruthy()
+    expect(within(existing).getByText('X')).toBeTruthy()
+    expect(
+      within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
+        .className
+    ).toContain('cu-gfs-existing-access__revoke')
 
     fireEvent.click(
       within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
@@ -174,7 +200,7 @@ describe('GfsGrantPanel bulk access', () => {
       expect(mockDeleteGfsGrant).toHaveBeenCalledWith('33333333-3333-3333-3333-333333333333')
     )
     await waitFor(() =>
-      expect(within(existing).getByText('No direct access configured.')).toBeTruthy()
+      expect(within(existing).getByText('No direct grants or shares yet.')).toBeTruthy()
     )
     expect(mockGetGfsGrants).toHaveBeenCalledTimes(2)
     expect(mockGetGfsShares).toHaveBeenCalledTimes(2)
@@ -202,7 +228,7 @@ describe('GfsGrantPanel bulk access', () => {
       })
     )
     renderPanel()
-    const existing = await screen.findByRole('region', { name: 'Existing access' })
+    const existing = await screen.findByRole('region', { name: 'Who has access' })
     fireEvent.click(
       within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
     )
@@ -211,7 +237,7 @@ describe('GfsGrantPanel bulk access', () => {
 
     expect(await screen.findByText('Access was already removed.')).toBeTruthy()
     await waitFor(() =>
-      expect(within(existing).getByText('No direct access configured.')).toBeTruthy()
+      expect(within(existing).getByText('No direct grants or shares yet.')).toBeTruthy()
     )
     expect(screen.queryByRole('alert')).toBeNull()
     expect(mockGetGfsGrants).toHaveBeenCalledTimes(2)
@@ -237,7 +263,7 @@ describe('GfsGrantPanel bulk access', () => {
       })
     )
     renderPanel()
-    const existing = await screen.findByRole('region', { name: 'Existing access' })
+    const existing = await screen.findByRole('region', { name: 'Who has access' })
     fireEvent.click(
       within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
     )
@@ -275,15 +301,13 @@ describe('GfsGrantPanel bulk access', () => {
     selectPermission('Read')
     await submit('Grant access')
 
-    const existing = await screen.findByRole('region', { name: 'Existing access' })
-    expect(await within(existing).findByText('Grant · read · resource only')).toBeTruthy()
+    const existing = await screen.findByRole('region', { name: 'Who has access' })
+    expect(await within(existing).findByText('Direct grant · user')).toBeTruthy()
     expect(initialSignal?.aborted).toBe(true)
     resolveInitialGrants({ items: [] })
 
-    await waitFor(() =>
-      expect(within(existing).getByText('Grant · read · resource only')).toBeTruthy()
-    )
-    expect(within(existing).queryByText('No direct access configured.')).toBeNull()
+    await waitFor(() => expect(within(existing).getByText('Direct grant · user')).toBeTruthy())
+    expect(within(existing).queryByText('No direct grants or shares yet.')).toBeNull()
   })
 
   it('aborts the active access hydration when the panel unmounts', async () => {
@@ -334,7 +358,7 @@ describe('GfsGrantPanel bulk access', () => {
     expect(within(permissions).getByRole('menuitemcheckbox', { name: 'Write' })).not.toBeChecked()
     expect(within(permissions).queryByRole('menuitemcheckbox', { name: 'Delete' })).toBeNull()
     expect(within(permissions).queryByRole('menuitemcheckbox', { name: 'Share' })).toBeNull()
-    expect(screen.getByRole('button', { name: 'Create share' })).toBeDisabled()
+    expect(createShareDisabled).toBe(true)
 
     await submit('Grant access')
 
@@ -390,7 +414,7 @@ describe('GfsGrantPanel bulk access', () => {
     expect(dialog).toHaveTextContent('"reports"')
     expect(dialog).toHaveTextContent('Permissions: read, write')
     expect(dialog).toHaveTextContent('Scope: this resource and all descendants')
-    expect(screen.getByRole('button', { name: 'Create share' })).toBeDisabled()
+    expect(createShareDisabled).toBe(true)
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
@@ -482,7 +506,7 @@ describe('GfsGrantPanel bulk access', () => {
       within(openPermissionMenu()).getByRole('menuitemcheckbox', { name: 'Delete' })
     ).not.toBeChecked()
     selectPermission('Read')
-    expect(screen.getByRole('button', { name: 'Create share' })).toBeEnabled()
+    await waitFor(() => expect(createShareDisabled).toBe(false))
   })
 
   it('caps the UI selection at 100 subjects', async () => {

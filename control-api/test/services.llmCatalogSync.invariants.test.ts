@@ -87,4 +87,19 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
     expect(models).toContain('claude-opus-4-5') // stale + enabled → present
     expect(models).not.toContain('claude-sonnet-5') // disabled → absent
   })
+
+  it('does not discover or stale Codex subscription rows from models.dev', async () => {
+    const db = makeFakeDb([
+      { provider: 'codex-subscription', model: 'gpt-5', source: 'discovery', enabled: false },
+    ])
+    const catalog = trimSnapshot({ anthropic: ['claude-opus-4-5'] })
+    await syncDiscoveredModels(
+      { loadCatalog: loadStub(catalog, 'live'), ...LOW_FLOOR },
+      db.connector
+    )
+    expect(db.get('codex-subscription', 'gpt-5')?.stale).toBe(false)
+    expect(
+      db.rows.some(row => row.provider === 'codex-subscription' && row.model !== 'gpt-5')
+    ).toBe(false)
+  })
 })

@@ -108,6 +108,7 @@ const makeNavigationValue = (
   selectedAgent: null,
   selectedAgentRoute: 'details',
   selectedContext: null,
+  selectedContextTab: 'agents',
   selectedTeam: null,
   handleNavSelect: vi.fn(),
   handleOpenAgentWorkspace: vi.fn(),

@@ -16,7 +16,7 @@ import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconChevronRight, IconCopy, IconPencil, IconRefresh, IconX } from './icons'
+import { IconChevronRight, IconCopy, IconRefresh, IconX } from './icons'
 
 const ENABLED_TOOLTIP = 'Enabled controls whether this server is available to contexts and agents.'
 type ConnectorSortKey = 'name' | 'enabled' | 'status'
@@ -194,7 +194,7 @@ function ConnectorContexts({
       {onAdd ? (
         <button
           type="button"
-          className="cu-btn cu-btn--secondary cu-btn--sm cu-connector-context-access__add"
+          className="cu-btn cu-btn--sm cu-connector-context-access__add"
           disabled={busy}
           onClick={onAdd}
         >
@@ -365,7 +365,7 @@ export function McpServerTable({
     return (
       <button
         type="button"
-        className={`cu-link cu-link--sm cu-table__sort-link${isActive ? ' is-active' : ''}`}
+        className={`cu-table__sort-link${isActive ? ' is-active' : ''}`}
         onClick={() => toggleSort(key)}
         aria-label={`Sort by ${label.toLowerCase()} ${nextDirection}`}
         aria-pressed={isActive}
@@ -540,33 +540,32 @@ export function McpServerTable({
                         onKeyDown={event => event.stopPropagation()}
                       >
                         <div className="cu-table-actions">
-                          {onEdit ? (
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--toolbar"
-                              onClick={() => onEdit({ namespace, name })}
-                              aria-label={`Edit connector ${name}`}
-                              title={`Edit connector ${name}`}
-                            >
-                              <IconPencil width={16} height={16} />
-                            </button>
-                          ) : null}
-                          {onDelete ? (
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                              onClick={() => void onDelete({ namespace, name })}
-                              disabled={deletingKey === key}
-                              aria-label={
-                                deletingKey === key ? 'Deleting...' : `Remove connector ${name}`
-                              }
-                              title={
-                                deletingKey === key ? 'Deleting...' : `Remove connector ${name}`
-                              }
-                            >
-                              <IconX width={16} height={16} />
-                            </button>
-                          ) : null}
+                          <RowActionsMenu
+                            ariaLabel={`Actions for connector ${name}`}
+                            horizontalTrigger
+                            actions={[
+                              ...(onEdit
+                                ? [
+                                    {
+                                      key: 'edit',
+                                      label: 'Edit',
+                                      onClick: () => onEdit({ namespace, name }),
+                                    },
+                                  ]
+                                : []),
+                              ...(onDelete
+                                ? [
+                                    {
+                                      key: 'remove',
+                                      label: deletingKey === key ? 'Deleting…' : 'Delete',
+                                      danger: true,
+                                      disabled: deletingKey === key,
+                                      onClick: () => void onDelete({ namespace, name }),
+                                    },
+                                  ]
+                                : []),
+                            ]}
+                          />
                         </div>
                       </td>
                     </tr>

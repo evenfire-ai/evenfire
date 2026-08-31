@@ -15,10 +15,49 @@ import {
   resolveMcpRequestTimeoutMs,
   withRequestTimeout,
 } from './requestOptions'
+import { extractStructuredHttpStatus, isAuthError } from './serverStatus'
 
 export type { McpToolCallOptions } from './requestOptions'
 
 type SupportedMcpTransport = SSEClientTransport | StreamableHTTPClientTransport
+
+/**
+ * Resolves the Bearer token for a connection just-in-time. `resolve()` is the
+ * normal path (return a cached-then-fetched token, honoring expiry); `refresh()`
+ * FORCES a fresh exchange (used after a live 401). A provider whose `resolve()`
+ * returns undefined yields a token-less connection — the catalog "representative"
+ * connection for an oauth server relies on this (connects without Authorization).
+ */
+export interface McpTokenProvider {
+  resolve(): Promise<string | undefined>
+  refresh(): Promise<string | undefined>
+}
+
+/**
+ * A token provider that always yields the same static token (or none). Preserves
+ * today's behavior for static (secretRef) servers and dev/workflow callers that
+ * pass a plain token string.
+ */
+export function staticTokenProvider(token?: string): McpTokenProvider {
+  return {
+    resolve: async () => token,
+    refresh: async () => token,
+  }
+}
+
+/**
+ * Terminal auth failure surfaced by a live tool call. Thrown when a 403 arrives
+ * (insufficient scope — no retry) or a 401 survives one forced-refresh retry.
+ * The manager evicts the affected per-user partition on this error.
+ */
+export class McpAuthError extends Error {
+  readonly status: number
+  constructor(serverName: string, status: number) {
+    super(`MCP server ${serverName} auth failed (${status})`)
+    this.name = 'McpAuthError'
+    this.status = status
+  }
+}
 
 interface McpCallRecovery {
   sourceEpoch: number
@@ -32,7 +71,9 @@ export class McpClient {
   private client: Client | null = null
   private transport: SupportedMcpTransport | null = null
   private serverConfig: McpServerInfo
-  private authToken?: string
+  private tokenProvider?: McpTokenProvider
+  /** Token resolved for the CURRENT connection, re-read on every (re)connect. */
+  private currentAuthToken?: string
   private proxyUrl?: string
   private tools: McpTool[] = []
   private connected: boolean = false
@@ -43,9 +84,9 @@ export class McpClient {
   private readonly retirementController = new AbortController()
   private readonly transportCleanups = new WeakMap<SupportedMcpTransport, Promise<void>>()
 
-  constructor(serverConfig: McpServerInfo, authToken?: string, proxyUrl?: string) {
+  constructor(serverConfig: McpServerInfo, tokenProvider?: McpTokenProvider, proxyUrl?: string) {
     this.serverConfig = serverConfig
-    this.authToken = authToken
+    this.tokenProvider = tokenProvider
     this.proxyUrl = proxyUrl
   }
 
@@ -142,8 +183,10 @@ export class McpClient {
     const { transport } = this.serverConfig
     const headers: Record<string, string> = {}
 
-    if (this.authToken) {
-      headers['Authorization'] = `Bearer ${this.authToken}`
+    // currentAuthToken is resolved per (re)connect in connect() below; a
+    // representative (token-less) connection leaves it undefined → no header.
+    if (this.currentAuthToken) {
+      headers['Authorization'] = `Bearer ${this.currentAuthToken}`
     }
 
     const targetUrl = this.resolveUrl()
@@ -175,6 +218,20 @@ export class McpClient {
     console.log(`[MCP:${this.name}] Connecting to ${transport.url} (${transport.type})...`)
 
     this.ensureNotRetired()
+    // Per-connection JIT token resolution (spec §6): the SDK bakes the
+    // Authorization header once at transport-build time, so the token is
+    // re-read here on EVERY (re)connect right before createTransport. A 401
+    // recovery path forces a fresh exchange via tokenProvider.refresh() before
+    // reconnecting, so this resolve() then returns the refreshed token.
+    //
+    // Only await when a provider exists, so the token-less path stays fully
+    // synchronous up to the SDK connect (preserves abort/timeout ordering).
+    if (this.tokenProvider) {
+      this.currentAuthToken = await this.tokenProvider.resolve()
+      ensureNotAborted(options.signal)
+    } else {
+      this.currentAuthToken = undefined
+    }
     const connectionEpoch = ++this.connectionEpoch
     const nextTransport = this.createTransport()
     const nextClient = new Client(
@@ -254,7 +311,7 @@ export class McpClient {
     // The credential is no longer authoritative once this client is detached.
     // Clear the retained value synchronously before asynchronous transport
     // cleanup so a retired object cannot keep the old bearer alive in memory.
-    this.authToken = undefined
+    this.currentAuthToken = undefined
     this.retirementController.abort(this.lifecycleError('closed'))
     return this.detachConnection()
   }
@@ -533,13 +590,68 @@ export class McpClient {
       console.log(`[MCP:${this.name}] Tool result:`, JSON.stringify(result).substring(0, 200))
       return result
     } catch (error) {
-      const sessionError = this.isSessionError(error)
+      // Strict auth detection FIRST: only a structured 401/403 counts, never the
+      // message regex (which would read '320' out of a JSON-RPC -32003 code).
+      const authError = isAuthError(error)
+      const sessionError = !authError && this.isSessionError(error)
       if (this.retired) {
         throw this.lifecycleError('closed')
       }
       const callCurrent = this.isCallCurrent(callEpoch, callClient)
       if (!callCurrent && (!sessionError || !this.canAdoptCallRecovery(callEpoch, callClient))) {
+        // Auth recovery requires the call to still be current — a superseded
+        // call never enters the refresh/retry path (it falls through here).
         throw this.lifecycleError('superseded')
+      }
+      if (authError) {
+        const status = extractStructuredHttpStatus(error)
+        // 403 (insufficient scope) is terminal — never enter the refresh retry.
+        if (status === 403) {
+          console.warn(`[MCP:${this.name}] Tool call rejected (403, insufficient scope) — terminal`)
+          throw new McpAuthError(this.name, 403)
+        }
+        // 401: force a fresh token exchange, reconnect through the SAME fencing
+        // as session recovery, and retry exactly once. A second 401 is terminal.
+        console.warn(
+          `[MCP:${this.name}] Tool call auth failed (401), refreshing token, retrying once...`
+        )
+        try {
+          await this.tokenProvider?.refresh()
+          ensureNotAborted(options.signal)
+          await this.reconnectForCall(callEpoch, callClient, {
+            timeoutMs: remainingBudgetMs(deadlineMs),
+            signal: options.signal,
+          })
+          ensureNotAborted(options.signal)
+          const retryClient = this.client
+          if (!retryClient || !this.connected) throw this.lifecycleError('superseded')
+          const retryEpoch = this.connectionEpoch
+          const result = await retryClient.callTool(
+            {
+              name: toolName,
+              arguments: args,
+            },
+            undefined,
+            callRequestOptions()
+          )
+          this.ensureCallCurrent(retryEpoch, retryClient)
+          console.log(
+            `[MCP:${this.name}] Tool result (after auth refresh):`,
+            JSON.stringify(result).substring(0, 200)
+          )
+          return result
+        } catch (retryError) {
+          if (isAuthError(retryError)) {
+            // Second auth failure — terminal (auth_failed), evict upstream. No loop.
+            const retryStatus = extractStructuredHttpStatus(retryError) ?? 401
+            console.error(
+              `[MCP:${this.name}] Tool call auth failed again (${retryStatus}) — terminal`
+            )
+            throw new McpAuthError(this.name, retryStatus)
+          }
+          console.error(`[MCP:${this.name}] Tool call failed after auth refresh:`, retryError)
+          throw retryError
+        }
       }
       if (sessionError) {
         console.warn(`[MCP:${this.name}] Session lost, reconnecting and retrying after delay...`)

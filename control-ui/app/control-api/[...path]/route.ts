@@ -45,7 +45,7 @@ function resolveGfsUploadProxyTimeoutMs(): number {
 // default. Set CONTROL_UI_PROXY_MAX_BODY_BYTES on the deployment to change it.
 const DEFAULT_MAX_BODY_BYTES = 24 * 1024 * 1024
 const MAX_BODY_BYTES_CEILING = 512 * 1024 * 1024
-const GFS_UPLOAD_MAX_PART_BYTES = 16 * 1024 * 1024
+export const GFS_UPLOAD_MAX_PART_BYTES = 16 * 1024 * 1024
 function resolveMaxBodyBytes(): number {
   const raw = process.env.CONTROL_UI_PROXY_MAX_BODY_BYTES
   const parsed = raw ? Number(raw) : Number.NaN
@@ -147,6 +147,11 @@ function copyRequestHeaders(req: NextRequest): Headers {
       headers.set(key, value)
     }
   })
+  const host = req.headers.get('host') ?? req.nextUrl.host
+  if (host) {
+    headers.set('x-forwarded-host', host)
+    headers.set('x-forwarded-proto', req.nextUrl.protocol.replace(':', ''))
+  }
   return headers
 }
 

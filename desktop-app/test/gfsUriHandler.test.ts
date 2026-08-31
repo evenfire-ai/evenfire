@@ -531,7 +531,7 @@ describe('GfsClient resource mutations', () => {
     )
   })
 
-  it('replaces, renames, and deletes with If-Match through the user plane', async () => {
+  it('replaces, renames, deletes, and moves with If-Match through the user plane', async () => {
     const requestJson = vi.fn(async () => ({
       ok: true,
       data: CHILD,
@@ -540,6 +540,10 @@ describe('GfsClient resource mutations', () => {
     await client.replaceFile({ resourceId: RID, encodedData: 'aGVsbG8=', ifMatch: 1 }, 'tok')
     await client.renameResource({ resourceId: RID, newName: 'renamed.md', ifMatch: 2 }, 'tok')
     await client.deleteResource({ resourceId: RID, ifMatch: 3 }, 'tok')
+    await client.moveResource(
+      { resourceId: RID, destinationId: '22222222-2222-2222-2222-222222222222', ifMatch: 4 },
+      'tok'
+    )
     expect(requestJson).toHaveBeenNthCalledWith(
       1,
       'PUT',
@@ -561,6 +565,15 @@ describe('GfsClient resource mutations', () => {
       'DELETE',
       `https://api.example/api/v1/me/gfs/resources/${RID}?drive=main`,
       { token: 'tok', body: { ifMatch: 3 } }
+    )
+    expect(requestJson).toHaveBeenNthCalledWith(
+      4,
+      'PATCH',
+      `https://api.example/api/v1/me/gfs/resources/${RID}?drive=main`,
+      {
+        token: 'tok',
+        body: { newParentId: '22222222-2222-2222-2222-222222222222', ifMatch: 4 },
+      }
     )
   })
 })

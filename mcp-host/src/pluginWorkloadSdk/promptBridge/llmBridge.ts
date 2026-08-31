@@ -2,7 +2,7 @@ import { LlmErrorCode } from '../../core/errors'
 import { type ChatMessage, FinishReason } from '../../core/types'
 import { type SingleTurnProvider, createLLMProvider } from '../../llm'
 import { type ClassifiedLike, type FailoverClass, classifyFailoverClass } from '../../llm/failover'
-import { isLlmProvider } from '../../llm/registryCore'
+import { descriptorFor, isLlmProvider } from '../../llm/registryCore'
 import { CircuitBreaker } from '../domain/circuitBreaker'
 import { PluginWorkloadError, type PluginWorkloadProviderAttemptContext } from '../domain/errors'
 import type { PromptBridgeTarget } from '../domain/types'
@@ -250,7 +250,13 @@ export class LlmBridge {
   }
 
   private breakerKey(target: PromptBridgeTarget): string {
-    return [target.targetRef, target.provider, target.model, target.credentialSlot].join('\u0000')
+    return [
+      target.targetRef,
+      target.provider,
+      target.model,
+      target.credentialSlot,
+      target.connectionRef ?? '',
+    ].join('\u0000')
   }
 
   private breakerFor(target: PromptBridgeTarget): CircuitBreaker {
@@ -293,6 +299,59 @@ export class LlmBridge {
       }
 
       const breaker = this.breakerFor(authorized.target)
+      if (
+        isLlmProvider(authorized.target.provider) &&
+        descriptorFor(authorized.target.provider).authMode === 'oauth-broker'
+      ) {
+        if (!breaker.allow()) {
+          lastProviderError = new ClassifiedProviderError(
+            { code: LlmErrorCode.ApiCallFailed, retryable: true },
+            new PluginWorkloadError(
+              'provider_unavailable',
+              'LLM provider circuit is open',
+              true,
+              'provider_unavailable'
+            )
+          )
+          if (index === request.targets.length - 1) {
+            throw lastProviderError.toPluginWorkloadError()
+          }
+          continue
+        }
+        try {
+          const completion = await this.attempt(
+            { target: authorized.target, keys: {}, llmSecretName: '' },
+            { ...request, timeoutMs: remainingTimeoutMs(deadlineAt) },
+            breaker
+          )
+          return {
+            ...completion,
+            servedTarget: authorized.target,
+            fallbackUsed: index > 0,
+            attemptCount: index + 1,
+            llmSecretName: '',
+            providerAttemptAcknowledgement: 'owned_by_finalizer',
+          }
+        } catch (error) {
+          if (
+            error instanceof ClassifiedProviderError &&
+            error.classified.providerCode === 'budget_denied'
+          ) {
+            throw error.toPluginWorkloadError()
+          }
+          if (!(error instanceof ClassifiedProviderError)) throw error
+          lastProviderError = error
+          const failureClass = classifyFailoverClass(
+            error.classified.code,
+            error.classified.retryable
+          )
+          const eligible = failureClass !== null && triggerOn.has(failureClass)
+          if (!eligible || index === request.targets.length - 1) {
+            throw error.toPluginWorkloadError()
+          }
+          continue
+        }
+      }
       if (!breaker.allow()) {
         // A circuit-open target still consumes an ordered, auditable physical
         // attempt. Reserve and close it as `skipped` before advancing; without
@@ -518,7 +577,12 @@ export class LlmBridge {
     credential: BrokeredCredential,
     request: LlmBridgeRequest,
     breaker: CircuitBreaker
-  ): Promise<Pick<LlmBridgeResult, 'model' | 'content' | 'usage' | 'finishReason'>> {
+  ): Promise<
+    Pick<
+      LlmBridgeResult,
+      'model' | 'content' | 'usage' | 'finishReason' | 'providerAttemptId' | 'providerAttemptIndex'
+    >
+  > {
     if (request.timeoutMs <= 0) {
       throw new PluginWorkloadError(
         'provider_unavailable',
@@ -571,8 +635,9 @@ export class LlmBridge {
       }
       const inputTokens = response.usage?.input_tokens ?? 0
       const outputTokens = response.usage?.output_tokens ?? 0
+      const brokerBacked = descriptorFor(providerId).authMode === 'oauth-broker'
       if (
-        response.usage_reported === false ||
+        (!brokerBacked && response.usage_reported === false) ||
         inputTokens < 0 ||
         outputTokens < 0 ||
         !Number.isInteger(inputTokens) ||
@@ -591,6 +656,14 @@ export class LlmBridge {
         content: response.content,
         usage: { inputTokens, outputTokens },
         finishReason: mapFinishReason(response.finish_reason),
+        ...(typeof response.providerAttemptId === 'string' && response.providerAttemptId
+          ? { providerAttemptId: response.providerAttemptId }
+          : {}),
+        ...(typeof response.providerAttemptIndex === 'number' &&
+        Number.isInteger(response.providerAttemptIndex) &&
+        response.providerAttemptIndex >= 1
+          ? { providerAttemptIndex: response.providerAttemptIndex }
+          : {}),
       }
     } catch (error) {
       if (error instanceof PluginWorkloadError) throw error
@@ -611,7 +684,11 @@ export class LlmBridge {
       const reason =
         classifyFailoverClass(classified.code, classified.retryable) ?? 'provider_unavailable'
       throw new ClassifiedProviderError(
-        { code: classified.code, retryable: classified.retryable },
+        {
+          code: classified.code,
+          retryable: classified.retryable,
+          ...(classified.providerCode ? { providerCode: classified.providerCode } : {}),
+        },
         new PluginWorkloadError(
           'provider_unavailable',
           `LLM provider error: ${classified.code}`,

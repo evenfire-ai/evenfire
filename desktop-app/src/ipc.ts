@@ -598,6 +598,22 @@ export function registerIpcHandlers(service: AppService): void {
     }
   )
   ipcMain.handle(
+    'gfs:moveResource',
+    async (
+      event,
+      payload: { resourceId: string; destinationId: string; drive?: string; ifMatch?: number }
+    ) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      return service.moveGfsResource(
+        sanitizeString(payload?.resourceId),
+        sanitizeString(payload?.destinationId),
+        drive,
+        sanitizeOptionalInteger(payload?.ifMatch)
+      )
+    }
+  )
+  ipcMain.handle(
     'gfs:deleteResource',
     async (event, payload: { resourceId: string; drive?: string; ifMatch?: number }) => {
       assertTrustedSender(event)
@@ -1115,6 +1131,47 @@ export function registerIpcHandlers(service: AppService): void {
         targetHostRefs,
         { teamId: sanitizeString(teamId) || undefined }
       )
+    }
+  )
+
+  // U5 (mcp-oauth reactive consent): the renderer's "Connect <server>" button.
+  // Fetches a fresh provider authorize-URL (host-bound to the suspended
+  // conversation's hostRef) and opens it in the OS browser. The deep-link return
+  // (`clerum://oauth-completed?…&source=mcp`) is routed by main.ts back to the
+  // renderer to resume the suspended task.
+  ipcMain.handle(
+    'rpc:connectMcpServer',
+    async (event, { mcpServerName, hostRef, contextId, options }) => {
+      assertTrustedSender(event)
+      const server = sanitizeString(mcpServerName)
+      const targetHostRef = sanitizeString(hostRef)
+      const ctx = sanitizeString(contextId) || undefined
+      // `confirmShared` is a UX-only flag (the server-side authz per flavor is
+      // authoritative). The panel sets it for `oauth-context` connectors so main
+      // shows a team-wide confirm dialog; the reactive U5 path omits it.
+      const confirmShared = options && typeof options === 'object' && options.confirmShared === true
+      return service.requestMcpOauthAuthorize(server, targetHostRef, ctx, { confirmShared })
+    }
+  )
+
+  // Proactive connectors panel (spec 11 U2): the classified per-agent fleet.
+  ipcMain.handle('rpc:listConnectors', async event => {
+    assertTrustedSender(event)
+    return service.getConnectors()
+  })
+
+  // Proactive disconnect (spec 11 U4): revoke an mcp-server's OAuth grant. Main
+  // shows an explicit confirm dialog before the DELETE (destructive; team-wide
+  // for `oauth-context`). `shared` drives only the confirm copy.
+  ipcMain.handle(
+    'rpc:disconnectMcpServer',
+    async (event, { mcpServerName, hostRef, contextId, options }) => {
+      assertTrustedSender(event)
+      const server = sanitizeString(mcpServerName)
+      const targetHostRef = sanitizeString(hostRef)
+      const ctx = sanitizeString(contextId) || undefined
+      const shared = options && typeof options === 'object' && options.shared === true
+      return service.disconnectMcpServer(server, targetHostRef, ctx, { shared })
     }
   )
 

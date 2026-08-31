@@ -27,4 +27,13 @@ describe('CONTROL_ROUTES', () => {
     expect(CONTROL_ROUTES.agentOutputs.root).toBe('/agent-outputs/recipe-artifacts')
     expect(CONTROL_ROUTES.globalFileSystem).toBe('/global-file-system')
   })
+
+  it('does not expose an LLM Models Codex subscription owner path', () => {
+    expect('codexSubscription' in CONTROL_ROUTES.llmModels).toBe(false)
+  })
+
+  it('nests ChatGPT subscriptions under Secrets LLM', () => {
+    expect(CONTROL_ROUTES.secrets.llmSubscriptions).toBe('/secrets/llm/subscriptions')
+    expect(CONTROL_ROUTES.secrets.subscription).toBe('/secrets/llm/subscriptions')
+  })
 })

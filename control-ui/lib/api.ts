@@ -50,6 +50,11 @@ export type Metadata = {
    * optimistic-concurrency precondition (docs/architecture/stateless-invariants.md).
    */
   resourceVersion?: string
+  /** K8s-standard creation timestamp (RFC3339). Not in the type for older
+   *  endpoints but carried by the new admin payloads. */
+  creationTimestamp?: string
+  /** K8s-standard resource UID. Same caveat as creationTimestamp. */
+  uid?: string
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_CONTROL_API_BASE_URL || '/control-api'
@@ -86,7 +91,7 @@ async function parseJsonResponse(res: Response): Promise<unknown> {
 }
 
 export function formatApiError(res: Response, text: string): Error {
-  let detail = text
+  let detail: string
   let parsedBody: Record<string, unknown> | null = null
   try {
     const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
@@ -1362,7 +1367,7 @@ export async function sfsUpload(
       handler?.()
       throw new Error('401 Unauthorized - session expired, please sign in again')
     }
-    let detail = text
+    let detail: string
     try {
       const parsed = JSON.parse(text) as { error?: { message?: string; code?: string } }
       detail = parsed.error?.message || parsed.error?.code || text
@@ -2464,6 +2469,7 @@ export type WorkflowRecipeResource = {
     namespace?: string
     creationTimestamp?: string
     labels?: Record<string, string>
+    annotations?: Record<string, string>
   }
   spec?: Record<string, unknown>
   status?: WorkflowRecipeStatus
@@ -2495,7 +2501,7 @@ export async function getRecipe(name: string) {
 }
 
 export async function createRecipe(payload: {
-  metadata: { name: string; namespace?: string }
+  metadata: { name: string; namespace?: string; annotations?: Record<string, string> }
   spec: Record<string, unknown>
 }) {
   return apiSend(
@@ -2530,7 +2536,7 @@ export type ServerValidationResult =
 // let the reconciler catch at L4.
 export async function validateRecipeServer(
   recipe: {
-    metadata: { name: string; namespace?: string }
+    metadata: { name: string; namespace?: string; annotations?: Record<string, string> }
     spec: Record<string, unknown>
   },
   opts: { mode?: 'create' | 'edit' } = {}
@@ -2553,7 +2559,13 @@ export async function validateRecipeServer(
   throw new Error(`${res.status} ${res.statusText} - ${text}`)
 }
 
-export async function updateRecipe(name: string, payload: { spec: Record<string, unknown> }) {
+export async function updateRecipe(
+  name: string,
+  payload: {
+    spec: Record<string, unknown>
+    metadata?: { annotations?: Record<string, string> }
+  }
+) {
   return apiSend(
     'PUT',
     `/api/v1/admin/recipes/${encodeURIComponent(name)}`,
@@ -3023,11 +3035,29 @@ export type RegistryEntry = {
           service?: { name?: string; namespace?: string; port?: number }
           remote?: { baseUrl?: string }
         }
-        lifecyclePoints?: string[] // "preCall" | "moderate" | "postCallSuccess" | "onError"
+        // The CRD enumerates six: the four LLM-lane points below plus the tool
+        // lane's preToolUse/postToolUse.
+        lifecyclePoints?: string[] // "preCall" | "moderate" | "postCallSuccess" | "onError" | "preToolUse" | "postToolUse"
         path?: string
         credentialSchema?: CredentialSchema
         defaultConfig?: Record<string, unknown>
         requiredEgress?: unknown
+        // What the hook author says the hook needs to function. Advisory: it
+        // seeds the install form, but the operator's selection is the grant and
+        // stays bounded by Host.spec.guardrails.capabilityCeiling.
+        requiredCapabilities?: HookCapability[]
+        // The author's suggested runtime posture, used to pre-fill the install
+        // form. `orderHint` is a word, not the CRD's numeric `order`.
+        authorDefaults?: {
+          failMode?: 'open' | 'closed'
+          orderHint?: string
+          timeoutMs?: number
+          onUnavailable?: {
+            mode?: 'strict' | 'breaker'
+            failureThreshold?: number
+            cooldownMs?: number
+          }
+        }
       })
     | null
   artifact_refs: Record<string, unknown> | null
@@ -3607,7 +3637,12 @@ export type PluginWorkloadSdkPromptTarget = {
   provider: string
   model: string
   // Identity of a provider-owned secret data key; never a secret value.
+  // Empty for oauth-broker (Codex) targets, which have no static Secret key.
   credentialSlot: string
+  // Codex subscription connection key the target executes against. Only set
+  // for oauth-broker providers; the grant must already exist (choose, don't
+  // create) and offer the selected model.
+  connectionRef?: string
 }
 
 export type PluginWorkloadSdkQuotaLimits = {

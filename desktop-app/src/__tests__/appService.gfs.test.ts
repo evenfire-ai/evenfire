@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
-import { mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AppService, legacyEncodedFile, migrateDesktopGfsUploadState } from '../appService.js'
 import { config, getActiveEnvKey } from '../config.js'
-import { DesktopUploadCapabilityError } from '../gfs/upload.js'
+import { DesktopUploadCapabilityError, normalizeUploadProductMaxBytes } from '../gfs/upload.js'
 
 vi.mock('../chatStoreBinding.js', () => ({
   bindChatStoreForUser: vi.fn(),
@@ -23,6 +23,7 @@ function gfsService() {
       createShare: ReturnType<typeof vi.fn>
       listShares: ReturnType<typeof vi.fn>
       revokeShare: ReturnType<typeof vi.fn>
+      moveResource: ReturnType<typeof vi.fn>
     }
     grantGfs: (
       resourceId: string,
@@ -34,6 +35,12 @@ function gfsService() {
     createGfsShare: (resourceId: string, subjectKeys: string[], drive?: string) => Promise<void>
     listGfsShares: (resourceId: string, drive?: string) => Promise<unknown[]>
     revokeGfsShare: (shareId: string) => Promise<void>
+    moveGfsResource: (
+      resourceId: string,
+      destinationId: string,
+      drive?: string,
+      ifMatch?: number
+    ) => Promise<{ resourceId: string; version: number }>
   }
   service.sessionToken = 'session-token'
   service.gfsClient = {
@@ -41,11 +48,25 @@ function gfsService() {
     createShare: vi.fn().mockResolvedValue(undefined),
     listShares: vi.fn().mockResolvedValue([]),
     revokeShare: vi.fn().mockResolvedValue(undefined),
+    moveResource: vi.fn().mockResolvedValue({ resourceId: RESOURCE_ID, version: 9 }),
   }
   return service
 }
 
 describe('AppService GFS delegation subject boundary', () => {
+  it('moves a resource into a destination folder through the user-plane GFS client', async () => {
+    const service = gfsService()
+    const destinationId = '33333333-3333-4333-8333-333333333333'
+
+    await service.moveGfsResource(RESOURCE_ID, destinationId, 'main', 8)
+
+    expect(service.gfsClient.moveResource).toHaveBeenCalledTimes(1)
+    expect(service.gfsClient.moveResource).toHaveBeenCalledWith(
+      { resourceId: RESOURCE_ID, drive: 'main', destinationId, ifMatch: 8 },
+      'session-token'
+    )
+  })
+
   it('forwards share list and revoke through the in-memory session token only', async () => {
     const service = gfsService()
     const shareId = '22222222-2222-4222-8222-222222222222'
@@ -312,7 +333,9 @@ describe('AppService GFS upload security scope', () => {
       await writeFile(filePath, Buffer.from('legacy payload'))
       const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
       service.startDesktopGfsUpload.mockRejectedValue(
-        new DesktopUploadCapabilityError('resumable uploads are disabled')
+        new DesktopUploadCapabilityError('resumable uploads are disabled', {
+          allowLegacyFallback: true,
+        })
       )
       service.gfsClient = {
         createResource: vi.fn().mockResolvedValue({
@@ -354,6 +377,61 @@ describe('AppService GFS upload security scope', () => {
     }
   })
 
+  it('fails loudly without legacy fallback for malformed v2 capabilities', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-malformed-capability-'))
+    try {
+      const filePath = join(root, 'payload.bin')
+      await writeFile(filePath, Buffer.from('payload'))
+      const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+      let malformed: unknown
+      try {
+        normalizeUploadProductMaxBytes(0)
+      } catch (error) {
+        malformed = error
+      }
+      expect(malformed).toBeInstanceOf(DesktopUploadCapabilityError)
+      service.startDesktopGfsUpload.mockRejectedValue(malformed)
+      service.gfsClient = {
+        createResource: vi.fn(),
+        replaceFile: vi.fn(),
+      }
+
+      await expect(
+        service.startGfsFileUpload('parent-rid', 'payload.bin', filePath, 'main')
+      ).rejects.toBe(malformed)
+      expect(service.gfsClient.createResource).not.toHaveBeenCalled()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects above the legacy limit before invoking the fallback request', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-legacy-limit-fallback-'))
+    try {
+      const filePath = join(root, 'oversized-legacy.bin')
+      await writeFile(filePath, Buffer.alloc(0))
+      await truncate(filePath, 16 * 1024 * 1024 + 1)
+      const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+      service.startDesktopGfsUpload.mockRejectedValue(
+        new DesktopUploadCapabilityError('resumable uploads are disabled', {
+          allowLegacyFallback: true,
+        })
+      )
+      service.gfsClient = {
+        createResource: vi.fn(),
+        replaceFile: vi.fn(),
+      }
+
+      await expect(
+        service.startGfsFileUpload('parent-rid', 'oversized-legacy.bin', filePath, 'main')
+      ).rejects.toThrow('legacy GFS is limited to 16 MiB')
+      expect(service.gfsClient.createResource).not.toHaveBeenCalled()
+      expect(service.gfsClient.replaceFile).not.toHaveBeenCalled()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('never falls back to a second legacy resource for an explicit resume', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-explicit-resume-no-fallback-'))
     try {
@@ -361,7 +439,9 @@ describe('AppService GFS upload security scope', () => {
       await writeFile(filePath, Buffer.from('resume payload'))
       const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
       service.startDesktopGfsUpload.mockRejectedValue(
-        new DesktopUploadCapabilityError('resumable uploads are disabled')
+        new DesktopUploadCapabilityError('resumable uploads are disabled', {
+          allowLegacyFallback: true,
+        })
       )
       service.gfsClient = {
         createResource: vi.fn(),
@@ -385,7 +465,9 @@ describe('AppService GFS upload security scope', () => {
       await writeFile(filePath, Buffer.from('replace payload'))
       const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
       service.startDesktopGfsUpload.mockRejectedValue(
-        new DesktopUploadCapabilityError('resumable uploads are disabled')
+        new DesktopUploadCapabilityError('resumable uploads are disabled', {
+          allowLegacyFallback: true,
+        })
       )
       service.gfsClient = {
         createResource: vi.fn(),
