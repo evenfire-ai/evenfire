@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { DataTable } from '@clerum/frontend-table-system'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
@@ -47,6 +47,7 @@ export function SessionReplay({
   const [openFilterId, setOpenFilterId] = useState<string | null>(null)
   const [copiedSessionKey, setCopiedSessionKey] = useState<string | null>(null)
   const [order, setOrder] = useState<'oldest' | 'latest'>('latest')
+  const loadMoreGeneration = useRef(0)
 
   const columns = useMemo<TableHeaderColumn[]>(
     () =>
@@ -55,7 +56,11 @@ export function SessionReplay({
         ...(column.key === 'activity'
           ? {
               activeDirection: order === 'latest' ? ('desc' as const) : ('asc' as const),
-              onSort: () => setOrder(current => (current === 'latest' ? 'oldest' : 'latest')),
+              onSort: () => {
+                loadMoreGeneration.current += 1
+                setLoadingMore(false)
+                setOrder(current => (current === 'latest' ? 'oldest' : 'latest'))
+              },
               sortLabel: column.label,
             }
           : {}),
@@ -71,6 +76,8 @@ export function SessionReplay({
   )
 
   useEffect(() => {
+    loadMoreGeneration.current += 1
+    setLoadingMore(false)
     setPage(null)
     setSessions([])
     setError(null)
@@ -90,11 +97,15 @@ export function SessionReplay({
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false)
       })
-    return () => controller.abort()
+    return () => {
+      controller.abort()
+      loadMoreGeneration.current += 1
+    }
   }, [apiQuery, boundaryEpoch, order, stateKey])
 
   async function loadMore() {
     if (!apiQuery || !page?.nextCursor) return
+    const generation = ++loadMoreGeneration.current
     setLoadingMore(true)
     setError(null)
     try {
@@ -103,12 +114,15 @@ export function SessionReplay({
         cursor: page.nextCursor,
         order,
       })
+      if (generation !== loadMoreGeneration.current) return
       setPage(next)
       setSessions(current => [...current, ...next.sessions])
     } catch (readError) {
-      setError(readError instanceof Error ? readError.message : 'Unable to load more sessions.')
+      if (generation === loadMoreGeneration.current) {
+        setError(readError instanceof Error ? readError.message : 'Unable to load more sessions.')
+      }
     } finally {
-      setLoadingMore(false)
+      if (generation === loadMoreGeneration.current) setLoadingMore(false)
     }
   }
 
