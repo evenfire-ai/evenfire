@@ -282,6 +282,55 @@ describe('McpServerTable — connector access summaries', () => {
     }
   })
 
+  it('preserves context navigation and accessible access-dialog focus behavior', () => {
+    const onOpenContext = vi.fn()
+    render(
+      <McpServerTable
+        items={[makeItem({ name: 'airtable-server' })]}
+        contexts={[makeContextBinding({ name: 'research', mcpServers: ['airtable-server'] })]}
+        onOpenContext={onOpenContext}
+      />
+    )
+
+    const trigger = screen.getByRole('button', {
+      name: 'Actions for connector airtable-server',
+    })
+    fireEvent.click(trigger)
+    fireEvent.click(screen.getByRole('menuitem', { name: 'View access details' }))
+
+    const close = screen.getByRole('button', { name: 'Close' })
+    const contextLink = screen.getByRole('button', { name: 'research' })
+    expect(close).toHaveFocus()
+    fireEvent.keyDown(window, { key: 'Tab' })
+    expect(contextLink).toHaveFocus()
+    fireEvent.keyDown(window, { key: 'Tab', shiftKey: true })
+    expect(close).toHaveFocus()
+    fireEvent.click(contextLink)
+    expect(onOpenContext).toHaveBeenCalledWith('research')
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'Access for airtable-server' })).toBeNull()
+    expect(trigger).toHaveFocus()
+  })
+
+  it('keeps connector endpoint links and image copy actions available', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const image = 'ghcr.io/example/mcp:1.0'
+    render(<McpServerTable items={[makeItem({ name: 'airtable-server', image })]} />)
+
+    expect(screen.getByRole('link', { name: /brave-search\.mcp-server/ })).toHaveAttribute(
+      'href',
+      'http://brave-search.mcp-server.svc.cluster.local:3000/mcp'
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Copy image reference' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(image))
+    expect(screen.getByRole('button', { name: 'image reference copied' })).toBeInTheDocument()
+  })
+
   it('renders an empty access state when no principals are mapped', () => {
     const items = [makeItem({ name: 'unused-server' })]
     render(<McpServerTable items={items} />)

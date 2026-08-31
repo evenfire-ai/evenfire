@@ -2,6 +2,7 @@
 
 import React, { useMemo, useState } from 'react'
 import { DataTable } from '@clerum/frontend-table-system'
+import { copyTextToClipboard } from '@lib/clipboard'
 import type {
   ConnectorAccessSummary,
   ConnectorContextBinding,
@@ -16,7 +17,7 @@ import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconRefresh, IconX } from './icons'
+import { IconCopy, IconRefresh, IconX } from './icons'
 
 const ENABLED_TOOLTIP = 'Enabled controls whether this server is available to contexts and agents.'
 type ConnectorSortKey =
@@ -102,10 +103,55 @@ function StatusBadge({ status }: { status?: McpServerStatus }) {
   )
 }
 
+function CopyableValue({
+  copyLabel,
+  copied,
+  href,
+  onCopy,
+  value,
+}: {
+  copyLabel: string
+  copied: boolean
+  href?: string
+  onCopy: () => void
+  value: string
+}) {
+  if (!value) return <span className="cu-muted">—</span>
+  return (
+    <span className="cu-copy-field">
+      {href ? (
+        <a
+          className="cu-copy-field__value cu-link cu-cell-truncate"
+          href={href}
+          rel="noreferrer"
+          target="_blank"
+          title={value}
+        >
+          {value}
+        </a>
+      ) : (
+        <span className="cu-copy-field__value cu-cell-truncate" title={value}>
+          {value}
+        </span>
+      )}
+      <button
+        aria-label={copied ? `${copyLabel} copied` : `Copy ${copyLabel}`}
+        className="cu-btn cu-btn--icon cu-btn--ghost"
+        onClick={onCopy}
+        title={copied ? 'Copied' : `Copy ${copyLabel}`}
+        type="button"
+      >
+        <IconCopy height={14} width={14} />
+      </button>
+    </span>
+  )
+}
+
 export function McpServerTable({
   items,
   accessByConnectorKey,
   contexts = [],
+  onOpenContext,
   onAddToContexts,
   onRemoveFromContext,
   updatingContextMembershipKey,
@@ -125,6 +171,10 @@ export function McpServerTable({
   const [serverKeyAddingContexts, setServerKeyAddingContexts] = useState<string | null>(null)
   const [serverKeyViewingAccess, setServerKeyViewingAccess] = useState<string | null>(null)
   const [selectedContextNamesToAdd, setSelectedContextNamesToAdd] = useState<string[]>([])
+  const [copiedValueKey, setCopiedValueKey] = useState<string | null>(null)
+  const accessDialogRef = React.useRef<HTMLElement | null>(null)
+  const accessCloseButtonRef = React.useRef<HTMLButtonElement | null>(null)
+  const accessOpenerRef = React.useRef<HTMLElement | null>(null)
   const rows = useMemo(
     () =>
       items.map(item => {
@@ -216,6 +266,40 @@ export function McpServerTable({
     return () => clearInterval(id)
   }, [onRefresh])
 
+  React.useEffect(() => {
+    if (!serverKeyViewingAccess) return
+    accessCloseButtonRef.current?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setServerKeyViewingAccess(null)
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = Array.from(
+        accessDialogRef.current?.querySelectorAll<HTMLElement>(
+          'a[href], button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])'
+        ) ?? []
+      )
+      const first = focusable[0]
+      const last = focusable.at(-1)
+      if (!first || !last) return
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    const opener = accessOpenerRef.current
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      opener?.focus()
+    }
+  }, [serverKeyViewingAccess])
+
   function toggleSort(key: ConnectorSortKey) {
     if (sortKey === key) {
       setSortDirection(direction => (direction === 'asc' ? 'desc' : 'asc'))
@@ -265,6 +349,16 @@ export function McpServerTable({
     if (updatingContextMembershipKey) return
     setSelectedContextNamesToAdd([])
     setServerKeyAddingContexts(null)
+  }
+
+  async function copyValue(copyKey: string, value: string) {
+    if (await copyTextToClipboard(value)) setCopiedValueKey(copyKey)
+  }
+
+  function openAccessDetails(key: string) {
+    accessOpenerRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setServerKeyViewingAccess(key)
   }
 
   const isInitialLoad = loading && items.length === 0
@@ -388,14 +482,23 @@ export function McpServerTable({
                       <TransportBadge type={spec.transport?.type} />
                     </td>
                     <td className="cu-code-text">
-                      <span className="cu-cell-truncate" title={spec.transport?.url || spec.image}>
-                        {spec.transport?.url || spec.image || '—'}
-                      </span>
+                      <CopyableValue
+                        copied={copiedValueKey === `${key}/endpoint`}
+                        copyLabel="endpoint"
+                        href={spec.transport?.url}
+                        onCopy={() =>
+                          void copyValue(`${key}/endpoint`, spec.transport?.url || spec.image || '')
+                        }
+                        value={spec.transport?.url || spec.image || ''}
+                      />
                     </td>
                     <td className="cu-code-text">
-                      <span className="cu-cell-truncate" title={spec.image || undefined}>
-                        {spec.image || '—'}
-                      </span>
+                      <CopyableValue
+                        copied={copiedValueKey === `${key}/image`}
+                        copyLabel="image reference"
+                        onCopy={() => void copyValue(`${key}/image`, spec.image || '')}
+                        value={spec.image || ''}
+                      />
                     </td>
                     <td>
                       {assignedContexts.length} context{assignedContexts.length === 1 ? '' : 's'} ·{' '}
@@ -449,7 +552,7 @@ export function McpServerTable({
                           {
                             key: 'view-access',
                             label: 'View access details',
-                            onClick: () => setServerKeyViewingAccess(key),
+                            onClick: () => openAccessDetails(key),
                           },
                           ...(onRemoveFromContext
                             ? assignedContexts.map(context => ({
@@ -580,21 +683,25 @@ export function McpServerTable({
             const access = accessByConnectorKey?.[row.key]
             const linkedContexts = contextsForConnector(row.name)
             const groups = [
-              { key: 'contexts', label: 'Contexts', items: linkedContexts.map(item => item.name) },
+              {
+                key: 'contexts',
+                label: 'Contexts',
+                items: linkedContexts.map(item => ({ key: item.name, label: item.name })),
+              },
               {
                 key: 'agents',
                 label: 'Agents',
-                items: (access?.agents ?? []).map(item => item.label),
+                items: (access?.agents ?? []).map(item => ({ key: item.id, label: item.label })),
               },
               {
                 key: 'teams',
                 label: 'Teams',
-                items: (access?.teams ?? []).map(item => item.label),
+                items: (access?.teams ?? []).map(item => ({ key: item.id, label: item.label })),
               },
               {
                 key: 'users',
                 label: 'Users',
-                items: (access?.users ?? []).map(item => item.label),
+                items: (access?.users ?? []).map(item => ({ key: item.id, label: item.label })),
               },
             ]
             return (
@@ -609,6 +716,7 @@ export function McpServerTable({
                   aria-labelledby="connector-access-title"
                   aria-modal="true"
                   className="cu-modal-panel"
+                  ref={accessDialogRef}
                   role="dialog"
                 >
                   <div className="cu-modal-panel__header">
@@ -626,7 +734,19 @@ export function McpServerTable({
                         {group.items.length ? (
                           <ul className="cu-registry-context-access__list">
                             {group.items.map(item => (
-                              <li key={item}>{item}</li>
+                              <li key={item.key}>
+                                {group.key === 'contexts' && onOpenContext ? (
+                                  <button
+                                    className="cu-link"
+                                    onClick={() => onOpenContext(item.label)}
+                                    type="button"
+                                  >
+                                    {item.label}
+                                  </button>
+                                ) : (
+                                  item.label
+                                )}
+                              </li>
                             ))}
                           </ul>
                         ) : (
@@ -639,6 +759,7 @@ export function McpServerTable({
                     <button
                       className="cu-btn cu-btn--primary"
                       onClick={() => setServerKeyViewingAccess(null)}
+                      ref={accessCloseButtonRef}
                       type="button"
                     >
                       Close
