@@ -234,6 +234,14 @@ export function CodexSubscriptionHub() {
   async function handleConnect(row: CodexSubscriptionConnectionView) {
     const epoch = ++connectEpoch.current
     setBusyKey(row.connectionKey)
+    // Open the verification page synchronously, inside the click handler and
+    // before any await — popup blockers honour user activation here, so the
+    // tab reliably appears. The device code lands in the card right after.
+    try {
+      window.open(CODEX_DEVICE_VERIFICATION_URI, '_blank', 'noopener,noreferrer')
+    } catch {
+      // Blocked or unavailable — the card's link is the manual fallback.
+    }
     try {
       const started = await startCodexDeviceConnect(
         row.status === 'connected' ? 'reconnect' : 'connect',
@@ -592,7 +600,7 @@ export function CodexSubscriptionHub() {
                   {userCode ? (
                     <div className="cu-device-setup" data-testid="codex-device-code">
                       <p className="cu-device-setup__step">
-                        1. Open the ChatGPT verification page:
+                        1. ChatGPT opened in a new tab — if it did not, use this link:
                       </p>
                       {(() => {
                         // Locked fallback (from dev): even if the backend

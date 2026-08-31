@@ -84,6 +84,10 @@ describe('CodexSubscriptionHub', () => {
   })
 
   it('creates the subscription when the name is confirmed and auto-starts sign-in', async () => {
+    vi.stubGlobal(
+      'open',
+      vi.fn(() => ({}))
+    )
     vi.mocked(createCodexSubscriptionConnection).mockResolvedValue(
       connection({
         connectionKey: 'codex-bbb',
@@ -211,6 +215,8 @@ describe('CodexSubscriptionHub', () => {
   })
 
   it('shows the device code card with the verification link and copy actions', async () => {
+    const openMock = vi.fn(() => ({}))
+    vi.stubGlobal('open', openMock)
     vi.mocked(startCodexDeviceConnect).mockResolvedValue({
       userCode: 'ABCD-1234',
       verificationUri: 'https://chatgpt.com/device',
@@ -236,6 +242,12 @@ describe('CodexSubscriptionHub', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Sign in with ChatGPT' }))
     const card = await screen.findByTestId('codex-device-code')
     expect(card).toHaveTextContent('ABCD-1234')
+    // The verification tab opens synchronously in the click handler.
+    expect(openMock).toHaveBeenCalledWith(
+      'https://auth.openai.com/codex/device',
+      '_blank',
+      'noopener,noreferrer'
+    )
     const link = screen.getByTestId('codex-device-verification-link')
     expect(link).toHaveAttribute('href', 'https://chatgpt.com/device')
     expect(link).toHaveAttribute('target', '_blank')
