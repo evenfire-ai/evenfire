@@ -16,7 +16,6 @@ function ProviderSummary({
 
   return (
     <span className="cu-agent-select__providers">
-      <span className="cu-agent-select__providers-label">Providers: </span>
       {providers.map((provider, index) => (
         <Fragment key={provider.id}>
           {index > 0 ? ', ' : null}
@@ -85,7 +84,7 @@ export function LlmSecretSelect({
             options.map((option, index) => (
               <Fragment key={option.value}>
                 {option.group && option.group !== options[index - 1]?.group ? (
-                  <span className="cu-agent-select__empty">{option.group}</span>
+                  <span className="cu-agent-select__group">{option.group}</span>
                 ) : null}
                 <button
                   type="button"

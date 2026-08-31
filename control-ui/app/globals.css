@@ -322,6 +322,12 @@ body.cu-body {
   max-width: min(28rem, 100%);
 }
 
+/* Detail-page forms that need more room for their selects and embedded cards
+   (agent Models & creds). */
+.cu-form-stack--wide {
+  max-width: min(35rem, 100%);
+}
+
 .cu-connector-credentials-form {
   display: grid;
   gap: var(--cu-space-3);
@@ -1808,6 +1814,10 @@ textarea.cu-input {
 
 .cu-tabs--flush {
   margin: 0;
+}
+
+.cu-tabs--nested {
+  margin-top: var(--cu-space-4);
 }
 
 .cu-tabs--tight {
@@ -6633,8 +6643,14 @@ textarea.cu-input {
   line-height: 1.25;
 }
 
-.cu-agent-select__providers-label {
-  margin-right: 0.1rem;
+.cu-agent-select__group {
+  display: block;
+  padding: var(--cu-space-2) 0.65rem var(--cu-space-05);
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-2xs);
+  font-weight: var(--cu-font-weight-bold);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
 .cu-agent-select__provider {
@@ -8509,19 +8525,9 @@ textarea.cu-input {
 }
 
 /* OpenAI ships a white-on-transparent mark, so on light surfaces it needs to be
-   knocked back to black. Scoped to provider-level controls — the model dropdown
-   reuses the same icon on a different treatment and must not inherit this. */
+   knocked back to black — provider pickers, credential dropdowns, model
+   dropdowns, chips, and filters all sit on light surfaces in this theme. */
 :root[data-theme='light']
-  :is(
-    .cu-llm-config__provider-select,
-    .cu-llm-cred-add,
-    .cu-llm-model-group__toggle,
-    .cu-filter-select__copy,
-    .cu-filter-select__icon,
-    .cu-chip,
-    .cu-px-provider,
-
-  )
   .cu-llm-provider-icon:is([data-provider='openai'], [data-provider='codex-subscription'])
   img {
   filter: brightness(0);

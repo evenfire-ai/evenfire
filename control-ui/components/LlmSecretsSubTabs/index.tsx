@@ -10,7 +10,7 @@ export function LlmSecretsSubTabs({ activeValue }: { activeValue: LlmSecretsSubT
     <TabBar<LlmSecretsSubTab>
       ariaLabel="LLM secret kinds"
       activeValue={activeValue}
-      className="cu-tabs--flush"
+      className="cu-tabs--flush cu-tabs--nested"
       options={[
         { value: 'api-key', href: CONTROL_ROUTES.secrets.llm, label: 'API-KEY' },
         {

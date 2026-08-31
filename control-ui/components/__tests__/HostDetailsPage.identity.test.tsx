@@ -201,7 +201,7 @@ describe('HostDetailsPage identity integration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'LLM Secret' }))
 
     const zaiOption = screen.getByRole('option', { name: /zai-secret/ })
-    expect(zaiOption).toHaveTextContent('Providers: Z.AI')
+    expect(zaiOption).toHaveTextContent('Z.AI')
     expect(zaiOption.querySelector('img')).toHaveAttribute('src', '/provider-icons/zai.svg')
   })
 
