@@ -174,7 +174,7 @@ export class SecretsLlmSubscriptionsPage {
     const response = await created
     expect(response.status(), `create grant must return 201, got ${response.status()}`).toBe(201)
     const body = (await response.json()) as { connectionKey?: string }
-    expect(body.connectionKey).toEqual(expect.any(String))
+    expect(body.connectionKey).toBeTruthy()
     await this.expectConnectModal()
     return String(body.connectionKey)
   }

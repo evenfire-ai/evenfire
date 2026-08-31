@@ -81,6 +81,27 @@ export type CodexOAuthErrorCode =
   | 'fingerprint_in_use'
   | 'connection_mismatch'
 
+const CODEX_OAUTH_ERROR_CODES: ReadonlySet<CodexOAuthErrorCode> = new Set([
+  'disabled',
+  'not_connected',
+  'state_replayed',
+  'state_expired',
+  'state_cancelled',
+  'replacement_required',
+  'stale_revision',
+  'refresh_in_flight',
+  'provider_unavailable',
+  'no_grant',
+  'invalid_callback',
+  'browser_oauth_unregistered',
+  'fingerprint_in_use',
+  'connection_mismatch',
+])
+
+export function isCodexOAuthErrorCode(value: string): value is CodexOAuthErrorCode {
+  return CODEX_OAUTH_ERROR_CODES.has(value as CodexOAuthErrorCode)
+}
+
 export class CodexSubscriptionOAuthError extends Error {
   readonly code: CodexOAuthErrorCode
 
@@ -160,7 +181,7 @@ export type CodexCatalogSyncResult =
   | {
       ok: false
       catalogStatus: Extract<CodexCatalogOutcome, 'auth-rejected' | 'unavailable'> | 'never_synced'
-      reason: string
+      reason: CodexOAuthErrorCode | 'catalog_sync_failed'
       added?: number
       refreshed?: number
       staled?: number
@@ -631,12 +652,8 @@ export async function runCodexCatalogSync(
       { err, event: 'codex_catalog_auto_sync_failed', connectionKey: key },
       'automatic catalog sync after grant failed'
     )
-    const reason =
-      err instanceof CodexSubscriptionOAuthError
-        ? err.code
-        : err instanceof Error
-          ? err.message
-          : 'catalog_sync_failed'
+    const reason: CodexOAuthErrorCode | 'catalog_sync_failed' =
+      err instanceof CodexSubscriptionOAuthError ? err.code : 'catalog_sync_failed'
     return { ok: false, catalogStatus: 'never_synced', reason }
   }
 }

@@ -369,14 +369,31 @@ describe('admin Codex subscription routes', () => {
     oauth.runCatalogSync.mockResolvedValue({
       ok: false,
       catalogStatus: 'never_synced',
-      reason: 'reauth_required',
+      reason: 'provider_unavailable',
     })
     const res = await request(makeAuthedApp(makeGateway(materialize))).post(
       '/admin/llm/providers/codex-subscription/connections/codex-aaa/catalog/sync'
     )
     expect(res.status).toBe(400)
-    expect(res.body.error).toBe('reauth_required')
+    expect(res.body.error).toBe('provider_unavailable')
     expect(materialize).not.toHaveBeenCalled()
+    assertNoLeak(res.body)
+  })
+
+  it('returns 503 catalog_sync_failed for an untyped catalog failure and never echoes the raw reason', async () => {
+    const materialize = vi.fn(async () => {})
+    oauth.runCatalogSync.mockResolvedValue({
+      ok: false,
+      catalogStatus: 'never_synced',
+      reason: 'proxy down',
+    })
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/catalog/sync'
+    )
+    expect(res.status).toBe(503)
+    expect(res.body.error).toBe('catalog_sync_failed')
+    expect(JSON.stringify(res.body)).not.toContain('proxy down')
+    expect(materialize).toHaveBeenCalledTimes(1)
     assertNoLeak(res.body)
   })
 
@@ -555,7 +572,42 @@ describe('admin Codex subscription routes', () => {
     expect(res.body.status).toBe('connected')
     expect(res.body.connection.catalogStatus).toBe('ready')
     expect(oauth.runCatalogSync).toHaveBeenCalledTimes(1)
+    expect(oauth.runCatalogSync).toHaveBeenCalledWith(
+      expect.objectContaining({ connectionKey: 'codex-aaa' }),
+      'codex-aaa',
+      expect.anything()
+    )
     expect(callOrder).toEqual(['sync', 'publish'])
+    assertNoLeak(res.body)
+  })
+
+  it('overlays this-attempt catalogStatus when connected poll sync fails without a connection', async () => {
+    const materialize = vi.fn(async () => {})
+    oauth.pollDevice.mockResolvedValue({
+      status: 'connected',
+      connection: {
+        connectionKey: 'codex-aaa',
+        status: 'connected',
+        catalogStatus: 'ready',
+      },
+    })
+    oauth.runCatalogSync.mockResolvedValue({
+      ok: false,
+      catalogStatus: 'never_synced',
+      reason: 'catalog_sync_failed',
+    })
+    const res = await request(makeAuthedApp(makeGateway(materialize))).get(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/device/poll'
+    )
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe('connected')
+    expect(res.body.connection.catalogStatus).toBe('never_synced')
+    expect(oauth.runCatalogSync).toHaveBeenCalledWith(
+      expect.objectContaining({ connectionKey: 'codex-aaa' }),
+      'codex-aaa',
+      expect.anything()
+    )
+    expect(materialize).toHaveBeenCalledTimes(1)
     assertNoLeak(res.body)
   })
 

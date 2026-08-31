@@ -11283,6 +11283,11 @@ textarea.cu-input {
   gap: var(--cu-space-2);
 }
 
+.cu-codex-device-code a {
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+}
+
 .cu-codex-device-code__row {
   display: flex;
   flex-wrap: wrap;

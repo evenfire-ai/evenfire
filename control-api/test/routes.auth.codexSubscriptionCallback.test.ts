@@ -99,6 +99,11 @@ describe('GET /auth/codex-subscription/callback', () => {
     )
     expect(res.headers['set-cookie']).toBeUndefined()
     expect(oauth.runCatalogSync).toHaveBeenCalledTimes(1)
+    expect(oauth.runCatalogSync).toHaveBeenCalledWith(
+      expect.objectContaining({ connectionKey: 'codex-aaa' }),
+      'codex-aaa',
+      expect.anything()
+    )
     assertNoLeak(res.text)
   })
 

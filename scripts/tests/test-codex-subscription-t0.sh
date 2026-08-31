@@ -216,6 +216,7 @@ run_group "workflow-recipes" "workflow-recipes" \
 
 run_group "control-ui" "control-ui" \
   "components/__tests__/CodexSubscriptionHub.test.tsx" \
+  "lib/__tests__/codexSubscription.sanitize.test.ts" \
   "components/__tests__/LlmProviderConfig.test.tsx" \
   "lib/__tests__/llm.codexGrantModel.test.ts" \
   "lib/__tests__/llmCredentialSelect.test.ts" \

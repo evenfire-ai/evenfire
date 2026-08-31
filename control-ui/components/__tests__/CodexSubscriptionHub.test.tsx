@@ -137,12 +137,46 @@ describe('CodexSubscriptionHub', () => {
     await waitFor(() => {
       expect(createCodexSubscriptionConnection).toHaveBeenCalledWith({ displayName: 'New team' })
     })
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
     expect(await screen.findByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Sync catalog' })).toBeInTheDocument()
     await waitFor(() => {
       expect(startCodexDeviceConnect).toHaveBeenCalledWith('connect', 'codex-bbb')
     })
     expect(syncCodexSubscriptionCatalog).not.toHaveBeenCalled()
     expect(revokeCodexSubscription).not.toHaveBeenCalled()
+  })
+
+  it('keeps the Add subscription dialog when Create is rejected', async () => {
+    vi.mocked(createCodexSubscriptionConnection).mockRejectedValue(new Error('name taken'))
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Add subscription' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), {
+      target: { value: 'Taken name' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+    expect(await screen.findByText('name taken')).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Add subscription' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Sign in with ChatGPT' })).not.toBeInTheDocument()
+    expect(startCodexDeviceConnect).not.toHaveBeenCalled()
+  })
+
+  it('does not POST when Create is clicked with an empty name', async () => {
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Add subscription' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+    expect(await screen.findByText('Subscription name is required.')).toBeInTheDocument()
+    expect(createCodexSubscriptionConnection).not.toHaveBeenCalled()
+    expect(startCodexDeviceConnect).not.toHaveBeenCalled()
   })
 
   it('renders a ChatGPT verification link and copies the device code', async () => {
@@ -170,6 +204,12 @@ describe('CodexSubscriptionHub', () => {
     expect(link).toHaveAttribute('href', 'https://auth.openai.com/codex/device')
     expect(link).toHaveAttribute('target', '_blank')
     expect(link.getAttribute('rel') ?? '').toContain('noopener')
+    expect(link.getAttribute('rel') ?? '').toContain('noreferrer')
+    expect(screen.getByTestId('codex-device-code').closest('[role="status"]')).toHaveTextContent(
+      'ABCD-1234'
+    )
+    expect(screen.getByRole('button', { name: 'Update subscription' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Saving…' })).not.toBeInTheDocument()
     expect(screen.getByTestId('codex-device-code')).toHaveTextContent('ABCD-1234')
     fireEvent.click(screen.getByRole('button', { name: 'Copy code' }))
     await waitFor(() => {
@@ -272,10 +312,38 @@ describe('CodexSubscriptionHub', () => {
     ).toBeInTheDocument()
   })
 
+  it('renders the ChatGPT verification link from the pencil Sign in path', async () => {
+    vi.mocked(startCodexDeviceConnect).mockResolvedValue({
+      userCode: 'WXYZ-9876',
+      verificationUri: 'https://auth.openai.com/codex/device',
+      intervalSeconds: 0.001,
+      state: 'state-pencil',
+      intent: 'reconnect',
+    })
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Update ChatGPT subscription Team A' })
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with ChatGPT' }))
+    const link = await screen.findByTestId('codex-device-verification-link')
+    expect(link).toHaveAttribute('href', 'https://auth.openai.com/codex/device')
+    expect(link.getAttribute('rel') ?? '').toContain('noopener')
+    expect(link.getAttribute('rel') ?? '').toContain('noreferrer')
+    expect(screen.getByTestId('codex-device-code').closest('[role="status"]')).toHaveTextContent(
+      'WXYZ-9876'
+    )
+    expect(screen.getByRole('button', { name: 'Update subscription' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Saving…' })).not.toBeInTheDocument()
+  })
+
   it('opens the grant modal for Sign in, Sync, and model toggles without binding hosts', async () => {
     vi.mocked(startCodexDeviceConnect).mockResolvedValue({
       userCode: 'ABCD-1234',
-      verificationUri: 'https://chatgpt.com/device',
+      verificationUri: 'https://auth.openai.com/codex/device',
       intervalSeconds: 1,
       state: 'state-1',
       intent: 'connect',

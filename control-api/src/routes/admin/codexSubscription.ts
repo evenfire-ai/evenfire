@@ -29,6 +29,7 @@ import {
   type CodexOAuthDeps,
   CodexSubscriptionOAuthError,
   getCodexSubscriptionConnection,
+  isCodexOAuthErrorCode,
   pollCodexDevice,
   refreshCodexSubscriptionConnection,
   revokeCodexSubscription,
@@ -417,6 +418,11 @@ export function createAdminCodexSubscriptionRouter(
         )
         if (sync.connection) {
           result = { ...result, connection: sync.connection }
+        } else if (!sync.ok) {
+          result = {
+            ...result,
+            connection: { ...result.connection, catalogStatus: sync.catalogStatus },
+          }
         }
         if (await publishRuntimeAllowlistOrFail(res)) return
       }
@@ -461,26 +467,16 @@ export function createAdminCodexSubscriptionRouter(
         })
         return
       }
-      if (synced.reason === 'no_grant') {
-        res.status(404).json({ error: 'no_grant' })
+      if (synced.reason === 'no_grant' || synced.reason === 'disabled') {
+        res.status(404).json({ error: synced.reason })
         return
       }
       if (synced.reason === 'stale_revision') {
         res.status(409).json({ error: 'stale_revision' })
         return
       }
-      if (synced.reason === 'disabled') {
-        res.status(404).json({ error: 'disabled' })
-        return
-      }
-      if (synced.reason !== 'catalog_sync_failed' && synced.reason !== 'unavailable') {
-        sendOAuthError(
-          res,
-          new CodexSubscriptionOAuthError(
-            synced.reason as ConstructorParameters<typeof CodexSubscriptionOAuthError>[0],
-            synced.reason
-          )
-        )
+      if (isCodexOAuthErrorCode(synced.reason)) {
+        sendOAuthError(res, new CodexSubscriptionOAuthError(synced.reason, synced.reason))
         return
       }
       if (await publishRuntimeAllowlistOrFail(res)) return

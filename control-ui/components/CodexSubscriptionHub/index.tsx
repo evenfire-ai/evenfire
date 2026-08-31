@@ -48,6 +48,7 @@ export function CodexSubscriptionHub() {
   const [error, setError] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const [busyKey, setBusyKey] = useState<string | null>(null)
+  const [deviceConnecting, setDeviceConnecting] = useState(false)
   const [creating, setCreating] = useState(false)
   const [createName, setCreateName] = useState('')
   const [editing, setEditing] = useState<CodexSubscriptionConnectionView | null>(null)
@@ -92,6 +93,12 @@ export function CodexSubscriptionHub() {
       .finally(() => setLoading(false))
   }, [capability, enabled, load])
 
+  useEffect(() => {
+    return () => {
+      connectEpoch.current += 1
+    }
+  }, [])
+
   const filtered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase()
     const rows = connections.filter(row => row.status !== 'revoked')
@@ -135,6 +142,7 @@ export function CodexSubscriptionHub() {
   async function openEdit(row: CodexSubscriptionConnectionView) {
     connectEpoch.current += 1
     setBusyKey(null)
+    setDeviceConnecting(false)
     setEditing(row)
     setEditName(grantLabel(row))
     setEditDefault(row.defaultModel ?? '')
@@ -157,12 +165,16 @@ export function CodexSubscriptionHub() {
   function closeEdit() {
     connectEpoch.current += 1
     setBusyKey(null)
+    setDeviceConnecting(false)
     setEditing(null)
     setEditName('')
     setEditDefault('')
     setEditModels([])
     setUserCode(null)
     setVerificationUri(null)
+    void load().catch(err => {
+      setError(err instanceof Error ? err.message : 'Failed to load ChatGPT subscriptions')
+    })
   }
 
   async function handleSaveEdit() {
@@ -187,6 +199,7 @@ export function CodexSubscriptionHub() {
   async function startDeviceConnect(row: CodexSubscriptionConnectionView) {
     const epoch = ++connectEpoch.current
     setBusyKey(row.connectionKey)
+    setDeviceConnecting(true)
     try {
       const started = await startCodexDeviceConnect(
         row.status === 'connected' ? 'reconnect' : 'connect',
@@ -234,7 +247,10 @@ export function CodexSubscriptionHub() {
       setVerificationUri(null)
       setError(err instanceof Error ? err.message : 'ChatGPT sign-in failed')
     } finally {
-      if (epoch === connectEpoch.current) setBusyKey(null)
+      if (epoch === connectEpoch.current) {
+        setBusyKey(null)
+        setDeviceConnecting(false)
+      }
     }
   }
 
@@ -607,7 +623,7 @@ export function CodexSubscriptionHub() {
                 </button>
               </div>
               {userCode ? (
-                <div className="cu-codex-device-code">
+                <div className="cu-codex-device-code" role="status">
                   <p className="cu-field__hint">
                     Enter this code at{' '}
                     {verificationUri ? (
@@ -689,7 +705,7 @@ export function CodexSubscriptionHub() {
                 onClick={() => void handleSaveEdit()}
                 disabled={Boolean(busyKey)}
               >
-                {busyKey ? 'Saving…' : 'Update subscription'}
+                {busyKey && !deviceConnecting ? 'Saving…' : 'Update subscription'}
               </button>
             </div>
           </div>

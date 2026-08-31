@@ -123,16 +123,21 @@ test.describe('Codex subscription connection', () => {
     const grantKey = await hub.createGrant(displayName)
     const deviceRes = await deviceStart
     expect(deviceRes.status(), `device start must return 200, got ${deviceRes.status()}`).toBe(200)
+    expect(new URL(deviceRes.url()).pathname).toBe(
+      `/api/v1/admin/llm/providers/codex-subscription/connections/${grantKey}/device/start`
+    )
     const deviceBody = (await deviceRes.json()) as {
       userCode?: string
       verificationUri?: string
     }
-    expect(deviceBody.userCode).toEqual(expect.any(String))
+    expect(deviceBody.userCode).toBeTruthy()
+    expect(deviceBody.verificationUri).toBe('https://auth.openai.com/codex/device')
 
     const link = page.getByTestId('codex-device-verification-link')
-    await expect(link).toHaveAttribute('href', 'https://auth.openai.com/codex/device')
+    await expect(link).toHaveAttribute('href', String(deviceBody.verificationUri))
     await expect(link).toHaveAttribute('target', '_blank')
     await expect(link).toHaveAttribute('rel', /noopener/)
+    await expect(link).toHaveAttribute('rel', /noreferrer/)
     await expect(page.getByTestId('codex-device-code')).toHaveText(String(deviceBody.userCode))
 
     await page.getByRole('button', { name: 'Copy code' }).click()

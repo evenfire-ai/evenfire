@@ -798,6 +798,31 @@ describe('codex subscription OAuth broker', () => {
     const result = await runCodexCatalogSync(deps(vi.fn()), 'team-plus', {
       listModels: async () => ({ outcome: 'unavailable' }),
     })
-    expect(result).toEqual({ ok: false, catalogStatus: 'never_synced', reason: 'proxy down' })
+    expect(result).toEqual({
+      ok: false,
+      catalogStatus: 'never_synced',
+      reason: 'catalog_sync_failed',
+    })
+  })
+
+  it('returns a typed OAuth reason when catalog sync throws CodexSubscriptionOAuthError', async () => {
+    repos.loadSecrets.mockResolvedValue({
+      refreshToken: 'refresh-secret',
+      accessToken: 'access-secret',
+      accessTokenExpiresAt: new Date(Date.now() + 60_000),
+      chatgptAccountId: 'acct',
+      credentialRevision: 1,
+    })
+    catalog.sync.mockRejectedValue(
+      new CodexSubscriptionOAuthError('provider_unavailable', 'chatgpt down')
+    )
+    const result = await runCodexCatalogSync(deps(vi.fn()), 'team-plus', {
+      listModels: async () => ({ outcome: 'unavailable' }),
+    })
+    expect(result).toEqual({
+      ok: false,
+      catalogStatus: 'never_synced',
+      reason: 'provider_unavailable',
+    })
   })
 })
