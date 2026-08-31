@@ -879,15 +879,17 @@ describe('SandboxUiPage', () => {
     // embedded app and the user can never reach the confirm/dismiss buttons.
     rerender(<SandboxUiPage deepLinkShellOverlayOpen />)
 
-    await waitFor(() => {
-      expect(screen.getByTestId('sandbox-ui-embed-preview')).toBeTruthy()
-      expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(false)
-    })
+    // toHaveBeenLastCalledWith(false) would be satisfied by a stray false->true
+    // ->false flicker inside this phase; assert the exact call list (scoped by
+    // the mockClear above) so any transient setVisible(true) fails the test.
+    await waitFor(() => expect(screen.getByTestId('sandbox-ui-embed-preview')).toBeTruthy())
+    expect(sandboxUi.setVisible.mock.calls).toEqual([[false]])
 
     sandboxUi.setVisible.mockClear()
     rerender(<SandboxUiPage />)
 
-    await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
+    await waitFor(() => expect(screen.queryByTestId('sandbox-ui-embed-preview')).toBeNull())
+    expect(sandboxUi.setVisible.mock.calls).toEqual([[true]])
   })
 
   it('hides an active native view even before local launch state is available', async () => {
