@@ -154,7 +154,9 @@ describe('RecipesTab — render', () => {
     render(<RecipesTab {...DEFAULT_PROPS} items={[]} />)
     // Copy/branches are covered by PluginsEmptyState.test; here we only assert
     // the explainer is shown for the no-plugins (non-search) empty state.
-    expect(screen.getByText('plugins-empty-state')).toBeInTheDocument()
+    const explainer = screen.getByText('plugins-empty-state')
+    expect(explainer).toBeInTheDocument()
+    expect(explainer.closest('td')?.querySelector('span > div')).toBeNull()
   })
 
   it('shows loading state in Refresh button', () => {

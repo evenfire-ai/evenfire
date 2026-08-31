@@ -239,7 +239,7 @@ export function TableStateRow({
   return (
     <tr>
       <td className={classNames('eft-table__state', `eft-table__state--${kind}`)} colSpan={colSpan}>
-        <span>{message}</span>
+        <div>{message}</div>
         {action ? <span className="eft-table__state-action">{action}</span> : null}
       </td>
     </tr>
