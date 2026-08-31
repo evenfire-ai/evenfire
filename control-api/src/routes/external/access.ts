@@ -4,6 +4,8 @@ import { sendPublicApiError } from '../../http/publicApiError.js'
 import type { K8sGateway } from '../../k8s.js'
 import {
   type ExternalAuthedRequest,
+  requireCompletedExternalSessionAuthenticationWithPublicErrors,
+  requireExternalSessionLimiterIdentityWithPublicErrors,
   requireValidExternalSessionTokenWithPublicErrors,
 } from '../../middleware/externalSessionAuth.js'
 import {
@@ -179,10 +181,10 @@ function sendCatalogError(
 export function createExternalAccessRouter(gateway: K8sGateway): Router {
   const router = Router()
   router.use('/external/access', attachAccessExecutionBudget)
-  router.use('/external/access', requireValidExternalSessionTokenWithPublicErrors)
 
   router.get(
     '/external/access/capabilities',
+    requireValidExternalSessionTokenWithPublicErrors,
     requireAuthenticatedExternalUserRateLimitContext,
     rateLimitMiddleware(externalUserRateLimitOptions('access_capabilities', 'authenticated')),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
@@ -208,12 +210,13 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/access/catalog',
-    asyncHandler((req, res, next) => requireEffectiveV2Contract('catalog', req, res, next)),
+    requireExternalSessionLimiterIdentityWithPublicErrors,
+    requireAuthenticatedExternalUserRateLimitContext,
     rateLimitMiddleware({
       bucketType: 'external_access_catalog',
       maxPerMinute: CATALOG_RATE_LIMIT_PER_MINUTE,
       getBucketKey: req =>
-        `external_access_catalog:${(req as ExternalAuthedRequest).externalAuth?.userId ?? 'unknown'}`,
+        `external_access_catalog:${(req as ExternalAuthedRequest).externalAuth!.userId}`,
       onLimited: (req, res, retryAfterSeconds) =>
         sendPublicApiError(
           req,
@@ -225,6 +228,8 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
           { retryAfterSeconds }
         ),
     }),
+    requireCompletedExternalSessionAuthenticationWithPublicErrors,
+    asyncHandler((req, res, next) => requireEffectiveV2Contract('catalog', req, res, next)),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const families = catalogFamilies(req.query.families)
       const limit = pageLimit(req.query.limit)
@@ -252,12 +257,13 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/access/resolve',
-    asyncHandler((req, res, next) => requireEffectiveV2Contract('action', req, res, next)),
+    requireExternalSessionLimiterIdentityWithPublicErrors,
+    requireAuthenticatedExternalUserRateLimitContext,
     rateLimitMiddleware({
       bucketType: 'external_access_resolve',
       maxPerMinute: RESOLVE_RATE_LIMIT_PER_MINUTE,
       getBucketKey: req =>
-        `external_access_resolve:${(req as ExternalAuthedRequest).externalAuth?.userId ?? 'unknown'}`,
+        `external_access_resolve:${(req as ExternalAuthedRequest).externalAuth!.userId}`,
       onLimited: (req, res, retryAfterSeconds) =>
         sendPublicApiError(
           req,
@@ -269,6 +275,8 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
           { retryAfterSeconds }
         ),
     }),
+    requireCompletedExternalSessionAuthenticationWithPublicErrors,
+    asyncHandler((req, res, next) => requireEffectiveV2Contract('action', req, res, next)),
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       const body = req.body as Record<string, unknown> | undefined
       const rawResource =
