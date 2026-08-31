@@ -1248,7 +1248,7 @@ export default function HostDetailsPage() {
                       onClick={() => void cancelModelEdit()}
                       disabled={busy}
                     >
-                      Cancel model changes
+                      Cancel
                     </button>
                     <button
                       type="button"
@@ -1263,7 +1263,7 @@ export default function HostDetailsPage() {
                             !codexModels.includes(modelNameDraft.trim())))
                       }
                     >
-                      {busy ? 'Saving…' : 'Save model configuration'}
+                      {busy ? 'Saving…' : 'Save'}
                     </button>
                   </div>
                 </>

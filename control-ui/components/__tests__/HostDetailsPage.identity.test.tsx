@@ -277,9 +277,7 @@ describe('HostDetailsPage identity integration', () => {
     expect(screen.queryByText('Secret reference')).not.toBeInTheDocument()
     expect(screen.queryByText('Broker-backed — no LLM secret required')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
-    expect(
-      screen.queryByRole('button', { name: 'Save model configuration' })
-    ).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
   })
 
   it('opens Advanced on the Hooks sub-tab', async () => {
@@ -409,8 +407,8 @@ describe('HostDetailsPage identity integration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
     expect(screen.getByLabelText('Credential')).toBeInTheDocument()
     expect(screen.queryByRole('radio', { name: /ChatGPT subscription/i })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Save model configuration' })).toBeDisabled()
-    fireEvent.click(screen.getByRole('button', { name: 'Save model configuration' }))
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
     expect(api.apiSend).not.toHaveBeenCalledWith(
       'PUT',
       '/api/v1/admin/hosts/foo',
