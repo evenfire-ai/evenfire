@@ -2538,7 +2538,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
              host_ref, recipe_namespace, recipe_name, payload_metadata, payload_sha256, occurred_at
            ) VALUES (
              'mcp_host_runtime', 'mcp-host', $1, $2, $3::uuid, $4,
-             $5, 'direct_chat', 'run_lifecycle', 'succeeded',
+             $5, 'direct_chat', 'run_start', 'started',
              'mcp-host:test', ARRAY[]::text[], 'not_applicable', $6,
              'mcp-host', 'standalone', '{}'::jsonb, $7, $8::timestamptz
            )
@@ -2552,7 +2552,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
            FROM inserted`,
         [
           randomUUID(),
-          randomUUID(),
+          randomBytes(32).toString('hex'),
           randomUUID(),
           fixture.sessionId,
           `span-${fixture.sessionId}`,
