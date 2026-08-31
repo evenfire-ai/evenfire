@@ -122,7 +122,15 @@ export function useChatDrawerResize(
 
   const onResizeHandleMouseDown = React.useCallback(
     (event: React.MouseEvent<HTMLElement>) => {
+      // Only the left button starts a drag; ignore middle/right so a right-click
+      // over the 8px strip while the left button is held can't open a second,
+      // re-entrant drag.
+      if (event.button !== 0) return
       event.preventDefault()
+      // End any drag still in progress before installing a new one, so the
+      // previous drag's window listeners/rAF are always torn down first — a
+      // re-entrant mousedown must never orphan an earlier drag's `onMove`.
+      endDragRef.current?.()
       // The drawer's right edge is fixed while docked; measure it once from the
       // live element (robust to any transformed ancestor) so the width tracks
       // `rightEdge - cursorX` for the whole drag.
@@ -143,14 +151,20 @@ export function useChatDrawerResize(
         pointerX = moveEvent.clientX
         if (!frame) frame = window.requestAnimationFrame(apply)
       }
-      // Idempotent teardown. Also runs on `blur` (mouse released outside the
-      // window never fires `mouseup`) and from the cleanup effect below.
+      // Teardown. Each closure removes its OWN listeners/rAF unconditionally,
+      // BEFORE the guard, so a superseded drag can always detach itself and can
+      // never leave this closure's `onMove` pinned to `window` (the leak this
+      // ordering fixes). The guard then protects ONLY the shared state
+      // (body style, isResizing, endDragRef) so a superseded drag's late
+      // teardown doesn't clobber the drag that replaced it. Also runs on `blur`
+      // (mouse released outside the window never fires `mouseup`) and from the
+      // cleanup effect below.
       const endDrag = () => {
-        if (endDragRef.current !== endDrag) return
         if (frame) window.cancelAnimationFrame(frame)
         window.removeEventListener('mousemove', onMove)
         window.removeEventListener('mouseup', endDrag)
         window.removeEventListener('blur', endDrag)
+        if (endDragRef.current !== endDrag) return
         document.body.style.userSelect = ''
         document.body.style.cursor = ''
         endDragRef.current = null
