@@ -279,6 +279,20 @@ export const hostFleetRequestsTotal = counter({
   labelNames: ['result'] as const,
 })
 
+// Closed `error` names; never a Host name.
+export const hostFleetBenignSupersessionsTotal = counter({
+  name: 'clerum_hcc_host_fleet_benign_supersessions_total',
+  help: 'Host fleet workers withdrawn because a name-equivalent benign supersession retired the pass.',
+  labelNames: ['error'] as const,
+})
+
+// Closed `decision` set: applied | retry.
+export const hostFleetLifecycleCatchTotal = counter({
+  name: 'clerum_hcc_host_fleet_lifecycle_catch_total',
+  help: 'Host fleet catch-path decisions while a CommunicationChannel lifecycle generation is in flight (applied when hostFailures is empty, retry otherwise).',
+  labelNames: ['decision'] as const,
+})
+
 // #493: successful replace() only, inside replaceWithConflictRetry. Kind is
 // next.kind ?? 'unknown'. Direct Role PUTs stay invisible until G5.
 export const writesTotal = counter({
