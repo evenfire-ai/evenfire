@@ -125,7 +125,12 @@ export function TableRow({
 }: React.HTMLAttributes<HTMLTableRowElement> & { onNavigate?: () => void }) {
   const activate = (event: KeyboardEvent<HTMLTableRowElement>) => {
     props.onKeyDown?.(event)
-    if (event.defaultPrevented || !onNavigate || (event.key !== 'Enter' && event.key !== ' '))
+    if (
+      event.defaultPrevented ||
+      event.target !== event.currentTarget ||
+      !onNavigate ||
+      (event.key !== 'Enter' && event.key !== ' ')
+    )
       return
     event.preventDefault()
     onNavigate()

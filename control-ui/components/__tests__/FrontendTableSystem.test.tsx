@@ -53,6 +53,8 @@ describe('shared frontend table system', () => {
             <td>Record</td>
             <td>
               <button onClick={onChild}>Child action</button>
+              <a href="/elsewhere">Child link</a>
+              <input aria-label="Child selection" type="checkbox" />
             </td>
           </TableRow>
         </tbody>
@@ -65,6 +67,16 @@ describe('shared frontend table system', () => {
     expect(onNavigate).toHaveBeenCalledTimes(2)
     fireEvent.click(screen.getByRole('button', { name: 'Child action' }))
     expect(onChild).toHaveBeenCalledOnce()
+    expect(onNavigate).toHaveBeenCalledTimes(2)
+
+    for (const child of [
+      screen.getByRole('button', { name: 'Child action' }),
+      screen.getByRole('link', { name: 'Child link' }),
+      screen.getByRole('checkbox', { name: 'Child selection' }),
+    ]) {
+      fireEvent.keyDown(child, { key: 'Enter' })
+      fireEvent.keyDown(child, { key: ' ' })
+    }
     expect(onNavigate).toHaveBeenCalledTimes(2)
   })
 
