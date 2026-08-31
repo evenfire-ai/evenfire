@@ -2,7 +2,7 @@
 
 import React, { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
 import { RowActionsMenu } from '@components/RowActionsMenu'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { LlmHookStatus } from '../lib/api'
@@ -13,7 +13,6 @@ import type {
 } from './GuardrailHooksTable.types'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconShield } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -204,29 +203,27 @@ export function GuardrailHooksTable({
           </>
         }
       />
-      {isInitialLoad ? (
-        <div className="eft-table-viewport cu-table-wrap cu-guardrails-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band cu-guardrails-table">
-            <thead>
-              <TableHeaderRow columns={columns} />
-            </thead>
-            <tbody>
-              <SkeletonTableRows columns={columns.length} rows={5} />
-            </tbody>
-          </DataTable>
-        </div>
-      ) : filteredRows.length === 0 ? (
-        <div className="cu-empty">
-          {normalizedSearch ? 'No guardrails match this search.' : 'No guardrails installed.'}
-        </div>
-      ) : (
-        <div className="eft-table-viewport cu-table-wrap cu-guardrails-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band cu-guardrails-table">
-            <thead>
-              <TableHeaderRow columns={columns} />
-            </thead>
-            <tbody>
-              {hookSort.sortedRows.map(({ key, name, item }) => {
+      <div className="eft-table-viewport cu-table-wrap cu-guardrails-table-wrap">
+        <DataTable className="eft-table cu-table cu-table--header-band cu-guardrails-table">
+          <thead>
+            <TableHeaderRow columns={columns} />
+          </thead>
+          <tbody>
+            {isInitialLoad ? (
+              <TableStateRow
+                colSpan={columns.length}
+                kind="loading"
+                message="Loading guardrails…"
+              />
+            ) : filteredRows.length === 0 ? (
+              <TableStateRow
+                colSpan={columns.length}
+                message={
+                  normalizedSearch ? 'No guardrails match this search.' : 'No guardrails installed.'
+                }
+              />
+            ) : (
+              hookSort.sortedRows.map(({ key, name, item }) => {
                 const spec = (item.spec || {}) as LlmHookSpecView
                 const lifecycle = (spec.lifecyclePoints || []).join(', ')
                 return (
@@ -286,11 +283,11 @@ export function GuardrailHooksTable({
                     </td>
                   </tr>
                 )
-              })}
-            </tbody>
-          </DataTable>
-        </div>
-      )}
+              })
+            )}
+          </tbody>
+        </DataTable>
+      </div>
     </div>
   )
 }

@@ -2,14 +2,13 @@
 
 import { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { DEFAULT_WORKFLOW_RECIPE_NAMESPACE } from '@constants/workflowRecipes'
 import type { WorkflowRecipeResource } from '../lib/api'
 import { PluginsEmptyState } from './PluginsEmptyState'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconWorkflow } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -128,29 +127,23 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
       />
       {error ? <div className="cu-banner cu-banner--error cu-table-error">{error}</div> : null}
 
-      {isInitialLoad ? (
-        <div className="eft-table-viewport cu-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band cu-installed-plugins-table">
-            <thead>
-              <TableHeaderRow columns={columns} />
-            </thead>
-            <tbody>
-              <SkeletonTableRows columns={columns.length} rows={4} />
-            </tbody>
-          </DataTable>
-        </div>
-      ) : filteredItems.length === 0 ? (
-        <div className="cu-empty">
-          {normalizedSearch ? 'No plugins match this search.' : <PluginsEmptyState />}
-        </div>
-      ) : (
-        <div className="eft-table-viewport cu-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band cu-installed-plugins-table">
-            <thead>
-              <TableHeaderRow columns={columns} />
-            </thead>
-            <tbody>
-              {recipeSort.sortedRows.map(item => {
+      <div className="eft-table-viewport cu-table-wrap">
+        <DataTable className="eft-table cu-table cu-table--header-band cu-installed-plugins-table">
+          <thead>
+            <TableHeaderRow columns={columns} />
+          </thead>
+          <tbody>
+            {isInitialLoad ? (
+              <TableStateRow colSpan={columns.length} kind="loading" message="Loading plugins…" />
+            ) : error && recipeSort.sortedRows.length === 0 ? (
+              <TableStateRow colSpan={columns.length} kind="error" message={error} />
+            ) : filteredItems.length === 0 ? (
+              <TableStateRow
+                colSpan={columns.length}
+                message={normalizedSearch ? 'No plugins match this search.' : <PluginsEmptyState />}
+              />
+            ) : (
+              recipeSort.sortedRows.map(item => {
                 const name = item.metadata?.name ?? '(unnamed)'
                 const namespace = item.metadata?.namespace ?? DEFAULT_WORKFLOW_RECIPE_NAMESPACE
                 const key = `${namespace}/${name}`
@@ -187,11 +180,11 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
                     <td className="cu-installed-plugin__created">{created}</td>
                   </tr>
                 )
-              })}
-            </tbody>
-          </DataTable>
-        </div>
-      )}
+              })
+            )}
+          </tbody>
+        </DataTable>
+      </div>
     </div>
   )
 }

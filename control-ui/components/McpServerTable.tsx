@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, TableStateRow } from '@clerum/frontend-table-system'
 import { copyTextToClipboard } from '@lib/clipboard'
 import type {
   ConnectorAccessSummary,
@@ -13,7 +13,6 @@ import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { SelectionDropdown } from './SelectionDropdown'
 import { IconCable } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -411,29 +410,27 @@ export function McpServerTable({
         }
       />
       {detailContent ? <div className="cu-card__body">{detailContent}</div> : null}
-      {isInitialLoad ? (
-        <div className="eft-table-viewport cu-table-wrap cu-connectors-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band cu-connectors-table">
-            <thead>
-              <TableHeaderRow columns={columns} />
-            </thead>
-            <tbody>
-              <SkeletonTableRows columns={columns.length} rows={5} />
-            </tbody>
-          </DataTable>
-        </div>
-      ) : filteredRows.length === 0 ? (
-        <div className="cu-empty">
-          {normalizedSearch ? 'No connectors match this search.' : 'No connectors found.'}
-        </div>
-      ) : (
-        <div className="eft-table-viewport cu-table-wrap cu-connectors-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band cu-connectors-table">
-            <thead>
-              <TableHeaderRow columns={columns} />
-            </thead>
-            <tbody>
-              {filteredRows.map(({ key, namespace, name, item }) => {
+      <div className="eft-table-viewport cu-table-wrap cu-connectors-table-wrap">
+        <DataTable className="eft-table cu-table cu-table--header-band cu-connectors-table">
+          <thead>
+            <TableHeaderRow columns={columns} />
+          </thead>
+          <tbody>
+            {isInitialLoad ? (
+              <TableStateRow
+                colSpan={columns.length}
+                kind="loading"
+                message="Loading connectors…"
+              />
+            ) : filteredRows.length === 0 ? (
+              <TableStateRow
+                colSpan={columns.length}
+                message={
+                  normalizedSearch ? 'No connectors match this search.' : 'No connectors found.'
+                }
+              />
+            ) : (
+              filteredRows.map(({ key, namespace, name, item }) => {
                 const spec = item.spec || {}
                 const assignedContexts = contextsForConnector(name)
                 const contextMembershipBusy = updatingContextMembershipKey === key
@@ -562,11 +559,11 @@ export function McpServerTable({
                     </td>
                   </tr>
                 )
-              })}
-            </tbody>
-          </DataTable>
-        </div>
-      )}
+              })
+            )}
+          </tbody>
+        </DataTable>
+      </div>
       {serverKeyAddingContexts
         ? (() => {
             const row = rows.find(candidate => candidate.key === serverKeyAddingContexts)

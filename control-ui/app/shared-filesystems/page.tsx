@@ -2,11 +2,15 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable, RowActionMenu, useTableSort } from '@clerum/frontend-table-system'
+import {
+  DataTable,
+  RowActionMenu,
+  TableStateRow,
+  useTableSort,
+} from '@clerum/frontend-table-system'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { IconSharedFiles } from '@components/Sidebar/icons'
-import { SkeletonTableRows } from '@components/SkeletonTableRows'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
@@ -230,100 +234,105 @@ export default function SharedFileSystemsPage() {
           </div>
         ) : null}
 
-        {filteredItems.length === 0 && !loading ? (
-          <div className="cu-card__body">
-            <div className="cu-empty">
-              {normalizedSearch ? (
-                'No shared files match this search.'
-              ) : (
-                <>
-                  No SharedFileSystems yet. Click <strong>New</strong> to create one
-                </>
-              )}
-            </div>
-          </div>
-        ) : (
-          <div className="eft-table-viewport cu-table-wrap">
-            <DataTable className="eft-table cu-table cu-table--header-band">
-              <thead>
-                <TableHeaderRow columns={columns} />
-              </thead>
-              <tbody>
-                {isInitialLoad ? (
-                  <SkeletonTableRows columns={columns.length} rows={5} />
-                ) : (
-                  fileSystemSort.sortedRows.map(item => {
-                    const name = item.metadata?.name || ''
-                    const isDeleting = deletingNames.has(name)
-                    const status = item.status || {}
-                    const mountedBy = status.mountedByContexts || []
-                    const phase = status.phase || 'Unknown'
-                    const phaseClass =
-                      phase === 'Ready'
-                        ? 'cu-badge cu-badge--ok'
-                        : phase === 'Failed' || phase === 'Degraded'
-                          ? 'cu-badge cu-badge--error'
-                          : 'cu-badge'
-                    return (
-                      <tr
-                        key={name}
-                        className="cu-table__row cu-table__row--clickable"
-                        onClick={() => {
-                          if (!isDeleting) {
-                            router.push(CONTROL_ROUTES.agentFiles.detail(name))
-                          }
-                        }}
-                        onKeyDown={e => {
-                          if (isDeleting) return
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault()
-                            router.push(CONTROL_ROUTES.agentFiles.detail(name))
-                          }
-                        }}
-                        tabIndex={0}
-                        role="link"
-                        aria-label={`Open shared filesystem ${name}`}
-                      >
-                        <td>
-                          <span className="cu-link">{name}</span>
-                        </td>
-                        <td>
-                          <span className={phaseClass}>{phase}</span>
-                        </td>
-                        <td>{status.capacity || item.spec?.size || '—'}</td>
-                        <td>{status.storageClassName || item.spec?.storageClassName || '—'}</td>
-                        <td>
-                          {mountedBy.length === 0
-                            ? '—'
-                            : mountedBy.map(c => `${c.namespace}/${c.name}`).join(', ')}
-                        </td>
-                        <td style={{ textAlign: 'right' }} onClick={e => e.stopPropagation()}>
-                          <RowActionMenu
-                            ariaLabel={`Actions for shared filesystem ${name}`}
-                            actions={[
-                              {
-                                key: 'view',
-                                label: 'View details',
-                                onSelect: () => router.push(CONTROL_ROUTES.agentFiles.detail(name)),
-                              },
-                              {
-                                key: 'delete',
-                                label: isDeleting ? 'Deleting…' : 'Delete',
-                                danger: true,
-                                disabled: isDeleting,
-                                onSelect: () => setDeleteTarget(name),
-                              },
-                            ]}
-                          />
-                        </td>
-                      </tr>
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band">
+            <thead>
+              <TableHeaderRow columns={columns} />
+            </thead>
+            <tbody>
+              {isInitialLoad ? (
+                <TableStateRow
+                  colSpan={columns.length}
+                  kind="loading"
+                  message="Loading agent files…"
+                />
+              ) : error && fileSystemSort.sortedRows.length === 0 ? (
+                <TableStateRow colSpan={columns.length} kind="error" message={error} />
+              ) : filteredItems.length === 0 ? (
+                <TableStateRow
+                  colSpan={columns.length}
+                  message={
+                    normalizedSearch ? (
+                      'No shared files match this search.'
+                    ) : (
+                      <>
+                        No SharedFileSystems yet. Click <strong>New</strong> to create one
+                      </>
                     )
-                  })
-                )}
-              </tbody>
-            </DataTable>
-          </div>
-        )}
+                  }
+                />
+              ) : (
+                fileSystemSort.sortedRows.map(item => {
+                  const name = item.metadata?.name || ''
+                  const isDeleting = deletingNames.has(name)
+                  const status = item.status || {}
+                  const mountedBy = status.mountedByContexts || []
+                  const phase = status.phase || 'Unknown'
+                  const phaseClass =
+                    phase === 'Ready'
+                      ? 'cu-badge cu-badge--ok'
+                      : phase === 'Failed' || phase === 'Degraded'
+                        ? 'cu-badge cu-badge--error'
+                        : 'cu-badge'
+                  return (
+                    <tr
+                      key={name}
+                      className="cu-table__row cu-table__row--clickable"
+                      onClick={() => {
+                        if (!isDeleting) {
+                          router.push(CONTROL_ROUTES.agentFiles.detail(name))
+                        }
+                      }}
+                      onKeyDown={e => {
+                        if (isDeleting) return
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          router.push(CONTROL_ROUTES.agentFiles.detail(name))
+                        }
+                      }}
+                      tabIndex={0}
+                      role="link"
+                      aria-label={`Open shared filesystem ${name}`}
+                    >
+                      <td>
+                        <span className="cu-link">{name}</span>
+                      </td>
+                      <td>
+                        <span className={phaseClass}>{phase}</span>
+                      </td>
+                      <td>{status.capacity || item.spec?.size || '—'}</td>
+                      <td>{status.storageClassName || item.spec?.storageClassName || '—'}</td>
+                      <td>
+                        {mountedBy.length === 0
+                          ? '—'
+                          : mountedBy.map(c => `${c.namespace}/${c.name}`).join(', ')}
+                      </td>
+                      <td style={{ textAlign: 'right' }} onClick={e => e.stopPropagation()}>
+                        <RowActionMenu
+                          ariaLabel={`Actions for shared filesystem ${name}`}
+                          actions={[
+                            {
+                              key: 'view',
+                              label: 'View details',
+                              onSelect: () => router.push(CONTROL_ROUTES.agentFiles.detail(name)),
+                            },
+                            {
+                              key: 'delete',
+                              label: isDeleting ? 'Deleting…' : 'Delete',
+                              danger: true,
+                              disabled: isDeleting,
+                              onSelect: () => setDeleteTarget(name),
+                            },
+                          ]}
+                        />
+                      </td>
+                    </tr>
+                  )
+                })
+              )}
+            </tbody>
+          </DataTable>
+        </div>
       </div>
 
       {deleteTarget ? (

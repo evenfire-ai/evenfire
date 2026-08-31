@@ -100,3 +100,17 @@ test('ordinary web record tables keep an explicit sorting model', () => {
     assert.match(source, /onSort/, `${file} must expose sortable headers`)
   }
 })
+
+test('primary record tables keep headers mounted through data states', () => {
+  const statefulTables = [
+    'control-ui/app/shared-filesystems/page.tsx',
+    'control-ui/components/GuardrailHooksTable.tsx',
+    'control-ui/components/McpServerTable.tsx',
+    'control-ui/components/RecipesTab.tsx',
+    'profile-ui/app/members/page.tsx',
+  ]
+
+  for (const file of statefulTables) {
+    assert.match(readFileSync(file, 'utf8'), /TableStateRow/, `${file} must render table state rows`)
+  }
+})
