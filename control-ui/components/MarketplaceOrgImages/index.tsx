@@ -129,7 +129,7 @@ export function MarketplaceOrgImages({ orgScope }: { orgScope: string }) {
                 ) : view.kind === 'unavailable' ? (
                   <TableStateRow
                     colSpan={columns.length}
-                    message="Image listing isn’t available on this registry yet. Your pushed images still work."
+                    message="Image listing isn’t available on this registry yet. Your pushed images still work, and the list will appear here once the registry exposes it."
                   />
                 ) : rows.length === 0 ? (
                   <TableStateRow
