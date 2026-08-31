@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import {
   DataTable,
   RowActionMenu,
+  TableRow,
   TableStateRow,
   useTableSort,
 } from '@clerum/frontend-table-system'
@@ -275,22 +276,14 @@ export default function SharedFileSystemsPage() {
                         ? 'cu-badge cu-badge--error'
                         : 'cu-badge'
                   return (
-                    <tr
+                    <TableRow
                       key={name}
                       className="cu-table__row cu-table__row--clickable"
-                      onClick={() => {
+                      onNavigate={() => {
                         if (!isDeleting) {
                           router.push(CONTROL_ROUTES.agentFiles.detail(name))
                         }
                       }}
-                      onKeyDown={e => {
-                        if (isDeleting) return
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault()
-                          router.push(CONTROL_ROUTES.agentFiles.detail(name))
-                        }
-                      }}
-                      tabIndex={0}
                       role="link"
                       aria-label={`Open shared filesystem ${name}`}
                     >
@@ -326,7 +319,7 @@ export default function SharedFileSystemsPage() {
                           ]}
                         />
                       </td>
-                    </tr>
+                    </TableRow>
                   )
                 })
               )}

@@ -317,21 +317,30 @@ describe('McpServerTable — connector access summaries', () => {
   })
 
   it('keeps connector endpoint links and image copy actions available', async () => {
+    const onEdit = vi.fn()
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: { writeText },
     })
     const image = 'ghcr.io/example/mcp:1.0'
-    render(<McpServerTable items={[makeItem({ name: 'airtable-server', image })]} />)
+    render(
+      <McpServerTable items={[makeItem({ name: 'airtable-server', image })]} onEdit={onEdit} />
+    )
 
-    expect(screen.getByRole('link', { name: /brave-search\.mcp-server/ })).toHaveAttribute(
+    const endpointLink = screen.getByRole('link', { name: /brave-search\.mcp-server/ })
+    expect(endpointLink).toHaveAttribute(
       'href',
       'http://brave-search.mcp-server.svc.cluster.local:3000/mcp'
     )
-    fireEvent.click(screen.getByRole('button', { name: 'Copy image reference' }))
+    fireEvent.click(endpointLink)
+    fireEvent.keyDown(endpointLink, { key: 'Enter' })
+    const copyButton = screen.getByRole('button', { name: 'Copy image reference' })
+    fireEvent.click(copyButton)
+    fireEvent.keyDown(copyButton, { key: 'Enter' })
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(image))
     expect(screen.getByRole('button', { name: 'image reference copied' })).toBeInTheDocument()
+    expect(onEdit).not.toHaveBeenCalled()
   })
 
   it('renders an empty access state when no principals are mapped', () => {

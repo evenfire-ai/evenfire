@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, TableRow } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   AdminPendingInvitationListItem,
@@ -246,13 +246,6 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
       source: 'member',
     })
     router.push(CONTROL_ROUTES.usersAndTeams.newAdmin(Object.fromEntries(searchParams)))
-  }
-
-  function handleRowKeyDown(event: React.KeyboardEvent<HTMLTableRowElement>, open: () => void) {
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault()
-      open()
-    }
   }
 
   function toggleTeamSort(nextKey: TeamSortKey) {
@@ -628,12 +621,10 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                     </thead>
                     <tbody>
                       {sortedTeams.map(team => (
-                        <tr
+                        <TableRow
                           key={team.id}
                           className="cu-table__row cu-table__row--clickable"
-                          onClick={() => openTeam(team)}
-                          onKeyDown={event => handleRowKeyDown(event, () => openTeam(team))}
-                          tabIndex={0}
+                          onNavigate={() => openTeam(team)}
                           aria-label={`Open team ${team.name}`}
                         >
                           <td>
@@ -699,7 +690,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                               ]}
                             />
                           </td>
-                        </tr>
+                        </TableRow>
                       ))}
                     </tbody>
                   </DataTable>
@@ -863,12 +854,10 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                         </thead>
                         <tbody>
                           {sortedUsers.map(user => (
-                            <tr
+                            <TableRow
                               key={user.id}
                               className="cu-table__row cu-table__row--clickable"
-                              onClick={() => openUser(user)}
-                              onKeyDown={event => handleRowKeyDown(event, () => openUser(user))}
-                              tabIndex={0}
+                              onNavigate={() => openUser(user)}
                               aria-label={`Open member ${user.name || user.email}`}
                             >
                               <td>
@@ -952,7 +941,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                                   ]}
                                 />
                               </td>
-                            </tr>
+                            </TableRow>
                           ))}
                         </tbody>
                       </DataTable>

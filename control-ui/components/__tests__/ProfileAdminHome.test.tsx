@@ -157,7 +157,9 @@ describe('ProfileAdminHome — members invitations', () => {
 
     await screen.findByLabelText('Open member Accepted Invitee')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Actions for member Accepted Invitee' }))
+    const trigger = screen.getByRole('button', { name: 'Actions for member Accepted Invitee' })
+    fireEvent.keyDown(trigger, { key: 'Enter' })
+    fireEvent.click(trigger)
 
     expect(mockPush).not.toHaveBeenCalled()
   })
@@ -219,7 +221,9 @@ describe('ProfileAdminHome — members invitations', () => {
 
     await screen.findByLabelText('Open team Marketing')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Actions for team Marketing' }))
+    const trigger = screen.getByRole('button', { name: 'Actions for team Marketing' })
+    fireEvent.keyDown(trigger, { key: 'Enter' })
+    fireEvent.click(trigger)
 
     expect(mockPush).not.toHaveBeenCalled()
   })

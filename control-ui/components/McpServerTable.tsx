@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable, TableStateRow } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, TableStateRow } from '@clerum/frontend-table-system'
 import { copyTextToClipboard } from '@lib/clipboard'
 import type {
   ConnectorAccessSummary,
@@ -436,21 +436,10 @@ export function McpServerTable({
                 const contextMembershipBusy = updatingContextMembershipKey === key
                 const access = accessByConnectorKey?.[key]
                 return (
-                  <tr
+                  <TableRow
                     className={onEdit ? 'cu-table__row cu-table__row--clickable' : undefined}
                     key={key}
-                    onClick={onEdit ? () => onEdit({ namespace, name }) : undefined}
-                    onKeyDown={
-                      onEdit
-                        ? event => {
-                            if (event.key === 'Enter' || event.key === ' ') {
-                              event.preventDefault()
-                              onEdit({ namespace, name })
-                            }
-                          }
-                        : undefined
-                    }
-                    tabIndex={onEdit ? 0 : undefined}
+                    onNavigate={onEdit ? () => onEdit({ namespace, name }) : undefined}
                   >
                     <td>{name}</td>
                     <td>
@@ -557,7 +546,7 @@ export function McpServerTable({
                         ]}
                       />
                     </td>
-                  </tr>
+                  </TableRow>
                 )
               })
             )}
