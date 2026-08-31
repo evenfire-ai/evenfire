@@ -73,6 +73,27 @@ test('shared table colors resolve through tokens declared by both web apps', () 
   assert.doesNotMatch(sharedCss, /--eft-[^:]+:[^;]*#[0-9a-f]{3,8}/i)
 })
 
+test('shared table typography uses each web app contract', () => {
+  const sharedCss = readFileSync('packages/frontend-table-system/styles.css', 'utf8')
+  const controlCss = readFileSync('control-ui/app/globals.css', 'utf8')
+  const profileCss = readFileSync('profile-ui/app/globals.css', 'utf8')
+
+  assert.match(
+    sharedCss,
+    /\.eft-table tbody td[\s\S]*font-size:\s*var\(--eft-table-cell-font-size\)/
+  )
+  assert.match(
+    sharedCss,
+    /\.eft-table thead th[\s\S]*font-size:\s*var\(--eft-table-header-font-size\)[\s\S]*font-weight:\s*var\(--eft-table-header-font-weight\)[\s\S]*letter-spacing:\s*var\(--eft-table-header-letter-spacing\)/
+  )
+  assert.match(controlCss, /--eft-table-header-font-size:\s*var\(--cu-font-size-2xs\)/)
+  assert.match(controlCss, /--eft-table-header-font-weight:\s*var\(--cu-font-weight-semibold\)/)
+  assert.match(controlCss, /--eft-table-cell-font-size:\s*var\(--cu-font-size-md\)/)
+  assert.match(profileCss, /--eft-table-header-font-size:\s*0\.75rem/)
+  assert.match(profileCss, /--eft-table-header-font-weight:\s*600/)
+  assert.match(profileCss, /--eft-table-cell-font-size:\s*0\.9rem/)
+})
+
 test('ordinary web record tables keep an explicit sorting model', () => {
   const ordinaryRecordTables = [
     'control-ui/app/outputs/page.tsx',

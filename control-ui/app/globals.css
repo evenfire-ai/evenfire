@@ -79,6 +79,10 @@
   --cu-font-size-2xl: 1.125rem; /* 18px  page subhead                   */
   --cu-font-size-3xl: 1.375rem; /* 22px  page hero                      */
   --cu-font-size-4xl: 1.75rem; /* 28px  auth hero only                 */
+  --eft-table-header-font-size: var(--cu-font-size-2xs);
+  --eft-table-header-font-weight: var(--cu-font-weight-semibold);
+  --eft-table-header-letter-spacing: 0.05em;
+  --eft-table-cell-font-size: var(--cu-font-size-md);
 
   --cu-font-weight-regular: 400;
   --cu-font-weight-medium: 500;

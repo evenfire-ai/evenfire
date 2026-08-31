@@ -121,9 +121,9 @@
   background: var(--eft-surface-muted);
   border-bottom: 1px solid var(--eft-border);
   color: var(--eft-muted);
-  font-size: 0.6875rem;
-  font-weight: 700;
-  letter-spacing: 0.055em;
+  font-size: var(--eft-table-header-font-size);
+  font-weight: var(--eft-table-header-font-weight);
+  letter-spacing: var(--eft-table-header-letter-spacing);
   padding: 0.625rem 0.75rem;
   position: sticky;
   text-align: left;
@@ -134,7 +134,7 @@
 }
 .eft-table tbody td {
   border-bottom: 1px solid color-mix(in srgb, var(--eft-border) 75%, transparent);
-  font-size: 0.8125rem;
+  font-size: var(--eft-table-cell-font-size);
   line-height: 1.35;
   padding: 0.625rem 0.75rem;
   vertical-align: middle;

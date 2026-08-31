@@ -60,6 +60,10 @@
   --cu-create-flow-min-height: calc(100vh - 7rem);
   --cu-toast-top-offset: calc(var(--cu-space-5) * 3.5);
   --cu-font: 'Inter', system-ui, -apple-system, sans-serif;
+  --eft-table-header-font-size: 0.75rem;
+  --eft-table-header-font-weight: 600;
+  --eft-table-header-letter-spacing: 0.04em;
+  --eft-table-cell-font-size: 0.9rem;
 }
 
 *,
