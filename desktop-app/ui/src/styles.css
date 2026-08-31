@@ -12683,7 +12683,11 @@ pre {
 
 .chat-drawer {
   position: fixed;
-  top: calc(var(--space-4) + 36px + var(--space-2));
+  /* Follow the measured top of the embed slot (`--chat-drawer-top`, published by
+     App from useEmbedBounds) so the drawer stays aligned when the sandbox-ui
+     header wraps in a narrow window. The fallback keeps the pre-measure/test
+     behavior: a single-row header at space-4 + 36px + space-2 = 64px. */
+  top: var(--chat-drawer-top, calc(var(--space-4) + 36px + var(--space-2)));
   right: var(--space-4);
   bottom: var(--space-4);
   width: var(--chat-drawer-width);

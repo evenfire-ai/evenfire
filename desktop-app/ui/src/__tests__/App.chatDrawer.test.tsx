@@ -20,6 +20,7 @@ const sandboxUiPageHarness = vi.hoisted(() => ({
     chatDrawerOpen?: boolean
     onToggleChatDrawer?: () => void
     onEmbeddedAppMounted?: () => void
+    onEmbedSlotTopChange?: (topPx: number) => void
   },
 }))
 const appHeaderHarness = vi.hoisted(() => ({
@@ -590,5 +591,29 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
     resizeTo(2000)
     expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
     expect(screen.queryByRole('button', { name: 'Open chats' })).toBeNull()
+  })
+
+  it('publishes --chat-drawer-top from the measured embed slot, falling back until measured', () => {
+    render(<App />)
+
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+
+    const panel = document.querySelector('.content-panel') as HTMLElement
+    expect(panel.className).toContain('content-panel--chat-drawer-open')
+    // The width var is always present while docked; the top var stays absent until
+    // the embed reports a measured top, so the CSS 64px fallback applies.
+    expect(panel.style.getPropertyValue('--chat-drawer-width')).not.toBe('')
+    expect(panel.style.getPropertyValue('--chat-drawer-top')).toBe('')
+
+    // The embed reports a wrapped-header top through the real callback path.
+    act(() => sandboxUiPageHarness.props?.onEmbedSlotTopChange?.(140))
+    expect(panel.style.getPropertyValue('--chat-drawer-top')).toBe('140px')
   })
 })

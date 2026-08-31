@@ -262,6 +262,10 @@ export function App() {
   const [notificationDrawerReady, setNotificationDrawerReady] = React.useState(false)
   const [chatDrawerOpen, setChatDrawerOpen] = React.useState(false)
   const [chatDrawerReady, setChatDrawerReady] = React.useState(false)
+  // Measured top of the embed slot, published as `--chat-drawer-top` so the fixed
+  // drawer follows the app content down when the sandbox-ui header wraps (narrow
+  // window). 0 means "not measured yet" -> the CSS fallback (64px) applies.
+  const [chatDrawerEmbedTop, setChatDrawerEmbedTop] = React.useState(0)
   const [chatSwitcherFocusRequestId, setChatSwitcherFocusRequestId] = React.useState(0)
   const [availableSandboxUiApps, setAvailableSandboxUiApps] = React.useState<ActiveSandboxUiApp[]>(
     []
@@ -2013,7 +2017,14 @@ export function App() {
                               }${chatDrawerVisible ? ' content-panel--chat-drawer-open' : ''}`}
                               style={
                                 chatDrawerVisible
-                                  ? { '--chat-drawer-width': `${chatDrawerResize.width}px` }
+                                  ? {
+                                      '--chat-drawer-width': `${chatDrawerResize.width}px`,
+                                      // Only publish the measured top once we have one;
+                                      // when 0 (pre-measure/tests) the CSS fallback applies.
+                                      ...(chatDrawerEmbedTop > 0
+                                        ? { '--chat-drawer-top': `${chatDrawerEmbedTop}px` }
+                                        : {}),
+                                    }
                                   : undefined
                               }
                             >
@@ -2087,6 +2098,7 @@ export function App() {
                                     onEmbeddedAppBack={handleSandboxUiClosed}
                                     onEmbeddedAppRemoved={handleSandboxUiRemoved}
                                     onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
+                                    onEmbedSlotTopChange={setChatDrawerEmbedTop}
                                     onNotify={vm.pushToast}
                                     onShortcutOpenResult={handleSandboxUiShortcutOpenResult}
                                   />
