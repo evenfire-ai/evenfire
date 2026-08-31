@@ -72,3 +72,31 @@ test('shared table colors resolve through tokens declared by both web apps', () 
   assert.match(controlCss, /:root\[data-theme='light'\][\s\S]*--cu-surface-hover\s*:/)
   assert.doesNotMatch(sharedCss, /--eft-[^:]+:[^;]*#[0-9a-f]{3,8}/i)
 })
+
+test('ordinary web record tables keep an explicit sorting model', () => {
+  const ordinaryRecordTables = [
+    'control-ui/app/outputs/page.tsx',
+    'control-ui/app/shared-filesystems/page.tsx',
+    'control-ui/components/CodexSubscriptionHub/index.tsx',
+    'control-ui/components/CommunicationChannelsTable.tsx',
+    'control-ui/components/ControlAdminsPanel/index.tsx',
+    'control-ui/components/GuardrailHooksTable.tsx',
+    'control-ui/components/LlmPriceTable.tsx',
+    'control-ui/components/MarketplaceOrgImages/index.tsx',
+    'control-ui/components/McpServerTable.tsx',
+    'control-ui/components/PublisherView/GrantedToMe.tsx',
+    'control-ui/components/PublisherView/OwnedEntries.tsx',
+    'control-ui/components/RecipesTab.tsx',
+    'control-ui/components/RegistryApiKeysPanel.tsx',
+    'control-ui/components/RegistryCatalog.tsx',
+    'control-ui/components/SecretsTable.tsx',
+    'control-ui/components/TokenBudgetTable.tsx',
+    'profile-ui/app/members/page.tsx',
+  ]
+
+  for (const file of ordinaryRecordTables) {
+    const source = readFileSync(file, 'utf8')
+    assert.match(source, /useTableSort|sortKey/, `${file} must declare its sorting model`)
+    assert.match(source, /onSort/, `${file} must expose sortable headers`)
+  }
+})

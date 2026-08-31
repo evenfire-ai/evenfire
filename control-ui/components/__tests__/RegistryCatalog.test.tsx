@@ -226,14 +226,17 @@ describe('RegistryCatalog tabs and columns', () => {
         element => element.textContent
       )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by name ascending' }))
     expect(listedNames()).toEqual(['alpha-search', 'brave-search', 'zebra-search'])
+    expect(screen.getByRole('columnheader', { name: 'Name' })).toHaveAttribute(
+      'aria-sort',
+      'ascending'
+    )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by version descending' }))
-    expect(listedNames()).toEqual(['alpha-search', 'zebra-search', 'brave-search'])
-
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by version ascending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Version ascending' }))
     expect(listedNames()).toEqual(['brave-search', 'zebra-search', 'alpha-search'])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Version descending' }))
+    expect(listedNames()).toEqual(['alpha-search', 'zebra-search', 'brave-search'])
   })
 })
 

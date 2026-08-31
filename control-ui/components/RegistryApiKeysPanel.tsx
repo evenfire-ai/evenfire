@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, useTableSort } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type CreateRegistryApiKeyInput,
@@ -69,6 +69,43 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
   // likely than a real managed deployment misreporting its own mode.
   const [connectionMode, setConnectionMode] = useState<'self-hosted' | 'managed' | 'unknown'>(
     'unknown'
+  )
+  const keySort = useTableSort<
+    RegistryApiKey,
+    'prefix' | 'description' | 'scopes' | 'created_by' | 'created' | 'expires' | 'last_used'
+  >({
+    rows: view.kind === 'ready' ? view.keys : [],
+    defaultKey: 'created',
+    defaultDirection: 'desc',
+    identity: key => key.id,
+    accessors: {
+      prefix: key => key.key_prefix,
+      description: key => key.description,
+      scopes: key => key.scopes.join(', '),
+      created_by: key => key.created_by_username,
+      created: key => key.created_at,
+      expires: key => key.expires_at,
+      last_used: key => key.last_used_at,
+    },
+  })
+  const columns = API_KEYS_COLUMNS.map(column =>
+    column.key === 'actions'
+      ? column
+      : {
+          ...column,
+          activeDirection: keySort.key === column.key ? keySort.direction : null,
+          onSort: () =>
+            keySort.sortBy(
+              column.key as
+                | 'prefix'
+                | 'description'
+                | 'scopes'
+                | 'created_by'
+                | 'created'
+                | 'expires'
+                | 'last_used'
+            ),
+        }
   )
 
   const load = useCallback(async () => {
@@ -203,10 +240,10 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
             <div className="eft-table-viewport cu-table-wrap">
               <DataTable className="eft-table cu-table">
                 <thead>
-                  <TableHeaderRow columns={API_KEYS_COLUMNS} />
+                  <TableHeaderRow columns={columns} />
                 </thead>
                 <tbody>
-                  {view.keys.map(k => (
+                  {keySort.sortedRows.map(k => (
                     <tr key={k.id}>
                       <td>
                         <code>{k.key_prefix}</code>

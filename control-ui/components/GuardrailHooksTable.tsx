@@ -2,7 +2,7 @@
 
 import React, { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, useTableSort } from '@clerum/frontend-table-system'
 import { RowActionsMenu } from '@components/RowActionsMenu'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { LlmHookStatus } from '../lib/api'
@@ -116,6 +116,32 @@ export function GuardrailHooksTable({
         .includes(normalizedSearch)
     })
   }, [normalizedSearch, rows])
+  const hookSort = useTableSort<
+    (typeof filteredRows)[number],
+    'name' | 'lifecycle' | 'order' | 'failMode' | 'status'
+  >({
+    rows: filteredRows,
+    defaultKey: 'name',
+    identity: row => row.key,
+    accessors: {
+      name: row => row.name,
+      lifecycle: row => ((row.item.spec || {}) as LlmHookSpecView).lifecyclePoints?.join(', '),
+      order: row => ((row.item.spec || {}) as LlmHookSpecView).order,
+      failMode: row => ((row.item.spec || {}) as LlmHookSpecView).failMode,
+      status: row =>
+        row.item.status?.conditions?.find(condition => condition.type === 'Ready')?.status,
+    },
+  })
+  const columns = HOOK_COLUMNS.map(column =>
+    column.key === 'actions'
+      ? column
+      : {
+          ...column,
+          activeDirection: hookSort.key === column.key ? hookSort.direction : null,
+          onSort: () =>
+            hookSort.sortBy(column.key as 'name' | 'lifecycle' | 'order' | 'failMode' | 'status'),
+        }
+  )
 
   React.useEffect(() => {
     if (!onRefresh) return
@@ -182,10 +208,10 @@ export function GuardrailHooksTable({
         <div className="eft-table-viewport cu-table-wrap cu-guardrails-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band cu-guardrails-table">
             <thead>
-              <TableHeaderRow columns={HOOK_COLUMNS} />
+              <TableHeaderRow columns={columns} />
             </thead>
             <tbody>
-              <SkeletonTableRows columns={HOOK_COLUMNS.length} rows={5} />
+              <SkeletonTableRows columns={columns.length} rows={5} />
             </tbody>
           </DataTable>
         </div>
@@ -197,10 +223,10 @@ export function GuardrailHooksTable({
         <div className="eft-table-viewport cu-table-wrap cu-guardrails-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band cu-guardrails-table">
             <thead>
-              <TableHeaderRow columns={HOOK_COLUMNS} />
+              <TableHeaderRow columns={columns} />
             </thead>
             <tbody>
-              {filteredRows.map(({ key, name, item }) => {
+              {hookSort.sortedRows.map(({ key, name, item }) => {
                 const spec = (item.spec || {}) as LlmHookSpecView
                 const lifecycle = (spec.lifecyclePoints || []).join(', ')
                 return (

@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { DataTable, TableRow } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, useTableSort } from '@clerum/frontend-table-system'
 import { MARKETPLACE_ENTRY_TYPE_LABELS } from '@constants/marketplaceEntryTypes'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
@@ -37,20 +37,6 @@ const COLUMNS: TableHeaderColumn[] = [
 
 function entryKey(e: OwnedRegistryEntry): string {
   return `${e.name}@${e.version}`
-}
-
-// Descending semver-ish sort so the latest version leads each group. Falls back
-// to a reverse lexical compare when a segment isn't numeric.
-function compareVersionDesc(a: string, b: string): number {
-  const pa = a.split('.')
-  const pb = b.split('.')
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const x = Number.parseInt(pa[i] ?? '0', 10)
-    const y = Number.parseInt(pb[i] ?? '0', 10)
-    if (Number.isNaN(x) || Number.isNaN(y)) return b.localeCompare(a)
-    if (x !== y) return y - x
-  }
-  return b.localeCompare(a)
 }
 
 // The registry's owned-entries payload carries `serverMode` but not `entry_type`
@@ -175,14 +161,30 @@ export function OwnedEntries({
   // cross-org sharing does to this org's private entries, so a `?type=` filter
   // that happens to hide them all must not make it disappear.
   const hasPrivateEntries = entries.some(e => e.visibility === 'private')
-  const sortedEntries = useMemo(
-    () =>
-      [...visibleEntries].sort(
-        (left, right) =>
-          left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }) ||
-          compareVersionDesc(left.version, right.version)
-      ),
-    [visibleEntries]
+  const entrySort = useTableSort<
+    OwnedRegistryEntry,
+    'name' | 'type' | 'version' | 'visibility' | 'status'
+  >({
+    rows: visibleEntries,
+    defaultKey: 'name',
+    identity: entryKey,
+    accessors: {
+      name: entry => entry.name,
+      type: entry => entryTypeLabel(entry),
+      version: entry => entry.version,
+      visibility: entry => entry.visibility,
+      status: entry => entry.status,
+    },
+  })
+  const columns = COLUMNS.map(column =>
+    column.key === 'actions'
+      ? column
+      : {
+          ...column,
+          activeDirection: entrySort.key === column.key ? entrySort.direction : null,
+          onSort: () =>
+            entrySort.sortBy(column.key as 'name' | 'type' | 'version' | 'visibility' | 'status'),
+        }
   )
 
   return (
@@ -227,10 +229,10 @@ export function OwnedEntries({
               <div className="eft-table-viewport cu-table-wrap">
                 <DataTable className="eft-table cu-table">
                   <thead>
-                    <TableHeaderRow columns={COLUMNS} />
+                    <TableHeaderRow columns={columns} />
                   </thead>
                   <tbody>
-                    {sortedEntries.map(e => {
+                    {entrySort.sortedRows.map(e => {
                       const isPrivate = e.visibility === 'private'
                       const detailRoute = CONTROL_ROUTES.marketplace.entry(e.name, e.version)
                       const rowActions: RowActionMenuItem[] = [

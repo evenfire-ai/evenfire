@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, useTableSort } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { GrantedToMeItem } from '../../lib/api'
 import type { InboundGrantsStatus } from '../../lib/hooks/useInboundGrants'
@@ -36,6 +36,21 @@ export function GrantedToMe({
   grants: GrantedToMeItem[]
   reload: () => void
 }) {
+  const grantSort = useTableSort<GrantedToMeItem, 'plugin' | 'owner' | 'since'>({
+    rows: grants,
+    defaultKey: 'plugin',
+    identity: grant => `${grant.ownerOrg}/${grant.pluginName}`,
+    accessors: {
+      plugin: grant => grant.pluginName,
+      owner: grant => grant.ownerOrg,
+      since: grant => grant.createdAt,
+    },
+  })
+  const columns = COLUMNS.map(column => ({
+    ...column,
+    activeDirection: grantSort.key === column.key ? grantSort.direction : null,
+    onSort: () => grantSort.sortBy(column.key as 'plugin' | 'owner' | 'since'),
+  }))
   if (status === 'loading') {
     return <SectionLoadingSkeleton label="Loading shared plugins" rows={3} />
   }
@@ -59,10 +74,10 @@ export function GrantedToMe({
     <div className="eft-table-viewport cu-table-wrap">
       <DataTable className="eft-table cu-table">
         <thead>
-          <TableHeaderRow columns={COLUMNS} />
+          <TableHeaderRow columns={columns} />
         </thead>
         <tbody>
-          {grants.map(g => (
+          {grantSort.sortedRows.map(g => (
             <tr key={`${g.ownerOrg}/${g.pluginName}`}>
               <td>
                 <code>{g.pluginName}</code>

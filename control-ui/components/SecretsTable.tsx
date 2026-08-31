@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, TableHeaderCell, useTableSort } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type RecipeSecretItem,
@@ -162,6 +162,38 @@ export function SecretsTable({
         .includes(normalizedRecipeSearch)
     )
   }, [recipeRows, normalizedRecipeSearch])
+  const llmSort = useTableSort<string, 'name' | 'providers'>({
+    rows: filteredRows,
+    defaultKey: 'name',
+    identity: name => name,
+    accessors: {
+      name: name => name,
+      providers: name =>
+        getProvidersWithCompleteCredentials(keysByName.get(name) ?? [])
+          .map(getProviderLabel)
+          .join(', '),
+    },
+  })
+  const mcpSort = useTableSort<McpSecretRow, 'name' | 'servers' | 'registry'>({
+    rows: filteredMcpRows,
+    defaultKey: 'name',
+    identity: row => row.name,
+    accessors: {
+      name: row => row.name,
+      servers: row => row.servers.join(', '),
+      registry: row => row.registryEntries.join(', '),
+    },
+  })
+  const recipeSort = useTableSort<RecipeSecretRow, 'name' | 'keys' | 'recipes'>({
+    rows: filteredRecipeRows,
+    defaultKey: 'name',
+    identity: row => `${row.namespace}/${row.name}`,
+    accessors: {
+      name: row => `${row.namespace}/${row.name}`,
+      keys: row => row.keys.join(', '),
+      recipes: row => row.recipes.join(', '),
+    },
+  })
 
   function openUpdate(name: string) {
     setEditingName(name)
@@ -494,8 +526,8 @@ export function SecretsTable({
             <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th>Providers</th>
+                  <TableHeaderCell label="Name" />
+                  <TableHeaderCell label="Providers" />
                   <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
                 </tr>
               </thead>
@@ -531,13 +563,21 @@ export function SecretsTable({
             <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th>Providers</th>
+                  <TableHeaderCell
+                    activeDirection={llmSort.key === 'name' ? llmSort.direction : null}
+                    label="Name"
+                    onSort={() => llmSort.sortBy('name')}
+                  />
+                  <TableHeaderCell
+                    activeDirection={llmSort.key === 'providers' ? llmSort.direction : null}
+                    label="Providers"
+                    onSort={() => llmSort.sortBy('providers')}
+                  />
                   <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
                 </tr>
               </thead>
               <tbody>
-                {filteredRows.map(name => {
+                {llmSort.sortedRows.map(name => {
                   const providers = getProvidersWithCompleteCredentials(keysByName.get(name) ?? [])
                   return (
                     <tr key={name}>
@@ -592,9 +632,9 @@ export function SecretsTable({
             <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th style={{ width: '36%' }}>Attached connectors</th>
-                  <th style={{ width: '34%' }}>Marketplace Source</th>
+                  <TableHeaderCell label="Name" />
+                  <TableHeaderCell label="Attached connectors" style={{ width: '36%' }} />
+                  <TableHeaderCell label="Marketplace Source" style={{ width: '34%' }} />
                   <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
                 </tr>
               </thead>
@@ -629,14 +669,28 @@ export function SecretsTable({
             <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th style={{ width: '36%' }}>Attached connectors</th>
-                  <th style={{ width: '34%' }}>Marketplace Source</th>
+                  <TableHeaderCell
+                    activeDirection={mcpSort.key === 'name' ? mcpSort.direction : null}
+                    label="Name"
+                    onSort={() => mcpSort.sortBy('name')}
+                  />
+                  <TableHeaderCell
+                    activeDirection={mcpSort.key === 'servers' ? mcpSort.direction : null}
+                    label="Attached connectors"
+                    onSort={() => mcpSort.sortBy('servers')}
+                    style={{ width: '36%' }}
+                  />
+                  <TableHeaderCell
+                    activeDirection={mcpSort.key === 'registry' ? mcpSort.direction : null}
+                    label="Marketplace Source"
+                    onSort={() => mcpSort.sortBy('registry')}
+                    style={{ width: '34%' }}
+                  />
                   <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
                 </tr>
               </thead>
               <tbody>
-                {filteredMcpRows.map(row => (
+                {mcpSort.sortedRows.map(row => (
                   <tr key={row.name}>
                     <td>{row.name}</td>
                     <td style={{ color: 'var(--cu-text-soft)', fontSize: '0.8125rem' }}>
@@ -680,9 +734,9 @@ export function SecretsTable({
             <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th style={{ width: '32%' }}>Keys</th>
-                  <th style={{ width: '32%' }}>Used by recipes</th>
+                  <TableHeaderCell label="Name" />
+                  <TableHeaderCell label="Keys" style={{ width: '32%' }} />
+                  <TableHeaderCell label="Used by recipes" style={{ width: '32%' }} />
                   <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
                 </tr>
               </thead>
@@ -723,14 +777,28 @@ export function SecretsTable({
             <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th style={{ width: '32%' }}>Keys</th>
-                  <th style={{ width: '32%' }}>Used by recipes</th>
+                  <TableHeaderCell
+                    activeDirection={recipeSort.key === 'name' ? recipeSort.direction : null}
+                    label="Name"
+                    onSort={() => recipeSort.sortBy('name')}
+                  />
+                  <TableHeaderCell
+                    activeDirection={recipeSort.key === 'keys' ? recipeSort.direction : null}
+                    label="Keys"
+                    onSort={() => recipeSort.sortBy('keys')}
+                    style={{ width: '32%' }}
+                  />
+                  <TableHeaderCell
+                    activeDirection={recipeSort.key === 'recipes' ? recipeSort.direction : null}
+                    label="Used by recipes"
+                    onSort={() => recipeSort.sortBy('recipes')}
+                    style={{ width: '32%' }}
+                  />
                   <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
                 </tr>
               </thead>
               <tbody>
-                {filteredRecipeRows.map(row => (
+                {recipeSort.sortedRows.map(row => (
                   <tr key={`${row.status}:${row.namespace}:${row.name}`}>
                     <td>
                       <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>

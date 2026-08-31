@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, TableHeaderCell, useTableSort } from '@clerum/frontend-table-system'
 import {
   type CodexSubscriptionConnectionView,
   createCodexSubscriptionConnection,
@@ -99,6 +99,15 @@ export function CodexSubscriptionHub() {
       [grantLabel(row), row.connectionKey, row.status].join(' ').toLowerCase().includes(q)
     )
   }, [connections, searchQuery])
+  const subscriptionSort = useTableSort<CodexSubscriptionConnectionView, 'name' | 'status'>({
+    rows: filtered,
+    defaultKey: 'name',
+    identity: row => row.connectionKey,
+    accessors: {
+      name: grantLabel,
+      status: row => statusLabel(mapConnectionStatus(row.status)),
+    },
+  })
 
   async function handleCreate() {
     const displayName = createName.trim()
@@ -360,8 +369,8 @@ export function CodexSubscriptionHub() {
             <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th>Status</th>
+                  <TableHeaderCell label="Name" />
+                  <TableHeaderCell label="Status" />
                   <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
                 </tr>
               </thead>
@@ -393,13 +402,25 @@ export function CodexSubscriptionHub() {
             <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th>Status</th>
+                  <TableHeaderCell
+                    activeDirection={
+                      subscriptionSort.key === 'name' ? subscriptionSort.direction : null
+                    }
+                    label="Name"
+                    onSort={() => subscriptionSort.sortBy('name')}
+                  />
+                  <TableHeaderCell
+                    activeDirection={
+                      subscriptionSort.key === 'status' ? subscriptionSort.direction : null
+                    }
+                    label="Status"
+                    onSort={() => subscriptionSort.sortBy('status')}
+                  />
                   <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
                 </tr>
               </thead>
               <tbody>
-                {filtered.map(row => {
+                {subscriptionSort.sortedRows.map(row => {
                   const mapped = mapConnectionStatus(row.status)
                   return (
                     <tr key={row.connectionKey}>

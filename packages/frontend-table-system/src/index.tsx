@@ -183,6 +183,8 @@ export function TableHeaderCell({
     : onSort
       ? 'none'
       : undefined
+  const nextDirection = activeDirection === 'asc' ? 'descending' : 'ascending'
+  const accessibleSortLabel = String(sortLabel ?? label)
   return (
     <th
       {...props}
@@ -194,7 +196,7 @@ export function TableHeaderCell({
         <span className="eft-table__sort-group">
           {label}
           <button
-            aria-label={`Sort by ${String(sortLabel)}`}
+            aria-label={`Sort by ${accessibleSortLabel} ${nextDirection}`}
             className="eft-table__sort eft-table__sort--icon"
             onClick={onSort}
             type="button"
@@ -205,7 +207,12 @@ export function TableHeaderCell({
           </button>
         </span>
       ) : onSort ? (
-        <button className="eft-table__sort" onClick={onSort} type="button">
+        <button
+          aria-label={`Sort by ${accessibleSortLabel} ${nextDirection}`}
+          className="eft-table__sort"
+          onClick={onSort}
+          type="button"
+        >
           <span>{label}</span>
           <span aria-hidden="true" className="eft-table__sort-indicator">
             {activeDirection === 'asc' ? '↑' : activeDirection === 'desc' ? '↓' : '↕'}

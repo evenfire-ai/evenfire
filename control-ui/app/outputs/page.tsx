@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { useParams } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, TableHeaderCell, useTableSort } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { AuthGate } from '../../components/AuthGate'
 import { DashboardLayout } from '../../components/DashboardLayout'
@@ -118,6 +118,39 @@ function OutputsPageContent() {
         .includes(normalizedSearch)
     )
   }, [chatArtifacts, normalizedSearch])
+  const workflowSort = useTableSort<
+    WorkflowOutputRow,
+    'file' | 'format' | 'recipe' | 'run' | 'completed'
+  >({
+    rows: filteredWorkflowOutputs,
+    defaultKey: 'completed',
+    defaultDirection: 'desc',
+    identity: output =>
+      `${output.namespace}/${output.recipeName}/${output.runId}/${output.fileName}`,
+    accessors: {
+      file: output => output.fileName,
+      format: output => output.format,
+      recipe: output => `${output.namespace}/${output.recipeName}`,
+      run: output => output.runId,
+      completed: output => output.completedAt,
+    },
+  })
+  const artifactSort = useTableSort<
+    ChatArtifactOutputRow,
+    'file' | 'format' | 'size' | 'host' | 'created'
+  >({
+    rows: filteredChatArtifacts,
+    defaultKey: 'created',
+    defaultDirection: 'desc',
+    identity: artifact => `${artifact.hostRef}/${artifact.fileName}/${artifact.createdAt}`,
+    accessors: {
+      file: artifact => artifact.fileName,
+      format: artifact => artifact.format,
+      size: artifact => artifact.sizeBytes,
+      host: artifact => artifact.hostRef,
+      created: artifact => artifact.createdAt,
+    },
+  })
 
   const FORMAT_COLORS: Record<string, string> = {
     pdf: '#ef4444',
@@ -218,13 +251,27 @@ function OutputsPageContent() {
                 <DataTable className="eft-table cu-table cu-table--header-band">
                   <thead>
                     <tr>
-                      {['File', 'Format', 'Recipe', 'Run', 'Completed', 'Action'].map(h => (
-                        <th key={h}>{h}</th>
+                      {(
+                        [
+                          ['file', 'File'],
+                          ['format', 'Format'],
+                          ['recipe', 'Recipe'],
+                          ['run', 'Run'],
+                          ['completed', 'Completed'],
+                        ] as const
+                      ).map(([key, label]) => (
+                        <TableHeaderCell
+                          activeDirection={workflowSort.key === key ? workflowSort.direction : null}
+                          key={key}
+                          label={label}
+                          onSort={() => workflowSort.sortBy(key)}
+                        />
                       ))}
+                      <TableHeaderCell label="Action" />
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredWorkflowOutputs.map(output => (
+                    {workflowSort.sortedRows.map(output => (
                       <tr
                         key={`${output.namespace}-${output.recipeName}-${output.runId}-${output.fileName}`}
                       >
@@ -304,13 +351,29 @@ function OutputsPageContent() {
                   <DataTable className="eft-table cu-table cu-table--header-band">
                     <thead>
                       <tr>
-                        {['File', 'Format', 'Size', 'Host', 'Created', 'Action'].map(h => (
-                          <th key={h}>{h}</th>
+                        {(
+                          [
+                            ['file', 'File'],
+                            ['format', 'Format'],
+                            ['size', 'Size'],
+                            ['host', 'Host'],
+                            ['created', 'Created'],
+                          ] as const
+                        ).map(([key, label]) => (
+                          <TableHeaderCell
+                            activeDirection={
+                              artifactSort.key === key ? artifactSort.direction : null
+                            }
+                            key={key}
+                            label={label}
+                            onSort={() => artifactSort.sortBy(key)}
+                          />
                         ))}
+                        <TableHeaderCell label="Action" />
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredChatArtifacts.map(artifact => (
+                      {artifactSort.sortedRows.map(artifact => (
                         <tr key={`${artifact.hostRef}-${artifact.fileName}-${artifact.createdAt}`}>
                           <td style={{ fontFamily: 'monospace', fontSize: 13 }}>
                             {artifact.fileName}

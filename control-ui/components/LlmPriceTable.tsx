@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, useTableSort } from '@clerum/frontend-table-system'
 import type { LlmModelPrice, UnpricedModel } from '@lib/api'
 import { getProviderDisplayLabel } from '@lib/llm'
 import type { LlmPriceTableProps } from './LlmPriceTable.types'
@@ -97,6 +97,59 @@ export function LlmPriceTable({
     )
   }, [missingPriceItems, normalizedSearch])
 
+  type PriceSortKey =
+    | 'provider'
+    | 'model'
+    | 'input'
+    | 'output'
+    | 'cacheRead'
+    | 'cacheWrite'
+    | 'currency'
+    | 'enabled'
+  const priceSort = useTableSort<LlmModelPrice, PriceSortKey>({
+    rows: filteredPrices,
+    defaultKey: 'provider',
+    identity: price => price.id,
+    accessors: {
+      provider: price => getProviderDisplayLabel(price.provider),
+      model: price => price.model,
+      input: price => price.input_token_price,
+      output: price => price.output_token_price,
+      cacheRead: price => price.cache_read_token_price,
+      cacheWrite: price => price.cache_write_token_price,
+      currency: price => price.currency,
+      enabled: price => price.enabled,
+    },
+  })
+  const missingSort = useTableSort<UnpricedModel, PriceSortKey>({
+    rows: filteredMissingPriceItems,
+    defaultKey: 'provider',
+    identity: item => `${item.provider ?? ''}/${item.model}`,
+    accessors: {
+      provider: item => (item.provider ? getProviderDisplayLabel(item.provider) : 'Any provider'),
+      model: item => item.model,
+      input: () => null,
+      output: () => null,
+      cacheRead: () => null,
+      cacheWrite: () => null,
+      currency: () => null,
+      enabled: () => false,
+    },
+  })
+  const columns = PRICE_COLUMNS.map(column =>
+    column.key === 'actions'
+      ? column
+      : {
+          ...column,
+          activeDirection: priceSort.key === column.key ? priceSort.direction : null,
+          onSort: () => {
+            const key = column.key as PriceSortKey
+            priceSort.sortBy(key)
+            missingSort.sortBy(key)
+          },
+        }
+  )
+
   const visibleRowCount = filteredPrices.length + filteredMissingPriceItems.length
   const isInitialLoad = Boolean(loading) && items.length === 0
 
@@ -143,10 +196,10 @@ export function LlmPriceTable({
         <div className="eft-table-viewport cu-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
-              <TableHeaderRow columns={PRICE_COLUMNS} />
+              <TableHeaderRow columns={columns} />
             </thead>
             <tbody>
-              <SkeletonTableRows columns={PRICE_COLUMNS.length} rows={4} />
+              <SkeletonTableRows columns={columns.length} rows={4} />
             </tbody>
           </DataTable>
         </div>
@@ -160,10 +213,10 @@ export function LlmPriceTable({
         <div className="eft-table-viewport cu-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
-              <TableHeaderRow columns={PRICE_COLUMNS} />
+              <TableHeaderRow columns={columns} />
             </thead>
             <tbody>
-              {filteredPrices.map((price: LlmModelPrice) => {
+              {priceSort.sortedRows.map((price: LlmModelPrice) => {
                 const isUnpriced = unpricedItems.some(
                   item =>
                     item.model === price.model &&
@@ -229,7 +282,7 @@ export function LlmPriceTable({
                   </tr>
                 )
               })}
-              {filteredMissingPriceItems.map((item: UnpricedModel) => {
+              {missingSort.sortedRows.map((item: UnpricedModel) => {
                 const label = item.provider
                   ? `${getProviderDisplayLabel(item.provider)}/${item.model}`
                   : item.model

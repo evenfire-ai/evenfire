@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, useTableSort } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { DEFAULT_WORKFLOW_RECIPE_NAMESPACE } from '@constants/workflowRecipes'
 import type { WorkflowRecipeResource } from '../lib/api'
@@ -57,6 +57,22 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
         .includes(normalizedSearch)
     })
   }, [items, normalizedSearch])
+  const recipeSort = useTableSort<WorkflowRecipeResource, 'name' | 'phase' | 'created'>({
+    rows: filteredItems,
+    defaultKey: 'name',
+    identity: item =>
+      `${item.metadata?.namespace ?? DEFAULT_WORKFLOW_RECIPE_NAMESPACE}/${item.metadata?.name ?? ''}`,
+    accessors: {
+      name: item => item.metadata?.name,
+      phase: item => normalizeRecipePhase(item.status?.phase),
+      created: item => item.metadata?.creationTimestamp,
+    },
+  })
+  const columns = RECIPE_COLUMNS.map(column => ({
+    ...column,
+    activeDirection: recipeSort.key === column.key ? recipeSort.direction : null,
+    onSort: () => recipeSort.sortBy(column.key as 'name' | 'phase' | 'created'),
+  }))
   const isInitialLoad = loading && items.length === 0
 
   function detailHref(name: string, namespace: string): string {
@@ -116,10 +132,10 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
         <div className="eft-table-viewport cu-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band cu-installed-plugins-table">
             <thead>
-              <TableHeaderRow columns={RECIPE_COLUMNS} />
+              <TableHeaderRow columns={columns} />
             </thead>
             <tbody>
-              <SkeletonTableRows columns={RECIPE_COLUMNS.length} rows={4} />
+              <SkeletonTableRows columns={columns.length} rows={4} />
             </tbody>
           </DataTable>
         </div>
@@ -131,10 +147,10 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
         <div className="eft-table-viewport cu-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band cu-installed-plugins-table">
             <thead>
-              <TableHeaderRow columns={RECIPE_COLUMNS} />
+              <TableHeaderRow columns={columns} />
             </thead>
             <tbody>
-              {filteredItems.map(item => {
+              {recipeSort.sortedRows.map(item => {
                 const name = item.metadata?.name ?? '(unnamed)'
                 const namespace = item.metadata?.namespace ?? DEFAULT_WORKFLOW_RECIPE_NAMESPACE
                 const key = `${namespace}/${name}`

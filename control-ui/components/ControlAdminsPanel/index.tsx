@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, TableHeaderCell, useTableSort } from '@clerum/frontend-table-system'
 import { useAuth } from '@components/AuthContext'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { RowActionsMenu } from '@components/RowActionsMenu'
@@ -123,6 +123,35 @@ export function ControlAdminsPanel({
         .some(value => value.toLowerCase().includes(normalizedSearch))
     )
   }, [admins, normalizedSearch])
+  const invitationSort = useTableSort<
+    ControlAdminInvitationItem,
+    'email' | 'status' | 'expires' | 'created'
+  >({
+    rows: filteredInvitations,
+    defaultKey: 'email',
+    identity: invitation => invitation.id,
+    accessors: {
+      email: invitation => invitation.email,
+      status: invitation => invitation.status,
+      expires: invitation => invitation.expiresAt,
+      created: invitation => invitation.createdAt,
+    },
+  })
+  const adminSort = useTableSort<
+    ControlAdminListItem,
+    'username' | 'email' | 'status' | 'gfs' | 'lastLogin'
+  >({
+    rows: filteredAdmins,
+    defaultKey: 'username',
+    identity: admin => admin.id,
+    accessors: {
+      username: admin => admin.username,
+      email: admin => admin.email,
+      status: admin => formatAdminStatus(admin.status),
+      gfs: admin => admin.gfsOperatorLink?.status,
+      lastLogin: admin => admin.lastLoginAt,
+    },
+  })
 
   async function handleCancelInvitation(invitation: ControlAdminInvitationItem) {
     const shouldCancel = await confirm({
@@ -331,10 +360,32 @@ export function ControlAdminsPanel({
           <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <tr>
-                <th>Pending invitation</th>
-                <th>Status</th>
-                <th>Expires</th>
-                <th>Created</th>
+                <TableHeaderCell
+                  activeDirection={invitationSort.key === 'email' ? invitationSort.direction : null}
+                  label="Pending invitation"
+                  onSort={() => invitationSort.sortBy('email')}
+                />
+                <TableHeaderCell
+                  activeDirection={
+                    invitationSort.key === 'status' ? invitationSort.direction : null
+                  }
+                  label="Status"
+                  onSort={() => invitationSort.sortBy('status')}
+                />
+                <TableHeaderCell
+                  activeDirection={
+                    invitationSort.key === 'expires' ? invitationSort.direction : null
+                  }
+                  label="Expires"
+                  onSort={() => invitationSort.sortBy('expires')}
+                />
+                <TableHeaderCell
+                  activeDirection={
+                    invitationSort.key === 'created' ? invitationSort.direction : null
+                  }
+                  label="Created"
+                  onSort={() => invitationSort.sortBy('created')}
+                />
                 <th aria-label="Actions" />
               </tr>
             </thead>
@@ -342,7 +393,7 @@ export function ControlAdminsPanel({
               {loading ? (
                 <SkeletonTableRows columns={5} rows={2} />
               ) : (
-                filteredInvitations.map(invitation => (
+                invitationSort.sortedRows.map(invitation => (
                   <tr key={invitation.id}>
                     <td>{invitation.email}</td>
                     <td>{invitation.status}</td>
@@ -376,11 +427,31 @@ export function ControlAdminsPanel({
         <DataTable className="eft-table cu-table cu-table--header-band">
           <thead>
             <tr>
-              <th>Username</th>
-              <th>Email</th>
-              <th>Status</th>
-              <th>Desktop GFS access</th>
-              <th>Last sign-in</th>
+              <TableHeaderCell
+                activeDirection={adminSort.key === 'username' ? adminSort.direction : null}
+                label="Username"
+                onSort={() => adminSort.sortBy('username')}
+              />
+              <TableHeaderCell
+                activeDirection={adminSort.key === 'email' ? adminSort.direction : null}
+                label="Email"
+                onSort={() => adminSort.sortBy('email')}
+              />
+              <TableHeaderCell
+                activeDirection={adminSort.key === 'status' ? adminSort.direction : null}
+                label="Status"
+                onSort={() => adminSort.sortBy('status')}
+              />
+              <TableHeaderCell
+                activeDirection={adminSort.key === 'gfs' ? adminSort.direction : null}
+                label="Desktop GFS access"
+                onSort={() => adminSort.sortBy('gfs')}
+              />
+              <TableHeaderCell
+                activeDirection={adminSort.key === 'lastLogin' ? adminSort.direction : null}
+                label="Last sign-in"
+                onSort={() => adminSort.sortBy('lastLogin')}
+              />
               <th aria-label="Actions" />
             </tr>
           </thead>
@@ -388,7 +459,7 @@ export function ControlAdminsPanel({
             {loading ? (
               <SkeletonTableRows columns={6} rows={5} />
             ) : filteredAdmins.length > 0 ? (
-              filteredAdmins.map(admin => {
+              adminSort.sortedRows.map(admin => {
                 const currentAdmin = isCurrentAdmin(admin)
                 const label = admin.email ? `${admin.username} (${admin.email})` : admin.username
                 const memberCreationUnavailable = !admin.email || admin.passwordPending

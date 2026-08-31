@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, useTableSort } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { type OrgImage, listOrgImages } from '../../lib/api'
 import { RetryBanner } from '../PublisherView/RetryBanner'
@@ -64,6 +64,21 @@ export function MarketplaceOrgImages({ orgScope }: { orgScope: string }) {
             : [{ name: img.name, tag: '<tag>' }]
         )
       : []
+  const imageSort = useTableSort<(typeof rows)[number], 'image' | 'tag' | 'coordinate'>({
+    rows,
+    defaultKey: 'image',
+    identity: row => `${row.name}:${row.tag}`,
+    accessors: {
+      image: row => row.name,
+      tag: row => row.tag,
+      coordinate: row => buildImageCoordinate(DEFAULT_REGISTRY_HOST, orgScope, row.name, row.tag),
+    },
+  })
+  const columns = COLUMNS.map(column => ({
+    ...column,
+    activeDirection: imageSort.key === column.key ? imageSort.direction : null,
+    onSort: () => imageSort.sortBy(column.key as 'image' | 'tag' | 'coordinate'),
+  }))
 
   return (
     <section>
@@ -111,10 +126,10 @@ export function MarketplaceOrgImages({ orgScope }: { orgScope: string }) {
               <div className="eft-table-viewport cu-table-wrap">
                 <DataTable className="eft-table cu-table">
                   <thead>
-                    <TableHeaderRow columns={COLUMNS} />
+                    <TableHeaderRow columns={columns} />
                   </thead>
                   <tbody>
-                    {rows.map(r => (
+                    {imageSort.sortedRows.map(r => (
                       <tr key={`${r.name}:${r.tag}`}>
                         <td>
                           <code>{r.name}</code>

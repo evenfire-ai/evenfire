@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, useTableSort } from '@clerum/frontend-table-system'
 import type { TokenBudget } from '@lib/api'
 import {
   budgetProgressPercent,
@@ -64,6 +64,46 @@ export function TokenBudgetTable({
         .includes(normalizedSearch)
     })
   }, [items, lookups, normalizedSearch])
+  const budgetSort = useTableSort<
+    TokenBudget,
+    'name' | 'scope' | 'unit' | 'period' | 'progress' | 'enforcement' | 'enabled'
+  >({
+    rows: filteredItems,
+    defaultKey: 'name',
+    identity: budget => budget.id,
+    accessors: {
+      name: budget => budget.name,
+      scope: budget =>
+        formatBudgetScope(budget.scope, lookups)
+          .map(segment => `${segment.label} ${segment.values.join(' ')}`)
+          .join(' '),
+      unit: budget => budget.unit,
+      period: budget => budget.period,
+      progress: budget =>
+        budget.limit_amount > 0 ? (budget.spent ?? 0) / budget.limit_amount : (budget.spent ?? 0),
+      enforcement: budget => budget.enforcement,
+      enabled: budget => budget.enabled,
+    },
+  })
+  const columns = BUDGET_COLUMNS.map(column =>
+    column.key === 'actions'
+      ? column
+      : {
+          ...column,
+          activeDirection: budgetSort.key === column.key ? budgetSort.direction : null,
+          onSort: () =>
+            budgetSort.sortBy(
+              column.key as
+                | 'name'
+                | 'scope'
+                | 'unit'
+                | 'period'
+                | 'progress'
+                | 'enforcement'
+                | 'enabled'
+            ),
+        }
+  )
 
   const isInitialLoad = Boolean(loading) && items.length === 0
 
@@ -110,10 +150,10 @@ export function TokenBudgetTable({
         <div className="eft-table-viewport cu-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
-              <TableHeaderRow columns={BUDGET_COLUMNS} />
+              <TableHeaderRow columns={columns} />
             </thead>
             <tbody>
-              <SkeletonTableRows columns={BUDGET_COLUMNS.length} rows={4} />
+              <SkeletonTableRows columns={columns.length} rows={4} />
             </tbody>
           </DataTable>
         </div>
@@ -127,10 +167,10 @@ export function TokenBudgetTable({
         <div className="eft-table-viewport cu-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
-              <TableHeaderRow columns={BUDGET_COLUMNS} />
+              <TableHeaderRow columns={columns} />
             </thead>
             <tbody>
-              {filteredItems.map((budget: TokenBudget) => (
+              {budgetSort.sortedRows.map((budget: TokenBudget) => (
                 <BudgetRow
                   key={budget.id}
                   budget={budget}

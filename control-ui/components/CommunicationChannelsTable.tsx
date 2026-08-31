@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, useTableSort } from '@clerum/frontend-table-system'
 import {
   COMMUNICATION_CHANNEL_PROVIDERS,
   type CommunicationChannelProvider,
@@ -131,6 +131,30 @@ export function CommunicationChannelsTable({
         .includes(normalizedSearch)
     })
   }, [normalizedSearch, rows])
+  const channelSort = useTableSort<(typeof filteredRows)[number], 'name' | 'agent' | 'type'>({
+    rows: filteredRows,
+    defaultKey: 'name',
+    identity: row => row.key,
+    accessors: {
+      name: row => row.item.metadata?.name,
+      agent: row => row.item.spec?.hostRef,
+      type: row =>
+        COMMUNICATION_CHANNEL_PROVIDERS.filter(provider =>
+          configuredProviders(row.item).has(provider)
+        )
+          .map(communicationChannelProviderLabel)
+          .join(', '),
+    },
+  })
+  const columns = COMMUNICATION_CHANNEL_COLUMNS.map(column =>
+    column.key === 'actions'
+      ? column
+      : {
+          ...column,
+          activeDirection: channelSort.key === column.key ? channelSort.direction : null,
+          onSort: () => channelSort.sortBy(column.key as 'name' | 'agent' | 'type'),
+        }
+  )
 
   async function deleteRow(item: CommunicationChannelItem) {
     const name = item.metadata?.name
@@ -217,10 +241,10 @@ export function CommunicationChannelsTable({
           <div className="eft-table-viewport cu-table-wrap">
             <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
-                <TableHeaderRow columns={COMMUNICATION_CHANNEL_COLUMNS} />
+                <TableHeaderRow columns={columns} />
               </thead>
               <tbody>
-                <SkeletonTableRows columns={COMMUNICATION_CHANNEL_COLUMNS.length} rows={3} />
+                <SkeletonTableRows columns={columns.length} rows={3} />
               </tbody>
             </DataTable>
           </div>
@@ -232,10 +256,10 @@ export function CommunicationChannelsTable({
           <div className="eft-table-viewport cu-table-wrap">
             <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
-                <TableHeaderRow columns={COMMUNICATION_CHANNEL_COLUMNS} />
+                <TableHeaderRow columns={columns} />
               </thead>
               <tbody>
-                {filteredRows.map(({ key, item }) => {
+                {channelSort.sortedRows.map(({ key, item }) => {
                   const name = item.metadata?.name || '-'
                   const spec = item.spec || {}
                   const configuredProviderTypes = configuredProviders(item)

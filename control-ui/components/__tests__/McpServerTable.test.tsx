@@ -188,15 +188,18 @@ describe('McpServerTable — column sorting', () => {
         element => element.textContent
       )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by name ascending' }))
     expect(listedNames()).toEqual([
       'alpha-server',
       'bravo-server',
       'charlie-server',
       'zebra-server',
     ])
+    expect(screen.getByRole('columnheader', { name: 'Name' })).toHaveAttribute(
+      'aria-sort',
+      'ascending'
+    )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by enabled ascending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Enabled ascending' }))
     expect(listedNames()).toEqual([
       'alpha-server',
       'charlie-server',
@@ -204,7 +207,7 @@ describe('McpServerTable — column sorting', () => {
       'zebra-server',
     ])
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by status ascending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Status ascending' }))
     expect(listedNames()).toEqual([
       'charlie-server',
       'bravo-server',

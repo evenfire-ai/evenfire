@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable, RowActionMenu } from '@clerum/frontend-table-system'
+import { DataTable, RowActionMenu, useTableSort } from '@clerum/frontend-table-system'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { IconSharedFiles } from '@components/Sidebar/icons'
@@ -151,6 +151,36 @@ export default function SharedFileSystemsPage() {
         return [name, phase, storageClass].join(' ').toLowerCase().includes(normalizedSearch)
       })
     : items
+  const fileSystemSort = useTableSort<
+    SharedFileSystemResource,
+    'name' | 'phase' | 'capacity' | 'storage-class' | 'mounted-by-contexts'
+  >({
+    rows: filteredItems,
+    defaultKey: 'name',
+    identity: item => item.metadata?.name,
+    accessors: {
+      name: item => item.metadata?.name,
+      phase: item => item.status?.phase,
+      capacity: item => item.status?.capacity || item.spec?.size,
+      'storage-class': item => item.status?.storageClassName || item.spec?.storageClassName,
+      'mounted-by-contexts': item =>
+        (item.status?.mountedByContexts || [])
+          .map(context => `${context.namespace}/${context.name}`)
+          .join(', '),
+    },
+  })
+  const columns = SHARED_FILE_SYSTEM_COLUMNS.map(column =>
+    column.key === 'actions'
+      ? column
+      : {
+          ...column,
+          activeDirection: fileSystemSort.key === column.key ? fileSystemSort.direction : null,
+          onSort: () =>
+            fileSystemSort.sortBy(
+              column.key as 'name' | 'phase' | 'capacity' | 'storage-class' | 'mounted-by-contexts'
+            ),
+        }
+  )
   const isInitialLoad = loading && items.length === 0
 
   return (
@@ -216,13 +246,13 @@ export default function SharedFileSystemsPage() {
           <div className="eft-table-viewport cu-table-wrap">
             <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
-                <TableHeaderRow columns={SHARED_FILE_SYSTEM_COLUMNS} />
+                <TableHeaderRow columns={columns} />
               </thead>
               <tbody>
                 {isInitialLoad ? (
-                  <SkeletonTableRows columns={SHARED_FILE_SYSTEM_COLUMNS.length} rows={5} />
+                  <SkeletonTableRows columns={columns.length} rows={5} />
                 ) : (
-                  filteredItems.map(item => {
+                  fileSystemSort.sortedRows.map(item => {
                     const name = item.metadata?.name || ''
                     const isDeleting = deletingNames.has(name)
                     const status = item.status || {}

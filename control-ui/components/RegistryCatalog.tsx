@@ -58,7 +58,7 @@ export default function RegistryCatalog() {
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('all')
-  const [sortKey, setSortKey] = useState<CatalogSortKey | null>(null)
+  const [sortKey, setSortKey] = useState<CatalogSortKey>('name')
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
   const [removeTarget, setRemoveTarget] = useState<RegistryEntry | null>(null)
   const [removing, setRemoving] = useState(false)
@@ -85,7 +85,11 @@ export default function RegistryCatalog() {
       column.key === 'quality' ||
       column.key === 'version'
     ) {
-      return { ...column, label: renderSortHeader(column.key, column.label as string) }
+      return {
+        ...column,
+        activeDirection: sortKey === column.key ? sortDirection : null,
+        onSort: () => toggleSort(column.key as CatalogSortKey),
+      }
     }
     return column
   })
@@ -155,8 +159,6 @@ export default function RegistryCatalog() {
         entry.tags.some(tag => tag.toLowerCase().includes(query))
       )
     })
-    if (!sortKey) return visibleEntries
-
     const direction = sortDirection === 'asc' ? 1 : -1
     return [...visibleEntries].sort((left, right) => {
       const comparison =
@@ -188,30 +190,7 @@ export default function RegistryCatalog() {
       return
     }
     setSortKey(key)
-    setSortDirection(key === 'version' ? 'desc' : 'asc')
-  }
-
-  function renderSortHeader(key: CatalogSortKey, label: string) {
-    const isActive = sortKey === key
-    const indicator = isActive ? (sortDirection === 'asc' ? '↑' : '↓') : ''
-    const nextDirection = isActive
-      ? sortDirection === 'asc'
-        ? 'descending'
-        : 'ascending'
-      : key === 'version'
-        ? 'descending'
-        : 'ascending'
-    return (
-      <button
-        type="button"
-        className={`cu-table__sort-link${isActive ? ' is-active' : ''}`}
-        onClick={() => toggleSort(key)}
-        aria-label={`Sort by ${label.toLowerCase()} ${nextDirection}`}
-        aria-pressed={isActive}
-      >
-        {label} {indicator}
-      </button>
-    )
+    setSortDirection('asc')
   }
 
   function isEntryInstalled(entry: RegistryEntry): boolean {

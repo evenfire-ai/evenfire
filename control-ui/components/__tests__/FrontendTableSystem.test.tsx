@@ -22,7 +22,7 @@ describe('shared frontend table system', () => {
     )
 
     expect(screen.getByRole('columnheader')).toHaveAttribute('aria-sort', 'ascending')
-    fireEvent.click(screen.getByRole('button', { name: 'Name' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Name descending' }))
     expect(onSort).toHaveBeenCalledOnce()
   })
 

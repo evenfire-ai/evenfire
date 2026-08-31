@@ -166,7 +166,7 @@ export function McpServerTable({
   loading,
 }: McpServerTableProps) {
   const [searchQuery, setSearchQuery] = useState('')
-  const [sortKey, setSortKey] = useState<ConnectorSortKey | null>(null)
+  const [sortKey, setSortKey] = useState<ConnectorSortKey>('name')
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
   const [serverKeyAddingContexts, setServerKeyAddingContexts] = useState<string | null>(null)
   const [serverKeyViewingAccess, setServerKeyViewingAccess] = useState<string | null>(null)
@@ -217,8 +217,6 @@ export function McpServerTable({
             .toLowerCase()
             .includes(normalizedSearch)
         })
-    if (!sortKey) return matchingRows
-
     const direction = sortDirection === 'asc' ? 1 : -1
     return [...matchingRows].sort((left, right) => {
       const leftAccess = accessByConnectorKey?.[left.key]
@@ -309,28 +307,13 @@ export function McpServerTable({
     setSortDirection('asc')
   }
 
-  function renderSortHeader(key: ConnectorSortKey, label: string) {
-    const isActive = sortKey === key
-    const indicator = isActive ? (sortDirection === 'asc' ? '↑' : '↓') : ''
-    const nextDirection = isActive && sortDirection === 'asc' ? 'descending' : 'ascending'
-    return (
-      <button
-        type="button"
-        className={`cu-table__sort-link${isActive ? ' is-active' : ''}`}
-        onClick={() => toggleSort(key)}
-        aria-label={`Sort by ${label.toLowerCase()} ${nextDirection}`}
-        aria-pressed={isActive}
-      >
-        {label} {indicator}
-      </button>
-    )
-  }
-
   const columns = CONNECTOR_COLUMNS.map(column => {
     if (column.key !== 'actions') {
+      const key = column.key as ConnectorSortKey
       return {
         ...column,
-        label: renderSortHeader(column.key as ConnectorSortKey, column.label as string),
+        activeDirection: sortKey === key ? sortDirection : null,
+        onSort: () => toggleSort(key),
       }
     }
     return column
