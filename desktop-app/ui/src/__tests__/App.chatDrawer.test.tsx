@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
 import { App } from '@/App'
+import type { AppNotification } from '@/uiTypes'
 
 // Keep @components/Common, ChatDrawer and ChatSwitcher REAL so the drawer's
 // open-chats switcher renders and can be driven. Everything else that App mounts
@@ -25,7 +26,7 @@ const appHeaderHarness = vi.hoisted(() => ({
   props: null as null | { notificationTrayMode?: 'drawer' | 'overlay' },
   // Captured from context so tests can drive the "open conversation" gesture the
   // notification tray fires.
-  openNotification: null as null | ((notification: unknown) => Promise<void>),
+  openNotification: null as null | ((notification: AppNotification) => Promise<void>),
 }))
 
 vi.mock('@hooks/useAppController', () => ({ useAppController: vi.fn() }))
@@ -159,9 +160,28 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   return controller
 }
 
+// dev extended ChatMetadata (SidebarChatEntry's base) with the now-required
+// createdAt/updatedAt/messageCount fields; the fixture carries them so it
+// matches vm.chatList's real shape. The values are inert for these tests,
+// which assert on the displayed title.
+const CHAT_LIST_TS = '2024-01-01T00:00:00.000Z'
 const CHAT_LIST = [
-  { id: 'chat-1', title: 'First chat', agentRef: 'alpha' },
-  { id: 'chat-2', title: 'Second chat', agentRef: 'alpha' },
+  {
+    id: 'chat-1',
+    title: 'First chat',
+    agentRef: 'alpha',
+    createdAt: CHAT_LIST_TS,
+    updatedAt: CHAT_LIST_TS,
+    messageCount: 0,
+  },
+  {
+    id: 'chat-2',
+    title: 'Second chat',
+    agentRef: 'alpha',
+    createdAt: CHAT_LIST_TS,
+    updatedAt: CHAT_LIST_TS,
+    messageCount: 0,
+  },
 ]
 
 describe('App chat drawer — reopen preserves the last-viewed chat', () => {
