@@ -145,6 +145,22 @@ export class SecretsLlmSubscriptionsPage {
     return this.page.getByRole('row', { name: new RegExp(displayName) })
   }
 
+  async expectConnectModal() {
+    const dialog = this.page.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Sync catalog' })).toBeVisible()
+  }
+
+  async closeConnectModal() {
+    await this.page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click()
+    await expect(this.page.getByRole('dialog')).toHaveCount(0)
+  }
+
+  /**
+   * Create a named grant. After the 201 the sync dialog stays open
+   * (Sign in visible). Callers that leave Secrets must closeConnectModal first.
+   */
   async createGrant(displayName: string): Promise<string> {
     await this.page.getByRole('button', { name: 'Add subscription' }).click()
     await this.page.getByLabel('Name', { exact: true }).fill(displayName)
@@ -156,10 +172,10 @@ export class SecretsLlmSubscriptionsPage {
     )
     await this.page.getByRole('button', { name: 'Create', exact: true }).click()
     const response = await created
-    expect(response.ok(), `create grant must succeed, got ${response.status()}`).toBe(true)
+    expect(response.status(), `create grant must return 201, got ${response.status()}`).toBe(201)
     const body = (await response.json()) as { connectionKey?: string }
     expect(body.connectionKey).toEqual(expect.any(String))
-    await expect(this.page.getByRole('cell', { name: displayName, exact: true })).toBeVisible()
+    await this.expectConnectModal()
     return String(body.connectionKey)
   }
 

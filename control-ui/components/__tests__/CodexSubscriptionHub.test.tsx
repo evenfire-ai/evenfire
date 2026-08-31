@@ -7,6 +7,7 @@ import {
   listCodexSubscriptionConnections,
   patchCodexCatalogModel,
   patchCodexSubscriptionConnection,
+  pollCodexDevice,
   revokeCodexSubscription,
   startCodexDeviceConnect,
   syncCodexSubscriptionCatalog,
@@ -45,6 +46,24 @@ vi.mock('@lib/codexSubscription', async importOriginal => {
   }
 })
 
+type DevicePollView = Awaited<ReturnType<typeof pollCodexDevice>>
+
+const pendingPolls: Array<(value: DevicePollView) => void> = []
+
+function holdDevicePoll() {
+  vi.mocked(pollCodexDevice).mockImplementation(
+    () =>
+      new Promise<DevicePollView>(resolve => {
+        pendingPolls.push(resolve)
+      })
+  )
+}
+
+function releaseDevicePolls(view: DevicePollView = { status: 'expired' }) {
+  const resolvers = pendingPolls.splice(0)
+  for (const resolve of resolvers) resolve(view)
+}
+
 function connection(
   overrides: Partial<CodexSubscriptionConnectionView> &
     Pick<CodexSubscriptionConnectionView, 'connectionKey'>
@@ -75,17 +94,35 @@ describe('CodexSubscriptionHub', () => {
       { model: 'gpt-5.1', enabled: true, stale: false },
       { model: 'gpt-5.3-codex', enabled: false, stale: false },
     ])
+    vi.mocked(startCodexDeviceConnect).mockResolvedValue({
+      userCode: 'ABCD-1234',
+      verificationUri: 'https://auth.openai.com/codex/device',
+      intervalSeconds: 0.001,
+      state: 'state-1',
+      intent: 'connect',
+    })
+    pendingPolls.length = 0
+    holdDevicePoll()
   })
 
-  afterEach(() => {
-    cleanup()
-    vi.clearAllMocks()
+  afterEach(async () => {
+    try {
+      await new Promise(resolve => setTimeout(resolve, 20))
+      releaseDevicePolls()
+    } finally {
+      cleanup()
+      vi.clearAllMocks()
+    }
   })
 
-  it('creates a subscription from the Add modal', async () => {
-    vi.mocked(createCodexSubscriptionConnection).mockResolvedValue(
-      connection({ connectionKey: 'codex-bbb', displayName: 'New team' })
-    )
+  it('opens the sync modal and starts device connect after Create without using the pencil', async () => {
+    const created = connection({
+      connectionKey: 'codex-bbb',
+      displayName: 'New team',
+      status: 'disconnected',
+      catalogStatus: 'never_synced',
+    })
+    vi.mocked(createCodexSubscriptionConnection).mockResolvedValue(created)
     render(
       <ToastProvider>
         <CodexSubscriptionHub />
@@ -100,7 +137,115 @@ describe('CodexSubscriptionHub', () => {
     await waitFor(() => {
       expect(createCodexSubscriptionConnection).toHaveBeenCalledWith({ displayName: 'New team' })
     })
+    expect(await screen.findByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument()
+    await waitFor(() => {
+      expect(startCodexDeviceConnect).toHaveBeenCalledWith('connect', 'codex-bbb')
+    })
+    expect(syncCodexSubscriptionCatalog).not.toHaveBeenCalled()
     expect(revokeCodexSubscription).not.toHaveBeenCalled()
+  })
+
+  it('renders a ChatGPT verification link and copies the device code', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    vi.mocked(createCodexSubscriptionConnection).mockResolvedValue(
+      connection({
+        connectionKey: 'codex-bbb',
+        displayName: 'New team',
+        status: 'disconnected',
+        catalogStatus: 'never_synced',
+      })
+    )
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Add subscription' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), {
+      target: { value: 'New team' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+    const link = await screen.findByTestId('codex-device-verification-link')
+    expect(link).toHaveAttribute('href', 'https://auth.openai.com/codex/device')
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link.getAttribute('rel') ?? '').toContain('noopener')
+    expect(screen.getByTestId('codex-device-code')).toHaveTextContent('ABCD-1234')
+    fireEvent.click(screen.getByRole('button', { name: 'Copy code' }))
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith('ABCD-1234')
+    })
+    expect(await screen.findByText('Code copied')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+  })
+
+  it('does not POST catalog/sync after a ready poll', async () => {
+    vi.mocked(createCodexSubscriptionConnection).mockResolvedValue(
+      connection({
+        connectionKey: 'codex-bbb',
+        displayName: 'New team',
+        status: 'disconnected',
+        catalogStatus: 'never_synced',
+      })
+    )
+    vi.mocked(startCodexDeviceConnect).mockResolvedValue({
+      userCode: 'ABCD-1234',
+      verificationUri: 'https://auth.openai.com/codex/device',
+      intervalSeconds: 0.001,
+      state: 'state-1',
+      intent: 'connect',
+    })
+    vi.mocked(pollCodexDevice).mockResolvedValue({
+      status: 'connected',
+      connection: connection({
+        connectionKey: 'codex-bbb',
+        displayName: 'New team',
+        catalogStatus: 'ready',
+      }),
+    })
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Add subscription' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), {
+      target: { value: 'New team' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+    await waitFor(() => {
+      expect(pollCodexDevice).toHaveBeenCalled()
+    })
+    expect(await screen.findByText('Connected — catalog synced')).toBeInTheDocument()
+    expect(syncCodexSubscriptionCatalog).not.toHaveBeenCalled()
+  })
+
+  it('keeps the sync modal open with Sign in when device/start fails after Create', async () => {
+    vi.mocked(createCodexSubscriptionConnection).mockResolvedValue(
+      connection({
+        connectionKey: 'codex-ccc',
+        displayName: 'Retry team',
+        status: 'disconnected',
+        catalogStatus: 'never_synced',
+      })
+    )
+    vi.mocked(startCodexDeviceConnect).mockRejectedValue(new Error('device start failed'))
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Add subscription' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), {
+      target: { value: 'Retry team' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+    expect(await screen.findByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument()
+    expect(await screen.findByText('device start failed')).toBeInTheDocument()
   })
 
   it('renders subscriptions as a Secrets table with pencil and delete actions', async () => {

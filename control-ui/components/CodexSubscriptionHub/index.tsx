@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { copyTextToClipboard } from '@lib/clipboard'
 import {
   type CodexSubscriptionConnectionView,
   createCodexSubscriptionConnection,
@@ -32,7 +33,7 @@ import { SelectionDropdown } from '../SelectionDropdown'
 import { IconKey } from '../Sidebar/icons'
 import { TablePanelHeader } from '../TablePanelHeader'
 import { useToast } from '../Toast'
-import { IconPencil, IconRefresh, IconX } from '../icons'
+import { IconCopy, IconPencil, IconRefresh, IconX } from '../icons'
 
 function grantLabel(row: CodexSubscriptionConnectionView): string {
   return row.displayName || row.connectionKey
@@ -57,6 +58,7 @@ export function CodexSubscriptionHub() {
   >([])
   const [userCode, setUserCode] = useState<string | null>(null)
   const [verificationUri, setVerificationUri] = useState<string | null>(null)
+  const connectEpoch = useRef(0)
   const enabled = isCodexSubscriptionUiEnabled(capability)
 
   useEffect(() => {
@@ -107,20 +109,32 @@ export function CodexSubscriptionHub() {
     }
     setBusyKey('create')
     try {
-      await createCodexSubscriptionConnection({ displayName })
+      const created = await createCodexSubscriptionConnection({ displayName })
       setCreateName('')
       setCreating(false)
       setError('')
-      await load()
+      setEditing(created)
+      setEditName(grantLabel(created))
+      setEditDefault(created.defaultModel ?? '')
+      setEditModels([])
+      setUserCode(null)
+      setVerificationUri(null)
       showToast(`Subscription ${displayName} created.`, { tone: 'success' })
+      void startDeviceConnect(created)
+      try {
+        await load()
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load ChatGPT subscriptions')
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create subscription')
-    } finally {
       setBusyKey(null)
     }
   }
 
   async function openEdit(row: CodexSubscriptionConnectionView) {
+    connectEpoch.current += 1
+    setBusyKey(null)
     setEditing(row)
     setEditName(grantLabel(row))
     setEditDefault(row.defaultModel ?? '')
@@ -141,6 +155,8 @@ export function CodexSubscriptionHub() {
   }
 
   function closeEdit() {
+    connectEpoch.current += 1
+    setBusyKey(null)
     setEditing(null)
     setEditName('')
     setEditDefault('')
@@ -168,19 +184,23 @@ export function CodexSubscriptionHub() {
     }
   }
 
-  async function handleConnect(row: CodexSubscriptionConnectionView) {
+  async function startDeviceConnect(row: CodexSubscriptionConnectionView) {
+    const epoch = ++connectEpoch.current
     setBusyKey(row.connectionKey)
     try {
       const started = await startCodexDeviceConnect(
         row.status === 'connected' ? 'reconnect' : 'connect',
         row.connectionKey
       )
+      if (epoch !== connectEpoch.current) return
       setUserCode(started.userCode)
       setVerificationUri(started.verificationUri)
       const deadline = Date.now() + started.intervalSeconds * 1000 * 40
       while (Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, started.intervalSeconds * 1000))
+        if (epoch !== connectEpoch.current) return
         const polled = await pollCodexDevice(started.state, row.connectionKey)
+        if (epoch !== connectEpoch.current) return
         if (polled.status === 'connected') {
           setUserCode(null)
           setVerificationUri(null)
@@ -189,6 +209,13 @@ export function CodexSubscriptionHub() {
           const models = await listCodexConnectionModels(latest.connectionKey)
           setEditModels(models)
           await load()
+          if (latest.catalogStatus === 'ready') {
+            showToast('Connected — catalog synced', { tone: 'success' })
+          } else {
+            showToast('Connected, but catalog sync failed — use Sync catalog to retry', {
+              tone: 'error',
+            })
+          }
           return
         }
         if (polled.status === 'expired' || polled.status === 'denied') {
@@ -202,12 +229,23 @@ export function CodexSubscriptionHub() {
       setVerificationUri(null)
       setError('ChatGPT sign-in timed out. Try again.')
     } catch (err) {
+      if (epoch !== connectEpoch.current) return
       setUserCode(null)
       setVerificationUri(null)
       setError(err instanceof Error ? err.message : 'ChatGPT sign-in failed')
     } finally {
-      setBusyKey(null)
+      if (epoch === connectEpoch.current) setBusyKey(null)
     }
+  }
+
+  async function handleCopyUserCode() {
+    if (!userCode) return
+    const copied = await copyTextToClipboard(userCode)
+    if (copied) {
+      showToast('Code copied', { tone: 'success' })
+      return
+    }
+    setError('Could not copy the verification code')
   }
 
   async function handleSync(row: CodexSubscriptionConnectionView) {
@@ -512,7 +550,7 @@ export function CodexSubscriptionHub() {
           className="cu-modal-overlay"
           role="presentation"
           onClick={e => {
-            if (e.target === e.currentTarget && !busyKey) closeEdit()
+            if (e.target === e.currentTarget) closeEdit()
           }}
         >
           <div
@@ -530,7 +568,6 @@ export function CodexSubscriptionHub() {
                 type="button"
                 className="cu-btn cu-btn--icon cu-btn--ghost"
                 onClick={closeEdit}
-                disabled={Boolean(busyKey)}
                 aria-label="Close"
               >
                 <IconX width={18} height={18} />
@@ -555,7 +592,7 @@ export function CodexSubscriptionHub() {
                 <button
                   type="button"
                   className="cu-btn cu-btn--ghost cu-btn--sm"
-                  onClick={() => void handleConnect(editing)}
+                  onClick={() => void startDeviceConnect(editing)}
                   disabled={Boolean(busyKey)}
                 >
                   Sign in with ChatGPT
@@ -570,10 +607,38 @@ export function CodexSubscriptionHub() {
                 </button>
               </div>
               {userCode ? (
-                <p data-testid="codex-device-code">
-                  Enter {userCode}
-                  {verificationUri ? ` at ${verificationUri}` : ''}
-                </p>
+                <div className="cu-codex-device-code">
+                  <p className="cu-field__hint">
+                    Enter this code at{' '}
+                    {verificationUri ? (
+                      <a
+                        className="cu-link"
+                        data-testid="codex-device-verification-link"
+                        href={verificationUri}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {verificationUri}
+                      </a>
+                    ) : (
+                      'the ChatGPT verification page'
+                    )}
+                  </p>
+                  <div className="cu-codex-device-code__row">
+                    <code data-testid="codex-device-code" className="cu-codex-device-code__value">
+                      {userCode}
+                    </code>
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--ghost cu-btn--sm"
+                      onClick={() => void handleCopyUserCode()}
+                      aria-label="Copy code"
+                    >
+                      <IconCopy width={15} height={15} />
+                      Copy
+                    </button>
+                  </div>
+                </div>
               ) : null}
               {editModels.length > 0 ? (
                 <fieldset className="cu-field">
@@ -615,12 +680,7 @@ export function CodexSubscriptionHub() {
               </div>
             </div>
             <div className="cu-modal-panel__foot">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={closeEdit}
-                disabled={Boolean(busyKey)}
-              >
+              <button type="button" className="cu-btn cu-btn--ghost cu-btn--sm" onClick={closeEdit}>
                 Cancel
               </button>
               <button

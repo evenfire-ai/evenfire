@@ -89,18 +89,22 @@ test.describe('Codex subscription connection', () => {
     await expect(page.getByRole('tab', { name: 'Subscriptions', selected: true })).toBeVisible()
   })
 
-  test('J3 Add subscription POSTs 201 and shows the displayName row', async ({ page }) => {
+  test('J3 Create lands on the sync modal, not the table alone', async ({ page }) => {
     const shell = new ControlUiShell(page)
     const hub = new SecretsLlmSubscriptionsPage(page)
     const displayName = `e2e-add-${Date.now().toString(36)}`
     await loginFromHome(page)
     await shell.openSecretsLlmSubscriptions()
     const key = await hub.createGrant(displayName)
+    await expect(page).toHaveURL(/\/secrets\/llm\/subscriptions$/)
+    await hub.expectConnectModal()
     const listed = await listConnections()
     expect(listed.find(row => row.connectionKey === key)?.displayName).toBe(displayName)
+    await hub.closeConnectModal()
+    await expect(page.getByRole('cell', { name: displayName, exact: true })).toBeVisible()
   })
 
-  test('J4 pencil Sign in and Sync live on Secrets, never on the agent', async ({ page }) => {
+  test('J4 Create starts device connect with a usable ChatGPT link and copy', async ({ page }) => {
     const shell = new ControlUiShell(page)
     const hub = new SecretsLlmSubscriptionsPage(page)
     const agents = new AgentListPage(page)
@@ -109,27 +113,37 @@ test.describe('Codex subscription connection', () => {
 
     await loginFromHome(page)
     await shell.openSecretsLlmSubscriptions()
-    const grantKey = await hub.createGrant(displayName)
-    await hub.openGrant(displayName)
-
-    const signIn = page.getByRole('button', { name: 'Sign in with ChatGPT' })
-    await expect(signIn).toBeEnabled()
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
     const deviceStart = page.waitForResponse(
       response =>
         /\/api\/v1\/admin\/llm\/providers\/codex-subscription\/(connections\/[^/]+\/)?device\/start$/.test(
           new URL(response.url()).pathname
         ) && response.request().method() === 'POST'
     )
-    await signIn.click()
+    const grantKey = await hub.createGrant(displayName)
     const deviceRes = await deviceStart
-    expect(deviceRes.ok(), `device start must succeed, got ${deviceRes.status()}`).toBe(true)
-    const deviceBody = (await deviceRes.json()) as { userCode?: string }
+    expect(deviceRes.status(), `device start must return 200, got ${deviceRes.status()}`).toBe(200)
+    const deviceBody = (await deviceRes.json()) as {
+      userCode?: string
+      verificationUri?: string
+    }
     expect(deviceBody.userCode).toEqual(expect.any(String))
-    await expect(page.getByTestId('codex-device-code')).toContainText(String(deviceBody.userCode))
+
+    const link = page.getByTestId('codex-device-verification-link')
+    await expect(link).toHaveAttribute('href', 'https://auth.openai.com/codex/device')
+    await expect(link).toHaveAttribute('target', '_blank')
+    await expect(link).toHaveAttribute('rel', /noopener/)
+    await expect(page.getByTestId('codex-device-code')).toHaveText(String(deviceBody.userCode))
+
+    await page.getByRole('button', { name: 'Copy code' }).click()
+    await expect(page.getByText('Code copied')).toBeVisible()
+    await expect
+      .poll(async () => page.evaluate(() => navigator.clipboard.readText()))
+      .toBe(String(deviceBody.userCode))
 
     const grant = (await listConnections()).find(row => row.connectionKey === grantKey)
     expect(grant, 'created grant must be listed').toBeTruthy()
-    const sync = page.getByRole('button', { name: 'Sync catalog' })
+    const sync = page.getByRole('dialog').getByRole('button', { name: 'Sync catalog' })
     if (grant?.status === 'connected') {
       const syncResPromise = page.waitForResponse(
         response =>
@@ -139,12 +153,14 @@ test.describe('Codex subscription connection', () => {
       )
       await sync.click()
       const syncRes = await syncResPromise
-      expect(syncRes.ok(), `catalog sync must succeed, got ${syncRes.status()}`).toBe(true)
+      expect(syncRes.ok(), `manual catalog sync retry must succeed, got ${syncRes.status()}`).toBe(
+        true
+      )
     } else {
       await expect(sync, 'Sync stays disabled until the grant is connected').toBeDisabled()
     }
 
-    await page.getByRole('button', { name: 'Cancel' }).click()
+    await hub.closeConnectModal()
     await shell.openAgents()
     await seedCodexAgents(page, 1)
     await agents.openNth(0)
@@ -237,6 +253,7 @@ test.describe('Codex subscription connection', () => {
     await loginFromHome(page)
     await shell.openSecretsLlmSubscriptions()
     const grantKey = await hub.createGrant(displayName)
+    await hub.closeConnectModal()
     await shell.openAgents()
     await seedCodexAgents(page, 1)
     const agentName = await agents.openNth(0)
@@ -275,6 +292,7 @@ test.describe('Codex subscription connection', () => {
     await loginFromHome(page)
     await shell.openSecretsLlmSubscriptions()
     await hub.createGrant(displayName)
+    await hub.closeConnectModal()
     await shell.openAgents()
     await seedCodexAgents(page, 2)
     await agents.openNth(0)
@@ -300,6 +318,7 @@ test.describe('Codex subscription connection', () => {
     await loginFromHome(page)
     await shell.openSecretsLlmSubscriptions()
     const grantKey = await hub.createGrant(displayName)
+    await hub.closeConnectModal()
     await shell.openAgents()
     await seedCodexAgents(page, 1)
     const agentName = await agents.openNth(0)
@@ -325,6 +344,7 @@ test.describe('Codex subscription connection', () => {
     await loginFromHome(page)
     await shell.openSecretsLlmSubscriptions()
     const grantKey = await hub.createGrant(displayName)
+    await hub.closeConnectModal()
     await shell.openAgents()
     await seedCodexAgents(page, 1)
     const agentName = await agents.openNth(0)
@@ -370,6 +390,7 @@ test.describe('Codex subscription connection', () => {
     expect(grantPatches, 'API-KEY must not PATCH grant metadata').toEqual([])
     await shell.openSecretsLlmSubscriptions()
     await hub.createGrant(displayName)
+    await hub.closeConnectModal()
     expect(secretPuts, 'Subscriptions must not PUT LLM secrets').toEqual([])
   })
 })

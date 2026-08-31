@@ -3,6 +3,7 @@ import {
   type CodexSubscriptionConnectionView,
   isAssignableCodexGrant,
   sanitizeCodexConnection,
+  sanitizeCodexDevicePoll,
 } from '../codexSubscription'
 
 function connected(
@@ -38,6 +39,27 @@ describe('sanitizeCodexConnection', () => {
     expect(() => sanitizeCodexConnection(connected({ connectionKey: undefined }))).toThrow(
       /connection key is invalid/
     )
+  })
+})
+
+describe('sanitizeCodexDevicePoll', () => {
+  it('keeps catalogStatus when present and defaults when the backend omits it', () => {
+    const ready = sanitizeCodexDevicePoll({
+      status: 'connected',
+      connection: connected(),
+    })
+    expect(ready.status).toBe('connected')
+    if (ready.status === 'connected') {
+      expect(ready.connection.catalogStatus).toBe('ready')
+    }
+    const omitted = sanitizeCodexDevicePoll({
+      status: 'connected',
+      connection: { ...connected(), catalogStatus: undefined },
+    })
+    expect(omitted.status).toBe('connected')
+    if (omitted.status === 'connected') {
+      expect(omitted.connection.catalogStatus).toBe('never_synced')
+    }
   })
 })
 

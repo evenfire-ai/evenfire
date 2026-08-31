@@ -12,6 +12,7 @@ const oauth = vi.hoisted(() => ({
   refresh: vi.fn(),
   revoke: vi.fn(),
   ensureFresh: vi.fn(),
+  runCatalogSync: vi.fn(),
 }))
 
 const catalog = vi.hoisted(() => ({
@@ -31,6 +32,7 @@ vi.mock('../src/services/codexSubscriptionOAuth.js', async () => {
     refreshCodexSubscriptionConnection: oauth.refresh,
     revokeCodexSubscription: oauth.revoke,
     ensureFreshCodexAccessToken: oauth.ensureFresh,
+    runCodexCatalogSync: oauth.runCatalogSync,
   }
 })
 
@@ -146,6 +148,14 @@ describe('admin Codex subscription routes', () => {
     catalog.listOffered.mockReset()
     catalog.listOffered.mockResolvedValue(['gpt-5.1'])
     oauth.ensureFresh.mockResolvedValue(undefined)
+    oauth.runCatalogSync.mockResolvedValue({
+      ok: true,
+      catalogStatus: 'ready',
+      added: 0,
+      refreshed: 0,
+      staled: 0,
+      connection: { connectionKey: 'codex-aaa', status: 'connected', catalogStatus: 'ready' },
+    })
     vi.mocked(pool.query).mockReset()
   })
 
@@ -336,9 +346,9 @@ describe('admin Codex subscription routes', () => {
 
   it('publishes the runtime ConfigMap after a catalog sync', async () => {
     const materialize = vi.fn(async () => {})
-    catalog.loadSecrets.mockResolvedValue({ accessToken: 'access-secret' })
-    catalog.sync.mockResolvedValue({
-      outcome: 'ready',
+    oauth.runCatalogSync.mockResolvedValue({
+      ok: true,
+      catalogStatus: 'ready',
       added: 8,
       refreshed: 0,
       staled: 0,
@@ -349,22 +359,23 @@ describe('admin Codex subscription routes', () => {
     )
     expect(res.status).toBe(200)
     expect(res.body.added).toBe(8)
-    expect(oauth.ensureFresh).toHaveBeenCalledTimes(1)
+    expect(oauth.runCatalogSync).toHaveBeenCalledTimes(1)
     expect(materialize).toHaveBeenCalledTimes(1)
     assertNoLeak(res.body)
   })
 
   it('does not publish the runtime ConfigMap when catalog sync cannot refresh the access token', async () => {
     const materialize = vi.fn(async () => {})
-    oauth.ensureFresh.mockRejectedValueOnce(
-      new CodexSubscriptionOAuthError('reauth_required', 'refresh token rejected')
-    )
+    oauth.runCatalogSync.mockResolvedValue({
+      ok: false,
+      catalogStatus: 'never_synced',
+      reason: 'reauth_required',
+    })
     const res = await request(makeAuthedApp(makeGateway(materialize))).post(
       '/admin/llm/providers/codex-subscription/connections/codex-aaa/catalog/sync'
     )
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('reauth_required')
-    expect(catalog.sync).not.toHaveBeenCalled()
     expect(materialize).not.toHaveBeenCalled()
     assertNoLeak(res.body)
   })
@@ -373,9 +384,9 @@ describe('admin Codex subscription routes', () => {
     const materialize = vi.fn(async () => {
       throw new Error('apiserver down')
     })
-    catalog.loadSecrets.mockResolvedValue({ accessToken: 'access-secret' })
-    catalog.sync.mockResolvedValue({
-      outcome: 'ready',
+    oauth.runCatalogSync.mockResolvedValue({
+      ok: true,
+      catalogStatus: 'ready',
       added: 8,
       refreshed: 0,
       staled: 0,
@@ -426,9 +437,10 @@ describe('admin Codex subscription routes', () => {
 
   it('publishes the runtime ConfigMap after a recorded non-ready catalog sync', async () => {
     const materialize = vi.fn(async () => {})
-    catalog.loadSecrets.mockResolvedValue({ accessToken: 'access-secret' })
-    catalog.sync.mockResolvedValue({
-      outcome: 'auth-rejected',
+    oauth.runCatalogSync.mockResolvedValue({
+      ok: false,
+      catalogStatus: 'auth-rejected',
+      reason: 'catalog_sync_failed',
       added: 0,
       refreshed: 0,
       staled: 0,
@@ -453,9 +465,10 @@ describe('admin Codex subscription routes', () => {
     const materialize = vi.fn(async () => {
       throw new Error('apiserver down')
     })
-    catalog.loadSecrets.mockResolvedValue({ accessToken: 'access-secret' })
-    catalog.sync.mockResolvedValue({
-      outcome: 'unavailable',
+    oauth.runCatalogSync.mockResolvedValue({
+      ok: false,
+      catalogStatus: 'unavailable',
+      reason: 'catalog_sync_failed',
       added: 0,
       refreshed: 0,
       staled: 0,
@@ -511,12 +524,63 @@ describe('admin Codex subscription routes', () => {
 
   it('publishes the runtime ConfigMap after a connected device poll', async () => {
     const materialize = vi.fn(async () => {})
-    oauth.pollDevice.mockResolvedValue({ status: 'connected', connectionKey: 'codex-aaa' })
+    const callOrder: string[] = []
+    oauth.pollDevice.mockResolvedValue({
+      status: 'connected',
+      connection: {
+        connectionKey: 'codex-aaa',
+        status: 'connected',
+        catalogStatus: 'never_synced',
+      },
+    })
+    oauth.runCatalogSync.mockImplementation(async () => {
+      callOrder.push('sync')
+      return {
+        ok: true,
+        catalogStatus: 'ready',
+        added: 2,
+        refreshed: 0,
+        staled: 0,
+        connection: { connectionKey: 'codex-aaa', status: 'connected', catalogStatus: 'ready' },
+      }
+    })
+    const res = await request(
+      makeAuthedApp({
+        ...makeGateway(async () => {
+          callOrder.push('publish')
+        }),
+      })
+    ).get('/admin/llm/providers/codex-subscription/connections/codex-aaa/device/poll')
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe('connected')
+    expect(res.body.connection.catalogStatus).toBe('ready')
+    expect(oauth.runCatalogSync).toHaveBeenCalledTimes(1)
+    expect(callOrder).toEqual(['sync', 'publish'])
+    assertNoLeak(res.body)
+  })
+
+  it('keeps a connected device poll at 200 when automatic catalog sync fails', async () => {
+    const materialize = vi.fn(async () => {})
+    oauth.pollDevice.mockResolvedValue({
+      status: 'connected',
+      connection: {
+        connectionKey: 'codex-aaa',
+        status: 'connected',
+        catalogStatus: 'never_synced',
+      },
+    })
+    oauth.runCatalogSync.mockResolvedValue({
+      ok: false,
+      catalogStatus: 'unavailable',
+      reason: 'catalog_sync_failed',
+      connection: { connectionKey: 'codex-aaa', status: 'connected', catalogStatus: 'unavailable' },
+    })
     const res = await request(makeAuthedApp(makeGateway(materialize))).get(
       '/admin/llm/providers/codex-subscription/connections/codex-aaa/device/poll'
     )
     expect(res.status).toBe(200)
     expect(res.body.status).toBe('connected')
+    expect(res.body.connection.catalogStatus).toBe('unavailable')
     expect(materialize).toHaveBeenCalledTimes(1)
     assertNoLeak(res.body)
   })
@@ -525,7 +589,10 @@ describe('admin Codex subscription routes', () => {
     const materialize = vi.fn(async () => {
       throw new Error('apiserver down')
     })
-    oauth.pollDevice.mockResolvedValue({ status: 'connected', connectionKey: 'codex-aaa' })
+    oauth.pollDevice.mockResolvedValue({
+      status: 'connected',
+      connection: { connectionKey: 'codex-aaa', status: 'connected', catalogStatus: 'ready' },
+    })
     const res = await request(makeAuthedApp(makeGateway(materialize))).get(
       '/admin/llm/providers/codex-subscription/device/poll'
     )
@@ -543,6 +610,7 @@ describe('admin Codex subscription routes', () => {
     )
     expect(res.status).toBe(200)
     expect(materialize).not.toHaveBeenCalled()
+    expect(oauth.runCatalogSync).not.toHaveBeenCalled()
     assertNoLeak(res.body)
   })
 

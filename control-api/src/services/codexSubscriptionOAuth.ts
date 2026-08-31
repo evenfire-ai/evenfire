@@ -2,7 +2,12 @@ import { createHash, randomBytes } from 'node:crypto'
 import type { DbClient } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
 import { chatgptAccountIdFromJwt } from './chatgptAccountId.js'
-import { rebuildLiveCodexUnionAllowlist } from './codexSubscriptionCatalog.js'
+import {
+  type CodexCatalogOutcome,
+  type CodexCatalogTransport,
+  rebuildLiveCodexUnionAllowlist,
+  syncCodexSubscriptionCatalog,
+} from './codexSubscriptionCatalog.js'
 import {
   CodexSubscriptionFingerprintConflictError,
   type CodexSubscriptionSafeConnection,
@@ -141,6 +146,26 @@ export type CodexDevicePollResult =
   | { status: 'connected'; connection: CodexSubscriptionSafeConnection }
   | { status: 'expired' }
   | { status: 'denied' }
+
+/** Fail-soft catalog fetch after a grant is persisted. Never throws. */
+export type CodexCatalogSyncResult =
+  | {
+      ok: true
+      catalogStatus: 'ready'
+      added: number
+      refreshed: number
+      staled: number
+      connection: CodexSubscriptionSafeConnection
+    }
+  | {
+      ok: false
+      catalogStatus: Extract<CodexCatalogOutcome, 'auth-rejected' | 'unavailable'> | 'never_synced'
+      reason: string
+      added?: number
+      refreshed?: number
+      staled?: number
+      connection?: CodexSubscriptionSafeConnection | null
+    }
 
 function requireEnabled(deps: CodexOAuthDeps): void {
   if (!deps.enabled) {
@@ -556,6 +581,63 @@ export async function ensureFreshCodexAccessToken(deps: CodexOAuthDeps): Promise
     throw err
   } finally {
     await releaseCodexSubscriptionRefreshLock(deps.db, lockToken, key)
+  }
+}
+
+/**
+ * Fail-soft first catalog fetch after OAuth persist. Never throws: a connected
+ * grant stays connected when ChatGPT catalog is unavailable.
+ */
+export async function runCodexCatalogSync(
+  deps: CodexOAuthDeps,
+  connectionKey: string,
+  transport: CodexCatalogTransport
+): Promise<CodexCatalogSyncResult> {
+  const key = normalizeCodexConnectionKey(connectionKey)
+  try {
+    const keyed = { ...deps, connectionKey: key }
+    await ensureFreshCodexAccessToken(keyed)
+    const secrets = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey, key)
+    if (!secrets?.accessToken) {
+      return { ok: false, catalogStatus: 'never_synced', reason: 'no_grant' }
+    }
+    const synced = await syncCodexSubscriptionCatalog(deps.db, transport, secrets.accessToken, {
+      connectionKey: key,
+    })
+    if (!synced.connection) {
+      return { ok: false, catalogStatus: 'never_synced', reason: 'stale_revision' }
+    }
+    if (synced.outcome !== 'ready') {
+      return {
+        ok: false,
+        catalogStatus: synced.outcome,
+        reason: 'catalog_sync_failed',
+        added: synced.added,
+        refreshed: synced.refreshed,
+        staled: synced.staled,
+        connection: synced.connection,
+      }
+    }
+    return {
+      ok: true,
+      catalogStatus: 'ready',
+      added: synced.added,
+      refreshed: synced.refreshed,
+      staled: synced.staled,
+      connection: synced.connection,
+    }
+  } catch (err) {
+    log.warn(
+      { err, event: 'codex_catalog_auto_sync_failed', connectionKey: key },
+      'automatic catalog sync after grant failed'
+    )
+    const reason =
+      err instanceof CodexSubscriptionOAuthError
+        ? err.code
+        : err instanceof Error
+          ? err.message
+          : 'catalog_sync_failed'
+    return { ok: false, catalogStatus: 'never_synced', reason }
   }
 }
 
