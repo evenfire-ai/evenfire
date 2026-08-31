@@ -48,6 +48,7 @@ vi.mock('node:dns/promises', () => ({
 vi.mock('./metrics', () => ({
   networkPolicySafetyPassDurationSeconds: { observe: vi.fn() },
   networkPolicySafetyPassPoliciesTotal: { inc: vi.fn() },
+  writesTotal: { inc: vi.fn() },
 }))
 
 function makeMockNetworkingApi() {
