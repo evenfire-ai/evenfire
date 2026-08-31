@@ -48,6 +48,18 @@ vi.mock('../src/services/codexSubscriptionConnection.js', async () => {
   }
 })
 
+const catalog = vi.hoisted(() => ({
+  sync: vi.fn(),
+}))
+
+vi.mock('../src/services/codexSubscriptionCatalog.js', async () => {
+  const actual = await vi.importActual('../src/services/codexSubscriptionCatalog.js')
+  return {
+    ...actual,
+    syncCodexSubscriptionCatalog: catalog.sync,
+  }
+})
+
 const {
   CodexSubscriptionOAuthError,
   CODEX_OAUTH_AUTHORIZE_URL,
@@ -62,6 +74,7 @@ const {
   revokeCodexSubscription,
   startCodexBrowserConnect,
   startCodexDeviceConnect,
+  runCodexCatalogSync,
 } = await import('../src/services/codexSubscriptionOAuth.js')
 
 const KEY = deriveOAuthEncryptionKey('ab'.repeat(32))
@@ -102,6 +115,7 @@ function deps(fetchFn: typeof fetch) {
 describe('codex subscription OAuth broker', () => {
   beforeEach(() => {
     for (const fn of Object.values(repos)) fn.mockReset()
+    catalog.sync.mockReset()
   })
 
   it('starts a browser PKCE flow without leaking secrets', async () => {
@@ -748,5 +762,67 @@ describe('codex subscription OAuth broker', () => {
     )
     expect(result).toMatchObject({ status: 'connected' })
     expect(repos.insertInitial.mock.calls[0]?.[3]).toBe('team-plus')
+  })
+
+  it('runs a fail-soft catalog sync after a grant is ready', async () => {
+    repos.loadSecrets.mockResolvedValue({
+      refreshToken: 'refresh-secret',
+      accessToken: 'access-secret',
+      accessTokenExpiresAt: new Date(Date.now() + 60_000),
+      chatgptAccountId: 'acct',
+      credentialRevision: 1,
+    })
+    catalog.sync.mockResolvedValue({
+      outcome: 'ready',
+      added: 3,
+      refreshed: 0,
+      staled: 0,
+      connection: { connectionKey: 'team-plus', status: 'connected', catalogStatus: 'ready' },
+    })
+    const result = await runCodexCatalogSync(deps(vi.fn()), 'team-plus', {
+      listModels: async () => ({ outcome: 'ready', models: [] }),
+    })
+    expect(result).toMatchObject({ ok: true, catalogStatus: 'ready', added: 3 })
+    expect(catalog.sync).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not throw when automatic catalog sync fails', async () => {
+    repos.loadSecrets.mockResolvedValue({
+      refreshToken: 'refresh-secret',
+      accessToken: 'access-secret',
+      accessTokenExpiresAt: new Date(Date.now() + 60_000),
+      chatgptAccountId: 'acct',
+      credentialRevision: 1,
+    })
+    catalog.sync.mockRejectedValue(new Error('proxy down'))
+    const result = await runCodexCatalogSync(deps(vi.fn()), 'team-plus', {
+      listModels: async () => ({ outcome: 'unavailable' }),
+    })
+    expect(result).toEqual({
+      ok: false,
+      catalogStatus: 'never_synced',
+      reason: 'catalog_sync_failed',
+    })
+  })
+
+  it('returns a typed OAuth reason when catalog sync throws CodexSubscriptionOAuthError', async () => {
+    repos.loadSecrets.mockResolvedValue({
+      refreshToken: 'refresh-secret',
+      accessToken: 'access-secret',
+      accessTokenExpiresAt: new Date(Date.now() + 60_000),
+      chatgptAccountId: 'acct',
+      credentialRevision: 1,
+    })
+    catalog.sync.mockRejectedValue(
+      new CodexSubscriptionOAuthError('provider_unavailable', 'chatgpt down')
+    )
+    const result = await runCodexCatalogSync(deps(vi.fn()), 'team-plus', {
+      listModels: async () => ({ outcome: 'unavailable' }),
+    })
+    expect(result).toEqual({
+      ok: false,
+      catalogStatus: 'never_synced',
+      reason: 'provider_unavailable',
+    })
   })
 })
