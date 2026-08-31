@@ -88,6 +88,7 @@ export default function RegistryCatalog() {
       return {
         ...column,
         activeDirection: sortKey === column.key ? sortDirection : null,
+        defaultDirection: column.key === 'version' ? 'desc' : 'asc',
         onSort: () => toggleSort(column.key as CatalogSortKey),
       }
     }

@@ -199,7 +199,7 @@ describe('LlmDiscoveryPanel sorting', () => {
     )
     expandOpenAi()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by model ascending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Model ascending' }))
 
     expect(rowOrder()).toEqual(['alpha', 'bravo', 'charlie'])
   })
@@ -217,7 +217,7 @@ describe('LlmDiscoveryPanel sorting', () => {
     )
     expandOpenAi()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by context window descending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Context window descending' }))
 
     expect(rowOrder()).toEqual(['large', 'small', 'unknown'])
   })

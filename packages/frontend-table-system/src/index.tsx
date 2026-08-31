@@ -164,6 +164,7 @@ export function TableCell({
 export function TableHeaderCell({
   activeDirection,
   className,
+  defaultDirection = 'asc',
   kind = 'text',
   label,
   onSort,
@@ -171,6 +172,7 @@ export function TableHeaderCell({
   ...props
 }: Omit<ThHTMLAttributes<HTMLTableCellElement>, 'children'> & {
   activeDirection?: SortDirection | null
+  defaultDirection?: SortDirection
   kind?: CellKind
   label: ReactNode
   onSort?: () => void
@@ -183,7 +185,13 @@ export function TableHeaderCell({
     : onSort
       ? 'none'
       : undefined
-  const nextDirection = activeDirection === 'asc' ? 'descending' : 'ascending'
+  const nextDirection = activeDirection
+    ? activeDirection === 'asc'
+      ? 'descending'
+      : 'ascending'
+    : defaultDirection === 'asc'
+      ? 'ascending'
+      : 'descending'
   const accessibleSortLabel = String(sortLabel ?? label)
   return (
     <th
@@ -428,7 +436,11 @@ export function stableSortRows<TRow>(
   return rows
     .map((row, index) => ({ index, row }))
     .sort((left, right) => {
-      const primary = compareSortValues(value(left.row), value(right.row)) * multiplier
+      const leftValue = value(left.row)
+      const rightValue = value(right.row)
+      if (leftValue == null) return rightValue == null ? 0 : 1
+      if (rightValue == null) return -1
+      const primary = compareSortValues(leftValue, rightValue) * multiplier
       if (primary !== 0) return primary
       const secondary = compareSortValues(identity(left.row), identity(right.row))
       return secondary || left.index - right.index
@@ -439,18 +451,22 @@ export function stableSortRows<TRow>(
 export function useTableSort<TRow, TKey extends string>({
   accessors,
   defaultDirection = 'asc',
+  defaultDirections,
   defaultKey,
   identity,
   rows,
 }: {
   accessors: Record<TKey, (row: TRow) => SortValue>
   defaultDirection?: SortDirection
+  defaultDirections?: Partial<Record<TKey, SortDirection>>
   defaultKey: TKey
   identity: (row: TRow) => SortValue
   rows: readonly TRow[]
 }) {
   const [key, setKey] = useState<TKey>(defaultKey)
-  const [direction, setDirection] = useState<SortDirection>(defaultDirection)
+  const [direction, setDirection] = useState<SortDirection>(
+    defaultDirections?.[defaultKey] ?? defaultDirection
+  )
   const sortedRows = useMemo(
     () => stableSortRows(rows, accessors[key], direction, identity),
     [accessors, direction, identity, key, rows]
@@ -459,7 +475,7 @@ export function useTableSort<TRow, TKey extends string>({
     if (nextKey === key) setDirection(current => (current === 'asc' ? 'desc' : 'asc'))
     else {
       setKey(nextKey)
-      setDirection('asc')
+      setDirection(defaultDirections?.[nextKey] ?? 'asc')
     }
   }
   return { direction, key, setDirection, setKey, sortBy, sortedRows }

@@ -13,6 +13,7 @@ export function TableHeaderRow({ columns }: { columns: TableHeaderColumn[] }) {
           title={column.title}
           label={column.label}
           activeDirection={column.activeDirection}
+          defaultDirection={column.defaultDirection}
           onSort={column.onSort}
           sortLabel={column.sortLabel}
           style={{

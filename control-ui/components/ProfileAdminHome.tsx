@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable, TableRow } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, useTableSort } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   AdminPendingInvitationListItem,
@@ -29,12 +29,15 @@ import { SectionSearchInput } from './SectionSearchInput'
 import { IconShield, IconUsers } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
 import { TabBar } from './TabBar'
+import { TableHeaderRow } from './TableHeaderRow'
+import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
 import { useToast } from './Toast'
 import { IconAlertTriangle, IconRefresh, IconX } from './icons'
 import { CheckboxField } from './ui'
 
-type TeamSortKey = 'members' | 'agents' | 'contexts'
+type TeamSortKey = 'name' | 'members' | 'agents' | 'contexts'
+type MemberSortKey = 'name' | 'email' | 'teams'
 
 export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: ProfileAdminHomeProps) {
   const router = useRouter()
@@ -50,9 +53,6 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
   const [adminLoading, setAdminLoading] = useState(false)
   const [adminCounts, setAdminCounts] = useState({ admins: 0, invitations: 0 })
   const [filteredTeams, setFilteredTeams] = useState<TeamListItem[]>([])
-  const [teamSortKey, setTeamSortKey] = useState<TeamSortKey>('members')
-  const [teamSortDir, setTeamSortDir] = useState<'asc' | 'desc'>('desc')
-  const [memberTeamsSortDir, setMemberTeamsSortDir] = useState<'asc' | 'desc'>('desc')
 
   const [teamToDelete, setTeamToDelete] = useState<TeamListItem | null>(null)
   const [userToDelete, setUserToDelete] = useState<AdminUser | null>(null)
@@ -181,43 +181,66 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
     })
   }, [pendingInvitations, searchInput, users])
 
-  const sortedTeams = useMemo(() => {
-    const sorted = [...filteredTeams]
-    const direction = teamSortDir === 'asc' ? 1 : -1
-    sorted.sort((a, b) => {
-      let countDiff = 0
-      if (teamSortKey === 'members') {
-        countDiff = a.memberCount - b.memberCount
-      } else if (teamSortKey === 'agents') {
-        countDiff = (teamAgentCounts[a.id] ?? 0) - (teamAgentCounts[b.id] ?? 0)
-      } else {
-        countDiff = (teamContextCounts[a.id] ?? 0) - (teamContextCounts[b.id] ?? 0)
-      }
-      countDiff *= direction
-      if (countDiff !== 0) return countDiff
-      return a.name.localeCompare(b.name)
-    })
-    return sorted
-  }, [filteredTeams, teamAgentCounts, teamContextCounts, teamSortDir, teamSortKey])
-
-  const sortedUsers = useMemo(() => {
-    const sorted = [...visibleUsers]
-    const direction = memberTeamsSortDir === 'asc' ? 1 : -1
-    sorted.sort((a, b) => {
-      const countDiff = ((a.activeTeamCount || 0) - (b.activeTeamCount || 0)) * direction
-      if (countDiff !== 0) return countDiff
-      const aLabel = a.displayName || a.name || a.email
-      const bLabel = b.displayName || b.name || b.email
-      return aLabel.localeCompare(bLabel)
-    })
-    return sorted
-  }, [visibleUsers, memberTeamsSortDir])
+  const teamSort = useTableSort<TeamListItem, TeamSortKey>({
+    rows: filteredTeams,
+    defaultKey: 'name',
+    defaultDirections: { agents: 'desc', contexts: 'desc', members: 'desc' },
+    identity: team => team.id,
+    accessors: {
+      name: team => team.name,
+      members: team => team.memberCount,
+      agents: team => teamAgentCounts[team.id] ?? 0,
+      contexts: team => teamContextCounts[team.id] ?? 0,
+    },
+  })
+  const memberSort = useTableSort<AdminUser, MemberSortKey>({
+    rows: visibleUsers,
+    defaultKey: 'name',
+    defaultDirections: { teams: 'desc' },
+    identity: user => user.id,
+    accessors: {
+      name: user => user.displayName || user.name || user.email,
+      email: user => user.email,
+      teams: user => user.activeTeamCount || 0,
+    },
+  })
 
   const membersTabLabel =
     activeTab === 'users'
       ? `Members (${visibleUsers.length}${pendingInvitations.length ? `, ${pendingInvitations.length} pending` : ''})`
       : 'Members'
   const teamsTabLabel = activeTab === 'teams' ? `Teams (${teams.length})` : 'Teams'
+  const teamColumns: TableHeaderColumn[] = [
+    { key: 'name', label: 'Team name' },
+    { key: 'members', label: 'Members', width: '5rem', align: 'right' },
+    { key: 'agents', label: 'Agents', width: '5rem', align: 'right' },
+    { key: 'contexts', label: 'Contexts', width: '5rem', align: 'right' },
+    { key: 'actions', width: '4.5rem', align: 'right', ariaLabel: 'Actions' },
+  ].map(column =>
+    column.key === 'actions'
+      ? column
+      : {
+          ...column,
+          activeDirection: teamSort.key === column.key ? teamSort.direction : null,
+          defaultDirection: column.key === 'name' ? 'asc' : 'desc',
+          onSort: () => teamSort.sortBy(column.key as TeamSortKey),
+        }
+  )
+  const memberColumns: TableHeaderColumn[] = [
+    { key: 'name', label: 'Name' },
+    { key: 'email', label: 'Email' },
+    { key: 'teams', label: 'Teams', width: '7rem', align: 'right' },
+    { key: 'actions', width: '4.5rem', align: 'right', ariaLabel: 'Actions' },
+  ].map(column =>
+    column.key === 'actions'
+      ? column
+      : {
+          ...column,
+          activeDirection: memberSort.key === column.key ? memberSort.direction : null,
+          defaultDirection: column.key === 'teams' ? 'desc' : 'asc',
+          onSort: () => memberSort.sortBy(column.key as MemberSortKey),
+        }
+  )
   const adminsTabLabel =
     activeTab === 'admins'
       ? `Admins (${adminCounts.admins}${
@@ -246,34 +269,6 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
       source: 'member',
     })
     router.push(CONTROL_ROUTES.usersAndTeams.newAdmin(Object.fromEntries(searchParams)))
-  }
-
-  function toggleTeamSort(nextKey: TeamSortKey) {
-    if (teamSortKey === nextKey) {
-      setTeamSortDir(prev => (prev === 'asc' ? 'desc' : 'asc'))
-      return
-    }
-    setTeamSortKey(nextKey)
-    setTeamSortDir('desc')
-  }
-
-  function renderTeamSortButton(key: TeamSortKey, label: string) {
-    const isActive = teamSortKey === key
-    const indicator = isActive ? (teamSortDir === 'asc' ? '↑' : '↓') : ''
-    const sortDirectionLabel =
-      isActive && teamSortDir === 'asc' ? 'descending' : isActive ? 'ascending' : 'descending'
-    return (
-      <button
-        type="button"
-        className="cu-link cu-link--sm"
-        style={{ color: 'var(--cu-text-muted)', whiteSpace: 'nowrap' }}
-        onClick={() => toggleTeamSort(key)}
-        aria-label={`Sort by ${label.toLowerCase()} ${sortDirectionLabel}`}
-      >
-        {label}
-        {indicator ? ` ${indicator}` : ''}
-      </button>
-    )
   }
 
   async function resendPendingInvitation(invitation: AdminPendingInvitationListItem) {
@@ -578,19 +573,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                 <div className="eft-table-viewport cu-table-wrap">
                   <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
                     <thead>
-                      <tr>
-                        <th>Team name</th>
-                        <th style={{ width: '5rem', textAlign: 'right' }}>
-                          {renderTeamSortButton('members', 'Members')}
-                        </th>
-                        <th style={{ width: '5rem', textAlign: 'right' }}>
-                          {renderTeamSortButton('agents', 'Agents')}
-                        </th>
-                        <th style={{ width: '5rem', textAlign: 'right' }}>
-                          {renderTeamSortButton('contexts', 'Contexts')}
-                        </th>
-                        <th style={{ width: '4.5rem', textAlign: 'right' }} aria-label="Actions" />
-                      </tr>
+                      <TableHeaderRow columns={teamColumns} />
                     </thead>
                     <tbody>
                       <SkeletonTableRows columns={5} rows={5} />
@@ -605,22 +588,10 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                 <div className="eft-table-viewport cu-table-wrap">
                   <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
                     <thead>
-                      <tr>
-                        <th>Team name</th>
-                        <th style={{ width: '5rem', textAlign: 'right' }}>
-                          {renderTeamSortButton('members', 'Members')}
-                        </th>
-                        <th style={{ width: '5rem', textAlign: 'right' }}>
-                          {renderTeamSortButton('agents', 'Agents')}
-                        </th>
-                        <th style={{ width: '5rem', textAlign: 'right' }}>
-                          {renderTeamSortButton('contexts', 'Contexts')}
-                        </th>
-                        <th style={{ width: '4.5rem', textAlign: 'right' }} aria-label="Actions" />
-                      </tr>
+                      <TableHeaderRow columns={teamColumns} />
                     </thead>
                     <tbody>
-                      {sortedTeams.map(team => (
+                      {teamSort.sortedRows.map(team => (
                         <TableRow
                           key={team.id}
                           className="cu-table__row cu-table__row--clickable"
@@ -703,24 +674,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                 <div className="eft-table-viewport cu-table-wrap">
                   <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
                     <thead>
-                      <tr>
-                        <th>Name</th>
-                        <th>Email</th>
-                        <th style={{ width: '5rem', textAlign: 'right' }}>
-                          <button
-                            type="button"
-                            className="cu-link cu-link--sm"
-                            style={{ color: 'var(--cu-text-muted)', whiteSpace: 'nowrap' }}
-                            onClick={() =>
-                              setMemberTeamsSortDir(prev => (prev === 'asc' ? 'desc' : 'asc'))
-                            }
-                            aria-label={`Sort by team count ${memberTeamsSortDir === 'asc' ? 'descending' : 'ascending'}`}
-                          >
-                            Teams {memberTeamsSortDir === 'asc' ? '↑' : '↓'}
-                          </button>
-                        </th>
-                        <th style={{ width: '4.5rem', textAlign: 'right' }} aria-label="Actions" />
-                      </tr>
+                      <TableHeaderRow columns={memberColumns} />
                     </thead>
                     <tbody>
                       <SkeletonTableRows columns={4} rows={5} />
@@ -834,26 +788,10 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                     <div className="eft-table-viewport cu-table-wrap">
                       <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
                         <thead>
-                          <tr>
-                            <th>Name</th>
-                            <th>Email</th>
-                            <th className="cu-table__col-count">
-                              <button
-                                type="button"
-                                className="cu-table__sort-link"
-                                onClick={() =>
-                                  setMemberTeamsSortDir(prev => (prev === 'asc' ? 'desc' : 'asc'))
-                                }
-                                aria-label={`Sort by team count ${memberTeamsSortDir === 'asc' ? 'descending' : 'ascending'}`}
-                              >
-                                Teams {memberTeamsSortDir === 'asc' ? '↑' : '↓'}
-                              </button>
-                            </th>
-                            <th className="cu-table__col-actions-wide" aria-label="Actions" />
-                          </tr>
+                          <TableHeaderRow columns={memberColumns} />
                         </thead>
                         <tbody>
-                          {sortedUsers.map(user => (
+                          {memberSort.sortedRows.map(user => (
                             <TableRow
                               key={user.id}
                               className="cu-table__row cu-table__row--clickable"

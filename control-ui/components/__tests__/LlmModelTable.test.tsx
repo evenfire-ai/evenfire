@@ -392,7 +392,7 @@ describe('LlmModelTable sorting', () => {
     renderTable([charlie, alpha, bravo])
     expandAnthropicModels()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by model ascending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Model ascending' }))
 
     expect(expandedRowOrder()).toEqual(['alpha', 'bravo', 'charlie'])
   })
@@ -403,11 +403,11 @@ describe('LlmModelTable sorting', () => {
     renderTable([alpha, bravo])
     expandAnthropicModels()
 
-    const modelSort = screen.getByRole('button', { name: 'Sort by model ascending' })
+    const modelSort = screen.getByRole('button', { name: 'Sort by Model ascending' })
     fireEvent.click(modelSort)
     expect(expandedRowOrder()).toEqual(['alpha', 'bravo'])
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by model descending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Model descending' }))
     expect(expandedRowOrder()).toEqual(['bravo', 'alpha'])
   })
 
@@ -418,7 +418,7 @@ describe('LlmModelTable sorting', () => {
     renderTable([small, large, unknown])
     expandAnthropicModels()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by context window descending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Context window descending' }))
 
     expect(expandedRowOrder()).toEqual(['large', 'small', 'unknown'])
   })
@@ -430,12 +430,12 @@ describe('LlmModelTable sorting', () => {
     expandAnthropicModels()
 
     // Model asc (default for text columns).
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by model ascending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Model ascending' }))
     expect(expandedRowOrder()).toEqual(['alpha', 'bravo'])
 
     // Switching to context window uses its natural default (descending) — not
     // the previous direction — so the operator gets the most useful ordering.
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by context window descending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Context window descending' }))
     expect(expandedRowOrder()).toEqual(['bravo', 'alpha'])
   })
 })

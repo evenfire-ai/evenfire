@@ -10,6 +10,7 @@ export type TableHeaderColumn = {
   title?: string
   width?: string
   activeDirection?: SortDirection | null
+  defaultDirection?: SortDirection
   onSort?: () => void
   sortLabel?: ReactNode
 }

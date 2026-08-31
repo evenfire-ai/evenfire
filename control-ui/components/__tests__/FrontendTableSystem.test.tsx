@@ -41,6 +41,14 @@ describe('shared frontend table system', () => {
         row => row.id
       ).map(row => row.id)
     ).toEqual(['a', 'b', 'c'])
+    expect(
+      stableSortRows(
+        rows,
+        row => row.name,
+        'desc',
+        row => row.id
+      ).map(row => row.id)
+    ).toEqual(['a', 'b', 'c'])
   })
 
   it('supports pointer and keyboard row navigation without hijacking child actions', () => {
