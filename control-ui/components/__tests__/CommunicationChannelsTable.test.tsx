@@ -197,7 +197,7 @@ describe('CommunicationChannelsTable — row actions kebab', () => {
     } as unknown as CommunicationChannelItem
   }
 
-  it('exposes one canonical detail action for the row navigation destination', () => {
+  it('routes the View details menu item through the row navigation handler', () => {
     const onOpenChannel = vi.fn()
     render(
       <ToastProvider>
