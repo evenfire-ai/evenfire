@@ -39,6 +39,18 @@ function entryKey(e: OwnedRegistryEntry): string {
   return `${e.name}@${e.version}`
 }
 
+function compareVersionDesc(a: string, b: string): number {
+  const pa = a.split('.')
+  const pb = b.split('.')
+  for (let index = 0; index < Math.max(pa.length, pb.length); index += 1) {
+    const left = Number.parseInt(pa[index] ?? '0', 10)
+    const right = Number.parseInt(pb[index] ?? '0', 10)
+    if (Number.isNaN(left) || Number.isNaN(right)) return b.localeCompare(a)
+    if (left !== right) return right - left
+  }
+  return b.localeCompare(a)
+}
+
 // The registry's owned-entries payload carries `serverMode` but not `entry_type`
 // (mcp-servers always have a serverMode; recipes don't). Prefer an explicit
 // entry_type if the registry ever starts sending it, else infer from serverMode.
@@ -186,6 +198,14 @@ export function OwnedEntries({
             entrySort.sortBy(column.key as 'name' | 'type' | 'version' | 'visibility' | 'status'),
         }
   )
+  const sortedEntries = useMemo(() => {
+    if (entrySort.key !== 'name') return entrySort.sortedRows
+    const direction = entrySort.direction === 'asc' ? 1 : -1
+    return [...entrySort.sortedRows].sort((left, right) => {
+      const byName = left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
+      return byName === 0 ? compareVersionDesc(left.version, right.version) : byName * direction
+    })
+  }, [entrySort.direction, entrySort.key, entrySort.sortedRows])
 
   return (
     <section>
@@ -232,7 +252,7 @@ export function OwnedEntries({
                     <TableHeaderRow columns={columns} />
                   </thead>
                   <tbody>
-                    {entrySort.sortedRows.map(e => {
+                    {sortedEntries.map(e => {
                       const isPrivate = e.visibility === 'private'
                       const detailRoute = CONTROL_ROUTES.marketplace.entry(e.name, e.version)
                       const rowActions: RowActionMenuItem[] = [

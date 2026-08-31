@@ -338,6 +338,11 @@ describe('OwnedEntries', () => {
     expect(screen.getByText('1.1.0')).toBeInTheDocument()
     expect(screen.getByText('1.0.0')).toBeInTheDocument()
     expect(screen.queryByText('Previous versions')).toBeNull()
+    expect(Array.from(document.querySelectorAll('tbody tr')).map(row => row.textContent)).toEqual([
+      expect.stringContaining('1.2.0'),
+      expect.stringContaining('1.1.0'),
+      expect.stringContaining('1.0.0'),
+    ])
   })
 
   it('each version row installs that exact published version', async () => {

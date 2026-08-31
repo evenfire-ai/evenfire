@@ -190,7 +190,7 @@ export default function RegistryCatalog() {
       return
     }
     setSortKey(key)
-    setSortDirection('asc')
+    setSortDirection(key === 'version' ? 'desc' : 'asc')
   }
 
   function isEntryInstalled(entry: RegistryEntry): boolean {

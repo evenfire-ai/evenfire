@@ -233,10 +233,10 @@ describe('RegistryCatalog tabs and columns', () => {
     )
 
     fireEvent.click(screen.getByRole('button', { name: 'Sort by Version ascending' }))
-    expect(listedNames()).toEqual(['brave-search', 'zebra-search', 'alpha-search'])
-
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by Version descending' }))
     expect(listedNames()).toEqual(['alpha-search', 'zebra-search', 'brave-search'])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Version ascending' }))
+    expect(listedNames()).toEqual(['brave-search', 'zebra-search', 'alpha-search'])
   })
 })
 
