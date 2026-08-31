@@ -335,10 +335,10 @@ describe('HostDetailsPage current model and credential flow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
 
     expect(screen.getByRole('region', { name: 'LLM configuration' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Save model configuration' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Update secret' })).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save model configuration' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() =>
       expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
@@ -373,13 +373,11 @@ describe('HostDetailsPage current model and credential flow', () => {
       screen.getByLabelText('Current model', { selector: '#llm-primary-model' })
     ).toHaveTextContent('gpt-5.4')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel model changes' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
 
     expect(await screen.findByText('gpt-4.1')).toBeInTheDocument()
     await waitFor(() => expect(api.getHostDetailBundle).toHaveBeenCalledTimes(2))
-    expect(
-      screen.queryByRole('button', { name: 'Save model configuration' })
-    ).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
     expect(
       (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.some(
         args => args[0] === 'PUT' && args[1] === '/api/v1/admin/hosts/foo'
@@ -412,13 +410,13 @@ describe('HostDetailsPage current model and credential flow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
     fireEvent.click(screen.getByLabelText('Current model', { selector: '#llm-primary-model' }))
     fireEvent.click(await screen.findByRole('option', { name: 'gpt-5.4' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Save model configuration' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     expect(await screen.findByText('model save failed')).toBeInTheDocument()
     expect(
       screen.getByLabelText('Current model', { selector: '#llm-primary-model' })
     ).toHaveTextContent('gpt-5.4')
-    expect(screen.getByRole('button', { name: 'Save model configuration' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
     expect(screen.queryByText('Model configuration saved.')).not.toBeInTheDocument()
 
     const payload = findHostPutPayload() as {
@@ -475,13 +473,11 @@ describe('HostDetailsPage current model and credential flow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
     fireEvent.click(screen.getByLabelText('Current model', { selector: '#llm-primary-model' }))
     fireEvent.click(await screen.findByRole('option', { name: 'gpt-5.4' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Save model configuration' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     expect(await screen.findByText('Model configuration saved.')).toBeInTheDocument()
     expect(await screen.findByText('gpt-4.1')).toBeInTheDocument()
-    expect(
-      screen.queryByRole('button', { name: 'Save model configuration' })
-    ).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
 
     const payload = findHostPutPayload() as {
       metadata?: { resourceVersion?: string }
@@ -570,7 +566,7 @@ describe('HostDetailsPage current model and credential flow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
     fireEvent.click(screen.getByRole('button', { name: 'LLM Secret' }))
     fireEvent.click(screen.getByRole('option', { name: /openai-secret-b/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Save model configuration' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() =>
       expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
@@ -627,7 +623,7 @@ describe('HostDetailsPage cross-tab draft preservation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
     // Keep the existing static-credentials secret. Emptying it now fails
     // closed (Codex broker chains omit secretRef; OpenAI still requires one).
-    fireEvent.click(screen.getByRole('button', { name: 'Save model configuration' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
     expect(await screen.findByText('Model configuration saved.')).toBeInTheDocument()
 
     navigateToTab(view, 'overview')
@@ -655,8 +651,8 @@ describe('HostDetailsPage cross-tab draft preservation', () => {
     expect(screen.getByLabelText('Credential')).toBeInTheDocument()
     expect(screen.queryByText('Secret reference')).not.toBeInTheDocument()
     expect(screen.queryByRole('radio', { name: /ChatGPT subscription/i })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Save model configuration' })).toBeDisabled()
-    fireEvent.click(screen.getByRole('button', { name: 'Save model configuration' }))
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     expect(api.apiSend).not.toHaveBeenCalledWith(
       'PUT',

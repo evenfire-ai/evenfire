@@ -16,7 +16,6 @@ import { collectWorkflowRecipeSecretRefs } from '../lib/workflowRecipeSecretRefs
 import { useConfirmDialog } from './ConfirmDialog'
 import { LlmProviderIcon } from './LlmProviderIcon'
 import { LlmSecretUpdateModal } from './LlmSecretUpdateModal'
-import { LlmSecretsSubTabs } from './LlmSecretsSubTabs'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SecretsScopeTabs } from './SecretsScopeTabs'
 import { SectionSearchInput } from './SectionSearchInput'
@@ -42,10 +41,7 @@ type McpSecretRow = {
 }
 type RecipeSecretStatus = 'provisioned' | 'missing'
 type RecipeSecretRowOwnership =
-  | { kind: 'shared' }
-  | { kind: 'owner-recipe'; recipeName: string }
-  | { kind: 'unlabeled' }
-  | null // missing rows: not yet provisioned, ownership chosen at create time.
+  { kind: 'shared' } | { kind: 'owner-recipe'; recipeName: string } | { kind: 'unlabeled' } | null // missing rows: not yet provisioned, ownership chosen at create time.
 type RecipeSecretRow = {
   name: string
   namespace: string
@@ -469,7 +465,6 @@ export function SecretsTable({
 
         <div className="cu-card__body cu-card__body--auto cu-secrets-strip">
           <SecretsScopeTabs activeValue={scope} />
-          {scope === 'llm' ? <LlmSecretsSubTabs activeValue="api-key" /> : null}
         </div>
 
         {scope === 'llm' && error && (
