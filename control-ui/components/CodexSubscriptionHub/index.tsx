@@ -26,13 +26,14 @@ import {
 import { useConfirmDialog } from '../ConfirmDialog'
 import { LlmProviderIcon } from '../LlmProviderIcon'
 import { LlmSecretsSubTabs } from '../LlmSecretsSubTabs'
+import { RowActionsMenu } from '../RowActionsMenu'
 import { SecretsScopeTabs } from '../SecretsScopeTabs'
 import { SectionSearchInput } from '../SectionSearchInput'
 import { SelectionDropdown } from '../SelectionDropdown'
 import { IconKey } from '../Sidebar/icons'
 import { TablePanelHeader } from '../TablePanelHeader'
 import { useToast } from '../Toast'
-import { IconPencil, IconRefresh, IconX } from '../icons'
+import { IconRefresh, IconX } from '../icons'
 import { CheckboxField } from '../ui'
 
 function grantLabel(row: CodexSubscriptionConnectionView): string {
@@ -53,6 +54,10 @@ export function CodexSubscriptionHub() {
   const [editing, setEditing] = useState<CodexSubscriptionConnectionView | null>(null)
   const [editName, setEditName] = useState('')
   const [editDefault, setEditDefault] = useState('')
+  // True while the open modal is the continuation of the CREATE flow — the
+  // grant was just created and the operator is doing first-time setup
+  // (sign-in, model picks, default model) instead of updating an existing one.
+  const [setupNew, setSetupNew] = useState(false)
   const [editModels, setEditModels] = useState<
     Array<{ model: string; enabled: boolean; stale: boolean }>
   >([])
@@ -108,12 +113,16 @@ export function CodexSubscriptionHub() {
     }
     setBusyKey('create')
     try {
-      await createCodexSubscriptionConnection({ displayName })
+      const created = await createCodexSubscriptionConnection({ displayName })
       setCreateName('')
       setCreating(false)
       setError('')
       await load()
       showToast(`Subscription ${displayName} created.`, { tone: 'success' })
+      // Continue straight into first-time setup: sign in, pick models, set the
+      // default. Same modal surface as edit, framed as a setup flow.
+      await openEdit(created)
+      setSetupNew(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create subscription')
     } finally {
@@ -125,6 +134,7 @@ export function CodexSubscriptionHub() {
     setEditing(row)
     setEditName(grantLabel(row))
     setEditDefault(row.defaultModel ?? '')
+    setSetupNew(false)
     setUserCode(null)
     setVerificationUri(null)
     setError('')
@@ -146,6 +156,7 @@ export function CodexSubscriptionHub() {
     setEditName('')
     setEditDefault('')
     setEditModels([])
+    setSetupNew(false)
     setUserCode(null)
     setVerificationUri(null)
   }
@@ -160,7 +171,12 @@ export function CodexSubscriptionHub() {
       })
       setEditing(updated)
       await load()
-      showToast(`Subscription ${grantLabel(updated)} updated.`, { tone: 'success' })
+      showToast(
+        setupNew
+          ? `Subscription ${grantLabel(updated)} is ready.`
+          : `Subscription ${grantLabel(updated)} updated.`,
+        { tone: 'success' }
+      )
       closeEdit()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not update subscription')
@@ -411,27 +427,24 @@ export function CodexSubscriptionHub() {
                       </td>
                       <td style={{ textAlign: 'right' }}>
                         <div style={{ display: 'inline-flex', gap: '0.35rem' }}>
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--toolbar"
-                            onClick={() => void openEdit(row)}
-                            aria-label={`Update ChatGPT subscription ${grantLabel(row)}`}
-                          >
-                            <IconPencil width={16} height={16} />
-                          </button>
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void handleRevoke(row)}
-                            disabled={busyKey === row.connectionKey}
-                            aria-label={
-                              busyKey === row.connectionKey
-                                ? 'Deleting…'
-                                : `Delete ChatGPT subscription ${grantLabel(row)}`
-                            }
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
+                          <RowActionsMenu
+                            ariaLabel={`Actions for ChatGPT subscription ${grantLabel(row)}`}
+                            horizontalTrigger
+                            actions={[
+                              {
+                                key: 'update',
+                                label: 'Update',
+                                onClick: () => void openEdit(row),
+                              },
+                              {
+                                key: 'delete',
+                                label: busyKey === row.connectionKey ? 'Deleting…' : 'Delete',
+                                danger: true,
+                                disabled: busyKey === row.connectionKey,
+                                onClick: () => void handleRevoke(row),
+                              },
+                            ]}
+                          />
                         </div>
                       </td>
                     </tr>
@@ -484,6 +497,9 @@ export function CodexSubscriptionHub() {
                   onChange={e => setCreateName(e.target.value)}
                   disabled={busyKey === 'create'}
                 />
+                <span className="cu-field__hint">
+                  Next: sign in with ChatGPT, pick the models to offer, and set a default.
+                </span>
               </div>
             </div>
             <div className="cu-modal-panel__foot">
@@ -501,7 +517,7 @@ export function CodexSubscriptionHub() {
                 onClick={() => void handleCreate()}
                 disabled={busyKey === 'create'}
               >
-                {busyKey === 'create' ? 'Saving…' : 'Create'}
+                {busyKey === 'create' ? 'Creating…' : 'Create and set up'}
               </button>
             </div>
           </div>
@@ -525,7 +541,9 @@ export function CodexSubscriptionHub() {
           >
             <div className="cu-modal-panel__head">
               <strong id="codex-edit-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Update ChatGPT subscription {grantLabel(editing)}
+                {setupNew
+                  ? `Set up ChatGPT subscription ${grantLabel(editing)}`
+                  : `Update ChatGPT subscription ${grantLabel(editing)}`}
               </strong>
               <button
                 type="button"
@@ -539,6 +557,12 @@ export function CodexSubscriptionHub() {
             </div>
             <div className="cu-form-stack cu-form-stack--wide" style={{ maxWidth: '100%' }}>
               {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
+              {setupNew ? (
+                <p className="cu-field__hint" style={{ margin: 0 }}>
+                  Grant created — sign in with ChatGPT, choose the models to offer, and set a
+                  default to finish setup.
+                </p>
+              ) : null}
               <div className="cu-field">
                 <label htmlFor="codex-edit-name">Name</label>
                 <input
@@ -555,8 +579,9 @@ export function CodexSubscriptionHub() {
                     <span className={statusTagClass(uiStatus)}>{statusLabel(uiStatus)}</span>
                   </div>
                   <p className="cu-field__hint" style={{ margin: 0 }}>
-                    Agents authorize through this subscription&apos;s ChatGPT grant. Reconnect if
-                    the grant expired, or sync to refresh the model catalog.
+                    {setupNew
+                      ? 'Agents authorize through this subscription’s ChatGPT grant. Sign in to connect it.'
+                      : 'Agents authorize through this subscription’s ChatGPT grant. Reconnect if the grant expired, or sync to refresh the model catalog.'}
                   </p>
                   <div className="cu-form-inline">
                     <button
@@ -663,7 +688,7 @@ export function CodexSubscriptionHub() {
                 onClick={closeEdit}
                 disabled={Boolean(busyKey)}
               >
-                Cancel
+                {setupNew ? 'Finish later' : 'Cancel'}
               </button>
               <button
                 type="button"
@@ -671,7 +696,7 @@ export function CodexSubscriptionHub() {
                 onClick={() => void handleSaveEdit()}
                 disabled={Boolean(busyKey)}
               >
-                {busyKey ? 'Saving…' : 'Update subscription'}
+                {busyKey ? 'Saving…' : setupNew ? 'Finish setup' : 'Update subscription'}
               </button>
             </div>
           </div>

@@ -82,7 +82,7 @@ describe('CodexSubscriptionHub', () => {
     vi.clearAllMocks()
   })
 
-  it('creates a subscription from the Add modal', async () => {
+  it('creates a subscription from the Add modal and continues into setup', async () => {
     vi.mocked(createCodexSubscriptionConnection).mockResolvedValue(
       connection({ connectionKey: 'codex-bbb', displayName: 'New team' })
     )
@@ -96,14 +96,17 @@ describe('CodexSubscriptionHub', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), {
       target: { value: 'New team' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Create and set up' }))
     await waitFor(() => {
       expect(createCodexSubscriptionConnection).toHaveBeenCalledWith({ displayName: 'New team' })
     })
     expect(revokeCodexSubscription).not.toHaveBeenCalled()
+    expect(await screen.findByText('Set up ChatGPT subscription New team')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Finish setup' })).toBeInTheDocument()
   })
 
-  it('renders subscriptions as a Secrets table with pencil and delete actions', async () => {
+  it('renders subscriptions as a Secrets table with a row actions menu', async () => {
     render(
       <ToastProvider>
         <CodexSubscriptionHub />
@@ -119,12 +122,9 @@ describe('CodexSubscriptionHub', () => {
     )
     expect(screen.queryByRole('columnheader', { name: 'Agents' })).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Add agents to this subscription')).not.toBeInTheDocument()
-    expect(
-      screen.getByRole('button', { name: 'Update ChatGPT subscription Team A' })
-    ).toBeInTheDocument()
-    expect(
-      screen.getByRole('button', { name: 'Delete ChatGPT subscription Team A' })
-    ).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for ChatGPT subscription Team A' }))
+    expect(screen.getByRole('menuitem', { name: 'Update' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument()
   })
 
   it('opens the grant modal for Sign in, Sync, and model toggles without binding hosts', async () => {
@@ -155,8 +155,9 @@ describe('CodexSubscriptionHub', () => {
       </ToastProvider>
     )
     fireEvent.click(
-      await screen.findByRole('button', { name: 'Update ChatGPT subscription Team A' })
+      await screen.findByRole('button', { name: 'Actions for ChatGPT subscription Team A' })
     )
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Update' }))
     expect(await screen.findByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Sync catalog' })).toBeInTheDocument()
     expect(listCodexConnectionModels).toHaveBeenCalledWith('codex-aaa')
@@ -188,8 +189,9 @@ describe('CodexSubscriptionHub', () => {
       </ToastProvider>
     )
     fireEvent.click(
-      await screen.findByRole('button', { name: 'Delete ChatGPT subscription Team A' })
+      await screen.findByRole('button', { name: 'Actions for ChatGPT subscription Team A' })
     )
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }))
     await waitFor(() => {
       expect(revokeCodexSubscription).toHaveBeenCalledWith('codex-aaa')
     })
