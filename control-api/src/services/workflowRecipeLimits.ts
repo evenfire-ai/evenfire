@@ -18,8 +18,11 @@ type WorkflowLimitConfig = Pick<
 const MAX_EGRESS_BINDINGS = 20
 const NON_TRANSPORT_PUBLIC_WEB_MESSAGE =
   'public-web is only supported on MCP transport workloads; non-transport workloads must use exact-host egressBindings'
-// issue #510 — same ceiling the WRC reconciler and the CRD CEL enforce, from
-// the one shared constant so the three layers cannot drift apart.
+// issue #510 — the invariant: on a non-transport surface a binding may be wide
+// in addresses or wide in ports, never both. Same ceiling the WRC reconciler
+// and the CRD CEL enforce, from the one shared constant so the three layers
+// cannot drift apart. 80/443 is the platform's default web pair, not a protocol
+// claim — a NetworkPolicy filters port numbers and never inspects traffic.
 const NON_TRANSPORT_PROVIDER_PORT_MESSAGE =
   `egressClass "provider" on a non-transport workload is limited to port ` +
   `${PROVIDER_NON_TRANSPORT_ALLOWED_PORTS.join(' or ')}; ` +

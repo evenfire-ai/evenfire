@@ -245,14 +245,17 @@ export declare function resolveProviderRanges(input: {
 
 /**
  * issue #510 — ports reachable by an `egressClass: provider` binding on a
- * NON-TRANSPORT workload.
+ * NON-TRANSPORT surface.
  *
- * These are exactly the ports `public-web` allows. Capping here makes
- * `provider` a strict subset of `public-web` in both address space and ports,
- * so the tier that is permitted on non-transport workloads cannot reach further
- * than the tier that is refused on them. Transport workloads are not capped.
+ * The invariant: on non-transport surfaces a binding may be wide in ADDRESSES
+ * or wide in PORTS, never both. Only `exact-host` — one declared, auditable
+ * FQDN — may declare an arbitrary port. Transport workloads are not capped.
  *
- * The CRD's CEL rule carries the same literal; a parity test pins them together.
+ * 80 and 443 because they are the platform's default web pair, NOT because they
+ * imply a protocol: a NetworkPolicy filters port numbers and never inspects
+ * traffic, so this list cannot force TLS and does not claim to.
+ *
+ * The CRD's CEL rules carry the same literal; a parity test pins them together.
  */
 export declare const PROVIDER_NON_TRANSPORT_ALLOWED_PORTS: readonly number[]
 

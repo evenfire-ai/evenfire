@@ -111,11 +111,14 @@ spec:
                 - rule: "!has(self.ui) || !has(self.ui.egress) || !has(self.ui.egress.internal) || self.ui.egress.internal.all(e, self.workloads.exists(w, w.id == e.workloadRef && !has(w.transport)))"
                   message: "spec.ui.egress.internal[].workloadRef must reference a non-MCP-server workload"
                 # R19 (issue #510): ui.egress.external entries carry a `provider`
-                # object but NO `egressClass` field, and R16 already forces the UI
-                # workload to be non-transport. They therefore take the same port
-                # ceiling as a non-transport workload binding: the ports
-                # `public-web` allows, so `provider` stays a strict subset of the
-                # tier that is refused here. The literal mirrors
+                # object but NO `egressClass` field — here `provider` is a
+                # MODIFIER of a declared fqdn entry, not a choice between
+                # classes, which is why no enum exists on this surface. R16
+                # already forces the UI workload to be non-transport, so these
+                # entries take the same ceiling as a non-transport workload
+                # binding: wide in addresses OR wide in ports, never both.
+                # 80/443 is the platform's default web pair, not a protocol
+                # claim. The literal mirrors
                 # PROVIDER_NON_TRANSPORT_ALLOWED_PORTS in
                 # packages/network-policy-core/index.cjs; a parity test pins them.
                 - rule: "!has(self.ui) || !has(self.ui.egress) || !has(self.ui.egress.external) || self.ui.egress.external.all(e, !has(e.provider) || e.port in [80, 443])"
@@ -983,16 +986,21 @@ spec:
                     x-kubernetes-validations:
                       - rule: "self.type != 'cronjob' || has(self.schedule)"
                         message: "CronJob workloads must specify a schedule"
-                      # issue #510: `egressClass: provider` on a NON-TRANSPORT
-                      # workload is capped to the ports `public-web` allows.
-                      # `public-web` is refused outright on this workload class,
-                      # so without the cap the REFUSED tier would be narrower
-                      # than the PERMITTED one on the port dimension — a
-                      # non-transport workload could reach a provider's whole
-                      # netblock catalog on any port (a /20 on TCP/22 was
-                      # reproduced). With the cap, `provider` is a strict subset
-                      # of `public-web` in both address space and ports.
-                      # Transport workloads are deliberately not capped.
+                      # issue #510 — the invariant: on a non-transport surface a
+                      # binding may be wide in ADDRESSES or wide in PORTS, never
+                      # both. Only `exact-host` (one declared, auditable FQDN)
+                      # may declare an arbitrary port; any class granting more
+                      # than one destination host is limited to the web ports.
+                      # Without this, a non-transport workload reached a whole
+                      # netblock catalog on any port — a /20 on TCP/22 was
+                      # reproduced. The neighbour here is `exact-host`, not
+                      # `public-web`: public-web is refused outright on this
+                      # class, so "subset of public-web" says nothing about it.
+                      # 80/443 is the platform's default web pair, NOT a
+                      # protocol claim — a NetworkPolicy filters port numbers
+                      # and never inspects traffic.
+                      # Transport workloads are deliberately not capped; the
+                      # message names that escape hatch on purpose.
                       # This rule lives at WORKLOAD level, not binding level:
                       # binding-item CEL cannot see its workload's `transport`.
                       # The literal mirrors PROVIDER_NON_TRANSPORT_ALLOWED_PORTS

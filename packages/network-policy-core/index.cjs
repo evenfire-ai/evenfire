@@ -736,22 +736,42 @@ function resolveProviderRanges(input) {
 }
 
 // issue #510 — port ceiling for `egressClass: provider` on NON-TRANSPORT
-// workloads.
+// surfaces.
 //
-// The asymmetry this closes: `provider` is far narrower than `public-web` on
-// ADDRESS SPACE (~10k addresses today, 2^22 at the bounds ceiling, vs ~3.7e9)
-// but was UNBOUNDED on PORTS, while `public-web` is refused outright on
-// non-transport workloads. A non-transport workload could therefore reach a
+// THE INVARIANT (the sentence a reviewer can check):
+//
+//   On non-transport surfaces a binding may be wide in ADDRESSES or wide in
+//   PORTS, never both. Any class granting more than one destination host is
+//   limited to the web ports; only `exact-host` — a single declared, auditable
+//   FQDN — may declare an arbitrary port.
+//
+// Why it is needed: `provider` is far narrower than `public-web` on address
+// space (~10k addresses today, 2^22 at the bounds ceiling, vs ~3.7e9) but was
+// UNBOUNDED on ports. A non-transport workload could therefore reach a
 // provider's whole netblock catalog on any port — a /20 on TCP/22 was
-// reproduced against a `phase: active` recipe.
+// reproduced against a `phase: active` recipe. That is a rectangle wide on both
+// axes, which the invariant above forbids.
 //
-// Capping non-transport `provider` to the ports `public-web` itself allows
-// makes `provider` a STRICT SUBSET of `public-web` in BOTH dimensions. The tier
-// that is permitted can then never reach further than the tier that is refused,
-// which is what makes permitting it coherent rather than an inversion.
+// WHY 80 AND 443, and not 443 alone: these are the ports the platform and its
+// integrators treat as the default web pair. A NetworkPolicy filters PORT
+// NUMBERS, NOT PROTOCOLS — it never inspects traffic, so allowing only 443
+// would not force TLS (a server may speak plaintext on 443) and denying 80
+// would not prevent it. Narrowing to 443 would name a guarantee this mechanism
+// cannot give. Whether an external service is secure is the responsibility of
+// whoever enables it.
+//
+// WHAT THIS DOES NOT BUY: for rentable-cloud providers a range includes
+// infrastructure an attacker can lease. The ceiling trims PROTOCOL surface
+// (lateral SSH, SMTP, arbitrary C2); it does not prevent exfiltration over 80
+// or 443. That is governed by catalog curation — which providers are seeded and
+// with which bounds — not by this list.
 //
 // Transport workloads are deliberately NOT capped: they are the class the
-// capability tier was built for, and `public-web` is already available to them.
+// capability tier was built for, and they pay for their width with the MCP
+// runtime's supervision. Note this makes the ceiling a FORCING FUNCTION FOR
+// INTENT rather than a hard boundary: an author who needs another port can
+// declare `transport` and change lanes, which the error message says out loud.
+// That is the intended escape hatch, not a bypass.
 //
 // Provider-blind by construction: a port list, no provider names — the
 // generality gate (scripts/ci/check-provider-generality.sh) stays satisfied.

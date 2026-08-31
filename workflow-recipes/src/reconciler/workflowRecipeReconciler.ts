@@ -371,17 +371,25 @@ function validateWorkloadEgressBindings(
       throw new Error(`${prefix}: port must be an integer between 1 and 65535`)
     }
 
-    // issue #510 — cap `provider` on NON-TRANSPORT workloads to the ports
-    // `public-web` allows. `public-web` is refused outright above for this
-    // workload class; without this cap `provider` would be the WIDER grant on
-    // the port dimension (any 1-65535 against a whole netblock catalog — a /20
-    // on TCP/22 was reproduced), i.e. the refused tier would be narrower than
-    // the permitted one. With the cap, `provider` is a strict subset of
-    // `public-web` in both dimensions and permitting it is coherent.
+    // issue #510 — the invariant: on a non-transport surface a binding may be
+    // wide in ADDRESSES or wide in PORTS, never both. Only `exact-host` — one
+    // declared, auditable FQDN — may declare an arbitrary port; any class
+    // granting more than one destination host is limited to the web ports.
+    //
+    // Without this, `provider` reached a whole netblock catalog on any port (a
+    // /20 on TCP/22 was reproduced on a `phase: active` recipe) — wide on both
+    // axes. Note the comparison is with `exact-host`, the actual neighbour on
+    // this surface: `public-web` is refused outright here (see above), so being
+    // a "subset of public-web" says nothing useful about this lane.
+    //
+    // 80/443 is the platform's default web pair, not a protocol claim: a
+    // NetworkPolicy filters port numbers and never inspects traffic, so this
+    // cannot force TLS and does not pretend to.
     //
     // Placed AFTER the port range check so `binding.port` is a valid integer,
     // and BEFORE any catalog read so the ceiling holds even when the netblocks
-    // ConfigMap is missing or stale. Transport workloads are not capped.
+    // ConfigMap is missing or stale. Transport workloads are not capped — the
+    // error below names that escape hatch deliberately.
     if (
       egressClass === 'provider' &&
       !workload.transport &&
