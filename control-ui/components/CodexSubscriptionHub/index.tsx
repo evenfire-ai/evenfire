@@ -33,7 +33,7 @@ import { SelectionDropdown } from '../SelectionDropdown'
 import { IconKey } from '../Sidebar/icons'
 import { TablePanelHeader } from '../TablePanelHeader'
 import { useToast } from '../Toast'
-import { IconCheck, IconCopy, IconRefresh, IconX } from '../icons'
+import { IconCopy, IconRefresh, IconX } from '../icons'
 import { CheckboxField } from '../ui'
 
 function grantLabel(row: CodexSubscriptionConnectionView): string {
@@ -128,14 +128,14 @@ export function CodexSubscriptionHub() {
     )
   }, [connections, searchQuery])
 
-  // The name check (or the footer CTA) confirms the name: it creates the empty
-  // grant with that display name and starts the device sign-in right away —
-  // by the time the operator approves the code, the catalog is already synced
-  // server-side (connect handshake) and the models grid is populated.
-  async function confirmNameAndCreate() {
+  // Create makes the grant with the typed display name and starts the device
+  // sign-in right away — by the time the operator approves the code, the
+  // catalog is already synced server-side (connect handshake) and the models
+  // grid is populated.
+  async function handleCreate() {
     const displayName = editName.trim()
     if (!displayName) {
-      setError('Please confirm the name first — type a name, then select the check.')
+      setError('Subscription name is required.')
       return
     }
     setBusyKey('create')
@@ -540,39 +540,15 @@ export function CodexSubscriptionHub() {
               {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
               <div className="cu-field">
                 <label htmlFor="codex-sub-name">Name</label>
-                <div className="cu-copy-field">
-                  <input
-                    id="codex-sub-name"
-                    value={editName}
-                    onChange={e => setEditName(e.target.value)}
-                    disabled={Boolean(busyKey) || Boolean(creating && editing)}
-                    placeholder="The name agents see when they pick this subscription"
-                  />
-                  {creating && editing ? (
-                    <span
-                      className="cu-name-check cu-name-check--confirmed"
-                      title="Name confirmed"
-                      aria-label="Name confirmed"
-                    >
-                      <IconCheck width={16} height={16} />
-                    </span>
-                  ) : (
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--icon cu-btn--ghost"
-                      onClick={() => void confirmNameAndCreate()}
-                      disabled={!editName.trim() || Boolean(busyKey)}
-                      aria-label="Confirm name"
-                      title="Confirm name"
-                    >
-                      <IconCheck width={16} height={16} />
-                    </button>
-                  )}
-                </div>
+                <input
+                  id="codex-sub-name"
+                  value={editName}
+                  onChange={e => setEditName(e.target.value)}
+                  disabled={Boolean(busyKey)}
+                  placeholder="The name agents see when they pick this subscription"
+                />
                 <span className="cu-field__hint">
-                  {creating && editing
-                    ? 'Name confirmed — the subscription exists. Sign in and pick models to finish.'
-                    : 'Confirm the name to create the subscription and unlock sign-in.'}
+                  The name agents see when they pick this subscription.
                 </span>
               </div>
               {setupNew && editing ? (
@@ -594,7 +570,7 @@ export function CodexSubscriptionHub() {
                   </p>
                   <div className="cu-form-inline">
                     <span
-                      title={editing ? undefined : 'Please confirm the name first'}
+                      title={editing ? undefined : 'Create the subscription first'}
                       className="cu-hover-hint"
                     >
                       <button
@@ -773,9 +749,9 @@ export function CodexSubscriptionHub() {
                 <button
                   type="button"
                   className="cu-btn cu-btn--primary"
-                  onClick={() => void confirmNameAndCreate()}
+                  onClick={() => void handleCreate()}
                   disabled={!editName.trim() || Boolean(busyKey)}
-                  title={editName.trim() ? undefined : 'Please confirm the name first'}
+                  title={editName.trim() ? undefined : 'Type a name to create the subscription'}
                 >
                   {busyKey === 'create' ? 'Creating…' : 'Create and set up'}
                 </button>

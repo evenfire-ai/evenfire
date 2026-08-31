@@ -114,7 +114,7 @@ describe('CodexSubscriptionHub', () => {
     expect(await screen.findByText('Team A')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Add subscription' }))
 
-    // Before confirmation the full form is shown, but sign-in is gated and
+    // Before creating, the full form is shown but sign-in is gated and
     // nothing has been created yet.
     expect(createCodexSubscriptionConnection).not.toHaveBeenCalled()
     const nameInput = screen.getByRole('textbox', { name: 'Name' })
@@ -122,19 +122,18 @@ describe('CodexSubscriptionHub', () => {
     expect(signIn).toBeDisabled()
     expect(signIn.closest('.cu-hover-hint')).toHaveAttribute(
       'title',
-      'Please confirm the name first'
+      'Create the subscription first'
     )
 
-    // Confirming the name creates the grant and starts the device sign-in.
+    // Creating the grant starts the device sign-in right away.
     fireEvent.change(nameInput, { target: { value: 'New team' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm name' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Create and set up' }))
     await waitFor(() => {
       expect(createCodexSubscriptionConnection).toHaveBeenCalledWith({ displayName: 'New team' })
     })
     await waitFor(() => {
       expect(startCodexDeviceConnect).toHaveBeenCalledWith('connect', 'codex-bbb')
     })
-    expect(screen.getByTitle('Name confirmed')).toBeInTheDocument()
     // Once the device flow settles the dialog keeps the setup form with the
     // models synced by the connect handshake.
     await waitFor(() => {

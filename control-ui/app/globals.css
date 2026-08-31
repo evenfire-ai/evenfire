@@ -8617,20 +8617,6 @@ textarea.cu-input {
   font-size: 0.75rem;
 }
 
-/* Name confirmation affordance in the subscription dialog: the check button
-   creates the grant; once confirmed it flips to a static green check. */
-.cu-name-check {
-  display: inline-grid;
-  place-items: center;
-  width: 2rem;
-  height: 2rem;
-  color: var(--cu-text-muted);
-}
-
-.cu-name-check--confirmed {
-  color: var(--cu-success);
-}
-
 /* Wrapper that keeps a tooltip available on a disabled button (disabled
    elements suppress their own title in some browsers). */
 .cu-hover-hint {
