@@ -54,6 +54,20 @@ function makeServer(): McpServerCRD {
   }
 }
 
+function makeStdioServer(): McpServerCRD {
+  return {
+    name: 'test-mcp',
+    namespace: 'mcp-server',
+    uid: 'uid-test-1234',
+    spec: {
+      contextRef: 'ctx1',
+      image: 'my-mcp-server:v1',
+      transport: { type: 'stdio', port: 3000 },
+      command: ['/mcp-bin/mcp-server'],
+    },
+  }
+}
+
 function mergedForCompare(desired: k8s.V1Deployment, existing: k8s.V1Deployment): k8s.V1Deployment {
   return preserveDeploymentAnnotations(
     {
@@ -162,5 +176,77 @@ describe('McpServer ensureDeployment no-op gate', () => {
 
     expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
     expect(isCurrent).toHaveBeenCalled()
+  })
+})
+
+describe('McpServer stdio ensureDeployment no-op gate', () => {
+  let appsApi: MockAppsApi
+  let reconciler: McpServerReconciler
+  const server = makeStdioServer()
+
+  beforeEach(() => {
+    appsApi = createMockAppsApi()
+    reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      assumeInventoryAuthorityWhenUnconfigured: true,
+      appsApi: asAppsApi(appsApi),
+      coreApi: asCoreApi(createMockCoreApi()),
+      customApi: asCustomApi(createMockCustomApi()),
+    })
+    appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
+  })
+
+  it('stdio-bridge authors imagePullPolicy so the live default-fill is a no-op', () => {
+    const desired = (reconciler as any).buildDeployment(server, 'rev-1') as k8s.V1Deployment
+    const podSpec = desired.spec?.template?.spec
+    expect(podSpec?.initContainers?.find(c => c.name === 'copy-mcp-app')?.imagePullPolicy).toBe(
+      'IfNotPresent'
+    )
+    expect(podSpec?.containers?.find(c => c.name === 'stdio-bridge')?.imagePullPolicy).toBe(
+      'IfNotPresent'
+    )
+    const existing = asApiserverDeployment(desired)
+    expect(deploymentMatchesDesired(mergedForCompare(desired, existing), existing)).toBe(true)
+  })
+
+  it('McpServer stdio mutation sweep: every desired leaf is detectable', () => {
+    const desired = (reconciler as any).buildDeployment(server, 'rev-1') as k8s.V1Deployment
+    const existing = asApiserverDeployment(desired)
+    const undetectable: string[] = []
+    for (const path of collectLeafPaths(desired)) {
+      const mutated = cloneAndMutateLeaf(desired, path) as k8s.V1Deployment
+      if (deploymentMatchesDesired(mergedForCompare(mutated, existing), existing)) {
+        undetectable.push(formatLeafPath(path))
+      }
+    }
+    expect(undetectable, `undetectable leaf path(s): ${undetectable.join(', ')}`).toEqual([])
+  })
+
+  it('NOOP-MCPDEP-STDIO-1: equivalent stdio Deployment skips replace and Updated logs', async () => {
+    const desired = (reconciler as any).buildDeployment(server, 'rev-1') as k8s.V1Deployment
+    appsApi.readNamespacedDeployment.mockResolvedValue(asApiserverDeployment(desired))
+    const log = vi.spyOn(console, 'log')
+    try {
+      await (reconciler as any).ensureDeployment(server, 'rev-1')
+      expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+      expect(updatedLogs(log, 'Updated', 'Deployment "test-mcp"')).toEqual([])
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  it('IMAGE-MCPDEP-STDIO-1: image bump replaces the copy init container once', async () => {
+    const live = (reconciler as any).buildDeployment(server, 'rev-1') as k8s.V1Deployment
+    appsApi.readNamespacedDeployment.mockResolvedValue(asApiserverDeployment(live))
+    const bumped = makeStdioServer()
+    bumped.spec.image = 'my-mcp-server:v2'
+    await (reconciler as any).ensureDeployment(bumped, 'rev-1')
+    expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
+    const body = (
+      appsApi.replaceNamespacedDeployment.mock.calls[0][0] as { body: k8s.V1Deployment }
+    ).body
+    const copyImage = body.spec?.template?.spec?.initContainers?.find(
+      c => c.name === 'copy-mcp-app'
+    )?.image
+    expect(copyImage).toBe('my-mcp-server:v2')
   })
 })

@@ -136,6 +136,29 @@ describe('asApiserverDeployment', () => {
     ) as k8s.V1Deployment
     expect(asApiserverDeployment(desired)).not.toEqual(desired)
   })
+
+  it('FIXTURE-1: fills omitted imagePullPolicy the way apps/v1 defaults it', () => {
+    const containerOf = (desired: k8s.V1Deployment) =>
+      asApiserverDeployment(desired).spec?.template?.spec?.containers?.[0]
+
+    expect(containerOf(sparseDeployment())?.imagePullPolicy).toBe('IfNotPresent')
+
+    const latest = sparseDeployment()
+    latest.spec!.template.spec!.containers![0].image = 'img:latest'
+    expect(containerOf(latest)?.imagePullPolicy).toBe('Always')
+
+    const untagged = sparseDeployment()
+    untagged.spec!.template.spec!.containers![0].image = 'img'
+    expect(containerOf(untagged)?.imagePullPolicy).toBe('Always')
+
+    const digested = sparseDeployment()
+    digested.spec!.template.spec!.containers![0].image = 'img@sha256:aaaaaaaa'
+    expect(containerOf(digested)?.imagePullPolicy).toBe('IfNotPresent')
+
+    const authored = sparseDeployment()
+    authored.spec!.template.spec!.containers![0].imagePullPolicy = 'Never'
+    expect(containerOf(authored)?.imagePullPolicy).toBe('Never')
+  })
 })
 
 type CanonicalPodSpec = {
@@ -168,6 +191,7 @@ function deploymentWithProbe(
             {
               name: 'c',
               image: 'img:1',
+              imagePullPolicy: 'IfNotPresent',
               livenessProbe: {
                 httpGet: { path: '/live', port: 80 },
                 periodSeconds: 5,
@@ -223,6 +247,13 @@ describe('safe-strip lemma equality guards', () => {
 })
 
 describe('deploymentMatchesDesired', () => {
+  it('omitted imagePullPolicy is not a no-op against the apiserver default-fill', () => {
+    const desired = sparseDeployment()
+    const existing = asApiserverDeployment(desired)
+    expect(existing.spec?.template?.spec?.containers?.[0]?.imagePullPolicy).toBe('IfNotPresent')
+    expect(deploymentMatchesDesired(mergedForCompare(desired, existing), existing)).toBe(false)
+  })
+
   it('returns false when either spec is missing (fail-open-to-write)', () => {
     const desired = sparseDeployment()
     expect(deploymentMatchesDesired(undefined, desired)).toBe(false)

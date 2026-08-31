@@ -1370,6 +1370,8 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
                     {
                       name: 'stdio-bridge',
                       image: config.stdioBridgeImage, // G10: configurable bridge image
+                      imagePullPolicy:
+                        server.spec.imagePullPolicy || config.mcpServerImagePullPolicy,
                       env: [
                         {
                           name: 'STDIO_COMMAND',

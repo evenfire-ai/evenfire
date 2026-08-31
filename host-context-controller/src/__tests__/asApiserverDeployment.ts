@@ -4,8 +4,10 @@ import type * as k8s from '@kubernetes/client-node'
  * Apply documented apps/v1 defaulting onto a desired Deployment. Unlike
  * `asApiserverService`, this is not a recorded-blob overlay: it fills fields
  * the apiserver would default-fill, leaving every HCC-authored value intact.
- * Refresh this function when a live `kubectl get deploy -o json` reveals a
- * default the fixture does not model (PR G §8).
+ * Container `imagePullPolicy` follows kube `DefaultImagePullPolicy` (Always
+ * for `:latest` / untagged; IfNotPresent otherwise). Refresh this function
+ * when a live `kubectl get deploy -o json` reveals a default the fixture
+ * does not model (PR G §8).
  */
 const SERVER_TIME = new Date('2026-04-01T00:00:00.000Z')
 const SERVER_UID = '11111111-2222-3333-4444-555555555555'
@@ -96,6 +98,9 @@ function applyPodSpecDefaults(podSpec: k8s.V1PodSpec | undefined): void {
 }
 
 function applyContainerDefaults(container: k8s.V1Container): void {
+  if (container.imagePullPolicy === undefined) {
+    container.imagePullPolicy = defaultImagePullPolicy(container.image)
+  }
   if (container.terminationMessagePath === undefined) {
     container.terminationMessagePath = '/dev/termination-log'
   }
@@ -123,6 +128,21 @@ function applyProbeDefaults(probe: k8s.V1Probe | undefined): void {
   if (probe.successThreshold === undefined) probe.successThreshold = 1
   if (probe.failureThreshold === undefined) probe.failureThreshold = 3
   if (probe.httpGet && probe.httpGet.scheme === undefined) probe.httpGet.scheme = 'HTTP'
+}
+
+/**
+ * Mirror kube `DefaultImagePullPolicy` / `tags.Latest`: Always when the
+ * reference has no tag or the tag is `latest`; IfNotPresent for any other
+ * tag or a digest. This is not a full docker-reference parser.
+ */
+function defaultImagePullPolicy(image: string | undefined): 'Always' | 'IfNotPresent' {
+  if (!image) return 'Always'
+  if (image.includes('@')) return 'IfNotPresent'
+  const slash = image.lastIndexOf('/')
+  const name = slash === -1 ? image : image.slice(slash + 1)
+  const colon = name.lastIndexOf(':')
+  if (colon === -1) return 'Always'
+  return name.slice(colon + 1) === 'latest' ? 'Always' : 'IfNotPresent'
 }
 
 function applyVolumeDefaults(volume: k8s.V1Volume): void {

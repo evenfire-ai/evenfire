@@ -48,6 +48,12 @@ describe('Deployment writer inventory', () => {
           source.includes('deploymentMatchesDesired'),
           `${rel} is gated but does not reference deploymentMatchesDesired`
         ).toBe(true)
+        const directGates = source.match(/isUpToDate:\s*deploymentMatchesDesired\b/g)?.length ?? 0
+        const wrapperGates = source.match(/return deploymentMatchesDesired\s*\(/g)?.length ?? 0
+        expect(
+          directGates + wrapperGates,
+          `${rel} has ${count} Deployment replace(s) but ${directGates + wrapperGates} isUpToDate gate(s)`
+        ).toBe(count)
       }
       if (isExempt) {
         expect(
