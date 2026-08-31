@@ -86,7 +86,6 @@ export function CommunicationChannelsTable({
   refreshing,
   onCreateChannel,
   onCopyChannel,
-  onEditChannel,
   onOpenChannel,
 }: {
   items: CommunicationChannelItem[]
@@ -96,7 +95,6 @@ export function CommunicationChannelsTable({
   refreshing?: boolean
   onCreateChannel?: () => void
   onCopyChannel?: (name: string, provider: CommunicationChannelProvider) => void
-  onEditChannel?: (name: string) => void
   onOpenChannel?: (name: string) => void
 }) {
   const [deletingKey, setDeletingKey] = useState<string | null>(null)
@@ -287,15 +285,6 @@ export function CommunicationChannelsTable({
                                       key: 'view',
                                       label: 'View details',
                                       onClick: () => onOpenChannel(name),
-                                    },
-                                  ]
-                                : []),
-                              ...(onEditChannel
-                                ? [
-                                    {
-                                      key: 'edit',
-                                      label: 'Edit',
-                                      onClick: () => onEditChannel(name),
                                     },
                                   ]
                                 : []),

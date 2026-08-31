@@ -197,14 +197,14 @@ describe('CommunicationChannelsTable — row actions kebab', () => {
     } as unknown as CommunicationChannelItem
   }
 
-  it('opens the kebab with Edit + Delete and routes Edit through the matching handler', () => {
-    const onEditChannel = vi.fn()
+  it('exposes one canonical detail action for the row navigation destination', () => {
+    const onOpenChannel = vi.fn()
     render(
       <ToastProvider>
         <CommunicationChannelsTable
           items={[teamsChannelItem()]}
           onChanged={vi.fn().mockResolvedValue(undefined)}
-          onEditChannel={onEditChannel}
+          onOpenChannel={onOpenChannel}
           onRefresh={vi.fn()}
           refreshing={false}
         />
@@ -213,12 +213,14 @@ describe('CommunicationChannelsTable — row actions kebab', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Actions for channel teams-channel' }))
 
-    const editItem = screen.getByRole('menuitem', { name: 'Edit' })
+    const detailItems = screen.getAllByRole('menuitem', { name: 'View details' })
     const deleteItem = screen.getByRole('menuitem', { name: 'Delete' })
+    expect(detailItems).toHaveLength(1)
+    expect(screen.queryByRole('menuitem', { name: 'Edit' })).not.toBeInTheDocument()
     expect(deleteItem).toHaveClass('eft-row-actions__item--danger')
 
-    fireEvent.click(editItem)
-    expect(onEditChannel).toHaveBeenCalledWith('teams-channel')
+    fireEvent.click(detailItems[0])
+    expect(onOpenChannel).toHaveBeenCalledWith('teams-channel')
   })
 
   it('opens the confirm dialog when Delete is clicked on the kebab', () => {
@@ -227,7 +229,7 @@ describe('CommunicationChannelsTable — row actions kebab', () => {
         <CommunicationChannelsTable
           items={[teamsChannelItem()]}
           onChanged={vi.fn().mockResolvedValue(undefined)}
-          onEditChannel={vi.fn()}
+          onOpenChannel={vi.fn()}
           onRefresh={vi.fn()}
           refreshing={false}
         />
@@ -240,7 +242,7 @@ describe('CommunicationChannelsTable — row actions kebab', () => {
     expect(screen.getByRole('alertdialog')).toHaveTextContent(/Delete communication channel/)
   })
 
-  it('still renders the kebab without Edit when onEditChannel is omitted', () => {
+  it('still renders the kebab without a detail action when row navigation is omitted', () => {
     render(
       <ToastProvider>
         <CommunicationChannelsTable
@@ -254,7 +256,7 @@ describe('CommunicationChannelsTable — row actions kebab', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Actions for channel teams-channel' }))
 
-    expect(screen.queryByRole('menuitem', { name: 'Edit' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'View details' })).not.toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument()
   })
 
