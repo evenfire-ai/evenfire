@@ -32,16 +32,22 @@ export type ExternalSessionClient = Readonly<{
   requestedContract?: 'v1' | 'v2'
 }>
 
-export type ExternalSessionAuthentication =
+export type ExternalSessionIdentityAuthentication =
   | {
       status: 'authenticated'
       claims: AuthClaims
       contract: 'v1' | 'v2'
       authorityContext: ExternalSessionAuthorityContext
-      policy: EffectiveUserAccessPolicy
+      tokenClaims: AuthClaims | UserSessionV2Claims
     }
   | { status: 'invalid' | 'expired' | 'revoked'; reason: string }
   | { status: 'upgrade_required'; reason: string }
+
+export type ExternalSessionAuthentication =
+  | (Extract<ExternalSessionIdentityAuthentication, { status: 'authenticated' }> & {
+      policy: EffectiveUserAccessPolicy
+    })
+  | Exclude<ExternalSessionIdentityAuthentication, { status: 'authenticated' }>
 
 export type ExternalSessionRenewal =
   | { status: 'renewed'; session: IssuedUserSession }
@@ -53,6 +59,7 @@ type AuthenticationOptions = Readonly<{
   policy?: EffectiveUserAccessPolicy
   budget?: AccessExecutionBudget
   now?: Date
+  identity?: Extract<ExternalSessionIdentityAuthentication, { status: 'authenticated' }>
 }>
 
 export type ExternalSessionAuthorityContext = Readonly<
@@ -129,27 +136,16 @@ function normalizedV2Claims(
 }
 
 /**
- * Sole external-user authentication boundary. No route or middleware may call
- * a low-level external-user token verifier directly.
+ * The identity-only stage of the sole external-user authentication boundary.
+ * It is sufficient to derive a trusted authenticated rate-limit subject, but
+ * intentionally performs no effective-policy, rollout, or readiness lookup.
  */
-export async function authenticateExternalUserSession(
+export async function authenticateExternalUserSessionIdentity(
   token: string,
-  options: AuthenticationOptions
-): Promise<ExternalSessionAuthentication> {
-  const policy =
-    options.policy ?? (await resolveEffectiveUserAccessPolicy({ budget: options.budget }))
-  if (
-    purposeRequiresMinimumClient(options.purpose) &&
-    !clientMeetsMinimum(options.client, policy)
-  ) {
-    return { status: 'upgrade_required', reason: 'minimum_client_version' }
-  }
-
+  options: Pick<AuthenticationOptions, 'budget' | 'now'> = {}
+): Promise<ExternalSessionIdentityAuthentication> {
   const v2Claims = verifyUserSessionV2Token(token)
   if (v2Claims) {
-    if (!v2Allowed(options.purpose, policy)) {
-      return { status: 'invalid', reason: 'session_contract_not_accepted' }
-    }
     const validation = await validateUserSessionClaims(v2Claims, {
       now: options.now,
       budget: options.budget,
@@ -159,6 +155,7 @@ export async function authenticateExternalUserSession(
       status: 'authenticated',
       contract: 'v2',
       claims: normalizedV2Claims(v2Claims, validation.identity),
+      tokenClaims: v2Claims,
       authorityContext: Object.freeze({
         contract: 'v2',
         userId: v2Claims.sub,
@@ -166,15 +163,11 @@ export async function authenticateExternalUserSession(
         jti: v2Claims.jti,
         sessionVersion: v2Claims.sv,
       }),
-      policy,
     }
   }
 
   const v1Claims = verifyExternalSessionToken(token)
   if (!v1Claims) return { status: 'invalid', reason: 'invalid_representation' }
-  if (!v1Allowed(options.purpose, policy)) {
-    return { status: 'invalid', reason: 'session_contract_not_accepted' }
-  }
   const validation = await validateLegacyUserSession(token, v1Claims, {
     budget: options.budget,
   })
@@ -190,6 +183,7 @@ export async function authenticateExternalUserSession(
       ...v1Claims,
       authGeneration,
     }),
+    tokenClaims: v1Claims,
     authorityContext: Object.freeze({
       contract: 'v1',
       userId: v1Claims.userId,
@@ -197,8 +191,84 @@ export async function authenticateExternalUserSession(
       issuedAt: v1Claims.iat!,
       authGeneration,
     }),
-    policy,
   }
+}
+
+/**
+ * Rechecks mutable session authority after the authenticated limiter permits
+ * the request. It reuses the Stage-A verified claims and does not re-verify
+ * the bearer representation.
+ */
+async function revalidateExternalUserSessionIdentity(
+  token: string,
+  identity: Extract<ExternalSessionIdentityAuthentication, { status: 'authenticated' }>,
+  options: Pick<AuthenticationOptions, 'budget' | 'now'>
+): Promise<ExternalSessionIdentityAuthentication> {
+  if (identity.contract === 'v2') {
+    const validation = await validateUserSessionClaims(
+      identity.tokenClaims as UserSessionV2Claims,
+      {
+        now: options.now,
+        budget: options.budget,
+      }
+    )
+    if (validation.status !== 'valid') return validation
+    const claims = identity.tokenClaims as UserSessionV2Claims
+    return {
+      ...identity,
+      claims: normalizedV2Claims(claims, validation.identity),
+    }
+  }
+
+  const claims = identity.tokenClaims as AuthClaims
+  const validation = await validateLegacyUserSession(token, claims, {
+    budget: options.budget,
+  })
+  if (validation.status !== 'valid') return validation
+  return identity
+}
+
+/**
+ * Sole external-user authentication boundary. No route or middleware may call
+ * a low-level external-user token verifier directly.
+ */
+export async function authenticateExternalUserSession(
+  token: string,
+  options: AuthenticationOptions
+): Promise<ExternalSessionAuthentication> {
+  const policy =
+    options.policy ?? (await resolveEffectiveUserAccessPolicy({ budget: options.budget }))
+  const identity = options.identity
+    ? await revalidateExternalUserSessionIdentity(token, options.identity, {
+        budget: options.budget,
+        now: options.now,
+      })
+    : null
+  if (identity && identity.status !== 'authenticated') return identity
+
+  if (
+    purposeRequiresMinimumClient(options.purpose) &&
+    !clientMeetsMinimum(options.client, policy)
+  ) {
+    return { status: 'upgrade_required', reason: 'minimum_client_version' }
+  }
+
+  const authenticatedIdentity =
+    identity ??
+    (await authenticateExternalUserSessionIdentity(token, {
+      budget: options.budget,
+      now: options.now,
+    }))
+  if (authenticatedIdentity.status !== 'authenticated') return authenticatedIdentity
+
+  if (
+    (authenticatedIdentity.contract === 'v1' && !v1Allowed(options.purpose, policy)) ||
+    (authenticatedIdentity.contract === 'v2' && !v2Allowed(options.purpose, policy))
+  ) {
+    return { status: 'invalid', reason: 'session_contract_not_accepted' }
+  }
+
+  return { ...authenticatedIdentity, policy }
 }
 
 export async function renewExternalUserSession(
