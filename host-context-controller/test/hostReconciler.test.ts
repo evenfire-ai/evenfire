@@ -56,7 +56,7 @@ vi.mock('../src/config', () => ({
     desktopPort: 3000,
     desktopResources: {
       requests: { memory: '256Mi', cpu: '250m' },
-      limits: { memory: '4Gi', cpu: '1000m' },
+      limits: { memory: '4Gi', cpu: '1' },
     },
     devMcpServers: [],
     devContexts: [],
@@ -814,7 +814,7 @@ describe('HostReconciler — desktop support', () => {
     expect(resources.requests.memory).toBe('256Mi')
     expect(resources.requests.cpu).toBe('250m')
     expect(resources.limits.memory).toBe('4Gi')
-    expect(resources.limits.cpu).toBe('1000m')
+    expect(resources.limits.cpu).toBe('1')
   })
 
   it('creates desktop NetworkPolicy when desktop enabled', async () => {
@@ -1488,7 +1488,9 @@ describe('reconcileChannelReaderDeployment', () => {
     appsApi.replaceNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
     coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
 
-    await (reconciler as any).reconcileChannelReaderDeployment(host)
+    await expect((reconciler as any).reconcileChannelReaderDeployment(host)).rejects.toThrow(
+      /ownership changed to host "other-host"/
+    )
 
     expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
   })
