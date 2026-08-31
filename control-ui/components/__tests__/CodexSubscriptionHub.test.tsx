@@ -5,7 +5,6 @@ import {
   createCodexSubscriptionConnection,
   listCodexConnectionModels,
   listCodexSubscriptionConnections,
-  patchCodexCatalogModel,
   patchCodexSubscriptionConnection,
   pollCodexDevice,
   revokeCodexSubscription,
@@ -38,7 +37,6 @@ vi.mock('@lib/codexSubscription', async importOriginal => {
     listCodexConnectionModels: vi.fn(),
     createCodexSubscriptionConnection: vi.fn(),
     patchCodexSubscriptionConnection: vi.fn(),
-    patchCodexCatalogModel: vi.fn(),
     startCodexDeviceConnect: vi.fn(),
     pollCodexDevice: vi.fn(),
     syncCodexSubscriptionCatalog: vi.fn(),
@@ -139,7 +137,8 @@ describe('CodexSubscriptionHub', () => {
     })
     expect(await screen.findByRole('dialog')).toBeInTheDocument()
     expect(await screen.findByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Sync catalog' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Sync catalog' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'Enabled models' })).not.toBeInTheDocument()
     await waitFor(() => {
       expect(startCodexDeviceConnect).toHaveBeenCalledWith('connect', 'codex-bbb')
     })
@@ -386,7 +385,7 @@ describe('CodexSubscriptionHub', () => {
     expect(screen.queryByRole('button', { name: 'Saving…' })).not.toBeInTheDocument()
   })
 
-  it('opens the grant modal for Sign in, Sync, and model toggles without binding hosts', async () => {
+  it('opens the grant modal for Sign in and default model without a Sync catalog control', async () => {
     vi.mocked(startCodexDeviceConnect).mockResolvedValue({
       userCode: 'ABCD-1234',
       verificationUri: 'https://auth.openai.com/codex/device',
@@ -394,17 +393,6 @@ describe('CodexSubscriptionHub', () => {
       state: 'state-1',
       intent: 'connect',
     })
-    vi.mocked(syncCodexSubscriptionCatalog).mockResolvedValue({
-      outcome: 'ready',
-      added: 1,
-      refreshed: 0,
-      staled: 0,
-      connection: connection({ connectionKey: 'codex-aaa', displayName: 'Team A' }),
-    })
-    vi.mocked(patchCodexCatalogModel).mockResolvedValue([
-      { model: 'gpt-5.1', enabled: true, stale: false },
-      { model: 'gpt-5.3-codex', enabled: true, stale: false },
-    ])
     vi.mocked(patchCodexSubscriptionConnection).mockResolvedValue(
       connection({ connectionKey: 'codex-aaa', displayName: 'Team A', defaultModel: 'gpt-5.1' })
     )
@@ -417,16 +405,10 @@ describe('CodexSubscriptionHub', () => {
       await screen.findByRole('button', { name: 'Update ChatGPT subscription Team A' })
     )
     expect(await screen.findByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Sync catalog' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Sync catalog' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'Enabled models' })).not.toBeInTheDocument()
     expect(listCodexConnectionModels).toHaveBeenCalledWith('codex-aaa')
-    fireEvent.click(screen.getByRole('button', { name: 'Sync catalog' }))
-    await waitFor(() => {
-      expect(syncCodexSubscriptionCatalog).toHaveBeenCalledWith('codex-aaa')
-    })
-    fireEvent.click(screen.getByLabelText('gpt-5.3-codex'))
-    await waitFor(() => {
-      expect(patchCodexCatalogModel).toHaveBeenCalledWith('codex-aaa', 'gpt-5.3-codex', true)
-    })
+    expect(syncCodexSubscriptionCatalog).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'Update subscription' }))
     await waitFor(() => {
       expect(patchCodexSubscriptionConnection).toHaveBeenCalledWith('codex-aaa', {

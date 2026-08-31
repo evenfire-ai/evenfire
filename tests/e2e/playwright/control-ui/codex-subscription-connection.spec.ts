@@ -148,22 +148,12 @@ test.describe('Codex subscription connection', () => {
 
     const grant = (await listConnections()).find(row => row.connectionKey === grantKey)
     expect(grant, 'created grant must be listed').toBeTruthy()
-    const sync = page.getByRole('dialog').getByRole('button', { name: 'Sync catalog' })
-    if (grant?.status === 'connected') {
-      const syncResPromise = page.waitForResponse(
-        response =>
-          new RegExp(
-            `/api/v1/admin/llm/providers/codex-subscription/connections/${grantKey}/catalog/sync$`
-          ).test(new URL(response.url()).pathname) && response.request().method() === 'POST'
-      )
-      await sync.click()
-      const syncRes = await syncResPromise
-      expect(syncRes.ok(), `manual catalog sync retry must succeed, got ${syncRes.status()}`).toBe(
-        true
-      )
-    } else {
-      await expect(sync, 'Sync stays disabled until the grant is connected').toBeDisabled()
-    }
+    await expect(
+      page.getByRole('dialog').getByRole('button', { name: 'Sync catalog' })
+    ).toHaveCount(0)
+    await expect(
+      page.getByRole('dialog').getByRole('group', { name: 'Enabled models' })
+    ).toHaveCount(0)
 
     await hub.closeConnectModal()
     await shell.openAgents()
@@ -173,7 +163,7 @@ test.describe('Codex subscription connection', () => {
     await model.expectOneCredentialSelect()
   })
 
-  test('J5 enable and default PATCH, then reopen matches GET models', async ({ page }) => {
+  test('J5 default-model PATCH, then reopen matches the selected default', async ({ page }) => {
     const shell = new ControlUiShell(page)
     const hub = new SecretsLlmSubscriptionsPage(page)
     await loginFromHome(page)
@@ -191,25 +181,10 @@ test.describe('Codex subscription connection', () => {
     )
     await hub.openGrant(displayName)
     await modelsGet
-    const firstToggle = page.getByRole('dialog').locator('input[type="checkbox"]').first()
-    await expect(firstToggle, 'grant modal must list catalog models').toBeVisible()
-    const modelName = (
-      (await firstToggle.evaluate(node => node.closest('label')?.textContent)) ?? ''
-    )
-      .replace('(stale)', '')
-      .trim()
-    expect(modelName).toMatch(/\S/)
-
-    const patchModel = page.waitForResponse(
-      response =>
-        new RegExp(
-          `/api/v1/admin/llm/providers/codex-subscription/connections/${grantKey}/models/`
-        ).test(new URL(response.url()).pathname) && response.request().method() === 'PATCH'
-    )
-    const wasEnabled = await firstToggle.isChecked()
-    await firstToggle.click()
-    const patchRes = await patchModel
-    expect(patchRes.ok(), `model PATCH must succeed, got ${patchRes.status()}`).toBe(true)
+    await expect(
+      page.getByRole('dialog').getByRole('button', { name: 'Sync catalog' })
+    ).toHaveCount(0)
+    await expect(page.getByRole('dialog').locator('input[type="checkbox"]')).toHaveCount(0)
 
     await page.getByLabel('Default model').click()
     const defaultOption = page.getByRole('option').first()
@@ -235,12 +210,7 @@ test.describe('Codex subscription connection', () => {
         ).test(new URL(response.url()).pathname) && response.request().method() === 'GET'
     )
     await hub.openGrant(displayName)
-    const modelsRes = await reopened
-    const modelsBody = (await modelsRes.json()) as {
-      models?: Array<{ model?: string; enabled?: boolean }>
-    }
-    const toggled = modelsBody.models?.find(row => row.model === modelName)
-    expect(toggled?.enabled).toBe(!wasEnabled)
+    await reopened
     if (defaultName) {
       await expect(page.getByLabel('Default model')).toContainText(defaultName)
     }

@@ -7,12 +7,10 @@ import {
   createCodexSubscriptionConnection,
   listCodexConnectionModels,
   listCodexSubscriptionConnections,
-  patchCodexCatalogModel,
   patchCodexSubscriptionConnection,
   pollCodexDevice,
   revokeCodexSubscription,
   startCodexDeviceConnect,
-  syncCodexSubscriptionCatalog,
 } from '@lib/codexSubscription'
 import {
   type CodexSubscriptionCapability,
@@ -227,7 +225,7 @@ export function CodexSubscriptionHub() {
           if (latest.catalogStatus === 'ready') {
             showToast('Connected — catalog synced', { tone: 'success' })
           } else {
-            showToast('Connected, but catalog sync failed — use Sync catalog to retry', {
+            showToast('Connected, but catalog sync failed. Sign in again to retry.', {
               tone: 'error',
             })
           }
@@ -265,43 +263,6 @@ export function CodexSubscriptionHub() {
       return
     }
     setError('Could not copy the verification code')
-  }
-
-  async function handleSync(row: CodexSubscriptionConnectionView) {
-    if (row.status !== 'connected') return
-    setBusyKey(row.connectionKey)
-    try {
-      const synced = await syncCodexSubscriptionCatalog(row.connectionKey)
-      if (synced.outcome !== 'ready') {
-        setError(`Catalog sync ${synced.outcome}`)
-        return
-      }
-      const models = await listCodexConnectionModels(row.connectionKey)
-      setEditModels(models)
-      await load()
-      showToast(`Catalog synced: ${grantLabel(row)}`, { tone: 'success' })
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Catalog sync failed')
-    } finally {
-      setBusyKey(null)
-    }
-  }
-
-  async function handleToggleModel(
-    row: CodexSubscriptionConnectionView,
-    model: string,
-    enabledNext: boolean
-  ) {
-    setBusyKey(row.connectionKey)
-    try {
-      const models = await patchCodexCatalogModel(row.connectionKey, model, enabledNext)
-      setEditModels(models)
-      if (editDefault === model && !enabledNext) setEditDefault('')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not update model')
-    } finally {
-      setBusyKey(null)
-    }
   }
 
   async function handleRevoke(row: CodexSubscriptionConnectionView) {
@@ -615,14 +576,6 @@ export function CodexSubscriptionHub() {
                   disabled={Boolean(busyKey)}
                 >
                   Sign in with ChatGPT
-                </button>{' '}
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--ghost cu-btn--sm"
-                  onClick={() => void handleSync(editing)}
-                  disabled={Boolean(busyKey) || editing.status !== 'connected'}
-                >
-                  Sync catalog
                 </button>
               </div>
               {userCode ? (
@@ -658,25 +611,6 @@ export function CodexSubscriptionHub() {
                     </button>
                   </div>
                 </div>
-              ) : null}
-              {editModels.length > 0 ? (
-                <fieldset className="cu-field">
-                  <legend className="cu-field__label">Enabled models</legend>
-                  {editModels.map(model => (
-                    <label key={model.model} className="cu-field" style={{ display: 'block' }}>
-                      <input
-                        type="checkbox"
-                        checked={model.enabled}
-                        disabled={Boolean(busyKey) || model.stale}
-                        onChange={e =>
-                          void handleToggleModel(editing, model.model, e.target.checked)
-                        }
-                      />{' '}
-                      {model.model}
-                      {model.stale ? ' (stale)' : ''}
-                    </label>
-                  ))}
-                </fieldset>
               ) : null}
               <div className="cu-field">
                 <label htmlFor="codex-edit-default">Default model</label>

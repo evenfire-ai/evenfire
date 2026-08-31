@@ -149,7 +149,8 @@ export class SecretsLlmSubscriptionsPage {
     const dialog = this.page.getByRole('dialog')
     await expect(dialog).toBeVisible()
     await expect(dialog.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeVisible()
-    await expect(dialog.getByRole('button', { name: 'Sync catalog' })).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Sync catalog' })).toHaveCount(0)
+    await expect(dialog.getByRole('group', { name: 'Enabled models' })).toHaveCount(0)
   }
 
   async closeConnectModal() {
