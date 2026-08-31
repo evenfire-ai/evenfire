@@ -1,5 +1,28 @@
 # Removing "Context" from the Control UI — Implementation Run
 
+## 0. Agent handoff brief (read this first if you are an AI agent picking this up)
+
+**What this is:** the k8s Context resource was removed from all user-facing control-ui surfaces. **Frontend-only** — the wire contract is frozen (`contextRef`, `contextIds`, `mcpServers`, `security.allowContextRef`, all `/api/v1/admin/*` payloads byte-identical). Never "fix" anything by changing control-api, charts, CRDs, or payload shapes; required backend changes get documented in §3, and that list is empty.
+
+**The mental model (one line):** connectors are granted to *agents*; the private per-agent scope (a Context on the wire) is invisible plumbing; users/teams get "Access" tabs whose rows resolve to agent names.
+
+**Flow map (high level):**
+- **Legacy links** `/contexts/*` → client resolver (`app/contexts/[[...slug]]/page.tsx`) → owning agent's Connectors tab, else `/agents` (§6.3).
+- **Agent connectors** — agent detail ▸ Connectors tab is the only context writer; additive PUTs with `resourceVersion` (§4; spec-preservation contract re-homed in `HostDetailsPage.connectors.test.tsx`).
+- **Connector access** — `/connectors` expanded row: Agents group (write: per-agent remove, shared-scope confirm, "Add agents" modal), Teams/Users read-only; orphan scopes invisible (§5.1).
+- **Create connector** — Connector ▸ *Access* (optional agents) ▸ Secrets; no agents ⇒ silent private scope (CRD requires `spec.contextRef`) (§5.3).
+- **Marketplace install** — Package ▸ Credentials ▸ Install; silent private scope per install via `lib/privateContext.ts`; grant agents afterwards (§5.4, decision D3).
+- **Users & Teams Access** — tabs renamed `access`; labels resolved by `lib/accessScopeLabels.ts` (owners → displayName → muted raw id); deleted scopes render as "Removed access" tombstones (§7).
+- **Peripheral** — SFS "Mounted by" resolves agents; recipe banner says "connector scope"; budget chip "Connector scope" (§8).
+
+**Key files:** `lib/privateContext.ts`, `lib/accessScopeLabels.ts`, `lib/agentContext.ts`, `app/mcp-servers/page.tsx` (bindings+targets), `components/McpServerTable.*`, `components/CreateMcpServerForm/`, `components/RegistryInstallForm/`, `app/hosts/[name]/page.tsx`, `app/profile-admin/{users,teams}/[id]/page.tsx`, `next.config.js` (legacy redirects).
+
+**Test/evidence assets:** main e2e catalog in `tests/e2e/playwright/control-ui/` (+ `helpers/api-client.ts` seeding, `tsconfig.typecheck.json` gate); qa-recorder video journeys in `control-ui/e2e/qa-recorder-*.spec.ts` (run via `npm run qa:recorder:<name>`, videos under `.local-notes/qa-recorder/runs/control-ui/`, MP4 via `npm run qa:recorder:convert-mp4`). Mock backend for UI e2e without a cluster: `scripts/qa-recorder/mock-control-api.mjs` (any credentials; evidence produced against it is mock-backed UI e2e, never a T2 verdict).
+
+**Live status (see §10 tail for the authoritative log):** phases 0–4 + audit complete and committed; unit suite 1701/1701; 37 recorder journeys green with video evidence preserved in `.local-notes/qa-recorder/evidence-final/`; 2 core journeys (marketplace-install, recipe-scope-copy) were environment-killed mid-run and are re-queued; pre-existing journeys needing real cluster depth (rotation, cost, llm-lifecycle, invitations, gfs) fail against the mock by design.
+
+**Hard rules:** don't break the §2 guardrails (wire frozen, additive-spec, redirect-don't-strand, resolve-labels-client-side); the §2.5 exclusion list is exhaustive — "context window", `may_add_context`, "User context" (USER.md), kubectl `--context`, `host-context-controller`, wire keys, internal identifiers are NOT leaks. Diff hygiene: always diff against base `a584c259a` (`origin/dev` moves under us).
+
 **Status:** Implemented on branch `feat/context-removal` (phases 0–4 complete, post-implementation audit clean — §11). This document is the source of truth for the change; the progress log in §10 is append-only history, and §12 is the full click-by-click manual test walkthrough.
 **Branch:** `feat/context-removal` (base: `origin/dev` @ `a584c259a`, which includes `feat/ux-improvements-29`).
 **Scope:** `control-ui/**` only. **No backend, CRD, or API-contract changes.** Every existing API call keeps its exact endpoint, payload, and field names.
