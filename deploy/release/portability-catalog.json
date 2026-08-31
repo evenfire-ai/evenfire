@@ -1,0 +1,86 @@
+{
+  "catalogVersion": "pc-v1-trial",
+  "kinds": [
+    {
+      "apiVersion": "clerum.io/v1alpha1",
+      "kind": "Host",
+      "order": 10,
+      "restoreTransform": "unsupported",
+      "quiescenceHook": "unsupported",
+      "credentialTransition": "unsupported",
+      "verificationProbe": "unsupported"
+    },
+    {
+      "apiVersion": "clerum.io/v1alpha1",
+      "kind": "Context",
+      "order": 20,
+      "restoreTransform": "unsupported",
+      "quiescenceHook": "unsupported",
+      "credentialTransition": "unsupported",
+      "verificationProbe": "unsupported"
+    },
+    {
+      "apiVersion": "clerum.io/v1alpha1",
+      "kind": "GlobalFileSystem",
+      "order": 30,
+      "restoreTransform": "unsupported",
+      "quiescenceHook": "unsupported",
+      "credentialTransition": "unsupported",
+      "verificationProbe": "unsupported"
+    },
+    {
+      "apiVersion": "clerum.io/v1alpha1",
+      "kind": "SharedFileSystem",
+      "order": 40,
+      "restoreTransform": "unsupported",
+      "quiescenceHook": "unsupported",
+      "credentialTransition": "unsupported",
+      "verificationProbe": "unsupported"
+    },
+    {
+      "apiVersion": "clerum.io/v1alpha1",
+      "kind": "CommunicationChannel",
+      "order": 50,
+      "restoreTransform": "unsupported",
+      "quiescenceHook": "unsupported",
+      "credentialTransition": "unsupported",
+      "verificationProbe": "unsupported"
+    },
+    {
+      "apiVersion": "clerum.io/v1alpha1",
+      "kind": "WorkflowRecipePolicy",
+      "order": 60,
+      "restoreTransform": "unsupported",
+      "quiescenceHook": "unsupported",
+      "credentialTransition": "unsupported",
+      "verificationProbe": "unsupported"
+    },
+    {
+      "apiVersion": "clerum.io/v1alpha1",
+      "kind": "WorkflowRecipe",
+      "order": 70,
+      "restoreTransform": "unsupported",
+      "quiescenceHook": "unsupported",
+      "credentialTransition": "unsupported",
+      "verificationProbe": "unsupported"
+    },
+    {
+      "apiVersion": "clerum.io/v1alpha1",
+      "kind": "McpServer",
+      "order": 80,
+      "restoreTransform": "unsupported",
+      "quiescenceHook": "unsupported",
+      "credentialTransition": "unsupported",
+      "verificationProbe": "unsupported"
+    },
+    {
+      "apiVersion": "clerum.io/v1alpha1",
+      "kind": "LlmHook",
+      "order": 90,
+      "restoreTransform": "unsupported",
+      "quiescenceHook": "unsupported",
+      "credentialTransition": "unsupported",
+      "verificationProbe": "unsupported"
+    }
+  ]
+}
