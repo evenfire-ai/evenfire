@@ -1125,8 +1125,7 @@ export function extractSecrets(
   const uiRef = (spec?.ui as Record<string, unknown> | undefined)?.workloadRef
   for (const workload of workloads ?? []) {
     const envSecret = workload.envSecret as
-      | { name?: string; keys?: Array<{ secretKey?: string; envVar?: string }> }
-      | undefined
+      { name?: string; keys?: Array<{ secretKey?: string; envVar?: string }> } | undefined
     if (!envSecret?.name || !Array.isArray(envSecret.keys)) continue
     const namespace =
       workload.transport !== undefined && workload.transport !== null
@@ -1691,7 +1690,7 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
         value: credentialSelectValue('', row.connectionKey),
         label: row.displayName || row.connectionKey,
         meta: 'ChatGPT subscription',
-        providers: [{ id: 'codex-subscription', label: 'ChatGPT' }],
+        providers: [{ id: 'codex-subscription', label: 'ChatGPT Subscription' }],
       }))
     if (
       codexConnectionRef &&
@@ -1705,7 +1704,7 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
         value: credentialSelectValue('', codexConnectionRef),
         label: `${codexConnectionRef} (unavailable)`,
         meta: 'ChatGPT subscription',
-        providers: [{ id: 'codex-subscription', label: 'ChatGPT' }],
+        providers: [{ id: 'codex-subscription', label: 'ChatGPT Subscription' }],
       })
     }
     return options
