@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { DataTable, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type CreateRegistryApiKeyInput,
@@ -18,7 +18,6 @@ import CreateApiKeyModal from './CreateApiKeyModal'
 import type { RegistryApiKeysPanelProps } from './RegistryApiKeysPanel.types'
 import RevealApiKeyModal from './RevealApiKeyModal'
 import { RowActionsMenu } from './RowActionsMenu'
-import { SectionLoadingSkeleton } from './SectionLoadingSkeleton'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -188,9 +187,6 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
       />
 
       <div className="cu-card__body">
-        {view.kind === 'loading' ? (
-          <SectionLoadingSkeleton label="Loading registry API keys" />
-        ) : null}
         {view.kind === 'not-owner' ? (
           <p className="cu-banner cu-banner--warn">
             You must be an org owner to manage API keys
@@ -225,26 +221,37 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
             managing API keys.
           </p>
         ) : null}
-        {view.kind === 'error' ? (
-          <p className="cu-banner cu-banner--warn">
-            Could not load API keys.{' '}
-            <Button type="button" variant="ghost" size="sm" onClick={() => void load()}>
-              Retry
-            </Button>
-          </p>
-        ) : null}
-
-        {view.kind === 'ready' ? (
-          view.keys.length === 0 ? (
-            <p>No API keys yet. Create one to publish to @{view.org} from CI or scripts.</p>
-          ) : (
-            <div className="eft-table-viewport cu-table-wrap">
-              <DataTable className="eft-table cu-table">
-                <thead>
-                  <TableHeaderRow columns={columns} />
-                </thead>
-                <tbody>
-                  {keySort.sortedRows.map(k => (
+        {view.kind === 'loading' || view.kind === 'error' || view.kind === 'ready' ? (
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table">
+              <thead>
+                <TableHeaderRow columns={columns} />
+              </thead>
+              <tbody>
+                {view.kind === 'loading' ? (
+                  <TableStateRow
+                    colSpan={columns.length}
+                    kind="loading"
+                    message="Loading registry API keys…"
+                  />
+                ) : view.kind === 'error' ? (
+                  <TableStateRow
+                    action={
+                      <Button type="button" variant="ghost" size="sm" onClick={() => void load()}>
+                        Retry
+                      </Button>
+                    }
+                    colSpan={columns.length}
+                    kind="error"
+                    message="Could not load API keys."
+                  />
+                ) : view.keys.length === 0 ? (
+                  <TableStateRow
+                    colSpan={columns.length}
+                    message={`No API keys yet. Create one to publish to @${view.org} from CI or scripts.`}
+                  />
+                ) : (
+                  keySort.sortedRows.map(k => (
                     <tr key={k.id}>
                       <td>
                         <code>{k.key_prefix}</code>
@@ -270,11 +277,11 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
                         />
                       </td>
                     </tr>
-                  ))}
-                </tbody>
-              </DataTable>
-            </div>
-          )
+                  ))
+                )}
+              </tbody>
+            </DataTable>
+          </div>
         ) : null}
       </div>
     </>

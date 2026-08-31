@@ -48,14 +48,14 @@ beforeEach(() => {
 })
 
 describe('OwnedEntries', () => {
-  it('renders a skeleton while owned entries load', () => {
+  it('keeps headers mounted while owned entries load', () => {
     vi.mocked(api.getOwnedRegistryEntries).mockReturnValue(
       new Promise(() => undefined) as ReturnType<typeof api.getOwnedRegistryEntries>
     )
-    const view = render(<OwnedEntries orgScope="acme" />)
+    render(<OwnedEntries orgScope="acme" />)
     expect(screen.getByRole('status', { name: /loading published entries/i })).toBeInTheDocument()
-    expect(screen.queryByText(/Loading your published entries/i)).toBeNull()
-    expect(view.container.querySelectorAll('.cu-skeleton').length).toBeGreaterThan(0)
+    expect(screen.getByRole('columnheader', { name: /name/i })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: /visibility/i })).toBeInTheDocument()
   })
 
   it('renders owned entries with visibility + status', async () => {

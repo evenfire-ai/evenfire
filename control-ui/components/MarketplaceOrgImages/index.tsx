@@ -1,10 +1,9 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { DataTable, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { type OrgImage, listOrgImages } from '../../lib/api'
-import { RetryBanner } from '../PublisherView/RetryBanner'
 import {
   DEFAULT_REGISTRY_HOST,
   buildImageCoordinate,
@@ -100,56 +99,74 @@ export function MarketplaceOrgImages({ orgScope }: { orgScope: string }) {
           }
         />
         <div className="cu-card__body">
-          {view.kind === 'loading' ? <p>Loading your images…</p> : null}
-          {view.kind === 'error' ? (
-            <RetryBanner message="Could not load your images." onRetry={() => void load()} />
-          ) : null}
-          {view.kind === 'unavailable' ? (
-            <p className="cu-banner cu-banner--info">
-              Image listing isn’t available on this registry yet. Your pushed images still work —
-              the list will appear here once the registry exposes it.
-            </p>
-          ) : null}
-
-          {view.kind === 'ready' && rows.length === 0 ? (
-            <p>
-              No images yet. Push a connector or plugin image under{' '}
-              <code>
-                {DEFAULT_REGISTRY_HOST}/{namespace}/
-              </code>{' '}
-              and it appears here.
-            </p>
-          ) : null}
-
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table">
+              <thead>
+                <TableHeaderRow columns={columns} />
+              </thead>
+              <tbody>
+                {view.kind === 'loading' ? (
+                  <TableStateRow
+                    colSpan={columns.length}
+                    kind="loading"
+                    message="Loading images…"
+                  />
+                ) : view.kind === 'error' ? (
+                  <TableStateRow
+                    action={
+                      <button
+                        type="button"
+                        className="cu-btn cu-btn--ghost cu-btn--sm"
+                        onClick={() => void load()}
+                      >
+                        Retry
+                      </button>
+                    }
+                    colSpan={columns.length}
+                    kind="error"
+                    message="Could not load your images."
+                  />
+                ) : view.kind === 'unavailable' ? (
+                  <TableStateRow
+                    colSpan={columns.length}
+                    message="Image listing isn’t available on this registry yet. Your pushed images still work."
+                  />
+                ) : rows.length === 0 ? (
+                  <TableStateRow
+                    colSpan={columns.length}
+                    message={
+                      <>
+                        No images yet. Push a connector or plugin image under{' '}
+                        <code>
+                          {DEFAULT_REGISTRY_HOST}/{namespace}/
+                        </code>{' '}
+                        and it appears here.
+                      </>
+                    }
+                  />
+                ) : (
+                  imageSort.sortedRows.map(r => (
+                    <tr key={`${r.name}:${r.tag}`}>
+                      <td>
+                        <code>{r.name}</code>
+                      </td>
+                      <td>{r.tag}</td>
+                      <td>
+                        <code>
+                          {buildImageCoordinate(DEFAULT_REGISTRY_HOST, orgScope, r.name, r.tag)}
+                        </code>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </DataTable>
+          </div>
           {view.kind === 'ready' && rows.length > 0 ? (
-            <>
-              <div className="eft-table-viewport cu-table-wrap">
-                <DataTable className="eft-table cu-table">
-                  <thead>
-                    <TableHeaderRow columns={columns} />
-                  </thead>
-                  <tbody>
-                    {imageSort.sortedRows.map(r => (
-                      <tr key={`${r.name}:${r.tag}`}>
-                        <td>
-                          <code>{r.name}</code>
-                        </td>
-                        <td>{r.tag}</td>
-                        <td>
-                          <code>
-                            {buildImageCoordinate(DEFAULT_REGISTRY_HOST, orgScope, r.name, r.tag)}
-                          </code>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </DataTable>
-              </div>
-              <p className="cu-muted-note cu-muted-note--spaced">
-                A push can still be rejected if the credential lacks publish permission or the org
-                has reached its image quota — those surface at push time.
-              </p>
-            </>
+            <p className="cu-muted-note cu-muted-note--spaced">
+              A push can still be rejected if the credential lacks publish permission or the org has
+              reached its image quota — those surface at push time.
+            </p>
           ) : null}
         </div>
       </div>

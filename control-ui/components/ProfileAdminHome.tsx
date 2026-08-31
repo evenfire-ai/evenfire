@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable, TableRow, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   AdminPendingInvitationListItem,
@@ -27,7 +27,6 @@ import type { ProfileAdminHomeProps, ProfileAdminTab } from './ProfileAdminHome.
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconShield, IconUsers } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TabBar } from './TabBar'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
@@ -572,35 +571,231 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
               onLoadingChange={handleAdminLoadingChange}
             />
           ) : activeTab === 'teams' ? (
+            <div className="eft-table-viewport cu-table-wrap">
+              <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
+                <thead>
+                  <TableHeaderRow columns={teamColumns} />
+                </thead>
+                <tbody>
+                  {busy && !loaded ? (
+                    <TableStateRow
+                      colSpan={teamColumns.length}
+                      kind="loading"
+                      message="Loading teams…"
+                    />
+                  ) : error && filteredTeams.length === 0 ? (
+                    <TableStateRow colSpan={teamColumns.length} kind="error" message={error} />
+                  ) : filteredTeams.length === 0 ? (
+                    <TableStateRow
+                      colSpan={teamColumns.length}
+                      message={
+                        teamSearchInput.trim() ? 'No teams match this search.' : 'No teams yet.'
+                      }
+                    />
+                  ) : (
+                    teamSort.sortedRows.map(team => (
+                      <TableRow
+                        key={team.id}
+                        className="cu-table__row cu-table__row--clickable"
+                        onNavigate={() => openTeam(team)}
+                        aria-label={`Open team ${team.name}`}
+                      >
+                        <td>
+                          <button
+                            type="button"
+                            className="cu-link"
+                            onClick={event => {
+                              event.stopPropagation()
+                              openTeam(team)
+                            }}
+                            onKeyDown={event => event.stopPropagation()}
+                          >
+                            {team.name}
+                          </button>
+                        </td>
+                        <td
+                          style={{
+                            fontVariantNumeric: 'tabular-nums',
+                            color: 'var(--cu-text-muted)',
+                            textAlign: 'right',
+                          }}
+                        >
+                          {team.memberCount}
+                        </td>
+                        <td
+                          style={{
+                            fontVariantNumeric: 'tabular-nums',
+                            color: 'var(--cu-text-muted)',
+                            textAlign: 'right',
+                          }}
+                        >
+                          {teamAgentCounts[team.id] ?? 0}
+                        </td>
+                        <td
+                          style={{
+                            fontVariantNumeric: 'tabular-nums',
+                            color: 'var(--cu-text-muted)',
+                            textAlign: 'right',
+                          }}
+                        >
+                          {teamContextCounts[team.id] ?? 0}
+                        </td>
+                        <td className="cu-table__cell-actions">
+                          <RowActionsMenu
+                            ariaLabel={`Actions for team ${team.name}`}
+                            horizontalTrigger
+                            actions={[
+                              {
+                                key: 'view',
+                                label: 'View team details',
+                                onClick: () => openTeam(team),
+                              },
+                              {
+                                key: 'delete',
+                                label: 'Delete',
+                                danger: true,
+                                disabled: busy && !loaded,
+                                onClick: () => {
+                                  setDeleteDialogError('')
+                                  setTeamToDelete(team)
+                                },
+                              },
+                            ]}
+                          />
+                        </td>
+                      </TableRow>
+                    ))
+                  )}
+                </tbody>
+              </DataTable>
+            </div>
+          ) : (
             <>
-              {busy && !loaded ? (
+              <div className="cu-profile-section">
+                <p className="cu-profile-section__label">Pending invitations</p>
                 <div className="eft-table-viewport cu-table-wrap">
                   <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
                     <thead>
-                      <TableHeaderRow columns={teamColumns} />
+                      <tr>
+                        <th>Team</th>
+                        <th>Email</th>
+                        <th className="cu-table__col-role">Role</th>
+                        <th className="cu-table__col-date">Invited</th>
+                        <th className="cu-table__col-actions" aria-label="Actions" />
+                      </tr>
                     </thead>
                     <tbody>
-                      <SkeletonTableRows columns={5} rows={5} />
+                      {busy && !loaded ? (
+                        <TableStateRow
+                          colSpan={5}
+                          kind="loading"
+                          message="Loading pending invitations…"
+                        />
+                      ) : error && filteredPendingInvitations.length === 0 ? (
+                        <TableStateRow colSpan={5} kind="error" message={error} />
+                      ) : filteredPendingInvitations.length === 0 ? (
+                        <TableStateRow
+                          colSpan={5}
+                          message={
+                            searchInput.trim()
+                              ? 'No pending invitations match this search.'
+                              : 'No pending invitations.'
+                          }
+                        />
+                      ) : (
+                        filteredPendingInvitations.map(invitation => (
+                          <tr key={invitation.id}>
+                            <td>
+                              {invitation.team_id ? (
+                                <button
+                                  type="button"
+                                  className="cu-link"
+                                  onClick={() =>
+                                    router.push(
+                                      CONTROL_ROUTES.usersAndTeams.team(invitation.team_id)
+                                    )
+                                  }
+                                >
+                                  {pendingInvitationTeamLabel(invitation)}
+                                </button>
+                              ) : (
+                                <span className="cu-muted">No team</span>
+                              )}
+                            </td>
+                            <td className="cu-table__cell-soft">{invitation.email}</td>
+                            <td>{formatTeamRole(invitation.role)}</td>
+                            <td className="cu-table__cell-muted">
+                              {new Date(invitation.created_at).toLocaleString()}
+                            </td>
+                            <td className="cu-table__cell-actions">
+                              <RowActionsMenu
+                                ariaLabel={`Actions for invitation to ${invitation.email}`}
+                                horizontalTrigger
+                                actions={[
+                                  {
+                                    key: 'resend',
+                                    label:
+                                      resendingInvitationId === invitation.id
+                                        ? 'Sending…'
+                                        : 'Resend',
+                                    disabled:
+                                      (busy && !loaded) || resendingInvitationId === invitation.id,
+                                    onClick: () => void resendPendingInvitation(invitation),
+                                  },
+                                  {
+                                    key: 'cancel',
+                                    label:
+                                      revokingInvitationId === invitation.id
+                                        ? 'Cancelling…'
+                                        : 'Cancel',
+                                    danger: true,
+                                    disabled:
+                                      (busy && !loaded) || revokingInvitationId === invitation.id,
+                                    onClick: () => {
+                                      setDeleteDialogError('')
+                                      setInvitationToCancel(invitation)
+                                    },
+                                  },
+                                ]}
+                              />
+                            </td>
+                          </tr>
+                        ))
+                      )}
                     </tbody>
                   </DataTable>
                 </div>
-              ) : filteredTeams.length === 0 ? (
-                <div className="cu-empty">
-                  {teamSearchInput.trim() ? 'No teams match this search.' : 'No teams yet.'}
-                </div>
-              ) : (
-                <div className="eft-table-viewport cu-table-wrap">
-                  <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
-                    <thead>
-                      <TableHeaderRow columns={teamColumns} />
-                    </thead>
-                    <tbody>
-                      {teamSort.sortedRows.map(team => (
+              </div>
+              <div className="eft-table-viewport cu-table-wrap">
+                <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
+                  <thead>
+                    <TableHeaderRow columns={memberColumns} />
+                  </thead>
+                  <tbody>
+                    {busy && !loaded ? (
+                      <TableStateRow
+                        colSpan={memberColumns.length}
+                        kind="loading"
+                        message="Loading members…"
+                      />
+                    ) : error && visibleUsers.length === 0 ? (
+                      <TableStateRow colSpan={memberColumns.length} kind="error" message={error} />
+                    ) : visibleUsers.length === 0 ? (
+                      <TableStateRow
+                        colSpan={memberColumns.length}
+                        message={
+                          searchInput.trim()
+                            ? 'No registered members match this search.'
+                            : 'No registered members yet.'
+                        }
+                      />
+                    ) : (
+                      memberSort.sortedRows.map(user => (
                         <TableRow
-                          key={team.id}
+                          key={user.id}
                           className="cu-table__row cu-table__row--clickable"
-                          onNavigate={() => openTeam(team)}
-                          aria-label={`Open team ${team.name}`}
+                          onNavigate={() => openUser(user)}
+                          aria-label={`Open member ${user.name || user.email}`}
                         >
                           <td>
                             <button
@@ -608,289 +803,87 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                               className="cu-link"
                               onClick={event => {
                                 event.stopPropagation()
-                                openTeam(team)
+                                openUser(user)
                               }}
                               onKeyDown={event => event.stopPropagation()}
                             >
-                              {team.name}
+                              {user.name || '—'}
                             </button>
                           </td>
-                          <td
-                            style={{
-                              fontVariantNumeric: 'tabular-nums',
-                              color: 'var(--cu-text-muted)',
-                              textAlign: 'right',
-                            }}
-                          >
-                            {team.memberCount}
+                          <td className="cu-table__cell-soft">
+                            <span className="cu-member-email">
+                              <span>{user.email}</span>
+                              {user.passwordPendingFromAcceptedInvitation ? (
+                                <span
+                                  className="cu-member-email__alert"
+                                  title="Invitation accepted, but this user still needs to set a password."
+                                  aria-label="Invitation accepted, password setup pending"
+                                >
+                                  <IconAlertTriangle width={14} height={14} />
+                                </span>
+                              ) : null}
+                            </span>
                           </td>
-                          <td
-                            style={{
-                              fontVariantNumeric: 'tabular-nums',
-                              color: 'var(--cu-text-muted)',
-                              textAlign: 'right',
-                            }}
-                          >
-                            {teamAgentCounts[team.id] ?? 0}
-                          </td>
-                          <td
-                            style={{
-                              fontVariantNumeric: 'tabular-nums',
-                              color: 'var(--cu-text-muted)',
-                              textAlign: 'right',
-                            }}
-                          >
-                            {teamContextCounts[team.id] ?? 0}
+                          <td className="cu-table__cell-numeric">
+                            <button
+                              type="button"
+                              className="cu-link cu-link--sm"
+                              title={memberTeamsTooltip(user)}
+                              onClick={() => openUserTeams(user)}
+                              aria-label={`Open teams for ${user.name || user.email}`}
+                            >
+                              {user.activeTeamCount}
+                            </button>
                           </td>
                           <td className="cu-table__cell-actions">
                             <RowActionsMenu
-                              ariaLabel={`Actions for team ${team.name}`}
+                              ariaLabel={`Actions for member ${user.name || user.email}`}
                               horizontalTrigger
                               actions={[
                                 {
                                   key: 'view',
-                                  label: 'View team details',
-                                  onClick: () => openTeam(team),
+                                  label: 'View member details',
+                                  onClick: () => openUser(user),
+                                },
+                                ...(user.passwordPendingFromAcceptedInvitation
+                                  ? [
+                                      {
+                                        key: 'resend',
+                                        label:
+                                          resendingPasswordSetupUserId === user.id
+                                            ? 'Sending…'
+                                            : 'Resend invite',
+                                        disabled:
+                                          (busy && !loaded) ||
+                                          resendingPasswordSetupUserId === user.id,
+                                        onClick: () => void resendPasswordSetupInvitation(user),
+                                      },
+                                    ]
+                                  : []),
+                                {
+                                  key: 'admin',
+                                  label: user.controlAdminId
+                                    ? 'View administrator access'
+                                    : 'Create administrator access',
+                                  disabled: busy && !loaded,
+                                  onClick: () => openAdminAccessForUser(user),
                                 },
                                 {
                                   key: 'delete',
-                                  label: 'Delete',
+                                  label: 'Delete member',
                                   danger: true,
                                   disabled: busy && !loaded,
-                                  onClick: () => {
-                                    setDeleteDialogError('')
-                                    setTeamToDelete(team)
-                                  },
+                                  onClick: () => void openDeleteUserDialog(user),
                                 },
                               ]}
                             />
                           </td>
                         </TableRow>
-                      ))}
-                    </tbody>
-                  </DataTable>
-                </div>
-              )}
-            </>
-          ) : (
-            <>
-              {busy && !loaded ? (
-                <div className="eft-table-viewport cu-table-wrap">
-                  <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
-                    <thead>
-                      <TableHeaderRow columns={memberColumns} />
-                    </thead>
-                    <tbody>
-                      <SkeletonTableRows columns={4} rows={5} />
-                    </tbody>
-                  </DataTable>
-                </div>
-              ) : (
-                <>
-                  {filteredPendingInvitations.length > 0 && (
-                    <div className="cu-profile-section">
-                      <p className="cu-profile-section__label">Pending invitations</p>
-                      <div className="eft-table-viewport cu-table-wrap">
-                        <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
-                          <thead>
-                            <tr>
-                              <th>Team</th>
-                              <th>Email</th>
-                              <th className="cu-table__col-role">Role</th>
-                              <th className="cu-table__col-date">Invited</th>
-                              <th className="cu-table__col-actions" aria-label="Actions" />
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {filteredPendingInvitations.map(invitation => (
-                              <tr key={invitation.id}>
-                                <td>
-                                  {invitation.team_id ? (
-                                    <button
-                                      type="button"
-                                      className="cu-link"
-                                      onClick={() =>
-                                        router.push(
-                                          CONTROL_ROUTES.usersAndTeams.team(invitation.team_id)
-                                        )
-                                      }
-                                    >
-                                      {pendingInvitationTeamLabel(invitation)}
-                                    </button>
-                                  ) : (
-                                    <span className="cu-muted">No team</span>
-                                  )}
-                                </td>
-                                <td className="cu-table__cell-soft">{invitation.email}</td>
-                                <td>{formatTeamRole(invitation.role)}</td>
-                                <td className="cu-table__cell-muted">
-                                  {new Date(invitation.created_at).toLocaleString()}
-                                </td>
-                                <td className="cu-table__cell-actions">
-                                  <RowActionsMenu
-                                    ariaLabel={`Actions for invitation to ${invitation.email}`}
-                                    horizontalTrigger
-                                    actions={[
-                                      {
-                                        key: 'resend',
-                                        label:
-                                          resendingInvitationId === invitation.id
-                                            ? 'Sending…'
-                                            : 'Resend',
-                                        disabled:
-                                          (busy && !loaded) ||
-                                          resendingInvitationId === invitation.id,
-                                        onClick: () => void resendPendingInvitation(invitation),
-                                      },
-                                      {
-                                        key: 'cancel',
-                                        label:
-                                          revokingInvitationId === invitation.id
-                                            ? 'Cancelling…'
-                                            : 'Cancel',
-                                        danger: true,
-                                        disabled:
-                                          (busy && !loaded) ||
-                                          revokingInvitationId === invitation.id,
-                                        onClick: () => {
-                                          setDeleteDialogError('')
-                                          setInvitationToCancel(invitation)
-                                        },
-                                      },
-                                    ]}
-                                  />
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </DataTable>
-                      </div>
-                    </div>
-                  )}
-                  {searchInput.trim() &&
-                    pendingInvitations.length > 0 &&
-                    filteredPendingInvitations.length === 0 && (
-                      <div className="cu-empty cu-empty--spaced-bottom">
-                        No pending invitations match this search.
-                      </div>
+                      ))
                     )}
-                  {visibleUsers.length === 0 && filteredPendingInvitations.length === 0 ? (
-                    <div className="cu-empty">
-                      {searchInput.trim()
-                        ? 'No members or pending invitations match this search.'
-                        : 'No members yet.'}
-                    </div>
-                  ) : visibleUsers.length === 0 ? (
-                    <div
-                      className={`cu-empty${filteredPendingInvitations.length ? ' cu-empty--spaced-top' : ''}`}
-                    >
-                      {searchInput.trim()
-                        ? 'No registered members match this search.'
-                        : 'No registered members yet.'}
-                    </div>
-                  ) : (
-                    <div className="eft-table-viewport cu-table-wrap">
-                      <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
-                        <thead>
-                          <TableHeaderRow columns={memberColumns} />
-                        </thead>
-                        <tbody>
-                          {memberSort.sortedRows.map(user => (
-                            <TableRow
-                              key={user.id}
-                              className="cu-table__row cu-table__row--clickable"
-                              onNavigate={() => openUser(user)}
-                              aria-label={`Open member ${user.name || user.email}`}
-                            >
-                              <td>
-                                <button
-                                  type="button"
-                                  className="cu-link"
-                                  onClick={event => {
-                                    event.stopPropagation()
-                                    openUser(user)
-                                  }}
-                                  onKeyDown={event => event.stopPropagation()}
-                                >
-                                  {user.name || '—'}
-                                </button>
-                              </td>
-                              <td className="cu-table__cell-soft">
-                                <span className="cu-member-email">
-                                  <span>{user.email}</span>
-                                  {user.passwordPendingFromAcceptedInvitation ? (
-                                    <span
-                                      className="cu-member-email__alert"
-                                      title="Invitation accepted, but this user still needs to set a password."
-                                      aria-label="Invitation accepted, password setup pending"
-                                    >
-                                      <IconAlertTriangle width={14} height={14} />
-                                    </span>
-                                  ) : null}
-                                </span>
-                              </td>
-                              <td className="cu-table__cell-numeric">
-                                <button
-                                  type="button"
-                                  className="cu-link cu-link--sm"
-                                  title={memberTeamsTooltip(user)}
-                                  onClick={() => openUserTeams(user)}
-                                  aria-label={`Open teams for ${user.name || user.email}`}
-                                >
-                                  {user.activeTeamCount}
-                                </button>
-                              </td>
-                              <td className="cu-table__cell-actions">
-                                <RowActionsMenu
-                                  ariaLabel={`Actions for member ${user.name || user.email}`}
-                                  horizontalTrigger
-                                  actions={[
-                                    {
-                                      key: 'view',
-                                      label: 'View member details',
-                                      onClick: () => openUser(user),
-                                    },
-                                    ...(user.passwordPendingFromAcceptedInvitation
-                                      ? [
-                                          {
-                                            key: 'resend',
-                                            label:
-                                              resendingPasswordSetupUserId === user.id
-                                                ? 'Sending…'
-                                                : 'Resend invite',
-                                            disabled:
-                                              (busy && !loaded) ||
-                                              resendingPasswordSetupUserId === user.id,
-                                            onClick: () => void resendPasswordSetupInvitation(user),
-                                          },
-                                        ]
-                                      : []),
-                                    {
-                                      key: 'admin',
-                                      label: user.controlAdminId
-                                        ? 'View administrator access'
-                                        : 'Create administrator access',
-                                      disabled: busy && !loaded,
-                                      onClick: () => openAdminAccessForUser(user),
-                                    },
-                                    {
-                                      key: 'delete',
-                                      label: 'Delete member',
-                                      danger: true,
-                                      disabled: busy && !loaded,
-                                      onClick: () => void openDeleteUserDialog(user),
-                                    },
-                                  ]}
-                                />
-                              </td>
-                            </TableRow>
-                          ))}
-                        </tbody>
-                      </DataTable>
-                    </div>
-                  )}
-                </>
-              )}
+                  </tbody>
+                </DataTable>
+              </div>
             </>
           )}
           {error ? (

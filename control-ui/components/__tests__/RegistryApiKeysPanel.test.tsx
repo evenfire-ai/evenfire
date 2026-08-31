@@ -42,14 +42,14 @@ const key = {
 }
 
 describe('RegistryApiKeysPanel', () => {
-  it('renders a skeleton while registry API keys load', () => {
+  it('keeps headers mounted while registry API keys load', () => {
     vi.mocked(api.listRegistryApiKeys).mockReturnValue(
       new Promise(() => undefined) as ReturnType<typeof api.listRegistryApiKeys>
     )
-    const view = render(<RegistryApiKeysPanel />)
+    render(<RegistryApiKeysPanel />)
     expect(screen.getByRole('status', { name: /loading registry api keys/i })).toBeInTheDocument()
-    expect(screen.queryByText(/^Loading/i)).toBeNull()
-    expect(view.container.querySelectorAll('.cu-skeleton').length).toBeGreaterThan(0)
+    expect(screen.getByRole('columnheader', { name: /prefix/i })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: /last used/i })).toBeInTheDocument()
   })
 
   it('renders the org header and table on success', async () => {

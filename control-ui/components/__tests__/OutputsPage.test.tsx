@@ -80,28 +80,30 @@ afterEach(() => {
 })
 
 describe('OutputsPage', () => {
-  it('shows workflow artifact skeleton rows while the workflow tab is loading', () => {
+  it('keeps workflow artifact headers mounted while the workflow tab is loading', () => {
     mockGetAdminOutputsOverview.mockReturnValue(new Promise<never>(() => {}))
 
-    const { container } = render(<OutputsPage />)
+    render(<OutputsPage />)
 
     expect(screen.getByText('Agent Outputs')).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'File' })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'Recipe' })).toBeInTheDocument()
     expect(screen.queryByText(/No workflow artifacts found/)).not.toBeInTheDocument()
-    expect(container.querySelectorAll('.cu-skeleton')).toHaveLength(24)
+    expect(screen.getByRole('status', { name: 'Loading recipe artifacts…' })).toBeInTheDocument()
   })
 
-  it('shows desktop artifact skeleton rows while the desktop tab is loading', () => {
+  it('keeps desktop artifact headers mounted while the desktop tab is loading', () => {
     navigationState.params = { tab: 'desktop-app-artifacts' }
     mockGetAdminOutputsOverview.mockReturnValue(new Promise<never>(() => {}))
 
-    const { container } = render(<OutputsPage />)
+    render(<OutputsPage />)
 
     expect(screen.getByRole('columnheader', { name: 'File' })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'Host' })).toBeInTheDocument()
     expect(screen.queryByText(/No desktop app artifacts found/)).not.toBeInTheDocument()
-    expect(container.querySelectorAll('.cu-skeleton')).toHaveLength(24)
+    expect(
+      screen.getByRole('status', { name: 'Loading desktop app artifacts…' })
+    ).toBeInTheDocument()
   })
 
   it('loads workflow artifacts from exact runs and downloads through the run-scoped URL', async () => {

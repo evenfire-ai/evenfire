@@ -343,15 +343,19 @@ describe('RegistryCatalog controls', () => {
 })
 
 describe('RegistryCatalog state handling', () => {
-  it('renders a skeleton across the compact columns while capability is resolving', () => {
+  it('keeps catalog headers mounted while capability is resolving', () => {
     vi.mocked(api.getRegistryCatalog).mockReturnValue(new Promise(() => {}))
     // Role is unknown while capability resolves, so the curator-only actions
     // column is absent and the four visible columns render 20 skeleton cells
     // across five rows.
     vi.mocked(api.getPublishScope).mockReturnValue(new Promise(() => {}))
-    const { container } = render(<RegistryCatalog />)
+    render(<RegistryCatalog />)
 
-    expect(container.querySelectorAll('.cu-skeleton')).toHaveLength(40)
+    expect(
+      screen.getByRole('status', { name: /loading marketplace connectors/i })
+    ).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Name' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Version' })).toBeInTheDocument()
   })
 
   it('shows an API error', async () => {
@@ -359,12 +363,15 @@ describe('RegistryCatalog state handling', () => {
     render(<RegistryCatalog />)
 
     expect(await screen.findByText('Error: Network error')).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Name' })).toBeInTheDocument()
+    expect(screen.getByRole('alert', { name: 'Network error' })).toBeInTheDocument()
   })
 
   it('shows the empty state when no entries match', async () => {
     mockApiSuccess([MOCK_RECIPE_ENTRY])
     render(<RegistryCatalog />)
     expect(await screen.findByText('No connectors match your filters.')).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Name' })).toBeInTheDocument()
   })
 })
 

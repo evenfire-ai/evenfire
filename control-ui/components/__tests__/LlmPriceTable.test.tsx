@@ -94,6 +94,8 @@ describe('LlmPriceTable', () => {
     fireEvent.change(screen.getByLabelText('Search prices'), { target: { value: 'openai' } })
     expect(screen.queryByText('claude-sonnet-4-6')).not.toBeInTheDocument()
     expect(screen.getByText('No prices match this search.')).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: /provider/i })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: /model/i })).toBeInTheDocument()
   })
 
   it('renders an unpriced model as a compact missing row with an add-price warning', () => {

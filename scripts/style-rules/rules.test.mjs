@@ -14,6 +14,31 @@ function violationsFor(file, content) {
   )
 }
 
+const PRIMARY_RECORD_TABLES = [
+  'control-ui/app/outputs/page.tsx',
+  'control-ui/app/shared-filesystems/page.tsx',
+  'control-ui/components/CodexSubscriptionHub/index.tsx',
+  'control-ui/components/CommunicationChannelsTable.tsx',
+  'control-ui/components/ContextTable.tsx',
+  'control-ui/components/ControlAdminsPanel/index.tsx',
+  'control-ui/components/GuardrailHooksTable.tsx',
+  'control-ui/components/HostTable.tsx',
+  'control-ui/components/LlmDiscoveryPanel/index.tsx',
+  'control-ui/components/LlmModelTable.tsx',
+  'control-ui/components/LlmPriceTable.tsx',
+  'control-ui/components/MarketplaceOrgImages/index.tsx',
+  'control-ui/components/McpServerTable.tsx',
+  'control-ui/components/ProfileAdminHome.tsx',
+  'control-ui/components/PublisherView/GrantedToMe.tsx',
+  'control-ui/components/PublisherView/OwnedEntries.tsx',
+  'control-ui/components/RecipesTab.tsx',
+  'control-ui/components/RegistryApiKeysPanel.tsx',
+  'control-ui/components/RegistryCatalog.tsx',
+  'control-ui/components/SecretsTable.tsx',
+  'control-ui/components/TokenBudgetTable.tsx',
+  'profile-ui/app/members/page.tsx',
+]
+
 test('rejects raw production tables in Control UI and Profile UI', () => {
   assert.equal(
     violationsFor('control-ui/app/agents/page.tsx', '<table><tbody /></table>').length,
@@ -95,30 +120,7 @@ test('shared table typography uses each web app contract', () => {
 })
 
 test('ordinary web record tables keep an explicit sorting model', () => {
-  const ordinaryRecordTables = [
-    'control-ui/app/outputs/page.tsx',
-    'control-ui/app/shared-filesystems/page.tsx',
-    'control-ui/components/CodexSubscriptionHub/index.tsx',
-    'control-ui/components/CommunicationChannelsTable.tsx',
-    'control-ui/components/ControlAdminsPanel/index.tsx',
-    'control-ui/components/GuardrailHooksTable.tsx',
-    'control-ui/components/LlmDiscoveryPanel/index.tsx',
-    'control-ui/components/LlmModelTable.tsx',
-    'control-ui/components/LlmPriceTable.tsx',
-    'control-ui/components/MarketplaceOrgImages/index.tsx',
-    'control-ui/components/McpServerTable.tsx',
-    'control-ui/components/ProfileAdminHome.tsx',
-    'control-ui/components/PublisherView/GrantedToMe.tsx',
-    'control-ui/components/PublisherView/OwnedEntries.tsx',
-    'control-ui/components/RecipesTab.tsx',
-    'control-ui/components/RegistryApiKeysPanel.tsx',
-    'control-ui/components/RegistryCatalog.tsx',
-    'control-ui/components/SecretsTable.tsx',
-    'control-ui/components/TokenBudgetTable.tsx',
-    'profile-ui/app/members/page.tsx',
-  ]
-
-  for (const file of ordinaryRecordTables) {
+  for (const file of PRIMARY_RECORD_TABLES) {
     const source = readFileSync(file, 'utf8')
     assert.match(source, /useTableSort|sortKey/, `${file} must declare its sorting model`)
     assert.match(source, /onSort/, `${file} must expose sortable headers`)
@@ -126,19 +128,19 @@ test('ordinary web record tables keep an explicit sorting model', () => {
 })
 
 test('primary record tables keep headers mounted through data states', () => {
-  const statefulTables = [
-    'control-ui/app/shared-filesystems/page.tsx',
-    'control-ui/components/GuardrailHooksTable.tsx',
-    'control-ui/components/McpServerTable.tsx',
-    'control-ui/components/RecipesTab.tsx',
-    'profile-ui/app/members/page.tsx',
-  ]
+  for (const file of PRIMARY_RECORD_TABLES) {
+    const source = readFileSync(file, 'utf8')
+    const tableBodies = [
+      ...source.matchAll(/<DataTable\b[\s\S]*?<tbody(?:\s[^>]*)?>([\s\S]*?)<\/tbody>/g),
+    ]
 
-  for (const file of statefulTables) {
-    assert.match(
-      readFileSync(file, 'utf8'),
-      /TableStateRow/,
-      `${file} must render table state rows`
-    )
+    assert.ok(tableBodies.length > 0, `${file} must render a shared DataTable`)
+    for (const [, body] of tableBodies) {
+      assert.match(
+        body,
+        /<Table(?:State|Empty)Row/,
+        `${file} must keep each DataTable mounted with an in-body state row`
+      )
+    }
   }
 })

@@ -2,14 +2,18 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { useParams } from 'next/navigation'
-import { DataTable, TableHeaderCell, useTableSort } from '@clerum/frontend-table-system'
+import {
+  DataTable,
+  TableHeaderCell,
+  TableStateRow,
+  useTableSort,
+} from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { AuthGate } from '../../components/AuthGate'
 import { DashboardLayout } from '../../components/DashboardLayout'
 import { RowActionsMenu } from '../../components/RowActionsMenu'
 import { SectionSearchInput } from '../../components/SectionSearchInput'
 import { IconOutputs } from '../../components/Sidebar/icons'
-import { SkeletonTableRows } from '../../components/SkeletonTableRows'
 import { TabBar } from '../../components/TabBar'
 import { TablePanelHeader } from '../../components/TablePanelHeader'
 import { IconRefresh } from '../../components/icons'
@@ -33,30 +37,6 @@ function formatBytes(bytes: number): string {
   const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
   const value = bytes / Math.pow(1024, i)
   return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`
-}
-
-function OutputsSkeletonTable({ headers }: { headers: string[] }) {
-  return (
-    <div
-      className="eft-table-viewport cu-table-wrap"
-      role="status"
-      aria-label="Loading outputs"
-      aria-live="polite"
-    >
-      <DataTable className="eft-table cu-table cu-table--header-band">
-        <thead>
-          <tr>
-            {headers.map(header => (
-              <th key={header}>{header}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          <SkeletonTableRows columns={headers.length} />
-        </tbody>
-      </DataTable>
-    </div>
-  )
 }
 
 function OutputsPageContent() {
@@ -272,42 +252,45 @@ function OutputsPageContent() {
 
         <div className="cu-card__body cu-outputs-content">
           {activeTab === 'workflow' ? (
-            showInitialLoading ? (
-              <OutputsSkeletonTable
-                headers={['File', 'Format', 'Recipe', 'Run', 'Completed', 'Action']}
-              />
-            ) : filteredWorkflowOutputs.length === 0 ? (
-              <div className="cu-empty">
-                {normalizedSearch
-                  ? 'No workflow artifacts match this search.'
-                  : 'No workflow artifacts found. Run a plugin with document generation tools to see outputs here.'}
-              </div>
-            ) : (
-              <div className="eft-table-viewport cu-table-wrap">
-                <DataTable className="eft-table cu-table cu-table--header-band">
-                  <thead>
-                    <tr>
-                      {(
-                        [
-                          ['file', 'File'],
-                          ['format', 'Format'],
-                          ['recipe', 'Recipe'],
-                          ['run', 'Run'],
-                          ['completed', 'Completed'],
-                        ] as const
-                      ).map(([key, label]) => (
-                        <TableHeaderCell
-                          activeDirection={workflowSort.key === key ? workflowSort.direction : null}
-                          key={key}
-                          label={label}
-                          onSort={() => workflowSort.sortBy(key)}
-                        />
-                      ))}
-                      <TableHeaderCell label="Actions" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {workflowSort.sortedRows.map(output => (
+            <div className="eft-table-viewport cu-table-wrap">
+              <DataTable className="eft-table cu-table cu-table--header-band">
+                <thead>
+                  <tr>
+                    {(
+                      [
+                        ['file', 'File'],
+                        ['format', 'Format'],
+                        ['recipe', 'Recipe'],
+                        ['run', 'Run'],
+                        ['completed', 'Completed'],
+                      ] as const
+                    ).map(([key, label]) => (
+                      <TableHeaderCell
+                        activeDirection={workflowSort.key === key ? workflowSort.direction : null}
+                        key={key}
+                        label={label}
+                        onSort={() => workflowSort.sortBy(key)}
+                      />
+                    ))}
+                    <TableHeaderCell label="Actions" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {showInitialLoading ? (
+                    <TableStateRow colSpan={6} kind="loading" message="Loading recipe artifacts…" />
+                  ) : error && filteredWorkflowOutputs.length === 0 ? (
+                    <TableStateRow colSpan={6} kind="error" message={error} />
+                  ) : filteredWorkflowOutputs.length === 0 ? (
+                    <TableStateRow
+                      colSpan={6}
+                      message={
+                        normalizedSearch
+                          ? 'No workflow artifacts match this search.'
+                          : 'No workflow artifacts found. Run a plugin with document generation tools to see outputs here.'
+                      }
+                    />
+                  ) : (
+                    workflowSort.sortedRows.map(output => (
                       <tr
                         key={`${output.namespace}-${output.recipeName}-${output.runId}-${output.fileName}`}
                       >
@@ -349,100 +332,101 @@ function OutputsPageContent() {
                           />
                         </td>
                       </tr>
-                    ))}
-                  </tbody>
-                </DataTable>
-              </div>
-            )
+                    ))
+                  )}
+                </tbody>
+              </DataTable>
+            </div>
           ) : (
-            <>
-              {showInitialLoading ? (
-                <OutputsSkeletonTable
-                  headers={['File', 'Format', 'Size', 'Host', 'Created', 'Action']}
-                />
-              ) : filteredChatArtifacts.length === 0 ? (
-                <div className="cu-empty">
-                  {normalizedSearch
-                    ? 'No desktop app artifacts match this search.'
-                    : 'No desktop app artifacts found. Use internal tools (`clerum__generate_pdf`, etc.) during chat to generate files.'}
-                </div>
-              ) : (
-                <div className="eft-table-viewport cu-table-wrap">
-                  <DataTable className="eft-table cu-table cu-table--header-band">
-                    <thead>
-                      <tr>
-                        {(
-                          [
-                            ['file', 'File'],
-                            ['format', 'Format'],
-                            ['size', 'Size'],
-                            ['host', 'Host'],
-                            ['created', 'Created'],
-                          ] as const
-                        ).map(([key, label]) => (
-                          <TableHeaderCell
-                            activeDirection={
-                              artifactSort.key === key ? artifactSort.direction : null
-                            }
-                            key={key}
-                            label={label}
-                            onSort={() => artifactSort.sortBy(key)}
+            <div className="eft-table-viewport cu-table-wrap">
+              <DataTable className="eft-table cu-table cu-table--header-band">
+                <thead>
+                  <tr>
+                    {(
+                      [
+                        ['file', 'File'],
+                        ['format', 'Format'],
+                        ['size', 'Size'],
+                        ['host', 'Host'],
+                        ['created', 'Created'],
+                      ] as const
+                    ).map(([key, label]) => (
+                      <TableHeaderCell
+                        activeDirection={artifactSort.key === key ? artifactSort.direction : null}
+                        key={key}
+                        label={label}
+                        onSort={() => artifactSort.sortBy(key)}
+                      />
+                    ))}
+                    <TableHeaderCell label="Actions" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {showInitialLoading ? (
+                    <TableStateRow
+                      colSpan={6}
+                      kind="loading"
+                      message="Loading desktop app artifacts…"
+                    />
+                  ) : error && filteredChatArtifacts.length === 0 ? (
+                    <TableStateRow colSpan={6} kind="error" message={error} />
+                  ) : filteredChatArtifacts.length === 0 ? (
+                    <TableStateRow
+                      colSpan={6}
+                      message={
+                        normalizedSearch
+                          ? 'No desktop app artifacts match this search.'
+                          : 'No desktop app artifacts found. Use internal tools (`clerum__generate_pdf`, etc.) during chat to generate files.'
+                      }
+                    />
+                  ) : (
+                    artifactSort.sortedRows.map(artifact => (
+                      <tr key={`${artifact.hostRef}-${artifact.fileName}-${artifact.createdAt}`}>
+                        <td style={{ fontFamily: 'monospace', fontSize: 13 }}>
+                          {artifact.fileName}
+                        </td>
+                        <td>
+                          <span
+                            style={{
+                              display: 'inline-block',
+                              padding: '2px 8px',
+                              borderRadius: 4,
+                              fontSize: 11,
+                              fontWeight: 600,
+                              background: 'var(--cu-bg-elevated)',
+                              color: getFormatColor(artifact.format),
+                              border: '1px solid var(--cu-border-subtle)',
+                            }}
+                          >
+                            {artifact.format.toUpperCase()}
+                          </span>
+                        </td>
+                        <td style={{ fontSize: 13, color: 'var(--cu-text-muted)' }}>
+                          {artifact.sizeBytes > 0 ? formatBytes(artifact.sizeBytes) : '—'}
+                        </td>
+                        <td style={{ fontSize: 13 }}>{artifact.hostRef}</td>
+                        <td style={{ fontSize: 13, color: 'var(--cu-text-muted)' }}>
+                          {artifact.createdAt ? new Date(artifact.createdAt).toLocaleString() : '—'}
+                        </td>
+                        <td className="cu-table__cell-actions">
+                          <RowActionsMenu
+                            ariaLabel={`Actions for desktop artifact ${artifact.fileName}`}
+                            horizontalTrigger
+                            actions={[
+                              {
+                                key: 'download',
+                                label: 'Download',
+                                onClick: () => void downloadChatArtifact(artifact),
+                              },
+                            ]}
                           />
-                        ))}
-                        <TableHeaderCell label="Actions" />
+                        </td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {artifactSort.sortedRows.map(artifact => (
-                        <tr key={`${artifact.hostRef}-${artifact.fileName}-${artifact.createdAt}`}>
-                          <td style={{ fontFamily: 'monospace', fontSize: 13 }}>
-                            {artifact.fileName}
-                          </td>
-                          <td>
-                            <span
-                              style={{
-                                display: 'inline-block',
-                                padding: '2px 8px',
-                                borderRadius: 4,
-                                fontSize: 11,
-                                fontWeight: 600,
-                                background: 'var(--cu-bg-elevated)',
-                                color: getFormatColor(artifact.format),
-                                border: '1px solid var(--cu-border-subtle)',
-                              }}
-                            >
-                              {artifact.format.toUpperCase()}
-                            </span>
-                          </td>
-                          <td style={{ fontSize: 13, color: 'var(--cu-text-muted)' }}>
-                            {artifact.sizeBytes > 0 ? formatBytes(artifact.sizeBytes) : '—'}
-                          </td>
-                          <td style={{ fontSize: 13 }}>{artifact.hostRef}</td>
-                          <td style={{ fontSize: 13, color: 'var(--cu-text-muted)' }}>
-                            {artifact.createdAt
-                              ? new Date(artifact.createdAt).toLocaleString()
-                              : '—'}
-                          </td>
-                          <td className="cu-table__cell-actions">
-                            <RowActionsMenu
-                              ariaLabel={`Actions for desktop artifact ${artifact.fileName}`}
-                              horizontalTrigger
-                              actions={[
-                                {
-                                  key: 'download',
-                                  label: 'Download',
-                                  onClick: () => void downloadChatArtifact(artifact),
-                                },
-                              ]}
-                            />
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </DataTable>
-                </div>
-              )}
-            </>
+                    ))
+                  )}
+                </tbody>
+              </DataTable>
+            </div>
           )}
         </div>
       </div>

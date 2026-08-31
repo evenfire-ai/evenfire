@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable, TableRow, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
 import type { LlmModelPrice, UnpricedModel } from '@lib/api'
 import { getProviderDisplayLabel } from '@lib/llm'
 import type { LlmPriceTableProps } from './LlmPriceTable.types'
@@ -10,7 +10,6 @@ import { MissingPriceWarning } from './MissingPriceWarning'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconPrice } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -189,31 +188,25 @@ export function LlmPriceTable({
           </>
         }
       />
-      {isInitialLoad ? (
-        <div className="eft-table-viewport cu-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={columns} />
-            </thead>
-            <tbody>
-              <SkeletonTableRows columns={columns.length} rows={4} />
-            </tbody>
-          </DataTable>
-        </div>
-      ) : visibleRowCount === 0 ? (
-        <div className="cu-empty">
-          {normalizedSearch
-            ? 'No prices match this search.'
-            : 'No model prices configured yet. Add one to start tracking cost.'}
-        </div>
-      ) : (
-        <div className="eft-table-viewport cu-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={columns} />
-            </thead>
-            <tbody>
-              {tableSort.sortedRows.map(row => {
+      <div className="eft-table-viewport cu-table-wrap">
+        <DataTable className="eft-table cu-table cu-table--header-band">
+          <thead>
+            <TableHeaderRow columns={columns} />
+          </thead>
+          <tbody>
+            {isInitialLoad ? (
+              <TableStateRow colSpan={columns.length} kind="loading" message="Loading prices…" />
+            ) : visibleRowCount === 0 ? (
+              <TableStateRow
+                colSpan={columns.length}
+                message={
+                  normalizedSearch
+                    ? 'No prices match this search.'
+                    : 'No model prices configured yet. Add one to start tracking cost.'
+                }
+              />
+            ) : (
+              tableSort.sortedRows.map(row => {
                 if (row.kind === 'missing') {
                   const { item } = row
                   const label = item.provider
@@ -337,11 +330,11 @@ export function LlmPriceTable({
                     </td>
                   </TableRow>
                 )
-              })}
-            </tbody>
-          </DataTable>
-        </div>
-      )}
+              })
+            )}
+          </tbody>
+        </DataTable>
+      </div>
     </div>
   )
 }

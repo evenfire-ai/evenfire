@@ -1,14 +1,13 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable, TableRow, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
 import { getProviderLabel } from '../lib/llm'
 import type { HostItem, HostRef } from './HostTable.types'
 import { LlmProviderIcon } from './LlmProviderIcon'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconRobot } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableEmptyRow } from './TableEmptyRow'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
@@ -230,24 +229,19 @@ export function HostTable({
           </>
         }
       />
-      {isInitialLoad ? (
-        <div className="eft-table-viewport cu-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={hostColumns} />
-            </thead>
-            <tbody>
-              <SkeletonTableRows columns={hostColumns.length} rows={4} />
-            </tbody>
-          </DataTable>
-        </div>
-      ) : filteredRows.length === 0 ? (
-        <div className="eft-table-viewport cu-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={hostColumns} />
-            </thead>
-            <tbody>
+      <div className="eft-table-viewport cu-table-wrap">
+        <DataTable className="eft-table cu-table cu-table--header-band">
+          <thead>
+            <TableHeaderRow columns={hostColumns} />
+          </thead>
+          <tbody>
+            {isInitialLoad ? (
+              <TableStateRow
+                colSpan={hostColumns.length}
+                kind="loading"
+                message="Loading agents…"
+              />
+            ) : filteredRows.length === 0 ? (
               <TableEmptyRow
                 colSpan={hostColumns.length}
                 message={normalizedSearch ? 'No agents match this search.' : 'No agents found.'}
@@ -257,17 +251,8 @@ export function HostTable({
                     : undefined
                 }
               />
-            </tbody>
-          </DataTable>
-        </div>
-      ) : (
-        <div className="eft-table-viewport cu-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={hostColumns} />
-            </thead>
-            <tbody>
-              {hostSort.sortedRows.map(({ key, namespace, name, displayName, item }) => {
+            ) : (
+              hostSort.sortedRows.map(({ key, namespace, name, displayName, item }) => {
                 const rawContext = String(item.spec?.contextRef || '').trim()
                 const contextRef = rawContext || '-'
                 const contextServers = contextsByRef?.[rawContext]
@@ -346,11 +331,11 @@ export function HostTable({
                     </td>
                   </TableRow>
                 )
-              })}
-            </tbody>
-          </DataTable>
-        </div>
-      )}
+              })
+            )}
+          </tbody>
+        </DataTable>
+      </div>
     </div>
   )
 }

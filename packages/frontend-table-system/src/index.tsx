@@ -247,7 +247,12 @@ export function TableStateRow({
   return (
     <tr>
       <td className={classNames('eft-table__state', `eft-table__state--${kind}`)} colSpan={colSpan}>
-        <div>{message}</div>
+        <div
+          aria-label={kind !== 'empty' && typeof message === 'string' ? message : undefined}
+          role={kind === 'loading' ? 'status' : kind === 'error' ? 'alert' : undefined}
+        >
+          {message}
+        </div>
         {action ? <span className="eft-table__state-action">{action}</span> : null}
       </td>
     </tr>

@@ -1,10 +1,9 @@
 'use client'
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { DataTable, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
 import { LlmProviderIcon } from '@components/LlmProviderIcon'
 import { IconModels } from '@components/Sidebar/icons'
-import { SkeletonTableRows } from '@components/SkeletonTableRows'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
@@ -355,29 +354,25 @@ export function LlmDiscoveryPanel({
           </div>
         ) : null}
 
-        {isInitialLoad ? (
-          <div className="eft-table-viewport cu-table-wrap cu-table-wrap--sticky-header">
-            <DataTable className="eft-table cu-table cu-table--header-band">
-              <thead>
-                <TableHeaderRow columns={reviewColumns} />
-              </thead>
-              <tbody>
-                <SkeletonTableRows columns={reviewColumns.length} rows={4} />
-              </tbody>
-            </DataTable>
-          </div>
-        ) : reviewQueue.length === 0 ? (
-          <div className="cu-empty">
-            No models awaiting review. Sync the catalog to pull newly released models.
-          </div>
-        ) : (
-          <div className="eft-table-viewport cu-table-wrap cu-table-wrap--sticky-header">
-            <DataTable className="eft-table cu-table cu-table--header-band cu-llm-review-table">
-              <thead>
-                <TableHeaderRow columns={reviewColumns} />
-              </thead>
-              <tbody className="cu-llm-model-group">
-                {reviewSort.sortedRows.map(model => (
+        <div className="eft-table-viewport cu-table-wrap cu-table-wrap--sticky-header">
+          <DataTable className="eft-table cu-table cu-table--header-band cu-llm-review-table">
+            <thead>
+              <TableHeaderRow columns={reviewColumns} />
+            </thead>
+            <tbody className="cu-llm-model-group">
+              {isInitialLoad ? (
+                <TableStateRow
+                  colSpan={reviewColumns.length}
+                  kind="loading"
+                  message="Loading discovery review…"
+                />
+              ) : reviewQueue.length === 0 ? (
+                <TableStateRow
+                  colSpan={reviewColumns.length}
+                  message="No models awaiting review. Sync the catalog to pull newly released models."
+                />
+              ) : (
+                reviewSort.sortedRows.map(model => (
                   <tr key={model.id} className="cu-table__row cu-llm-model-row">
                     <td>
                       <input
@@ -413,11 +408,11 @@ export function LlmDiscoveryPanel({
                       </button>
                     </td>
                   </tr>
-                ))}
-              </tbody>
-            </DataTable>
-          </div>
-        )}
+                ))
+              )}
+            </tbody>
+          </DataTable>
+        </div>
       </div>
     </>
   )

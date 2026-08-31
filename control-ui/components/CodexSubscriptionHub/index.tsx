@@ -1,7 +1,12 @@
 'use client'
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { DataTable, TableHeaderCell, useTableSort } from '@clerum/frontend-table-system'
+import {
+  DataTable,
+  TableHeaderCell,
+  TableStateRow,
+  useTableSort,
+} from '@clerum/frontend-table-system'
 import { copyTextToClipboard } from '@lib/clipboard'
 import {
   CODEX_DEVICE_VERIFICATION_URI,
@@ -452,63 +457,47 @@ export function CodexSubscriptionHub() {
           </div>
         ) : null}
 
-        {initialLoad ? (
-          <div className="eft-table-viewport cu-table-wrap">
-            <DataTable className="eft-table cu-table cu-table--header-band">
-              <thead>
-                <tr>
-                  <TableHeaderCell label="Name" />
-                  <TableHeaderCell label="Status" />
-                  <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
-                </tr>
-              </thead>
-              <tbody>
-                {Array.from({ length: 3 }).map((_, idx) => (
-                  <tr key={idx}>
-                    <td>
-                      <div className="cu-skeleton cu-skeleton--cell" style={{ width: '55%' }} />
-                    </td>
-                    <td>
-                      <div className="cu-skeleton cu-skeleton--cell" style={{ width: '40%' }} />
-                    </td>
-                    <td>
-                      <div className="cu-skeleton cu-skeleton--cell" style={{ width: '4rem' }} />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </DataTable>
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="cu-empty">
-            {searchQuery.trim()
-              ? 'No ChatGPT subscriptions match this search.'
-              : 'No ChatGPT subscriptions found.'}
-          </div>
-        ) : (
-          <div className="eft-table-viewport cu-table-wrap">
-            <DataTable className="eft-table cu-table cu-table--header-band">
-              <thead>
-                <tr>
-                  <TableHeaderCell
-                    activeDirection={
-                      subscriptionSort.key === 'name' ? subscriptionSort.direction : null
-                    }
-                    label="Name"
-                    onSort={() => subscriptionSort.sortBy('name')}
-                  />
-                  <TableHeaderCell
-                    activeDirection={
-                      subscriptionSort.key === 'status' ? subscriptionSort.direction : null
-                    }
-                    label="Status"
-                    onSort={() => subscriptionSort.sortBy('status')}
-                  />
-                  <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
-                </tr>
-              </thead>
-              <tbody>
-                {subscriptionSort.sortedRows.map(row => {
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band">
+            <thead>
+              <tr>
+                <TableHeaderCell
+                  activeDirection={
+                    subscriptionSort.key === 'name' ? subscriptionSort.direction : null
+                  }
+                  label="Name"
+                  onSort={() => subscriptionSort.sortBy('name')}
+                />
+                <TableHeaderCell
+                  activeDirection={
+                    subscriptionSort.key === 'status' ? subscriptionSort.direction : null
+                  }
+                  label="Status"
+                  onSort={() => subscriptionSort.sortBy('status')}
+                />
+                <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
+              </tr>
+            </thead>
+            <tbody>
+              {initialLoad ? (
+                <TableStateRow
+                  colSpan={3}
+                  kind="loading"
+                  message="Loading ChatGPT subscriptions…"
+                />
+              ) : error && filtered.length === 0 ? (
+                <TableStateRow colSpan={3} kind="error" message={error} />
+              ) : filtered.length === 0 ? (
+                <TableStateRow
+                  colSpan={3}
+                  message={
+                    searchQuery.trim()
+                      ? 'No ChatGPT subscriptions match this search.'
+                      : 'No ChatGPT subscriptions found.'
+                  }
+                />
+              ) : (
+                subscriptionSort.sortedRows.map(row => {
                   const mapped = mapConnectionStatus(row.status)
                   return (
                     <tr key={row.connectionKey}>
@@ -538,11 +527,11 @@ export function CodexSubscriptionHub() {
                       </td>
                     </tr>
                   )
-                })}
-              </tbody>
-            </DataTable>
-          </div>
-        )}
+                })
+              )}
+            </tbody>
+          </DataTable>
+        </div>
       </div>
       {creating || editing ? (
         <div

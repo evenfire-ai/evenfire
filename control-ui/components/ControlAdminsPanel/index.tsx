@@ -2,11 +2,15 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable, TableHeaderCell, useTableSort } from '@clerum/frontend-table-system'
+import {
+  DataTable,
+  TableHeaderCell,
+  TableStateRow,
+  useTableSort,
+} from '@clerum/frontend-table-system'
 import { useAuth } from '@components/AuthContext'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { RowActionsMenu } from '@components/RowActionsMenu'
-import { SkeletonTableRows } from '@components/SkeletonTableRows'
 import { useToast } from '@components/Toast'
 import { IconAlertTriangle } from '@components/icons'
 import { CONTROL_ROUTES } from '@constants/routes'
@@ -355,74 +359,77 @@ export function ControlAdminsPanel({
   return (
     <div className="cu-profile-section">
       {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
-      {loading || filteredInvitations.length > 0 ? (
-        <div className="eft-table-viewport cu-table-wrap cu-table-wrap--border-top">
-          <DataTable className="eft-table cu-table cu-table--header-band">
-            <thead>
-              <tr>
-                <TableHeaderCell
-                  activeDirection={invitationSort.key === 'email' ? invitationSort.direction : null}
-                  label="Pending invitation"
-                  onSort={() => invitationSort.sortBy('email')}
-                />
-                <TableHeaderCell
-                  activeDirection={
-                    invitationSort.key === 'status' ? invitationSort.direction : null
-                  }
-                  label="Status"
-                  onSort={() => invitationSort.sortBy('status')}
-                />
-                <TableHeaderCell
-                  activeDirection={
-                    invitationSort.key === 'expires' ? invitationSort.direction : null
-                  }
-                  label="Expires"
-                  onSort={() => invitationSort.sortBy('expires')}
-                />
-                <TableHeaderCell
-                  activeDirection={
-                    invitationSort.key === 'created' ? invitationSort.direction : null
-                  }
-                  label="Created"
-                  onSort={() => invitationSort.sortBy('created')}
-                />
-                <th aria-label="Actions" />
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <SkeletonTableRows columns={5} rows={2} />
-              ) : (
-                invitationSort.sortedRows.map(invitation => (
-                  <tr key={invitation.id}>
-                    <td>{invitation.email}</td>
-                    <td>{invitation.status}</td>
-                    <td>{formatDate(invitation.expiresAt)}</td>
-                    <td>{formatDate(invitation.createdAt)}</td>
-                    <td className="cu-table__cell-actions">
-                      <RowActionsMenu
-                        ariaLabel={`Actions for invitation ${invitation.email}`}
-                        actions={[
-                          {
-                            key: 'cancel',
-                            label:
-                              cancellingInvitationId === invitation.id
-                                ? 'Canceling…'
-                                : 'Cancel invitation',
-                            disabled: cancellingInvitationId === invitation.id,
-                            onClick: () => void handleCancelInvitation(invitation),
-                            danger: true,
-                          },
-                        ]}
-                      />
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </DataTable>
-        </div>
-      ) : null}
+      <div className="eft-table-viewport cu-table-wrap cu-table-wrap--border-top">
+        <DataTable className="eft-table cu-table cu-table--header-band">
+          <thead>
+            <tr>
+              <TableHeaderCell
+                activeDirection={invitationSort.key === 'email' ? invitationSort.direction : null}
+                label="Pending invitation"
+                onSort={() => invitationSort.sortBy('email')}
+              />
+              <TableHeaderCell
+                activeDirection={invitationSort.key === 'status' ? invitationSort.direction : null}
+                label="Status"
+                onSort={() => invitationSort.sortBy('status')}
+              />
+              <TableHeaderCell
+                activeDirection={invitationSort.key === 'expires' ? invitationSort.direction : null}
+                label="Expires"
+                onSort={() => invitationSort.sortBy('expires')}
+              />
+              <TableHeaderCell
+                activeDirection={invitationSort.key === 'created' ? invitationSort.direction : null}
+                label="Created"
+                onSort={() => invitationSort.sortBy('created')}
+              />
+              <th aria-label="Actions" />
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <TableStateRow colSpan={5} kind="loading" message="Loading invitations…" />
+            ) : error && filteredInvitations.length === 0 ? (
+              <TableStateRow colSpan={5} kind="error" message={error} />
+            ) : filteredInvitations.length === 0 ? (
+              <TableStateRow
+                colSpan={5}
+                message={
+                  normalizedSearch
+                    ? 'No pending invitations match this search.'
+                    : 'No pending invitations.'
+                }
+              />
+            ) : (
+              invitationSort.sortedRows.map(invitation => (
+                <tr key={invitation.id}>
+                  <td>{invitation.email}</td>
+                  <td>{invitation.status}</td>
+                  <td>{formatDate(invitation.expiresAt)}</td>
+                  <td>{formatDate(invitation.createdAt)}</td>
+                  <td className="cu-table__cell-actions">
+                    <RowActionsMenu
+                      ariaLabel={`Actions for invitation ${invitation.email}`}
+                      actions={[
+                        {
+                          key: 'cancel',
+                          label:
+                            cancellingInvitationId === invitation.id
+                              ? 'Canceling…'
+                              : 'Cancel invitation',
+                          disabled: cancellingInvitationId === invitation.id,
+                          onClick: () => void handleCancelInvitation(invitation),
+                          danger: true,
+                        },
+                      ]}
+                    />
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </DataTable>
+      </div>
       <div className="eft-table-viewport cu-table-wrap cu-table-wrap--border-top">
         <DataTable className="eft-table cu-table cu-table--header-band">
           <thead>
@@ -457,7 +464,9 @@ export function ControlAdminsPanel({
           </thead>
           <tbody>
             {loading ? (
-              <SkeletonTableRows columns={6} rows={5} />
+              <TableStateRow colSpan={6} kind="loading" message="Loading administrators…" />
+            ) : error && filteredAdmins.length === 0 ? (
+              <TableStateRow colSpan={6} kind="error" message={error} />
             ) : filteredAdmins.length > 0 ? (
               adminSort.sortedRows.map(admin => {
                 const currentAdmin = isCurrentAdmin(admin)
@@ -575,11 +584,10 @@ export function ControlAdminsPanel({
                 )
               })
             ) : (
-              <tr>
-                <td colSpan={6}>
-                  {normalizedSearch ? 'No admins match this search.' : 'No admins found.'}
-                </td>
-              </tr>
+              <TableStateRow
+                colSpan={6}
+                message={normalizedSearch ? 'No admins match this search.' : 'No admins found.'}
+              />
             )}
           </tbody>
         </DataTable>

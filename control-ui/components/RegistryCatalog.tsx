@@ -3,13 +3,12 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { DataTable, TableRow } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, TableStateRow } from '@clerum/frontend-table-system'
 import { FilterSelect } from '@components/FilterSelect'
 import { MarketplaceTabs } from '@components/MarketplaceTabs'
 import { type RowActionMenuItem, RowActionsMenu } from '@components/RowActionsMenu'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { IconStore } from '@components/Sidebar/icons'
-import { SkeletonTableRows } from '@components/SkeletonTableRows'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
@@ -210,8 +209,7 @@ export default function RegistryCatalog() {
   const showConnectBanner =
     connectionMode === 'self-hosted' &&
     (connectionState === 'disconnected' || connectionState === 'rejected')
-  // Computed once, rendered in BOTH the error early-return and the normal branch
-  // so the connect prompt survives a catalog browse failure (DRY).
+  // Keep the connect prompt visible even when the catalog request fails.
   const connectBanner = showConnectBanner ? (
     <div className="cu-banner cu-banner--info" role="status">
       <span>
@@ -227,19 +225,6 @@ export default function RegistryCatalog() {
       </button>
     </div>
   ) : null
-
-  if (error) {
-    return (
-      <div className="cu-registry-layout">
-        {connectBanner}
-        <div className="cu-card cu-card--viewport-fill cu-section-card">
-          <div className="cu-card__body">
-            <div className="cu-banner cu-banner--error">Error: {error}</div>
-          </div>
-        </div>
-      </div>
-    )
-  }
 
   return (
     <div className="cu-registry-layout">
@@ -305,6 +290,7 @@ export default function RegistryCatalog() {
           }
         />
         <MarketplaceTabs active="connectors" />
+        {error ? <div className="cu-banner cu-banner--error">Error: {error}</div> : null}
         <div className="eft-table-viewport cu-table-wrap cu-marketplace-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band cu-marketplace-table">
             <thead>
@@ -312,7 +298,18 @@ export default function RegistryCatalog() {
             </thead>
             <tbody>
               {isInitialLoad ? (
-                <SkeletonTableRows columns={columns.length} rows={5} />
+                <TableStateRow
+                  colSpan={columns.length}
+                  kind="loading"
+                  message="Loading Marketplace connectors…"
+                />
+              ) : error ? (
+                <TableStateRow colSpan={columns.length} kind="error" message={error} />
+              ) : filtered.length === 0 ? (
+                <TableStateRow
+                  colSpan={columns.length}
+                  message="No connectors match your filters."
+                />
               ) : (
                 filtered.map(entry => {
                   const typeMeta = entry.server_mode
@@ -437,13 +434,6 @@ export default function RegistryCatalog() {
                   )
                 })
               )}
-              {!isInitialLoad && filtered.length === 0 ? (
-                <tr>
-                  <td colSpan={columns.length} className="cu-empty">
-                    No connectors match your filters.
-                  </td>
-                </tr>
-              ) : null}
             </tbody>
           </DataTable>
         </div>

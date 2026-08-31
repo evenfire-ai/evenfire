@@ -1,12 +1,11 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable, TableRow, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
 import { ContextResource } from '../lib/api'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconGroupWork } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -140,29 +139,25 @@ export function ContextTable({
           </>
         }
       />
-      {isInitialLoad ? (
-        <div className="eft-table-viewport cu-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={contextColumns} />
-            </thead>
-            <tbody>
-              <SkeletonTableRows columns={contextColumns.length} rows={4} />
-            </tbody>
-          </DataTable>
-        </div>
-      ) : filteredRows.length === 0 ? (
-        <div className="cu-empty">
-          {normalizedSearch ? 'No contexts match this search.' : 'No contexts found.'}
-        </div>
-      ) : (
-        <div className="eft-table-viewport cu-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={contextColumns} />
-            </thead>
-            <tbody>
-              {contextSort.sortedRows.map(({ key, name, displayName, item, mcpServers }) => (
+      <div className="eft-table-viewport cu-table-wrap">
+        <DataTable className="eft-table cu-table cu-table--header-band">
+          <thead>
+            <TableHeaderRow columns={contextColumns} />
+          </thead>
+          <tbody>
+            {isInitialLoad ? (
+              <TableStateRow
+                colSpan={contextColumns.length}
+                kind="loading"
+                message="Loading contexts…"
+              />
+            ) : filteredRows.length === 0 ? (
+              <TableStateRow
+                colSpan={contextColumns.length}
+                message={normalizedSearch ? 'No contexts match this search.' : 'No contexts found.'}
+              />
+            ) : (
+              contextSort.sortedRows.map(({ key, name, displayName, item, mcpServers }) => (
                 <TableRow
                   key={key}
                   className="cu-table__row cu-table__row--clickable"
@@ -207,11 +202,11 @@ export function ContextTable({
                     </div>
                   </td>
                 </TableRow>
-              ))}
-            </tbody>
-          </DataTable>
-        </div>
-      )}
+              ))
+            )}
+          </tbody>
+        </DataTable>
+      </div>
     </div>
   )
 }

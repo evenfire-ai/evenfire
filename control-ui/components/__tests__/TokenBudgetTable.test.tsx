@@ -108,5 +108,7 @@ describe('TokenBudgetTable', () => {
     fireEvent.change(screen.getByLabelText('Search budgets'), { target: { value: 'tokens-only' } })
     expect(screen.queryByText('Monthly OpenAI cap')).not.toBeInTheDocument()
     expect(screen.getByText('No budgets match this search.')).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: /name/i })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: /spent \/ limit/i })).toBeInTheDocument()
   })
 })

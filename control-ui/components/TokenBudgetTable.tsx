@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable, TableRow, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
 import type { TokenBudget } from '@lib/api'
 import {
   budgetProgressPercent,
@@ -13,7 +13,6 @@ import {
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconBudget } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -146,31 +145,25 @@ export function TokenBudgetTable({
           </>
         }
       />
-      {isInitialLoad ? (
-        <div className="eft-table-viewport cu-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={columns} />
-            </thead>
-            <tbody>
-              <SkeletonTableRows columns={columns.length} rows={4} />
-            </tbody>
-          </DataTable>
-        </div>
-      ) : filteredItems.length === 0 ? (
-        <div className="cu-empty">
-          {normalizedSearch
-            ? 'No budgets match this search.'
-            : 'No token budgets defined yet. Create one to start tracking spend against a limit.'}
-        </div>
-      ) : (
-        <div className="eft-table-viewport cu-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={columns} />
-            </thead>
-            <tbody>
-              {budgetSort.sortedRows.map((budget: TokenBudget) => (
+      <div className="eft-table-viewport cu-table-wrap">
+        <DataTable className="eft-table cu-table cu-table--header-band">
+          <thead>
+            <TableHeaderRow columns={columns} />
+          </thead>
+          <tbody>
+            {isInitialLoad ? (
+              <TableStateRow colSpan={columns.length} kind="loading" message="Loading budgets…" />
+            ) : filteredItems.length === 0 ? (
+              <TableStateRow
+                colSpan={columns.length}
+                message={
+                  normalizedSearch
+                    ? 'No budgets match this search.'
+                    : 'No token budgets defined yet. Create one to start tracking spend against a limit.'
+                }
+              />
+            ) : (
+              budgetSort.sortedRows.map((budget: TokenBudget) => (
                 <BudgetRow
                   key={budget.id}
                   budget={budget}
@@ -181,11 +174,11 @@ export function TokenBudgetTable({
                   deleting={deletingId === budget.id}
                   toggling={togglingId === budget.id}
                 />
-              ))}
-            </tbody>
-          </DataTable>
-        </div>
-      )}
+              ))
+            )}
+          </tbody>
+        </DataTable>
+      </div>
     </div>
   )
 }

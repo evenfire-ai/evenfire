@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useEffect, useMemo, useState } from 'react'
-import { DataTable, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
 import type { LlmAllowedModel } from '@lib/api'
 import { catalogGroupKey, formatContextWindow, getProviderDisplayLabel } from '@lib/llm'
 import { isUnpricedAllowedModel } from '@lib/llmModelUnpriced'
@@ -12,7 +12,6 @@ import { MissingPriceWarning } from './MissingPriceWarning'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconModels } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -292,31 +291,29 @@ export function LlmModelTable({
         }
       />
       {navigation}
-      {isInitialLoad ? (
-        <div className="eft-table-viewport cu-table-wrap cu-table-wrap--sticky-header">
-          <DataTable className="eft-table cu-table cu-table--header-band cu-llm-model-table">
-            <thead>
-              <TableHeaderRow columns={modelColumns} />
-            </thead>
-            <tbody>
-              <SkeletonTableRows columns={modelColumns.length} rows={4} />
-            </tbody>
-          </DataTable>
-        </div>
-      ) : filteredItems.length === 0 ? (
-        <div className="cu-empty">
-          {hasActiveFilter
-            ? 'No models match this filter.'
-            : 'No models in the allowlist yet. Add one to let agents and runtime use it.'}
-        </div>
-      ) : (
-        <div className="eft-table-viewport cu-table-wrap cu-table-wrap--sticky-header">
-          <DataTable className="eft-table cu-table cu-table--header-band cu-llm-model-table">
-            <thead>
-              <TableHeaderRow columns={modelColumns} />
-            </thead>
-            <tbody className="cu-llm-model-group">
-              {modelSort.sortedRows.map((model: DisplayModel) => (
+      <div className="eft-table-viewport cu-table-wrap cu-table-wrap--sticky-header">
+        <DataTable className="eft-table cu-table cu-table--header-band cu-llm-model-table">
+          <thead>
+            <TableHeaderRow columns={modelColumns} />
+          </thead>
+          <tbody className="cu-llm-model-group">
+            {isInitialLoad ? (
+              <TableStateRow
+                colSpan={modelColumns.length}
+                kind="loading"
+                message="Loading models…"
+              />
+            ) : filteredItems.length === 0 ? (
+              <TableStateRow
+                colSpan={modelColumns.length}
+                message={
+                  hasActiveFilter
+                    ? 'No models match this filter.'
+                    : 'No models in the allowlist yet. Add one to let agents and runtime use it.'
+                }
+              />
+            ) : (
+              modelSort.sortedRows.map((model: DisplayModel) => (
                 <tr key={model.id} className="cu-table__row cu-llm-model-row">
                   <td>
                     <span className="cu-inline-icon-label">
@@ -425,11 +422,11 @@ export function LlmModelTable({
                     />
                   </td>
                 </tr>
-              ))}
-            </tbody>
-          </DataTable>
-        </div>
-      )}
+              ))
+            )}
+          </tbody>
+        </DataTable>
+      </div>
     </div>
   )
 }

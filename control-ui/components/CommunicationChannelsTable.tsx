@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { DataTable, TableRow, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
 import {
   COMMUNICATION_CHANNEL_PROVIDERS,
   type CommunicationChannelProvider,
@@ -13,7 +13,6 @@ import { useConfirmDialog } from './ConfirmDialog'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconBroadcast } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -237,29 +236,27 @@ export function CommunicationChannelsTable({
             {error}
           </div>
         ) : null}
-        {isInitialLoad ? (
-          <div className="eft-table-viewport cu-table-wrap">
-            <DataTable className="eft-table cu-table cu-table--header-band">
-              <thead>
-                <TableHeaderRow columns={columns} />
-              </thead>
-              <tbody>
-                <SkeletonTableRows columns={columns.length} rows={3} />
-              </tbody>
-            </DataTable>
-          </div>
-        ) : filteredRows.length === 0 ? (
-          <div className="cu-empty">
-            {normalizedSearch ? 'No channels match this search.' : 'No resources found.'}
-          </div>
-        ) : (
-          <div className="eft-table-viewport cu-table-wrap">
-            <DataTable className="eft-table cu-table cu-table--header-band">
-              <thead>
-                <TableHeaderRow columns={columns} />
-              </thead>
-              <tbody>
-                {channelSort.sortedRows.map(({ key, item }) => {
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band">
+            <thead>
+              <TableHeaderRow columns={columns} />
+            </thead>
+            <tbody>
+              {isInitialLoad ? (
+                <TableStateRow
+                  colSpan={columns.length}
+                  kind="loading"
+                  message="Loading communication channels…"
+                />
+              ) : filteredRows.length === 0 ? (
+                <TableStateRow
+                  colSpan={columns.length}
+                  message={
+                    normalizedSearch ? 'No channels match this search.' : 'No resources found.'
+                  }
+                />
+              ) : (
+                channelSort.sortedRows.map(({ key, item }) => {
                   const name = item.metadata?.name || '-'
                   const spec = item.spec || {}
                   const configuredProviderTypes = configuredProviders(item)
@@ -321,11 +318,11 @@ export function CommunicationChannelsTable({
                       </td>
                     </TableRow>
                   )
-                })}
-              </tbody>
-            </DataTable>
-          </div>
-        )}
+                })
+              )}
+            </tbody>
+          </DataTable>
+        </div>
       </div>
       {confirmDialog}
     </>
