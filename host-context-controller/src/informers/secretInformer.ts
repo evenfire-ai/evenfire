@@ -7,9 +7,10 @@
  * created after the McpServer, or a required key is added later).
  *
  * Disconnect behavior: exponential backoff 1s → 2s → 4s → … capped at 30s.
- * The backoff counter resets on a successfully established watch and on any
- * subsequent event. A quiet namespace that reconnects cleanly every recycle
- * must not climb to the 30s cap (#461).
+ * Reset only while the stream is still live after `watch()` resolves, and on
+ * any later Secret event. `@kubernetes/client-node@1.4.0` calls `done(err)`
+ * then resolves on HTTP 403 / fetch failure; that path must keep climbing
+ * (#461 / jozer review 5065983153).
  */
 import * as k8s from '@kubernetes/client-node'
 import {
@@ -105,9 +106,10 @@ export class SecretInformer {
     if (this.stopped) return false
 
     const path = `/api/v1/namespaces/${this.namespace}/secrets`
+    let watchEnded = false
 
     const watchCallback = (type: string, apiObj: unknown): void => {
-      if (this.stopped) return
+      if (this.stopped || watchEnded) return
 
       const evtType = type as SecretEventType
       if (evtType !== 'ADDED' && evtType !== 'MODIFIED' && evtType !== 'DELETED') {
@@ -134,7 +136,8 @@ export class SecretInformer {
     }
 
     const doneCallback = (err: Error | null) => {
-      if (this.stopped) return
+      if (this.stopped || watchEnded) return
+      watchEnded = true
       if (err) {
         console.warn('[SecretInformer] watch ended with error:', err.message)
       } else {
@@ -146,9 +149,15 @@ export class SecretInformer {
 
     try {
       this.attempts += 1
-      this.abortController = await this.watch.watch(path, {}, watchCallback, doneCallback)
-      // Establishment proves the stream is healthy. Event-only reset left
-      // quiet namespaces (no Secret churn) permanently at the 30s cap.
+      const request = await this.watch.watch(path, {}, watchCallback, doneCallback)
+      // Client 1.4.0: HTTP 403 / fetch failure calls done(err) then resolves.
+      // Resetting here would pin every informer at 1s forever.
+      if (this.stopped || watchEnded) {
+        request.abort()
+        this.abortController = null
+        return false
+      }
+      this.abortController = request
       this.attempts = 0
       secretInformerRunning.set(1)
       console.log(`[SecretInformer] watch established for namespace ${this.namespace}`)

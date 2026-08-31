@@ -143,6 +143,35 @@ describe('SecretInformer', () => {
     warnSpy.mockRestore()
   })
 
+  it('climbs backoff when Watch.watch calls done(err) then resolves (client 1.4.0)', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    watchFn.mockImplementation(
+      async (path: string, _qs: Record<string, unknown>, cb: WatchCallback, done: DoneCallback) => {
+        const abort = vi.fn()
+        const ctrl = { abort } as unknown as AbortController
+        calls.push({ path, cb, done, abort })
+        done(new Error('Forbidden'))
+        return ctrl
+      }
+    )
+
+    await expect(informer.start()).resolves.toBe(false)
+    expect(watchFn).toHaveBeenCalledTimes(1)
+    expect(calls[0].abort).toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(999)
+    expect(watchFn).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(watchFn).toHaveBeenCalledTimes(2)
+
+    await vi.advanceTimersByTimeAsync(1999)
+    expect(watchFn).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(watchFn).toHaveBeenCalledTimes(3)
+    warnSpy.mockRestore()
+  })
+
   it('resets backoff on successful establish so a quiet namespace reconnects at 1s', async () => {
     vi.useFakeTimers()
 
