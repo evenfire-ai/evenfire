@@ -87,6 +87,9 @@ const clerum = Object.freeze({
     passwordLogin: (email: string, password: string) =>
       ipcRenderer.invoke('auth:passwordLogin', { email, password }),
     diagnoseLoginBackend: () => ipcRenderer.invoke('auth:diagnoseLoginBackend'),
+    probeLocalhostReachable: () => ipcRenderer.invoke('auth:probeLocalhostReachable'),
+    openDeploymentDocs: () => ipcRenderer.invoke('auth:openDeploymentDocs'),
+    openHostedSignup: () => ipcRenderer.invoke('auth:openHostedSignup'),
     startDesktopSetup: (email: string) => ipcRenderer.invoke('auth:startDesktopSetup', { email }),
     openForgotPassword: (email?: string) =>
       ipcRenderer.invoke('auth:openForgotPassword', { email }),

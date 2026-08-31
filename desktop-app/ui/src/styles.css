@@ -9991,43 +9991,15 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   animation: boot-screen-out var(--boot-exit-duration) ease forwards;
 }
 
+/* The splash carries the same lockup as the auth cards, one step larger since
+   it stands alone on a full-screen backdrop rather than above a form. */
 .boot-brand {
+  --brand-lockup-height: 34px;
+
   display: inline-flex;
   align-items: center;
-  gap: var(--space-2-5);
   opacity: 0;
   animation: boot-brand-in 600ms cubic-bezier(0.2, 0.8, 0.25, 1) both;
-}
-
-.boot-brand-mark {
-  width: 44px;
-  height: 44px;
-  flex: 0 0 auto;
-  object-fit: contain;
-}
-
-.boot-brand-copy {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-  text-align: left;
-}
-
-.boot-brand-title {
-  font-size: var(--font-size-xl);
-  font-weight: var(--font-weight-bold);
-  line-height: var(--line-height-tight);
-  color: var(--text);
-}
-
-.boot-brand-subtitle {
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-bold);
-  line-height: 1.15;
-  color: var(--text-muted);
-  letter-spacing: var(--letter-spacing-caps);
-  text-transform: uppercase;
-  white-space: nowrap;
 }
 
 .boot-progress {
@@ -10125,42 +10097,54 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 .auth-card__header {
   display: grid;
   gap: var(--space-2);
+  justify-items: center;
 }
 
+/* Hairline separating the brand from the form or wizard step below. Its own
+   element rather than a border on the header, so the space above and below is
+   the rule's own margin and can be tuned without touching header padding.
+   Uses the edge token so it tracks the theme instead of pinning one grey. */
+.auth-card__divider {
+  width: 70%;
+  height: 1px;
+  /* No margin — the card's grid gap already spaces this. `justify-self` does
+     the centering instead, so the two never compound. */
+  justify-self: center;
+  background: rgba(var(--edge-rgb), 0.3);
+}
+
+/* One logotype asset carrying mark and wordmark together, the same lockup
+   Control UI's login card and this app's SidebarNav use — not the square mark
+   beside hand-typed text. Shared by every brand surface (auth, onboarding, the
+   boot splash) so they cannot drift apart. The two theme files are swapped by
+   CSS rather than by reading the theme in JS, so the right one paints on the
+   first frame. Height is a variable so a surface can scale the lockup without
+   forking the rule. */
 .auth-brand {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-2);
+  margin: var(--space-2) 0;
 }
 
-.auth-brand-mark {
-  width: 42px;
-  height: 42px;
-  flex: 0 0 auto;
+.brand-lockup {
+  display: block;
+  width: 100%;
+  max-width: 200px;
+  max-height: var(--brand-lockup-height, 28px);
   object-fit: contain;
+  background: transparent;
 }
 
-.auth-brand-copy {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
+.brand-lockup--dark {
+  display: none;
 }
 
-.auth-brand-title {
-  font-size: var(--font-size-xl);
-  font-weight: 700;
-  line-height: 1.1;
-  color: var(--text);
+:root[data-theme='dark'] .brand-lockup--light {
+  display: none;
 }
 
-.auth-brand-subtitle {
-  font-size: var(--font-size-xs);
-  font-weight: 700;
-  line-height: 1.15;
-  color: var(--text-muted);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  white-space: nowrap;
+:root[data-theme='dark'] .brand-lockup--dark {
+  display: block;
 }
 
 .auth-flow-card {
@@ -10255,6 +10239,136 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   flex-direction: column;
   gap: var(--space-2);
   align-items: stretch;
+}
+
+/* First-run onboarding (spec §5.2). The wizard reuses the auth card shell and
+   the auth form/link primitives; only the answer list is new. */
+
+/* Hold one height across every step so the card stops growing and shrinking as
+   the user moves through the wizard. The body takes the slack and scrolls if a
+   step ever outgrows it, and the footer keeps Back pinned to the bottom so it
+   does not travel with the content above it. Capped against the viewport so a
+   short window scrolls instead of overflowing. */
+/* One card shape shared by every pre-authentication screen — the onboarding
+   wizard and sign-in alike — so the card never resizes as the user moves
+   between steps, or when onboarding hands off to sign-in.
+
+   Sized to the tallest content: the manual environment form with the Localhost
+   option showing, which needs ~500px (two fields, a 72px option, and the brand
+   header). Shorter screens carry the slack as empty space; that is the trade
+   for a card that holds still. Capped against the viewport so a short window
+   scrolls the body instead of overflowing. */
+.auth-card--flow {
+  /* 20% wider than the base auth card (420px): the wizard carries option rows
+     and the run-style comparison, which read cramped at sign-in's width. */
+  width: min(504px, 94vw);
+  height: min(540px, 86vh);
+  /* header, divider, body, footer — the body takes the slack. */
+  grid-template-rows: auto auto 1fr auto;
+}
+
+.auth-card__body {
+  display: grid;
+  gap: var(--space-3);
+  align-content: start;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.auth-card__footer {
+  display: flex;
+  align-items: end;
+  min-height: var(--space-5);
+}
+
+/* A bare h1 falls back to the browser's 2em — 32px, which is off the type
+   scale entirely and oversized inside a 420px card. Pull it onto the scale,
+   above the 18px brand title so the step heading still leads. */
+.auth-card--flow h1 {
+  font-size: var(--font-size-2xl);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.onboarding-options {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.onboarding-option {
+  display: grid;
+  gap: var(--space-1);
+  justify-items: start;
+  text-align: left;
+  white-space: normal;
+}
+
+.onboarding-option__title {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  color: var(--text);
+}
+
+.onboarding-option__hint {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-regular);
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+/* Q2's "I have no idea" branch: the two run styles compared. Stacked rather
+   than side-by-side columns, which would be unreadable at the card's width. */
+.onboarding-compare {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.onboarding-compare__group {
+  display: grid;
+  gap: var(--space-1-5);
+}
+
+.onboarding-compare__title {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  color: var(--text);
+}
+
+.onboarding-compare__lead {
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.onboarding-compare__list {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.onboarding-compare__item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1-5);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.onboarding-compare__mark {
+  font-weight: var(--font-weight-semibold);
+}
+
+.onboarding-compare__mark--pro {
+  color: var(--success);
+}
+
+.onboarding-compare__mark--con {
+  color: var(--warning);
 }
 
 .auth-button-loading {

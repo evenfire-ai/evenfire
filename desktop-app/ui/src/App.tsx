@@ -73,6 +73,7 @@ import { ContextDetailsPage } from '@pages/ContextDetailsPage'
 import { ContextsPage } from '@pages/ContextsPage'
 import { FilesPage } from '@pages/FilesPage'
 import { McpServersPage } from '@pages/McpServersPage'
+import { OnboardingPage } from '@pages/OnboardingPage'
 import { SandboxUiPage } from '@pages/SandboxUiPage'
 import type {
   SandboxUiConversationOrigin,
@@ -559,7 +560,7 @@ export function App() {
   activeConversationOriginRef.current = activeConversationOrigin
 
   /**
-   * Plugin permission prompts (spec §9). Main hides the plugin's
+   * Plugin permission prompts. Main hides the plugin's
    * `WebContentsView` before pushing the request and restores it once the user
    * answers, so the plugin can neither fake the prompt nor paint over it. The
    * prompt is centered over — and its backdrop scoped to — the plugin's embed
@@ -2175,7 +2176,13 @@ export function App() {
           </NavigationContext.Provider>
         ) : (
           <>
-            {vm.hasDependencyOutage ? <UnavailablePage /> : <AuthPage />}
+            {vm.unauthenticatedView === 'outage' ? (
+              <UnavailablePage />
+            ) : vm.unauthenticatedView === 'onboarding' ? (
+              <OnboardingPage onboarding={vm.onboarding} />
+            ) : (
+              <AuthPage />
+            )}
             {environmentSetupConfirmationDialog}
             {environmentSetupSuccessDialog}
             <ToastStack items={vm.toasts} />
