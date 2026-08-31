@@ -122,7 +122,11 @@ follow the fail-closed migration and rollout order in
 before enabling the feature flag.
 
 When deployable code changed and the E2E runner will manage port-forwards
-itself, force the sync and skip the short-lived background port-forward refresh:
+itself, force the sync and skip the short-lived background port-forward refresh.
+Inner `pre-gate-sync` may use `--skip-port-forwards`; never pass that globally
+into `make minikube-t2`. Do not kill this lane's `branch-profile-pf`.
+`make minikube-pf-all-bg` is a gate refresh only; it must not replace
+`branch-profile-pf`.
 
 ```bash
 make minikube-pre-gate-sync GATE=<gate-name> ARGS="--force-cluster-sync --skip-port-forwards"
@@ -157,6 +161,25 @@ open http://localhost:3000
 ```
 
 `make minikube-setup` seeds the default test user and agent/context access. `npm run ui` keeps the required API port-forwards open while it runs the local frontends.
+
+For a branch-owned profile, the host-side hold for Control UI / Desktop is
+the first-hand entry point (gitignored helper at repo root — do not search
+for it). Implementation: `.local-notes/minikube-profiles/branch-profile.sh`.
+HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
+Profile-owned random ports only (never shared `:3000`/`:8090`).
+`make minikube-pf-all-bg` is a gate refresh only; it must not replace
+`branch-profile-pf`. Do not start UI PFs from a sandboxed agent shell. Run
+the make target on the host. Do not kill this lane's `branch-profile-pf`.
+`branch-profile-pf-health` starts PFs then STOPS them on EXIT — do not use
+it as the lasting hold.
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+```
 
 `make test-e2e-vitest` and `make test-e2e-all` install `tests/e2e`
 dependencies when missing and hold the minikube port-forwards for the Vitest
@@ -478,6 +501,26 @@ kubectl rollout restart deployment/rpc-proxy -n rpc-proxy --context clerum-test
 ---
 
 ## Port Forwards for the Desktop App
+
+On a branch-owned profile, do not use the shared `:3000`/`:8090` mapping
+below. First-hand entry point (gitignored helper at repo root — do not
+search for it):
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+```
+
+Implementation: `.local-notes/minikube-profiles/branch-profile.sh`.
+HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
+`make minikube-pf-all-bg` is a gate refresh only; it must not replace
+`branch-profile-pf`. `branch-profile-pf-health` starts PFs then STOPS them
+on EXIT — do not use it as the lasting hold.
+
+The shared `clerum-test` Desktop mapping remains:
 
 ```bash
 make minikube-pf-desktop

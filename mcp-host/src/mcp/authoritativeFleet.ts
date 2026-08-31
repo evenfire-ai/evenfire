@@ -468,6 +468,18 @@ async function resolveRequiredMcpAuthToken(
     expectedCredentialRevision?: string
   ) => Promise<string | undefined>
 ): Promise<string | undefined> {
+  // oauth servers never resolve a token eagerly here: the eager/reconcile path
+  // admits only the token-less representative connection (which populates the
+  // catalog), and per-user/per-context tokens are resolved lazily by the
+  // per-connection tokenProvider at connect time. Returning undefined (never
+  // throwing) keeps the representative admissible without a grant.
+  // Read from the HCC v2 `authKind` (mini-spec §3.2/§4.4): under v2 `auth` is
+  // never emitted, so gating on it would route an oauth server into the static
+  // getAuthToken path and make HCC's getCredential throw.
+  if (server.authKind === 'oauth-user' || server.authKind === 'oauth-context') {
+    return undefined
+  }
+
   if (
     !server.enabled ||
     !server.status?.ready ||

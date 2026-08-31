@@ -1,6 +1,6 @@
 import { type Mock, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LlmError, LlmErrorCode } from '../../../core/errors'
-import { FailoverEngine } from '../engine'
+import { type ClassifiedLike, FailoverEngine } from '../engine'
 import type { FailoverSwitchEvent, LlmPolicy, ModelPair } from '../types'
 
 const PRIMARY: ModelPair = { provider: 'claude', model: 'claude-sonnet-4-6' }
@@ -312,5 +312,69 @@ describe('FailoverEngine', () => {
     // After reset the primary is attempted again immediately.
     const res = await e.run(PRIMARY, () => () => Promise.resolve('primary'), classify)
     expect(res).toBe('primary')
+  })
+
+  it('assigns a distinct providerAttemptIndex to each physical attempt', async () => {
+    const e = engine(
+      policy({
+        fallbacks: [
+          { provider: 'openai', model: 'gpt-5.4' },
+          { provider: 'zai', model: 'glm-5.1' },
+        ],
+      })
+    )
+    const indexes: number[] = []
+    await e.run(
+      PRIMARY,
+      (t, physical) => {
+        indexes.push(physical.providerAttemptIndex)
+        if (t.kind === 'primary')
+          return () => Promise.reject(llmError(LlmErrorCode.RateLimited, true))
+        if (t.kind === 'fallback' && t.index === 0)
+          return () => Promise.reject(llmError(LlmErrorCode.ModelOverloaded, true))
+        return () => Promise.resolve('ok')
+      },
+      classify
+    )
+    expect(indexes).toEqual([1, 2, 3])
+  })
+
+  it('treats budget_denied as terminal unless the policy opts in', async () => {
+    const err = new LlmError(
+      'budget denied',
+      'codex-subscription',
+      LlmErrorCode.InsufficientQuota,
+      false,
+      undefined,
+      undefined,
+      'budget_denied'
+    )
+    const classifyWithCode = (caught: unknown): ClassifiedLike | null => {
+      if (caught instanceof LlmError) {
+        return {
+          code: caught.code as LlmErrorCode,
+          retryable: caught.retryable,
+          providerCode: caught.providerCode,
+        }
+      }
+      return classify(caught)
+    }
+    const denied = engine()
+    await expect(
+      denied.run(
+        PRIMARY,
+        t => (t.kind === 'primary' ? () => Promise.reject(err) : () => Promise.resolve('nope')),
+        classifyWithCode
+      )
+    ).rejects.toBe(err)
+
+    const optedIn = engine(policy({ budgetDeniedFailover: true }))
+    await expect(
+      optedIn.run(
+        PRIMARY,
+        t => (t.kind === 'primary' ? () => Promise.reject(err) : () => Promise.resolve('fallback')),
+        classifyWithCode
+      )
+    ).resolves.toBe('fallback')
   })
 })

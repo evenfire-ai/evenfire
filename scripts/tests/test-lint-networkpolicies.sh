@@ -218,3 +218,72 @@ RUBYOPT=--disable=gems ruby -ryaml -e '
   abort("sandbox-ui static slice must render renamed baseline policies: #{missing.join(", ")}") unless missing.empty?
 ' "${MINIKUBE_RENDERED}"
 echo "PASS: minikube sandbox-ui static policies do not take HCC-owned deny-all/DNS ownership and retain kube-dns-only DNS egress"
+
+RUBYOPT=--disable=gems ruby -ryaml -e '
+  ingress = nil
+  egress = nil
+  YAML.load_stream(File.read(ARGV.fetch(0))) do |doc|
+    next unless doc.is_a?(Hash) && doc["kind"] == "NetworkPolicy"
+    next unless doc.dig("metadata", "namespace") == "control-plane"
+    case doc.dig("metadata", "name")
+    when "codex-llm-proxy-ingress" then ingress = doc
+    when "codex-llm-proxy-egress" then egress = doc
+    end
+  end
+  abort("rendered overlay is missing codex-llm-proxy-ingress") unless ingress
+  abort("rendered overlay is missing codex-llm-proxy-egress") unless egress
+
+  ingress_ports = Array(ingress.dig("spec", "ingress")).flat_map { |rule| Array(rule["ports"]).map { |port| port["port"] } }
+  abort("codex-llm-proxy-ingress must expose 8080/8081/9090") unless ([8080, 8081, 9090] - ingress_ports).empty?
+
+  Array(ingress.dig("spec", "ingress")).each_with_index do |rule, rule_idx|
+    abort("codex-llm-proxy-ingress[#{rule_idx}] must declare from") if Array(rule["from"]).empty?
+    Array(rule["from"]).each do |peer|
+      abort("codex-llm-proxy-ingress must not use a namespace-wide selector") if peer == { "namespaceSelector" => {} } || peer == { "podSelector" => {} }
+    end
+  end
+
+  forbidden_apps = %w[control-api control-postgres host-context-controller workflow-recipes mcp-host]
+  saw_gateway = false
+  saw_public = false
+  Array(egress.dig("spec", "egress")).each_with_index do |rule, rule_idx|
+    Array(rule["to"]).each do |peer|
+      app = peer.dig("podSelector", "matchLabels", "app")
+      abort("codex-llm-proxy-egress[#{rule_idx}] must not allow #{app}") if forbidden_apps.include?(app)
+      saw_gateway = true if app == "control-api-rpc-gateway"
+      ip = peer.dig("ipBlock", "cidr")
+      next unless ip == "0.0.0.0/0"
+      saw_public = true
+      excepts = Array(peer.dig("ipBlock", "except"))
+      abort("codex-llm-proxy-egress public HTTPS is missing private-range exceptions") if excepts.empty?
+      abort("codex-llm-proxy-egress public HTTPS is missing metadata exception") unless excepts.include?("169.254.0.0/16")
+    end
+  end
+  abort("codex-llm-proxy-egress must allow control-api-rpc-gateway") unless saw_gateway
+  abort("codex-llm-proxy-egress must allow public HTTPS with exceptions") unless saw_public
+' "${MINIKUBE_RENDERED}"
+echo "PASS: rendered Codex proxy NetworkPolicies stay narrowly scoped"
+
+BROAD_RENDERED="${TMP_DIR}/minikube-rendered-broad-proxy.yaml"
+RUBYOPT=--disable=gems ruby -ryaml -e '
+  docs = []
+  YAML.load_stream(File.read(ARGV.fetch(0))) do |doc|
+    next unless doc.is_a?(Hash)
+    if doc["kind"] == "NetworkPolicy" && doc.dig("metadata", "name") == "codex-llm-proxy-egress"
+      doc["spec"] ||= {}
+      doc["spec"]["egress"] ||= []
+      doc["spec"]["egress"] << {
+        "ports" => [{ "port" => 443, "protocol" => "TCP" }],
+        "to" => [{ "ipBlock" => { "cidr" => "0.0.0.0/0" } }]
+      }
+    end
+    docs << doc
+  end
+  File.write(ARGV.fetch(1), docs.map { |doc| YAML.dump(doc) }.join("---\n"))
+' "${MINIKUBE_RENDERED}" "${BROAD_RENDERED}"
+if run_lint "${BROAD_RENDERED}" >/tmp/lint-netpol-codex-broad.out 2>&1; then
+  echo "FAIL: Codex proxy broad public egress without exceptions should fail" >&2
+  exit 1
+fi
+grep -q "without public-only exceptions" /tmp/lint-netpol-codex-broad.out
+echo "PASS: lint-networkpolicies rejects a broad Codex proxy egress mutation"

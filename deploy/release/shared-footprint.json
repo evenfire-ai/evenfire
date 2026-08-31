@@ -1,0 +1,21 @@
+{
+  "footprintVersion": "fp-v1-trial",
+  "baseline": {
+    "cpuMillis": 2000,
+    "memoryMib": 4096,
+    "storageGib": 10,
+    "ephemeralStorageGib": 4,
+    "pods": 24,
+    "pvcs": 3
+  },
+  "plans": {
+    "trial": {
+      "cpuMillis": 1000,
+      "memoryMib": 2048,
+      "storageGib": 5,
+      "ephemeralStorageGib": 2,
+      "pods": 12,
+      "pvcs": 2
+    }
+  }
+}

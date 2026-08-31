@@ -68,6 +68,7 @@ interface BuildConfigOpts {
   // Validation hook to exercise inner-arg validation against the real schema.
   beforeExecution?: (name: string, params: Record<string, unknown>) => boolean
   invalidNames?: Set<string>
+  progressReporter?: LoopConfig['progressReporter']
 }
 
 function makeConfig(opts: BuildConfigOpts): LoopConfig {
@@ -99,7 +100,26 @@ function makeConfig(opts: BuildConfigOpts): LoopConfig {
     toolTimeout: 5000,
     toolProgressInterval: 0,
     bridge: opts.bridge,
+    progressReporter: opts.progressReporter,
   }
+}
+
+/** Records the ordered stream of tool-card lifecycle events (start/complete). */
+function recordingReporter(): {
+  reporter: LoopConfig['progressReporter']
+  events: Array<{ kind: 'start' | 'complete'; toolCallId: string; isError?: boolean }>
+} {
+  const events: Array<{ kind: 'start' | 'complete'; toolCallId: string; isError?: boolean }> = []
+  const reporter = {
+    reportToolStart: (e: { toolCallId: string }) =>
+      events.push({ kind: 'start', toolCallId: e.toolCallId }),
+    reportToolComplete: (e: { toolCallId: string; isError: boolean }) =>
+      events.push({ kind: 'complete', toolCallId: e.toolCallId, isError: e.isError }),
+    reportToolProgress: () => {},
+    reportThinking: () => {},
+    reportLlmInProgress: () => {},
+  } as unknown as LoopConfig['progressReporter']
+  return { reporter, events }
 }
 
 function bridgeContext(nativeNames: string[], deferrable: string[]): LoopConfig['bridge'] {
@@ -115,7 +135,106 @@ function bridgeCall(id: string, name: string, args: Record<string, unknown>): To
   return { id, name: 'clerum__tool_call', arguments: { name, arguments: args } }
 }
 
+/** A tool whose execute() returns a connect_required marker (as toolRegistryAdapter would). */
+class ConnectRequiredTool implements Tool {
+  constructor(private readonly _name: string) {}
+  name(): string {
+    return this._name
+  }
+  description(): string {
+    return `${this._name} desc`
+  }
+  parametersSchema(): Record<string, unknown> {
+    return { type: 'object', properties: {} }
+  }
+  requiresSanitization(): boolean {
+    return false
+  }
+  requiresApproval(): boolean {
+    return false
+  }
+  async execute(): Promise<ToolOutput> {
+    return {
+      content: 'MCP server monday auth failed (401)',
+      duration_ms: 1,
+      is_error: true,
+      metadata: { connect_required: { mcpServerName: 'monday' } },
+    }
+  }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
+
+describe('U5 — connect_required inline suspension (auto-approved / cron path)', () => {
+  it('turns a connect_required tool result into a durable connect suspension', async () => {
+    const config = makeConfig({
+      tools: { monday__list_boards: new ConnectRequiredTool('monday__list_boards') },
+    })
+    const { toolResults, pendingApproval } = await executeToolCalls(
+      [{ id: 'call-1', name: 'monday__list_boards', arguments: { limit: 5 } }],
+      config,
+      0,
+      [{ role: 'user', content: 'list boards' }]
+    )
+
+    // A connect_required suspension is raised (not fed to the LLM as an error).
+    expect(pendingApproval).toBeDefined()
+    expect(pendingApproval).toMatchObject({
+      reason: 'connect_required',
+      mcpServerName: 'monday',
+      tool_name: 'monday__list_boards',
+      tool_call_id: 'call-1',
+    })
+    // The failed connect result is NOT pushed (the tool re-executes fresh on resume).
+    expect(toolResults.find(r => r.tool_call_id === 'call-1')).toBeUndefined()
+  })
+
+  it('closes the tool card (start→complete) before suspending — no dangling "running" step', async () => {
+    const { reporter, events } = recordingReporter()
+    const config = makeConfig({
+      tools: { monday__list_boards: new ConnectRequiredTool('monday__list_boards') },
+      progressReporter: reporter,
+    })
+    const { pendingApproval } = await executeToolCalls(
+      [{ id: 'call-1', name: 'monday__list_boards', arguments: {} }],
+      config,
+      0,
+      [{ role: 'user', content: 'list boards' }]
+    )
+
+    expect(pendingApproval?.reason).toBe('connect_required')
+    // Observable event sequence: the start is closed by a matching complete
+    // BEFORE the (later) suspended event — no step card left "running". This
+    // mirrors the resume path (taskExecutor emits reportToolComplete before its
+    // own connect check).
+    expect(events).toEqual([
+      { kind: 'start', toolCallId: 'call-1' },
+      { kind: 'complete', toolCallId: 'call-1', isError: true },
+    ])
+  })
+
+  it('leaves following batch calls unexecuted with a synthetic not-executed result', async () => {
+    const config = makeConfig({
+      tools: {
+        monday__list_boards: new ConnectRequiredTool('monday__list_boards'),
+        server__other: new StubTool('server__other'),
+      },
+    })
+    const { toolResults, pendingApproval } = await executeToolCalls(
+      [
+        { id: 'call-1', name: 'monday__list_boards', arguments: {} },
+        { id: 'call-2', name: 'server__other', arguments: {} },
+      ],
+      config,
+      0,
+      [{ role: 'user', content: 'do both' }]
+    )
+    expect(pendingApproval?.reason).toBe('connect_required')
+    const other = toolResults.find(r => r.tool_call_id === 'call-2')
+    expect(other?.is_error).toBe(true)
+    expect(other?.content).toContain('Not executed')
+  })
+})
 
 describe('clerum__tool_call bridge intercept', () => {
   it('unwraps to the real tool, preserving call.id on the result', async () => {

@@ -6,7 +6,7 @@
 import { config } from './config'
 import { hccLogger } from './logger'
 import { McpApiAuthenticator } from './mcpApiAuthentication'
-import type { HostWorkflowControlScope } from './types'
+import type { EffectiveMcpHostControlScope } from './types'
 import { signInternalControlJwt } from './utils/internalControlSigner'
 
 export interface McpHostRuntimeTokenResponse {
@@ -57,7 +57,7 @@ function positiveInteger(value: unknown): number | null {
 export async function issueMcpHostRuntimeTokens(
   hostName: string,
   hostUid: string,
-  workflowControlScopes: HostWorkflowControlScope[] = []
+  workflowControlScopes: EffectiveMcpHostControlScope[] = []
 ): Promise<McpHostRuntimeTokenResponse> {
   if (
     typeof hostName !== 'string' ||

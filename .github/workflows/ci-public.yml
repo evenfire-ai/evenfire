@@ -67,6 +67,9 @@ jobs:
           - packages/workflow-runtime-core
           - packages/workflow-sdk
           - packages/network-policy-core
+          - packages/llm-provider-attempt-contract
+          - packages/codex-catalog-projection
+          - codex-llm-proxy
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -125,8 +128,11 @@ jobs:
       # network-policy-core is a hand-authored .cjs + .d.ts with no tsconfig, so
       # `tsc --noEmit` resolves no project (like mcp-servers). Its .d.ts is kept
       # aligned with the runtime by the "runtime exports stay aligned" node:test.
+      # llm-provider-attempt-contract and codex-catalog-projection are the same
+      # shape: hand-authored .cjs + .d.ts, no tsconfig; node --test keeps the
+      # types aligned with the runtime.
       - name: Typecheck (tsc --noEmit)
-        if: matrix.service != 'mcp-servers' && matrix.service != 'packages/desktop-app-links' && matrix.service != 'packages/network-policy-core'
+        if: matrix.service != 'mcp-servers' && matrix.service != 'packages/desktop-app-links' && matrix.service != 'packages/network-policy-core' && matrix.service != 'packages/llm-provider-attempt-contract' && matrix.service != 'packages/codex-catalog-projection'
         working-directory: ${{ matrix.service }}
         run: npx tsc --noEmit
 
@@ -209,6 +215,23 @@ jobs:
             echo 'real-Postgres control-api lane reported skipped tests' >&2
             exit 1
           fi
+          # Codex subscription suites must stay inside the real-Postgres filter.
+          # A rename or move that drops them from `*realPostgres*` would otherwise
+          # still pass the aggregate counts above.
+          for suite in \
+            db.codexSubscriptionConnection.realPostgres.integration \
+            services.codexSubscriptionOAuth.realPostgres.integration \
+            services.codexSubscriptionCatalog.realPostgres.integration \
+            services.llmProviderAttemptAuthorization.realPostgres.integration \
+            services.llmProviderAttemptStore.realPostgres.integration \
+            services.llmProviderAttemptRedemption.realPostgres.integration \
+            services.llmProviderAttemptFinalization.realPostgres.integration
+          do
+            grep -Fq "$suite" "$normalized_log" || {
+              echo "real-Postgres control-api lane omitted Codex suite ${suite}" >&2
+              exit 1
+            }
+          done
 
       - name: Install gfs-controller dependencies
         working-directory: gfs-controller

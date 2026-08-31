@@ -273,6 +273,70 @@ describe('ContextMapperClient Host-scoped v2 inventory', () => {
     )
   })
 
+  it('preserves a valid authKind from the v2 inventory (mini-spec 10 §3.3)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify(inventory([authorizedServer({ authKind: 'oauth-user' })])), {
+            status: 200,
+          })
+        )
+    )
+    const client = new ContextMapperClient('http://context-mapper.test', {
+      authentication: authentication(),
+    })
+
+    const result = await client.pollServers()
+    expect(result.servers[0].authKind).toBe('oauth-user')
+  })
+
+  it('rejects an authKind value outside the enum', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify(inventory([authorizedServer({ authKind: 'oauth-admin' })])), {
+            status: 200,
+          })
+        )
+    )
+    const client = new ContextMapperClient('http://context-mapper.test', {
+      authentication: authentication(),
+    })
+
+    await expect(client.pollServers()).rejects.toThrow(
+      'HCC inventory response contains an invalid authKind'
+    )
+  })
+
+  it('still rejects forbidden metadata even when a valid authKind is present (guard intact, I1)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(
+            JSON.stringify(
+              inventory([
+                authorizedServer({ authKind: 'oauth-context', contextRef: 'foreign-context' }),
+              ])
+            ),
+            { status: 200 }
+          )
+        )
+    )
+    const client = new ContextMapperClient('http://context-mapper.test', {
+      authentication: authentication(),
+    })
+
+    await expect(client.pollServers()).rejects.toThrow(
+      'HCC inventory response contains forbidden authority metadata'
+    )
+  })
+
   it('accepts an authenticated HTTP 200 empty inventory as authoritative', async () => {
     vi.stubGlobal(
       'fetch',
