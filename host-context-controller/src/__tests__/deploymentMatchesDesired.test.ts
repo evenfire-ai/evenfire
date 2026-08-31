@@ -18,7 +18,12 @@ import {
   preserveDeploymentAnnotations,
 } from '../utils'
 import { asApiserverDeployment } from './asApiserverDeployment'
-import { cloneAndMutateLeaf, collectLeafPaths, formatLeafPath } from './mutateJsonLeaves'
+import {
+  cloneAndMutateLeaf,
+  collectLeafPaths,
+  collectLiveOnlySpecLeaves,
+  formatLeafPath,
+} from './mutateJsonLeaves'
 
 vi.mock('../config', () => ({
   config: {
@@ -118,6 +123,24 @@ function expectSweepDetectsEveryLeaf(desired: k8s.V1Deployment, existing: k8s.V1
   expect(undetectable, `undetectable leaf path(s): ${undetectable.join(', ')}`).toEqual([])
 }
 
+function expectSweepDetectsLiveOnlySpecLeaves(
+  desired: k8s.V1Deployment,
+  existing: k8s.V1Deployment
+): void {
+  const liveOnly = collectLiveOnlySpecLeaves(desired, existing)
+  expect(liveOnly.length, 'fixture added no spec-only leaves').toBeGreaterThan(0)
+  const undetectable: string[] = []
+  for (const path of liveOnly) {
+    const mutatedExisting = cloneAndMutateLeaf(existing, path) as k8s.V1Deployment
+    if (deploymentMatchesDesired(mergedForCompare(desired, mutatedExisting), mutatedExisting)) {
+      undetectable.push(formatLeafPath(path))
+    }
+  }
+  expect(undetectable, `undetectable live-only spec path(s): ${undetectable.join(', ')}`).toEqual(
+    []
+  )
+}
+
 describe('asApiserverDeployment', () => {
   it('FIXTURE-1: default-fills a sparse Deployment so it differs structurally', () => {
     const desired = sparseDeployment()
@@ -135,6 +158,15 @@ describe('asApiserverDeployment', () => {
       'rev-abc'
     ) as k8s.V1Deployment
     expect(asApiserverDeployment(desired)).not.toEqual(desired)
+  })
+
+  it('FIXTURE-1: omitted Deployment spec fields come from the recorded blob', () => {
+    const desired = sparseDeployment()
+    const existing = asApiserverDeployment(desired)
+    expect(existing.spec?.progressDeadlineSeconds).toBe(600)
+    expect(existing.spec?.revisionHistoryLimit).toBe(10)
+    expect(existing.spec?.template?.spec?.dnsPolicy).toBe('ClusterFirst')
+    expect(existing.spec?.template?.spec?.restartPolicy).toBe('Always')
   })
 
   it('FIXTURE-1: fills omitted imagePullPolicy the way apps/v1 defaults it', () => {
@@ -282,11 +314,24 @@ describe('deploymentMatchesDesired', () => {
     expectSweepDetectsEveryLeaf(desired, asApiserverDeployment(desired))
   })
 
+  it('Host mutation sweep: every live-only spec leaf is detectable', () => {
+    const desired = createReconciler().buildDeployment(makeHost())
+    expectSweepDetectsLiveOnlySpecLeaves(desired, asApiserverDeployment(desired))
+  })
+
   it('channel-reader mutation sweep: every desired leaf is detectable', () => {
     const desired = (createReconciler() as any).buildChannelReaderDeployment(
       makeHost(),
       'rev-abc'
     ) as k8s.V1Deployment
     expectSweepDetectsEveryLeaf(desired, asApiserverDeployment(desired))
+  })
+
+  it('channel-reader mutation sweep: every live-only spec leaf is detectable', () => {
+    const desired = (createReconciler() as any).buildChannelReaderDeployment(
+      makeHost(),
+      'rev-abc'
+    ) as k8s.V1Deployment
+    expectSweepDetectsLiveOnlySpecLeaves(desired, asApiserverDeployment(desired))
   })
 })

@@ -1,34 +1,27 @@
 import type * as k8s from '@kubernetes/client-node'
 
 /**
- * Apply documented apps/v1 defaulting onto a desired Deployment. Unlike
- * `asApiserverService`, this is not a recorded-blob overlay: it fills fields
- * the apiserver would default-fill, leaving every HCC-authored value intact.
- * Container `imagePullPolicy` follows kube `DefaultImagePullPolicy` (Always
- * for `:latest` / untagged; IfNotPresent otherwise). Refresh this function
- * when a live `kubectl get deploy -o json` reveals a default the fixture
- * does not model (PR G §8).
+ * Recorded kube-apiserver GET of an apps/v1 Deployment (`kubectl get deploy
+ * -o json` shape), not a field list copied from
+ * `normalizeDeploymentForComparison`. Stamp controller-owned identity and
+ * PodSpec via `asApiserverDeployment`. When a newer apiserver default-fills
+ * a field, refresh this blob so the suite goes red until the comparator or
+ * builder learns that default (PR G §8).
+ *
+ * Container `imagePullPolicy` is filled after overlay from kube
+ * `DefaultImagePullPolicy` (Always for `:latest` / untagged; IfNotPresent
+ * otherwise) because recorded containers are replaced by the desired list.
  */
 const SERVER_TIME = new Date('2026-04-01T00:00:00.000Z')
 const SERVER_UID = '11111111-2222-3333-4444-555555555555'
 const SERVER_RESOURCE_VERSION = '1776125'
 
-export function asApiserverDeployment(desired: k8s.V1Deployment): k8s.V1Deployment {
-  const live = structuredClone(desired)
-  applyServerOwnedMetadata(live)
-  applyDeploymentSpecDefaults(live.spec)
-  return live
-}
-
-function applyServerOwnedMetadata(deployment: k8s.V1Deployment): void {
-  const name = deployment.metadata?.name ?? 'unnamed'
-  const namespace = deployment.metadata?.namespace ?? 'default'
-  deployment.metadata = {
-    ...deployment.metadata,
+export const RECORDED_APPSV1_DEPLOYMENT: k8s.V1Deployment = {
+  apiVersion: 'apps/v1',
+  kind: 'Deployment',
+  metadata: {
     annotations: {
-      ...deployment.metadata?.annotations,
-      'deployment.kubernetes.io/revision':
-        deployment.metadata?.annotations?.['deployment.kubernetes.io/revision'] ?? '1',
+      'deployment.kubernetes.io/revision': '1',
     },
     creationTimestamp: SERVER_TIME,
     generation: 1,
@@ -42,18 +35,102 @@ function applyServerOwnedMetadata(deployment: k8s.V1Deployment): void {
         time: SERVER_TIME,
       },
     ],
+    name: 'recorded-deploy',
+    namespace: 'recorded-ns',
     resourceVersion: SERVER_RESOURCE_VERSION,
     uid: SERVER_UID,
-    selfLink: `/apis/apps/v1/namespaces/${namespace}/deployments/${name}`,
-  }
-  deployment.status = {
+    selfLink: '/apis/apps/v1/namespaces/recorded-ns/deployments/recorded-deploy',
+  },
+  spec: {
+    replicas: 1,
+    progressDeadlineSeconds: 600,
+    revisionHistoryLimit: 10,
+    minReadySeconds: 0,
+    paused: false,
+    selector: { matchLabels: { app: 'recorded' } },
+    strategy: {
+      type: 'RollingUpdate',
+      rollingUpdate: { maxSurge: '25%', maxUnavailable: '25%' },
+    },
+    template: {
+      metadata: {
+        creationTimestamp: SERVER_TIME,
+        labels: { app: 'recorded' },
+      },
+      spec: {
+        restartPolicy: 'Always',
+        dnsPolicy: 'ClusterFirst',
+        schedulerName: 'default-scheduler',
+        terminationGracePeriodSeconds: 30,
+        enableServiceLinks: true,
+        preemptionPolicy: 'PreemptLowerPriority',
+        serviceAccountName: 'default',
+        containers: [
+          {
+            name: 'recorded',
+            image: 'recorded:1',
+            imagePullPolicy: 'IfNotPresent',
+            terminationMessagePath: '/dev/termination-log',
+            terminationMessagePolicy: 'File',
+          },
+        ],
+      },
+    },
+  },
+  status: {
     observedGeneration: 1,
-    replicas: deployment.spec?.replicas ?? 1,
+    replicas: 1,
     readyReplicas: 0,
     updatedReplicas: 0,
-    unavailableReplicas: deployment.spec?.replicas ?? 1,
+    unavailableReplicas: 1,
     conditions: [],
+  },
+}
+
+export function asApiserverDeployment(desired: k8s.V1Deployment): k8s.V1Deployment {
+  const live = overlayDefined(
+    structuredClone(RECORDED_APPSV1_DEPLOYMENT),
+    desired
+  ) as k8s.V1Deployment
+  const name = desired.metadata?.name ?? live.metadata?.name ?? 'unnamed'
+  const namespace = desired.metadata?.namespace ?? live.metadata?.namespace ?? 'default'
+  live.metadata = {
+    ...live.metadata,
+    selfLink: `/apis/apps/v1/namespaces/${namespace}/deployments/${name}`,
   }
+  const replicas = live.spec?.replicas ?? 1
+  live.status = {
+    ...RECORDED_APPSV1_DEPLOYMENT.status,
+    replicas,
+    unavailableReplicas: replicas,
+  }
+  applyDeploymentSpecDefaults(live.spec)
+  return live
+}
+
+const REPLACE_OBJECT_KEYS = new Set([
+  'selector',
+  'labels',
+  'matchLabels',
+  'matchExpressions',
+  'strategy',
+])
+
+/** Defined overlay keys win; omitted keys keep the recorded apiserver default. */
+function overlayDefined(base: unknown, overlay: unknown): unknown {
+  if (overlay === undefined) return base
+  if (overlay === null || typeof overlay !== 'object' || Array.isArray(overlay)) return overlay
+  if (base === null || typeof base !== 'object' || Array.isArray(base)) return overlay
+  const out: Record<string, unknown> = { ...(base as Record<string, unknown>) }
+  for (const [key, value] of Object.entries(overlay as Record<string, unknown>)) {
+    if (value === undefined) continue
+    if (REPLACE_OBJECT_KEYS.has(key) && typeof value === 'object' && !Array.isArray(value)) {
+      out[key] = value
+      continue
+    }
+    out[key] = overlayDefined((base as Record<string, unknown>)[key], value)
+  }
+  return out
 }
 
 function applyDeploymentSpecDefaults(spec: k8s.V1Deployment['spec']): void {
@@ -89,7 +166,7 @@ function applyPodSpecDefaults(podSpec: k8s.V1PodSpec | undefined): void {
   if (podSpec.enableServiceLinks === undefined) podSpec.enableServiceLinks = true
   if (podSpec.preemptionPolicy === undefined) podSpec.preemptionPolicy = 'PreemptLowerPriority'
   if (!podSpec.serviceAccountName) podSpec.serviceAccountName = 'default'
-  if (podSpec.serviceAccount === undefined) podSpec.serviceAccount = podSpec.serviceAccountName
+  podSpec.serviceAccount = podSpec.serviceAccountName
 
   for (const container of [...(podSpec.initContainers ?? []), ...(podSpec.containers ?? [])]) {
     applyContainerDefaults(container)

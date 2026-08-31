@@ -51,3 +51,25 @@ export function cloneAndMutateLeaf(root: unknown, path: string[]): unknown {
 export function formatLeafPath(path: string[]): string {
   return path.length === 0 ? '(root)' : path.join('.')
 }
+
+/**
+ * Spec leaves the apiserver/fixture added that `desired` omitted.
+ * `creationTimestamp` is stripped unconditionally by the comparator.
+ */
+export function collectLiveOnlySpecLeaves(desired: unknown, existing: unknown): string[][] {
+  return collectLeafPaths(existing).filter(path => {
+    if (path[0] !== 'spec') return false
+    if (path.includes('creationTimestamp')) return false
+    return getAtPath(desired, path) === undefined
+  })
+}
+
+export function undetectableLiveOnlySpecLeaves(
+  desired: unknown,
+  existing: unknown,
+  isStillNoOp: (mutatedExisting: unknown) => boolean
+): string[] {
+  return collectLiveOnlySpecLeaves(desired, existing)
+    .filter(path => isStillNoOp(cloneAndMutateLeaf(existing, path)))
+    .map(formatLeafPath)
+}

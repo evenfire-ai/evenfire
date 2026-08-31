@@ -5,7 +5,13 @@ import { SharedFileSystemReconciler } from '../sharedFileSystemReconciler'
 import type { SharedFileSystemCRD } from '../types'
 import { deploymentMatchesDesired, preserveDeploymentAnnotations } from '../utils'
 import { asApiserverDeployment } from './asApiserverDeployment'
-import { cloneAndMutateLeaf, collectLeafPaths, formatLeafPath } from './mutateJsonLeaves'
+import {
+  cloneAndMutateLeaf,
+  collectLeafPaths,
+  collectLiveOnlySpecLeaves,
+  formatLeafPath,
+  undetectableLiveOnlySpecLeaves,
+} from './mutateJsonLeaves'
 
 const RESTARTED_AT = 'kubectl.kubernetes.io/restartedAt'
 const RESTART_STAMP = '2026-08-31T10:00:00Z'
@@ -116,6 +122,20 @@ describe('SFS Deployment no-op gate', () => {
       }
     }
     expect(undetectable, `undetectable leaf path(s): ${undetectable.join(', ')}`).toEqual([])
+  })
+
+  it('SFS mutation sweep: every live-only spec leaf is detectable', () => {
+    const desired = buildDeployment(sfs, factoryConfig)
+    const existing = asApiserverDeployment(desired)
+    expect(collectLiveOnlySpecLeaves(desired, existing).length).toBeGreaterThan(0)
+    expect(
+      undetectableLiveOnlySpecLeaves(desired, existing, mutated =>
+        deploymentMatchesDesired(
+          mergedForCompare(desired, mutated as k8s.V1Deployment),
+          mutated as k8s.V1Deployment
+        )
+      )
+    ).toEqual([])
   })
 
   it('NOOP-SFS-1: equivalent Deployment skips replace', async () => {

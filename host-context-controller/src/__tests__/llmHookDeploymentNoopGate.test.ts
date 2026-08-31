@@ -16,7 +16,13 @@ import { LlmHookReconciler, computePodKey } from '../llmHookReconciler'
 import type { HostCRD, LlmHookCRD } from '../types'
 import { deploymentMatchesDesired, preserveDeploymentAnnotations } from '../utils'
 import { asApiserverDeployment } from './asApiserverDeployment'
-import { cloneAndMutateLeaf, collectLeafPaths, formatLeafPath } from './mutateJsonLeaves'
+import {
+  cloneAndMutateLeaf,
+  collectLeafPaths,
+  collectLiveOnlySpecLeaves,
+  formatLeafPath,
+  undetectableLiveOnlySpecLeaves,
+} from './mutateJsonLeaves'
 
 vi.mock('../config', () => ({
   config: {
@@ -109,6 +115,24 @@ describe('LlmHook ensureDeployment no-op gate', () => {
       }
     }
     expect(undetectable, `undetectable leaf path(s): ${undetectable.join(', ')}`).toEqual([])
+  })
+
+  it('LlmHook mutation sweep: every live-only spec leaf is detectable', () => {
+    const desired = (reconciler as any).buildDeployment(
+      podKey,
+      members,
+      'rev-1'
+    ) as k8s.V1Deployment
+    const existing = asApiserverDeployment(desired)
+    expect(collectLiveOnlySpecLeaves(desired, existing).length).toBeGreaterThan(0)
+    expect(
+      undetectableLiveOnlySpecLeaves(desired, existing, mutated =>
+        deploymentMatchesDesired(
+          mergedForCompare(desired, mutated as k8s.V1Deployment),
+          mutated as k8s.V1Deployment
+        )
+      )
+    ).toEqual([])
   })
 
   it('NOOP-LLMDEP-1: equivalent Deployment skips replace and Updated logs', async () => {
