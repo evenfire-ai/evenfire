@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { rulesForFile } from './rules.mjs'
 
@@ -53,4 +54,21 @@ test('does not confuse RowActionsMenu with the retired RowActions component', ()
     ),
     []
   )
+})
+
+test('shared table colors resolve through tokens declared by both web apps', () => {
+  const sharedCss = readFileSync('packages/frontend-table-system/styles.css', 'utf8')
+  const controlCss = readFileSync('control-ui/app/globals.css', 'utf8')
+  const profileCss = readFileSync('profile-ui/app/globals.css', 'utf8')
+  const bindings = [...sharedCss.matchAll(/--eft-[^:]+:\s*var\((--cu-[^)]+)\);/g)]
+
+  assert.ok(bindings.length >= 7)
+  for (const [, token] of bindings) {
+    assert.match(controlCss, new RegExp(`${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:`))
+    assert.match(profileCss, new RegExp(`${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:`))
+  }
+  assert.match(controlCss, /--cu-focus-rgb\s*:/)
+  assert.match(profileCss, /--cu-focus-rgb\s*:/)
+  assert.match(controlCss, /:root\[data-theme='light'\][\s\S]*--cu-surface-hover\s*:/)
+  assert.doesNotMatch(sharedCss, /--eft-[^:]+:[^;]*#[0-9a-f]{3,8}/i)
 })

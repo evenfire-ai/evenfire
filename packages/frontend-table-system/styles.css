@@ -1,12 +1,12 @@
 :root {
-  --eft-surface: var(--cu-bg-elevated, var(--surface-elevated, #171a21));
-  --eft-surface-muted: var(--cu-bg-subtle, var(--surface-subtle, #20242d));
-  --eft-border: var(--cu-border, var(--border-color, #343946));
-  --eft-text: var(--cu-text, var(--text-primary, #f5f7fb));
-  --eft-muted: var(--cu-text-muted, var(--text-muted, #a7afbf));
-  --eft-accent: var(--cu-accent, var(--accent, #7c9cff));
-  --eft-danger: var(--cu-danger, var(--danger, #ff6b7a));
-  --eft-focus: var(--cu-focus-ring, var(--focus-ring, #9bb5ff));
+  --eft-surface: var(--cu-surface);
+  --eft-surface-muted: var(--cu-surface-hover);
+  --eft-border: var(--cu-border);
+  --eft-text: var(--cu-text);
+  --eft-muted: var(--cu-text-muted);
+  --eft-accent: var(--cu-accent);
+  --eft-danger: var(--cu-danger);
+  --eft-focus: rgba(var(--cu-focus-rgb), 0.8);
 }
 
 .eft-data-view-header {
