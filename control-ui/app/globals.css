@@ -8583,6 +8583,40 @@ textarea.cu-input {
   margin: 0;
 }
 
+/* ChatGPT device sign-in card shown while the subscription modal waits for the
+   operator to approve the device code in the auto-opened ChatGPT tab. */
+.cu-device-setup {
+  display: grid;
+  gap: var(--cu-space-2);
+  padding: var(--cu-space-3) var(--cu-space-4);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-elevated);
+}
+
+.cu-device-setup__step {
+  margin: 0;
+  color: var(--cu-text-soft);
+  font-size: 0.8125rem;
+}
+
+.cu-device-setup__link {
+  color: var(--cu-accent);
+}
+
+.cu-device-setup__code {
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-align: center;
+}
+
+.cu-device-setup__note {
+  margin: 0;
+  color: var(--cu-text-muted);
+  font-size: 0.75rem;
+}
+
 /* Read-only model configuration summary. It mirrors the editor's provider
    blocks so operators can understand the configured model surface without
    opening edit mode. */

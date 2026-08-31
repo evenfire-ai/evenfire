@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import { copyTextToClipboard } from '@lib/clipboard'
 import {
   type CodexSubscriptionConnectionView,
   createCodexSubscriptionConnection,
@@ -32,11 +33,25 @@ import { SelectionDropdown } from '../SelectionDropdown'
 import { IconKey } from '../Sidebar/icons'
 import { TablePanelHeader } from '../TablePanelHeader'
 import { useToast } from '../Toast'
-import { IconRefresh, IconX } from '../icons'
+import { IconCopy, IconRefresh, IconX } from '../icons'
 import { CheckboxField } from '../ui'
 
 function grantLabel(row: CodexSubscriptionConnectionView): string {
   return row.displayName || row.connectionKey
+}
+
+async function copyDeviceValue(
+  value: string,
+  label: string,
+  showToast: ReturnType<typeof useToast>['showToast']
+) {
+  const copied = await copyTextToClipboard(value)
+  showToast(
+    copied
+      ? `${label} copied.`
+      : `Could not copy the ${label.toLowerCase()} — select it and copy manually.`,
+    { tone: copied ? 'success' : 'error' }
+  )
 }
 
 export function CodexSubscriptionHub() {
@@ -62,6 +77,9 @@ export function CodexSubscriptionHub() {
   >([])
   const [userCode, setUserCode] = useState<string | null>(null)
   const [verificationUri, setVerificationUri] = useState<string | null>(null)
+  // True when the browser blocked the automatic ChatGPT tab, so the card tells
+  // the operator to use the manual link instead of assuming the tab opened.
+  const [deviceTabBlocked, setDeviceTabBlocked] = useState(false)
   const enabled = isCodexSubscriptionUiEnabled(capability)
 
   useEffect(() => {
@@ -136,6 +154,7 @@ export function CodexSubscriptionHub() {
     setSetupNew(false)
     setUserCode(null)
     setVerificationUri(null)
+    setDeviceTabBlocked(false)
     setError('')
     if (row.status === 'connected') {
       try {
@@ -158,6 +177,7 @@ export function CodexSubscriptionHub() {
     setSetupNew(false)
     setUserCode(null)
     setVerificationUri(null)
+    setDeviceTabBlocked(false)
   }
 
   async function handleSaveEdit() {
@@ -193,6 +213,16 @@ export function CodexSubscriptionHub() {
       )
       setUserCode(started.userCode)
       setVerificationUri(started.verificationUri)
+      // Open the verification page straight away so the operator never has to
+      // copy the URL by hand. Browsers may still block the popup (especially
+      // after the await), so remember the failure and surface a manual link.
+      let opened: Window | null = null
+      try {
+        opened = window.open(started.verificationUri, '_blank', 'noopener,noreferrer')
+      } catch {
+        opened = null
+      }
+      setDeviceTabBlocked(!opened)
       const deadline = Date.now() + started.intervalSeconds * 1000 * 40
       while (Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, started.intervalSeconds * 1000))
@@ -599,14 +629,55 @@ export function CodexSubscriptionHub() {
                     </button>
                   </div>
                   {userCode ? (
-                    <p
-                      className="cu-field__hint"
-                      data-testid="codex-device-code"
-                      style={{ margin: 0 }}
-                    >
-                      Enter {userCode}
-                      {verificationUri ? ` at ${verificationUri}` : ''}
-                    </p>
+                    <div className="cu-device-setup" data-testid="codex-device-code">
+                      <p className="cu-device-setup__step">
+                        {deviceTabBlocked
+                          ? '1. Your browser blocked the pop-up — open ChatGPT with this link:'
+                          : '1. ChatGPT opened in a new tab. If it did not, use this link:'}
+                      </p>
+                      {verificationUri ? (
+                        <div className="cu-copy-field">
+                          <a
+                            className="cu-readonly-field cu-copy-field__value cu-device-setup__link"
+                            href={verificationUri}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            {verificationUri}
+                          </a>
+                          <button
+                            type="button"
+                            className="cu-btn cu-btn--icon cu-btn--ghost"
+                            onClick={() =>
+                              void copyDeviceValue(verificationUri, 'Sign-in link', showToast)
+                            }
+                            aria-label="Copy sign-in link"
+                            title="Copy sign-in link"
+                          >
+                            <IconCopy width={14} height={14} />
+                          </button>
+                        </div>
+                      ) : null}
+                      <p className="cu-device-setup__step">2. Enter this code:</p>
+                      <div className="cu-copy-field">
+                        <div className="cu-readonly-field cu-copy-field__value cu-device-setup__code">
+                          {userCode}
+                        </div>
+                        <button
+                          type="button"
+                          className="cu-btn cu-btn--icon cu-btn--ghost"
+                          onClick={() => void copyDeviceValue(userCode, 'Device code', showToast)}
+                          aria-label="Copy device code"
+                          title="Copy device code"
+                        >
+                          <IconCopy width={14} height={14} />
+                        </button>
+                      </div>
+                      <p className="cu-device-setup__note" role="status">
+                        Checking automatically — this dialog continues as soon as you approve the
+                        code in ChatGPT.
+                      </p>
+                    </div>
                   ) : null}
                 </div>
                 {editModels.length > 0 ? (

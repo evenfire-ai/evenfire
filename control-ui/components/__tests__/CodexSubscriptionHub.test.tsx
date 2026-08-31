@@ -7,6 +7,7 @@ import {
   listCodexSubscriptionConnections,
   patchCodexCatalogModel,
   patchCodexSubscriptionConnection,
+  pollCodexDevice,
   revokeCodexSubscription,
   startCodexDeviceConnect,
   syncCodexSubscriptionCatalog,
@@ -80,6 +81,7 @@ describe('CodexSubscriptionHub', () => {
   afterEach(() => {
     cleanup()
     vi.clearAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('creates a subscription from the Add modal and continues into setup', async () => {
@@ -179,6 +181,49 @@ describe('CodexSubscriptionHub', () => {
         defaultModel: 'gpt-5.1',
       })
     })
+  })
+
+  it('opens ChatGPT in a new tab and shows the device code with copy actions', async () => {
+    const openMock = vi.fn(() => null)
+    vi.stubGlobal('open', openMock)
+    vi.mocked(startCodexDeviceConnect).mockResolvedValue({
+      userCode: 'ABCD-1234',
+      verificationUri: 'https://chatgpt.com/device',
+      intervalSeconds: 0.01,
+      state: 'state-1',
+      intent: 'connect',
+    })
+    vi.mocked(pollCodexDevice).mockResolvedValue({
+      status: 'connected',
+      connection: connection({ connectionKey: 'codex-aaa', displayName: 'Team A' }),
+    })
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for ChatGPT subscription Team A' })
+    )
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Update' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with ChatGPT' }))
+    const card = await screen.findByTestId('codex-device-code')
+    expect(card).toHaveTextContent('ABCD-1234')
+    expect(openMock).toHaveBeenCalledWith(
+      'https://chatgpt.com/device',
+      '_blank',
+      'noopener,noreferrer'
+    )
+    expect(screen.getByRole('link', { name: 'https://chatgpt.com/device' })).toHaveAttribute(
+      'target',
+      '_blank'
+    )
+    expect(screen.getByRole('button', { name: 'Copy sign-in link' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Copy device code' })).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.queryByTestId('codex-device-code')).not.toBeInTheDocument()
+    })
+    expect(listCodexConnectionModels).toHaveBeenCalledWith('codex-aaa')
   })
 
   it('revokes from the table delete action after confirm', async () => {
