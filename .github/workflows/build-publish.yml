@@ -129,6 +129,7 @@ jobs:
               - 'control-ui/**'
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/display-field/**'
+              - 'packages/frontend-table-system/**'
             external-rest-api:
               - 'external-rest-api/**'
             host-context-controller:
@@ -148,6 +149,7 @@ jobs:
             profile-ui:
               - 'profile-ui/**'
               - 'packages/desktop-app-links/**'
+              - 'packages/frontend-table-system/**'
             rpc-proxy:
               - 'rpc-proxy/**'
             workflow-recipes:

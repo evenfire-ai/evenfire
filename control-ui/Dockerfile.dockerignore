@@ -4,6 +4,8 @@
 !packages/workflow-recipe-capability-policy/**
 !packages/display-field/
 !packages/display-field/**
+!packages/frontend-table-system/
+!packages/frontend-table-system/**
 !packages/llm-providers/
 !packages/llm-providers/**
 !scripts/

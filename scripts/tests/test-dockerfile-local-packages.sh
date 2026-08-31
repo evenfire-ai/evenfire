@@ -103,8 +103,8 @@ assert_dockerignore_allows() {
 assert_copy_before_every_ci control-api/Dockerfile \
   display-field image-policy llm-providers workflow-recipe-capability-policy workflow-runtime-core
 assert_copy_before_every_ci control-ui/Dockerfile \
-  display-field llm-providers workflow-recipe-capability-policy
-assert_copy_before_every_ci profile-ui/Dockerfile desktop-app-links
+  display-field frontend-table-system llm-providers workflow-recipe-capability-policy
+assert_copy_before_every_ci profile-ui/Dockerfile desktop-app-links frontend-table-system
 assert_copy_before_every_ci host-context-controller/Dockerfile \
   image-policy llm-providers network-policy-core workflow-recipe-capability-policy
 assert_copy_before_every_ci mcp-host/Dockerfile llm-providers
@@ -123,13 +123,16 @@ assert_copy_before_last_ci workflow-recipes/Dockerfile.coordinator workflow-reci
 assert_copy_before_last_ci workflow-recipes/Dockerfile.coordinator image-policy
 
 assert_materialized control-ui/Dockerfile display-field
+assert_materialized control-ui/Dockerfile frontend-table-system
 assert_materialized control-ui/Dockerfile llm-providers
 assert_materialized control-ui/Dockerfile workflow-recipe-capability-policy
 assert_materialized profile-ui/Dockerfile desktop-app-links
+assert_materialized profile-ui/Dockerfile frontend-table-system
 
 assert_dockerignore_allows control-api/Dockerfile.dockerignore display-field
 assert_dockerignore_allows control-api/Dockerfile.dockerignore llm-providers
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore display-field
+assert_dockerignore_allows control-ui/Dockerfile.dockerignore frontend-table-system
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore llm-providers
 
 if (( failures > 0 )); then

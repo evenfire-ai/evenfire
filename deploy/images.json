@@ -36,7 +36,8 @@
       "source_paths": [
         "control-ui/**",
         "packages/workflow-recipe-capability-policy/**",
-        "packages/display-field/**"
+        "packages/display-field/**",
+        "packages/frontend-table-system/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -121,7 +122,11 @@
       "name": "profile-ui",
       "path": "profile-ui",
       "rooted": true,
-      "source_paths": ["profile-ui/**", "packages/desktop-app-links/**"],
+      "source_paths": [
+        "profile-ui/**",
+        "packages/desktop-app-links/**",
+        "packages/frontend-table-system/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
