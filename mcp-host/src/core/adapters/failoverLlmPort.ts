@@ -31,7 +31,11 @@ import type {
 /** Classify a thrown error for the engine. Only real `LlmError`s are eligible. */
 function classifyLlmError(err: unknown): ClassifiedLike | null {
   if (err instanceof LlmError) {
-    return { code: err.code as LlmErrorCode, retryable: err.retryable }
+    return {
+      code: err.code as LlmErrorCode,
+      retryable: err.retryable,
+      ...(err.providerCode ? { providerCode: err.providerCode } : {}),
+    }
   }
   return null
 }

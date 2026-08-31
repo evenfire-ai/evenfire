@@ -1,5 +1,6 @@
 import { vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
+import { updatedLogs } from '../../test/__fixtures__/updatedLogs'
 
 /**
  * Recorded kube-apiserver GET of a namespaced Role (`kubectl get role -o json`
@@ -56,37 +57,37 @@ function shuffleLabelKeys(labels: Record<string, string>): Record<string, string
  */
 export function asApiserverPolicyRule(rule: k8s.V1PolicyRule): k8s.V1PolicyRule {
   const live: Record<string, unknown> = {}
-  if (rule.apiGroups !== undefined) live.apiGroups = rule.apiGroups
-  if (rule.nonResourceURLs !== undefined) live.nonResourceURLs = rule.nonResourceURLs
-  if (rule.resourceNames !== undefined) live.resourceNames = rule.resourceNames
-  if (rule.resources !== undefined) live.resources = rule.resources
-  if (rule.verbs !== undefined) live.verbs = rule.verbs
+  if (rule.apiGroups !== undefined) live.apiGroups = structuredClone(rule.apiGroups)
+  if (rule.nonResourceURLs !== undefined)
+    live.nonResourceURLs = structuredClone(rule.nonResourceURLs)
+  if (rule.resourceNames !== undefined) live.resourceNames = structuredClone(rule.resourceNames)
+  if (rule.resources !== undefined) live.resources = structuredClone(rule.resources)
+  if (rule.verbs !== undefined) live.verbs = structuredClone(rule.verbs)
   return live as unknown as k8s.V1PolicyRule
 }
 
 export function asApiserverRole(desired: k8s.V1Role): k8s.V1Role {
+  const desiredClone = structuredClone(desired)
   const recorded = structuredClone(RECORDED_ROLE)
-  const labels = desired.metadata?.labels ?? {}
+  const labels = desiredClone.metadata?.labels ?? {}
   return {
     ...recorded,
     metadata: {
       ...recorded.metadata,
-      name: desired.metadata?.name,
-      namespace: desired.metadata?.namespace,
+      name: desiredClone.metadata?.name,
+      namespace: desiredClone.metadata?.namespace,
       labels: shuffleLabelKeys({ ...labels }),
       annotations: {
         ...recorded.metadata?.annotations,
-        ...desired.metadata?.annotations,
+        ...desiredClone.metadata?.annotations,
       },
-      ownerReferences: desired.metadata?.ownerReferences,
-      selfLink: `/apis/rbac.authorization.k8s.io/v1/namespaces/${desired.metadata?.namespace}/roles/${desired.metadata?.name}`,
+      ownerReferences: desiredClone.metadata?.ownerReferences,
+      selfLink: `/apis/rbac.authorization.k8s.io/v1/namespaces/${desiredClone.metadata?.namespace}/roles/${desiredClone.metadata?.name}`,
     },
-    rules: (desired.rules ?? []).map(asApiserverPolicyRule),
+    rules: (desiredClone.rules ?? []).map(asApiserverPolicyRule),
   }
 }
 
 export function updatedRoleLogs(log: ReturnType<typeof vi.spyOn>, needle: string): string[] {
-  return log.mock.calls
-    .map((call: unknown[]) => String(call[0]))
-    .filter((line: string) => line.includes('Updated Role') && line.includes(needle))
+  return updatedLogs(log, 'Updated Role', needle)
 }

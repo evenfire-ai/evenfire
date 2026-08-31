@@ -93,6 +93,9 @@ function hostNameFromResourceName(name = ''): string {
   if (name.startsWith('mcp-host-') && name.endsWith('-egress-gfs')) {
     return name.replace(/^mcp-host-/, '').replace(/-egress-gfs$/, '')
   }
+  if (name.startsWith('mcp-host-') && name.endsWith('-egress-codex-proxy')) {
+    return name.replace(/^mcp-host-/, '').replace(/-egress-codex-proxy$/, '')
+  }
   if (name.startsWith('rpc-proxy-') && name.endsWith('-egress-mcp-host')) {
     return name.replace(/^rpc-proxy-/, '').replace(/-egress-mcp-host$/, '')
   }
@@ -289,4 +292,10 @@ export function asNetworkingApi(mock: MockNetworkingApi): k8s.NetworkingV1Api {
 
 export function asRbacApi(mock: MockRbacApi): k8s.RbacAuthorizationV1Api {
   return mock as unknown as k8s.RbacAuthorizationV1Api
+}
+
+/** Constructor-only KubeConfig: every makeApiClient returns an empty stub. */
+export function makeStubKc(): k8s.KubeConfig {
+  const stub = new Proxy({}, { get: () => vi.fn() })
+  return { makeApiClient: () => stub } as unknown as k8s.KubeConfig
 }

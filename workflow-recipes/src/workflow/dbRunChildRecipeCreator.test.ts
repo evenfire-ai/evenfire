@@ -197,6 +197,42 @@ describe('createDbRunChildRecipe', () => {
     expect(childSpec?.computed).toEqual([{ name: 'db_mode', expression: "'readonly'" }])
   })
 
+  it('copies the parent Codex grant annotation onto the DB-run child recipe', async () => {
+    const parent = makeParent()
+    ;(parent.metadata as Record<string, unknown>).annotations = {
+      'clerum.io/codex-connection-ref': 'team-plus',
+    }
+    const customApi = {
+      getNamespacedCustomObject: vi.fn().mockResolvedValue(parent),
+      createNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: { name: 'demo-parent-00000000' },
+      }),
+    } as unknown as k8s.CustomObjectsApi
+
+    await createDbRunChildRecipe(customApi, makeRun())
+
+    expect(
+      (customApi.createNamespacedCustomObject as unknown as ReturnType<typeof vi.fn>).mock
+        .calls[0]?.[0]?.body?.metadata?.annotations?.['clerum.io/codex-connection-ref']
+    ).toBe('team-plus')
+  })
+
+  it('does not invent a Codex grant annotation when the parent has none', async () => {
+    const customApi = {
+      getNamespacedCustomObject: vi.fn().mockResolvedValue(makeParent()),
+      createNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: { name: 'demo-parent-00000000' },
+      }),
+    } as unknown as k8s.CustomObjectsApi
+
+    await createDbRunChildRecipe(customApi, makeRun())
+
+    expect(
+      (customApi.createNamespacedCustomObject as unknown as ReturnType<typeof vi.fn>).mock
+        .calls[0]?.[0]?.body?.metadata?.annotations?.['clerum.io/codex-connection-ref']
+    ).toBeUndefined()
+  })
+
   it('retains the exact parent GFS intent on a DB-run child recipe', async () => {
     const gfs: WorkflowRecipeGfsIntentSpec = {
       publishTargets: [{ drive: 'main', target: 'published-results' }],

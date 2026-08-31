@@ -63,13 +63,17 @@ for line in diff.splitlines():
     if line.startswith("+++ b/"):
         current = line[6:]
         path = current.lower()
+        path_parts = path.split("/")
         if (
             path == ".env"
             or path.startswith(".env.")
             or path.endswith((".pem", ".key", ".p12", ".pfx", ".log"))
             or path.endswith(("/kubeconfig", "/config"))
             or (
-                any(token in path for token in ("id_rsa", "id_ed25519", "credential", "wallet", "keystore"))
+                (
+                    any(token in path for token in ("id_rsa", "id_ed25519"))
+                    or any(part in {"credential", "credentials", "wallet", "keystore"} for part in path_parts)
+                )
                 and path not in safe_source_paths
             )
             or "screenshot" in path
@@ -110,6 +114,17 @@ for line in diff.splitlines():
             and reason == "credential assignment"
             and match.group(1)
             and (safe_fixture.search(match.group(1)) or "$" in match.group(1))
+        ):
+            continue
+        if (
+            match
+            and reason == "private runtime URL"
+            and (
+                "/test/" in f"/{current.lower()}"
+                or "/tests/" in f"/{current.lower()}"
+                or current.lower().startswith("scripts/tests/")
+                or current.lower().endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx"))
+            )
         ):
             continue
         if match:

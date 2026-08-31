@@ -39,6 +39,7 @@ SERVICES := \
 	rpc-proxy \
 	mcp-proxy \
 	webhook-proxy \
+	codex-llm-proxy \
 	webhook-gateway \
 	stdio-bridge \
 	profile-ui \
@@ -47,7 +48,8 @@ SERVICES := \
 	mcp-servers \
 	packages/desktop-app-links \
 	packages/workflow-runtime-core \
-	packages/workflow-sdk
+	packages/workflow-sdk \
+	packages/llm-provider-attempt-contract
 
 # Services that have unit tests
 TEST_SERVICES := \
@@ -60,6 +62,7 @@ TEST_SERVICES := \
 	rpc-proxy \
 	mcp-proxy \
 	webhook-proxy \
+	codex-llm-proxy \
 	webhook-gateway \
 	stdio-bridge \
 	profile-ui \
@@ -68,7 +71,8 @@ TEST_SERVICES := \
 	packages/desktop-app-links \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk \
-	packages/network-policy-core
+	packages/network-policy-core \
+	packages/llm-provider-attempt-contract
 
 # ── Optional private infra (gcp-*, promotion) ──────────────────────────────
 -include Makefile.infra
@@ -115,6 +119,10 @@ test-unit-all: ## Run unit tests across all services
 		echo "FAILED:$$failed"; exit 1; \
 	fi
 	@echo "All unit tests passed."
+
+.PHONY: test-codex-subscription-t0
+test-codex-subscription-t0: ## Run the Codex subscription T0 aggregator (counts, no skips)
+	@bash scripts/tests/test-codex-subscription-t0.sh
 
 # ── Build Preflight ──────────────────────────────────────────────────
 .PHONY: build-preflight
@@ -599,6 +607,10 @@ minikube-sync-auth-key-if-present: ## Sync JWT public key only when minikube aut
 	  $(MAKE) --no-print-directory minikube-sync-auth-key; \
 	fi
 
+.PHONY: minikube-sync-codex-subscription-url
+minikube-sync-codex-subscription-url: ## Resolve branch Control UI URL and sync CONTROL_API_CONTROL_UI_BASE_URL for Codex OAuth
+	@bash scripts/minikube/sync-codex-subscription-control-ui-url.sh --context=$(MINIKUBE_PROFILE)
+
 # ── Minikube Port Forwards ──────────────────────────────────────────
 .PHONY: minikube-pf-control-ui
 minikube-pf-control-ui: ## Port-forward Control UI → localhost:3000
@@ -783,8 +795,12 @@ local-web: ## Run Control UI locally against minikube control-api port-forward
 	wait_for_port control-api 8090 "$$api_pid" http://127.0.0.1:8090/health; \
 	CONTROL_API_INTERNAL_URL=http://localhost:8090 npm --prefix control-ui run dev
 
+.PHONY: local-app-onboarding
+local-app-onboarding: ## Run Desktop App showing the first-run onboarding flow (isolated; real environments untouched)
+	@$(MAKE) --no-print-directory EVENFIRE_ONBOARDING_PREVIEW=true local-app
+
 .PHONY: local-app
-local-app: ## Run Desktop App locally against minikube API port-forwards
+local-app: ## Run Desktop App locally against minikube API port-forwards (EVENFIRE_ONBOARDING_PREVIEW=true previews onboarding)
 	@set -euo pipefail; \
 	cleanup() { \
 		local pids; \
@@ -854,7 +870,7 @@ local-app: ## Run Desktop App locally against minikube API port-forwards
 	wait_for_port control-api 8090 "$$control_api_pid" http://127.0.0.1:8090/health; \
 	wait_for_port external-rest-api 8091 "$$external_api_pid" http://127.0.0.1:8091/health; \
 	wait_for_port rpc-proxy 8094 "$$rpc_proxy_pid" http://127.0.0.1:8094/health; \
-	env -u ELECTRON_RUN_AS_NODE EXTERNAL_REST_API_BASE_URL=http://127.0.0.1:8091 RPC_PROXY_BASE_URL=http://127.0.0.1:8094 CONTROL_API_BASE_URL=http://127.0.0.1:8090 npm --prefix desktop-app run dev
+	env -u ELECTRON_RUN_AS_NODE EXTERNAL_REST_API_BASE_URL=http://127.0.0.1:8091 RPC_PROXY_BASE_URL=http://127.0.0.1:8094 CONTROL_API_BASE_URL=http://127.0.0.1:8090 EVENFIRE_ONBOARDING_PREVIEW="$(EVENFIRE_ONBOARDING_PREVIEW)" npm --prefix desktop-app run dev
 
 .PHONY: local-ui
 local-ui: ## Run Control UI, Profile UI, and Desktop App locally against minikube port-forwards
@@ -1081,6 +1097,25 @@ test-e2e-workflow-runtime: ## Run workflow runtime E2E gate
 test-e2e-wrc-internal-dependency-networkpolicy: ## Run issue #485 WRC internal-dependency NetworkPolicy E2E gate
 	@echo "Running WRC internal-dependency NetworkPolicy E2E gate..."
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-internal-dependency-networkpolicy.sh
+
+.PHONY: test-e2e-codex-subscription-network-boundary
+test-e2e-codex-subscription-network-boundary: ## Codex LLM proxy NetworkPolicy boundary (exit 3 before deploy)
+	@echo "Running Codex subscription network-boundary gate..."
+	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-codex-subscription-network-boundary.sh
+
+.PHONY: test-e2e-codex-subscription-runtime
+test-e2e-codex-subscription-runtime: ## Codex subscription runtime acceptance (RED until HCC/WRC/mcp-host wiring)
+	@echo "Running Codex subscription runtime acceptance..."
+	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-codex-subscription-runtime.sh
+
+.PHONY: test-e2e-codex-subscription-playwright
+test-e2e-codex-subscription-playwright: ## Codex subscription Control UI guardians (5 tests; Desktop deferred until connected subscription)
+	@echo "Running Codex subscription Control UI Playwright guardians..."
+	@if [ -z "$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" ]; then \
+		echo "Refusing Codex subscription Playwright: explicit Kubernetes context is required" >&2; \
+		exit 1; \
+	fi
+	MINIKUBE_PROFILE="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" KUBECONTEXT="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" bash scripts/e2e/e2e-codex-subscription-playwright.sh
 
 .PHONY: test-e2e-plugin-workload-sdk
 test-e2e-plugin-workload-sdk: ## Run Plugin Workload SDK E2E gate (minikube only; requires E2E_PLUGIN_SDK_WRITE_CONFIRM=1)

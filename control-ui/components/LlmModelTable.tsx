@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import type { LlmAllowedModel } from '@lib/api'
-import { formatContextWindow, getProviderDisplayLabel } from '@lib/llm'
+import { catalogGroupKey, formatContextWindow, getProviderDisplayLabel } from '@lib/llm'
 import { isUnpricedAllowedModel } from '@lib/llmModelUnpriced'
 import { type SortDirection, TableSortHeader, compareNullsLast, toggleSort } from '@lib/tableSort'
 import { FilterSelect } from './FilterSelect'
@@ -51,6 +51,38 @@ function compareModel(a: LlmAllowedModel, b: LlmAllowedModel): number {
 
 const ALL_PROVIDERS = '__all__'
 
+type DisplayModel = LlmAllowedModel & {
+  credentialLabel: string
+  apiKeyRow?: LlmAllowedModel
+  subscriptionRow?: LlmAllowedModel
+}
+
+function collapseFamilyRows(family: string, models: LlmAllowedModel[]): DisplayModel[] {
+  if (family !== 'openai') {
+    return models.map(row => ({ ...row, credentialLabel: '' }))
+  }
+  const byName = new Map<string, LlmAllowedModel[]>()
+  for (const row of models) {
+    const list = byName.get(row.model) ?? []
+    list.push(row)
+    byName.set(row.model, list)
+  }
+  return Array.from(byName.entries()).map(([, rows]) => {
+    const apiKey = rows.find(row => row.provider === 'openai')
+    const subscription = rows.find(row => row.provider === 'codex-subscription')
+    const primary = apiKey ?? subscription ?? rows[0]
+    const parts: string[] = []
+    if (apiKey) parts.push('API key')
+    if (subscription) parts.push('Subscription')
+    return {
+      ...primary,
+      credentialLabel: parts.join(' · '),
+      apiKeyRow: apiKey,
+      subscriptionRow: subscription,
+    }
+  })
+}
+
 type EnabledFilter = 'all' | 'enabled' | 'disabled'
 type SourceFilter = 'all' | 'manual' | 'discovery'
 
@@ -76,8 +108,8 @@ export function LlmModelTable({
   const normalizedSearch = searchQuery.trim().toLowerCase()
 
   const providerOptions = useMemo(() => {
-    return Array.from(new Set(items.map(model => model.provider))).sort((left, right) =>
-      getProviderDisplayLabel(left).localeCompare(getProviderDisplayLabel(right))
+    return Array.from(new Set(items.map(model => catalogGroupKey(model.provider)))).sort(
+      (left, right) => getProviderDisplayLabel(left).localeCompare(getProviderDisplayLabel(right))
     )
   }, [items])
 
@@ -123,7 +155,9 @@ export function LlmModelTable({
 
   const filteredItems = useMemo(() => {
     return items.filter(model => {
-      if (providerFilter !== ALL_PROVIDERS && model.provider !== providerFilter) return false
+      if (providerFilter !== ALL_PROVIDERS && catalogGroupKey(model.provider) !== providerFilter) {
+        return false
+      }
       if (enabledFilter === 'enabled' && !model.enabled) return false
       if (enabledFilter === 'disabled' && model.enabled) return false
       if (sourceFilter !== 'all' && model.source !== sourceFilter) return false
@@ -144,25 +178,30 @@ export function LlmModelTable({
   const groupedItems = useMemo(() => {
     const groups = new Map<string, LlmAllowedModel[]>()
     for (const model of filteredItems) {
-      const group = groups.get(model.provider)
+      const family = catalogGroupKey(model.provider)
+      const group = groups.get(family)
       if (group) group.push(model)
-      else groups.set(model.provider, [model])
+      else groups.set(family, [model])
     }
-    for (const group of groups.values()) {
-      if (!sortKey) continue
-      const direction = sortDir === 'asc' ? 1 : -1
-      const byKey = compareModelByKey(sortKey)
-      group.sort((a, b) => {
-        if (sortKey === 'contextWindow') {
-          const nullOrder = compareNullsLast(a.context_window_tokens, b.context_window_tokens)
-          if (nullOrder !== null) return nullOrder
-        }
-        const diff = byKey(a, b) * direction
-        if (diff !== 0) return diff
-        return compareModel(a, b)
-      })
+    const collapsed: Array<[string, DisplayModel[]]> = []
+    for (const [family, rows] of groups.entries()) {
+      const display = collapseFamilyRows(family, rows)
+      if (sortKey) {
+        const direction = sortDir === 'asc' ? 1 : -1
+        const byKey = compareModelByKey(sortKey)
+        display.sort((a, b) => {
+          if (sortKey === 'contextWindow') {
+            const nullOrder = compareNullsLast(a.context_window_tokens, b.context_window_tokens)
+            if (nullOrder !== null) return nullOrder
+          }
+          const diff = byKey(a, b) * direction
+          if (diff !== 0) return diff
+          return compareModel(a, b)
+        })
+      }
+      collapsed.push([family, display])
     }
-    return Array.from(groups.entries()).sort(([left], [right]) =>
+    return collapsed.sort(([left], [right]) =>
       getProviderDisplayLabel(left).localeCompare(getProviderDisplayLabel(right))
     )
   }, [filteredItems, sortDir, sortKey])
@@ -217,6 +256,7 @@ export function LlmModelTable({
 
   const modelColumns: TableHeaderColumn[] = [
     { key: 'model', label: renderSortHeader('model', 'Model'), minWidth: '15rem' },
+    { key: 'credential', label: 'Credential', width: '11rem' },
     { key: 'vendor', label: renderSortHeader('vendor', 'Vendor'), width: '10rem' },
     {
       key: 'displayName',
@@ -333,7 +373,10 @@ export function LlmModelTable({
             </thead>
             {groupedItems.map(([provider, models]) => {
               const providerLabel = getProviderDisplayLabel(provider)
-              const providerModels = items.filter(model => model.provider === provider)
+              const providerModels = collapseFamilyRows(
+                provider,
+                items.filter(model => catalogGroupKey(model.provider) === provider)
+              )
               const enabledCount = providerModels.filter(model => model.enabled).length
               const staleCount = providerModels.filter(model => model.stale).length
               const hasFilteredModels = models.length !== providerModels.length
@@ -374,7 +417,7 @@ export function LlmModelTable({
                     </td>
                   </tr>
                   {expanded
-                    ? models.map((model: LlmAllowedModel) => (
+                    ? models.map((model: DisplayModel) => (
                         <tr key={model.id} className="cu-table__row cu-llm-model-row">
                           <td className="cu-px-model">
                             <span className="cu-px-model-content">
@@ -387,6 +430,7 @@ export function LlmModelTable({
                               ) : null}
                             </span>
                           </td>
+                          <td>{model.credentialLabel || '—'}</td>
                           <td>{model.vendor || '—'}</td>
                           <td>{model.display_name || '—'}</td>
                           <td className="cu-px-num">
@@ -418,20 +462,55 @@ export function LlmModelTable({
                             <RowActionsMenu
                               ariaLabel={`Actions for model ${model.provider}/${model.model}`}
                               horizontalTrigger
-                              actions={[
-                                {
-                                  key: 'edit',
-                                  label: 'Edit',
-                                  onClick: () => onEdit(model.id),
-                                },
-                                {
-                                  key: 'delete',
-                                  label: deletingId === model.id ? 'Deleting…' : 'Delete',
-                                  danger: true,
-                                  disabled: deletingId === model.id,
-                                  onClick: () => void onDelete(model),
-                                },
-                              ]}
+                              actions={
+                                model.apiKeyRow && model.subscriptionRow
+                                  ? [
+                                      {
+                                        key: 'edit-api-key',
+                                        label: 'Edit API key',
+                                        onClick: () => onEdit(model.apiKeyRow!.id),
+                                      },
+                                      {
+                                        key: 'edit-subscription',
+                                        label: 'Edit subscription',
+                                        onClick: () => onEdit(model.subscriptionRow!.id),
+                                      },
+                                      {
+                                        key: 'delete-api-key',
+                                        label:
+                                          deletingId === model.apiKeyRow.id
+                                            ? 'Deleting…'
+                                            : 'Delete API key',
+                                        danger: true,
+                                        disabled: deletingId === model.apiKeyRow.id,
+                                        onClick: () => void onDelete(model.apiKeyRow!),
+                                      },
+                                      {
+                                        key: 'delete-subscription',
+                                        label:
+                                          deletingId === model.subscriptionRow.id
+                                            ? 'Deleting…'
+                                            : 'Delete subscription',
+                                        danger: true,
+                                        disabled: deletingId === model.subscriptionRow.id,
+                                        onClick: () => void onDelete(model.subscriptionRow!),
+                                      },
+                                    ]
+                                  : [
+                                      {
+                                        key: 'edit',
+                                        label: 'Edit',
+                                        onClick: () => onEdit(model.id),
+                                      },
+                                      {
+                                        key: 'delete',
+                                        label: deletingId === model.id ? 'Deleting…' : 'Delete',
+                                        danger: true,
+                                        disabled: deletingId === model.id,
+                                        onClick: () => void onDelete(model),
+                                      },
+                                    ]
+                              }
                             />
                           </td>
                         </tr>

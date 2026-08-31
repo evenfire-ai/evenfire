@@ -6,12 +6,18 @@ import type {
   TextareaHTMLAttributes,
 } from 'react'
 
-export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger'
+export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'ghost-danger' | 'danger'
 export type ButtonSize = 'md' | 'sm'
 
 export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   block?: boolean
+  /** Square, padding-free button sized for a single glyph. */
+  icon?: boolean
   size?: ButtonSize
+  /** Disables the button and swaps its content for a spinner. */
+  loading?: boolean
+  /** Borderless treatment for buttons sitting in a table or panel toolbar. */
+  toolbar?: boolean
   variant?: ButtonVariant
 }
 

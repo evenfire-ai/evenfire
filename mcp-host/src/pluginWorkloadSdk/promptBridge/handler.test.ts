@@ -483,4 +483,26 @@ describe('PromptBridgeHandler', () => {
     )
     expect(report).not.toHaveBeenCalled()
   })
+
+  it('does not return an SDK-only completion without a physical attempt receipt', async () => {
+    const finalize = vi.fn<FinalizePromptBridge>()
+    const complete = vi.fn().mockResolvedValue({
+      model: primary.model,
+      servedTarget: primary,
+      fallbackUsed: false,
+      attemptCount: 1,
+      llmSecretName: '',
+      providerAttemptAcknowledgement: 'owned_by_finalizer',
+      content: 'ok',
+      usage: { inputTokens: 1, outputTokens: 1 },
+      finishReason: 'complete',
+    })
+    const { handler } = makeDeps({ complete, finalize })
+
+    await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      message: 'provider attempt receipt is missing from the SDK-only completion',
+    })
+    expect(finalize).not.toHaveBeenCalled()
+  })
 })
