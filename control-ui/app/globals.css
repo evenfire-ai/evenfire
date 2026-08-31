@@ -8617,29 +8617,29 @@ textarea.cu-input {
   font-size: 0.75rem;
 }
 
-/* Pre-create state of the subscription dialog: instead of a lone name input,
-   spell out what the flow will do once the grant exists. */
-.cu-modal-steps {
-  display: grid;
-  gap: var(--cu-space-2);
-  padding: var(--cu-space-3) var(--cu-space-4);
-  border: 1px dashed var(--cu-border-subtle);
-  border-radius: var(--cu-radius-sm);
+/* Name confirmation affordance in the subscription dialog: the check button
+   creates the grant; once confirmed it flips to a static green check. */
+.cu-name-check {
+  display: inline-grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  color: var(--cu-text-muted);
 }
 
-.cu-modal-steps__title {
-  color: var(--cu-text);
-  font-size: 0.8125rem;
-  font-weight: 600;
+.cu-name-check--confirmed {
+  color: var(--cu-success);
 }
 
-.cu-modal-steps__list {
-  display: grid;
-  gap: var(--cu-space-1);
-  margin: 0;
-  padding-left: var(--cu-space-5);
-  color: var(--cu-text-soft);
-  font-size: 0.8125rem;
+/* Wrapper that keeps a tooltip available on a disabled button (disabled
+   elements suppress their own title in some browsers). */
+.cu-hover-hint {
+  display: inline-flex;
+  cursor: not-allowed;
+}
+
+.cu-hover-hint > .cu-btn:not(:disabled) {
+  cursor: pointer;
 }
 
 /* Read-only model configuration summary. It mirrors the editor's provider

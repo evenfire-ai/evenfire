@@ -33,7 +33,7 @@ import { SelectionDropdown } from '../SelectionDropdown'
 import { IconKey } from '../Sidebar/icons'
 import { TablePanelHeader } from '../TablePanelHeader'
 import { useToast } from '../Toast'
-import { IconCopy, IconRefresh, IconX } from '../icons'
+import { IconCheck, IconCopy, IconRefresh, IconX } from '../icons'
 import { CheckboxField } from '../ui'
 
 function grantLabel(row: CodexSubscriptionConnectionView): string {
@@ -121,18 +121,23 @@ export function CodexSubscriptionHub() {
     )
   }, [connections, searchQuery])
 
-  // Opening the Add dialog immediately creates a backend draft grant so the
-  // FULL setup form (name, sign-in, models, default) is live right away — no
-  // name-only gate. If the operator cancels without signing in, the pristine
-  // draft is revoked again so no empty rows linger in the table.
-  async function createDraft() {
+  // The name check (or the footer CTA) confirms the name: it creates the empty
+  // grant with that display name and unlocks the rest of the setup form
+  // (sign-in, models, default) in the same dialog.
+  async function confirmNameAndCreate() {
+    const displayName = editName.trim()
+    if (!displayName) {
+      setError('Please confirm the name first — type a name, then select the check.')
+      return
+    }
     setBusyKey('create')
-    setError('')
     try {
-      const created = await createCodexSubscriptionConnection({ displayName: '' })
+      const created = await createCodexSubscriptionConnection({ displayName })
+      setError('')
       openEdit(created)
       setSetupNew(true)
-      setEditName('')
+      await load()
+      showToast(`Subscription ${displayName} created.`, { tone: 'success' })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create subscription')
     } finally {
@@ -151,22 +156,6 @@ export function CodexSubscriptionHub() {
     setVerificationUri(null)
     setDeviceTabBlocked(false)
     setError('')
-    void createDraft()
-  }
-
-  // Cancel in create mode. A pristine draft (never signed in) is removed again;
-  // once the operator signed in the grant is real and is kept.
-  function cancelCreate() {
-    const draftRow = editing
-    const revokePristine = Boolean(draftRow && draftRow.status === 'disconnected')
-    setCreating(false)
-    closeEdit()
-    if (revokePristine && draftRow) {
-      void revokeCodexSubscription(draftRow.connectionKey)
-        .catch(() => {})
-        .then(() => load())
-        .catch(() => {})
-    }
   }
 
   async function openEdit(row: CodexSubscriptionConnectionView) {
@@ -506,15 +495,14 @@ export function CodexSubscriptionHub() {
           </div>
         )}
       </div>
-
       {creating || editing ? (
         <div
           className="cu-modal-overlay"
           role="presentation"
           onClick={e => {
             if (e.target === e.currentTarget && !busyKey) {
-              if (creating) cancelCreate()
-              else closeEdit()
+              setCreating(false)
+              closeEdit()
             }
           }}
         >
@@ -539,8 +527,8 @@ export function CodexSubscriptionHub() {
                 type="button"
                 className="cu-btn cu-btn--icon cu-btn--ghost"
                 onClick={() => {
-                  if (creating) cancelCreate()
-                  else closeEdit()
+                  setCreating(false)
+                  closeEdit()
                 }}
                 disabled={Boolean(busyKey)}
                 aria-label="Close"
@@ -552,220 +540,232 @@ export function CodexSubscriptionHub() {
               {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
               <div className="cu-field">
                 <label htmlFor="codex-sub-name">Name</label>
-                <input
-                  id="codex-sub-name"
-                  value={editName}
-                  onChange={e => setEditName(e.target.value)}
-                  disabled={Boolean(busyKey)}
-                  placeholder="The name agents see when they pick this subscription"
-                />
-              </div>
-              {creating && !editing ? (
-                <div className="cu-modal-steps">
-                  <span className="cu-modal-steps__title">
-                    {busyKey === 'create'
-                      ? 'Creating your subscription…'
-                      : 'Could not create the subscription.'}
-                  </span>
-                  <ol className="cu-modal-steps__list">
-                    <li>
-                      Sign in with ChatGPT — ChatGPT opens in a new tab and you enter a device code.
-                    </li>
-                    <li>Pick the models to offer and choose a default.</li>
-                  </ol>
-                  {busyKey !== 'create' ? (
+                <div className="cu-copy-field">
+                  <input
+                    id="codex-sub-name"
+                    value={editName}
+                    onChange={e => setEditName(e.target.value)}
+                    disabled={Boolean(busyKey) || Boolean(creating && editing)}
+                    placeholder="The name agents see when they pick this subscription"
+                  />
+                  {creating && editing ? (
+                    <span
+                      className="cu-name-check cu-name-check--confirmed"
+                      title="Name confirmed"
+                      aria-label="Name confirmed"
+                    >
+                      <IconCheck width={16} height={16} />
+                    </span>
+                  ) : (
                     <button
                       type="button"
-                      className="cu-btn cu-btn--ghost cu-btn--sm"
-                      onClick={() => void createDraft()}
+                      className="cu-btn cu-btn--icon cu-btn--ghost"
+                      onClick={() => void confirmNameAndCreate()}
+                      disabled={!editName.trim() || Boolean(busyKey)}
+                      aria-label="Confirm name"
+                      title="Confirm name"
                     >
-                      Try again
+                      <IconCheck width={16} height={16} />
                     </button>
+                  )}
+                </div>
+                <span className="cu-field__hint">
+                  {creating && editing
+                    ? 'Name confirmed — the subscription exists. Sign in and pick models to finish.'
+                    : 'Confirm the name to create the subscription and unlock sign-in.'}
+                </span>
+              </div>
+              {setupNew && editing ? (
+                <p className="cu-field__hint" style={{ margin: 0 }}>
+                  Grant created — sign in with ChatGPT, choose the models to offer, and set a
+                  default to finish setup.
+                </p>
+              ) : null}
+              <section className="cu-llm-config" aria-label="Subscription configuration">
+                <div className="cu-llm-config__block">
+                  <div className="cu-llm-config__block-head">
+                    <span className="cu-llm-config__block-title">ChatGPT sign-in</span>
+                    <span className={statusTagClass(uiStatus)}>{statusLabel(uiStatus)}</span>
+                  </div>
+                  <p className="cu-field__hint" style={{ margin: 0 }}>
+                    {setupNew || !editing
+                      ? 'Agents authorize through this subscription’s ChatGPT grant. Sign in to connect it.'
+                      : 'Agents authorize through this subscription’s ChatGPT grant. Reconnect if the grant expired, or sync to refresh the model catalog.'}
+                  </p>
+                  <div className="cu-form-inline">
+                    <span
+                      title={editing ? undefined : 'Please confirm the name first'}
+                      className="cu-hover-hint"
+                    >
+                      <button
+                        type="button"
+                        className="cu-btn cu-btn--ghost cu-btn--sm"
+                        onClick={() => {
+                          if (editing) void handleConnect(editing)
+                        }}
+                        disabled={Boolean(busyKey) || !editing}
+                      >
+                        Sign in with ChatGPT
+                      </button>
+                    </span>
+                    <span
+                      title={editing ? undefined : 'Please confirm the name first'}
+                      className="cu-hover-hint"
+                    >
+                      <button
+                        type="button"
+                        className="cu-btn cu-btn--ghost cu-btn--sm"
+                        onClick={() => {
+                          if (editing) void handleSync(editing)
+                        }}
+                        disabled={Boolean(busyKey) || !editing || editing.status !== 'connected'}
+                      >
+                        Sync catalog
+                      </button>
+                    </span>
+                  </div>
+                  {userCode ? (
+                    <div className="cu-device-setup" data-testid="codex-device-code">
+                      <p className="cu-device-setup__step">
+                        {deviceTabBlocked
+                          ? '1. Your browser blocked the pop-up — open ChatGPT with this link:'
+                          : '1. ChatGPT opened in a new tab. If it did not, use this link:'}
+                      </p>
+                      {verificationUri ? (
+                        <div className="cu-copy-field">
+                          <a
+                            className="cu-readonly-field cu-copy-field__value cu-device-setup__link"
+                            href={verificationUri}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            {verificationUri}
+                          </a>
+                          <button
+                            type="button"
+                            className="cu-btn cu-btn--icon cu-btn--ghost"
+                            onClick={() =>
+                              void copyDeviceValue(verificationUri, 'Sign-in link', showToast)
+                            }
+                            aria-label="Copy sign-in link"
+                            title="Copy sign-in link"
+                          >
+                            <IconCopy width={14} height={14} />
+                          </button>
+                        </div>
+                      ) : null}
+                      <p className="cu-device-setup__step">2. Enter this code:</p>
+                      <div className="cu-copy-field">
+                        <div className="cu-readonly-field cu-copy-field__value cu-device-setup__code">
+                          {userCode}
+                        </div>
+                        <button
+                          type="button"
+                          className="cu-btn cu-btn--icon cu-btn--ghost"
+                          onClick={() => void copyDeviceValue(userCode, 'Device code', showToast)}
+                          aria-label="Copy device code"
+                          title="Copy device code"
+                        >
+                          <IconCopy width={14} height={14} />
+                        </button>
+                      </div>
+                      <p className="cu-device-setup__note" role="status">
+                        Checking automatically — this dialog continues as soon as you approve the
+                        code in ChatGPT.
+                      </p>
+                    </div>
                   ) : null}
                 </div>
-              ) : editing ? (
-                <>
-                  {setupNew ? (
-                    <p className="cu-field__hint" style={{ margin: 0 }}>
-                      Grant created — sign in with ChatGPT, choose the models to offer, and set a
-                      default to finish setup.
-                    </p>
-                  ) : null}
-                  <section className="cu-llm-config" aria-label="Subscription configuration">
-                    <div className="cu-llm-config__block">
-                      <div className="cu-llm-config__block-head">
-                        <span className="cu-llm-config__block-title">ChatGPT sign-in</span>
-                        <span className={statusTagClass(uiStatus)}>{statusLabel(uiStatus)}</span>
-                      </div>
-                      <p className="cu-field__hint" style={{ margin: 0 }}>
-                        {setupNew
-                          ? 'Agents authorize through this subscription’s ChatGPT grant. Sign in to connect it.'
-                          : 'Agents authorize through this subscription’s ChatGPT grant. Reconnect if the grant expired, or sync to refresh the model catalog.'}
-                      </p>
-                      <div className="cu-form-inline">
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--ghost cu-btn--sm"
-                          onClick={() => void handleConnect(editing)}
-                          disabled={Boolean(busyKey)}
-                        >
-                          Sign in with ChatGPT
-                        </button>
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--ghost cu-btn--sm"
-                          onClick={() => void handleSync(editing)}
-                          disabled={Boolean(busyKey) || editing.status !== 'connected'}
-                        >
-                          Sync catalog
-                        </button>
-                      </div>
-                      {userCode ? (
-                        <div className="cu-device-setup" data-testid="codex-device-code">
-                          <p className="cu-device-setup__step">
-                            {deviceTabBlocked
-                              ? '1. Your browser blocked the pop-up — open ChatGPT with this link:'
-                              : '1. ChatGPT opened in a new tab. If it did not, use this link:'}
-                          </p>
-                          {verificationUri ? (
-                            <div className="cu-copy-field">
-                              <a
-                                className="cu-readonly-field cu-copy-field__value cu-device-setup__link"
-                                href={verificationUri}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                              >
-                                {verificationUri}
-                              </a>
-                              <button
-                                type="button"
-                                className="cu-btn cu-btn--icon cu-btn--ghost"
-                                onClick={() =>
-                                  void copyDeviceValue(verificationUri, 'Sign-in link', showToast)
-                                }
-                                aria-label="Copy sign-in link"
-                                title="Copy sign-in link"
-                              >
-                                <IconCopy width={14} height={14} />
-                              </button>
-                            </div>
-                          ) : null}
-                          <p className="cu-device-setup__step">2. Enter this code:</p>
-                          <div className="cu-copy-field">
-                            <div className="cu-readonly-field cu-copy-field__value cu-device-setup__code">
-                              {userCode}
-                            </div>
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--ghost"
-                              onClick={() =>
-                                void copyDeviceValue(userCode, 'Device code', showToast)
-                              }
-                              aria-label="Copy device code"
-                              title="Copy device code"
-                            >
-                              <IconCopy width={14} height={14} />
-                            </button>
-                          </div>
-                          <p className="cu-device-setup__note" role="status">
-                            Checking automatically — this dialog continues as soon as you approve
-                            the code in ChatGPT.
-                          </p>
-                        </div>
+                {editModels.length > 0 || setupNew ? (
+                  <div className="cu-llm-config__block">
+                    <div className="cu-llm-config__block-head">
+                      <span className="cu-llm-config__block-title">Enabled models</span>
+                      {editModels.length > 0 ? (
+                        <span className="cu-llm-config__block-tag cu-llm-config__block-tag--muted">
+                          {editModels.filter(model => model.enabled && !model.stale).length} of{' '}
+                          {editModels.length} enabled
+                        </span>
                       ) : null}
                     </div>
                     {editModels.length > 0 ? (
-                      <div className="cu-llm-config__block">
-                        <div className="cu-llm-config__block-head">
-                          <span className="cu-llm-config__block-title">Enabled models</span>
-                          <span className="cu-llm-config__block-tag cu-llm-config__block-tag--muted">
-                            {editModels.filter(model => model.enabled && !model.stale).length} of{' '}
-                            {editModels.length} enabled
-                          </span>
-                        </div>
-                        <div className="cu-llm-config__model-row">
-                          {editModels.map(model => (
-                            <CheckboxField
-                              key={model.model}
-                              checked={model.enabled}
-                              disabled={Boolean(busyKey) || model.stale}
-                              label={
-                                <span className="cu-px-provider">
-                                  <LlmProviderIcon
-                                    provider="codex-subscription"
-                                    label={model.model}
-                                  />
-                                  {model.model}
-                                </span>
-                              }
-                              description={
-                                model.stale ? 'No longer in the ChatGPT catalog.' : undefined
-                              }
-                              onChange={e =>
-                                void handleToggleModel(editing, model.model, e.target.checked)
-                              }
-                            />
-                          ))}
-                        </div>
-                        <span className="cu-field__hint">
-                          Synced from the ChatGPT catalog. Disabled models are not offered to
-                          agents.
-                        </span>
+                      <div className="cu-llm-config__model-row">
+                        {editModels.map(model => (
+                          <CheckboxField
+                            key={model.model}
+                            checked={model.enabled}
+                            disabled={Boolean(busyKey) || model.stale}
+                            label={
+                              <span className="cu-px-provider">
+                                <LlmProviderIcon
+                                  provider="codex-subscription"
+                                  label={model.model}
+                                />
+                                {model.model}
+                              </span>
+                            }
+                            description={
+                              model.stale ? 'No longer in the ChatGPT catalog.' : undefined
+                            }
+                            onChange={e =>
+                              editing
+                                ? void handleToggleModel(editing, model.model, e.target.checked)
+                                : undefined
+                            }
+                          />
+                        ))}
                       </div>
-                    ) : null}
-                    <div className="cu-llm-config__block">
-                      <div className="cu-llm-config__block-head">
-                        <span className="cu-llm-config__block-title">Primary model</span>
-                        <span className="cu-llm-config__block-tag cu-llm-config__block-tag--muted">
-                          Optional
-                        </span>
-                      </div>
-                      <div className="cu-field">
-                        <label htmlFor="codex-edit-default">Default model</label>
-                        <SelectionDropdown
-                          id="codex-edit-default"
-                          value={editDefault ? [editDefault] : []}
-                          options={offeredDefaults.map(model => ({
-                            value: model,
-                            label: model,
-                            icon: <LlmProviderIcon provider="codex-subscription" label={model} />,
-                          }))}
-                          placeholder={
-                            offeredDefaults.length === 0 ? 'No enabled models' : 'Select model…'
-                          }
-                          searchPlaceholder="Search models…"
-                          selectionLabel="model"
-                          multiple={false}
-                          showSelectedChips={false}
-                          disabled={Boolean(busyKey) || offeredDefaults.length === 0}
-                          onChange={next => setEditDefault(next[0] ?? '')}
-                        />
-                        <span className="cu-field__hint">
-                          Preselected for new chats; agents can pick any enabled model.
-                        </span>
-                      </div>
-                    </div>
-                  </section>
-                </>
-              ) : null}
+                    ) : (
+                      <p className="cu-field__hint" style={{ margin: 0 }}>
+                        No models yet — confirm the name, sign in with ChatGPT, and sync the catalog
+                        to load the models this grant offers.
+                      </p>
+                    )}
+                    <span className="cu-field__hint">
+                      Synced from the ChatGPT catalog. Disabled models are not offered to agents.
+                    </span>
+                  </div>
+                ) : null}
+                <div className="cu-llm-config__block">
+                  <div className="cu-llm-config__block-head">
+                    <span className="cu-llm-config__block-title">Primary model</span>
+                    <span className="cu-llm-config__block-tag cu-llm-config__block-tag--muted">
+                      Optional
+                    </span>
+                  </div>
+                  <div className="cu-field">
+                    <label htmlFor="codex-edit-default">Default model</label>
+                    <SelectionDropdown
+                      id="codex-edit-default"
+                      value={editDefault ? [editDefault] : []}
+                      options={offeredDefaults.map(model => ({
+                        value: model,
+                        label: model,
+                        icon: <LlmProviderIcon provider="codex-subscription" label={model} />,
+                      }))}
+                      placeholder={
+                        offeredDefaults.length === 0 ? 'No enabled models' : 'Select model…'
+                      }
+                      searchPlaceholder="Search models…"
+                      selectionLabel="model"
+                      multiple={false}
+                      showSelectedChips={false}
+                      disabled={Boolean(busyKey) || !editing || offeredDefaults.length === 0}
+                      onChange={next => setEditDefault(next[0] ?? '')}
+                    />
+                    <span className="cu-field__hint">
+                      Preselected for new chats; agents can pick any enabled model.
+                    </span>
+                  </div>
+                </div>
+              </section>
             </div>
             <div className="cu-modal-panel__foot">
               <button
                 type="button"
                 className="cu-btn cu-btn--ghost cu-btn--sm"
                 onClick={() => {
-                  if (creating) {
-                    // "Finish later" keeps the draft (the operator already
-                    // signed in or configured it); Cancel removes a pristine one.
-                    if (editing && setupNew) {
-                      setCreating(false)
-                      closeEdit()
-                    } else {
-                      cancelCreate()
-                    }
-                  } else {
-                    closeEdit()
-                  }
+                  setCreating(false)
+                  closeEdit()
                 }}
                 disabled={Boolean(busyKey)}
               >
@@ -780,7 +780,17 @@ export function CodexSubscriptionHub() {
                 >
                   {busyKey ? 'Saving…' : setupNew ? 'Finish setup' : 'Update subscription'}
                 </button>
-              ) : null}
+              ) : (
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--primary"
+                  onClick={() => void confirmNameAndCreate()}
+                  disabled={!editName.trim() || Boolean(busyKey)}
+                  title={editName.trim() ? undefined : 'Please confirm the name first'}
+                >
+                  {busyKey === 'create' ? 'Creating…' : 'Create and set up'}
+                </button>
+              )}
             </div>
           </div>
         </div>
