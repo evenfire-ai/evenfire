@@ -16,8 +16,8 @@ import type {
 import { useToast } from '../../components/Toast'
 import {
   apiSend,
-  getContextTeams,
-  getContextUsers,
+  getAgentTeams,
+  getAgentUsers,
   getContexts,
   getHosts,
   getMcpServers,
@@ -107,21 +107,22 @@ function bindingsByConnectorFromContexts(
   return bindings
 }
 
-// User/team access summaries stay context-derived (read-only groups in the
-// table); the agents group itself comes from the bindings above.
-async function loadContextAccess(
-  contextRef: string
+// User/team access summaries ride the AGENTS that carry the connector (the
+// same grants operators make in Users & Teams ▸ Access/Agents tabs), not the
+// legacy scope-centric context mappings. Read-only groups in the table.
+async function loadAgentAccess(
+  agentName: string
 ): Promise<readonly [ConnectorAccessSummary, boolean]> {
   const [usersResult, teamsResult] = await Promise.allSettled([
-    getContextUsers(contextRef),
-    getContextTeams(contextRef),
+    getAgentUsers(agentName),
+    getAgentTeams(agentName),
   ])
   const accessLoadFailed = usersResult.status === 'rejected' || teamsResult.status === 'rejected'
   if (usersResult.status === 'rejected') {
-    console.warn(`Failed to load users for context ${contextRef}:`, usersResult.reason)
+    console.warn(`Failed to load users for agent ${agentName}:`, usersResult.reason)
   }
   if (teamsResult.status === 'rejected') {
-    console.warn(`Failed to load teams for context ${contextRef}:`, teamsResult.reason)
+    console.warn(`Failed to load teams for agent ${agentName}:`, teamsResult.reason)
   }
   const users =
     usersResult.status === 'fulfilled'
@@ -200,23 +201,23 @@ export default function McpServersPage() {
       const nextAgentTargets = agentTargetsFromHosts(hosts)
       const nextBindings = bindingsByConnectorFromContexts(nextContexts, nextAgentTargets)
 
-      // Read-only user/team summaries are merged across the agent-owned
-      // scopes that carry each connector (bindings), so the visible access
-      // grid never depends on invisible orphan contexts.
-      const managedContextRefs = [
+      // Read-only user/team summaries are merged across the AGENTS that
+      // carry each connector (bindings), matching the grants operators see
+      // in Users & Teams — never the legacy scope-centric mappings.
+      const managedAgentNames = [
         ...new Set(
           Object.values(nextBindings)
             .flat()
-            .map(binding => binding.contextRef)
+            .flatMap(binding => binding.agents.map(agent => agent.id))
         ),
       ]
       const accessResults = await Promise.all(
-        managedContextRefs.map(
-          async contextRef => [contextRef, await loadContextAccess(contextRef)] as const
+        managedAgentNames.map(
+          async agentName => [agentName, await loadAgentAccess(agentName)] as const
         )
       )
-      const accessByContext = new Map(
-        accessResults.map(([contextRef, [summary]]) => [contextRef, summary] as const)
+      const accessByAgent = new Map(
+        accessResults.map(([agentName, [summary]]) => [agentName, summary] as const)
       )
       const accessLoadFailed = accessResults.some(([, [, failed]]) => failed)
       if (accessLoadFailed) {
@@ -228,12 +229,13 @@ export default function McpServersPage() {
         (acc, connector) => {
           const connectorName = resourceName(connector)
           const connectorBindings = nextBindings[connectorName] ?? []
-          const bindingRefs = connectorBindings.map(binding => binding.contextRef)
-          if (bindingRefs.length > 0) {
+          const bindingAgentNames = connectorBindings.flatMap(binding =>
+            binding.agents.map(agent => agent.id)
+          )
+          if (bindingAgentNames.length > 0) {
             const merged = mergeAccessSummaries(
-              bindingRefs.map(
-                contextRef =>
-                  accessByContext.get(contextRef) ?? { agents: [], users: [], teams: [] }
+              bindingAgentNames.map(
+                agentName => accessByAgent.get(agentName) ?? { agents: [], users: [], teams: [] }
               )
             )
             // The agents group must reflect the bindings (the write model) so

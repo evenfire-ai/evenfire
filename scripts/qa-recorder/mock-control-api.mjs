@@ -319,6 +319,28 @@ const server = createServer(async (req, res) => {
       contexts.set(name, context)
       return json(res, 201, context)
     }
+    if (/^agents\/[^/]+\/users$/.test(rest) && M === 'GET') {
+      const name = decodeURIComponent(nameFrom(rest.replace('/users', '')))
+      const items = []
+      for (const [userId, agents] of userAgents) {
+        if ((agents ?? []).includes(name)) {
+          const u = users.find(candidate => candidate.id === userId)
+          if (u) items.push({ id: u.id, email: u.email, name: u.name, displayName: u.displayName })
+        }
+      }
+      return json(res, 200, { items })
+    }
+    if (/^agents\/[^/]+\/teams$/.test(rest) && M === 'GET') {
+      const name = decodeURIComponent(nameFrom(rest.replace('/teams', '')))
+      const items = []
+      for (const [teamId, agents] of teamAgents) {
+        if ((agents ?? []).includes(name)) {
+          const t = teams.find(candidate => candidate.id === teamId)
+          if (t) items.push({ id: t.id, name: t.name })
+        }
+      }
+      return json(res, 200, { items })
+    }
     if (/^contexts\/[^/]+\/users$/.test(rest) && M === 'GET') return json(res, 200, contextUsers(nameFrom(rest.replace('/users', ''))))
     if (/^contexts\/[^/]+\/teams$/.test(rest) && M === 'GET') return json(res, 200, contextTeams(nameFrom(rest.replace('/teams', ''))))
     if (/^contexts\/[^/]+$/.test(rest) && M === 'GET') {

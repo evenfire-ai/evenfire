@@ -21,8 +21,8 @@ import {
 import { CONTROL_ROUTES } from '@constants/routes'
 import { getAgentDisplayName } from '@lib/agentName'
 import {
-  getContextTeams,
-  getContextUsers,
+  getAgentTeams,
+  getAgentUsers,
   getContexts,
   getHosts,
   getMcpServer,
@@ -200,31 +200,45 @@ export default function EditMcpServerPage() {
     setContextAccessError('')
 
     void (async () => {
-      const [hostsResults, contextResults] = await Promise.all([
-        Promise.allSettled([getHosts()]),
-        Promise.all(
-          contextNames.map(async contextName => {
-            const [usersResult, teamsResult] = await Promise.allSettled([
-              getContextUsers(contextName),
-              getContextTeams(contextName),
-            ])
-            return { contextName, usersResult, teamsResult }
-          })
-        ),
-      ])
+      // Resolve the AGENTS whose scopes carry this connector, then read their
+      // user/team grants — the same mappings operators manage in Users &
+      // Teams — instead of the legacy scope-centric context sub-resources.
+      const hostsResult = await Promise.allSettled([getHosts()])
       if (cancelled) return
 
-      const hostsResult = hostsResults[0]
+      const hosts = hostsResult[0].status === 'fulfilled' ? (hostsResult[0].value.items ?? []) : []
+      const contextNameSet = new Set(contextNames)
+      const owningAgents = [
+        ...new Set(
+          hosts
+            .map(host => {
+              const ref = String(host.spec?.contextRef ?? '').trim()
+              return contextNameSet.has(ref) ? String(host.metadata?.name ?? '') : ''
+            })
+            .filter(Boolean)
+        ),
+      ]
+
+      const agentResults = await Promise.all(
+        owningAgents.map(async agentName => {
+          const [usersResult, teamsResult] = await Promise.allSettled([
+            getAgentUsers(agentName),
+            getAgentTeams(agentName),
+          ])
+          return { agentName, usersResult, teamsResult }
+        })
+      )
+      if (cancelled) return
+
       const failed =
-        hostsResult.status === 'rejected' ||
-        contextResults.some(
+        hostsResult[0].status === 'rejected' ||
+        agentResults.some(
           result =>
             result.usersResult.status === 'rejected' || result.teamsResult.status === 'rejected'
         )
-      const hosts = hostsResult.status === 'fulfilled' ? (hostsResult.value.items ?? []) : []
       setContextAccess(
         mergeAccessSummaries(
-          contextResults.map(({ contextName, usersResult, teamsResult }) => ({
+          agentResults.map(({ agentName, usersResult, teamsResult }) => ({
             users:
               usersResult.status === 'fulfilled'
                 ? sortAccessPrincipals(
@@ -243,14 +257,12 @@ export default function EditMcpServerPage() {
                     }))
                   )
                 : [],
-            agents: sortAccessPrincipals(
-              hosts
-                .filter(host => String(host.spec?.contextRef ?? '').trim() === contextName)
-                .map(host => {
-                  const agentName = host.metadata?.name || 'unknown'
-                  return { id: agentName, label: getAgentDisplayName(agentName) || agentName }
-                })
-            ),
+            agents: [
+              {
+                id: agentName,
+                label: getAgentDisplayName(agentName) || agentName,
+              },
+            ],
           }))
         )
       )
