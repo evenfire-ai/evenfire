@@ -883,6 +883,11 @@ describe('SandboxUiPage', () => {
     // ->false flicker inside this phase; assert the exact call list (scoped by
     // the mockClear above) so any transient setVisible(true) fails the test.
     await waitFor(() => expect(screen.getByTestId('sandbox-ui-embed-preview')).toBeTruthy())
+    // The placeholder shown while the native view is hidden is the captured
+    // preview data URL; assert it so the fixture literal is load-bearing.
+    expect(screen.getByTestId('sandbox-ui-embed-preview').getAttribute('src')).toBe(
+      'data:image/png;base64,deeplink'
+    )
     expect(sandboxUi.setVisible.mock.calls).toEqual([[false]])
 
     sandboxUi.setVisible.mockClear()
