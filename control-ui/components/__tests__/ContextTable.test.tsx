@@ -102,6 +102,12 @@ describe('ContextTable', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Actions for context business' }))
 
+    fireEvent.click(screen.getByRole('menuitem', { name: 'View details' }))
+    expect(onView).toHaveBeenCalledWith({ name: 'business' })
+
+    onView.mockClear()
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for context business' }))
+
     fireEvent.click(screen.getByRole('menuitem', { name: 'Edit' }))
     expect(onEdit).toHaveBeenCalledWith({ name: 'business' })
     expect(onView).not.toHaveBeenCalled()

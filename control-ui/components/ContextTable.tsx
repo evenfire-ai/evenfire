@@ -186,6 +186,11 @@ export function ContextTable({
                         horizontalTrigger
                         actions={[
                           {
+                            key: 'view',
+                            label: 'View details',
+                            onClick: () => openContext(name),
+                          },
+                          {
                             key: 'edit',
                             label: 'Edit',
                             onClick: () => onEdit({ name }),
