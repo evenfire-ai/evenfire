@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { DbClient } from '../src/db.js'
 import type { K8sGateway } from '../src/k8s.js'
 import {
   isK8sResourceNotFound,
@@ -7,6 +8,13 @@ import {
 } from '../src/services/access/mcpInvocable.js'
 
 type Resource = Record<string, unknown>
+
+// rpc-proxy rail caller identity + a DB that reports NO grants. These existing
+// suites use `none`/`bearer`/disabled servers, which the grant-presence gate
+// never touches, so the resolved list is unaffected — they double as a guard
+// that `none` servers are NOT grant-gated.
+const CALLER = 'user-1'
+const NO_GRANTS_DB: DbClient = { query: async () => ({ rows: [], rowCount: 0 }) }
 
 function gateway(resources: {
   contexts?: Resource[]
@@ -71,7 +79,13 @@ describe('resolveInvocableMcpServersForContexts', () => {
       contexts: [ctx('trading', ['mcp-a', 'mcp-b']), ctx('business', ['mcp-c'])],
       mcpservers: [okServer('mcp-a'), okServer('mcp-b'), okServer('mcp-c')],
     })
-    const out = await resolveInvocableMcpServersForContexts(g, 'mcp-server', ['trading'])
+    const out = await resolveInvocableMcpServersForContexts(
+      g,
+      'mcp-server',
+      ['trading'],
+      CALLER,
+      NO_GRANTS_DB
+    )
     expect(out.map(s => s.name)).toEqual(['mcp-a', 'mcp-b'])
     expect(out[0].url).toContain('mcp-a.mcp-server.svc')
   })
@@ -87,9 +101,9 @@ describe('resolveInvocableMcpServersForContexts', () => {
         },
       ],
     })
-    const names = (await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'])).map(
-      s => s.name
-    )
+    const names = (
+      await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'], CALLER, NO_GRANTS_DB)
+    ).map(s => s.name)
     expect(names).toEqual(['a'])
   })
 
@@ -104,9 +118,9 @@ describe('resolveInvocableMcpServersForContexts', () => {
         },
       ],
     })
-    const names = (await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'])).map(
-      s => s.name
-    )
+    const names = (
+      await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'], CALLER, NO_GRANTS_DB)
+    ).map(s => s.name)
     expect(names).toEqual(['a'])
   })
 
@@ -121,9 +135,9 @@ describe('resolveInvocableMcpServersForContexts', () => {
         },
       ],
     })
-    const names = (await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'])).map(
-      s => s.name
-    )
+    const names = (
+      await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'], CALLER, NO_GRANTS_DB)
+    ).map(s => s.name)
     expect(names).toEqual(['a'])
   })
 
@@ -137,7 +151,13 @@ describe('resolveInvocableMcpServersForContexts', () => {
         },
       ],
     })
-    const out = await resolveInvocableMcpServersForContexts(g, 'mcp-server', ['trading'])
+    const out = await resolveInvocableMcpServersForContexts(
+      g,
+      'mcp-server',
+      ['trading'],
+      CALLER,
+      NO_GRANTS_DB
+    )
     expect(out).toEqual([
       { name: 'mcp-fred', url: 'http://mcp-fred.mcp-server.svc.cluster.local:3000/mcp' },
     ])
@@ -148,15 +168,17 @@ describe('resolveInvocableMcpServersForContexts', () => {
       contexts: [ctx('trading', ['a']), ctx('someone-else', ['b'])],
       mcpservers: [okServer('a'), okServer('b')],
     })
-    const names = (await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'])).map(
-      s => s.name
-    )
+    const names = (
+      await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'], CALLER, NO_GRANTS_DB)
+    ).map(s => s.name)
     expect(names).toEqual(['a'])
   })
 
   it('returns an empty array when no contexts are in scope', async () => {
     const g = gateway({ contexts: [ctx('trading', ['a'])], mcpservers: [okServer('a')] })
-    expect(await resolveInvocableMcpServersForContexts(g, 'ns', [])).toEqual([])
+    expect(await resolveInvocableMcpServersForContexts(g, 'ns', [], CALLER, NO_GRANTS_DB)).toEqual(
+      []
+    )
   })
 
   it('results are stable-sorted by name', async () => {
@@ -164,9 +186,9 @@ describe('resolveInvocableMcpServersForContexts', () => {
       contexts: [ctx('trading', ['b', 'a', 'c'])],
       mcpservers: [okServer('a'), okServer('b'), okServer('c')],
     })
-    const names = (await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'])).map(
-      s => s.name
-    )
+    const names = (
+      await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'], CALLER, NO_GRANTS_DB)
+    ).map(s => s.name)
     expect(names).toEqual(['a', 'b', 'c'])
   })
 })
@@ -361,7 +383,13 @@ describe('parity: agent-scoped server names ⊆ RPC-flat-list for the same conte
       mcpservers: [okServer('mcp-a'), okServer('mcp-b')],
       hosts: [host('trader', 'trading')],
     })
-    const rpc = await resolveInvocableMcpServersForContexts(g, 'ns', ['trading'])
+    const rpc = await resolveInvocableMcpServersForContexts(
+      g,
+      'ns',
+      ['trading'],
+      CALLER,
+      NO_GRANTS_DB
+    )
     const agents = await resolveMcpServersForAgents(g, {
       mcpServersNamespace: 'ns',
       hostsNamespace: 'mcp-host',

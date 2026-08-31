@@ -51,7 +51,7 @@ A few rules that follow from this split, and that surprise people:
 
 ## 2. Which providers are supported
 
-**22 providers**, defined once in
+**23 providers**, defined once in
 [`packages/llm-providers/index.cjs`](../../packages/llm-providers/index.cjs) —
 the single source of truth consumed by mcp-host, control-api, the workflow
 runtime, the host controller and the Control UI.

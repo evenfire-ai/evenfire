@@ -559,18 +559,24 @@ describe('HostDetailsPage current model and credential flow', () => {
   })
 
   it('changes the linked LLM Secret from the inline credentials dropdown', async () => {
+    setupApiMocks(formLoadHost, refetchedHost, [
+      { name: 'openai-secret', keys: ['openai-api-key'] },
+      { name: 'openai-secret-b', keys: ['openai-api-key'] },
+    ])
     const view = render(<HostDetailsPage />)
     navigateToTab(view, 'model')
     await screen.findByText('Current model')
 
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
     fireEvent.click(screen.getByRole('button', { name: 'LLM Secret' }))
-    fireEvent.click(screen.getByRole('option', { name: /anthropic-secret/ }))
+    fireEvent.click(screen.getByRole('option', { name: /openai-secret-b/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save model configuration' }))
 
     await waitFor(() =>
       expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
     )
     const payload = findHostPutPayload() as { spec: Record<string, unknown> }
-    expect(payload.spec.secretRef).toBe('anthropic-secret')
+    expect(payload.spec.secretRef).toBe('openai-secret-b')
     expect(payload.spec.model).toEqual(baseSpec.model)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
@@ -598,5 +604,68 @@ describe('HostDetailsPage current model and credential flow', () => {
         args => args[0] === 'PUT' && args[1] === '/api/v1/admin/hosts/foo'
       )
     ).toBe(false)
+  })
+})
+
+describe('HostDetailsPage cross-tab draft preservation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockParams = { name: 'foo' }
+    vi.mocked(api.getLlmModels).mockResolvedValue({ rows: [] })
+    setupApiMocks(formLoadHost, refetchedHost)
+  })
+
+  it('preserves an open Overview draft when model configuration is saved', async () => {
+    const view = render(<HostDetailsPage />)
+    await openOverviewEdit()
+    fireEvent.change(screen.getByLabelText('Agent name'), {
+      target: { value: 'unsaved-overview-name' },
+    })
+
+    navigateToTab(view, 'model')
+    expect(await screen.findByText('Current model')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    // Keep the existing static-credentials secret. Emptying it now fails
+    // closed (Codex broker chains omit secretRef; OpenAI still requires one).
+    fireEvent.click(screen.getByRole('button', { name: 'Save model configuration' }))
+    expect(await screen.findByText('Model configuration saved.')).toBeInTheDocument()
+
+    navigateToTab(view, 'overview')
+    expect(await screen.findByDisplayValue('unsaved-overview-name')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save agent name' })).toBeInTheDocument()
+  })
+
+  it('fails closed instead of writing an unassigned Codex connectionRef', async () => {
+    const { secretRef: _omit, ...specWithoutSecret } = baseSpec
+    void _omit
+    const codexHost: TestHost = {
+      metadata: { name: 'foo', resourceVersion: 'rv-form-load' },
+      spec: {
+        ...specWithoutSecret,
+        model: { provider: 'codex-subscription', name: 'gpt-5.1' },
+      },
+    }
+    setupApiMocks(codexHost, codexHost)
+
+    const view = render(<HostDetailsPage />)
+    navigateToTab(view, 'model')
+    expect(await screen.findByText('Current model')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+
+    expect(screen.getByLabelText('Credential')).toBeInTheDocument()
+    expect(screen.queryByText('Secret reference')).not.toBeInTheDocument()
+    expect(screen.queryByRole('radio', { name: /ChatGPT subscription/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save model configuration' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Save model configuration' }))
+
+    expect(api.apiSend).not.toHaveBeenCalledWith(
+      'PUT',
+      '/api/v1/admin/hosts/foo',
+      expect.objectContaining({
+        spec: expect.objectContaining({
+          model: expect.objectContaining({ connectionRef: 'unassigned' }),
+        }),
+      })
+    )
   })
 })

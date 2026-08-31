@@ -136,6 +136,17 @@ function setupArtifactSandbox(recipeName: string): string {
   return dir
 }
 
+function createOutsideTempFile(contents: string): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-outside-'))
+  const file = path.join(dir, 'outside.txt')
+  fs.writeFileSync(file, contents)
+  return file
+}
+
+function removeOutsideTempFile(file: string): void {
+  fs.rmSync(path.dirname(file), { recursive: true, force: true })
+}
+
 function teardownArtifactSandbox(dir: string): void {
   if (ORIGINAL_OUTPUT_DIR === undefined) delete process.env.CLERUM_OUTPUT_DIR
   else process.env.CLERUM_OUTPUT_DIR = ORIGINAL_OUTPUT_DIR
@@ -348,7 +359,26 @@ describe('workflowRouter — JWT auth middleware', () => {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({}),
       })
-      expect([200, 400]).toContain(res.status)
+      expect(res.status).toBe(200)
+    } finally {
+      server.close()
+    }
+  })
+
+  it('POST /configure maps configured:false to HTTP 400', async () => {
+    const token = await signWorkflowToken({ sub: 'wrc', scopes: ['configure'] })
+    const { baseUrl, server } = await createTestApp(publicKeyPem, true, {
+      configure: vi.fn().mockReturnValue({ configured: false, message: 'apiKey is required' }),
+    })
+    try {
+      const res = await fetch(`${baseUrl}/api/v1/workflow/configure`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ provider: 'openai' }),
+      })
+      expect(res.status).toBe(400)
+      const body = (await res.json()) as { configured: boolean }
+      expect(body.configured).toBe(false)
     } finally {
       server.close()
     }
@@ -692,8 +722,7 @@ describe('workflowRouter — GET /artifacts/:filename', () => {
 
   it('returns 403 when the artifact path is a symlink', async () => {
     sandboxDir = setupArtifactSandbox('recipe-a')
-    const outsideFile = path.join(os.tmpdir(), `clerum-outside-${process.pid}-${Date.now()}.txt`)
-    fs.writeFileSync(outsideFile, 'secret outside output')
+    const outsideFile = createOutsideTempFile('secret outside output')
     fs.symlinkSync(outsideFile, path.join(sandboxDir, 'leak.md'))
     const token = await signWorkflowToken({
       sub: 'wrc',
@@ -710,7 +739,7 @@ describe('workflowRouter — GET /artifacts/:filename', () => {
       const body = (await res.json()) as { error: string }
       expect(body.error).toMatch(/symlink/i)
     } finally {
-      fs.rmSync(outsideFile, { force: true })
+      removeOutsideTempFile(outsideFile)
       server.close()
     }
   })
@@ -961,9 +990,8 @@ describe('workflowRouter — DELETE /artifacts', () => {
 
   it('removes symlink artifacts without deleting their external target during bulk cleanup', async () => {
     sandboxDir = setupArtifactSandbox('recipe-a')
-    const outsideFile = path.join(os.tmpdir(), `clerum-outside-${process.pid}-${Date.now()}.txt`)
+    const outsideFile = createOutsideTempFile('secret outside output')
     fs.writeFileSync(path.join(sandboxDir, 'report.md'), 'ok')
-    fs.writeFileSync(outsideFile, 'secret outside output')
     fs.symlinkSync(outsideFile, path.join(sandboxDir, 'leak.md'))
     const token = await signWorkflowToken({
       sub: 'wrc',
@@ -981,7 +1009,7 @@ describe('workflowRouter — DELETE /artifacts', () => {
       expect(fs.readFileSync(outsideFile, 'utf8')).toBe('secret outside output')
       expect(fs.readdirSync(sandboxDir)).toHaveLength(0)
     } finally {
-      fs.rmSync(outsideFile, { force: true })
+      removeOutsideTempFile(outsideFile)
       server.close()
     }
   })
@@ -1198,8 +1226,7 @@ describe('workflowRouter — DELETE /artifacts/:filename', () => {
 
   it('returns 403 when deleting an artifact path that is a symlink', async () => {
     sandboxDir = setupArtifactSandbox('recipe-a')
-    const outsideFile = path.join(os.tmpdir(), `clerum-outside-${process.pid}-${Date.now()}.txt`)
-    fs.writeFileSync(outsideFile, 'secret outside output')
+    const outsideFile = createOutsideTempFile('secret outside output')
     fs.symlinkSync(outsideFile, path.join(sandboxDir, 'leak.md'))
     const token = await signWorkflowToken({
       sub: 'wrc',
@@ -1218,7 +1245,7 @@ describe('workflowRouter — DELETE /artifacts/:filename', () => {
       const body = (await res.json()) as { error: string }
       expect(body.error).toMatch(/symlink/i)
     } finally {
-      fs.rmSync(outsideFile, { force: true })
+      removeOutsideTempFile(outsideFile)
       server.close()
     }
   })

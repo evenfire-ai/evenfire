@@ -312,6 +312,7 @@ ALL_IMAGES=(
   "clerum/external-rest-api:test"
   "clerum/rpc-proxy:test"
   "clerum/webhook-proxy:test"
+  "clerum/codex-llm-proxy:test"
   "clerum/webhook-gateway:test"
   "clerum/channel-reader:test"
   "clerum/workflow-approval-request-reader:test"
@@ -340,6 +341,7 @@ KNOWN_BUILD_NAMES=(
   external-rest-api
   rpc-proxy
   webhook-proxy
+  codex-llm-proxy
   webhook-gateway
   channel-reader
   workflow-approval-request-reader
@@ -1130,6 +1132,11 @@ build_image "rpc-proxy" \
 build_image "webhook-proxy" \
   "${PROJECT_DIR}/webhook-proxy" \
   "clerum/webhook-proxy:test"
+
+build_image "codex-llm-proxy" \
+  "${PROJECT_DIR}" \
+  "clerum/codex-llm-proxy:test" \
+  "${PROJECT_DIR}/codex-llm-proxy/Dockerfile"
 
 build_image "webhook-gateway" \
   "${PROJECT_DIR}/webhook-gateway" \

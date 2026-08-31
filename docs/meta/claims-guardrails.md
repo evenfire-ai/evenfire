@@ -11,8 +11,8 @@ caveats over absolute language.
 | Do not write                                            | Prefer                                                                                                         |
 | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | Per-domain egress allowlisting for SaaS connectors      | Port/CIDR egress with documented FQDN limits                                                                   |
-| “Any model” / every provider under the sun              | The 22 canonical providers (README table); OpenAI-compatible entries are config                                |
-| A provider outside the shared package as shipped        | Only the 22 ids in `packages/llm-providers/index.cjs` ([overview](../llm-providers/README.md))                 |
+| “Any model” / every provider under the sun              | The 23 canonical providers (README table); OpenAI-compatible entries are config                                |
+| A provider outside the shared package as shipped        | Only the 23 ids in `packages/llm-providers/index.cjs` ([overview](../llm-providers/README.md))                 |
 | Context memory always-on                                | Built-in pre-pruning + tiered compaction; **configurable**                                                     |
 | Usage/cost in Grafana / `monitoring/`                   | control-api + control-ui (token dashboards, prices, budgets)                                                   |
 | Token budgets as a security boundary                    | Cost control; fail-open                                                                                        |

@@ -10,6 +10,11 @@
  * per-attempt broker.
  */
 import {
+  assignedCodexConnectionKey,
+  snapshotForAssignedCodexGrant,
+} from '@clerum/codex-catalog-projection'
+import {
+  PROVIDER_AUTH_MODE,
   PROVIDER_CREDENTIAL_SLOTS,
   isCredentialSlotOwnedByProvider,
   isLlmProviderId,
@@ -70,7 +75,9 @@ export interface PluginSdkCredentialTarget {
  * The allowlist gate needs it: an existing-but-empty CM must deny-all, whereas
  * an absent CM drops into degraded mode. See {@link ModelConfigHandler.handle}.
  */
-export type ConfigMapPresence = { exists: false } | { exists: true; data: Record<string, string> }
+export type ConfigMapPresence =
+  | { exists: false }
+  | { exists: true; data: Record<string, string>; annotations?: Record<string, string> }
 
 export interface K8sSecretReader {
   readConfigMap(namespace: string, name: string): Promise<Record<string, string> | null>
@@ -117,6 +124,8 @@ export type DegradedModeValidator = () => Promise<ConfigureModelResult | null>
 export interface HandleOptions {
   /** Enforced only when the allowlist ConfigMap does not exist (see R3.5). */
   validateDegraded?: DegradedModeValidator
+  /** Assigned Codex grant. Empty/missing is unassigned and never inherits. */
+  codexConnectionKey?: string
 }
 
 // ─── Handler ────────────────────────────────────────────────────────────
@@ -179,6 +188,26 @@ function parseAllowedModels(raw: string | undefined, provider: string): Set<stri
     }
   }
   return allowed
+}
+
+function isCodexModelAllowed(
+  provider: string,
+  model: string,
+  allowlistCm: { data: Record<string, string>; annotations?: Record<string, string> },
+  connectionKey?: string
+): boolean {
+  if (isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker') {
+    const snapshot = snapshotForAssignedCodexGrant(
+      assignedCodexConnectionKey(connectionKey),
+      { metadata: { annotations: allowlistCm.annotations ?? {} }, data: allowlistCm.data },
+      { flagEnabled: false }
+    )
+    const key = `${provider}:${model}`
+    const enabled = new Set(snapshot.enabledModels ?? [])
+    const stale = new Set(snapshot.staleModels ?? [])
+    return enabled.has(key) && !stale.has(key)
+  }
+  return parseAllowedModels(allowlistCm.data[provider], provider).has(model)
 }
 
 export class ModelConfigHandler {
@@ -323,8 +352,7 @@ export class ModelConfigHandler {
     if (!allowlistCm.exists) {
       return { status: 503, body: { error: 'Provider configuration unavailable' } }
     }
-    const allowed = parseAllowedModels(allowlistCm.data[target.provider], target.provider)
-    if (!allowed.has(target.model)) {
+    if (!isCodexModelAllowed(target.provider, target.model, allowlistCm)) {
       return { status: 403, body: { error: 'Provider target is not enabled' } }
     }
 
@@ -403,9 +431,17 @@ export class ModelConfigHandler {
       CONFIGMAP_NAMESPACE,
       ALLOWLIST_CONFIGMAP_NAME
     )
+    const brokerBacked = PROVIDER_AUTH_MODE[req.provider] === 'oauth-broker'
     if (allowlistCm.exists) {
-      const allowed = parseAllowedModels(allowlistCm.data[req.provider], req.provider)
-      if (!allowed.has(req.model)) {
+      const allowed = isCodexModelAllowed(
+        req.provider,
+        req.model,
+        allowlistCm,
+        opts?.codexConnectionKey
+      )
+      // oauth-broker configure is identity-only. Spend is gated by
+      // grantRedeemable on the coordinator and by authorize, not by 4xx here.
+      if (!allowed && !brokerBacked) {
         return {
           status: 403,
           body: {
@@ -424,6 +460,56 @@ export class ModelConfigHandler {
       if (opts?.validateDegraded) {
         const degradedError = await opts.validateDegraded()
         if (degradedError) return degradedError
+      }
+    }
+
+    // Broker-backed providers never resolve or mount a Secret. Control API
+    // remains the OAuth custodian; WRC only forwards provider/model identity.
+    if (brokerBacked) {
+      const configureBody: Record<string, unknown> = {
+        provider: req.provider,
+        model: req.model,
+      }
+      if (req.soulStorageRef && this.objectStorage) {
+        try {
+          const content = await this.objectStorage.download(
+            req.soulStorageRef.bucket,
+            req.soulStorageRef.key
+          )
+          if (content) configureBody.soulContent = content
+        } catch {
+          createLogger('wrc', 'model-config-handler').warn(
+            'SOUL download failed — continuing without step SOUL override',
+            { stepId: req.stepId }
+          )
+        }
+      }
+      try {
+        const result = await this.mcpHost.configure(
+          mcpHostEndpoint,
+          wrcConfigureToken,
+          configureBody
+        )
+        if (mcpHostConfigureRejected(result)) {
+          return {
+            status: 502,
+            body: { error: 'mcp_host configure failed', mcpHostStatus: result.status },
+          }
+        }
+      } catch {
+        return { status: 502, body: { error: 'mcp_host configure unreachable' } }
+      }
+      return {
+        status: 202,
+        body: {
+          configured: true,
+          provider: req.provider,
+          model: req.model,
+          identityBound: true,
+          grantRedeemable:
+            allowlistCm.exists &&
+            isCodexModelAllowed(req.provider, req.model, allowlistCm, opts?.codexConnectionKey),
+        },
       }
     }
 
@@ -447,7 +533,8 @@ export class ModelConfigHandler {
     const resolvedFallbacks = await this.resolveFallbacks(
       req,
       configMap,
-      allowlistCm.exists ? allowlistCm.data : null
+      allowlistCm.exists ? allowlistCm : null,
+      opts?.codexConnectionKey
     )
 
     // 3. Optional SOUL download
@@ -487,7 +574,7 @@ export class ModelConfigHandler {
 
     try {
       const result = await this.mcpHost.configure(mcpHostEndpoint, wrcConfigureToken, configureBody)
-      if (result.status >= 400) {
+      if (mcpHostConfigureRejected(result)) {
         return {
           status: 502,
           body: { error: 'mcp_host configure failed', mcpHostStatus: result.status },
@@ -574,7 +661,8 @@ export class ModelConfigHandler {
   private async resolveFallbacks(
     req: ConfigureModelRequest,
     configMap: Record<string, string>,
-    allowlist: Record<string, string> | null
+    allowlist: { data: Record<string, string>; annotations?: Record<string, string> } | null,
+    codexConnectionKey?: string
   ): Promise<Array<{ provider: string; model: string; apiKey: string; llmSecretName: string }>> {
     const fallbacks = req.fallbacks
     if (!fallbacks || fallbacks.length === 0) return []
@@ -599,8 +687,13 @@ export class ModelConfigHandler {
         log.warn('Skipping fallback with invalid provider/model', { stepId: req.stepId })
         continue
       }
-      const allowed = parseAllowedModels(allowlist[entry.provider], entry.provider)
-      if (!allowed.has(entry.model)) {
+      const allowed = isCodexModelAllowed(
+        entry.provider,
+        entry.model,
+        allowlist,
+        codexConnectionKey
+      )
+      if (!allowed) {
         log.warn('Skipping fallback model not in allowlist', {
           stepId: req.stepId,
           provider: entry.provider,
@@ -631,6 +724,14 @@ export class ModelConfigHandler {
     }
     return resolved
   }
+}
+
+/** mcp-host /configure answers HTTP 200 even when configured:false. */
+function mcpHostConfigureRejected(result: {
+  status: number
+  body?: Record<string, unknown>
+}): boolean {
+  return result.status >= 400 || result.body?.configured === false
 }
 
 function isBootstrapIdentityProof(body: Record<string, unknown>): boolean {

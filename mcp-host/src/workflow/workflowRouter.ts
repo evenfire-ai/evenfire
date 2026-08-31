@@ -151,7 +151,7 @@ export function createWorkflowRouter(service: WorkflowService): Router {
     if (!validateWorkflowBinding(req, res, { expectedSub: 'wrc' })) return
     const body = req.body as ConfigureRequest
     const result = service.configure(body)
-    res.json(result)
+    res.status(result.configured ? 200 : 400).json(result)
   })
 
   // POST /plugin-workload-sdk/bootstrap — publish only the public

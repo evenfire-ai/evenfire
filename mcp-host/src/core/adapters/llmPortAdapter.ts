@@ -255,6 +255,7 @@ export class LlmPortAdapter implements LlmPort {
       }
     }
     if (!this.usageReporter || !this.staticContext || !usageContext || !usage) return
+    if (this.providerName === 'codex-subscription') return
     const event: LlmUsageEvent = {
       request_id: requestId,
       ts: new Date().toISOString(),

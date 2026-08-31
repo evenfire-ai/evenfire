@@ -745,6 +745,14 @@ export function buildMcpHostPod(
               name: 'MCP_HOST_GATEWAY_URL',
               value: 'http://nginx-workflow-approval-gateway.control-plane.svc.cluster.local:8092',
             },
+            // Recipe pods do not mount the Host mcp-host-config ConfigMap.
+            // WRC keyless-configures oauth-broker against this process, so the
+            // Codex factory kill-switch and proxy URL must be on the pod.
+            { name: 'MCP_HOST_CODEX_SUBSCRIPTION_ENABLED', value: 'true' },
+            {
+              name: 'CODEX_LLM_PROXY_RUNTIME_URL',
+              value: 'http://codex-llm-proxy.control-plane.svc.cluster.local:8080',
+            },
             // PromptBridge resolves exactly one signed target credential per
             // attempt through WRC. Notification-only hosts are provider-free
             // and deliberately receive no broker URL.

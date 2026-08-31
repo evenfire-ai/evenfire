@@ -26,6 +26,32 @@ import { ToastProvider } from '../Toast'
  * These tests lock the new behavior so it cannot regress.
  */
 
+vi.mock('../../lib/codexSubscription', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../lib/codexSubscription')>()
+  return {
+    ...actual,
+    listCodexSubscriptionConnections: vi.fn().mockResolvedValue([
+      {
+        connectionKey: 'codex-aaa',
+        displayName: 'Team A',
+        status: 'connected',
+        defaultModel: 'gpt-5.1',
+        credentialRevision: 1,
+        catalogRevision: 1,
+        accountFingerprint: 'fp',
+        catalogStatus: 'ready',
+        catalogSyncedAt: '2026-08-20T00:00:00.000Z',
+        lastRefreshAt: '2026-08-20T00:00:00.000Z',
+        lastAuthAt: '2026-08-20T00:00:00.000Z',
+        refreshLockHeld: false,
+      },
+    ]),
+    listCodexConnectionModels: vi
+      .fn()
+      .mockResolvedValue([{ model: 'gpt-5.1', enabled: true, stale: false }]),
+  }
+})
+
 // Mock lib/api BEFORE importing the component. vi.mock is hoisted.
 vi.mock('../../lib/api', () => ({
   apiSend: vi.fn().mockResolvedValue({}),
@@ -73,6 +99,30 @@ vi.mock('../../lib/api', () => ({
         display_name: null,
         context_window_tokens: null,
         enabled: true,
+        created_at: '',
+        updated_at: '',
+      },
+      {
+        id: 'm4',
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+        vendor: 'OpenAI',
+        display_name: null,
+        context_window_tokens: null,
+        enabled: true,
+        stale: false,
+        created_at: '',
+        updated_at: '',
+      },
+      {
+        id: 'm5',
+        provider: 'codex-subscription',
+        model: 'old-codex',
+        vendor: 'OpenAI',
+        display_name: null,
+        context_window_tokens: null,
+        enabled: true,
+        stale: true,
         created_at: '',
         updated_at: '',
       },
@@ -129,6 +179,8 @@ async function walkToAccessStep(opts?: { agentName?: string }) {
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
   // Step 1: Model & Credentials — default model is valid; reuse the secret we provided.
+  // Context/connectors moved after Access (origin/dev UX). Codex subscriptions
+  // appear in the same LlmSecretSelect as API-key secrets.
   fireEvent.click(screen.getByLabelText(/Use an existing LLM Secret/i))
   fireEvent.click(screen.getByRole('button', { name: /Select LLM Secret/i }))
   fireEvent.click(screen.getByRole('option', { name: /secret-a/i }))
@@ -195,6 +247,8 @@ async function build409(bodyObj: Record<string, unknown>): Promise<Error> {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  vi.mocked(api.apiSend).mockReset()
+  vi.mocked(api.apiSend).mockResolvedValue({})
 })
 
 describe('HostWizard — credential draft is projected onto the active provider domain', () => {
@@ -855,4 +909,118 @@ describe('HostWizard — create-only seam + compensation (R5-C1/R5-B1, V-1, V-7)
     // is compensated (host never created), but nothing beyond that.
     expect(api.apiSend).toHaveBeenCalledWith('DELETE', '/api/v1/admin/secrets/crd-agent-llm')
   })
+})
+
+async function walkToModelStep(opts?: { agentName?: string }) {
+  const name = opts?.agentName ?? 'codex-agent'
+  await waitFor(() => {
+    expect(api.getAdminUsers).toHaveBeenCalled()
+  })
+  fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: name } })
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+  await waitFor(() => {
+    expect(
+      screen.getByLabelText('Provider', { selector: '#llm-primary-provider' })
+    ).toBeInTheDocument()
+  })
+}
+
+async function selectCodexSubscription(model = 'gpt-5.1') {
+  fireEvent.click(screen.getByRole('button', { name: /Select LLM Secret/i }))
+  fireEvent.click(screen.getByRole('option', { name: /Team A/i }))
+  await waitFor(() => {
+    expect(
+      screen.getByLabelText('Default model', { selector: '#llm-primary-model' })
+    ).toHaveTextContent(model)
+  })
+  expect(screen.queryByRole('radio', { name: /^ChatGPT subscription$/i })).not.toBeInTheDocument()
+}
+
+describe('HostWizard — broker-backed Codex authoring', () => {
+  it('creates a Codex-only Host without secretRef or a Secret POST', async () => {
+    await renderWizard()
+    await walkToModelStep({ agentName: 'codex-only' })
+    await selectCodexSubscription()
+    expect(screen.queryByLabelText(/OpenAI API key/i)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Default model', { selector: '#llm-primary-model' }))
+    expect(screen.queryByRole('option', { name: 'old-codex' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
+
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith(
+        'POST',
+        '/api/v1/admin/hosts',
+        expect.objectContaining({
+          metadata: { name: 'codex-only' },
+          spec: expect.objectContaining({
+            model: {
+              provider: 'codex-subscription',
+              name: 'gpt-5.1',
+              connectionRef: 'codex-aaa',
+            },
+          }),
+        })
+      )
+    })
+    const hostCall = vi
+      .mocked(api.apiSend)
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/hosts')
+    expect(hostCall?.[2]).not.toHaveProperty('spec.secretRef')
+    expect((hostCall?.[2] as { spec: Record<string, unknown> }).spec.secretRef).toBeUndefined()
+    expect(
+      vi
+        .mocked(api.apiSend)
+        .mock.calls.some(call => call[0] === 'POST' && call[1] === '/api/v1/admin/secrets')
+    ).toBe(false)
+  }, 15_000)
+
+  it('blocks Next until a ChatGPT subscription is chosen', async () => {
+    await renderWizard()
+    await walkToModelStep({ agentName: 'codex-needs-grant' })
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    expect(screen.getByText('Select an existing LLM Secret.')).toBeInTheDocument()
+    await selectCodexSubscription()
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()
+    })
+    expect(screen.queryByText('Select an existing LLM Secret.')).not.toBeInTheDocument()
+  }, 15_000)
+
+  it('seeds the grant default model when a ChatGPT subscription is chosen', async () => {
+    await renderWizard()
+    await walkToModelStep({ agentName: 'codex-keep-model' })
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText('Default model', { selector: '#llm-primary-model' })
+      ).toHaveTextContent(/\S/)
+    })
+    await selectCodexSubscription()
+    expect(
+      screen.getByLabelText('Default model', { selector: '#llm-primary-model' })
+    ).toHaveTextContent('gpt-5.1')
+    expect(screen.getByText(/Use an existing LLM Secret/i)).toBeInTheDocument()
+  }, 15_000)
+
+  it('requires exact credential slots when a static fallback joins a Codex primary', async () => {
+    await renderWizard()
+    await walkToModelStep({ agentName: 'codex-mixed' })
+    await selectCodexSubscription()
+    fireEvent.click(screen.getByRole('button', { name: /Fallback providers/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Add fallback provider/i }))
+    fireEvent.change(screen.getByLabelText('Provider', { selector: '#llm-fallback-0-provider' }), {
+      target: { value: 'openai' },
+    })
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Select secret/i })).toBeInTheDocument()
+    })
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
+    fireEvent.click(screen.getByRole('option', { name: /secret-a/i }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
+    })
+  }, 15_000)
 })

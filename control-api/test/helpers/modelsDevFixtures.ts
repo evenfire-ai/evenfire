@@ -15,6 +15,9 @@ import {
 
 /** models.dev provider KEY for one of our provider ids (e.g. 'claude' → 'anthropic'). */
 export function providerKey(id: LlmProviderId): string {
+  if (id === 'codex-subscription') {
+    throw new Error('providerKey: codex-subscription is not a models.dev catalog source')
+  }
   return PROVIDER_KEY_MAP[id]
 }
 

@@ -413,4 +413,77 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
       usageAccepted: false,
     })
   })
+
+  it('does not ingest Codex prompt-bridge usage because proxy finalize owns the ledger', async () => {
+    ingest.mockReset()
+    project.mockReset()
+    const db = dbWithRows(
+      [],
+      [],
+      {
+        id: IDS.invocation,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        method: 'promptBridge',
+        status: 'in_progress',
+        attempt_generation: 1,
+      },
+      {
+        invocation_id: IDS.invocation,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        attempt_generation: 1,
+        method: 'promptBridge',
+        status: 'in_progress',
+      },
+      {
+        id: IDS.providerAttempt,
+        invocation_id: IDS.invocation,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        attempt_generation: 1,
+        attempt_index: 1,
+        target_ref: 'codex-primary',
+        host_ref: inputBase.hostRef,
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+        credential_slot: 'codex-oauth',
+        status: 'in_progress',
+      },
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 }
+    )
+
+    const result = await finalizePromptBridgeInTransaction(
+      {
+        ...inputBase,
+        target: {
+          targetRef: 'codex-primary',
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          credentialSlot: 'codex-oauth',
+        },
+        status: 'complete',
+        usage: {
+          llmSecretName: 'unused-codex-secret',
+          callerRef: 'scanner',
+          fallbackUsed: false,
+          attemptCount: 1,
+          inputTokens: 12,
+          outputTokens: 7,
+        },
+      },
+      db as never
+    )
+
+    expect(result).toMatchObject({
+      status: 'complete',
+      outcome: 'exact',
+      usageAccepted: false,
+    })
+    expect(ingest).not.toHaveBeenCalled()
+    expect(project).not.toHaveBeenCalled()
+  })
 })

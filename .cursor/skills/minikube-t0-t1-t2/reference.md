@@ -18,6 +18,11 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
   the exact-head marker owns deployed freshness and `ports.env` is persistent.
 - **Do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.** Private profile
   state (ports, pids, markers). The harness is the only reader.
+- **Do not hunt for UI port-forwards.** First-hand hold:
+  `MINIKUBE_PROFILE=<owned-profile> make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf`
+  (implementation `branch-profile.sh` beside it). Run on the host, not a
+  sandboxed agent shell. `make minikube-pf-all-bg` is a gate refresh only.
+  `branch-profile-pf-health` stops PFs on EXIT. Never shared `:3000`/`:8090`.
 - **Do not invent `ADMIN_PASSWORD`** or any credential. When a product E2E
   needs it, load it from the primary checkout `.env`; never echo it.
 - **Do not reset PVCs** outside the explicit `T2_RESET_PVC=true` +
@@ -57,6 +62,13 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
   also exit zero. Do not override its one-worker/no-file-parallelism contract.
   Role-reset suites stay on the throwaway `postgres:16-alpine` (#412), never
   shared `control-postgres`.
+- **Do not treat a T1 `next:` line as a Docker repair license.**
+  `REAL_PG_REQUIRED_BUT_UNAVAILABLE` (isolated `postgres:16-alpine` not
+  reachable) still means re-enter `make minikube-t2` or
+  `make minikube-t2-real-postgres` on the owned profile. Forbidden:
+  `docker run` probes, `docker desktop restart` (destroys the Minikube
+  container and the owned profile), published-port experiments, and any
+  invented networking path between plan and verdict.
 - **Do not let NP08 refresh or reissue the Host lineage.** It may observe a
   fresher persisted access token only when its Host/recipe binding exactly
   matches the mounted token. Refresh tokens remain owned by mcp-host.
@@ -77,13 +89,13 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
 | `BOOTSTRAP_REQUIRED` | Profile missing/uninitialized, or the planner produced no transition. Standalone preflight refuses to bootstrap. | Run `MINIKUBE_PROFILE=<owned> CONTROL_API_REAL_PG_CONTEXT=<owned> make minikube-t2`; its internal planner makes `full-bootstrap` reachable. |
 | `HEAD_MARKER_MISMATCH` | Pre-gate marker does not match this worktree/HEAD; the final T2 preflight selected something other than `already-synced`. | Re-run the full target on this HEAD so `pre-gate-sync` updates the marker. Never hand-edit the marker. |
 | `IMAGE_MANIFEST_MISMATCH` | Deployed image provenance or the manifest `generated` stamp does not match the exact marker/worktree state. | Re-run the full target for the same owned profile; do not relabel or hand-edit the manifest. |
-| `PORT_FORWARD_CONFLICT` | A port-forward for this profile is owned by a process not recorded for it (or not a real `kubectl`). | Identify the foreign owner; if it belongs to another lane, stop. Restart forwards via `scripts/minikube/pf-all-stack.sh` for this profile only. |
+| `PORT_FORWARD_CONFLICT` | A port-forward for this profile is owned by a process not recorded for it (or not a real `kubectl`). | Identify the foreign owner; if it belongs to another lane, stop. Do not kill this lane's `branch-profile-pf`. Restore UI PFs with `make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf`. |
 | `PROFILE_BUSY` | Profile lock held. Live owner PID → genuinely busy. No valid owner PID → orphaned lock. | Live owner: wait or coordinate; never remove. Orphan: verify no T2 process owns the profile, then remove ONLY `$T2_LOCK_ROOT/<profile>.lock` and retry. Never remove the lock root. |
 | `DEVELOPMENT_SCOPE_REQUIRED` | Preflight/final preflight failed a precondition, or T2-only mode was attempted without `already-synced`. | Repair the first reported condition; if T2-only was refused, run full `make minikube-t2`. |
 | `CERTIFICATION_REQUIRED` | Runtime-only was requested without valid exact-head T0/T1 evidence for the full ownership tuple. | Run the full target once; do not hand-create or copy evidence. |
 | `SECRET_MISSING` / `CONFIGMAP_MISSING` | A required named runtime input is absent or unreadable. | Reconcile the same owned profile through the full target; never invent values. |
 | `ZERO_TESTS_EXECUTED` | A lane was configured off or executed nothing (including a required-but-missing Playwright journey). | Re-run with the lane enabled, or supply the required `T2_PLAYWRIGHT_COMMAND`. |
-| `REAL_PG_REQUIRED_BUT_UNAVAILABLE` | The explicit context, isolated PostgreSQL, DSN route, or exact-head database precondition is unavailable. | Use the standalone T1 target while repairing, then run one full certification. |
+| `REAL_PG_REQUIRED_BUT_UNAVAILABLE` | The explicit context, isolated PostgreSQL, DSN route, or exact-head database precondition is unavailable. | Re-enter `make minikube-t2` or `make minikube-t2-real-postgres` on the owned profile. Do not `docker run`, restart Docker Desktop, or probe published ports. |
 | `REAL_PG_REPORT_INCOMPLETE` | Vitest JSON did not prove the exact expected physical files. | Repair test selection/reporter output; do not accept suite counters as file identity. |
 | `REAL_PG_SUITE_FAILED` | Reporter, test assertions, process exit, or parent result contract failed. | Iterate with standalone T1; once green, run full T2 for final exact-head lane evidence. |
 | `POSTGRES_NOT_READY` | PostgreSQL precondition failed, or a PVC reset was requested without the exact expected UID. | Fix DB readiness; never guess a PVC UID. |
