@@ -7,9 +7,14 @@ import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { rootLogger } from '../../observability/logger.js'
 import { llmAllowlistConfigMapWriteFailuresTotal } from '../../observability/metrics.js'
 import {
+  type CodexCatalogTransport,
+  createCodexCatalogTransportFromEnv,
+} from '../../services/codexSubscriptionCatalog.js'
+import {
   type CodexOAuthDeps,
   CodexSubscriptionOAuthError,
   handleCodexBrowserCallback,
+  runCodexCatalogSync,
 } from '../../services/codexSubscriptionOAuth.js'
 import {
   buildCodexBrowserRedirectUri,
@@ -52,7 +57,10 @@ function redirectToCodexSurface(
   res.redirect(303, buildCodexBrowserReturnLocation(outcome))
 }
 
-export function createAuthCodexSubscriptionRouter(gateway?: K8sGateway): Router {
+export function createAuthCodexSubscriptionRouter(
+  gateway?: K8sGateway,
+  catalogTransport: CodexCatalogTransport = createCodexCatalogTransportFromEnv()
+): Router {
   const router = Router()
 
   router.get(
@@ -62,7 +70,12 @@ export function createAuthCodexSubscriptionRouter(gateway?: K8sGateway): Router 
       const code = typeof req.query.code === 'string' ? req.query.code : ''
       const state = typeof req.query.state === 'string' ? req.query.state : ''
       try {
-        await handleCodexBrowserCallback(oauthDeps(req), { code, state })
+        const connection = await handleCodexBrowserCallback(oauthDeps(req), { code, state })
+        await runCodexCatalogSync(
+          { ...oauthDeps(req), connectionKey: connection.connectionKey },
+          connection.connectionKey,
+          catalogTransport
+        )
         try {
           await publishAllowedModelsConfigMapAfterGrantChange(gateway?.llmAllowedModelsConfigMap())
         } catch (err) {
