@@ -6,6 +6,7 @@
 !packages/display-field/**
 !packages/frontend-table-system/
 !packages/frontend-table-system/**
+packages/frontend-table-system/node_modules/
 !packages/llm-providers/
 !packages/llm-providers/**
 !scripts/

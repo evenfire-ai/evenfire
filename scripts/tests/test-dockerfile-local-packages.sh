@@ -98,6 +98,18 @@ assert_dockerignore_allows() {
   fi
 }
 
+assert_dockerignore_excludes_generated_dependencies() {
+  local file="$1"
+  local package="$2"
+  local ignore="$REPO_ROOT/$file"
+  local allow_line exclude_line
+  allow_line="$(line_of_last "$ignore" "!packages/$package/**")"
+  exclude_line="$(line_of_last "$ignore" "packages/$package/node_modules/")"
+  if [[ -z "$allow_line" || -z "$exclude_line" || "$exclude_line" -le "$allow_line" ]]; then
+    fail "$file must exclude packages/$package/node_modules from its Docker context"
+  fi
+}
+
 # Direct consumers.  The first four are Node services; profile-ui and
 # control-ui are Next.js consumers and therefore also require materialization.
 assert_copy_before_every_ci control-api/Dockerfile \
@@ -134,6 +146,8 @@ assert_dockerignore_allows control-api/Dockerfile.dockerignore llm-providers
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore display-field
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore frontend-table-system
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore llm-providers
+assert_dockerignore_excludes_generated_dependencies \
+  control-ui/Dockerfile.dockerignore frontend-table-system
 
 if (( failures > 0 )); then
   echo "$failures Docker local-package contract failure(s)" >&2
