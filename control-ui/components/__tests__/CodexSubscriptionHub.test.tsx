@@ -84,9 +84,16 @@ describe('CodexSubscriptionHub', () => {
     vi.unstubAllGlobals()
   })
 
-  it('creates a subscription from the Add modal and continues into setup', async () => {
+  it('opens Add with a draft grant and the full setup form, and finishes with the typed name', async () => {
     vi.mocked(createCodexSubscriptionConnection).mockResolvedValue(
-      connection({ connectionKey: 'codex-bbb', displayName: 'New team' })
+      connection({
+        connectionKey: 'codex-bbb',
+        displayName: 'Codex subscription',
+        defaultModel: null,
+      })
+    )
+    vi.mocked(patchCodexSubscriptionConnection).mockResolvedValue(
+      connection({ connectionKey: 'codex-bbb', displayName: 'New team', defaultModel: null })
     )
     render(
       <ToastProvider>
@@ -95,17 +102,49 @@ describe('CodexSubscriptionHub', () => {
     )
     expect(await screen.findByText('Team A')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Add subscription' }))
-    fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), {
-      target: { value: 'New team' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Create and set up' }))
+    const nameInput = await screen.findByRole('textbox', { name: 'Name' })
+    fireEvent.change(nameInput, { target: { value: 'New team' } })
+    expect(await screen.findByRole('button', { name: 'Finish setup' })).toBeInTheDocument()
+    expect(createCodexSubscriptionConnection).toHaveBeenCalledWith({ displayName: '' })
+    expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Finish setup' }))
     await waitFor(() => {
-      expect(createCodexSubscriptionConnection).toHaveBeenCalledWith({ displayName: 'New team' })
+      expect(patchCodexSubscriptionConnection).toHaveBeenCalledWith('codex-bbb', {
+        displayName: 'New team',
+        defaultModel: null,
+      })
     })
     expect(revokeCodexSubscription).not.toHaveBeenCalled()
-    expect(await screen.findByText('Set up ChatGPT subscription New team')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Finish setup' })).toBeInTheDocument()
+  })
+
+  it('revokes the pristine draft when the Add dialog is cancelled', async () => {
+    vi.mocked(createCodexSubscriptionConnection).mockResolvedValue(
+      connection({
+        connectionKey: 'codex-ccc',
+        displayName: 'Codex subscription',
+        defaultModel: null,
+        status: 'disconnected',
+      })
+    )
+    vi.mocked(revokeCodexSubscription).mockResolvedValue(
+      connection({
+        connectionKey: 'codex-ccc',
+        displayName: 'Codex subscription',
+        status: 'revoked',
+      })
+    )
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    expect(await screen.findByText('Team A')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Add subscription' }))
+    await screen.findByRole('button', { name: 'Finish setup' })
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    await waitFor(() => {
+      expect(revokeCodexSubscription).toHaveBeenCalledWith('codex-ccc')
+    })
   })
 
   it('renders subscriptions as a Secrets table with a row actions menu', async () => {
@@ -189,7 +228,9 @@ describe('CodexSubscriptionHub', () => {
     vi.mocked(startCodexDeviceConnect).mockResolvedValue({
       userCode: 'ABCD-1234',
       verificationUri: 'https://chatgpt.com/device',
-      intervalSeconds: 0.01,
+      // Long enough that the card is observable; short enough that the
+      // auto-dismiss waitFor completes comfortably inside its timeout.
+      intervalSeconds: 0.3,
       state: 'state-1',
       intent: 'connect',
     })

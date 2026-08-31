@@ -64,7 +64,6 @@ export function CodexSubscriptionHub() {
   const [searchQuery, setSearchQuery] = useState('')
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
-  const [createName, setCreateName] = useState('')
   const [editing, setEditing] = useState<CodexSubscriptionConnectionView | null>(null)
   const [editName, setEditName] = useState('')
   const [editDefault, setEditDefault] = useState('')
@@ -122,29 +121,51 @@ export function CodexSubscriptionHub() {
     )
   }, [connections, searchQuery])
 
-  async function handleCreate() {
-    const displayName = createName.trim()
-    if (!displayName) {
-      setError('Subscription name is required.')
-      return
-    }
+  // Opening the Add dialog immediately creates a backend draft grant so the
+  // FULL setup form (name, sign-in, models, default) is live right away — no
+  // name-only gate. If the operator cancels without signing in, the pristine
+  // draft is revoked again so no empty rows linger in the table.
+  async function createDraft() {
     setBusyKey('create')
+    setError('')
     try {
-      const created = await createCodexSubscriptionConnection({ displayName })
-      setCreateName('')
-      setError('')
-      // Transition the SAME modal into setup — openEdit sets the editing state
-      // before creating flips off, so the dialog never unmounts in between and
-      // the name field the operator just typed into stays mounted.
-      await openEdit(created)
+      const created = await createCodexSubscriptionConnection({ displayName: '' })
+      openEdit(created)
       setSetupNew(true)
-      setCreating(false)
-      await load()
-      showToast(`Subscription ${displayName} created.`, { tone: 'success' })
+      setEditName('')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create subscription')
     } finally {
       setBusyKey(null)
+    }
+  }
+
+  function beginCreate() {
+    setCreating(true)
+    setEditing(null)
+    setEditName('')
+    setEditDefault('')
+    setEditModels([])
+    setSetupNew(false)
+    setUserCode(null)
+    setVerificationUri(null)
+    setDeviceTabBlocked(false)
+    setError('')
+    void createDraft()
+  }
+
+  // Cancel in create mode. A pristine draft (never signed in) is removed again;
+  // once the operator signed in the grant is real and is kept.
+  function cancelCreate() {
+    const draftRow = editing
+    const revokePristine = Boolean(draftRow && draftRow.status === 'disconnected')
+    setCreating(false)
+    closeEdit()
+    if (revokePristine && draftRow) {
+      void revokeCodexSubscription(draftRow.connectionKey)
+        .catch(() => {})
+        .then(() => load())
+        .catch(() => {})
     }
   }
 
@@ -183,6 +204,10 @@ export function CodexSubscriptionHub() {
 
   async function handleSaveEdit() {
     if (!editing) return
+    if (setupNew && !editName.trim()) {
+      setError('Give the subscription a name before finishing.')
+      return
+    }
     setBusyKey(editing.connectionKey)
     try {
       const updated = await patchCodexSubscriptionConnection(editing.connectionKey, {
@@ -379,9 +404,7 @@ export function CodexSubscriptionHub() {
                 type="button"
                 className="cu-btn cu-btn--primary cu-btn--sm"
                 onClick={() => {
-                  setCreating(true)
-                  setCreateName('')
-                  setError('')
+                  beginCreate()
                 }}
                 disabled={initialLoad}
               >
@@ -490,7 +513,7 @@ export function CodexSubscriptionHub() {
           role="presentation"
           onClick={e => {
             if (e.target === e.currentTarget && !busyKey) {
-              if (creating) setCreating(false)
+              if (creating) cancelCreate()
               else closeEdit()
             }
           }}
@@ -516,7 +539,7 @@ export function CodexSubscriptionHub() {
                 type="button"
                 className="cu-btn cu-btn--icon cu-btn--ghost"
                 onClick={() => {
-                  if (creating) setCreating(false)
+                  if (creating) cancelCreate()
                   else closeEdit()
                 }}
                 disabled={Boolean(busyKey)}
@@ -531,26 +554,34 @@ export function CodexSubscriptionHub() {
                 <label htmlFor="codex-sub-name">Name</label>
                 <input
                   id="codex-sub-name"
-                  value={creating ? createName : editName}
-                  onChange={e => (creating ? setCreateName : setEditName)(e.target.value)}
+                  value={editName}
+                  onChange={e => setEditName(e.target.value)}
                   disabled={Boolean(busyKey)}
+                  placeholder="The name agents see when they pick this subscription"
                 />
-                {creating ? (
-                  <span className="cu-field__hint">
-                    The name agents see when they pick this subscription.
-                  </span>
-                ) : null}
               </div>
-              {creating ? (
+              {creating && !editing ? (
                 <div className="cu-modal-steps">
-                  <span className="cu-modal-steps__title">What happens next</span>
+                  <span className="cu-modal-steps__title">
+                    {busyKey === 'create'
+                      ? 'Creating your subscription…'
+                      : 'Could not create the subscription.'}
+                  </span>
                   <ol className="cu-modal-steps__list">
-                    <li>Create the subscription with this name.</li>
                     <li>
                       Sign in with ChatGPT — ChatGPT opens in a new tab and you enter a device code.
                     </li>
                     <li>Pick the models to offer and choose a default.</li>
                   </ol>
+                  {busyKey !== 'create' ? (
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--ghost cu-btn--sm"
+                      onClick={() => void createDraft()}
+                    >
+                      Try again
+                    </button>
+                  ) : null}
                 </div>
               ) : editing ? (
                 <>
@@ -723,23 +754,24 @@ export function CodexSubscriptionHub() {
                 type="button"
                 className="cu-btn cu-btn--ghost cu-btn--sm"
                 onClick={() => {
-                  if (creating) setCreating(false)
-                  else closeEdit()
+                  if (creating) {
+                    // "Finish later" keeps the draft (the operator already
+                    // signed in or configured it); Cancel removes a pristine one.
+                    if (editing && setupNew) {
+                      setCreating(false)
+                      closeEdit()
+                    } else {
+                      cancelCreate()
+                    }
+                  } else {
+                    closeEdit()
+                  }
                 }}
                 disabled={Boolean(busyKey)}
               >
-                {creating || !setupNew ? 'Cancel' : 'Finish later'}
+                {creating && editing && setupNew ? 'Finish later' : 'Cancel'}
               </button>
-              {creating ? (
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--primary"
-                  onClick={() => void handleCreate()}
-                  disabled={busyKey === 'create'}
-                >
-                  {busyKey === 'create' ? 'Creating…' : 'Create and set up'}
-                </button>
-              ) : (
+              {editing ? (
                 <button
                   type="button"
                   className="cu-btn cu-btn--primary"
@@ -748,7 +780,7 @@ export function CodexSubscriptionHub() {
                 >
                   {busyKey ? 'Saving…' : setupNew ? 'Finish setup' : 'Update subscription'}
                 </button>
-              )}
+              ) : null}
             </div>
           </div>
         </div>
