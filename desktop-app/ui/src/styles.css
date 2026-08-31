@@ -12672,6 +12672,12 @@ pre {
    over it, exactly as they do over chat content in full-screen. Toasts
    (z-index: 4000) still sit above the header; the drawer's own z is unchanged. */
 .content-panel.content-panel--chat-drawer-open .top-bar {
+  /* Anchor the absolute top-bar to the LEFT edge of the fixed chat drawer so its
+     right-aligned box (wide global search) lives in the embed column instead of
+     painting over the drawer's top-right corner. The bell/tray and search move as
+     a unit, and their popovers (Inbox, search results) are anchored inside the
+     top-bar so they follow it and still surface in the embed column. */
+  right: calc(var(--chat-drawer-width) + var(--space-4) + var(--space-2));
   z-index: var(--layer-dropdown);
 }
 
