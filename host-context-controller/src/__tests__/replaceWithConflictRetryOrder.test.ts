@@ -8,11 +8,19 @@ import {
   serviceMatchesDesired,
 } from '../utils'
 
-async function readWritesTotal(kind: string): Promise<number> {
-  const metric = registry.getSingleMetric('clerum_hcc_writes_total')
-  if (!metric) throw new Error('clerum_hcc_writes_total is not registered')
+async function readLabeledCounter(name: string, kind: string): Promise<number> {
+  const metric = registry.getSingleMetric(name)
+  if (!metric) throw new Error(`${name} is not registered`)
   const snapshot = await metric.get()
   return snapshot.values.find(entry => entry.labels.kind === kind)?.value ?? 0
+}
+
+async function readWritesTotal(kind: string): Promise<number> {
+  return readLabeledCounter('clerum_hcc_writes_total', kind)
+}
+
+async function readWriteSkipsTotal(kind: string): Promise<number> {
+  return readLabeledCounter('clerum_hcc_write_skips_total', kind)
 }
 
 function apiException(code: number): ApiException<unknown> {
@@ -346,6 +354,56 @@ describe('replaceWithConflictRetry order and retry', () => {
 
     expect(replace).not.toHaveBeenCalled()
     expect(await readWritesTotal('Service')).toBe(before)
+  })
+
+  it('SKIP-1: isUpToDate skip increments clerum_hcc_write_skips_total{kind=Service}', async () => {
+    const replace = vi.fn()
+    const beforeWrites = await readWritesTotal('Service')
+    const beforeSkips = await readWriteSkipsTotal('Service')
+
+    await replaceWithConflictRetry({
+      description: 'Service "svc"',
+      logPrefix: '[Test]',
+      body: desired,
+      mergeExisting: preserveServiceAssignedFields,
+      isUpToDate: () => true,
+      read: async () => existing,
+      replace,
+    })
+
+    expect(replace).not.toHaveBeenCalled()
+    expect(await readWritesTotal('Service')).toBe(beforeWrites)
+    expect(await readWriteSkipsTotal('Service')).toBe(beforeSkips + 1)
+    expect(await registry.metrics()).toContain('clerum_hcc_write_skips_total')
+  })
+
+  it('SKIP-2: successful replace and read-404 do not increment write skips', async () => {
+    const replace = vi.fn().mockResolvedValue({})
+    const beforeSkips = await readWriteSkipsTotal('Service')
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    await replaceWithConflictRetry({
+      description: 'Service "svc"',
+      logPrefix: '[Test]',
+      body: desired,
+      mergeExisting: preserveServiceAssignedFields,
+      isUpToDate: () => false,
+      read: async () => existing,
+      replace,
+    })
+
+    await replaceWithConflictRetry({
+      description: 'Service "svc"',
+      logPrefix: '[Test]',
+      body: desired,
+      read: async () => {
+        throw { code: 404 }
+      },
+      replace,
+    })
+
+    expect(await readWriteSkipsTotal('Service')).toBe(beforeSkips)
+    log.mockRestore()
   })
 
   it('WRITE-3: 409 then successful replace increments once, not per attempt', async () => {

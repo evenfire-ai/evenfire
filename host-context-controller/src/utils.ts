@@ -1,5 +1,5 @@
 import * as k8s from '@kubernetes/client-node'
-import { writesTotal } from './metrics'
+import { writeSkipsTotal, writesTotal } from './metrics'
 
 /** Extract HTTP status code from a K8s client error (handles both error formats). */
 export function getErrorCode(error: unknown): number | undefined {
@@ -71,7 +71,10 @@ export async function replaceWithConflictRetry<
       metadata: { ...desired.metadata, resourceVersion: existing.metadata?.resourceVersion },
     }
     const next = mergeExisting ? mergeExisting(base, existing) : base
-    if (isUpToDate?.(next, existing)) return
+    if (isUpToDate?.(next, existing)) {
+      writeSkipsTotal.inc({ kind: next.kind ?? 'unknown' })
+      return
+    }
     if (mutationAllowed && !mutationAllowed()) return
     try {
       await replace(next)
