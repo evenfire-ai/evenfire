@@ -265,7 +265,7 @@ export function App() {
   // Measured top of the embed slot, published as `--chat-drawer-top` so the fixed
   // drawer follows the app content down when the sandbox-ui header wraps (narrow
   // window). 0 means "not measured yet" -> the CSS fallback (64px) applies.
-  const [chatDrawerEmbedTop, setChatDrawerEmbedTop] = React.useState(0)
+  const [chatDrawerEmbedTop, setChatDrawerEmbedTop] = React.useState<number | null>(null)
   const [chatSwitcherFocusRequestId, setChatSwitcherFocusRequestId] = React.useState(0)
   const [availableSandboxUiApps, setAvailableSandboxUiApps] = React.useState<ActiveSandboxUiApp[]>(
     []
@@ -2020,8 +2020,10 @@ export function App() {
                                   ? {
                                       '--chat-drawer-width': `${chatDrawerResize.width}px`,
                                       // Only publish the measured top once we have one;
-                                      // when 0 (pre-measure/tests) the CSS fallback applies.
-                                      ...(chatDrawerEmbedTop > 0
+                                      // when unmeasured (null, pre-measure/tests) the CSS
+                                      // fallback applies. Uses null — not 0 — so a legitimate
+                                      // rect.top of 0/negative still follows the embed.
+                                      ...(chatDrawerEmbedTop !== null
                                         ? { '--chat-drawer-top': `${chatDrawerEmbedTop}px` }
                                         : {}),
                                     }

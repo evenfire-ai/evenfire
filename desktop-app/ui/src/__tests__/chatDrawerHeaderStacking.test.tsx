@@ -68,7 +68,7 @@ describe('chat drawer header stacking', () => {
     // while the z-lift to the dropdown layer (593d7f5c) is preserved.
     const rule = /\.content-panel--chat-drawer-open \.top-bar\s*\{([^}]*)\}/.exec(stylesCss)
     expect(rule).not.toBeNull()
-    const body = rule![1]
+    const body = rule![1] ?? ''
     const right = /right:\s*([^;]+);/.exec(body)
     expect(right).not.toBeNull()
     expect(right![1]).toContain('--chat-drawer-width')
