@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
+import { DataTable } from '@clerum/frontend-table-system'
 import { getProviderLabel } from '../lib/llm'
 import type { HostItem, HostRef } from './HostTable.types'
 import { LlmProviderIcon } from './LlmProviderIcon'
@@ -205,19 +206,19 @@ export function HostTable({
         }
       />
       {isInitialLoad ? (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <TableHeaderRow columns={HOST_COLUMNS} />
             </thead>
             <tbody>
               <SkeletonTableRows columns={4} rows={4} />
             </tbody>
-          </table>
+          </DataTable>
         </div>
       ) : filteredRows.length === 0 ? (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <TableHeaderRow columns={HOST_COLUMNS} />
             </thead>
@@ -232,11 +233,11 @@ export function HostTable({
                 }
               />
             </tbody>
-          </table>
+          </DataTable>
         </div>
       ) : (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <TableHeaderRow columns={HOST_COLUMNS} />
             </thead>
@@ -331,7 +332,7 @@ export function HostTable({
                 )
               })}
             </tbody>
-          </table>
+          </DataTable>
         </div>
       )}
     </div>

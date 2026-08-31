@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { DEFAULT_WORKFLOW_RECIPE_NAMESPACE } from '@constants/workflowRecipes'
 import type { WorkflowRecipeResource } from '../lib/api'
@@ -113,23 +114,23 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
       {error ? <div className="cu-banner cu-banner--error cu-table-error">{error}</div> : null}
 
       {isInitialLoad ? (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band cu-installed-plugins-table">
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band cu-installed-plugins-table">
             <thead>
               <TableHeaderRow columns={RECIPE_COLUMNS} />
             </thead>
             <tbody>
               <SkeletonTableRows columns={RECIPE_COLUMNS.length} rows={4} />
             </tbody>
-          </table>
+          </DataTable>
         </div>
       ) : filteredItems.length === 0 ? (
         <div className="cu-empty">
           {normalizedSearch ? 'No plugins match this search.' : <PluginsEmptyState />}
         </div>
       ) : (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band cu-installed-plugins-table">
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band cu-installed-plugins-table">
             <thead>
               <TableHeaderRow columns={RECIPE_COLUMNS} />
             </thead>
@@ -176,7 +177,7 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
                 )
               })}
             </tbody>
-          </table>
+          </DataTable>
         </div>
       )}
     </div>

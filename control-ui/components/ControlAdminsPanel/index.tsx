@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { useAuth } from '@components/AuthContext'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { IconUsers } from '@components/Sidebar/icons'
@@ -327,8 +328,8 @@ export function ControlAdminsPanel({
     <div className="cu-profile-section">
       {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
       {loading || filteredInvitations.length > 0 ? (
-        <div className="cu-table-wrap cu-table-wrap--border-top">
-          <table className="cu-table cu-table--header-band">
+        <div className="eft-table-viewport cu-table-wrap cu-table-wrap--border-top">
+          <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <tr>
                 <th>Pending invitation</th>
@@ -365,11 +366,11 @@ export function ControlAdminsPanel({
                 ))
               )}
             </tbody>
-          </table>
+          </DataTable>
         </div>
       ) : null}
-      <div className="cu-table-wrap cu-table-wrap--border-top">
-        <table className="cu-table cu-table--header-band">
+      <div className="eft-table-viewport cu-table-wrap cu-table-wrap--border-top">
+        <DataTable className="eft-table cu-table cu-table--header-band">
           <thead>
             <tr>
               <th>Username</th>
@@ -536,7 +537,7 @@ export function ControlAdminsPanel({
               </tr>
             )}
           </tbody>
-        </table>
+        </DataTable>
       </div>
       {confirmDialog}
     </div>

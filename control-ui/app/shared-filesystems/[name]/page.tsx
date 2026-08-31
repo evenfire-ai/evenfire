@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { FileUploadModal } from '@components/FileUploadModal'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { useConfirmDialog } from '../../../components/ConfirmDialog'
@@ -361,15 +362,15 @@ export default function SharedFileSystemDetailsPage() {
                 </button>
               </div>
             </div>
-            <div className="cu-table-wrap">
-              <table className="cu-table">
+            <div className="eft-table-viewport cu-table-wrap">
+              <DataTable className="eft-table cu-table">
                 <thead>
                   <TableHeaderRow columns={FILE_COLUMNS} />
                 </thead>
                 <tbody>
                   <SkeletonTableRows columns={FILE_COLUMNS.length} rows={5} />
                 </tbody>
-              </table>
+              </DataTable>
             </div>
           </div>
         </div>
@@ -546,8 +547,8 @@ export default function SharedFileSystemDetailsPage() {
               files here to upload.
             </div>
           ) : (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
+            <div className="eft-table-viewport cu-table-wrap">
+              <DataTable className="eft-table cu-table">
                 <thead>
                   <TableHeaderRow columns={FILE_COLUMNS} />
                 </thead>
@@ -637,7 +638,7 @@ export default function SharedFileSystemDetailsPage() {
                     })
                   )}
                 </tbody>
-              </table>
+              </DataTable>
             </div>
           )}
         </div>

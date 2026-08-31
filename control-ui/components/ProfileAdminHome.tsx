@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   AdminPendingInvitationListItem,
@@ -580,8 +581,8 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
           ) : activeTab === 'teams' ? (
             <>
               {busy && !loaded ? (
-                <div className="cu-table-wrap">
-                  <table className="cu-table cu-table--profile cu-table--header-band">
+                <div className="eft-table-viewport cu-table-wrap">
+                  <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
                     <thead>
                       <tr>
                         <th>Team name</th>
@@ -600,15 +601,15 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                     <tbody>
                       <SkeletonTableRows columns={5} rows={5} />
                     </tbody>
-                  </table>
+                  </DataTable>
                 </div>
               ) : filteredTeams.length === 0 ? (
                 <div className="cu-empty">
                   {teamSearchInput.trim() ? 'No teams match this search.' : 'No teams yet.'}
                 </div>
               ) : (
-                <div className="cu-table-wrap">
-                  <table className="cu-table cu-table--profile cu-table--header-band">
+                <div className="eft-table-viewport cu-table-wrap">
+                  <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
                     <thead>
                       <tr>
                         <th>Team name</th>
@@ -693,15 +694,15 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                         </tr>
                       ))}
                     </tbody>
-                  </table>
+                  </DataTable>
                 </div>
               )}
             </>
           ) : (
             <>
               {busy && !loaded ? (
-                <div className="cu-table-wrap">
-                  <table className="cu-table cu-table--profile cu-table--header-band">
+                <div className="eft-table-viewport cu-table-wrap">
+                  <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
                     <thead>
                       <tr>
                         <th>Name</th>
@@ -725,15 +726,15 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                     <tbody>
                       <SkeletonTableRows columns={4} rows={5} />
                     </tbody>
-                  </table>
+                  </DataTable>
                 </div>
               ) : (
                 <>
                   {filteredPendingInvitations.length > 0 && (
                     <div className="cu-profile-section">
                       <p className="cu-profile-section__label">Pending invitations</p>
-                      <div className="cu-table-wrap">
-                        <table className="cu-table cu-table--profile cu-table--header-band">
+                      <div className="eft-table-viewport cu-table-wrap">
+                        <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
                           <thead>
                             <tr>
                               <th>Team</th>
@@ -802,7 +803,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                               </tr>
                             ))}
                           </tbody>
-                        </table>
+                        </DataTable>
                       </div>
                     </div>
                   )}
@@ -828,8 +829,8 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                         : 'No registered members yet.'}
                     </div>
                   ) : (
-                    <div className="cu-table-wrap">
-                      <table className="cu-table cu-table--profile cu-table--header-band">
+                    <div className="eft-table-viewport cu-table-wrap">
+                      <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
                         <thead>
                           <tr>
                             <th>Name</th>
@@ -955,7 +956,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                             </tr>
                           ))}
                         </tbody>
-                      </table>
+                      </DataTable>
                     </div>
                   )}
                 </>

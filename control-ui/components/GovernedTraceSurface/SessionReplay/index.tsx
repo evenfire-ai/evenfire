@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
+import { DataTable } from '@clerum/frontend-table-system'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
@@ -168,8 +169,8 @@ export function SessionReplay({
         {loading ? (
           <div className="cu-empty">Loading governed sessions...</div>
         ) : invalidRange ? null : (
-          <div className="cu-table-wrap cu-table-wrap--sticky-header">
-            <table className="cu-table cu-table--header-band cu-trace-explorer-table">
+          <div className="eft-table-viewport cu-table-wrap cu-table-wrap--sticky-header">
+            <DataTable className="eft-table cu-table cu-table--header-band cu-trace-explorer-table">
               <thead>
                 <TableHeaderRow columns={columns} />
               </thead>
@@ -199,7 +200,7 @@ export function SessionReplay({
                   </tr>
                 ) : null}
               </tbody>
-            </table>
+            </DataTable>
           </div>
         )}
         {page?.nextCursor ? (

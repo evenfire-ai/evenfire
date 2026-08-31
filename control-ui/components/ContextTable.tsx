@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
+import { DataTable } from '@clerum/frontend-table-system'
 import { ContextResource } from '../lib/api'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
@@ -121,23 +122,23 @@ export function ContextTable({
         }
       />
       {isInitialLoad ? (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <TableHeaderRow columns={CONTEXT_COLUMNS} />
             </thead>
             <tbody>
               <SkeletonTableRows columns={CONTEXT_COLUMNS.length} rows={4} />
             </tbody>
-          </table>
+          </DataTable>
         </div>
       ) : filteredRows.length === 0 ? (
         <div className="cu-empty">
           {normalizedSearch ? 'No contexts match this search.' : 'No contexts found.'}
         </div>
       ) : (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <TableHeaderRow columns={CONTEXT_COLUMNS} />
             </thead>
@@ -188,7 +189,7 @@ export function ContextTable({
                 </tr>
               ))}
             </tbody>
-          </table>
+          </DataTable>
         </div>
       )}
     </div>

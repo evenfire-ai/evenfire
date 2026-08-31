@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { useParams } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { AuthGate } from '../../components/AuthGate'
 import { DashboardLayout } from '../../components/DashboardLayout'
@@ -35,8 +36,13 @@ function formatBytes(bytes: number): string {
 
 function OutputsSkeletonTable({ headers }: { headers: string[] }) {
   return (
-    <div className="cu-table-wrap" role="status" aria-label="Loading outputs" aria-live="polite">
-      <table className="cu-table cu-table--header-band">
+    <div
+      className="eft-table-viewport cu-table-wrap"
+      role="status"
+      aria-label="Loading outputs"
+      aria-live="polite"
+    >
+      <DataTable className="eft-table cu-table cu-table--header-band">
         <thead>
           <tr>
             {headers.map(header => (
@@ -47,7 +53,7 @@ function OutputsSkeletonTable({ headers }: { headers: string[] }) {
         <tbody>
           <SkeletonTableRows columns={headers.length} />
         </tbody>
-      </table>
+      </DataTable>
     </div>
   )
 }
@@ -208,8 +214,8 @@ function OutputsPageContent() {
                   : 'No workflow artifacts found. Run a plugin with document generation tools to see outputs here.'}
               </div>
             ) : (
-              <div className="cu-table-wrap">
-                <table className="cu-table cu-table--header-band">
+              <div className="eft-table-viewport cu-table-wrap">
+                <DataTable className="eft-table cu-table cu-table--header-band">
                   <thead>
                     <tr>
                       {['File', 'Format', 'Recipe', 'Run', 'Completed', 'Action'].map(h => (
@@ -278,7 +284,7 @@ function OutputsPageContent() {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                </DataTable>
               </div>
             )
           ) : (
@@ -294,8 +300,8 @@ function OutputsPageContent() {
                     : 'No desktop app artifacts found. Use internal tools (`clerum__generate_pdf`, etc.) during chat to generate files.'}
                 </div>
               ) : (
-                <div className="cu-table-wrap">
-                  <table className="cu-table cu-table--header-band">
+                <div className="eft-table-viewport cu-table-wrap">
+                  <DataTable className="eft-table cu-table cu-table--header-band">
                     <thead>
                       <tr>
                         {['File', 'Format', 'Size', 'Host', 'Created', 'Action'].map(h => (
@@ -364,7 +370,7 @@ function OutputsPageContent() {
                         </tr>
                       ))}
                     </tbody>
-                  </table>
+                  </DataTable>
                 </div>
               )}
             </>

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
+import { DataTable } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type CreateRegistryApiKeyInput,
@@ -199,8 +200,8 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
           view.keys.length === 0 ? (
             <p>No API keys yet. Create one to publish to @{view.org} from CI or scripts.</p>
           ) : (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
+            <div className="eft-table-viewport cu-table-wrap">
+              <DataTable className="eft-table cu-table">
                 <thead>
                   <TableHeaderRow columns={API_KEYS_COLUMNS} />
                 </thead>
@@ -229,7 +230,7 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </DataTable>
             </div>
           )
         ) : null}

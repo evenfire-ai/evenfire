@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
@@ -397,8 +398,8 @@ export function GovernedTraceSurface({
               matchingCount={visibleEvents.length}
               windowLabel={traceWindowLabel(timeWindow)}
             />
-            <div className="cu-table-wrap cu-table-wrap--sticky-header">
-              <table className="cu-table cu-table--header-band">
+            <div className="eft-table-viewport cu-table-wrap cu-table-wrap--sticky-header">
+              <DataTable className="eft-table cu-table cu-table--header-band">
                 <thead>
                   <TableHeaderRow columns={TRACE_COLUMNS} />
                 </thead>
@@ -444,7 +445,7 @@ export function GovernedTraceSurface({
                     </tr>
                   ) : null}
                 </tbody>
-              </table>
+              </DataTable>
             </div>
           </>
         )}

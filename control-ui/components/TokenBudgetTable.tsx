@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
+import { DataTable } from '@clerum/frontend-table-system'
 import type { TokenBudget } from '@lib/api'
 import {
   budgetProgressPercent,
@@ -106,15 +107,15 @@ export function TokenBudgetTable({
         }
       />
       {isInitialLoad ? (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <TableHeaderRow columns={BUDGET_COLUMNS} />
             </thead>
             <tbody>
               <SkeletonTableRows columns={BUDGET_COLUMNS.length} rows={4} />
             </tbody>
-          </table>
+          </DataTable>
         </div>
       ) : filteredItems.length === 0 ? (
         <div className="cu-empty">
@@ -123,8 +124,8 @@ export function TokenBudgetTable({
             : 'No token budgets defined yet. Create one to start tracking spend against a limit.'}
         </div>
       ) : (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <TableHeaderRow columns={BUDGET_COLUMNS} />
             </thead>
@@ -142,7 +143,7 @@ export function TokenBudgetTable({
                 />
               ))}
             </tbody>
-          </table>
+          </DataTable>
         </div>
       )}
     </div>

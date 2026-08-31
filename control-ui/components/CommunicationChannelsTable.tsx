@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
+import { DataTable } from '@clerum/frontend-table-system'
 import {
   COMMUNICATION_CHANNEL_PROVIDERS,
   type CommunicationChannelProvider,
@@ -213,23 +214,23 @@ export function CommunicationChannelsTable({
           </div>
         ) : null}
         {isInitialLoad ? (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <TableHeaderRow columns={COMMUNICATION_CHANNEL_COLUMNS} />
               </thead>
               <tbody>
                 <SkeletonTableRows columns={COMMUNICATION_CHANNEL_COLUMNS.length} rows={3} />
               </tbody>
-            </table>
+            </DataTable>
           </div>
         ) : filteredRows.length === 0 ? (
           <div className="cu-empty">
             {normalizedSearch ? 'No channels match this search.' : 'No resources found.'}
           </div>
         ) : (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <TableHeaderRow columns={COMMUNICATION_CHANNEL_COLUMNS} />
               </thead>
@@ -297,7 +298,7 @@ export function CommunicationChannelsTable({
                   )
                 })}
               </tbody>
-            </table>
+            </DataTable>
           </div>
         )}
       </div>

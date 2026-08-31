@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useEffect, useRef, useState } from 'react'
+import { DataTable } from '@clerum/frontend-table-system'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
 import { Button, Field, FormSection, TextInput } from '@components/ui'
@@ -359,8 +360,8 @@ export function UpdateConnectorCredentials({
 
       <form className="cu-connector-credentials-form" onSubmit={handleSubmit}>
         <div className="cu-form-stack">
-          <div className="cu-table-wrap">
-            <table className="cu-table">
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table">
               <thead>
                 <tr>
                   <th>Secret key</th>
@@ -379,7 +380,7 @@ export function UpdateConnectorCredentials({
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </DataTable>
           </div>
 
           {envSecret.keys.map(k => (

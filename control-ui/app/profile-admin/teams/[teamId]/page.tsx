@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
 import { SelectionDropdown } from '@components/SelectionDropdown'
@@ -730,8 +731,8 @@ export default function TeamDetailsPage() {
                     </button>
                   </div>
                   {initialLoading ? (
-                    <div className="cu-table-wrap">
-                      <table className="cu-table">
+                    <div className="eft-table-viewport cu-table-wrap">
+                      <DataTable className="eft-table cu-table">
                         <thead>
                           <tr>
                             <th>Member</th>
@@ -779,7 +780,7 @@ export default function TeamDetailsPage() {
                             </tr>
                           ))}
                         </tbody>
-                      </table>
+                      </DataTable>
                     </div>
                   ) : (
                     <>
@@ -797,8 +798,8 @@ export default function TeamDetailsPage() {
                           >
                             Pending invitations
                           </p>
-                          <div className="cu-table-wrap">
-                            <table className="cu-table">
+                          <div className="eft-table-viewport cu-table-wrap">
+                            <DataTable className="eft-table cu-table">
                               <thead>
                                 <tr>
                                   <th>Email</th>
@@ -863,7 +864,7 @@ export default function TeamDetailsPage() {
                                   </tr>
                                 ))}
                               </tbody>
-                            </table>
+                            </DataTable>
                           </div>
                         </div>
                       )}
@@ -874,8 +875,8 @@ export default function TeamDetailsPage() {
                             : 'No members yet.'}
                         </div>
                       ) : (
-                        <div className="cu-table-wrap">
-                          <table className="cu-table">
+                        <div className="eft-table-viewport cu-table-wrap">
+                          <DataTable className="eft-table cu-table">
                             <thead>
                               <tr>
                                 <th>Member</th>
@@ -962,7 +963,7 @@ export default function TeamDetailsPage() {
                                 )
                               })}
                             </tbody>
-                          </table>
+                          </DataTable>
                         </div>
                       )}
                     </>

@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import { DataTable } from '@clerum/frontend-table-system'
 import {
   type CodexSubscriptionConnectionView,
   createCodexSubscriptionConnection,
@@ -357,8 +358,8 @@ export function CodexSubscriptionHub() {
         ) : null}
 
         {initialLoad ? (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
                   <th>Name</th>
@@ -381,7 +382,7 @@ export function CodexSubscriptionHub() {
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </DataTable>
           </div>
         ) : filtered.length === 0 ? (
           <div className="cu-empty">
@@ -390,8 +391,8 @@ export function CodexSubscriptionHub() {
               : 'No ChatGPT subscriptions found.'}
           </div>
         ) : (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
                   <th>Name</th>
@@ -437,7 +438,7 @@ export function CodexSubscriptionHub() {
                   )
                 })}
               </tbody>
-            </table>
+            </DataTable>
           </div>
         )}
       </div>

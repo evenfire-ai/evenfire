@@ -8,6 +8,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
+import { DataTable } from '@clerum/frontend-table-system'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import type { InfrastructureCostResponse, InfrastructureCostSelection } from '@lib/governedTrace'
@@ -136,8 +137,8 @@ function CostRunRateForecast({ response }: { response: InfrastructureCostRespons
         <span className="cu-trace-cost-section-title">Historical run-rate forecast</span>
         <span className="cu-trace-cost-chip">Directional</span>
       </div>
-      <div className="cu-table-wrap">
-        <table className="cu-table cu-table--header-band">
+      <div className="eft-table-viewport cu-table-wrap">
+        <DataTable className="eft-table cu-table cu-table--header-band">
           <thead>
             <tr>
               <th scope="col">Evidence basis</th>
@@ -177,7 +178,7 @@ function CostRunRateForecast({ response }: { response: InfrastructureCostRespons
               </tr>
             ))}
           </tbody>
-        </table>
+        </DataTable>
       </div>
       <div className="cu-trace-cost-forecast__warning" role="status">
         This extrapolates persisted daily patterns. Provisioned estimates capture replica/runtime
@@ -363,8 +364,8 @@ function ComponentsTable({
     <section className="cu-trace-cost-components">
       <span className="cu-trace-cost-section-title">{title}</span>
       {components.length ? (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <TableHeaderRow columns={COST_COMPONENT_COLUMNS} />
             </thead>
@@ -393,7 +394,7 @@ function ComponentsTable({
                 </tr>
               ))}
             </tbody>
-          </table>
+          </DataTable>
         </div>
       ) : (
         <div className="cu-empty cu-empty--compact">No component rows returned for this basis.</div>

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { AuthGate } from '@components/AuthGate'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
@@ -280,7 +281,7 @@ export default function CreateMemberPage() {
                       {selectedTeams.length > 0 ? (
                         <div className="cu-permission-selection">
                           <div className="cu-permission-selection__table cu-table-wrap">
-                            <table className="cu-table">
+                            <DataTable className="eft-table cu-table">
                               <thead>
                                 <tr>
                                   <th>Team</th>
@@ -347,7 +348,7 @@ export default function CreateMemberPage() {
                                   )
                                 })}
                               </tbody>
-                            </table>
+                            </DataTable>
                           </div>
                         </div>
                       ) : (

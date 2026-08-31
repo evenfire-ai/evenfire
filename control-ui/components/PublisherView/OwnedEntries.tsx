@@ -2,6 +2,7 @@
 
 import React, { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { IconChevronRight } from '@components/icons'
 import { MARKETPLACE_ENTRY_TYPE_LABELS } from '@constants/marketplaceEntryTypes'
 import { CONTROL_ROUTES } from '@constants/routes'
@@ -267,8 +268,8 @@ export function OwnedEntries({
           ) : null}
           {!loading && !error && visibleEntries.length > 0 ? (
             <>
-              <div className="cu-table-wrap">
-                <table className="cu-table">
+              <div className="eft-table-viewport cu-table-wrap">
+                <DataTable className="eft-table cu-table">
                   <thead>
                     <TableHeaderRow columns={COLUMNS} />
                   </thead>
@@ -403,7 +404,7 @@ export function OwnedEntries({
                       )
                     })}
                   </tbody>
-                </table>
+                </DataTable>
               </div>
             </>
           ) : null}

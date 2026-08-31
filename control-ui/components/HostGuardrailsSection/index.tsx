@@ -2,6 +2,7 @@
 
 import React, { useCallback, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
 import { IconX } from '@components/icons'
@@ -105,8 +106,8 @@ export function HostGuardrailsSection({
           ) : null}
         </div>
 
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <tr>
                 <th>Hook</th>
@@ -155,7 +156,7 @@ export function HostGuardrailsSection({
                 ))
               )}
             </tbody>
-          </table>
+          </DataTable>
         </div>
       </div>
 

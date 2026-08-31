@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useEffect, useMemo, useState } from 'react'
+import { DataTable } from '@clerum/frontend-table-system'
 import type { LlmAllowedModel } from '@lib/api'
 import { catalogGroupKey, formatContextWindow, getProviderDisplayLabel } from '@lib/llm'
 import { isUnpricedAllowedModel } from '@lib/llmModelUnpriced'
@@ -349,15 +350,15 @@ export function LlmModelTable({
       />
       {navigation}
       {isInitialLoad ? (
-        <div className="cu-table-wrap cu-table-wrap--sticky-header">
-          <table className="cu-table cu-table--header-band cu-llm-model-table">
+        <div className="eft-table-viewport cu-table-wrap cu-table-wrap--sticky-header">
+          <DataTable className="eft-table cu-table cu-table--header-band cu-llm-model-table">
             <thead>
               <TableHeaderRow columns={modelColumns} />
             </thead>
             <tbody>
               <SkeletonTableRows columns={modelColumns.length} rows={4} />
             </tbody>
-          </table>
+          </DataTable>
         </div>
       ) : filteredItems.length === 0 ? (
         <div className="cu-empty">
@@ -366,8 +367,8 @@ export function LlmModelTable({
             : 'No models in the allowlist yet. Add one to let agents and runtime use it.'}
         </div>
       ) : (
-        <div className="cu-table-wrap cu-table-wrap--sticky-header">
-          <table className="cu-table cu-table--header-band cu-llm-model-table">
+        <div className="eft-table-viewport cu-table-wrap cu-table-wrap--sticky-header">
+          <DataTable className="eft-table cu-table cu-table--header-band cu-llm-model-table">
             <thead>
               <TableHeaderRow columns={modelColumns} />
             </thead>
@@ -519,7 +520,7 @@ export function LlmModelTable({
                 </tbody>
               )
             })}
-          </table>
+          </DataTable>
         </div>
       )}
     </div>

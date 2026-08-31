@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { AuthGate } from '@components/AuthGate'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
@@ -260,7 +261,7 @@ export default function CreateControlAdminInvitationPage() {
                 </Field>
                 {selectedTeams.length > 0 ? (
                   <div className="cu-permission-selection__table cu-table-wrap">
-                    <table className="cu-table">
+                    <DataTable className="eft-table cu-table">
                       <thead>
                         <tr>
                           <th>Team</th>
@@ -323,7 +324,7 @@ export default function CreateControlAdminInvitationPage() {
                           )
                         })}
                       </tbody>
-                    </table>
+                    </DataTable>
                   </div>
                 ) : (
                   <p className="cu-muted-note--compact">No Desktop App teams selected.</p>

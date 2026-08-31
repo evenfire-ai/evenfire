@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '../../../app/constants/routes'
 import { useConfirmDialog } from '../../../components/ConfirmDialog'
 import { CreateFlowPanel } from '../../../components/CreateFlowPanel'
@@ -266,8 +267,8 @@ export default function GuardrailDetailPage() {
               {agents.length === 0 ? (
                 <div className="cu-empty">No agents reference this guardrail.</div>
               ) : (
-                <div className="cu-table-wrap">
-                  <table className="cu-table cu-table--header-band">
+                <div className="eft-table-viewport cu-table-wrap">
+                  <DataTable className="eft-table cu-table cu-table--header-band">
                     <thead>
                       <tr>
                         <th>Agent</th>
@@ -305,7 +306,7 @@ export default function GuardrailDetailPage() {
                         </tr>
                       ))}
                     </tbody>
-                  </table>
+                  </DataTable>
                 </div>
               )}
             </FormSection>

@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useEffect, useMemo, useState } from 'react'
+import { DataTable } from '@clerum/frontend-table-system'
 import {
   HostEnvEntry,
   HostEnvWriteResult,
@@ -260,7 +261,7 @@ export function HostEnvTable({ hostRef }: { hostRef: string }) {
         </div>
       ) : null}
 
-      <table className="cu-table" data-testid="host-env-table">
+      <DataTable className="eft-table cu-table" data-testid="host-env-table">
         <thead>
           <tr>
             <th>Name</th>
@@ -315,7 +316,7 @@ export function HostEnvTable({ hostRef }: { hostRef: string }) {
             ))
           )}
         </tbody>
-      </table>
+      </DataTable>
 
       {open ? (
         <section className="cu-host-env-form" data-testid="host-env-form">

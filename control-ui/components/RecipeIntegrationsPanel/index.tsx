@@ -1,6 +1,7 @@
 'use client'
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import { DataTable } from '@clerum/frontend-table-system'
 import {
   type UserGrant,
   type WorkflowRecipeResource,
@@ -247,8 +248,8 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
           .
         </div>
       ) : (
-        <div className="cu-table-wrap">
-          <table className="cu-table">
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table">
             <thead>
               <tr>
                 <th>Client</th>
@@ -361,8 +362,8 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
                               </div>
                             )}
                             {ugState.loadState === 'ready' && ugState.users.length > 0 && (
-                              <table
-                                className="cu-table"
+                              <DataTable
+                                className="eft-table cu-table"
                                 style={{ fontSize: '0.82rem', marginTop: 0 }}
                               >
                                 <thead>
@@ -406,7 +407,7 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
                                     )
                                   })}
                                 </tbody>
-                              </table>
+                              </DataTable>
                             )}
                             <div style={{ marginTop: '0.4rem' }}>
                               <button
@@ -417,7 +418,9 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
                                 aria-label="Refresh user grants"
                               >
                                 <IconRefresh
-                                  className={ugState.loadState === 'loading' ? 'cu-spin' : undefined}
+                                  className={
+                                    ugState.loadState === 'loading' ? 'cu-spin' : undefined
+                                  }
                                   width={14}
                                   height={14}
                                 />
@@ -431,7 +434,7 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
                 )
               })}
             </tbody>
-          </table>
+          </DataTable>
         </div>
       )}
       {confirmDialog}

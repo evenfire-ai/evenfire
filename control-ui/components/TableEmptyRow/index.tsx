@@ -1,5 +1,6 @@
 'use client'
 
+import { TableStateRow } from '@clerum/frontend-table-system'
 import { Button } from '@components/ui'
 import type { TableEmptyRowProps } from './types'
 
@@ -10,15 +11,16 @@ import type { TableEmptyRowProps } from './types'
  */
 export function TableEmptyRow({ action, colSpan, message }: TableEmptyRowProps) {
   return (
-    <tr>
-      <td className="cu-empty" colSpan={colSpan}>
-        {message}
-        {action ? (
+    <TableStateRow
+      action={
+        action ? (
           <Button className="cu-empty__action" onClick={action.onSelect} size="sm" variant="ghost">
             {action.label}
           </Button>
-        ) : null}
-      </td>
-    </tr>
+        ) : undefined
+      }
+      colSpan={colSpan}
+      message={message}
+    />
   )
 }

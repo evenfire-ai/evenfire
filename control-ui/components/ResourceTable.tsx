@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useMemo } from 'react'
+import { DataTable } from '@clerum/frontend-table-system'
 import { SkeletonTableRows } from './SkeletonTableRows'
 import { TablePanelHeader } from './TablePanelHeader'
 import { IconRefresh } from './icons'
@@ -67,8 +68,8 @@ export function ResourceTable({
           }
         />
         {isInitialLoad ? (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--profile">
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table cu-table--profile">
               <thead>
                 <tr>
                   <th>Connector name</th>
@@ -78,13 +79,13 @@ export function ResourceTable({
               <tbody>
                 <SkeletonTableRows columns={2} rows={5} />
               </tbody>
-            </table>
+            </DataTable>
           </div>
         ) : rows.length === 0 ? (
           <div className="cu-empty">No resources found.</div>
         ) : (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--profile">
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table cu-table--profile">
               <thead>
                 <tr>
                   <th>Connector name</th>
@@ -113,7 +114,7 @@ export function ResourceTable({
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </DataTable>
           </div>
         )}
       </div>

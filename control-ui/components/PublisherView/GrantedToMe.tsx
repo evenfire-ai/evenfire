@@ -1,6 +1,7 @@
 'use client'
 
 import Link from 'next/link'
+import { DataTable } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { GrantedToMeItem } from '../../lib/api'
 import type { InboundGrantsStatus } from '../../lib/hooks/useInboundGrants'
@@ -55,8 +56,8 @@ export function GrantedToMe({
   }
 
   return (
-    <div className="cu-table-wrap">
-      <table className="cu-table">
+    <div className="eft-table-viewport cu-table-wrap">
+      <DataTable className="eft-table cu-table">
         <thead>
           <TableHeaderRow columns={COLUMNS} />
         </thead>
@@ -71,7 +72,7 @@ export function GrantedToMe({
             </tr>
           ))}
         </tbody>
-      </table>
+      </DataTable>
     </div>
   )
 }

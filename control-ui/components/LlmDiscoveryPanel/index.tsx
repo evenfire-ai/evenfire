@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { DataTable } from '@clerum/frontend-table-system'
 import { LlmProviderIcon } from '@components/LlmProviderIcon'
 import { IconModels } from '@components/Sidebar/icons'
 import { SkeletonTableRows } from '@components/SkeletonTableRows'
@@ -468,23 +469,23 @@ export function LlmDiscoveryPanel({
         ) : null}
 
         {isInitialLoad ? (
-          <div className="cu-table-wrap cu-table-wrap--sticky-header">
-            <table className="cu-table cu-table--header-band">
+          <div className="eft-table-viewport cu-table-wrap cu-table-wrap--sticky-header">
+            <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <TableHeaderRow columns={reviewColumns} />
               </thead>
               <tbody>
                 <SkeletonTableRows columns={reviewColumns.length} rows={4} />
               </tbody>
-            </table>
+            </DataTable>
           </div>
         ) : reviewQueue.length === 0 ? (
           <div className="cu-empty">
             No models awaiting review. Sync the catalog to pull newly released models.
           </div>
         ) : (
-          <div className="cu-table-wrap cu-table-wrap--sticky-header">
-            <table className="cu-table cu-table--header-band cu-llm-review-table">
+          <div className="eft-table-viewport cu-table-wrap cu-table-wrap--sticky-header">
+            <DataTable className="eft-table cu-table cu-table--header-band cu-llm-review-table">
               <thead>
                 <TableHeaderRow columns={reviewColumns} />
               </thead>
@@ -532,7 +533,7 @@ export function LlmDiscoveryPanel({
                   </tbody>
                 )
               })}
-            </table>
+            </DataTable>
           </div>
         )}
       </div>

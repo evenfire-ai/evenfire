@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
+import { DataTable } from '@clerum/frontend-table-system'
 import type { LlmModelPrice, UnpricedModel } from '@lib/api'
 import { getProviderDisplayLabel } from '@lib/llm'
 import type { LlmPriceTableProps } from './LlmPriceTable.types'
@@ -139,15 +140,15 @@ export function LlmPriceTable({
         }
       />
       {isInitialLoad ? (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <TableHeaderRow columns={PRICE_COLUMNS} />
             </thead>
             <tbody>
               <SkeletonTableRows columns={PRICE_COLUMNS.length} rows={4} />
             </tbody>
-          </table>
+          </DataTable>
         </div>
       ) : visibleRowCount === 0 ? (
         <div className="cu-empty">
@@ -156,8 +157,8 @@ export function LlmPriceTable({
             : 'No model prices configured yet. Add one to start tracking cost.'}
         </div>
       ) : (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <TableHeaderRow columns={PRICE_COLUMNS} />
             </thead>
@@ -281,7 +282,7 @@ export function LlmPriceTable({
                 )
               })}
             </tbody>
-          </table>
+          </DataTable>
         </div>
       )}
     </div>

@@ -1,0 +1,25 @@
+{
+  "name": "@clerum/frontend-table-system",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.tsx",
+    "./styles.css": "./styles.css"
+  },
+  "peerDependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.28",
+    "@types/react-dom": "18.3.7",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.9.2"
+  },
+  "scripts": {
+    "build": "tsc --noEmit --skipLibCheck --types react,react-dom --jsx react-jsx --module esnext --moduleResolution bundler --target es2022 src/index.tsx",
+    "test": "tsc --noEmit --skipLibCheck --types react,react-dom --jsx react-jsx --module esnext --moduleResolution bundler --target es2022 src/index.tsx"
+  }
+}

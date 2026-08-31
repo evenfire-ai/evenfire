@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { IconSharedFiles } from '@components/Sidebar/icons'
@@ -212,8 +213,8 @@ export default function SharedFileSystemsPage() {
             </div>
           </div>
         ) : (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <TableHeaderRow columns={SHARED_FILE_SYSTEM_COLUMNS} />
               </thead>
@@ -284,7 +285,7 @@ export default function SharedFileSystemsPage() {
                   })
                 )}
               </tbody>
-            </table>
+            </DataTable>
           </div>
         )}
       </div>

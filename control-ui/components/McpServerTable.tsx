@@ -1,6 +1,7 @@
 'use client'
 
 import React, { Fragment, useMemo, useState } from 'react'
+import { DataTable } from '@clerum/frontend-table-system'
 import { copyTextToClipboard } from '../lib/clipboard'
 import type {
   ConnectorAccessSummary,
@@ -469,23 +470,23 @@ export function McpServerTable({
       />
       {detailContent ? <div className="cu-card__body">{detailContent}</div> : null}
       {isInitialLoad ? (
-        <div className="cu-table-wrap cu-connectors-table-wrap">
-          <table className="cu-table cu-table--header-band cu-expandable-table cu-connectors-table">
+        <div className="eft-table-viewport cu-table-wrap cu-connectors-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band cu-expandable-table cu-connectors-table">
             <thead>
               <TableHeaderRow columns={columns} />
             </thead>
             <tbody>
               <SkeletonTableRows columns={columns.length} rows={5} />
             </tbody>
-          </table>
+          </DataTable>
         </div>
       ) : filteredRows.length === 0 ? (
         <div className="cu-empty">
           {normalizedSearch ? 'No connectors match this search.' : 'No connectors found.'}
         </div>
       ) : (
-        <div className="cu-table-wrap cu-connectors-table-wrap">
-          <table className="cu-table cu-table--header-band cu-expandable-table cu-connectors-table">
+        <div className="eft-table-viewport cu-table-wrap cu-connectors-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band cu-expandable-table cu-connectors-table">
             <thead>
               <TableHeaderRow columns={columns} />
             </thead>
@@ -635,7 +636,7 @@ export function McpServerTable({
                 )
               })}
             </tbody>
-          </table>
+          </DataTable>
         </div>
       )}
       {serverKeyAddingContexts

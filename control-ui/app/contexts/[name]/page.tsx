@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
@@ -908,8 +909,8 @@ export default function ContextDetailsPage() {
                   No connectors assigned yet.
                 </div>
               ) : (
-                <div className="cu-table-wrap">
-                  <table className="cu-table">
+                <div className="eft-table-viewport cu-table-wrap">
+                  <DataTable className="eft-table cu-table">
                     <thead>
                       <TableHeaderRow columns={CONNECTOR_COLUMNS} />
                     </thead>
@@ -935,7 +936,7 @@ export default function ContextDetailsPage() {
                         </tr>
                       ))}
                     </tbody>
-                  </table>
+                  </DataTable>
                 </div>
               )}
             </>
@@ -946,8 +947,8 @@ export default function ContextDetailsPage() {
               {sharedFileSystemsDraft.length === 0 ? (
                 <div className="cu-empty">No SharedFileSystems attached.</div>
               ) : (
-                <div className="cu-table-wrap">
-                  <table className="cu-table">
+                <div className="eft-table-viewport cu-table-wrap">
+                  <DataTable className="eft-table cu-table">
                     <thead>
                       <TableHeaderRow columns={SHARED_FILE_COLUMNS} />
                     </thead>
@@ -993,7 +994,7 @@ export default function ContextDetailsPage() {
                         </tr>
                       ))}
                     </tbody>
-                  </table>
+                  </DataTable>
                 </div>
               )}
 
@@ -1095,8 +1096,8 @@ export default function ContextDetailsPage() {
                   No agents reference this context.
                 </div>
               ) : (
-                <div className="cu-table-wrap">
-                  <table className="cu-table">
+                <div className="eft-table-viewport cu-table-wrap">
+                  <DataTable className="eft-table cu-table">
                     <thead>
                       <TableHeaderRow columns={AGENT_COLUMNS} />
                     </thead>
@@ -1116,7 +1117,7 @@ export default function ContextDetailsPage() {
                         </tr>
                       ))}
                     </tbody>
-                  </table>
+                  </DataTable>
                 </div>
               )}
             </>
@@ -1151,8 +1152,8 @@ export default function ContextDetailsPage() {
                   No teams mapped to this context.
                 </div>
               ) : (
-                <div className="cu-table-wrap">
-                  <table className="cu-table">
+                <div className="eft-table-viewport cu-table-wrap">
+                  <DataTable className="eft-table cu-table">
                     <thead>
                       <TableHeaderRow columns={TEAM_COLUMNS} />
                     </thead>
@@ -1186,7 +1187,7 @@ export default function ContextDetailsPage() {
                         </tr>
                       ))}
                     </tbody>
-                  </table>
+                  </DataTable>
                 </div>
               )}
             </>
@@ -1221,8 +1222,8 @@ export default function ContextDetailsPage() {
                   No members mapped to this context.
                 </div>
               ) : (
-                <div className="cu-table-wrap">
-                  <table className="cu-table">
+                <div className="eft-table-viewport cu-table-wrap">
+                  <DataTable className="eft-table cu-table">
                     <thead>
                       <TableHeaderRow columns={MEMBER_COLUMNS} />
                     </thead>
@@ -1260,7 +1261,7 @@ export default function ContextDetailsPage() {
                         )
                       })}
                     </tbody>
-                  </table>
+                  </DataTable>
                 </div>
               )}
             </>

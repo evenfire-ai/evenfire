@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { useAuth } from '@components/AuthContext'
 import { AuthGate } from '@components/AuthGate'
 import { Button } from '@components/Button'
@@ -169,8 +170,8 @@ export default function MembersPage() {
                   <h2 className="section-title">Pending invitations</h2>
                 </div>
               </div>
-              <div className="members-table-wrap">
-                <table className="members-table">
+              <div className="eft-table-viewport members-table-wrap">
+                <DataTable className="eft-table members-table">
                   <thead>
                     <tr>
                       <th>Email</th>
@@ -218,15 +219,15 @@ export default function MembersPage() {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                </DataTable>
               </div>
             </section>
           ) : null}
 
           {state !== 'loading' ? (
             <section className="section members-section">
-              <div className="members-table-wrap">
-                <table className="members-table">
+              <div className="eft-table-viewport members-table-wrap">
+                <DataTable className="eft-table members-table">
                   <thead>
                     <tr>
                       <th>Member</th>
@@ -287,7 +288,7 @@ export default function MembersPage() {
                       </tr>
                     ) : null}
                   </tbody>
-                </table>
+                </DataTable>
               </div>
             </section>
           ) : null}

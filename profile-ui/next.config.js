@@ -1,6 +1,12 @@
+const path = require('path')
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  transpilePackages: ['@clerum/frontend-table-system'],
+  turbopack: {
+    root: path.join(__dirname, '..'),
+  },
   experimental: {
     globalNotFound: true,
   },

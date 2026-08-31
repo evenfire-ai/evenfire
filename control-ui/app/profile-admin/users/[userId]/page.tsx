@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
 import { SelectionDropdown } from '@components/SelectionDropdown'
@@ -893,8 +894,8 @@ export default function UserDetailsPage() {
           ) : userCommunicationConversations.length === 0 ? (
             <div className="cu-empty">No connected communication channel conversations.</div>
           ) : (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
+            <div className="eft-table-viewport cu-table-wrap">
+              <DataTable className="eft-table cu-table">
                 <thead>
                   <tr>
                     <th>Communication channel</th>
@@ -928,7 +929,7 @@ export default function UserDetailsPage() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </DataTable>
             </div>
           )}
         </>
@@ -959,8 +960,8 @@ export default function UserDetailsPage() {
             </button>
           </div>
           {initialLoading ? (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
+            <div className="eft-table-viewport cu-table-wrap">
+              <DataTable className="eft-table cu-table">
                 <thead>
                   <tr>
                     <th>Context</th>
@@ -980,15 +981,15 @@ export default function UserDetailsPage() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </DataTable>
             </div>
           ) : assignedContextIds.length === 0 ? (
             <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
               No contexts assigned.
             </div>
           ) : (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
+            <div className="eft-table-viewport cu-table-wrap">
+              <DataTable className="eft-table cu-table">
                 <thead>
                   <tr>
                     <th>Context</th>
@@ -1030,14 +1031,14 @@ export default function UserDetailsPage() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </DataTable>
             </div>
           )}
           {!initialLoading && deletedContextIds.length > 0 && (
             <>
               <p className="cu-muted cu-deleted-access-heading">Deleted contexts</p>
-              <div className="cu-table-wrap">
-                <table className="cu-table">
+              <div className="eft-table-viewport cu-table-wrap">
+                <DataTable className="eft-table cu-table">
                   <tbody>
                     {deletedContextIds.map(contextId => (
                       <tr key={contextId}>
@@ -1046,7 +1047,7 @@ export default function UserDetailsPage() {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                </DataTable>
               </div>
             </>
           )}
@@ -1078,8 +1079,8 @@ export default function UserDetailsPage() {
             </button>
           </div>
           {initialLoading ? (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
+            <div className="eft-table-viewport cu-table-wrap">
+              <DataTable className="eft-table cu-table">
                 <thead>
                   <tr>
                     <th>Team</th>
@@ -1120,15 +1121,15 @@ export default function UserDetailsPage() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </DataTable>
             </div>
           ) : userTeams.length === 0 ? (
             <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
               Not a member of any team yet.
             </div>
           ) : (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
+            <div className="eft-table-viewport cu-table-wrap">
+              <DataTable className="eft-table cu-table">
                 <thead>
                   <tr>
                     <th>Team</th>
@@ -1211,7 +1212,7 @@ export default function UserDetailsPage() {
                     )
                   })}
                 </tbody>
-              </table>
+              </DataTable>
             </div>
           )}
         </>
@@ -1242,8 +1243,8 @@ export default function UserDetailsPage() {
             </button>
           </div>
           {initialLoading ? (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
+            <div className="eft-table-viewport cu-table-wrap">
+              <DataTable className="eft-table cu-table">
                 <thead>
                   <tr>
                     <th>Agent</th>
@@ -1263,15 +1264,15 @@ export default function UserDetailsPage() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </DataTable>
             </div>
           ) : assignedAgentNames.length === 0 ? (
             <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
               No agent access yet.
             </div>
           ) : (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
+            <div className="eft-table-viewport cu-table-wrap">
+              <DataTable className="eft-table cu-table">
                 <thead>
                   <tr>
                     <th>Agent</th>
@@ -1313,7 +1314,7 @@ export default function UserDetailsPage() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </DataTable>
             </div>
           )}
         </>

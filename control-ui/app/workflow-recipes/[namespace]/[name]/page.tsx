@@ -2,6 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { AuthGate } from '@components/AuthGate'
 import { BodyLoadingSkeleton } from '@components/BodyLoadingSkeleton'
 import { useConfirmDialog } from '@components/ConfirmDialog'
@@ -752,23 +753,23 @@ function WorkflowRecipeDetailContent() {
                 </div>
               ) : null}
               {loadingRuns && visibleRuns.length === 0 ? (
-                <div className="cu-table-wrap">
-                  <table className="cu-table">
+                <div className="eft-table-viewport cu-table-wrap">
+                  <DataTable className="eft-table cu-table">
                     <thead>
                       <TableHeaderRow columns={RUNS_COLUMNS} />
                     </thead>
                     <tbody>
                       <SkeletonTableRows columns={RUNS_COLUMNS.length} rows={3} />
                     </tbody>
-                  </table>
+                  </DataTable>
                 </div>
               ) : visibleRuns.length === 0 ? (
                 <div className="cu-empty">
                   No runs yet. Click <strong>Run…</strong> to trigger one.
                 </div>
               ) : (
-                <div className="cu-table-wrap">
-                  <table className="cu-table">
+                <div className="eft-table-viewport cu-table-wrap">
+                  <DataTable className="eft-table cu-table">
                     <thead>
                       <TableHeaderRow columns={RUNS_COLUMNS} />
                     </thead>
@@ -847,7 +848,7 @@ function WorkflowRecipeDetailContent() {
                         )
                       })}
                     </tbody>
-                  </table>
+                  </DataTable>
                 </div>
               )}
             </div>
@@ -912,21 +913,21 @@ function WorkloadsTab({
           </div>
         ) : null}
         {loading && rowIds.length === 0 ? (
-          <div className="cu-table-wrap">
-            <table className="cu-table">
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table">
               <thead>
                 <TableHeaderRow columns={WORKLOAD_COLUMNS} />
               </thead>
               <tbody>
                 <SkeletonTableRows columns={WORKLOAD_COLUMNS.length} rows={3} />
               </tbody>
-            </table>
+            </DataTable>
           </div>
         ) : rowIds.length === 0 ? (
           <div className="cu-empty">This plugin has no workloads or pods yet.</div>
         ) : (
-          <div className="cu-table-wrap">
-            <table className="cu-table">
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table">
               <thead>
                 <TableHeaderRow columns={WORKLOAD_COLUMNS} />
               </thead>
@@ -1004,7 +1005,7 @@ function WorkloadsTab({
                   })
                 })}
               </tbody>
-            </table>
+            </DataTable>
           </div>
         )}
       </div>
@@ -1033,8 +1034,8 @@ function ConditionsTab({ status }: { status: Record<string, unknown> | null }) {
           No conditions reported. Everything that the controller checks is healthy.
         </div>
       ) : (
-        <div className="cu-table-wrap">
-          <table className="cu-table">
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table">
             <thead>
               <TableHeaderRow columns={CONDITION_COLUMNS} />
             </thead>
@@ -1069,7 +1070,7 @@ function ConditionsTab({ status }: { status: Record<string, unknown> | null }) {
                 )
               })}
             </tbody>
-          </table>
+          </DataTable>
         </div>
       )}
     </div>

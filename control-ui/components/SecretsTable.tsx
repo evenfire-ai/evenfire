@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type RecipeSecretItem,
@@ -491,8 +492,8 @@ export function SecretsTable({
         )}
 
         {scope === 'llm' && isLlmInitialLoad ? (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
                   <th>Name</th>
@@ -521,15 +522,15 @@ export function SecretsTable({
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </DataTable>
           </div>
         ) : scope === 'llm' && filteredRows.length === 0 ? (
           <div className="cu-empty">
             {normalizedLlmSearch ? 'No LLM secrets match this search.' : <>No LLM secrets found.</>}
           </div>
         ) : scope === 'llm' ? (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
                   <th>Name</th>
@@ -586,11 +587,11 @@ export function SecretsTable({
                   )
                 })}
               </tbody>
-            </table>
+            </DataTable>
           </div>
         ) : scope === 'mcp' && isMcpInitialLoad ? (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
                   <th>Name</th>
@@ -617,7 +618,7 @@ export function SecretsTable({
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </DataTable>
           </div>
         ) : scope === 'mcp' && filteredMcpRows.length === 0 ? (
           <div className="cu-empty">
@@ -626,8 +627,8 @@ export function SecretsTable({
               : 'No connector secrets found.'}
           </div>
         ) : scope === 'mcp' ? (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
                   <th>Name</th>
@@ -674,11 +675,11 @@ export function SecretsTable({
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </DataTable>
           </div>
         ) : isRecipeInitialLoad ? (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
                   <th>Name</th>
@@ -711,7 +712,7 @@ export function SecretsTable({
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </DataTable>
           </div>
         ) : filteredRecipeRows.length === 0 ? (
           <div className="cu-empty">
@@ -720,8 +721,8 @@ export function SecretsTable({
               : 'No recipe secrets found.'}
           </div>
         ) : (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
+          <div className="eft-table-viewport cu-table-wrap">
+            <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
                   <th>Name</th>
@@ -835,7 +836,7 @@ export function SecretsTable({
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </DataTable>
           </div>
         )}
 

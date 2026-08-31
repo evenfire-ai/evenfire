@@ -2,6 +2,7 @@
 
 import React, { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { DataTable } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { LlmHookStatus } from '../lib/api'
 import type {
@@ -178,23 +179,23 @@ export function GuardrailHooksTable({
         }
       />
       {isInitialLoad ? (
-        <div className="cu-table-wrap cu-guardrails-table-wrap">
-          <table className="cu-table cu-table--header-band cu-guardrails-table">
+        <div className="eft-table-viewport cu-table-wrap cu-guardrails-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band cu-guardrails-table">
             <thead>
               <TableHeaderRow columns={HOOK_COLUMNS} />
             </thead>
             <tbody>
               <SkeletonTableRows columns={HOOK_COLUMNS.length} rows={5} />
             </tbody>
-          </table>
+          </DataTable>
         </div>
       ) : filteredRows.length === 0 ? (
         <div className="cu-empty">
           {normalizedSearch ? 'No guardrails match this search.' : 'No guardrails installed.'}
         </div>
       ) : (
-        <div className="cu-table-wrap cu-guardrails-table-wrap">
-          <table className="cu-table cu-table--header-band cu-guardrails-table">
+        <div className="eft-table-viewport cu-table-wrap cu-guardrails-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band cu-guardrails-table">
             <thead>
               <TableHeaderRow columns={HOOK_COLUMNS} />
             </thead>
@@ -269,7 +270,7 @@ export function GuardrailHooksTable({
                 )
               })}
             </tbody>
-          </table>
+          </DataTable>
         </div>
       )}
     </div>
