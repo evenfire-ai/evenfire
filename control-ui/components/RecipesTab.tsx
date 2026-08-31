@@ -13,13 +13,12 @@ import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconChevronRight, IconRefresh } from './icons'
+import { IconRefresh } from './icons'
 
 const RECIPE_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
   { key: 'phase', label: 'Phase' },
   { key: 'created', label: 'Created' },
-  { key: 'navigation', ariaLabel: 'Navigation', align: 'right' },
 ]
 
 type Props = {
@@ -170,9 +169,6 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
                       </span>
                     </td>
                     <td className="cu-installed-plugin__created">{created}</td>
-                    <td className="cu-installed-plugin__navigation" aria-hidden="true">
-                      <IconChevronRight width={18} height={18} />
-                    </td>
                   </tr>
                 )
               })}

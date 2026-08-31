@@ -44,6 +44,8 @@ describe('RecipesTab — render', () => {
   it('shows recipe name in table', () => {
     render(<RecipesTab {...DEFAULT_PROPS} />)
     expect(screen.getByText('test-recipe')).toBeInTheDocument()
+    expect(screen.getAllByRole('columnheader')).toHaveLength(3)
+    expect(screen.queryByRole('columnheader', { name: 'Navigation' })).not.toBeInTheDocument()
   })
 
   it('does not show namespace in the table', () => {
@@ -166,11 +168,11 @@ describe('RecipesTab — render', () => {
     expect(screen.getByText('API error 500')).toBeInTheDocument()
   })
 
-  it('shows table headers with an unlabeled navigation column', () => {
+  it('shows data headers without a redundant navigation column', () => {
     render(<RecipesTab {...DEFAULT_PROPS} />)
     expect(screen.getByText('Name')).toBeInTheDocument()
     expect(screen.getByText('Created')).toBeInTheDocument()
-    expect(screen.getByRole('columnheader', { name: 'Navigation' })).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'Navigation' })).not.toBeInTheDocument()
     expect(screen.queryByText('Navigation')).not.toBeInTheDocument()
     expect(screen.queryByText('Namespace')).not.toBeInTheDocument()
     expect(screen.queryByText('Workloads')).not.toBeInTheDocument()
