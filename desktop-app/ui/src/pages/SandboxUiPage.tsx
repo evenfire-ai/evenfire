@@ -156,7 +156,7 @@ export function SandboxUiPage({
   headerShellOverlayOpen = false,
   sidebarShellOverlayOpen = false,
   toastShellOverlayOpen = false,
-  deepLinkOverlayOpen = false,
+  deepLinkShellOverlayOpen = false,
   shortcutApp = null,
   shortcutOpenRequestId = 0,
   localSearchRequestId = 0,
@@ -192,7 +192,7 @@ export function SandboxUiPage({
     headerShellOverlayOpen ||
     sidebarShellOverlayOpen ||
     toastShellOverlayOpen ||
-    deepLinkOverlayOpen
+    deepLinkShellOverlayOpen
 
   const reload = useCallback(async () => {
     setError(null)

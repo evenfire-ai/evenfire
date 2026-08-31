@@ -877,7 +877,7 @@ describe('SandboxUiPage', () => {
     // The "Open app link?" / "App link could not be opened" dialogs live in the
     // renderer DOM; without hiding the WebContentsView they render behind the
     // embedded app and the user can never reach the confirm/dismiss buttons.
-    rerender(<SandboxUiPage deepLinkOverlayOpen />)
+    rerender(<SandboxUiPage deepLinkShellOverlayOpen />)
 
     await waitFor(() => {
       expect(screen.getByTestId('sandbox-ui-embed-preview')).toBeTruthy()

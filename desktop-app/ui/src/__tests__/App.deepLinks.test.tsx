@@ -37,7 +37,7 @@ const sidebarHarness = vi.hoisted(() => ({
 const sandboxUiPageHarness = vi.hoisted(() => ({
   props: null as null | {
     headerShellOverlayOpen?: boolean
-    deepLinkOverlayOpen?: boolean
+    deepLinkShellOverlayOpen?: boolean
     shortcutOpenRequestId?: number
     localSearchRequestId?: number
     actionRequest?: {
@@ -633,7 +633,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(sandboxUiPageHarness.props).not.toBeNull())
     // The native WebContentsView paints above renderer DOM, so the overlay
     // signal must stay off until a deep-link dialog actually needs to show.
-    expect(sandboxUiPageHarness.props?.deepLinkOverlayOpen).toBeFalsy()
+    expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBeFalsy()
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -641,12 +641,12 @@ describe('App deep-link orchestration', () => {
     })
 
     await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
-    expect(sandboxUiPageHarness.props?.deepLinkOverlayOpen).toBe(true)
+    expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(true)
 
     await confirmPendingAppLink()
     await reportShortcutOpenResult()
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
-    await waitFor(() => expect(sandboxUiPageHarness.props?.deepLinkOverlayOpen).toBe(false))
+    await waitFor(() => expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(false))
   })
 
   it('keeps the deep-link overlay signal raised while the failure dialog is open', async () => {
@@ -677,7 +677,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() =>
       expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
     )
-    expect(sandboxUiPageHarness.props?.deepLinkOverlayOpen).toBe(true)
+    expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(true)
 
     await act(async () => {
       confirmDialogHarness.props?.onCancel()
@@ -685,7 +685,7 @@ describe('App deep-link orchestration', () => {
     })
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
-    await waitFor(() => expect(sandboxUiPageHarness.props?.deepLinkOverlayOpen).toBe(false))
+    await waitFor(() => expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(false))
   })
 
   it('does not duplicate an authenticated confirmation for the same link id', async () => {
