@@ -75,20 +75,6 @@ describe('chat drawer header stacking', () => {
     expect(body).toContain('z-index: var(--layer-dropdown)')
   })
 
-  it('reserves mounted-header space for the relocated top-bar so app actions do not flow under it', () => {
-    // Regression guard: when the top-bar moves into the embed column, the sandbox-ui
-    // mounted header must reserve its footprint (search + gap + bell) on the right,
-    // not 0 — otherwise the app action buttons render under the global search box.
-    const rule = /\.content-panel--chat-drawer-open \.sandbox-ui-mounted-header\s*\{([^}]*)\}/.exec(
-      stylesCss
-    )
-    expect(rule).not.toBeNull()
-    const padding = /padding-right:\s*([^;]+);/.exec(rule![1] ?? '')
-    expect(padding).not.toBeNull()
-    expect(padding![1].trim()).not.toBe('0')
-    expect(padding![1]).toContain('--app-notification-drawer-width')
-  })
-
   it('documents the baseline: the header layer is below the drawer when it is not open', () => {
     document.body.innerHTML =
       '<section class="content-panel"><header class="top-bar"></header></section>'

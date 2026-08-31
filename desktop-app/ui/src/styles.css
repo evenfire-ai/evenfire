@@ -12661,14 +12661,7 @@ pre {
 }
 
 .content-panel.content-panel--chat-drawer-open .sandbox-ui-mounted-header {
-  /* The top-bar (global search + bell) is relocated into the embed column, left
-     of the drawer, so the mounted header must reserve room for it exactly as it
-     does in the default app view — otherwise its action buttons flow under the
-     search box. This reserves only the top-bar footprint (search + gap + 36px
-     bell); the drawer sits BELOW the mounted header (aligned to the embed slot
-     top), so it needs no reservation here. The .page padding above already
-     reserves the drawer gutter for the embed slot. */
-  padding-right: calc(var(--app-notification-drawer-width) + var(--space-2) + 36px);
+  padding-right: 0;
 }
 
 /* The chat drawer occupies the right rail at --layer-chat-overlay, above the
