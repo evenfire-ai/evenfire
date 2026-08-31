@@ -160,6 +160,13 @@ describe('asApiserverDeployment', () => {
     expect(asApiserverDeployment(desired)).not.toEqual(desired)
   })
 
+  it('FIXTURE-1: asApiserverDeployment does not mutate the caller desired object', () => {
+    const desired = sparseDeployment()
+    const before = structuredClone(desired)
+    asApiserverDeployment(desired)
+    expect(desired).toEqual(before)
+  })
+
   it('FIXTURE-1: omitted Deployment spec fields come from the recorded blob', () => {
     const desired = sparseDeployment()
     const existing = asApiserverDeployment(desired)
@@ -196,6 +203,7 @@ describe('asApiserverDeployment', () => {
 type CanonicalPodSpec = {
   serviceAccountName?: string
   containers?: Array<{
+    resources?: unknown
     livenessProbe?: { timeoutSeconds?: number; failureThreshold?: number }
   }>
 }
@@ -275,6 +283,35 @@ describe('safe-strip lemma equality guards', () => {
     const desired = deploymentWithProbe({ periodSeconds: 5 })
     const existing = asApiserverDeployment(desired)
     expect(deploymentMatchesDesired(mergedForCompare(desired, existing), existing)).toBe(true)
+  })
+
+  it('strips empty resources {} and keeps a non-empty request', () => {
+    const empty = deploymentWithProbe({ periodSeconds: 5 })
+    empty.spec!.template.spec!.containers![0].resources = {}
+    const kept = deploymentWithProbe({ periodSeconds: 5 })
+    kept.spec!.template.spec!.containers![0].resources = { requests: { cpu: '50m' } }
+    expect(
+      canonicalPodSpec(normalizeDeploymentForComparison(empty))?.containers?.[0]?.resources
+    ).toBeUndefined()
+    expect(
+      canonicalPodSpec(normalizeDeploymentForComparison(kept))?.containers?.[0]?.resources
+    ).toEqual({ requests: { cpu: '50m' } })
+  })
+
+  it('omitted container resources match a live empty resources object', () => {
+    const desired = deploymentWithProbe({ periodSeconds: 5 })
+    const existing = asApiserverDeployment(desired)
+    expect(existing.spec?.template?.spec?.containers?.[0]?.resources).toEqual({})
+    expect(desired.spec?.template?.spec?.containers?.[0]?.resources).toBeUndefined()
+    expect(deploymentMatchesDesired(mergedForCompare(desired, existing), existing)).toBe(true)
+  })
+
+  it('does not treat 1000m and 1 as the same cpu quantity', () => {
+    const milli = deploymentWithProbe({ periodSeconds: 5 })
+    milli.spec!.template.spec!.containers![0].resources = { limits: { cpu: '1000m' } }
+    const canonical = deploymentWithProbe({ periodSeconds: 5 })
+    canonical.spec!.template.spec!.containers![0].resources = { limits: { cpu: '1' } }
+    expect(deploymentMatchesDesired(milli, canonical)).toBe(false)
   })
 })
 

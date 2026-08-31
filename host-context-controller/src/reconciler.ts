@@ -1270,8 +1270,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
                     {
                       name: 'copy-mcp-app',
                       image: server.spec.image,
-                      imagePullPolicy:
-                        server.spec.imagePullPolicy || config.mcpServerImagePullPolicy,
+                      imagePullPolicy: config.mcpServerImagePullPolicy,
                       command: [
                         'sh',
                         '-c',
@@ -1332,8 +1331,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
                     {
                       name: 'mcp-server',
                       image: server.spec.image,
-                      imagePullPolicy:
-                        server.spec.imagePullPolicy || config.mcpServerImagePullPolicy,
+                      imagePullPolicy: config.mcpServerImagePullPolicy,
                       command: server.spec.command || undefined,
                       args: server.spec.args || undefined,
                       ports,
@@ -1370,8 +1368,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
                     {
                       name: 'stdio-bridge',
                       image: config.stdioBridgeImage, // G10: configurable bridge image
-                      imagePullPolicy:
-                        server.spec.imagePullPolicy || config.mcpServerImagePullPolicy,
+                      imagePullPolicy: config.mcpServerImagePullPolicy,
                       env: [
                         {
                           name: 'STDIO_COMMAND',

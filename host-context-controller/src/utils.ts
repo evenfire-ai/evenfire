@@ -61,7 +61,10 @@ export async function replaceWithConflictRetry<
     try {
       existing = await read()
     } catch (err) {
-      if (getErrorCode(err) === 404) return
+      if (getErrorCode(err) === 404) {
+        console.warn(`${logPrefix} ${description} disappeared (404); skipping replace`)
+        return
+      }
       throw err
     }
     validateExisting?.(existing)
@@ -72,6 +75,7 @@ export async function replaceWithConflictRetry<
     }
     const next = mergeExisting ? mergeExisting(base, existing) : base
     if (isUpToDate?.(next, existing)) {
+      if (mutationAllowed && !mutationAllowed()) return
       writeSkipsTotal.inc({ kind: next.kind ?? 'unknown' })
       return
     }
@@ -247,8 +251,10 @@ function normalizeServiceForComparison(service: k8s.V1Service): unknown {
 /**
  * True when the merged desired ConfigMap is equivalent to the live object.
  * ConfigMaps have no apps/v1-style spec defaulting, so comparison is the
- * whole object after stripping server-owned metadata. Doubt or a malformed
- * object returns false (fail-open-to-write).
+ * whole object after stripping server-owned metadata. Labels, finalizers,
+ * and ownerReferences are compared in full (mergeExisting keeps annotations
+ * only), so a foreign stamp there is permanent write churn, not a skip.
+ * Doubt or a malformed object returns false (fail-open-to-write).
  */
 export function configMapMatchesDesired(
   desired: k8s.V1ConfigMap | undefined,
@@ -330,7 +336,10 @@ function normalizeNetworkPolicyForComparison(policy: k8s.V1NetworkPolicy): unkno
  * must compare as drift rather than be silently ignored.
  *
  * Pod-template annotations are merged by preserveDeploymentAnnotations before
- * this comparison. Doubt or a malformed object returns false
+ * this comparison. Labels, finalizers, and ownerReferences are compared in
+ * full: a third-party stamp on those fields is drift and keeps the gate
+ * writing (fail-open), because mergeExisting does not absorb them.
+ * Doubt or a malformed object returns false
  * (fail-open-to-write), matching serviceMatchesDesired / networkPolicyMatchesDesired.
  */
 export function deploymentMatchesDesired(
@@ -378,6 +387,9 @@ export function normalizeDeploymentForComparison(deployment: k8s.V1Deployment): 
           delete podSpec.terminationGracePeriodSeconds
         if (podSpec.enableServiceLinks === true) delete podSpec.enableServiceLinks
         if (podSpec.preemptionPolicy === 'PreemptLowerPriority') delete podSpec.preemptionPolicy
+        // Cross-field default: kube mirrors serviceAccount from serviceAccountName.
+        // Delete the deprecated alias first; then strip SA === 'default'. Swapping
+        // these two lines would leave a dangling alias and force a write every pass.
         if (podSpec.serviceAccount === podSpec.serviceAccountName) delete podSpec.serviceAccount
         if (podSpec.serviceAccountName === 'default') delete podSpec.serviceAccountName
         if (Object.keys(podSpec.securityContext ?? {}).length === 0) delete podSpec.securityContext
@@ -396,6 +408,7 @@ export function normalizeDeploymentForComparison(deployment: k8s.V1Deployment): 
 }
 
 export function normalizeContainerDefaults(container: k8s.V1Container): void {
+  if (Object.keys(container.resources ?? {}).length === 0) delete container.resources
   if (container.terminationMessagePath === '/dev/termination-log') {
     delete container.terminationMessagePath
   }

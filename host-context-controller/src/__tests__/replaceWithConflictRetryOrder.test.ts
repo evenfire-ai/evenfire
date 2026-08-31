@@ -331,6 +331,7 @@ describe('replaceWithConflictRetry order and retry', () => {
   it('WRITE-2: isUpToDate skip and read-404 do not increment', async () => {
     const replace = vi.fn()
     const before = await readWritesTotal('Service')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
     await replaceWithConflictRetry({
       description: 'Service "svc"',
@@ -354,6 +355,31 @@ describe('replaceWithConflictRetry order and retry', () => {
 
     expect(replace).not.toHaveBeenCalled()
     expect(await readWritesTotal('Service')).toBe(before)
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringMatching(/disappeared \(404\); skipping replace/)
+    )
+    warn.mockRestore()
+  })
+
+  it('SKIP-3: isUpToDate skip with mutationAllowed false does not increment writes or skips', async () => {
+    const replace = vi.fn()
+    const beforeWrites = await readWritesTotal('Service')
+    const beforeSkips = await readWriteSkipsTotal('Service')
+
+    await replaceWithConflictRetry({
+      description: 'Service "svc"',
+      logPrefix: '[Test]',
+      body: desired,
+      mergeExisting: preserveServiceAssignedFields,
+      isUpToDate: () => true,
+      mutationAllowed: () => false,
+      read: async () => existing,
+      replace,
+    })
+
+    expect(replace).not.toHaveBeenCalled()
+    expect(await readWritesTotal('Service')).toBe(beforeWrites)
+    expect(await readWriteSkipsTotal('Service')).toBe(beforeSkips)
   })
 
   it('SKIP-1: isUpToDate skip increments clerum_hcc_write_skips_total{kind=Service}', async () => {

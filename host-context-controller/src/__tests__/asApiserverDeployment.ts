@@ -119,13 +119,17 @@ const REPLACE_OBJECT_KEYS = new Set([
 /** Defined overlay keys win; omitted keys keep the recorded apiserver default. */
 function overlayDefined(base: unknown, overlay: unknown): unknown {
   if (overlay === undefined) return base
-  if (overlay === null || typeof overlay !== 'object' || Array.isArray(overlay)) return overlay
-  if (base === null || typeof base !== 'object' || Array.isArray(base)) return overlay
+  if (overlay === null || typeof overlay !== 'object' || Array.isArray(overlay)) {
+    return structuredClone(overlay)
+  }
+  if (base === null || typeof base !== 'object' || Array.isArray(base)) {
+    return structuredClone(overlay)
+  }
   const out: Record<string, unknown> = { ...(base as Record<string, unknown>) }
   for (const [key, value] of Object.entries(overlay as Record<string, unknown>)) {
     if (value === undefined) continue
     if (REPLACE_OBJECT_KEYS.has(key) && typeof value === 'object' && !Array.isArray(value)) {
-      out[key] = value
+      out[key] = structuredClone(value)
       continue
     }
     out[key] = overlayDefined((base as Record<string, unknown>)[key], value)
@@ -175,6 +179,7 @@ function applyPodSpecDefaults(podSpec: k8s.V1PodSpec | undefined): void {
 }
 
 function applyContainerDefaults(container: k8s.V1Container): void {
+  if (container.resources === undefined) container.resources = {}
   if (container.imagePullPolicy === undefined) {
     container.imagePullPolicy = defaultImagePullPolicy(container.image)
   }

@@ -91,7 +91,20 @@ describe('Deployment writer inventory', () => {
       const rel = relative(SRC_ROOT, file).replaceAll('\\', '/')
       const source = readFileSync(file, 'utf8')
       const sites = callSiteIndexes(source)
-      if (sites.length === 0) continue
+      const identCount = [...source.matchAll(/replaceNamespacedDeployment\b/g)].filter(
+        match => match.index !== undefined && !isCommentLine(lineAt(source, match.index))
+      ).length
+      if (sites.length === 0) {
+        expect(
+          identCount,
+          `${rel} mentions replaceNamespacedDeployment but has no call; an alias/bind form is invisible to the call regex`
+        ).toBe(0)
+        continue
+      }
+      expect(
+        identCount,
+        `${rel} has ${identCount} replaceNamespacedDeployment identifier(s) but ${sites.length} call(s); an alias/bind form is invisible to the call regex`
+      ).toBe(sites.length)
       const isGated = GATED.has(rel)
       const isExempt = EXEMPT.has(rel)
       expect(

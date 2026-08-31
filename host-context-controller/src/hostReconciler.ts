@@ -2534,7 +2534,9 @@ export class HostReconciler {
    * - On 409 from create, compares a fresh, server-normalized Deployment and
    *   replaces only meaningful drift. Conflict retries rebuild against the
    *   latest live replica count. A Deployment owned by a different host is
-   *   never overwritten.
+   *   never overwritten: the initial read skips, and a retry-time ownership
+   *   change throws so write_skips_total does not count the refusal as a
+   *   healthy no-op.
    */
   private async reconcileChannelReaderDeployment(host: HostCRD): Promise<void> {
     const name = `channel-reader-${host.name}`
@@ -2601,12 +2603,18 @@ export class HostReconciler {
             }
             return preserveChannelReaderDeploymentAnnotations(desiredWithLiveReplicas, fresh)
           },
-          isUpToDate: (next, fresh) => {
+          validateExisting: fresh => {
             const freshOwnerHost = fresh.metadata?.labels?.[HOST_LABEL]
             // Never replace an object whose ownership changed during a retry.
-            if (freshOwnerHost && freshOwnerHost !== host.name) return true
-            return deploymentMatchesDesired(next, fresh)
+            // Veto here — not via isUpToDate — so write_skips_total stays a
+            // genuine no-op count.
+            if (freshOwnerHost && freshOwnerHost !== host.name) {
+              throw new Error(
+                `channel-reader Deployment ownership changed to host "${freshOwnerHost}"; refusing replace`
+              )
+            }
           },
+          isUpToDate: deploymentMatchesDesired,
         })
       } catch (replaceErr) {
         console.error(`[HostReconciler] Failed to update channel-reader "${name}":`, replaceErr)
