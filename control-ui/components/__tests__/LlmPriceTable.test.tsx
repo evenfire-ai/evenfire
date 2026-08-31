@@ -129,4 +129,17 @@ describe('LlmPriceTable', () => {
       '/cost-and-usage/llm-prices/new?model=shared-model'
     )
   })
+
+  it('sorts priced and missing rows as one global result set', () => {
+    renderTable({
+      items: [{ ...prices[0], provider: 'acme-labs', model: 'configured-model' }],
+      unpricedItems: [{ provider: 'openai', model: 'missing-model' }],
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Provider descending' }))
+
+    const rows = screen.getByRole('table').querySelectorAll('tbody tr')
+    expect(rows[0]).toHaveTextContent('OpenAI')
+    expect(rows[1]).toHaveTextContent('acme-labs')
+  })
 })

@@ -106,34 +106,35 @@ export function LlmPriceTable({
     | 'cacheWrite'
     | 'currency'
     | 'enabled'
-  const priceSort = useTableSort<LlmModelPrice, PriceSortKey>({
-    rows: filteredPrices,
+  type PriceTableRow =
+    | { kind: 'priced'; price: LlmModelPrice }
+    | { kind: 'missing'; item: UnpricedModel }
+  const tableRows = useMemo<PriceTableRow[]>(
+    () => [
+      ...filteredPrices.map(price => ({ kind: 'priced' as const, price })),
+      ...filteredMissingPriceItems.map(item => ({ kind: 'missing' as const, item })),
+    ],
+    [filteredMissingPriceItems, filteredPrices]
+  )
+  const tableSort = useTableSort<PriceTableRow, PriceSortKey>({
+    rows: tableRows,
     defaultKey: 'provider',
-    identity: price => price.id,
+    identity: row =>
+      row.kind === 'priced' ? row.price.id : `missing/${row.item.provider ?? ''}/${row.item.model}`,
     accessors: {
-      provider: price => getProviderDisplayLabel(price.provider),
-      model: price => price.model,
-      input: price => price.input_token_price,
-      output: price => price.output_token_price,
-      cacheRead: price => price.cache_read_token_price,
-      cacheWrite: price => price.cache_write_token_price,
-      currency: price => price.currency,
-      enabled: price => price.enabled,
-    },
-  })
-  const missingSort = useTableSort<UnpricedModel, PriceSortKey>({
-    rows: filteredMissingPriceItems,
-    defaultKey: 'provider',
-    identity: item => `${item.provider ?? ''}/${item.model}`,
-    accessors: {
-      provider: item => (item.provider ? getProviderDisplayLabel(item.provider) : 'Any provider'),
-      model: item => item.model,
-      input: () => null,
-      output: () => null,
-      cacheRead: () => null,
-      cacheWrite: () => null,
-      currency: () => null,
-      enabled: () => false,
+      provider: row =>
+        row.kind === 'priced'
+          ? getProviderDisplayLabel(row.price.provider)
+          : row.item.provider
+            ? getProviderDisplayLabel(row.item.provider)
+            : 'Any provider',
+      model: row => (row.kind === 'priced' ? row.price.model : row.item.model),
+      input: row => (row.kind === 'priced' ? row.price.input_token_price : null),
+      output: row => (row.kind === 'priced' ? row.price.output_token_price : null),
+      cacheRead: row => (row.kind === 'priced' ? row.price.cache_read_token_price : null),
+      cacheWrite: row => (row.kind === 'priced' ? row.price.cache_write_token_price : null),
+      currency: row => (row.kind === 'priced' ? row.price.currency : null),
+      enabled: row => (row.kind === 'priced' ? row.price.enabled : false),
     },
   })
   const columns = PRICE_COLUMNS.map(column =>
@@ -141,12 +142,8 @@ export function LlmPriceTable({
       ? column
       : {
           ...column,
-          activeDirection: priceSort.key === column.key ? priceSort.direction : null,
-          onSort: () => {
-            const key = column.key as PriceSortKey
-            priceSort.sortBy(key)
-            missingSort.sortBy(key)
-          },
+          activeDirection: tableSort.key === column.key ? tableSort.direction : null,
+          onSort: () => tableSort.sortBy(column.key as PriceSortKey),
         }
   )
 
@@ -216,7 +213,62 @@ export function LlmPriceTable({
               <TableHeaderRow columns={columns} />
             </thead>
             <tbody>
-              {priceSort.sortedRows.map((price: LlmModelPrice) => {
+              {tableSort.sortedRows.map(row => {
+                if (row.kind === 'missing') {
+                  const { item } = row
+                  const label = item.provider
+                    ? `${getProviderDisplayLabel(item.provider)}/${item.model}`
+                    : item.model
+                  return (
+                    <tr
+                      key={`missing/${item.provider ?? ''}/${item.model}`}
+                      className="cu-table__row cu-px-missing-row"
+                    >
+                      <td>
+                        {item.provider ? (
+                          <span className="cu-px-provider">
+                            <LlmProviderIcon
+                              provider={item.provider}
+                              label={getProviderDisplayLabel(item.provider)}
+                            />
+                            {getProviderDisplayLabel(item.provider)}
+                          </span>
+                        ) : (
+                          'Any provider'
+                        )}
+                      </td>
+                      <td className="cu-px-model">
+                        <span className="cu-px-model-content">
+                          {item.model}
+                          <MissingPriceWarning provider={item.provider} model={item.model} />
+                        </span>
+                      </td>
+                      <td className="cu-px-num">—</td>
+                      <td className="cu-px-num">—</td>
+                      <td className="cu-px-num">—</td>
+                      <td className="cu-px-num">—</td>
+                      <td>—</td>
+                      <td>
+                        <span className="cu-px-badge cu-px-badge--warn">Missing</span>
+                      </td>
+                      <td className="cu-px-actions">
+                        <RowActionsMenu
+                          ariaLabel={`Actions for price ${label}`}
+                          horizontalTrigger
+                          actions={[
+                            {
+                              key: 'add',
+                              label: 'Add price',
+                              onClick: () => onAddMissingPrice(item),
+                            },
+                          ]}
+                        />
+                      </td>
+                    </tr>
+                  )
+                }
+
+                const { price } = row
                 const isUnpriced = unpricedItems.some(
                   item =>
                     item.model === price.model &&
@@ -275,58 +327,6 @@ export function LlmPriceTable({
                             danger: true,
                             disabled: deletingId === price.id,
                             onClick: () => void onDelete(price),
-                          },
-                        ]}
-                      />
-                    </td>
-                  </tr>
-                )
-              })}
-              {missingSort.sortedRows.map((item: UnpricedModel) => {
-                const label = item.provider
-                  ? `${getProviderDisplayLabel(item.provider)}/${item.model}`
-                  : item.model
-                return (
-                  <tr
-                    key={`missing/${item.provider ?? ''}/${item.model}`}
-                    className="cu-table__row cu-px-missing-row"
-                  >
-                    <td>
-                      {item.provider ? (
-                        <span className="cu-px-provider">
-                          <LlmProviderIcon
-                            provider={item.provider}
-                            label={getProviderDisplayLabel(item.provider)}
-                          />
-                          {getProviderDisplayLabel(item.provider)}
-                        </span>
-                      ) : (
-                        'Any provider'
-                      )}
-                    </td>
-                    <td className="cu-px-model">
-                      <span className="cu-px-model-content">
-                        {item.model}
-                        <MissingPriceWarning provider={item.provider} model={item.model} />
-                      </span>
-                    </td>
-                    <td className="cu-px-num">—</td>
-                    <td className="cu-px-num">—</td>
-                    <td className="cu-px-num">—</td>
-                    <td className="cu-px-num">—</td>
-                    <td>—</td>
-                    <td>
-                      <span className="cu-px-badge cu-px-badge--warn">Missing</span>
-                    </td>
-                    <td className="cu-px-actions">
-                      <RowActionsMenu
-                        ariaLabel={`Actions for price ${label}`}
-                        horizontalTrigger
-                        actions={[
-                          {
-                            key: 'add',
-                            label: 'Add price',
-                            onClick: () => onAddMissingPrice(item),
                           },
                         ]}
                       />
