@@ -279,17 +279,14 @@ export const hostFleetRequestsTotal = counter({
   labelNames: ['result'] as const,
 })
 
-// #490: fleet-lane withdrawal of the four benign supersession names. Closed
-// `error` set — never a Host name. Distinct from host_fleet_requests_total
-// {failed} and from host_delete_cleanup_total{superseded}.
+// Closed `error` names; never a Host name.
 export const hostFleetBenignSupersessionsTotal = counter({
   name: 'clerum_hcc_host_fleet_benign_supersessions_total',
   help: 'Host fleet workers withdrawn because a name-equivalent benign supersession retired the pass.',
   labelNames: ['error'] as const,
 })
 
-// Maestro P-4: measure catch-path lifecycle decisions when a
-// CommunicationChannel generation is in flight. Do not treat rates as a claim.
+// Closed `decision` set: applied | retry.
 export const hostFleetLifecycleCatchTotal = counter({
   name: 'clerum_hcc_host_fleet_lifecycle_catch_total',
   help: 'Host fleet catch-path decisions while a CommunicationChannel lifecycle generation is in flight (applied when hostFailures is empty, retry otherwise).',

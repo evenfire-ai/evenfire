@@ -4678,14 +4678,9 @@ export class HostReconciler {
         await this.reconcile(host, source)
       } catch (error) {
         if (isBenignSupersessionError(error)) {
-          // Per-host reconcile() already recorded outcome=superseded and
-          // rethrew. Withdraw from this fleet pass so HostFleetReconcileError,
-          // host_fleet_requests_total{failed}, and the lifecycle retry stay
-          // reserved for genuine host failures. Match by error.name — the
-          // classes are unexported and statelessLifecycleExecutor synthesizes
-          // name-equivalent plain Errors.
+          // Watch-race withdrawal is not a host failure.
           hostFleetBenignSupersessionsTotal.inc({ error: error.name })
-          hccLogger.warn('Fleet Host reconcile withdrawn as benign supersession', {
+          log.warn('Fleet Host reconcile withdrawn as benign supersession', {
             err: error,
             errorName: error.name,
           })
