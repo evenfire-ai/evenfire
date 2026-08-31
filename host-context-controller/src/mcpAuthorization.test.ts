@@ -8,8 +8,20 @@ import {
   type AuthoritySecretMetadata,
   McpAuthorizationService,
   type McpAuthorizationStore,
+  deriveAuthKind,
   toPublicMcpTransport,
 } from './mcpAuthorization'
+import type { McpServerOAuth } from './types'
+
+// A complete McpServerOAuth block, shaped like the CRD `spec.oauth` the real
+// producer (k8sClient.readMcpServer) projects — never a hand-built partial.
+const fullOAuth = (grantScope: 'user' | 'context'): McpServerOAuth => ({
+  id: 'oauth-adapter',
+  provider: 'google',
+  clientIdRef: { name: 'oauth-secret', key: 'client-id' },
+  clientSecretRef: { name: 'oauth-secret', key: 'client-secret' },
+  grantScope,
+})
 
 const meta = (uid: string, resourceVersion: string) => ({ uid, resourceVersion })
 const principal: VerifiedMcpHostPrincipal = {
@@ -554,5 +566,86 @@ describe('McpAuthorizationService', () => {
     })
     expect(store.secretMetadataReads).toBe(0)
     expect(store.secretValueReads).toBe(0)
+  })
+})
+
+describe('deriveAuthKind (mini-spec 10 §3.1)', () => {
+  it.each([
+    [
+      'oauth + grantScope=user → oauth-user',
+      { type: 'oauth' as const },
+      { grantScope: 'user' as const },
+      true,
+      'oauth-user',
+    ],
+    [
+      'oauth + grantScope=context → oauth-context',
+      { type: 'oauth' as const },
+      { grantScope: 'context' as const },
+      true,
+      'oauth-context',
+    ],
+    [
+      'oauth + grantScope absent → oauth-user (CEL default)',
+      { type: 'oauth' as const },
+      undefined,
+      true,
+      'oauth-user',
+    ],
+    ['bearer (authRequired) → static', { type: 'bearer' as const }, undefined, true, 'static'],
+    ['apiKey (authRequired) → static', { type: 'apiKey' as const }, undefined, true, 'static'],
+    ['none → undefined (omitted)', { type: 'none' as const }, undefined, false, undefined],
+    ['absent auth → undefined', undefined, undefined, false, undefined],
+  ])('%s', (_label, auth, oauth, authRequired, expected) => {
+    expect(deriveAuthKind(auth as never, oauth as never, authRequired)).toBe(expected)
+  })
+
+  it('never collapses an oauth server to static across every grantScope', () => {
+    for (const grantScope of ['user', 'context', undefined] as const) {
+      const kind = deriveAuthKind({ type: 'oauth' }, grantScope ? { grantScope } : undefined, true)
+      expect(kind).not.toBe('static')
+      expect(kind?.startsWith('oauth-')).toBe(true)
+    }
+  })
+
+  it('is idempotent: same inputs yield the same authKind', () => {
+    const a = deriveAuthKind({ type: 'oauth' }, { grantScope: 'context' }, true)
+    const b = deriveAuthKind({ type: 'oauth' }, { grantScope: 'context' }, true)
+    expect(a).toBe(b)
+  })
+})
+
+describe('listServers authKind emission (mini-spec 10 §3.2, T1)', () => {
+  it.each([
+    ['oauth-user', { type: 'oauth' as const }, fullOAuth('user'), 'oauth-user'],
+    ['oauth-context', { type: 'oauth' as const }, fullOAuth('context'), 'oauth-context'],
+    [
+      'static (bearer)',
+      { type: 'bearer' as const, secretRef: 'server-a-auth', secretKey: 'token' },
+      undefined,
+      'static',
+    ],
+  ])('emits authKind=%s derived from the real producer', async (_label, auth, oauth, expected) => {
+    const store = new FakeStore()
+    store.serverObject = {
+      ...server,
+      auth,
+      ...(oauth ? { oauth } : {}),
+    }
+    const service = new McpAuthorizationService(store)
+    const inventory = await service.listServers(principal)
+    expect(inventory[0].authKind).toBe(expected)
+    // I1: the wire projection never leaks context/auth identity.
+    expect(inventory[0]).not.toHaveProperty('contextRef')
+    expect(inventory[0]).not.toHaveProperty('auth')
+    expect(inventory[0]).not.toHaveProperty('oauth')
+  })
+
+  it('omits authKind entirely for a no-auth server', async () => {
+    const store = new FakeStore()
+    store.serverObject = { ...server, auth: { type: 'none' } }
+    const service = new McpAuthorizationService(store)
+    const inventory = await service.listServers(principal)
+    expect(inventory[0]).not.toHaveProperty('authKind')
   })
 })

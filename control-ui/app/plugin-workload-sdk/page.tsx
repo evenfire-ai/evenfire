@@ -1,7 +1,6 @@
 'use client'
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useRouter } from 'next/navigation'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { SectionSearchInput } from '@components/SectionSearchInput'
@@ -30,10 +29,18 @@ import {
   searchPluginWorkloadSdkInvocations,
   upsertPluginWorkloadSdkGrant,
 } from '@lib/api'
+import {
+  type CodexSubscriptionConnectionView,
+  isAssignableCodexGrant,
+  listCodexConnectionModels,
+  listCodexSubscriptionConnections,
+} from '@lib/codexSubscription'
+import { isDisabledCapabilityError } from '@lib/codexSubscriptionFeature'
 import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
 import {
   LLM_PROVIDER_OPTIONS,
   type LlmProvider,
+  OPENAI_SUBSCRIPTION_PROVIDER,
   buildPromptBridgeTargetPolicy,
   getModelOptions,
   getPromptBridgeCredentialSlotOptions,
@@ -119,7 +126,6 @@ async function fetchUsersByRefs(userRefs: string[]): Promise<AdminUser[]> {
 }
 
 export default function PluginWorkloadSdkPage() {
-  const router = useRouter()
   const { confirm, confirmDialog } = useConfirmDialog()
   const { showToast } = useToast()
   const [view, setView] = useState<SdkView>('grants')
@@ -454,6 +460,14 @@ function GrantFormModal({
   const [targetModel, setTargetModel] = useState('')
   const [credentialSlot, setCredentialSlot] = useState('')
   const [availableCredentialKeys, setAvailableCredentialKeys] = useState<string[]>([])
+  // Codex (oauth-broker) targets choose an EXISTING permitted subscription
+  // grant instead of a Secret data key. Only connected grants with a ready
+  // catalog are listed, and the model picker narrows to that grant's enabled
+  // non-stale models — the same "choose, don't create" lock Hosts follow.
+  const isCodexProvider = modelProvider === OPENAI_SUBSCRIPTION_PROVIDER
+  const [codexConnectionRef, setCodexConnectionRef] = useState('')
+  const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
+  const [codexModels, setCodexModels] = useState<string[]>([])
   const [allowedEventTypes, setAllowedEventTypes] = useState(
     (grant?.allowedEventTypes ?? []).join(', ')
   )
@@ -516,6 +530,43 @@ function GrantFormModal({
       cancelled = true
     }
   }, [])
+  useEffect(() => {
+    if (!isCodexProvider) return
+    let cancelled = false
+    listCodexSubscriptionConnections()
+      .then(connections => {
+        if (cancelled) return
+        setCodexConnections(connections.filter(isAssignableCodexGrant))
+      })
+      .catch(err => {
+        if (cancelled) return
+        setCodexConnections([])
+        if (!isDisabledCapabilityError(err)) {
+          setError(err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions')
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isCodexProvider])
+  useEffect(() => {
+    if (!isCodexProvider || !codexConnectionRef) {
+      setCodexModels([])
+      return
+    }
+    let cancelled = false
+    listCodexConnectionModels(codexConnectionRef)
+      .then(models => {
+        if (cancelled) return
+        setCodexModels(models.filter(row => row.enabled && !row.stale).map(row => row.model))
+      })
+      .catch(() => {
+        if (!cancelled) setCodexModels([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isCodexProvider, codexConnectionRef])
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
@@ -580,17 +631,21 @@ function GrantFormModal({
   const callersList = parseList(allowedCallers)
   const wildcardPresent =
     promptTargets.some(target =>
-      [target.targetRef, target.provider, target.model, target.credentialSlot].some(value =>
-        value.includes('*')
-      )
+      [
+        target.targetRef,
+        target.provider,
+        target.model,
+        target.credentialSlot,
+        target.connectionRef ?? '',
+      ].some(value => value.includes('*'))
     ) ||
     hasWildcard(eventTypesList) ||
     hasWildcard(parseList(allowedTargetRefs)) ||
     hasWildcard(callersList)
 
   const providerModelOptions = useMemo(
-    () => getModelOptions(allowedCatalog, modelProvider),
-    [allowedCatalog, modelProvider]
+    () => (isCodexProvider ? codexModels : getModelOptions(allowedCatalog, modelProvider)),
+    [allowedCatalog, codexModels, isCodexProvider, modelProvider]
   )
   const credentialSlotOptions = useMemo(
     () => getPromptBridgeCredentialSlotOptions(modelProvider, availableCredentialKeys),
@@ -674,8 +729,11 @@ function GrantFormModal({
   function addPromptTarget() {
     const model = targetModel.trim()
     const slot = credentialSlot.trim()
+    const connectionRef = codexConnectionRef.trim()
     const ref = targetRef.trim() || `${modelProvider}-${model}-${promptTargets.length + 1}`
-    if (!model || !slot || !ref) return
+    // Codex targets bind a permitted subscription grant and carry no static
+    // Secret slot; API-key targets keep requiring a provider-owned slot.
+    if (!model || !ref || (isCodexProvider ? !connectionRef : !slot)) return
     if (
       promptTargets.some(
         target =>
@@ -687,7 +745,9 @@ function GrantFormModal({
     }
     setPromptTargets(current => [
       ...current,
-      { targetRef: ref, provider: modelProvider, model, credentialSlot: slot },
+      isCodexProvider
+        ? { targetRef: ref, provider: modelProvider, model, credentialSlot: '', connectionRef }
+        : { targetRef: ref, provider: modelProvider, model, credentialSlot: slot },
     ])
     setTargetRef('')
     setTargetModel('')
@@ -807,6 +867,7 @@ function GrantFormModal({
                       setModelProvider(next)
                       setTargetModel('')
                       setCredentialSlot('')
+                      setCodexConnectionRef('')
                     }}
                   >
                     {LLM_PROVIDER_OPTIONS.map(option => (
@@ -841,26 +902,54 @@ function GrantFormModal({
                     ))}
                   </SelectInput>
                 </Field>
-                <Field
-                  label="Credential slot"
-                  htmlFor="sdk-credential-slot"
-                  required
-                  description="Sanitized Secret data-key identity owned by this provider. Its value is never displayed or sent to the workload."
-                >
-                  <SelectInput
-                    id="sdk-credential-slot"
-                    compact
-                    value={credentialSlot}
-                    onChange={e => setCredentialSlot(e.target.value)}
+                {isCodexProvider ? (
+                  <Field
+                    label="Codex subscription"
+                    htmlFor="sdk-codex-connection"
+                    required
+                    description="Choose an existing connected ChatGPT subscription grant. Grants are created in Secrets & Connections; this policy only selects one, and only its enabled models can be added."
                   >
-                    <option value="">Select provider-owned slot…</option>
-                    {credentialSlotOptions.map(slot => (
-                      <option key={slot} value={slot}>
-                        {slot}
-                      </option>
-                    ))}
-                  </SelectInput>
-                </Field>
+                    <SelectInput
+                      id="sdk-codex-connection"
+                      compact
+                      value={codexConnectionRef}
+                      onChange={e => {
+                        setCodexConnectionRef(e.target.value)
+                        setTargetModel('')
+                      }}
+                    >
+                      <option value="">Select connected subscription…</option>
+                      {codexConnections.map(connection => (
+                        <option key={connection.connectionKey} value={connection.connectionKey}>
+                          {connection.displayName
+                            ? `${connection.displayName} (${connection.connectionKey})`
+                            : connection.connectionKey}
+                        </option>
+                      ))}
+                    </SelectInput>
+                  </Field>
+                ) : (
+                  <Field
+                    label="Credential slot"
+                    htmlFor="sdk-credential-slot"
+                    required
+                    description="Sanitized Secret data-key identity owned by this provider. Its value is never displayed or sent to the workload."
+                  >
+                    <SelectInput
+                      id="sdk-credential-slot"
+                      compact
+                      value={credentialSlot}
+                      onChange={e => setCredentialSlot(e.target.value)}
+                    >
+                      <option value="">Select provider-owned slot…</option>
+                      {credentialSlotOptions.map(slot => (
+                        <option key={slot} value={slot}>
+                          {slot}
+                        </option>
+                      ))}
+                    </SelectInput>
+                  </Field>
+                )}
                 <Field
                   label="Target reference"
                   htmlFor="sdk-target-ref"
@@ -880,7 +969,10 @@ function GrantFormModal({
                       type="button"
                       size="sm"
                       onClick={addPromptTarget}
-                      disabled={!targetModel.trim() || !credentialSlot.trim()}
+                      disabled={
+                        !targetModel.trim() ||
+                        (isCodexProvider ? !codexConnectionRef.trim() : !credentialSlot.trim())
+                      }
                     >
                       Add target
                     </Button>
@@ -893,7 +985,10 @@ function GrantFormModal({
                         <code>
                           {index === 0 ? 'default · ' : `fallback ${index} · `}
                           {target.targetRef}: {getProviderLabel(target.provider as LlmProvider)} /{' '}
-                          {target.model} / {target.credentialSlot}
+                          {target.model} /{' '}
+                          {target.connectionRef
+                            ? `sub:${target.connectionRef}`
+                            : target.credentialSlot}
                         </code>
                         <Button
                           type="button"

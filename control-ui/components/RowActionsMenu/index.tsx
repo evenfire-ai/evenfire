@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom'
 import { IconDotsVertical, IconMoreHorizontal } from '@components/icons'
 import type { RowActionsMenuProps } from './types'
 
-export type { RowAction } from './types'
+export type { RowActionMenuItem } from './types'
 
 function getEnabledMenuItems(menu: HTMLDivElement | null): HTMLButtonElement[] {
   if (!menu) return []

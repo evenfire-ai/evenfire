@@ -9,6 +9,7 @@ import {
   getRecipe,
   getRecipeSecrets,
 } from '../../lib/api'
+import { llmChainRequiresSecret } from '../../lib/llm'
 import { collectWorkflowRecipeSecretRefs } from '../../lib/workflowRecipeSecretRefs'
 import { useConfirmDialog } from '../ConfirmDialog'
 import { RowActionsMenu } from '../RowActionsMenu'
@@ -55,6 +56,7 @@ export function RecipeSecretsPanel({
 }) {
   const router = useRouter()
   const [rows, setRows] = useState<Row[]>([])
+  const [brokerBackedAgent, setBrokerBackedAgent] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [deletingName, setDeletingName] = useState<string | null>(null)
@@ -73,6 +75,10 @@ export function RecipeSecretsPanel({
 
       const spec = (recipe.spec ?? {}) as Record<string, unknown>
       const refs = collectWorkflowRecipeSecretRefs(spec)
+      const agent = (spec.agent ?? {}) as { provider?: string }
+      setBrokerBackedAgent(
+        typeof agent.provider === 'string' && !llmChainRequiresSecret(agent.provider)
+      )
 
       const next: Row[] = []
       for (const ref of refs.values()) {
@@ -200,7 +206,11 @@ export function RecipeSecretsPanel({
           <span className="cu-muted">Loading secrets…</span>
         </div>
       ) : rows.length === 0 ? (
-        <div className="cu-empty">This recipe declares no API-key Secret references.</div>
+        <div className="cu-empty">
+          {brokerBackedAgent
+            ? 'This recipe uses a broker-backed agent and does not require an LLM secret.'
+            : 'This recipe declares no API-key Secret references.'}
+        </div>
       ) : (
         <div className="cu-table-wrap">
           <table className="cu-table">

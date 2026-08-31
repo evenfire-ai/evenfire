@@ -14,6 +14,7 @@ import {
 } from '../lib/api'
 import { useConfirmDialog } from './ConfirmDialog'
 import CreateApiKeyModal from './CreateApiKeyModal'
+import type { RegistryApiKeysPanelProps } from './RegistryApiKeysPanel.types'
 import RevealApiKeyModal from './RevealApiKeyModal'
 import { SectionLoadingSkeleton } from './SectionLoadingSkeleton'
 import { TableHeaderRow } from './TableHeaderRow'
@@ -52,7 +53,7 @@ function fmtExpiry(v: string | null): string {
   return d.getTime() < Date.now() ? `Expired ${d.toLocaleDateString()}` : d.toLocaleString()
 }
 
-export default function RegistryApiKeysPanel() {
+export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKeysPanelProps) {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [view, setView] = useState<View>({ kind: 'loading' })
@@ -238,7 +239,7 @@ export default function RegistryApiKeysPanel() {
 
   return (
     <section>
-      <div className="cu-card cu-card--viewport-fill">{content}</div>
+      {embedded ? content : <div className="cu-card cu-card--viewport-fill">{content}</div>}
       {creating ? (
         <CreateApiKeyModal onCreate={handleCreate} onCancel={() => setCreating(false)} />
       ) : null}

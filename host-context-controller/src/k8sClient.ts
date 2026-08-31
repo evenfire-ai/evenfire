@@ -56,6 +56,7 @@ import {
 } from './mcpServerSafety'
 import {
   hostDeleteCleanupTotal,
+  hostFleetLifecycleCatchTotal,
   hostFleetRequestsTotal,
   hostWatchRecoverySeconds,
   initialConvergenceEffectsDroppedTotal,
@@ -64,6 +65,8 @@ import {
   initialConvergencePassResultsTotal,
   initialConvergenceRetriesTotal,
   initialConvergenceSwallowedTotal,
+  netPolDefaultsOnlyTickDurationSeconds,
+  netPolDefaultsOnlyTicksTotal,
   netPolResyncTicksSkippedTotal,
 } from './metrics'
 import {
@@ -894,6 +897,13 @@ export class McpServerWatcher implements McpServerProvider {
   // single-flight pass. Disabled by default (interval <= 0); startup still
   // runs one convergence. Never call netPolReconciler.fullReconcile from here.
   private netPolResyncTimer: ReturnType<typeof setInterval> | null = null
+  // Periodic L0/L1 defaults-only tick (#488). Disabled by default
+  // (interval <= 0). Never shares the full-pass in-flight skip; write sets
+  // are disjoint from the typed sweep.
+  private netPolDefaultsResyncTimer: ReturnType<typeof setInterval> | null = null
+  // Serializes overlapping defaults-only ticks. Distinct from
+  // initialConvergenceRuns.get('NetworkPolicy').
+  private netPolDefaultsOnlyRun: Promise<void> | null = null
   // Set by a timer tick so the next coordinated NetworkPolicy pass re-applies
   // L0/L1 defaults (class D). Startup and event-driven entry leave this false
   // — start() already ran ensureDefaultPolicies as a bootstrap barrier.
@@ -949,6 +959,11 @@ export class McpServerWatcher implements McpServerProvider {
     // Wire the cross-CRD lookup the HostReconciler needs to mount each
     // referenced SharedFileSystem RO into the per-Host mcp-host pod.
     this.hostReconciler.setResolveContextMounts(host => this.resolveContextMounts(host))
+    // Wire the oauth-server probe the HostReconciler uses to gate the
+    // derive-only `oauth:user-token` runtime scope: true iff the Host's Context
+    // fronts an enabled `auth.type: oauth` mcp-server. Reuses the same
+    // Context-scoped allow-list projection as mcp-host discovery.
+    this.hostReconciler.setHostFrontsOAuthServer(host => this.hostFrontsOAuthServer(host))
     // #281: HostReconciler drives channel-reader Deployment replicas from
     // the CC count below, populated by the CommunicationChannel watch
     // (see startCommunicationChannelWatch).
@@ -2218,10 +2233,12 @@ export class McpServerWatcher implements McpServerProvider {
       console.error(`[K8s] Host reconciliation after ${reason} failed:`, error)
       if (!this.stopped && ccLifecycleGeneration !== undefined) {
         if (error instanceof HostFleetReconcileError && error.hostFailures.length === 0) {
+          hostFleetLifecycleCatchTotal.inc({ decision: 'applied' })
           this.markCommunicationChannelLifecycleApplied(ccLifecycleGeneration)
         } else {
           // Retry Host convergence without coupling the lifecycle ladder to
           // orphan cleanup. A later periodic full pass retries cleanup work.
+          hostFleetLifecycleCatchTotal.inc({ decision: 'retry' })
           this.scheduleCommunicationChannelFleetRetry({
             ...request,
             mode: error instanceof HostFleetReconcileError ? 'lifecycle' : request.mode,
@@ -2427,6 +2444,20 @@ export class McpServerWatcher implements McpServerProvider {
    * no matching SharedFileSystem CRD are skipped (and logged) so the pod
    * can still come up while the operator catches up.
    */
+  /**
+   * True iff the Host's referenced Context fronts at least one ENABLED
+   * `auth.type: oauth` mcp-server. HostReconciler uses this to gate the
+   * derive-only `oauth:user-token` runtime scope. Reads the same
+   * Context-scoped allow-list projection (`getServerInfosByContext`, which
+   * already filters to enabled + allowed servers) that mcp-host discovery uses,
+   * so HCC does not need a second cross-CRD read path. HostReconciler wraps this
+   * call in a fail-closed guard, so a thrown read there yields no oauth scope.
+   */
+  private async hostFrontsOAuthServer(host: HostCRD): Promise<boolean> {
+    const servers = await this.getServerInfosByContext(host.spec.contextRef)
+    return servers.some(server => server.enabled && server.auth?.type === 'oauth')
+  }
+
   private async resolveContextMounts(host: HostCRD): Promise<ResolvedSfsMount[]> {
     const context = this.contexts.get(host.spec.contextRef)
     const refs = context?.spec.sharedFileSystems ?? []
@@ -2619,6 +2650,11 @@ export class McpServerWatcher implements McpServerProvider {
       contextRef: server.spec.contextRef,
       transport,
       auth: server.spec.auth,
+      // Discovery metadata only: the OAuth block is projected verbatim, but
+      // mcp-host does NOT read it — per-connection partition dispatch is driven
+      // by `authKind` (derived separately from the AuthorityMcpServer store),
+      // so this field currently has no consumer. Token is NEVER mounted (O4).
+      oauth: server.spec.oauth,
       enabled: server.spec.enabled !== false,
       status: this.reconciler.getStatus(server),
     }
@@ -2875,6 +2911,19 @@ export class McpServerWatcher implements McpServerProvider {
       )
     }
 
+    // Class-D cheap path (#488). Interval > 0 is an ops enable, not a merge
+    // default. This timer never consults initialConvergenceRuns and never
+    // calls runInitialNetworkPolicyConvergence / fullReconcile.
+    const netPolDefaultsResyncSec = config.netPolDefaultsResyncIntervalSec
+    if (netPolDefaultsResyncSec > 0) {
+      this.netPolDefaultsResyncTimer = setInterval(() => {
+        void this.runNetworkPolicyDefaultsOnly()
+      }, netPolDefaultsResyncSec * 1000)
+      console.log(
+        `[K8s] NetworkPolicy defaults-only resync enabled (every ${netPolDefaultsResyncSec}s)`
+      )
+    }
+
     const externalEgressResyncSec = config.externalEgressResyncIntervalSec
     // #205 delegates external-egress periodic resync to the convergence
     // coordinator. Its runResyncCore drives reconcileExternalEgress, so the
@@ -3054,6 +3103,51 @@ export class McpServerWatcher implements McpServerProvider {
       this.netPolConvergenceEnsureDefaults = true
     }
     return this.runInitialConvergence('NetworkPolicy')
+  }
+
+  /**
+   * Class-D defaults-only tick (#488).
+   *
+   * `ensureDefaultPolicies` writes only L0/L1: `ensureDefaultDeny`,
+   * `ensureInfrastructurePolicies`, `ensureAllowContextMapperApi`, and the
+   * two `deleteLegacyStaticPolicy` calls. The fleet sweep lists typed
+   * `policy-type ∈ {context-allow, rpc-proxy-egress, external-egress}`.
+   * Baseline never appears in that list, so a concurrent full NetPol pass
+   * is safe. Do not re-apply HARD REQUIREMENT 2 here and do not share
+   * `initialConvergenceRuns.has('NetworkPolicy')`.
+   *
+   * Overlapping defaults-only ticks serialize: a second tick increments
+   * `netPolResyncTicksSkippedTotal{reason="defaults-only-in-flight"}` and
+   * joins the in-flight run. Never increment `pass-in-flight` from here.
+   * Each executed tick records `netPolDefaultsOnlyTicksTotal` and
+   * `netPolDefaultsOnlyTickDurationSeconds` with result success|error.
+   */
+  private runNetworkPolicyDefaultsOnly(): Promise<void> {
+    if (this.netPolDefaultsOnlyRun) {
+      netPolResyncTicksSkippedTotal.inc({ reason: 'defaults-only-in-flight' })
+      return this.netPolDefaultsOnlyRun
+    }
+    const run = (async () => {
+      const startedAtMs = Date.now()
+      let result: 'success' | 'error' = 'success'
+      try {
+        await this.netPolReconciler.ensureDefaultPolicies()
+      } catch (error) {
+        result = 'error'
+        console.error('[K8s] NetworkPolicy defaults-only tick failed:', error)
+      } finally {
+        const seconds = Math.max(0, (Date.now() - startedAtMs) / 1000)
+        netPolDefaultsOnlyTicksTotal.inc({ result })
+        netPolDefaultsOnlyTickDurationSeconds.observe({ result }, seconds)
+      }
+    })()
+    this.netPolDefaultsOnlyRun = run
+    void run.finally(() => {
+      if (this.netPolDefaultsOnlyRun === run) {
+        this.netPolDefaultsOnlyRun = null
+      }
+    })
+    return run
   }
 
   private runInitialConvergence(lane: InitialConvergenceLane): Promise<void> {
@@ -4587,6 +4681,11 @@ export class McpServerWatcher implements McpServerProvider {
       clearInterval(this.netPolResyncTimer)
       this.netPolResyncTimer = null
     }
+    if (this.netPolDefaultsResyncTimer) {
+      clearInterval(this.netPolDefaultsResyncTimer)
+      this.netPolDefaultsResyncTimer = null
+    }
+    this.netPolDefaultsOnlyRun = null
     this.netPolConvergenceEnsureDefaults = false
     for (const timer of this.initialConvergenceRetryTimers.values()) {
       clearTimeout(timer)
@@ -4911,6 +5010,8 @@ export function createMcpAuthorizationStore(provider: McpServerProvider): McpAut
           description: object.spec.description,
           transport: { ...object.spec.transport },
           auth: object.spec.auth ? { ...object.spec.auth } : undefined,
+          // grantScope drives the inventory authKind derivation (mini-spec 10 §3.1).
+          oauth: object.spec.oauth ? { ...object.spec.oauth } : undefined,
           enabled: object.spec.enabled !== false,
           status,
         }

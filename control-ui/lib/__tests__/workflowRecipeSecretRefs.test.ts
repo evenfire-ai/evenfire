@@ -72,4 +72,29 @@ describe('collectWorkflowRecipeSecretRefs', () => {
       ['sandbox-ui', 'ui-creds', ['token']],
     ])
   })
+
+  it('does not invent an LLM Secret for a Codex-only agent, even if secretRef is leftover', () => {
+    const refs = collectWorkflowRecipeSecretRefs({
+      agent: {
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+        secretRef: { name: 'codex-oauth', key: 'refreshToken' },
+      },
+      steps: [{ id: 'draft', instruction: 'Write a note' }],
+    })
+    expect([...refs.values()]).toEqual([])
+  })
+
+  it('collects an agent secretRef only when the agent uses static credentials', () => {
+    const refs = collectWorkflowRecipeSecretRefs({
+      agent: {
+        provider: 'openai',
+        model: 'gpt-5.4',
+        secretRef: { name: 'openai-llm', key: 'openai-api-key' },
+      },
+    })
+    expect([...refs.values()].map(ref => [ref.namespace, ref.secretName, [...ref.keys]])).toEqual([
+      ['sandbox-recipes', 'openai-llm', ['openai-api-key']],
+    ])
+  })
 })
