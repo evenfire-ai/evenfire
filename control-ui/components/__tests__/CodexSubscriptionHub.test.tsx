@@ -10,7 +10,6 @@ import {
   pollCodexDevice,
   revokeCodexSubscription,
   startCodexDeviceConnect,
-  syncCodexSubscriptionCatalog,
 } from '@lib/codexSubscription'
 import { CodexSubscriptionHub } from '../CodexSubscriptionHub'
 import { ToastProvider } from '../Toast'
@@ -84,7 +83,7 @@ describe('CodexSubscriptionHub', () => {
     vi.unstubAllGlobals()
   })
 
-  it('creates the subscription when the name is confirmed and unlocks the setup form', async () => {
+  it('creates the subscription when the name is confirmed and auto-starts sign-in', async () => {
     vi.mocked(createCodexSubscriptionConnection).mockResolvedValue(
       connection({
         connectionKey: 'codex-bbb',
@@ -93,6 +92,17 @@ describe('CodexSubscriptionHub', () => {
         defaultModel: null,
       })
     )
+    vi.mocked(startCodexDeviceConnect).mockResolvedValue({
+      userCode: 'ABCD-1234',
+      verificationUri: 'https://chatgpt.com/device',
+      intervalSeconds: 0.3,
+      state: 'state-1',
+      intent: 'connect',
+    })
+    vi.mocked(pollCodexDevice).mockResolvedValue({
+      status: 'connected',
+      connection: connection({ connectionKey: 'codex-bbb', displayName: 'New team' }),
+    })
     vi.mocked(patchCodexSubscriptionConnection).mockResolvedValue(
       connection({ connectionKey: 'codex-bbb', displayName: 'New team', defaultModel: null })
     )
@@ -115,18 +125,23 @@ describe('CodexSubscriptionHub', () => {
       'Please confirm the name first'
     )
 
-    // Confirming the name creates the grant and unlocks the flow.
+    // Confirming the name creates the grant and starts the device sign-in.
     fireEvent.change(nameInput, { target: { value: 'New team' } })
     fireEvent.click(screen.getByRole('button', { name: 'Confirm name' }))
     await waitFor(() => {
       expect(createCodexSubscriptionConnection).toHaveBeenCalledWith({ displayName: 'New team' })
     })
-    const unlockedSignIn = await screen.findByRole('button', { name: 'Sign in with ChatGPT' })
-    expect(unlockedSignIn).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Finish setup' })).toBeInTheDocument()
+    await waitFor(() => {
+      expect(startCodexDeviceConnect).toHaveBeenCalledWith('connect', 'codex-bbb')
+    })
     expect(screen.getByTitle('Name confirmed')).toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Finish setup' }))
+    // Once the device flow settles the dialog keeps the setup form with the
+    // models synced by the connect handshake.
+    await waitFor(() => {
+      expect(listCodexConnectionModels).toHaveBeenCalledWith('codex-bbb')
+    })
+    const finish = await screen.findByRole('button', { name: 'Finish setup' })
+    fireEvent.click(finish)
     await waitFor(() => {
       expect(patchCodexSubscriptionConnection).toHaveBeenCalledWith('codex-bbb', {
         displayName: 'New team',
@@ -160,20 +175,13 @@ describe('CodexSubscriptionHub', () => {
     expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument()
   })
 
-  it('opens the grant modal for Sign in, Sync, and model toggles without binding hosts', async () => {
+  it('opens the grant modal for reconnect and model toggles without binding hosts', async () => {
     vi.mocked(startCodexDeviceConnect).mockResolvedValue({
       userCode: 'ABCD-1234',
       verificationUri: 'https://chatgpt.com/device',
       intervalSeconds: 1,
       state: 'state-1',
-      intent: 'connect',
-    })
-    vi.mocked(syncCodexSubscriptionCatalog).mockResolvedValue({
-      outcome: 'ready',
-      added: 1,
-      refreshed: 0,
-      staled: 0,
-      connection: connection({ connectionKey: 'codex-aaa', displayName: 'Team A' }),
+      intent: 'reconnect',
     })
     vi.mocked(patchCodexCatalogModel).mockResolvedValue([
       { model: 'gpt-5.1', enabled: true, stale: false },
@@ -192,12 +200,9 @@ describe('CodexSubscriptionHub', () => {
     )
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Update' }))
     expect(await screen.findByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Sync catalog' })).toBeInTheDocument()
+    // The catalog syncs automatically during connect — no manual sync button.
+    expect(screen.queryByRole('button', { name: 'Sync catalog' })).not.toBeInTheDocument()
     expect(listCodexConnectionModels).toHaveBeenCalledWith('codex-aaa')
-    fireEvent.click(screen.getByRole('button', { name: 'Sync catalog' }))
-    await waitFor(() => {
-      expect(syncCodexSubscriptionCatalog).toHaveBeenCalledWith('codex-aaa')
-    })
     fireEvent.click(screen.getByLabelText('gpt-5.3-codex'))
     await waitFor(() => {
       expect(patchCodexCatalogModel).toHaveBeenCalledWith('codex-aaa', 'gpt-5.3-codex', true)
@@ -211,9 +216,7 @@ describe('CodexSubscriptionHub', () => {
     })
   })
 
-  it('opens ChatGPT in a new tab and shows the device code with copy actions', async () => {
-    const openMock = vi.fn(() => null)
-    vi.stubGlobal('open', openMock)
+  it('shows the device code card with the verification link and copy actions', async () => {
     vi.mocked(startCodexDeviceConnect).mockResolvedValue({
       userCode: 'ABCD-1234',
       verificationUri: 'https://chatgpt.com/device',
@@ -221,7 +224,7 @@ describe('CodexSubscriptionHub', () => {
       // auto-dismiss waitFor completes comfortably inside its timeout.
       intervalSeconds: 0.3,
       state: 'state-1',
-      intent: 'connect',
+      intent: 'reconnect',
     })
     vi.mocked(pollCodexDevice).mockResolvedValue({
       status: 'connected',
@@ -239,17 +242,11 @@ describe('CodexSubscriptionHub', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Sign in with ChatGPT' }))
     const card = await screen.findByTestId('codex-device-code')
     expect(card).toHaveTextContent('ABCD-1234')
-    expect(openMock).toHaveBeenCalledWith(
-      'https://chatgpt.com/device',
-      '_blank',
-      'noopener,noreferrer'
-    )
-    expect(screen.getByRole('link', { name: 'https://chatgpt.com/device' })).toHaveAttribute(
-      'target',
-      '_blank'
-    )
+    const link = screen.getByTestId('codex-device-verification-link')
+    expect(link).toHaveAttribute('href', 'https://chatgpt.com/device')
+    expect(link).toHaveAttribute('target', '_blank')
     expect(screen.getByRole('button', { name: 'Copy sign-in link' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Copy device code' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Copy code' })).toBeInTheDocument()
     await waitFor(() => {
       expect(screen.queryByTestId('codex-device-code')).not.toBeInTheDocument()
     })

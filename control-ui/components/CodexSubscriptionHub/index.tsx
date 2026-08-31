@@ -13,7 +13,6 @@ import {
   pollCodexDevice,
   revokeCodexSubscription,
   startCodexDeviceConnect,
-  syncCodexSubscriptionCatalog,
 } from '@lib/codexSubscription'
 import {
   type CodexSubscriptionCapability,
@@ -77,9 +76,6 @@ export function CodexSubscriptionHub() {
   >([])
   const [userCode, setUserCode] = useState<string | null>(null)
   const [verificationUri, setVerificationUri] = useState<string | null>(null)
-  // True when the browser blocked the automatic ChatGPT tab, so the card tells
-  // the operator to use the manual link instead of assuming the tab opened.
-  const [deviceTabBlocked, setDeviceTabBlocked] = useState(false)
   // Ported from dev: bumps whenever the dialog closes/reopens or a new connect
   // starts, so a stale device-poll loop (closed dialog, switched row) can no
   // longer touch state after it was abandoned.
@@ -133,8 +129,9 @@ export function CodexSubscriptionHub() {
   }, [connections, searchQuery])
 
   // The name check (or the footer CTA) confirms the name: it creates the empty
-  // grant with that display name and unlocks the rest of the setup form
-  // (sign-in, models, default) in the same dialog.
+  // grant with that display name and starts the device sign-in right away —
+  // by the time the operator approves the code, the catalog is already synced
+  // server-side (connect handshake) and the models grid is populated.
   async function confirmNameAndCreate() {
     const displayName = editName.trim()
     if (!displayName) {
@@ -149,9 +146,11 @@ export function CodexSubscriptionHub() {
       setSetupNew(true)
       await load()
       showToast(`Subscription ${displayName} created.`, { tone: 'success' })
+      // Ownership of busyKey hands over to handleConnect; it clears it when
+      // the device flow settles. Only the failure path resets it here.
+      void handleConnect(created)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create subscription')
-    } finally {
       setBusyKey(null)
     }
   }
@@ -165,7 +164,6 @@ export function CodexSubscriptionHub() {
     setSetupNew(false)
     setUserCode(null)
     setVerificationUri(null)
-    setDeviceTabBlocked(false)
     setError('')
   }
 
@@ -177,7 +175,6 @@ export function CodexSubscriptionHub() {
     setSetupNew(false)
     setUserCode(null)
     setVerificationUri(null)
-    setDeviceTabBlocked(false)
     setError('')
     if (row.status === 'connected') {
       try {
@@ -201,7 +198,6 @@ export function CodexSubscriptionHub() {
     setSetupNew(false)
     setUserCode(null)
     setVerificationUri(null)
-    setDeviceTabBlocked(false)
     void load().catch(err => {
       setError(err instanceof Error ? err.message : 'Failed to load ChatGPT subscriptions')
     })
@@ -246,17 +242,6 @@ export function CodexSubscriptionHub() {
       if (epoch !== connectEpoch.current) return
       setUserCode(started.userCode)
       setVerificationUri(started.verificationUri)
-      // Open the verification page straight away so the operator never has to
-      // copy the URL by hand. Browsers may still block the popup (especially
-      // after the await), so remember the failure and surface a manual link.
-      let opened: Window | null = null
-      try {
-        opened = window.open(started.verificationUri, '_blank', 'noopener,noreferrer')
-      } catch {
-        opened = null
-      }
-      if (epoch !== connectEpoch.current) return
-      setDeviceTabBlocked(!opened)
       const deadline = Date.now() + started.intervalSeconds * 1000 * 40
       while (Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, started.intervalSeconds * 1000))
@@ -303,26 +288,6 @@ export function CodexSubscriptionHub() {
       if (epoch === connectEpoch.current) {
         setBusyKey(null)
       }
-    }
-  }
-
-  async function handleSync(row: CodexSubscriptionConnectionView) {
-    if (row.status !== 'connected') return
-    setBusyKey(row.connectionKey)
-    try {
-      const synced = await syncCodexSubscriptionCatalog(row.connectionKey)
-      if (synced.outcome !== 'ready') {
-        setError(`Catalog sync ${synced.outcome}`)
-        return
-      }
-      const models = await listCodexConnectionModels(row.connectionKey)
-      setEditModels(models)
-      await load()
-      showToast(`Catalog synced: ${grantLabel(row)}`, { tone: 'success' })
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Catalog sync failed')
-    } finally {
-      setBusyKey(null)
     }
   }
 
@@ -612,7 +577,7 @@ export function CodexSubscriptionHub() {
               </div>
               {setupNew && editing ? (
                 <p className="cu-field__hint" style={{ margin: 0 }}>
-                  Grant created — sign in with ChatGPT, choose the models to offer, and set a
+                  Grant created — sign-in started. Once connected, pick the models to offer and a
                   default to finish setup.
                 </p>
               ) : null}
@@ -624,8 +589,8 @@ export function CodexSubscriptionHub() {
                   </div>
                   <p className="cu-field__hint" style={{ margin: 0 }}>
                     {setupNew || !editing
-                      ? 'Agents authorize through this subscription’s ChatGPT grant. Sign in to connect it.'
-                      : 'Agents authorize through this subscription’s ChatGPT grant. Reconnect if the grant expired, or sync to refresh the model catalog.'}
+                      ? 'Agents authorize through this subscription’s ChatGPT grant. Sign in to connect it — the catalog syncs automatically.'
+                      : 'Agents authorize through this subscription’s ChatGPT grant. Reconnect if the grant expired — the catalog refreshes automatically.'}
                   </p>
                   <div className="cu-form-inline">
                     <span
@@ -643,28 +608,11 @@ export function CodexSubscriptionHub() {
                         Sign in with ChatGPT
                       </button>
                     </span>
-                    <span
-                      title={editing ? undefined : 'Please confirm the name first'}
-                      className="cu-hover-hint"
-                    >
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--ghost cu-btn--sm"
-                        onClick={() => {
-                          if (editing) void handleSync(editing)
-                        }}
-                        disabled={Boolean(busyKey) || !editing || editing.status !== 'connected'}
-                      >
-                        Sync catalog
-                      </button>
-                    </span>
                   </div>
                   {userCode ? (
                     <div className="cu-device-setup" data-testid="codex-device-code">
                       <p className="cu-device-setup__step">
-                        {deviceTabBlocked
-                          ? '1. Your browser blocked the pop-up — open ChatGPT with this link:'
-                          : '1. ChatGPT opened in a new tab. If it did not, use this link:'}
+                        1. Open the ChatGPT verification page:
                       </p>
                       {(() => {
                         // Locked fallback (from dev): even if the backend
@@ -674,6 +622,7 @@ export function CodexSubscriptionHub() {
                           <div className="cu-copy-field">
                             <a
                               className="cu-readonly-field cu-copy-field__value cu-device-setup__link"
+                              data-testid="codex-device-verification-link"
                               href={deviceUri}
                               target="_blank"
                               rel="noopener noreferrer"
@@ -702,9 +651,9 @@ export function CodexSubscriptionHub() {
                         <button
                           type="button"
                           className="cu-btn cu-btn--icon cu-btn--ghost"
-                          onClick={() => void copyDeviceValue(userCode, 'Device code', showToast)}
-                          aria-label="Copy device code"
-                          title="Copy device code"
+                          onClick={() => void copyDeviceValue(userCode, 'Code', showToast)}
+                          aria-label="Copy code"
+                          title="Copy code"
                         >
                           <IconCopy width={14} height={14} />
                         </button>
