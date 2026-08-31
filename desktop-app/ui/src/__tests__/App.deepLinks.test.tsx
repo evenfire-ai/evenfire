@@ -633,7 +633,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(sandboxUiPageHarness.props).not.toBeNull())
     // The native WebContentsView paints above renderer DOM, so the overlay
     // signal must stay off until a deep-link dialog actually needs to show.
-    expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBeFalsy()
+    expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(false)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
