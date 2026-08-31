@@ -1,7 +1,7 @@
 'use client'
 
-import React, { useMemo, useState } from 'react'
-import { DataTable, useTableSort } from '@clerum/frontend-table-system'
+import { useMemo, useState } from 'react'
+import { DataTable, TableRow, useTableSort } from '@clerum/frontend-table-system'
 import {
   COMMUNICATION_CHANNEL_PROVIDERS,
   type CommunicationChannelProvider,
@@ -267,58 +267,59 @@ export function CommunicationChannelsTable({
                     configuredProviderTypes.has(provider)
                   )
                   return (
-                    <React.Fragment key={key}>
-                      <tr>
-                        <td>
-                          <button
-                            type="button"
-                            className="cu-channel-table__name"
-                            onClick={() => onOpenChannel?.(name)}
-                            disabled={!onOpenChannel}
-                          >
-                            {name}
-                          </button>
-                        </td>
-                        <td>
-                          <span className="cu-table__cell-muted">{spec.hostRef || '-'}</span>
-                        </td>
-                        <td>
-                          {providerTypes.map(communicationChannelProviderLabel).join(', ') || '-'}
-                        </td>
-                        <td>
-                          <div className="cu-table-actions">
-                            <RowActionsMenu
-                              ariaLabel={`Actions for channel ${name}`}
-                              horizontalTrigger
-                              actions={[
-                                ...(onEditChannel
-                                  ? [
-                                      {
-                                        key: 'edit',
-                                        label: 'Edit',
-                                        onClick: () => onEditChannel(name),
-                                      },
-                                    ]
-                                  : []),
-                                ...copyTargetsForChannel(item).map(provider => ({
-                                  key: `copy-${provider}`,
-                                  label: `Copy config into ${communicationChannelProviderLabel(provider)}`,
-                                  onClick: () => onCopyChannel?.(name, provider),
-                                  disabled: !onCopyChannel,
-                                })),
-                                {
-                                  key: 'delete',
-                                  label: deletingKey === key ? 'Deleting…' : 'Delete',
-                                  danger: true,
-                                  disabled: deletingKey === key,
-                                  onClick: () => void deleteRow(item),
-                                },
-                              ]}
-                            />
-                          </div>
-                        </td>
-                      </tr>
-                    </React.Fragment>
+                    <TableRow
+                      key={key}
+                      onNavigate={onOpenChannel ? () => onOpenChannel(name) : undefined}
+                    >
+                      <td className="cu-channel-table__name">{name}</td>
+                      <td>
+                        <span className="cu-table__cell-muted">{spec.hostRef || '-'}</span>
+                      </td>
+                      <td>
+                        {providerTypes.map(communicationChannelProviderLabel).join(', ') || '-'}
+                      </td>
+                      <td>
+                        <div className="cu-table-actions">
+                          <RowActionsMenu
+                            ariaLabel={`Actions for channel ${name}`}
+                            horizontalTrigger
+                            actions={[
+                              ...(onOpenChannel
+                                ? [
+                                    {
+                                      key: 'view',
+                                      label: 'View details',
+                                      onClick: () => onOpenChannel(name),
+                                    },
+                                  ]
+                                : []),
+                              ...(onEditChannel
+                                ? [
+                                    {
+                                      key: 'edit',
+                                      label: 'Edit',
+                                      onClick: () => onEditChannel(name),
+                                    },
+                                  ]
+                                : []),
+                              ...copyTargetsForChannel(item).map(provider => ({
+                                key: `copy-${provider}`,
+                                label: `Copy config into ${communicationChannelProviderLabel(provider)}`,
+                                onClick: () => onCopyChannel?.(name, provider),
+                                disabled: !onCopyChannel,
+                              })),
+                              {
+                                key: 'delete',
+                                label: deletingKey === key ? 'Deleting…' : 'Delete',
+                                danger: true,
+                                disabled: deletingKey === key,
+                                onClick: () => void deleteRow(item),
+                              },
+                            ]}
+                          />
+                        </div>
+                      </td>
+                    </TableRow>
                   )
                 })}
               </tbody>

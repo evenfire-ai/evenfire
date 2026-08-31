@@ -29,6 +29,35 @@ function renderTable({
 }
 
 describe('CommunicationChannelsTable', () => {
+  it('navigates the durable record row without activating from its action menu', () => {
+    const onOpenChannel = vi.fn()
+    render(
+      <ToastProvider>
+        <CommunicationChannelsTable
+          items={[
+            {
+              metadata: { name: 'channel-a', namespace: 'channels' },
+              spec: { hostRef: 'agent-a' },
+            },
+          ]}
+          onChanged={vi.fn().mockResolvedValue(undefined)}
+          onOpenChannel={onOpenChannel}
+        />
+      </ToastProvider>
+    )
+
+    const row = screen.getByText('channel-a').closest('tr')
+    expect(row).toHaveAttribute('tabindex', '0')
+    fireEvent.click(row!)
+    fireEvent.keyDown(row!, { key: 'Enter' })
+    fireEvent.keyDown(row!, { key: ' ' })
+    expect(onOpenChannel).toHaveBeenCalledTimes(3)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for channel channel-a' }))
+    expect(onOpenChannel).toHaveBeenCalledTimes(3)
+    expect(screen.getAllByRole('menuitem')[0]).toHaveTextContent('View details')
+  })
+
   it('shows configured provider types in one column', () => {
     renderTable({
       items: [

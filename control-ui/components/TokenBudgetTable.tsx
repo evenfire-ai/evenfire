@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, useTableSort } from '@clerum/frontend-table-system'
 import type { TokenBudget } from '@lib/api'
 import {
   budgetProgressPercent,
@@ -216,7 +216,7 @@ function BudgetRow({
   const limitText = formatBudgetAmount(limit, budget.unit, budget.currency)
 
   return (
-    <tr className="cu-table__row">
+    <TableRow className="cu-table__row" onNavigate={() => onEdit(budget.id)}>
       <td className="cu-tb-name">{budget.name}</td>
       <td>
         {segments.length === 0 ? (
@@ -312,6 +312,6 @@ function BudgetRow({
           ]}
         />
       </td>
-    </tr>
+    </TableRow>
   )
 }

@@ -44,6 +44,24 @@ function renderTable(overrides: Partial<React.ComponentProps<typeof TokenBudgetT
 }
 
 describe('TokenBudgetTable', () => {
+  it('navigates budget rows by pointer and keyboard while isolating row controls', () => {
+    const onEdit = vi.fn()
+    const onToggle = vi.fn().mockResolvedValue(undefined)
+    renderTable({ onEdit, onToggle })
+
+    const row = screen.getByText('Monthly OpenAI cap').closest('tr')
+    expect(row).toHaveAttribute('tabindex', '0')
+    fireEvent.click(row!)
+    fireEvent.keyDown(row!, { key: 'Enter' })
+    fireEvent.keyDown(row!, { key: ' ' })
+    expect(onEdit).toHaveBeenCalledTimes(3)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Disable budget Monthly OpenAI cap' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for budget Monthly OpenAI cap' }))
+    expect(onToggle).toHaveBeenCalledWith(budgets[0])
+    expect(onEdit).toHaveBeenCalledTimes(3)
+  })
+
   it('renders a budget row with readable scope, unit, and period', () => {
     renderTable()
     expect(screen.getByText('Monthly OpenAI cap')).toBeInTheDocument()

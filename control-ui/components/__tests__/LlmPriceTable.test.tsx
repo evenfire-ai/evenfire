@@ -38,6 +38,23 @@ function renderTable(overrides: Partial<React.ComponentProps<typeof LlmPriceTabl
 }
 
 describe('LlmPriceTable', () => {
+  it('navigates priced rows by pointer and keyboard without activating from the menu trigger', () => {
+    const onEdit = vi.fn()
+    renderTable({ onEdit })
+
+    const row = screen.getByText('claude-sonnet-4-6').closest('tr')
+    expect(row).toHaveAttribute('tabindex', '0')
+    fireEvent.click(row!)
+    fireEvent.keyDown(row!, { key: 'Enter' })
+    fireEvent.keyDown(row!, { key: ' ' })
+    expect(onEdit).toHaveBeenCalledTimes(3)
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for price claude/claude-sonnet-4-6' })
+    )
+    expect(onEdit).toHaveBeenCalledTimes(3)
+  })
+
   it('renders a priced row with the provider label and prices', () => {
     renderTable()
     expect(screen.getByText('Anthropic')).toBeInTheDocument()

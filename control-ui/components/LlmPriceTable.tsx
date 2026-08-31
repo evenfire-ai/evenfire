@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, useTableSort } from '@clerum/frontend-table-system'
 import type { LlmModelPrice, UnpricedModel } from '@lib/api'
 import { getProviderDisplayLabel } from '@lib/llm'
 import type { LlmPriceTableProps } from './LlmPriceTable.types'
@@ -276,7 +276,11 @@ export function LlmPriceTable({
                 )
                 const providerLabel = getProviderDisplayLabel(price.provider)
                 return (
-                  <tr key={price.id} className="cu-table__row">
+                  <TableRow
+                    key={price.id}
+                    className="cu-table__row"
+                    onNavigate={() => onEdit(price.id)}
+                  >
                     <td>
                       <span className="cu-px-provider">
                         <LlmProviderIcon provider={price.provider} label={providerLabel} />
@@ -331,7 +335,7 @@ export function LlmPriceTable({
                         ]}
                       />
                     </td>
-                  </tr>
+                  </TableRow>
                 )
               })}
             </tbody>
