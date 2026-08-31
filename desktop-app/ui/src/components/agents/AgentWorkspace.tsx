@@ -5,7 +5,7 @@ import { useAuthContext } from '@contexts/AuthContext'
 import { useChatListContext } from '@contexts/ChatListContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
-import { DataTable, EmptyState, IconButton, MenuItem } from '@components/Common'
+import { DataTable, EmptyState, IconButton, MenuItem, StatusBanner } from '@components/Common'
 import { PageBreadcrumb } from '@components/PageBreadcrumb'
 import type { PageBreadcrumbItem } from '@components/PageBreadcrumb/types'
 import { ResourceBreadcrumbSwitcher } from '@components/ResourceBreadcrumbSwitcher'
@@ -106,6 +106,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   const {
     agents: connectorAgents,
     pendingKey: connectorPendingKey,
+    actionError: connectorActionError,
     authorize: authorizeConnector,
     disconnect: disconnectConnector,
   } = useConnectorsController()
@@ -493,6 +494,14 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
             <section className="agent-mcp-panel" aria-label="Agent connectors">
               <AgentHero agentName={selectedAgentDisplay} subtitle={routeSubtitle} />
 
+              {/* Parity with McpServersPage: the controller never rejects and
+                  records any write failure in `actionError`, so both mounts of
+                  it must surface that error — otherwise a failed
+                  authorize/disconnect from this panel is silent (R1-B1). */}
+              {connectorActionError ? (
+                <StatusBanner tone="error">{connectorActionError}</StatusBanner>
+              ) : null}
+
               <McpServerHealthTable
                 hostRef={selectedAgent ?? ''}
                 mcpServerNames={selectedAgentMcpServerNames}
@@ -501,10 +510,12 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
                 alwaysExpanded
                 connectorActions={connectorActionsByName}
                 onAuthorize={input => {
-                  authorizeConnector(input).catch(() => undefined)
+                  // Failures surface via `connectorActionError`; the hook never
+                  // rejects, so there is nothing to catch here.
+                  void authorizeConnector(input)
                 }}
                 onDisconnect={input => {
-                  disconnectConnector(input).catch(() => undefined)
+                  void disconnectConnector(input)
                 }}
               />
             </section>

@@ -23,6 +23,7 @@ const navMock = vi.hoisted(() => ({
 const connectorsMock = vi.hoisted(() => ({
   agents: [] as RpcConnectorsResult['agents'],
   pendingKey: null as string | null,
+  actionError: null as string | null,
   authorize: vi.fn(async () => undefined),
   disconnect: vi.fn(async () => undefined),
 }))
@@ -83,6 +84,7 @@ vi.mock('@hooks/domain/useConnectorsController', async importActual => ({
     error: null,
     agents: connectorsMock.agents,
     pendingKey: connectorsMock.pendingKey,
+    actionError: connectorsMock.actionError,
     refresh: vi.fn(),
     reset: vi.fn(),
     authorize: connectorsMock.authorize,
@@ -133,6 +135,7 @@ describe('AgentWorkspace — Connectors tab OAuth actions', () => {
     navMock.selectedAgentRoute = 'mcp-servers'
     connectorsMock.agents = []
     connectorsMock.pendingKey = null
+    connectorsMock.actionError = null
     mcpMock.selectedAgentMcpServers = []
   })
 
@@ -187,6 +190,22 @@ describe('AgentWorkspace — Connectors tab OAuth actions', () => {
         authKind: 'oauth-user',
       }),
     })
+  })
+
+  it('surfaces a controller write failure (actionError) in an error banner (R1-B1 parity with McpServersPage)', () => {
+    // The controller never rejects; it records any authorize/disconnect write
+    // failure in `actionError`. Both mounts of it (McpServersPage AND this agent
+    // panel) must render that error, or a failed action is silent here.
+    connectorsMock.agents = CONNECTORS.agents
+    connectorsMock.actionError = 'Couldn\'t disconnect "monday". write boom'
+    mcpMock.selectedAgentMcpServers = [{ name: 'monday' }]
+
+    renderTab()
+
+    const panel = screen.getByRole('region', { name: 'Agent connectors' })
+    expect(
+      within(panel).getByText('Couldn\'t disconnect "monday". write boom')
+    ).toBeTruthy()
   })
 
   it('renders no OAuth action button for a no_oauth connector', () => {
