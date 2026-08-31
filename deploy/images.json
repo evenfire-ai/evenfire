@@ -24,7 +24,6 @@
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
         "packages/network-policy-core/**",
-        "packages/display-field/**"
         "packages/display-field/**",
         "packages/llm-provider-attempt-contract/**"
       ],
