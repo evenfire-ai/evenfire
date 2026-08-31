@@ -349,6 +349,7 @@ export function normalizeDeploymentForComparison(deployment: k8s.V1Deployment): 
         if (podSpec.enableServiceLinks === true) delete podSpec.enableServiceLinks
         if (podSpec.preemptionPolicy === 'PreemptLowerPriority') delete podSpec.preemptionPolicy
         if (podSpec.serviceAccount === podSpec.serviceAccountName) delete podSpec.serviceAccount
+        if (podSpec.serviceAccountName === 'default') delete podSpec.serviceAccountName
         if (Object.keys(podSpec.securityContext ?? {}).length === 0) delete podSpec.securityContext
         for (const container of [
           ...(podSpec.initContainers ?? []),
@@ -372,7 +373,9 @@ export function normalizeContainerDefaults(container: k8s.V1Container): void {
   for (const probe of [container.startupProbe, container.livenessProbe, container.readinessProbe]) {
     if (!probe) continue
     if (probe.initialDelaySeconds === 0) delete probe.initialDelaySeconds
+    if (probe.timeoutSeconds === 1) delete probe.timeoutSeconds
     if (probe.successThreshold === 1) delete probe.successThreshold
+    if (probe.failureThreshold === 3) delete probe.failureThreshold
     if (probe.httpGet?.scheme === 'HTTP') delete probe.httpGet.scheme
   }
   for (const env of container.env ?? []) {

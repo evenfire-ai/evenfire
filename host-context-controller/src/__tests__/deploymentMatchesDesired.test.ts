@@ -12,7 +12,11 @@ import {
 } from '../../test/__fixtures__/testMocks'
 import { HostReconciler } from '../hostReconciler'
 import type { HostCRD } from '../types'
-import { deploymentMatchesDesired, preserveDeploymentAnnotations } from '../utils'
+import {
+  deploymentMatchesDesired,
+  normalizeDeploymentForComparison,
+  preserveDeploymentAnnotations,
+} from '../utils'
 import { asApiserverDeployment } from './asApiserverDeployment'
 import { cloneAndMutateLeaf, collectLeafPaths, formatLeafPath } from './mutateJsonLeaves'
 
@@ -131,6 +135,90 @@ describe('asApiserverDeployment', () => {
       'rev-abc'
     ) as k8s.V1Deployment
     expect(asApiserverDeployment(desired)).not.toEqual(desired)
+  })
+})
+
+type CanonicalPodSpec = {
+  serviceAccountName?: string
+  containers?: Array<{
+    livenessProbe?: { timeoutSeconds?: number; failureThreshold?: number }
+  }>
+}
+
+function canonicalPodSpec(normalized: unknown): CanonicalPodSpec | undefined {
+  return (normalized as { spec?: { template?: { spec?: CanonicalPodSpec } } }).spec?.template?.spec
+}
+
+function deploymentWithProbe(
+  probe: Partial<k8s.V1Probe>,
+  serviceAccountName?: string
+): k8s.V1Deployment {
+  return {
+    apiVersion: 'apps/v1',
+    kind: 'Deployment',
+    metadata: { name: 'probe-guard', namespace: 'ns' },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { app: 'probe-guard' } },
+      template: {
+        metadata: { labels: { app: 'probe-guard' } },
+        spec: {
+          ...(serviceAccountName !== undefined ? { serviceAccountName } : {}),
+          containers: [
+            {
+              name: 'c',
+              image: 'img:1',
+              livenessProbe: {
+                httpGet: { path: '/live', port: 80 },
+                periodSeconds: 5,
+                ...probe,
+              },
+            },
+          ],
+        },
+      },
+    },
+  }
+}
+
+describe('safe-strip lemma equality guards', () => {
+  it('strips timeoutSeconds === 1 and keeps a non-default 2', () => {
+    const stripped = canonicalPodSpec(
+      normalizeDeploymentForComparison(deploymentWithProbe({ timeoutSeconds: 1 }))
+    )
+    const kept = canonicalPodSpec(
+      normalizeDeploymentForComparison(deploymentWithProbe({ timeoutSeconds: 2 }))
+    )
+    expect(stripped?.containers?.[0]?.livenessProbe?.timeoutSeconds).toBeUndefined()
+    expect(kept?.containers?.[0]?.livenessProbe?.timeoutSeconds).toBe(2)
+  })
+
+  it('strips failureThreshold === 3 and keeps a non-default 6', () => {
+    const stripped = canonicalPodSpec(
+      normalizeDeploymentForComparison(deploymentWithProbe({ failureThreshold: 3 }))
+    )
+    const kept = canonicalPodSpec(
+      normalizeDeploymentForComparison(deploymentWithProbe({ failureThreshold: 6 }))
+    )
+    expect(stripped?.containers?.[0]?.livenessProbe?.failureThreshold).toBeUndefined()
+    expect(kept?.containers?.[0]?.livenessProbe?.failureThreshold).toBe(6)
+  })
+
+  it("strips serviceAccountName === 'default' and keeps a non-default name", () => {
+    const stripped = canonicalPodSpec(
+      normalizeDeploymentForComparison(deploymentWithProbe({}, 'default'))
+    )
+    const kept = canonicalPodSpec(
+      normalizeDeploymentForComparison(deploymentWithProbe({}, 'clerum-x'))
+    )
+    expect(stripped?.serviceAccountName).toBeUndefined()
+    expect(kept?.serviceAccountName).toBe('clerum-x')
+  })
+
+  it('omitted probe timeout/failure and SA match the apiserver defaults after merge', () => {
+    const desired = deploymentWithProbe({ periodSeconds: 5 })
+    const existing = asApiserverDeployment(desired)
+    expect(deploymentMatchesDesired(mergedForCompare(desired, existing), existing)).toBe(true)
   })
 })
 
