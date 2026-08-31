@@ -60,6 +60,7 @@ describe('PostgresGovernedSessionReplayRepository security boundaries', () => {
       after: null,
       limit: 20,
       promptState: 'enabled',
+      order: 'latest',
     })
 
     const sql = String(query.mock.calls[0]![0])
@@ -225,6 +226,7 @@ describe('PostgresGovernedSessionReplayRepository security boundaries', () => {
       after: null,
       limit: 20,
       promptState: 'enabled',
+      order: 'latest',
     })
 
     const sql = String(query.mock.calls[0]![0])
@@ -241,6 +243,111 @@ describe('PostgresGovernedSessionReplayRepository security boundaries', () => {
       tools: { totalCalls: 2, distinctTools: 2 },
       approvals: { requested: 2, approved: 1, denied: 1 },
     })
+  })
+
+  it('paginates both session orders deterministically across equal timestamps', async () => {
+    const row = (hostRef: string, sessionId: string, occurredAt: string) => ({
+      host_ref: hostRef,
+      session_id: sessionId,
+      first_occurred_at: occurredAt,
+      last_occurred_at: occurredAt,
+      origins: ['direct_chat'],
+      run_count: 1,
+      event_count: 1,
+      latest_run_outcome: 'succeeded',
+      agent_subjects: [],
+      human_subjects: [],
+      human_user_ids: [],
+      identity_issuers: [],
+      human_display_name: null,
+      event_human_verified: false,
+      tool_calls: 0,
+      distinct_tools: 0,
+      internal_tool_calls: 0,
+      mcp_server_tool_calls: 0,
+      workflow_tool_calls: 0,
+      unclassified_tool_calls: 0,
+      observed_llm_calls: 0,
+      metered_token_calls: 0,
+      cache_reported_calls: 0,
+      input_tokens: '0',
+      output_tokens: '0',
+      cache_read_tokens: '0',
+      cache_write_tokens: '0',
+      approvals_requested: 0,
+      approvals_approved: 0,
+      approvals_denied: 0,
+      prompt_count: 0,
+    })
+    const earlier = '2026-07-14T09:00:00.000Z'
+    const later = '2026-07-14T10:00:00.000Z'
+    const filters = {
+      occurredFrom: '2026-07-14T00:00:00.000Z',
+      occurredTo: '2026-07-15T00:00:00.000Z',
+      outcome: [],
+      sourceService: [],
+      sessionId: [],
+      hostRef: [],
+      humanUserId: [],
+      agentSub: [],
+      origin: [],
+      toolName: [],
+      approvalState: [],
+    }
+
+    for (const scenario of [
+      {
+        order: 'latest' as const,
+        pages: [
+          [row('host-z', 'session-z', later), row('host-b', 'session-b', earlier)],
+          [row('host-a', 'session-a', earlier)],
+        ],
+        expected: ['host-z/session-z', 'host-b/session-b', 'host-a/session-a'],
+        operator: '<',
+        direction: 'DESC',
+      },
+      {
+        order: 'oldest' as const,
+        pages: [
+          [row('host-a', 'session-a', earlier), row('host-b', 'session-b', earlier)],
+          [row('host-z', 'session-z', later)],
+        ],
+        expected: ['host-a/session-a', 'host-b/session-b', 'host-z/session-z'],
+        operator: '>',
+        direction: 'ASC',
+      },
+    ]) {
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce({ rows: scenario.pages[0] })
+        .mockResolvedValueOnce({ rows: scenario.pages[1] })
+      const repository = new PostgresGovernedSessionReplayRepository({ query } as never)
+      const first = await repository.list({
+        filters,
+        highWatermark: '10',
+        after: null,
+        limit: 2,
+        promptState: 'disabled',
+        order: scenario.order,
+      })
+      const second = await repository.list({
+        filters,
+        highWatermark: '10',
+        after: first.anchors.at(-1)!,
+        limit: 2,
+        promptState: 'disabled',
+        order: scenario.order,
+      })
+
+      expect(
+        [...first.summaries, ...second.summaries].map(item => `${item.hostRef}/${item.sessionId}`)
+      ).toEqual(scenario.expected)
+      const secondSql = String(query.mock.calls[1]![0])
+      expect(secondSql).toContain(`(last_occurred_at, host_ref, session_id) ${scenario.operator}`)
+      expect(secondSql).toContain(
+        `ORDER BY last_occurred_at ${scenario.direction}, host_ref ${scenario.direction}, session_id ${scenario.direction}`
+      )
+    }
   })
 
   it('attributes observed execution only through the canonical approval id', async () => {

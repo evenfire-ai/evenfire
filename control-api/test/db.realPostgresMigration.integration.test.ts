@@ -962,6 +962,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       after: null,
       limit: 50,
       promptState: 'disabled',
+      order: 'latest',
     })
     for (const [label, family, filters] of [
       ['administrative_list', 'administrative', { action: ['permission_grant'] }],
@@ -2665,6 +2666,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       after: null,
       limit: 10,
       promptState: 'disabled',
+      order: 'latest',
     })
     expect(page.summaries).toHaveLength(1)
     expect(page.summaries[0]).toMatchObject({
