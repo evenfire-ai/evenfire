@@ -6,6 +6,7 @@ import { DataTable, TableHeaderCell, useTableSort } from '@clerum/frontend-table
 import { CONTROL_ROUTES } from '@constants/routes'
 import { AuthGate } from '../../components/AuthGate'
 import { DashboardLayout } from '../../components/DashboardLayout'
+import { RowActionsMenu } from '../../components/RowActionsMenu'
 import { SectionSearchInput } from '../../components/SectionSearchInput'
 import { IconOutputs } from '../../components/Sidebar/icons'
 import { SkeletonTableRows } from '../../components/SkeletonTableRows'
@@ -165,6 +166,41 @@ function OutputsPageContent() {
   const showInitialLoading = loading && !hasLoaded
   const visibleOutputsCount = filteredWorkflowOutputs.length + filteredChatArtifacts.length
 
+  async function downloadWorkflowOutput(output: WorkflowOutputRow) {
+    const url = getWorkflowRunArtifactDownloadUrl(
+      output.namespace,
+      output.recipeName,
+      output.runId,
+      output.fileName
+    )
+    const resp = await fetch(url, { credentials: 'include' })
+    if (!resp.ok) {
+      setError(`${resp.status}: ${await resp.text()}`)
+      return
+    }
+    const blobUrl = URL.createObjectURL(await resp.blob())
+    const link = document.createElement('a')
+    link.href = blobUrl
+    link.download = `${output.runId.slice(0, 8)}-${output.fileName}`
+    link.click()
+    URL.revokeObjectURL(blobUrl)
+  }
+
+  async function downloadChatArtifact(artifact: ChatArtifactOutputRow) {
+    const url = getHostArtifactDownloadUrl(artifact.hostRef, artifact.fileName)
+    const resp = await fetch(url, { credentials: 'include' })
+    if (!resp.ok) {
+      setError(`${resp.status}: ${await resp.text()}`)
+      return
+    }
+    const blobUrl = URL.createObjectURL(await resp.blob())
+    const link = document.createElement('a')
+    link.href = blobUrl
+    link.download = artifact.fileName
+    link.click()
+    URL.revokeObjectURL(blobUrl)
+  }
+
   return (
     <DashboardLayout>
       <div className="cu-card cu-card--viewport-fill" style={{ marginBottom: '1.25rem' }}>
@@ -267,7 +303,7 @@ function OutputsPageContent() {
                           onSort={() => workflowSort.sortBy(key)}
                         />
                       ))}
-                      <TableHeaderCell label="Action" />
+                      <TableHeaderCell label="Actions" />
                     </tr>
                   </thead>
                   <tbody>
@@ -299,34 +335,18 @@ function OutputsPageContent() {
                         <td style={{ fontSize: 13, color: 'var(--cu-text-muted)' }}>
                           {output.completedAt ? new Date(output.completedAt).toLocaleString() : '—'}
                         </td>
-                        <td>
-                          <button
-                            className="cu-btn cu-btn--sm cu-btn--toolbar"
-                            onClick={async () => {
-                              const url = getWorkflowRunArtifactDownloadUrl(
-                                output.namespace,
-                                output.recipeName,
-                                output.runId,
-                                output.fileName
-                              )
-                              const resp = await fetch(url, {
-                                credentials: 'include',
-                              })
-                              if (!resp.ok) {
-                                setError(`${resp.status}: ${await resp.text()}`)
-                                return
-                              }
-                              const blob = await resp.blob()
-                              const blobUrl = URL.createObjectURL(blob)
-                              const link = document.createElement('a')
-                              link.href = blobUrl
-                              link.download = `${output.runId.slice(0, 8)}-${output.fileName}`
-                              link.click()
-                              URL.revokeObjectURL(blobUrl)
-                            }}
-                          >
-                            Download
-                          </button>
+                        <td className="cu-table__cell-actions">
+                          <RowActionsMenu
+                            ariaLabel={`Actions for workflow artifact ${output.fileName}`}
+                            horizontalTrigger
+                            actions={[
+                              {
+                                key: 'download',
+                                label: 'Download',
+                                onClick: () => void downloadWorkflowOutput(output),
+                              },
+                            ]}
+                          />
                         </td>
                       </tr>
                     ))}
@@ -369,7 +389,7 @@ function OutputsPageContent() {
                             onSort={() => artifactSort.sortBy(key)}
                           />
                         ))}
-                        <TableHeaderCell label="Action" />
+                        <TableHeaderCell label="Actions" />
                       </tr>
                     </thead>
                     <tbody>
@@ -403,32 +423,18 @@ function OutputsPageContent() {
                               ? new Date(artifact.createdAt).toLocaleString()
                               : '—'}
                           </td>
-                          <td>
-                            <button
-                              className="cu-btn cu-btn--sm cu-btn--toolbar"
-                              onClick={async () => {
-                                const url = getHostArtifactDownloadUrl(
-                                  artifact.hostRef,
-                                  artifact.fileName
-                                )
-                                const resp = await fetch(url, {
-                                  credentials: 'include',
-                                })
-                                if (!resp.ok) {
-                                  setError(`${resp.status}: ${await resp.text()}`)
-                                  return
-                                }
-                                const blob = await resp.blob()
-                                const blobUrl = URL.createObjectURL(blob)
-                                const link = document.createElement('a')
-                                link.href = blobUrl
-                                link.download = artifact.fileName
-                                link.click()
-                                URL.revokeObjectURL(blobUrl)
-                              }}
-                            >
-                              Download
-                            </button>
+                          <td className="cu-table__cell-actions">
+                            <RowActionsMenu
+                              ariaLabel={`Actions for desktop artifact ${artifact.fileName}`}
+                              horizontalTrigger
+                              actions={[
+                                {
+                                  key: 'download',
+                                  label: 'Download',
+                                  onClick: () => void downloadChatArtifact(artifact),
+                                },
+                              ]}
+                            />
                           </td>
                         </tr>
                       ))}

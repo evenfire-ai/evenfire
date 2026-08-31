@@ -151,7 +151,8 @@ describe('RegistryApiKeysPanel', () => {
       .mockResolvedValueOnce({ org: 'acme', keys: [] })
     vi.mocked(api.revokeRegistryApiKey).mockResolvedValue(undefined)
     render(<RegistryApiKeysPanel />)
-    fireEvent.click(await screen.findByRole('button', { name: /revoke/i }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for API key efrk_abc' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke' }))
     await waitFor(() => {
       expect(api.revokeRegistryApiKey).toHaveBeenCalledWith('k1')
       expect(api.listRegistryApiKeys).toHaveBeenCalledTimes(2)
@@ -171,7 +172,8 @@ describe('RegistryApiKeysPanel', () => {
       Object.assign(new Error('not found'), { status: 404 })
     )
     render(<RegistryApiKeysPanel />)
-    fireEvent.click(await screen.findByRole('button', { name: /revoke/i }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for API key efrk_abc' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke' }))
     await waitFor(() => {
       expect(api.listRegistryApiKeys).toHaveBeenCalledTimes(2)
     })

@@ -17,6 +17,7 @@ import { useConfirmDialog } from './ConfirmDialog'
 import CreateApiKeyModal from './CreateApiKeyModal'
 import type { RegistryApiKeysPanelProps } from './RegistryApiKeysPanel.types'
 import RevealApiKeyModal from './RevealApiKeyModal'
+import { RowActionsMenu } from './RowActionsMenu'
 import { SectionLoadingSkeleton } from './SectionLoadingSkeleton'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
@@ -254,15 +255,19 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
                       <td title={k.created_at}>{fmtTime(k.created_at, '—')}</td>
                       <td>{fmtExpiry(k.expires_at)}</td>
                       <td>{fmtTime(k.last_used_at, 'Never used')}</td>
-                      <td>
-                        <Button
-                          type="button"
-                          variant="danger"
-                          size="sm"
-                          onClick={() => void handleRevoke(k)}
-                        >
-                          Revoke
-                        </Button>
+                      <td className="cu-table__cell-actions">
+                        <RowActionsMenu
+                          ariaLabel={`Actions for API key ${k.key_prefix}`}
+                          horizontalTrigger
+                          actions={[
+                            {
+                              key: 'revoke',
+                              label: 'Revoke',
+                              danger: true,
+                              onClick: () => void handleRevoke(k),
+                            },
+                          ]}
+                        />
                       </td>
                     </tr>
                   ))}
