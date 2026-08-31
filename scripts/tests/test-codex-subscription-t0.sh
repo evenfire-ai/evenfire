@@ -151,6 +151,21 @@ require_ci_matrix_entry "codex-llm-proxy"
 require_ci_matrix_entry "packages/llm-provider-attempt-contract"
 require_ci_matrix_entry "packages/codex-catalog-projection"
 
+expected_device_uri='https://auth.openai.com/codex/device'
+api_device_uri="$(
+  sed -n "s/^export const CODEX_OAUTH_DEVICE_VERIFICATION_URI = '\\(.*\\)'$/\\1/p" \
+    "${ROOT}/control-api/src/services/codexSubscriptionOAuth.ts"
+)"
+ui_device_uri="$(
+  sed -n "s/^export const CODEX_DEVICE_VERIFICATION_URI = '\\(.*\\)'$/\\1/p" \
+    "${ROOT}/control-ui/lib/codexSubscription.ts"
+)"
+if [[ "${api_device_uri}" == "${expected_device_uri}" && "${ui_device_uri}" == "${expected_device_uri}" ]]; then
+  pass "device verification URI lock"
+else
+  fail "device verification URI lock (api=${api_device_uri:-missing} ui=${ui_device_uri:-missing})"
+fi
+
 run_group "shared-contract" "packages/llm-provider-attempt-contract" "index.test.cjs"
 run_group "codex-catalog-projection" "packages/codex-catalog-projection" "index.test.cjs"
 
@@ -216,6 +231,7 @@ run_group "workflow-recipes" "workflow-recipes" \
 
 run_group "control-ui" "control-ui" \
   "components/__tests__/CodexSubscriptionHub.test.tsx" \
+  "lib/__tests__/codexSubscription.sanitize.test.ts" \
   "components/__tests__/LlmProviderConfig.test.tsx" \
   "lib/__tests__/llm.codexGrantModel.test.ts" \
   "lib/__tests__/llmCredentialSelect.test.ts" \
