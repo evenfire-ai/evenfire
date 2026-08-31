@@ -285,6 +285,115 @@ function normalizeNetworkPolicyForComparison(policy: k8s.V1NetworkPolicy): unkno
   return canonicalizeValue(normalized)
 }
 
+/**
+ * True when the merged desired Deployment is equivalent to the live object.
+ * Kubernetes persists server metadata and defaulted Deployment/PodSpec fields
+ * that HCC does not author. Remove only those known fields before comparing;
+ * every HCC-authored field stays exact so an intentional removal or change
+ * still causes a rollout.
+ *
+ * Safe-strip lemma: a normalizer mutation of the form "delete field X iff
+ * X === documented-default, applied identically to both sides" cannot hide
+ * any real change for any consumer. Anything outside that form — unconditional
+ * deletes, value normalisation, per-writer branches — can hide changes and is
+ * forbidden. Keep this allowlist conservative: an unknown admission mutation
+ * must compare as drift rather than be silently ignored.
+ *
+ * Pod-template annotations are merged by preserveDeploymentAnnotations before
+ * this comparison. Doubt or a malformed object returns false
+ * (fail-open-to-write), matching serviceMatchesDesired / networkPolicyMatchesDesired.
+ */
+export function deploymentMatchesDesired(
+  desired: k8s.V1Deployment | undefined,
+  existing: k8s.V1Deployment | undefined
+): boolean {
+  try {
+    if (!desired?.spec || !existing?.spec) return false
+    return (
+      JSON.stringify(normalizeDeploymentForComparison(desired)) ===
+      JSON.stringify(normalizeDeploymentForComparison(existing))
+    )
+  } catch {
+    return false
+  }
+}
+
+export function normalizeDeploymentForComparison(deployment: k8s.V1Deployment): unknown {
+  const normalized = structuredClone(deployment)
+  stripServerOwnedMetadata(normalized)
+
+  const spec = normalized.spec
+  if (spec) {
+    if (spec.progressDeadlineSeconds === 600) delete spec.progressDeadlineSeconds
+    if (spec.revisionHistoryLimit === 10) delete spec.revisionHistoryLimit
+    if (spec.minReadySeconds === 0) delete spec.minReadySeconds
+    if (spec.paused === false) delete spec.paused
+    if (
+      spec.strategy?.type === 'RollingUpdate' &&
+      spec.strategy.rollingUpdate?.maxSurge === '25%' &&
+      spec.strategy.rollingUpdate.maxUnavailable === '25%'
+    ) {
+      delete spec.strategy
+    }
+    const template = spec.template
+    if (template) {
+      delete template.metadata?.creationTimestamp
+
+      const podSpec = template.spec
+      if (podSpec) {
+        if (podSpec.restartPolicy === 'Always') delete podSpec.restartPolicy
+        if (podSpec.dnsPolicy === 'ClusterFirst') delete podSpec.dnsPolicy
+        if (podSpec.schedulerName === 'default-scheduler') delete podSpec.schedulerName
+        if (podSpec.terminationGracePeriodSeconds === 30)
+          delete podSpec.terminationGracePeriodSeconds
+        if (podSpec.enableServiceLinks === true) delete podSpec.enableServiceLinks
+        if (podSpec.preemptionPolicy === 'PreemptLowerPriority') delete podSpec.preemptionPolicy
+        if (podSpec.serviceAccount === podSpec.serviceAccountName) delete podSpec.serviceAccount
+        if (Object.keys(podSpec.securityContext ?? {}).length === 0) delete podSpec.securityContext
+        for (const container of [
+          ...(podSpec.initContainers ?? []),
+          ...(podSpec.containers ?? []),
+        ]) {
+          normalizeContainerDefaults(container)
+        }
+        for (const volume of podSpec.volumes ?? []) normalizeVolumeDefaults(volume)
+      }
+    }
+  }
+
+  return canonicalizeValue(normalized)
+}
+
+export function normalizeContainerDefaults(container: k8s.V1Container): void {
+  if (container.terminationMessagePath === '/dev/termination-log') {
+    delete container.terminationMessagePath
+  }
+  if (container.terminationMessagePolicy === 'File') delete container.terminationMessagePolicy
+  for (const probe of [container.startupProbe, container.livenessProbe, container.readinessProbe]) {
+    if (!probe) continue
+    if (probe.initialDelaySeconds === 0) delete probe.initialDelaySeconds
+    if (probe.successThreshold === 1) delete probe.successThreshold
+    if (probe.httpGet?.scheme === 'HTTP') delete probe.httpGet.scheme
+  }
+  for (const env of container.env ?? []) {
+    if (env.valueFrom?.fieldRef?.apiVersion === 'v1') {
+      delete env.valueFrom.fieldRef.apiVersion
+    }
+  }
+}
+
+export function normalizeVolumeDefaults(volume: k8s.V1Volume): void {
+  if (volume.secret?.defaultMode === 420) delete volume.secret.defaultMode
+  if (volume.secret?.optional === false) delete volume.secret.optional
+  if (volume.configMap?.defaultMode === 420) delete volume.configMap.defaultMode
+  if (volume.configMap?.optional === false) delete volume.configMap.optional
+  if (volume.downwardAPI?.defaultMode === 420) delete volume.downwardAPI.defaultMode
+  if (volume.projected?.defaultMode === 420) delete volume.projected.defaultMode
+  if (volume.persistentVolumeClaim?.readOnly === false) {
+    delete volume.persistentVolumeClaim.readOnly
+  }
+}
+
 /** Create-or-replace a NetworkPolicy (409 catch → conflict-retry replace). */
 export async function applyNetworkPolicy(
   api: k8s.NetworkingV1Api,

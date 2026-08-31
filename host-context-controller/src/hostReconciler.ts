@@ -76,6 +76,7 @@ import {
   applyNetworkPolicy,
   canonicalStringify,
   canonicalizeValue,
+  deploymentMatchesDesired,
   getErrorCode,
   preserveDeploymentAnnotations,
   preserveServiceAssignedFields,
@@ -5068,22 +5069,6 @@ function roleMatchesDesired(desired: k8s.V1Role, existing: k8s.V1Role): boolean 
 }
 
 /**
- * Kubernetes persists server metadata and defaulted Deployment/PodSpec fields
- * that HCC does not author. Remove only those known fields before comparing
- * the objects; every HCC-authored field stays exact so an intentional removal
- * or change still causes a rollout. Keep this allowlist conservative: an
- * unknown admission mutation must compare as drift rather than be silently
- * ignored. Pod-template annotations are merged by preserveDeploymentAnnotations
- * before this comparison.
- */
-function deploymentMatchesDesired(desired: k8s.V1Deployment, existing: k8s.V1Deployment): boolean {
-  return (
-    JSON.stringify(normalizeDeploymentForComparison(desired)) ===
-    JSON.stringify(normalizeDeploymentForComparison(existing))
-  )
-}
-
-/**
  * Preserve operational pod-template annotations (kubectl restart markers,
  * operator edits) while keeping CONTROLLER-OWNED ones authoritative: a key in
  * `controllerOwned` that the desired template omits is REMOVED from the merge
@@ -5151,86 +5136,4 @@ function preserveChannelReaderDeploymentAnnotations(
   existing: k8s.V1Deployment
 ): k8s.V1Deployment {
   return preserveDeploymentAnnotationsExcept(desired, existing, ['clerum.io/credentials-revision'])
-}
-
-function normalizeDeploymentForComparison(deployment: k8s.V1Deployment): unknown {
-  const normalized = structuredClone(deployment)
-  delete normalized.status
-  delete normalized.metadata?.resourceVersion
-  delete normalized.metadata?.uid
-  delete normalized.metadata?.generation
-  delete normalized.metadata?.creationTimestamp
-  delete normalized.metadata?.managedFields
-  delete normalized.metadata?.selfLink
-
-  const spec = normalized.spec
-  if (spec) {
-    if (spec.progressDeadlineSeconds === 600) delete spec.progressDeadlineSeconds
-    if (spec.revisionHistoryLimit === 10) delete spec.revisionHistoryLimit
-    if (spec.minReadySeconds === 0) delete spec.minReadySeconds
-    if (spec.paused === false) delete spec.paused
-    if (
-      spec.strategy?.type === 'RollingUpdate' &&
-      spec.strategy.rollingUpdate?.maxSurge === '25%' &&
-      spec.strategy.rollingUpdate.maxUnavailable === '25%'
-    ) {
-      delete spec.strategy
-    }
-    const template = spec.template
-    if (template) {
-      delete template.metadata?.creationTimestamp
-
-      const podSpec = template.spec
-      if (podSpec) {
-        if (podSpec.restartPolicy === 'Always') delete podSpec.restartPolicy
-        if (podSpec.dnsPolicy === 'ClusterFirst') delete podSpec.dnsPolicy
-        if (podSpec.schedulerName === 'default-scheduler') delete podSpec.schedulerName
-        if (podSpec.terminationGracePeriodSeconds === 30)
-          delete podSpec.terminationGracePeriodSeconds
-        if (podSpec.enableServiceLinks === true) delete podSpec.enableServiceLinks
-        if (podSpec.preemptionPolicy === 'PreemptLowerPriority') delete podSpec.preemptionPolicy
-        if (podSpec.serviceAccount === podSpec.serviceAccountName) delete podSpec.serviceAccount
-        if (Object.keys(podSpec.securityContext ?? {}).length === 0) delete podSpec.securityContext
-        for (const container of [
-          ...(podSpec.initContainers ?? []),
-          ...(podSpec.containers ?? []),
-        ]) {
-          normalizeContainerDefaults(container)
-        }
-        for (const volume of podSpec.volumes ?? []) normalizeVolumeDefaults(volume)
-      }
-    }
-  }
-
-  return canonicalizeValue(normalized)
-}
-
-function normalizeContainerDefaults(container: k8s.V1Container): void {
-  if (container.terminationMessagePath === '/dev/termination-log') {
-    delete container.terminationMessagePath
-  }
-  if (container.terminationMessagePolicy === 'File') delete container.terminationMessagePolicy
-  for (const probe of [container.startupProbe, container.livenessProbe, container.readinessProbe]) {
-    if (!probe) continue
-    if (probe.initialDelaySeconds === 0) delete probe.initialDelaySeconds
-    if (probe.successThreshold === 1) delete probe.successThreshold
-    if (probe.httpGet?.scheme === 'HTTP') delete probe.httpGet.scheme
-  }
-  for (const env of container.env ?? []) {
-    if (env.valueFrom?.fieldRef?.apiVersion === 'v1') {
-      delete env.valueFrom.fieldRef.apiVersion
-    }
-  }
-}
-
-function normalizeVolumeDefaults(volume: k8s.V1Volume): void {
-  if (volume.secret?.defaultMode === 420) delete volume.secret.defaultMode
-  if (volume.secret?.optional === false) delete volume.secret.optional
-  if (volume.configMap?.defaultMode === 420) delete volume.configMap.defaultMode
-  if (volume.configMap?.optional === false) delete volume.configMap.optional
-  if (volume.downwardAPI?.defaultMode === 420) delete volume.downwardAPI.defaultMode
-  if (volume.projected?.defaultMode === 420) delete volume.projected.defaultMode
-  if (volume.persistentVolumeClaim?.readOnly === false) {
-    delete volume.persistentVolumeClaim.readOnly
-  }
 }
