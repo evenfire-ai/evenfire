@@ -76,6 +76,9 @@ export function CodexSubscriptionHub() {
   >([])
   const [userCode, setUserCode] = useState<string | null>(null)
   const [verificationUri, setVerificationUri] = useState<string | null>(null)
+  // Only true when window.open failed for the sign-in tab, so the card claims
+  // a new tab opened only when one actually did.
+  const [deviceTabBlocked, setDeviceTabBlocked] = useState(false)
   // Ported from dev: bumps whenever the dialog closes/reopens or a new connect
   // starts, so a stale device-poll loop (closed dialog, switched row) can no
   // longer touch state after it was abandoned.
@@ -132,6 +135,9 @@ export function CodexSubscriptionHub() {
   // sign-in right away — by the time the operator approves the code, the
   // catalog is already synced server-side (connect handshake) and the models
   // grid is populated.
+  // Create is its own phase: once the grant exists, nothing below may report
+  // "creation failed" — later failures (table refresh, sign-in) are reported
+  // as their own partial outcomes, and sign-in always gets a chance to start.
   async function handleCreate() {
     const displayName = editName.trim()
     if (!displayName) {
@@ -139,19 +145,24 @@ export function CodexSubscriptionHub() {
       return
     }
     setBusyKey('create')
+    let created: CodexSubscriptionConnectionView
     try {
-      const created = await createCodexSubscriptionConnection({ displayName })
-      setError('')
-      openEdit(created)
-      setSetupNew(true)
-      await load()
-      showToast(`Subscription ${displayName} created.`, { tone: 'success' })
-      // Ownership of busyKey hands over to handleConnect; it clears it when
-      // the device flow settles. Only the failure path resets it here.
-      void handleConnect(created)
+      created = await createCodexSubscriptionConnection({ displayName })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create subscription')
       setBusyKey(null)
+      return
+    }
+    setError('')
+    openEdit(created)
+    setSetupNew(true)
+    setBusyKey(null)
+    // Sign-in starts regardless of whether the table refresh succeeds.
+    void handleConnect(created)
+    try {
+      await load()
+    } catch {
+      showToast('Subscription created, but the list could not be refreshed.', { tone: 'info' })
     }
   }
 
@@ -164,6 +175,7 @@ export function CodexSubscriptionHub() {
     setSetupNew(false)
     setUserCode(null)
     setVerificationUri(null)
+    setDeviceTabBlocked(false)
     setError('')
   }
 
@@ -175,6 +187,7 @@ export function CodexSubscriptionHub() {
     setSetupNew(false)
     setUserCode(null)
     setVerificationUri(null)
+    setDeviceTabBlocked(false)
     setError('')
     if (row.status === 'connected') {
       try {
@@ -198,6 +211,7 @@ export function CodexSubscriptionHub() {
     setSetupNew(false)
     setUserCode(null)
     setVerificationUri(null)
+    setDeviceTabBlocked(false)
     void load().catch(err => {
       setError(err instanceof Error ? err.message : 'Failed to load ChatGPT subscriptions')
     })
@@ -216,7 +230,9 @@ export function CodexSubscriptionHub() {
         defaultModel: editDefault.trim() || null,
       })
       setEditing(updated)
-      await load()
+      // A refresh failure after a successful patch is partial — the update
+      // itself landed, so it must not surface as "update failed".
+      await load().catch(() => {})
       showToast(
         setupNew
           ? `Subscription ${grantLabel(updated)} is ready.`
@@ -237,11 +253,14 @@ export function CodexSubscriptionHub() {
     // Open the verification page synchronously, inside the click handler and
     // before any await — popup blockers honour user activation here, so the
     // tab reliably appears. The device code lands in the card right after.
+    // The card only claims the tab opened when open() actually returned one.
+    let openedTab: Window | null = null
     try {
-      window.open(CODEX_DEVICE_VERIFICATION_URI, '_blank', 'noopener,noreferrer')
+      openedTab = window.open(CODEX_DEVICE_VERIFICATION_URI, '_blank', 'noopener,noreferrer')
     } catch {
-      // Blocked or unavailable — the card's link is the manual fallback.
+      openedTab = null
     }
+    setDeviceTabBlocked(!openedTab)
     try {
       const started = await startCodexDeviceConnect(
         row.status === 'connected' ? 'reconnect' : 'connect',
@@ -264,7 +283,9 @@ export function CodexSubscriptionHub() {
           const models = await listCodexConnectionModels(latest.connectionKey)
           if (epoch !== connectEpoch.current) return
           setEditModels(models)
-          await load()
+          // A table refresh failure here is partial — connect itself worked,
+          // so it must not surface as "sign-in failed".
+          await load().catch(() => {})
           if (epoch !== connectEpoch.current) return
           // The backend syncs the catalog during connect — surface the outcome.
           if (latest.catalogStatus === 'ready') {
@@ -600,7 +621,9 @@ export function CodexSubscriptionHub() {
                   {userCode ? (
                     <div className="cu-device-setup" data-testid="codex-device-code">
                       <p className="cu-device-setup__step">
-                        1. ChatGPT opened in a new tab — if it did not, use this link:
+                        {deviceTabBlocked
+                          ? '1. Open the ChatGPT verification page:'
+                          : '1. ChatGPT opened in a new tab — if it did not, use this link:'}
                       </p>
                       {(() => {
                         // Locked fallback (from dev): even if the backend

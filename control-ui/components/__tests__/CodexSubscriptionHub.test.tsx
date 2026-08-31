@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { CodexSubscriptionConnectionView } from '@lib/codexSubscription'
 import {
+  CODEX_DEVICE_VERIFICATION_URI,
   createCodexSubscriptionConnection,
   listCodexConnectionModels,
   listCodexSubscriptionConnections,
@@ -98,7 +99,7 @@ describe('CodexSubscriptionHub', () => {
     )
     vi.mocked(startCodexDeviceConnect).mockResolvedValue({
       userCode: 'ABCD-1234',
-      verificationUri: 'https://chatgpt.com/device',
+      verificationUri: CODEX_DEVICE_VERIFICATION_URI,
       intervalSeconds: 0.3,
       state: 'state-1',
       intent: 'connect',
@@ -149,6 +150,65 @@ describe('CodexSubscriptionHub', () => {
     expect(revokeCodexSubscription).not.toHaveBeenCalled()
   })
 
+  it('reports partial success and still starts sign-in when the post-create reload fails', async () => {
+    vi.stubGlobal(
+      'open',
+      vi.fn(() => ({}))
+    )
+    const listMock = vi.mocked(listCodexSubscriptionConnections)
+    listMock
+      .mockResolvedValueOnce([connection({ connectionKey: 'codex-aaa', displayName: 'Team A' })])
+      .mockRejectedValueOnce(new Error('refresh boom'))
+      .mockResolvedValue([connection({ connectionKey: 'codex-aaa', displayName: 'Team A' })])
+    vi.mocked(createCodexSubscriptionConnection).mockResolvedValue(
+      connection({
+        connectionKey: 'codex-bbb',
+        displayName: 'New team',
+        status: 'disconnected',
+        defaultModel: null,
+      })
+    )
+    vi.mocked(startCodexDeviceConnect).mockResolvedValue({
+      userCode: 'ABCD-1234',
+      verificationUri: CODEX_DEVICE_VERIFICATION_URI,
+      intervalSeconds: 0.3,
+      state: 'state-1',
+      intent: 'connect',
+    })
+    vi.mocked(pollCodexDevice).mockResolvedValue({
+      status: 'connected',
+      connection: connection({ connectionKey: 'codex-bbb', displayName: 'New team' }),
+    })
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    expect(await screen.findByText('Team A')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Add subscription' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), {
+      target: { value: 'New team' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create and set up' }))
+    await waitFor(() => {
+      expect(createCodexSubscriptionConnection).toHaveBeenCalledWith({ displayName: 'New team' })
+    })
+    // The reload failure must not prevent sign-in from starting.
+    await waitFor(() => {
+      expect(startCodexDeviceConnect).toHaveBeenCalledWith('connect', 'codex-bbb')
+    })
+    // …and must be reported as partial success, not as a creation failure.
+    expect(
+      await screen.findByText('Subscription created, but the list could not be refreshed.')
+    ).toBeInTheDocument()
+    expect(screen.queryByText('Could not create subscription')).not.toBeInTheDocument()
+    expect(screen.queryByText('refresh boom')).not.toBeInTheDocument()
+    // The setup flow still completes once the device connect settles.
+    await waitFor(() => {
+      expect(listCodexConnectionModels).toHaveBeenCalledWith('codex-bbb')
+    })
+  })
+
   it('renders subscriptions as a Secrets table with a row actions menu', async () => {
     render(
       <ToastProvider>
@@ -176,7 +236,7 @@ describe('CodexSubscriptionHub', () => {
   it('opens the grant modal for reconnect and model toggles without binding hosts', async () => {
     vi.mocked(startCodexDeviceConnect).mockResolvedValue({
       userCode: 'ABCD-1234',
-      verificationUri: 'https://chatgpt.com/device',
+      verificationUri: CODEX_DEVICE_VERIFICATION_URI,
       intervalSeconds: 1,
       state: 'state-1',
       intent: 'reconnect',
@@ -219,7 +279,7 @@ describe('CodexSubscriptionHub', () => {
     vi.stubGlobal('open', openMock)
     vi.mocked(startCodexDeviceConnect).mockResolvedValue({
       userCode: 'ABCD-1234',
-      verificationUri: 'https://chatgpt.com/device',
+      verificationUri: CODEX_DEVICE_VERIFICATION_URI,
       // Long enough that the card is observable; short enough that the
       // auto-dismiss waitFor completes comfortably inside its timeout.
       intervalSeconds: 0.3,
@@ -249,7 +309,7 @@ describe('CodexSubscriptionHub', () => {
       'noopener,noreferrer'
     )
     const link = screen.getByTestId('codex-device-verification-link')
-    expect(link).toHaveAttribute('href', 'https://chatgpt.com/device')
+    expect(link).toHaveAttribute('href', CODEX_DEVICE_VERIFICATION_URI)
     expect(link).toHaveAttribute('target', '_blank')
     expect(screen.getByRole('button', { name: 'Copy sign-in link' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Copy code' })).toBeInTheDocument()

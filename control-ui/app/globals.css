@@ -8597,7 +8597,7 @@ textarea.cu-input {
 .cu-device-setup__step {
   margin: 0;
   color: var(--cu-text-soft);
-  font-size: 0.8125rem;
+  font-size: var(--cu-font-size-sm);
 }
 
 .cu-device-setup__link {
@@ -8605,8 +8605,8 @@ textarea.cu-input {
 }
 
 .cu-device-setup__code {
-  font-size: 1.05rem;
-  font-weight: 600;
+  font-size: var(--cu-font-size-xl);
+  font-weight: var(--cu-font-weight-semibold);
   letter-spacing: 0.14em;
   text-align: center;
 }
@@ -8614,7 +8614,7 @@ textarea.cu-input {
 .cu-device-setup__note {
   margin: 0;
   color: var(--cu-text-muted);
-  font-size: 0.75rem;
+  font-size: var(--cu-font-size-xs);
 }
 
 /* Wrapper that keeps a tooltip available on a disabled button (disabled
