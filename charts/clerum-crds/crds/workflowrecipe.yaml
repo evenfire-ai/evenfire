@@ -110,6 +110,16 @@ spec:
                 # workloads[].id that is itself NOT an MCP server (no transport).
                 - rule: "!has(self.ui) || !has(self.ui.egress) || !has(self.ui.egress.internal) || self.ui.egress.internal.all(e, self.workloads.exists(w, w.id == e.workloadRef && !has(w.transport)))"
                   message: "spec.ui.egress.internal[].workloadRef must reference a non-MCP-server workload"
+                # R19 (issue #510): ui.egress.external entries carry a `provider`
+                # object but NO `egressClass` field, and R16 already forces the UI
+                # workload to be non-transport. They therefore take the same port
+                # ceiling as a non-transport workload binding: the ports
+                # `public-web` allows, so `provider` stays a strict subset of the
+                # tier that is refused here. The literal mirrors
+                # PROVIDER_NON_TRANSPORT_ALLOWED_PORTS in
+                # packages/network-policy-core/index.cjs; a parity test pins them.
+                - rule: "!has(self.ui) || !has(self.ui.egress) || !has(self.ui.egress.external) || self.ui.egress.external.all(e, !has(e.provider) || e.port in [80, 443])"
+                  message: "spec.ui.egress.external[] provider entries are limited to port 80 or 443; provider egress on a non-transport surface may not reach other ports"
                 # R18: ui.defaultPath must not begin with a scheme prefix that
                 # the field-level regex doesn't catch when the URL also starts
                 # with '/'. The regex enforces the leading '/'; this rule blocks
@@ -973,6 +983,23 @@ spec:
                     x-kubernetes-validations:
                       - rule: "self.type != 'cronjob' || has(self.schedule)"
                         message: "CronJob workloads must specify a schedule"
+                      # issue #510: `egressClass: provider` on a NON-TRANSPORT
+                      # workload is capped to the ports `public-web` allows.
+                      # `public-web` is refused outright on this workload class,
+                      # so without the cap the REFUSED tier would be narrower
+                      # than the PERMITTED one on the port dimension — a
+                      # non-transport workload could reach a provider's whole
+                      # netblock catalog on any port (a /20 on TCP/22 was
+                      # reproduced). With the cap, `provider` is a strict subset
+                      # of `public-web` in both address space and ports.
+                      # Transport workloads are deliberately not capped.
+                      # This rule lives at WORKLOAD level, not binding level:
+                      # binding-item CEL cannot see its workload's `transport`.
+                      # The literal mirrors PROVIDER_NON_TRANSPORT_ALLOWED_PORTS
+                      # in packages/network-policy-core/index.cjs; a parity test
+                      # pins the two together.
+                      - rule: "has(self.transport) || !has(self.egressBindings) || self.egressBindings.all(b, !has(b.egressClass) || b.egressClass != 'provider' || b.port in [80, 443])"
+                        message: "egressClass 'provider' on a non-transport workload is limited to port 80 or 443; move the workload to an MCP transport to reach other ports"
                     properties:
                       id:
                         type: string

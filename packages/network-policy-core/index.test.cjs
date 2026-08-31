@@ -496,9 +496,14 @@ test('CORE-1 (G1) export surface snapshot: exactly the Phase-1 + provider-CIDR n
     // never loosened into a subset check.
     'NETWORK_READY_ANNOTATION', 'NETWORK_READY_GENERATION_ANNOTATION',
     'PRE_DEPLOY_ANNOTATION',
+    // issue #510 — the provider port ceiling, shared by the WRC reconciler and
+    // control-api so the two admission layers cannot drift. Widened
+    // deliberately, like the handshake names above.
+    'PROVIDER_NON_TRANSPORT_ALLOWED_PORTS',
     'RESOLVED_AT_ANNOTATION', 'STATE_ANNOTATION',
     'TARGETS_ANNOTATION', 'cidrOverlaps', 'cidrRange', 'classifyDnsError', 'emptyState',
-    'isAllowedExternalEgressCidr', 'parseProviderNetblocks', 'parseState',
+    'isAllowedExternalEgressCidr', 'isProviderNonTransportPortAllowed',
+    'parseProviderNetblocks', 'parseState',
     'partitionCidrsByFamily', 'partitionIpsByProviderRanges', 'reconcileEgressState',
     'resolveProviderRanges', 'serializeState', 'stateHash', 'validateProviderRanges',
   ])
@@ -808,4 +813,51 @@ test('CORE-20 (REG-6 residual): a CURATED provider cannot be claimed on an unmap
   const allowed = core.resolveProviderRanges({ ...args, curatedProviders: ['other'] })
   assert.equal(allowed.kind, 'ok')
   assert.deepEqual(allowed.ranges, ['93.184.216.0/24'])
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// issue #510 — the provider port ceiling is enforced in THREE layers: this
+// constant (consumed by the WRC reconciler and control-api) and two CEL rules
+// in the CRD, which cannot import TypeScript and therefore carry the literal.
+//
+// CEL is the only layer a hand-applied CR cannot bypass, so it must not silently
+// drift from the constant the services enforce. This test is the tripwire: it
+// fails if either rule is deleted, or if either port list stops matching.
+// Same shape as the existing `public egress blocklist parity` test in the HCC
+// suite — read the other layer's SOURCE and compare the literals.
+// ─────────────────────────────────────────────────────────────────────────────
+test('issue #510 — CRD CEL port ceiling stays in parity with PROVIDER_NON_TRANSPORT_ALLOWED_PORTS', () => {
+  const crdPath = path.join(
+    __dirname,
+    '..',
+    '..',
+    'charts',
+    'clerum-crds',
+    'crds',
+    'workflowrecipe.yaml'
+  )
+  const crd = fs.readFileSync(crdPath, 'utf8')
+
+  const expected = [...core.PROVIDER_NON_TRANSPORT_ALLOWED_PORTS]
+  assert.ok(expected.length > 0, 'the constant must not be empty — an empty list would allow nothing and pass vacuously')
+
+  // Both rules: the workload-level one (binding `b`) and the ui.egress.external
+  // one (entry `e`). Each must exist; a deleted rule is a removed gate.
+  const workloadRule = crd.match(/self\.egressBindings\.all\(b,[^\n]*?b\.port in \[([^\]]*)\]/)
+  assert.ok(workloadRule, 'the workload-level provider port ceiling CEL rule is missing from the CRD')
+
+  const uiRule = crd.match(/self\.ui\.egress\.external\.all\(e,[^\n]*?e\.port in \[([^\]]*)\]/)
+  assert.ok(uiRule, 'the ui.egress.external provider port ceiling CEL rule is missing from the CRD')
+
+  const parse = m => m[1].split(',').map(part => Number(part.trim()))
+  assert.deepEqual(
+    parse(workloadRule),
+    expected,
+    'the workload-level CEL port list drifted from PROVIDER_NON_TRANSPORT_ALLOWED_PORTS'
+  )
+  assert.deepEqual(
+    parse(uiRule),
+    expected,
+    'the ui.egress.external CEL port list drifted from PROVIDER_NON_TRANSPORT_ALLOWED_PORTS'
+  )
 })

@@ -1,3 +1,7 @@
+import {
+  PROVIDER_NON_TRANSPORT_ALLOWED_PORTS,
+  isProviderNonTransportPortAllowed,
+} from '@clerum/network-policy-core'
 import { config } from '../config.js'
 import { type DnsResolver, validateEgressBindingsPreflight } from '../http/validateMcpServerSpec.js'
 
@@ -14,6 +18,12 @@ type WorkflowLimitConfig = Pick<
 const MAX_EGRESS_BINDINGS = 20
 const NON_TRANSPORT_PUBLIC_WEB_MESSAGE =
   'public-web is only supported on MCP transport workloads; non-transport workloads must use exact-host egressBindings'
+// issue #510 — same ceiling the WRC reconciler and the CRD CEL enforce, from
+// the one shared constant so the three layers cannot drift apart.
+const NON_TRANSPORT_PROVIDER_PORT_MESSAGE =
+  `egressClass "provider" on a non-transport workload is limited to port ` +
+  `${PROVIDER_NON_TRANSPORT_ALLOWED_PORTS.join(' or ')}; ` +
+  `move the workload to an MCP transport to reach other ports`
 const TRANSPORT_CLUSTER_LOCAL_MESSAGE =
   'cluster-local egressBindings are only supported on non-transport workloads'
 const CLUSTER_DNS_SUFFIX = '.svc.cluster.local'
@@ -64,6 +74,40 @@ function rejectNonTransportPublicWebBindings(
     errors.push({
       field: `${fieldPrefix}[${bindingIndex}].egressClass`,
       message: NON_TRANSPORT_PUBLIC_WEB_MESSAGE,
+    })
+  })
+}
+
+// issue #510 — the admission-side half of the provider port ceiling. Call ONLY
+// for bindings on a non-transport surface: workloads without `transport`, and
+// `ui.egress.external`, whose workload is non-transport by CRD construction
+// (CEL R16). A transport workload keeps the full port range.
+function rejectNonTransportProviderPorts(
+  egressBindings: unknown,
+  fieldPrefix: string,
+  errors: WorkflowRecipeLimitError[]
+) {
+  if (!Array.isArray(egressBindings)) return
+  egressBindings.forEach((binding, bindingIndex) => {
+    if (!isPlainObject(binding)) return
+    // Two surfaces, two ways of being a provider binding. Workload bindings
+    // declare `egressClass: 'provider'`. `spec.ui.egress.external` items have NO
+    // `egressClass` field at all (so the `?? 'exact-host'` default would read
+    // them as exact-host) yet do accept a `provider` object — keying only on
+    // egressClass would leave that surface ungated, which is exactly the hole
+    // #510 reported. Declaring `provider` without the class is rejected
+    // elsewhere, so accepting either signal here cannot widen the gate.
+    const isProviderBinding =
+      binding.egressClass === 'provider' ||
+      (binding.egressClass === undefined && isPlainObject(binding.provider))
+    if (!isProviderBinding) return
+    // A malformed port is the port validator's business, not ours; rejecting it
+    // here too would report the same defect twice under the wrong field.
+    if (!Number.isInteger(binding.port)) return
+    if (isProviderNonTransportPortAllowed(binding.port)) return
+    errors.push({
+      field: `${fieldPrefix}[${bindingIndex}].port`,
+      message: NON_TRANSPORT_PROVIDER_PORT_MESSAGE,
     })
   })
 }
@@ -119,12 +163,26 @@ function validateEgressLimits(spec: Record<string, unknown>, errors: WorkflowRec
           `spec.workloads[${index}].egressBindings`,
           errors
         )
+        rejectNonTransportProviderPorts(
+          egressBindings,
+          `spec.workloads[${index}].egressBindings`,
+          errors
+        )
       }
       if (Array.isArray(egressBindings) && egressBindings.length > MAX_EGRESS_BINDINGS) {
         errors.push(maxItemsError(`spec.workloads[${index}].egressBindings`, MAX_EGRESS_BINDINGS))
       }
     })
   }
+
+  // issue #510 — `spec.ui.egress.external` has no `egressClass` field of its own
+  // yet accepts a `provider` object, and its workload is non-transport by CRD
+  // construction (CEL R16: `!has(w.transport)`). It therefore takes the same
+  // port ceiling as a non-transport workload binding.
+  const uiSpec = spec.ui
+  const uiEgressExternal =
+    isPlainObject(uiSpec) && isPlainObject(uiSpec.egress) ? uiSpec.egress.external : undefined
+  rejectNonTransportProviderPorts(uiEgressExternal, 'spec.ui.egress.external', errors)
 
   const runtimeEgress = spec.runtimeEgress
   if (isPlainObject(runtimeEgress) && isPlainObject(runtimeEgress.http)) {

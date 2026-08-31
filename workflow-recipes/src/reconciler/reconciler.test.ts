@@ -2315,6 +2315,99 @@ describe('WorkflowRecipeReconciler', () => {
     expect(result.message).toContain('public-web is only supported on MCP transport workloads')
   })
 
+  // issue #510 — the port ceiling that makes `provider` a strict subset of
+  // `public-web`. The reproduction in the issue was a /20 rendered on TCP/22 for
+  // a workload that cannot obtain `public-web` at all.
+  it('returns failed phase when a non-transport workload declares provider egress on a non-web port', async () => {
+    const recipe = makeRecipe({
+      spec: {
+        contextRef: 'default',
+        workloads: [
+          {
+            id: 'worker',
+            type: 'deployment',
+            image: 'worker:latest',
+            port: 8080,
+            egressBindings: [
+              {
+                egressClass: 'provider',
+                dns: 'api.github.com',
+                port: 22,
+                provider: { name: 'github', categories: ['api'] },
+              },
+            ],
+          },
+        ],
+      },
+    })
+
+    const result = await reconciler.reconcile(recipe)
+
+    expect(result.phase).toBe('failed')
+    expect(result.message).toContain(
+      'egressClass "provider" on a non-transport workload is limited to port 80 or 443'
+    )
+  })
+
+  it('does not apply the provider port ceiling to a transport workload', async () => {
+    const recipe = makeRecipe({
+      spec: {
+        contextRef: 'default',
+        workloads: [
+          {
+            id: 'agent',
+            type: 'deployment',
+            image: 'agent:latest',
+            port: 3000,
+            transport: { type: 'streamableHttp' },
+            egressBindings: [
+              {
+                egressClass: 'provider',
+                dns: 'api.github.com',
+                port: 22,
+                provider: { name: 'github', categories: ['api'] },
+              },
+            ],
+          },
+        ],
+      },
+    })
+
+    const result = await reconciler.reconcile(recipe)
+
+    // It may still fail for catalog reasons in this fixture; what must NOT
+    // happen is a rejection by the non-transport ceiling.
+    expect(result.message ?? '').not.toContain('is limited to port 80 or 443')
+  })
+
+  it('accepts provider egress on 443 for a non-transport workload', async () => {
+    const recipe = makeRecipe({
+      spec: {
+        contextRef: 'default',
+        workloads: [
+          {
+            id: 'worker',
+            type: 'deployment',
+            image: 'worker:latest',
+            port: 8080,
+            egressBindings: [
+              {
+                egressClass: 'provider',
+                dns: 'api.github.com',
+                port: 443,
+                provider: { name: 'github', categories: ['api'] },
+              },
+            ],
+          },
+        ],
+      },
+    })
+
+    const result = await reconciler.reconcile(recipe)
+
+    expect(result.message ?? '').not.toContain('is limited to port 80 or 443')
+  })
+
   it('creates workload egress policy for non-transport exact-host egressBindings', async () => {
     const recipe = makeRecipe({
       spec: {
@@ -10951,7 +11044,13 @@ describe('WorkflowRecipeReconciler', () => {
                 {
                   egressClass: 'provider',
                   dns: 'db.sandbox-recipes.svc.cluster.local',
-                  port: 5432,
+                  // 443, not the sibling's 5432: this test's subject is the
+                  // cluster-local HOSTNAME rejection, and since issue #510 a
+                  // non-transport provider binding on 5432 is independently
+                  // refused by the port ceiling. Keeping 5432 would make the
+                  // fixture trigger two violations and assert on the second,
+                  // so the test would pass or fail for the wrong reason.
+                  port: 443,
                   provider: { name: 'github' },
                 },
               ],

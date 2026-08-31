@@ -142,9 +142,7 @@ export declare const NETWORK_READY_GENERATION_ANNOTATION: string
  * Unknown/missing codes default to 'permanent'. Shared source of truth for WRC
  * and HCC so fail-static behaves identically platform-wide (issue #299).
  */
-export declare function classifyDnsError(
-  errOrCode: unknown
-): 'transient' | 'permanent'
+export declare function classifyDnsError(errOrCode: unknown): 'transient' | 'permanent'
 
 // ─── issue #299 Phase 2 — provider-CIDR pipeline (Part A). Provider-blind. ───
 
@@ -187,9 +185,11 @@ export declare function cidrOverlaps(left: string, right: string): boolean
 export declare function isAllowedExternalEgressCidr(cidr: string): boolean
 
 /** Split CIDRs by family (H5): ipv4 rendered, ipv6 stored inert, invalid rejected loudly by the writer. */
-export declare function partitionCidrsByFamily(
-  cidrs: readonly string[]
-): { ipv4: string[]; ipv6: string[]; invalid: string[] }
+export declare function partitionCidrsByFamily(cidrs: readonly string[]): {
+  ipv4: string[]
+  ipv6: string[]
+  invalid: string[]
+}
 
 /**
  * Validate + canonicalize declared provider ranges for one binding: syntactic
@@ -215,9 +215,11 @@ export declare function partitionIpsByProviderRanges(
  * Read the provider-netblocks ConfigMap data (provider-blind: `<provider>.<category>`
  * keys are opaque). IPv6 keys are skipped (H5); `_meta` is parsed as JSON.
  */
-export declare function parseProviderNetblocks(
-  cmData: Record<string, string> | undefined
-): { categories: Record<string, string[]>; meta: unknown; errors: string[] }
+export declare function parseProviderNetblocks(cmData: Record<string, string> | undefined): {
+  categories: Record<string, string[]>
+  meta: unknown
+  errors: string[]
+}
 
 /**
  * The single shared classification/validation composition used by the HCC
@@ -240,3 +242,23 @@ export declare function resolveProviderRanges(input: {
    */
   curatedProviders?: readonly string[]
 }): { kind: 'ok'; ranges: string[]; categories: string[] } | { kind: 'invalid'; reasons: string[] }
+
+/**
+ * issue #510 — ports reachable by an `egressClass: provider` binding on a
+ * NON-TRANSPORT workload.
+ *
+ * These are exactly the ports `public-web` allows. Capping here makes
+ * `provider` a strict subset of `public-web` in both address space and ports,
+ * so the tier that is permitted on non-transport workloads cannot reach further
+ * than the tier that is refused on them. Transport workloads are not capped.
+ *
+ * The CRD's CEL rule carries the same literal; a parity test pins them together.
+ */
+export declare const PROVIDER_NON_TRANSPORT_ALLOWED_PORTS: readonly number[]
+
+/**
+ * True when `port` is reachable by a `provider` binding on a non-transport
+ * workload. Do not consult this for transport workloads — the cap does not
+ * apply there.
+ */
+export declare function isProviderNonTransportPortAllowed(port: unknown): boolean

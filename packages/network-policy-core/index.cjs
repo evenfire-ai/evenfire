@@ -735,6 +735,37 @@ function resolveProviderRanges(input) {
   return { kind: 'ok', ranges: v.ranges, categories }
 }
 
+// issue #510 — port ceiling for `egressClass: provider` on NON-TRANSPORT
+// workloads.
+//
+// The asymmetry this closes: `provider` is far narrower than `public-web` on
+// ADDRESS SPACE (~10k addresses today, 2^22 at the bounds ceiling, vs ~3.7e9)
+// but was UNBOUNDED on PORTS, while `public-web` is refused outright on
+// non-transport workloads. A non-transport workload could therefore reach a
+// provider's whole netblock catalog on any port — a /20 on TCP/22 was
+// reproduced against a `phase: active` recipe.
+//
+// Capping non-transport `provider` to the ports `public-web` itself allows
+// makes `provider` a STRICT SUBSET of `public-web` in BOTH dimensions. The tier
+// that is permitted can then never reach further than the tier that is refused,
+// which is what makes permitting it coherent rather than an inversion.
+//
+// Transport workloads are deliberately NOT capped: they are the class the
+// capability tier was built for, and `public-web` is already available to them.
+//
+// Provider-blind by construction: a port list, no provider names — the
+// generality gate (scripts/ci/check-provider-generality.sh) stays satisfied.
+const PROVIDER_NON_TRANSPORT_ALLOWED_PORTS = Object.freeze([80, 443])
+
+/**
+ * True when `port` is reachable by a `provider` binding on a non-transport
+ * workload. Callers that already know the workload is a transport must not
+ * consult this — the cap does not apply there.
+ */
+function isProviderNonTransportPortAllowed(port) {
+  return PROVIDER_NON_TRANSPORT_ALLOWED_PORTS.includes(port)
+}
+
 module.exports = {
   STATE_ANNOTATION,
   TARGETS_ANNOTATION,
@@ -757,4 +788,6 @@ module.exports = {
   partitionIpsByProviderRanges,
   parseProviderNetblocks,
   resolveProviderRanges,
+  PROVIDER_NON_TRANSPORT_ALLOWED_PORTS,
+  isProviderNonTransportPortAllowed,
 }

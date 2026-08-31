@@ -15,7 +15,9 @@
  */
 import * as k8s from '@kubernetes/client-node'
 import {
+  PROVIDER_NON_TRANSPORT_ALLOWED_PORTS,
   STATE_ANNOTATION,
+  isProviderNonTransportPortAllowed,
   parseProviderNetblocks,
   resolveProviderRanges,
 } from '@clerum/network-policy-core'
@@ -367,6 +369,29 @@ function validateWorkloadEgressBindings(
       binding.port > 65535
     ) {
       throw new Error(`${prefix}: port must be an integer between 1 and 65535`)
+    }
+
+    // issue #510 — cap `provider` on NON-TRANSPORT workloads to the ports
+    // `public-web` allows. `public-web` is refused outright above for this
+    // workload class; without this cap `provider` would be the WIDER grant on
+    // the port dimension (any 1-65535 against a whole netblock catalog — a /20
+    // on TCP/22 was reproduced), i.e. the refused tier would be narrower than
+    // the permitted one. With the cap, `provider` is a strict subset of
+    // `public-web` in both dimensions and permitting it is coherent.
+    //
+    // Placed AFTER the port range check so `binding.port` is a valid integer,
+    // and BEFORE any catalog read so the ceiling holds even when the netblocks
+    // ConfigMap is missing or stale. Transport workloads are not capped.
+    if (
+      egressClass === 'provider' &&
+      !workload.transport &&
+      !isProviderNonTransportPortAllowed(binding.port)
+    ) {
+      throw new Error(
+        `${prefix}: egressClass "provider" on a non-transport workload is limited to port ` +
+          `${PROVIDER_NON_TRANSPORT_ALLOWED_PORTS.join(' or ')} (got ${binding.port}); ` +
+          `move the workload to an MCP transport to reach other ports`
+      )
     }
 
     if (Object.prototype.hasOwnProperty.call(rawBinding, 'dns')) {
