@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { DataTable } from '@clerum/frontend-table-system'
 import { FileUploadModal } from '@components/FileUploadModal'
+import { RowActionsMenu } from '@components/RowActionsMenu'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { useConfirmDialog } from '../../../components/ConfirmDialog'
 import { CreateFlowPanel } from '../../../components/CreateFlowPanel'
@@ -14,7 +15,7 @@ import { SkeletonTableRows } from '../../../components/SkeletonTableRows'
 import { TableHeaderRow } from '../../../components/TableHeaderRow'
 import type { TableHeaderColumn } from '../../../components/TableHeaderRow/types'
 import { useToast } from '../../../components/Toast'
-import { IconPencil, IconRefresh, IconX } from '../../../components/icons'
+import { IconRefresh, IconX } from '../../../components/icons'
 import {
   type SharedFileSystemResource,
   type WfcDirEntry,
@@ -591,47 +592,43 @@ export default function SharedFileSystemDetailsPage() {
                           <td>{isDir ? '—' : formatBytes(entry.size)}</td>
                           <td>{formatDate(entry.mtime)}</td>
                           <td className="cu-table__cell-actions">
-                            <div className="cu-row-actions cu-row-actions--wrap">
-                              {!isDir && (
-                                <button
-                                  type="button"
-                                  className="cu-btn cu-btn--ghost cu-btn--sm"
-                                  disabled={busy}
-                                  onClick={async () => {
-                                    try {
-                                      await sfsDownload(sfsName, targetPath)
-                                    } catch (e) {
-                                      flashError(e, `Failed to download ${entry.name}`)
-                                    }
-                                  }}
-                                >
-                                  Download
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                                onClick={() => {
-                                  setShowRename({ from: entry.name })
-                                  setRenameDraft(entry.name)
-                                }}
-                                disabled={busy}
-                                aria-label={`Rename ${entry.name}`}
-                                title={`Rename ${entry.name}`}
-                              >
-                                <IconPencil width={16} height={16} />
-                              </button>
-                              <button
-                                type="button"
-                                className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                                onClick={() => void onDelete(entry)}
-                                disabled={busy}
-                                aria-label={`Delete ${entry.name}`}
-                                title={`Delete ${entry.name}`}
-                              >
-                                <IconX width={16} height={16} />
-                              </button>
-                            </div>
+                            <RowActionsMenu
+                              ariaLabel={`Actions for ${entry.name}`}
+                              actions={[
+                                ...(!isDir
+                                  ? [
+                                      {
+                                        key: 'download',
+                                        label: 'Download',
+                                        disabled: busy,
+                                        onClick: async () => {
+                                          try {
+                                            await sfsDownload(sfsName, targetPath)
+                                          } catch (e) {
+                                            flashError(e, `Failed to download ${entry.name}`)
+                                          }
+                                        },
+                                      },
+                                    ]
+                                  : []),
+                                {
+                                  key: 'rename',
+                                  label: 'Rename',
+                                  disabled: busy,
+                                  onClick: () => {
+                                    setShowRename({ from: entry.name })
+                                    setRenameDraft(entry.name)
+                                  },
+                                },
+                                {
+                                  key: 'delete',
+                                  label: 'Delete',
+                                  danger: true,
+                                  disabled: busy,
+                                  onClick: () => void onDelete(entry),
+                                },
+                              ]}
+                            />
                           </td>
                         </tr>
                       )

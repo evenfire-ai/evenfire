@@ -2,9 +2,9 @@
 
 import React from 'react'
 import { DataTable } from '@clerum/frontend-table-system'
+import { RowActionsMenu } from '@components/RowActionsMenu'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
-import { IconX } from '@components/icons'
 import { Button, SelectInput, TextInput } from '@components/ui'
 import type {
   PluginWorkloadSdkFamily,
@@ -169,18 +169,19 @@ export function GrantsView({
                   {/* Per-run caps removed (issue #348). Shows API-set per-minute grant overrides when present (they take precedence over the platform ENV defaults); 'platform defaults' otherwise. The edit form does not manage these overrides. */}
                   <td>{quotaParts.length === 0 ? 'platform defaults' : quotaParts.join(', ')}</td>
                   <td className="cu-cell--right">
-                    <Button type="button" variant="ghost" size="sm" onClick={() => onEdit(grant)}>
-                      Edit
-                    </Button>
-                    <Button
-                      type="button"
-                      className="cu-btn--icon cu-btn--danger-icon"
-                      onClick={() => onDelete(grant)}
-                      disabled={deletingId === grant.id}
-                      aria-label={`Delete grant for ${grant.recipeName}`}
-                    >
-                      <IconX width={16} height={16} />
-                    </Button>
+                    <RowActionsMenu
+                      ariaLabel={`Actions for ${grant.recipeName}`}
+                      actions={[
+                        { key: 'edit', label: 'Edit', onClick: () => onEdit(grant) },
+                        {
+                          key: 'delete',
+                          label: 'Delete',
+                          onClick: () => onDelete(grant),
+                          disabled: deletingId === grant.id,
+                          danger: true,
+                        },
+                      ]}
+                    />
                   </td>
                 </tr>
               )

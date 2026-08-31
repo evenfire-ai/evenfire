@@ -18,7 +18,7 @@ export function TablePanelHeader({
       className="cu-table-panel__head"
       description={subtitle}
       title={
-        <span className="cu-table-panel__title-row">
+        <span className="cu-panel-title cu-table-panel__title-row">
           {title}
           {titleActions}
         </span>

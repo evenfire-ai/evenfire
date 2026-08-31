@@ -4,10 +4,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { DataTable } from '@clerum/frontend-table-system'
 import { useConfirmDialog } from '@components/ConfirmDialog'
+import { RowActionsMenu } from '@components/RowActionsMenu'
 import { SelectionModal } from '@components/SelectionModal'
 import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
-import { IconX } from '@components/icons'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   getAdminTeamAgents,
@@ -348,18 +348,24 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
                         </button>
                       </td>
                       <td className="cu-table__cell-actions">
-                        <div className="cu-row-actions">
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void revokeUserAccess(user.id)}
-                            disabled={busy}
-                            title="Revoke"
-                            aria-label="Revoke member access"
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
-                        </div>
+                        <RowActionsMenu
+                          ariaLabel={`Actions for ${user.displayName || user.name || user.email}`}
+                          actions={[
+                            {
+                              key: 'view',
+                              label: 'View details',
+                              onClick: () =>
+                                router.push(CONTROL_ROUTES.usersAndTeams.user(user.id)),
+                            },
+                            {
+                              key: 'revoke',
+                              label: 'Revoke access',
+                              onClick: () => void revokeUserAccess(user.id),
+                              disabled: busy,
+                              danger: true,
+                            },
+                          ]}
+                        />
                       </td>
                     </tr>
                   ))
@@ -383,18 +389,23 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
                       </button>
                     </td>
                     <td className="cu-table__cell-actions">
-                      <div className="cu-row-actions">
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                          onClick={() => void revokeTeamAccess(team.id)}
-                          disabled={busy}
-                          title="Revoke"
-                          aria-label="Revoke team access"
-                        >
-                          <IconX width={16} height={16} />
-                        </button>
-                      </div>
+                      <RowActionsMenu
+                        ariaLabel={`Actions for ${team.name}`}
+                        actions={[
+                          {
+                            key: 'view',
+                            label: 'View details',
+                            onClick: () => router.push(CONTROL_ROUTES.usersAndTeams.team(team.id)),
+                          },
+                          {
+                            key: 'revoke',
+                            label: 'Revoke access',
+                            onClick: () => void revokeTeamAccess(team.id),
+                            disabled: busy,
+                            danger: true,
+                          },
+                        ]}
+                      />
                     </td>
                   </tr>
                 ))

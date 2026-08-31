@@ -50,9 +50,9 @@ describe('ContextTable', () => {
       />
     )
 
-    expect(screen.getByText('business')).toHaveClass('cu-expandable-row__name')
+    expect(screen.getAllByText('business')[0]).toHaveClass('cu-expandable-row__name')
     expect(screen.getByText('Business context')).toHaveClass('cu-registry-description')
-    expect(container.querySelectorAll('thead th')).toHaveLength(3)
+    expect(container.querySelectorAll('thead th')).toHaveLength(5)
     expect(screen.queryByRole('button', { name: 'business' })).not.toBeInTheDocument()
   })
 
@@ -80,7 +80,7 @@ describe('ContextTable', () => {
     )
 
     // The visible name span renders the identifier, not a blank/whitespace label.
-    expect(screen.getByText('business')).toHaveClass('cu-expandable-row__name')
+    expect(screen.getAllByText('business')[0]).toHaveClass('cu-expandable-row__name')
   })
 
   it('does not open a context from the row actions kebab', () => {

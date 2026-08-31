@@ -14,6 +14,7 @@ export function TableHeaderRow({ columns }: { columns: TableHeaderColumn[] }) {
           label={column.label}
           activeDirection={column.activeDirection}
           onSort={column.onSort}
+          sortLabel={column.sortLabel}
           style={{
             ...(column.width ? { width: column.width } : {}),
             ...(column.minWidth ? { minWidth: column.minWidth } : {}),

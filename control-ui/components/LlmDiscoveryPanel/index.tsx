@@ -9,7 +9,7 @@ import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
 import { useToast } from '@components/Toast'
-import { IconChevronRight, IconRefresh } from '@components/icons'
+import { IconRefresh } from '@components/icons'
 import {
   type LlmAllowedModel,
   type LlmDiscoveryStatus,
@@ -28,15 +28,7 @@ const CONFIGMAP_DEFERRED_WARNING =
 
 type ProviderModelGroup = [provider: string, models: LlmAllowedModel[]]
 
-type ProviderGroupRowProps = {
-  colSpan: number
-  expanded: boolean
-  models: LlmAllowedModel[]
-  onToggle: () => void
-  provider: string
-}
-
-type ReviewSortKey = 'model' | 'vendor' | 'contextWindow'
+type ReviewSortKey = 'provider' | 'model' | 'vendor' | 'contextWindow'
 
 // Numeric columns lead descending (largest context window first); text columns
 // lead ascending (alphabetical). Picking a different column resets to that
@@ -44,12 +36,17 @@ type ReviewSortKey = 'model' | 'vendor' | 'contextWindow'
 const REVIEW_SORT_DEFAULT_DIR: Record<ReviewSortKey, SortDirection> = {
   contextWindow: 'desc',
   model: 'asc',
+  provider: 'asc',
   vendor: 'asc',
 }
 
 function compareReviewByKey(key: ReviewSortKey) {
   return (a: LlmAllowedModel, b: LlmAllowedModel): number => {
     switch (key) {
+      case 'provider':
+        return getProviderDisplayLabel(a.provider).localeCompare(
+          getProviderDisplayLabel(b.provider)
+        )
       case 'model':
         return a.model.localeCompare(b.model)
       case 'vendor':
@@ -79,70 +76,23 @@ function groupByProvider(
   sortKey: ReviewSortKey | null,
   sortDir: SortDirection
 ): ProviderModelGroup[] {
-  const groups = new Map<string, LlmAllowedModel[]>()
-  for (const model of models) {
-    const group = groups.get(model.provider)
-    if (group) group.push(model)
-    else groups.set(model.provider, [model])
-  }
+  const rows = [...models]
   if (sortKey) {
     const direction = sortDir === 'asc' ? 1 : -1
     const byKey = compareReviewByKey(sortKey)
-    for (const group of groups.values()) {
-      group.sort((a, b) => {
-        if (sortKey === 'contextWindow') {
-          const nullOrder = compareNullsLast(a.context_window_tokens, b.context_window_tokens)
-          if (nullOrder !== null) return nullOrder
-        }
-        const diff = byKey(a, b) * direction
-        if (diff !== 0) return diff
-        return compareReviewModel(a, b)
-      })
-    }
+    rows.sort((a, b) => {
+      if (sortKey === 'contextWindow') {
+        const nullOrder = compareNullsLast(a.context_window_tokens, b.context_window_tokens)
+        if (nullOrder !== null) return nullOrder
+      }
+      const diff = byKey(a, b) * direction
+      if (diff !== 0) return diff
+      return compareReviewModel(a, b)
+    })
+  } else {
+    rows.sort(compareReviewModel)
   }
-  return Array.from(groups.entries()).sort(([left], [right]) =>
-    getProviderDisplayLabel(left).localeCompare(getProviderDisplayLabel(right))
-  )
-}
-
-function ProviderGroupRow({
-  colSpan,
-  expanded,
-  models,
-  onToggle,
-  provider,
-}: ProviderGroupRowProps) {
-  const providerLabel = getProviderDisplayLabel(provider)
-  return (
-    <tr className="cu-llm-model-group__row">
-      <td colSpan={colSpan}>
-        <button
-          type="button"
-          className="cu-llm-model-group__toggle"
-          onClick={onToggle}
-          aria-expanded={expanded}
-          aria-label={`${expanded ? 'Collapse' : 'Expand'} ${providerLabel} review models`}
-        >
-          <span className="cu-llm-model-group__chevron" aria-hidden="true">
-            <IconChevronRight
-              className={expanded ? 'is-expanded' : undefined}
-              width={18}
-              height={18}
-            />
-          </span>
-          <LlmProviderIcon provider={provider} label={providerLabel} />
-          <span className="cu-llm-model-group__provider">{providerLabel}</span>
-          <span className="cu-llm-model-group__count">
-            {models.length} model{models.length === 1 ? '' : 's'}
-          </span>
-          <span className="cu-llm-model-group__summary">Awaiting operator enablement</span>
-          <span className="cu-llm-model-group__action" aria-hidden="true">
-            {expanded ? 'Hide models' : 'Show models'}
-          </span>
-        </button>
-      </td>
-    </tr>
-  )
+  return [['_all', rows]]
 }
 
 export function LlmDiscoveryPanel({
@@ -160,7 +110,6 @@ export function LlmDiscoveryPanel({
   const [pendingId, setPendingId] = useState<string | null>(null)
   const [bulkEnabling, setBulkEnabling] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
-  const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set())
   const [sortKey, setSortKey] = useState<ReviewSortKey | null>(null)
   const [sortDir, setSortDir] = useState<SortDirection>('asc')
   const statusRequestGeneration = useRef(0)
@@ -223,15 +172,6 @@ export function LlmDiscoveryPanel({
         return new Set()
       }
       return new Set(reviewQueue.map(model => model.id))
-    })
-  }
-
-  function toggleProvider(provider: string) {
-    setExpandedProviders(previous => {
-      const next = new Set(previous)
-      if (next.has(provider)) next.delete(provider)
-      else next.add(provider)
-      return next
     })
   }
 
@@ -375,6 +315,7 @@ export function LlmDiscoveryPanel({
         />
       ),
     },
+    { key: 'provider', label: renderSortHeader('provider', 'Provider'), minWidth: '9rem' },
     { key: 'model', label: renderSortHeader('model', 'Model'), minWidth: '12rem' },
     { key: 'vendor', label: renderSortHeader('vendor', 'Vendor'), width: '10rem' },
     {
@@ -490,46 +431,45 @@ export function LlmDiscoveryPanel({
                 <TableHeaderRow columns={reviewColumns} />
               </thead>
               {reviewGroups.map(([provider, models]) => {
-                const expanded = expandedProviders.has(provider)
                 return (
                   <tbody key={provider} className="cu-llm-model-group">
-                    <ProviderGroupRow
-                      colSpan={reviewColumns.length}
-                      expanded={expanded}
-                      models={models}
-                      onToggle={() => toggleProvider(provider)}
-                      provider={provider}
-                    />
-                    {expanded
-                      ? models.map(model => (
-                          <tr key={model.id} className="cu-table__row cu-llm-model-row">
-                            <td>
-                              <input
-                                type="checkbox"
-                                checked={selectedIds.has(model.id)}
-                                onChange={() => toggleRow(model.id)}
-                                disabled={bulkEnabling}
-                                aria-label={`Select ${modelLabel(model)}`}
-                              />
-                            </td>
-                            <td className="cu-px-model">{model.model}</td>
-                            <td>{model.vendor || '—'}</td>
-                            <td className="cu-px-num">
-                              {formatContextWindow(model.context_window_tokens)}
-                            </td>
-                            <td className="cu-px-actions">
-                              <button
-                                type="button"
-                                className="cu-btn cu-btn--primary cu-btn--sm"
-                                onClick={() => void handleEnable(model)}
-                                disabled={pendingId === model.id || bulkEnabling}
-                              >
-                                {pendingId === model.id ? 'Enabling…' : 'Enable'}
-                              </button>
-                            </td>
-                          </tr>
-                        ))
-                      : null}
+                    {models.map(model => (
+                      <tr key={model.id} className="cu-table__row cu-llm-model-row">
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(model.id)}
+                            onChange={() => toggleRow(model.id)}
+                            disabled={bulkEnabling}
+                            aria-label={`Select ${modelLabel(model)}`}
+                          />
+                        </td>
+                        <td>
+                          <span className="cu-inline-icon-label">
+                            <LlmProviderIcon
+                              provider={model.provider}
+                              label={getProviderDisplayLabel(model.provider)}
+                            />
+                            {getProviderDisplayLabel(model.provider)}
+                          </span>
+                        </td>
+                        <td className="cu-px-model">{model.model}</td>
+                        <td>{model.vendor || '—'}</td>
+                        <td className="cu-px-num">
+                          {formatContextWindow(model.context_window_tokens)}
+                        </td>
+                        <td className="cu-px-actions">
+                          <button
+                            type="button"
+                            className="cu-btn cu-btn--primary cu-btn--sm"
+                            onClick={() => void handleEnable(model)}
+                            disabled={pendingId === model.id || bulkEnabling}
+                          >
+                            {pendingId === model.id ? 'Enabling…' : 'Enable'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
                   </tbody>
                 )
               })}

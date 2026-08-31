@@ -5,11 +5,10 @@ import { useRouter } from 'next/navigation'
 import { DataTable } from '@clerum/frontend-table-system'
 import { useAuth } from '@components/AuthContext'
 import { useConfirmDialog } from '@components/ConfirmDialog'
-import { IconUsers } from '@components/Sidebar/icons'
+import { RowActionsMenu } from '@components/RowActionsMenu'
 import { SkeletonTableRows } from '@components/SkeletonTableRows'
 import { useToast } from '@components/Toast'
-import { IconAlertTriangle, IconTrash } from '@components/icons'
-import { Button } from '@components/ui'
+import { IconAlertTriangle } from '@components/icons'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type ControlAdminInvitationItem,
@@ -350,17 +349,21 @@ export function ControlAdminsPanel({
                     <td>{formatDate(invitation.expiresAt)}</td>
                     <td>{formatDate(invitation.createdAt)}</td>
                     <td className="cu-table__cell-actions">
-                      <div className="cu-row-actions">
-                        <Button
-                          type="button"
-                          variant="danger"
-                          size="sm"
-                          disabled={cancellingInvitationId === invitation.id}
-                          onClick={() => void handleCancelInvitation(invitation)}
-                        >
-                          {cancellingInvitationId === invitation.id ? 'Canceling...' : 'Cancel'}
-                        </Button>
-                      </div>
+                      <RowActionsMenu
+                        ariaLabel={`Actions for invitation ${invitation.email}`}
+                        actions={[
+                          {
+                            key: 'cancel',
+                            label:
+                              cancellingInvitationId === invitation.id
+                                ? 'Canceling…'
+                                : 'Cancel invitation',
+                            disabled: cancellingInvitationId === invitation.id,
+                            onClick: () => void handleCancelInvitation(invitation),
+                            danger: true,
+                          },
+                        ]}
+                      />
                     </td>
                   </tr>
                 ))
@@ -390,9 +393,7 @@ export function ControlAdminsPanel({
                 const label = admin.email ? `${admin.username} (${admin.email})` : admin.username
                 const memberCreationUnavailable = !admin.email || admin.passwordPending
                 const memberAccessDisabled = !admin.memberId && memberCreationUnavailable
-                const canCreateMember = !admin.memberId && !memberCreationUnavailable
                 const memberAccessAction = memberAccessActionLabel(admin)
-                const memberAccessLabel = `${memberAccessAction} for admin ${label}`
                 return (
                   <tr
                     key={admin.id}
@@ -445,86 +446,59 @@ export function ControlAdminsPanel({
                     </td>
                     <td>{formatDate(admin.lastLoginAt)}</td>
                     <td className="cu-table__cell-actions">
-                      <div className="cu-row-actions cu-row-actions--nowrap">
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--icon cu-btn--toolbar"
-                          disabled={memberAccessDisabled}
-                          onClick={() => openMemberAccess(admin)}
-                          aria-label={memberAccessLabel}
-                          title={memberAccessAction}
-                        >
-                          <IconUsers createBadge={canCreateMember} relationshipRole="member" />
-                        </button>
-                        {admin.gfsOperatorLink?.status === 'active' ? (
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--danger"
-                            disabled={revokingGfsLinkAdminId === admin.id}
-                            onClick={() => void handleRevokeGfsOperatorLink(admin)}
-                            aria-label={
-                              revokingGfsLinkAdminId === admin.id
-                                ? `Revoking Desktop GFS operator access for ${label}`
-                                : `Revoke Desktop GFS operator access for ${label}`
-                            }
-                            title="Remove only GFS operator authority; keep the admin and passwords"
-                          >
-                            {revokingGfsLinkAdminId === admin.id ? 'Revoking...' : 'Revoke GFS'}
-                          </button>
-                        ) : null}
-                        {admin.gfsOperatorLink?.status === 'revoked' ? (
-                          <button
-                            type="button"
-                            className="cu-btn"
-                            disabled={reactivatingGfsLinkAdminId === admin.id}
-                            onClick={() => void handleReactivateGfsOperatorLink(admin)}
-                            aria-label={
-                              reactivatingGfsLinkAdminId === admin.id
-                                ? `Reactivating Desktop GFS operator access for ${label}`
-                                : `Reactivate Desktop GFS operator access for ${label}`
-                            }
-                            title="Create a new audited GFS operator-link generation"
-                          >
-                            {reactivatingGfsLinkAdminId === admin.id
-                              ? 'Reactivating...'
-                              : 'Reactivate GFS'}
-                          </button>
-                        ) : null}
-                        {currentAdmin ? (
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            disabled
-                            aria-label="Current admin cannot be deleted"
-                            title="Current admin"
-                          >
-                            <IconTrash width={16} height={16} />
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            disabled={deletingAdminId === admin.id}
-                            onClick={() => void handleDeleteAdmin(admin)}
-                            aria-label={
-                              deletingAdminId === admin.id
-                                ? `Deleting admin ${label}`
-                                : `Delete admin ${label}`
-                            }
-                            title={
-                              admin.passwordPending
+                      <RowActionsMenu
+                        ariaLabel={`Actions for ${label}`}
+                        actions={[
+                          {
+                            key: 'member-access',
+                            label: memberAccessAction,
+                            disabled: memberAccessDisabled,
+                            onClick: () => openMemberAccess(admin),
+                          },
+                          ...(admin.gfsOperatorLink?.status === 'active'
+                            ? [
+                                {
+                                  key: 'revoke-gfs',
+                                  label:
+                                    revokingGfsLinkAdminId === admin.id
+                                      ? 'Revoking GFS…'
+                                      : 'Revoke GFS',
+                                  disabled: revokingGfsLinkAdminId === admin.id,
+                                  onClick: () => void handleRevokeGfsOperatorLink(admin),
+                                  danger: true,
+                                },
+                              ]
+                            : []),
+                          ...(admin.gfsOperatorLink?.status === 'revoked'
+                            ? [
+                                {
+                                  key: 'reactivate-gfs',
+                                  label:
+                                    reactivatingGfsLinkAdminId === admin.id
+                                      ? 'Reactivating GFS…'
+                                      : 'Reactivate GFS',
+                                  disabled: reactivatingGfsLinkAdminId === admin.id,
+                                  onClick: () => void handleReactivateGfsOperatorLink(admin),
+                                },
+                              ]
+                            : []),
+                          {
+                            key: 'delete',
+                            label: currentAdmin
+                              ? 'Current admin cannot be deleted'
+                              : admin.passwordPending
                                 ? deletingAdminId === admin.id
-                                  ? 'Canceling setup...'
+                                  ? 'Canceling setup…'
                                   : 'Cancel admin setup'
                                 : deletingAdminId === admin.id
-                                  ? 'Deleting...'
-                                  : 'Delete admin'
-                            }
-                          >
-                            <IconTrash width={16} height={16} />
-                          </button>
-                        )}
-                      </div>
+                                  ? 'Deleting…'
+                                  : 'Delete admin',
+                            disabled: currentAdmin || deletingAdminId === admin.id,
+                            onClick: () => void handleDeleteAdmin(admin),
+                            danger: true,
+                          },
+                        ]}
+                      />
                     </td>
                   </tr>
                 )

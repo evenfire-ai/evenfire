@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, useTableSort } from '@clerum/frontend-table-system'
 import { getProviderLabel } from '../lib/llm'
 import type { HostItem, HostRef } from './HostTable.types'
 import { LlmProviderIcon } from './LlmProviderIcon'
@@ -17,6 +17,7 @@ import { IconRefresh } from './icons'
 
 const HOST_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
+  { key: 'identifier', label: 'Identifier' },
   { key: 'context', label: 'Connectors', width: '14%' },
   { key: 'providers', label: 'Providers', minWidth: '8rem' },
   { key: 'actions', width: '3.5rem', align: 'right', ariaLabel: 'Actions' },
@@ -163,6 +164,30 @@ export function HostTable({
         .includes(normalizedSearch)
     })
   }, [normalizedSearch, rows])
+  const hostSort = useTableSort<
+    (typeof filteredRows)[number],
+    'name' | 'identifier' | 'context' | 'providers'
+  >({
+    rows: filteredRows,
+    defaultKey: 'name',
+    accessors: {
+      name: row => row.displayName,
+      identifier: row => row.name,
+      context: row => contextsByRef?.[String(row.item.spec?.contextRef || '').trim()]?.length ?? 0,
+      providers: row => collectProviderIds(row.item.spec || {}).join(','),
+    },
+    identity: row => row.key,
+  })
+  const hostColumns = HOST_COLUMNS.map(column => ({
+    ...column,
+    ...(column.key !== 'actions'
+      ? {
+          activeDirection: hostSort.key === column.key ? hostSort.direction : null,
+          onSort: () =>
+            hostSort.sortBy(column.key as 'name' | 'identifier' | 'context' | 'providers'),
+        }
+      : {}),
+  }))
 
   const isInitialLoad = loading && items.length === 0
 
@@ -209,10 +234,10 @@ export function HostTable({
         <div className="eft-table-viewport cu-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
-              <TableHeaderRow columns={HOST_COLUMNS} />
+              <TableHeaderRow columns={hostColumns} />
             </thead>
             <tbody>
-              <SkeletonTableRows columns={4} rows={4} />
+              <SkeletonTableRows columns={hostColumns.length} rows={4} />
             </tbody>
           </DataTable>
         </div>
@@ -220,11 +245,11 @@ export function HostTable({
         <div className="eft-table-viewport cu-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
-              <TableHeaderRow columns={HOST_COLUMNS} />
+              <TableHeaderRow columns={hostColumns} />
             </thead>
             <tbody>
               <TableEmptyRow
-                colSpan={HOST_COLUMNS.length}
+                colSpan={hostColumns.length}
                 message={normalizedSearch ? 'No agents match this search.' : 'No agents found.'}
                 action={
                   normalizedSearch
@@ -239,10 +264,10 @@ export function HostTable({
         <div className="eft-table-viewport cu-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
-              <TableHeaderRow columns={HOST_COLUMNS} />
+              <TableHeaderRow columns={hostColumns} />
             </thead>
             <tbody>
-              {filteredRows.map(({ key, namespace, name, displayName, item }) => {
+              {hostSort.sortedRows.map(({ key, namespace, name, displayName, item }) => {
                 const rawContext = String(item.spec?.contextRef || '').trim()
                 const contextRef = rawContext || '-'
                 const contextServers = contextsByRef?.[rawContext]
@@ -251,25 +276,16 @@ export function HostTable({
                 const providers = collectProviderIds(item.spec || {})
                 const openAgent = () => onOpen({ namespace, name })
                 return (
-                  <tr
+                  <TableRow
                     key={key}
                     className="cu-table__row cu-table__row--clickable"
-                    onClick={openAgent}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault()
-                        openAgent()
-                      }
-                    }}
-                    tabIndex={0}
+                    onNavigate={openAgent}
                     aria-label={`Open agent ${name}`}
                   >
                     <td>
                       <span className="cu-expandable-row__name">{displayName}</span>
-                      {displayName !== name ? (
-                        <div className="cu-table__cell-subtle">{name}</div>
-                      ) : null}
                     </td>
+                    <td className="cu-table__cell-subtle">{name}</td>
                     <td>
                       {contextClickable ? (
                         <ContextMcpHoverCard
@@ -328,7 +344,7 @@ export function HostTable({
                         ]}
                       />
                     </td>
-                  </tr>
+                  </TableRow>
                 )
               })}
             </tbody>

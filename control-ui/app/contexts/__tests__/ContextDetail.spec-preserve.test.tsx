@@ -199,7 +199,8 @@ describe('ContextDetailsPage spec preservation on connector/SFS edits (R5-M3)', 
 
     render(<ContextDetailsPage />)
     // Connectors is the default tab — remove one connector to trigger saveMcpServers.
-    fireEvent.click(await screen.findByRole('button', { name: 'Remove connector srv-b' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for connector srv-b' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove connector' }))
 
     await waitFor(() => expect(api.updateContext).toHaveBeenCalled())
     const spec = lastPutSpec()

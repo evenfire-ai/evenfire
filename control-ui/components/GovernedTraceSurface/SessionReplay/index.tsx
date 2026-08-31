@@ -56,6 +56,7 @@ export function SessionReplay({
           ? {
               activeDirection: order === 'latest' ? ('desc' as const) : ('asc' as const),
               onSort: () => setOrder(current => (current === 'latest' ? 'oldest' : 'latest')),
+              sortLabel: column.label,
             }
           : {}),
         label: (

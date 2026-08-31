@@ -7,6 +7,7 @@ import { DataTable } from '@clerum/frontend-table-system'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
+import { RowActionsMenu } from '@components/RowActionsMenu'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { TabBar } from '@components/TabBar'
 import { TableHeaderRow } from '@components/TableHeaderRow'
@@ -919,19 +920,19 @@ export default function ContextDetailsPage() {
                         <tr key={server}>
                           <td>{server}</td>
                           <td className="cu-table__cell-actions">
-                            <div className="cu-row-actions">
-                              <button
-                                type="button"
-                                className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                                onClick={() =>
-                                  void saveMcpServers(mcpServersDraft.filter(s => s !== server))
-                                }
-                                disabled={busy}
-                                aria-label={`Remove connector ${server}`}
-                              >
-                                <IconX width={16} height={16} />
-                              </button>
-                            </div>
+                            <RowActionsMenu
+                              ariaLabel={`Actions for connector ${server}`}
+                              actions={[
+                                {
+                                  key: 'remove',
+                                  label: 'Remove connector',
+                                  danger: true,
+                                  disabled: busy,
+                                  onClick: () =>
+                                    void saveMcpServers(mcpServersDraft.filter(s => s !== server)),
+                                },
+                              ]}
+                            />
                           </td>
                         </tr>
                       ))}
@@ -973,23 +974,23 @@ export default function ContextDetailsPage() {
                             <code style={{ fontSize: '0.85rem' }}>{ref.mountPath}</code>
                           </td>
                           <td className="cu-table__cell-actions">
-                            <div className="cu-row-actions">
-                              <button
-                                type="button"
-                                className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                                disabled={busy}
-                                onClick={() =>
-                                  void saveSharedFileSystems(
-                                    sharedFileSystemsDraft.filter(
-                                      r => !(r.name === ref.name && r.mountPath === ref.mountPath)
-                                    )
-                                  )
-                                }
-                                aria-label={`Detach shared filesystem ${ref.name}`}
-                              >
-                                <IconX width={16} height={16} />
-                              </button>
-                            </div>
+                            <RowActionsMenu
+                              ariaLabel={`Actions for shared filesystem ${ref.name}`}
+                              actions={[
+                                {
+                                  key: 'detach',
+                                  label: 'Detach shared filesystem',
+                                  danger: true,
+                                  disabled: busy,
+                                  onClick: () =>
+                                    void saveSharedFileSystems(
+                                      sharedFileSystemsDraft.filter(
+                                        r => !(r.name === ref.name && r.mountPath === ref.mountPath)
+                                      )
+                                    ),
+                                },
+                              ]}
+                            />
                           </td>
                         </tr>
                       ))}
@@ -1172,17 +1173,24 @@ export default function ContextDetailsPage() {
                             </button>
                           </td>
                           <td className="cu-table__cell-actions">
-                            <div className="cu-row-actions">
-                              <button
-                                type="button"
-                                className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                                onClick={() => void removeTeamFromContext(team.id)}
-                                disabled={busy}
-                                aria-label={`Remove team ${team.name}`}
-                              >
-                                <IconX width={16} height={16} />
-                              </button>
-                            </div>
+                            <RowActionsMenu
+                              ariaLabel={`Actions for team ${team.name}`}
+                              actions={[
+                                {
+                                  key: 'view',
+                                  label: 'View team details',
+                                  onClick: () =>
+                                    router.push(CONTROL_ROUTES.usersAndTeams.team(team.id)),
+                                },
+                                {
+                                  key: 'remove',
+                                  label: 'Remove team',
+                                  danger: true,
+                                  disabled: busy,
+                                  onClick: () => void removeTeamFromContext(team.id),
+                                },
+                              ]}
+                            />
                           </td>
                         </tr>
                       ))}
@@ -1245,17 +1253,24 @@ export default function ContextDetailsPage() {
                             </td>
                             <td className="cu-table__cell-muted">{user.email || user.id}</td>
                             <td className="cu-table__cell-actions">
-                              <div className="cu-row-actions">
-                                <button
-                                  type="button"
-                                  className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                                  onClick={() => void removeUserFromContext(user.id)}
-                                  disabled={busy}
-                                  aria-label={`Remove member ${memberLabel}`}
-                                >
-                                  <IconX width={16} height={16} />
-                                </button>
-                              </div>
+                              <RowActionsMenu
+                                ariaLabel={`Actions for member ${memberLabel}`}
+                                actions={[
+                                  {
+                                    key: 'view',
+                                    label: 'View member details',
+                                    onClick: () =>
+                                      router.push(CONTROL_ROUTES.usersAndTeams.user(user.id)),
+                                  },
+                                  {
+                                    key: 'remove',
+                                    label: 'Remove member',
+                                    danger: true,
+                                    disabled: busy,
+                                    onClick: () => void removeUserFromContext(user.id),
+                                  },
+                                ]}
+                              />
                             </td>
                           </tr>
                         )

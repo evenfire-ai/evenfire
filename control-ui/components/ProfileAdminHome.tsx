@@ -24,6 +24,7 @@ import { formatTeamNames, getSoloMemberTeamsForUser } from '../lib/profileAdminD
 import { formatTeamRole } from '../lib/teamRoles'
 import { ControlAdminsPanel } from './ControlAdminsPanel'
 import type { ProfileAdminHomeProps, ProfileAdminTab } from './ProfileAdminHome.types'
+import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconShield, IconUsers } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
@@ -675,21 +676,28 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                           >
                             {teamContextCounts[team.id] ?? 0}
                           </td>
-                          <td style={{ textAlign: 'right' }}>
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                              onClick={event => {
-                                event.stopPropagation()
-                                setDeleteDialogError('')
-                                setTeamToDelete(team)
-                              }}
-                              onKeyDown={event => event.stopPropagation()}
-                              disabled={busy && !loaded}
-                              aria-label={`Delete team ${team.name}`}
-                            >
-                              <IconX width={16} height={16} />
-                            </button>
+                          <td className="cu-table__cell-actions">
+                            <RowActionsMenu
+                              ariaLabel={`Actions for team ${team.name}`}
+                              horizontalTrigger
+                              actions={[
+                                {
+                                  key: 'view',
+                                  label: 'View team details',
+                                  onClick: () => openTeam(team),
+                                },
+                                {
+                                  key: 'delete',
+                                  label: 'Delete',
+                                  danger: true,
+                                  disabled: busy && !loaded,
+                                  onClick: () => {
+                                    setDeleteDialogError('')
+                                    setTeamToDelete(team)
+                                  },
+                                },
+                              ]}
+                            />
                           </td>
                         </tr>
                       ))}
@@ -770,35 +778,38 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                                   {new Date(invitation.created_at).toLocaleString()}
                                 </td>
                                 <td className="cu-table__cell-actions">
-                                  <div className="cu-row-actions cu-row-actions--wrap">
-                                    <button
-                                      type="button"
-                                      className="cu-btn cu-btn--sm"
-                                      onClick={() => void resendPendingInvitation(invitation)}
-                                      disabled={
-                                        (busy && !loaded) || resendingInvitationId === invitation.id
-                                      }
-                                    >
-                                      {resendingInvitationId === invitation.id
-                                        ? 'Sending…'
-                                        : 'Resend'}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="cu-btn cu-btn--ghost cu-btn--ghost-danger cu-btn--sm"
-                                      onClick={() => {
-                                        setDeleteDialogError('')
-                                        setInvitationToCancel(invitation)
-                                      }}
-                                      disabled={
-                                        (busy && !loaded) || revokingInvitationId === invitation.id
-                                      }
-                                    >
-                                      {revokingInvitationId === invitation.id
-                                        ? 'Cancelling…'
-                                        : 'Cancel'}
-                                    </button>
-                                  </div>
+                                  <RowActionsMenu
+                                    ariaLabel={`Actions for invitation to ${invitation.email}`}
+                                    horizontalTrigger
+                                    actions={[
+                                      {
+                                        key: 'resend',
+                                        label:
+                                          resendingInvitationId === invitation.id
+                                            ? 'Sending…'
+                                            : 'Resend',
+                                        disabled:
+                                          (busy && !loaded) ||
+                                          resendingInvitationId === invitation.id,
+                                        onClick: () => void resendPendingInvitation(invitation),
+                                      },
+                                      {
+                                        key: 'cancel',
+                                        label:
+                                          revokingInvitationId === invitation.id
+                                            ? 'Cancelling…'
+                                            : 'Cancel',
+                                        danger: true,
+                                        disabled:
+                                          (busy && !loaded) ||
+                                          revokingInvitationId === invitation.id,
+                                        onClick: () => {
+                                          setDeleteDialogError('')
+                                          setInvitationToCancel(invitation)
+                                        },
+                                      },
+                                    ]}
+                                  />
                                 </td>
                               </tr>
                             ))}
@@ -899,59 +910,47 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                                 </button>
                               </td>
                               <td className="cu-table__cell-actions">
-                                <div className="cu-row-actions cu-row-actions--nowrap">
-                                  {user.passwordPendingFromAcceptedInvitation ? (
-                                    <button
-                                      type="button"
-                                      className="cu-btn cu-btn--sm cu-nowrap"
-                                      onClick={event => {
-                                        event.stopPropagation()
-                                        void resendPasswordSetupInvitation(user)
-                                      }}
-                                      onKeyDown={event => event.stopPropagation()}
-                                      disabled={
-                                        (busy && !loaded) ||
-                                        resendingPasswordSetupUserId === user.id
-                                      }
-                                    >
-                                      {resendingPasswordSetupUserId === user.id
-                                        ? 'Sending…'
-                                        : 'Resend invite'}
-                                    </button>
-                                  ) : null}
-                                  <button
-                                    type="button"
-                                    className="cu-btn cu-btn--icon cu-btn--toolbar"
-                                    onClick={event => {
-                                      event.stopPropagation()
-                                      openAdminAccessForUser(user)
-                                    }}
-                                    onKeyDown={event => event.stopPropagation()}
-                                    disabled={busy && !loaded}
-                                    aria-label={`${
-                                      user.controlAdminId ? 'View admin' : 'Create admin'
-                                    } for member ${user.name || user.email}`}
-                                    title={user.controlAdminId ? 'View admin' : 'Create admin'}
-                                  >
-                                    <IconShield
-                                      createBadge={!user.controlAdminId}
-                                      relationshipRole="admin"
-                                    />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                                    onClick={event => {
-                                      event.stopPropagation()
-                                      void openDeleteUserDialog(user)
-                                    }}
-                                    onKeyDown={event => event.stopPropagation()}
-                                    disabled={busy && !loaded}
-                                    aria-label={`Delete member ${user.name || user.email}`}
-                                  >
-                                    <IconX width={16} height={16} />
-                                  </button>
-                                </div>
+                                <RowActionsMenu
+                                  ariaLabel={`Actions for member ${user.name || user.email}`}
+                                  horizontalTrigger
+                                  actions={[
+                                    {
+                                      key: 'view',
+                                      label: 'View member details',
+                                      onClick: () => openUser(user),
+                                    },
+                                    ...(user.passwordPendingFromAcceptedInvitation
+                                      ? [
+                                          {
+                                            key: 'resend',
+                                            label:
+                                              resendingPasswordSetupUserId === user.id
+                                                ? 'Sending…'
+                                                : 'Resend invite',
+                                            disabled:
+                                              (busy && !loaded) ||
+                                              resendingPasswordSetupUserId === user.id,
+                                            onClick: () => void resendPasswordSetupInvitation(user),
+                                          },
+                                        ]
+                                      : []),
+                                    {
+                                      key: 'admin',
+                                      label: user.controlAdminId
+                                        ? 'View administrator access'
+                                        : 'Create administrator access',
+                                      disabled: busy && !loaded,
+                                      onClick: () => openAdminAccessForUser(user),
+                                    },
+                                    {
+                                      key: 'delete',
+                                      label: 'Delete member',
+                                      danger: true,
+                                      disabled: busy && !loaded,
+                                      onClick: () => void openDeleteUserDialog(user),
+                                    },
+                                  ]}
+                                />
                               </td>
                             </tr>
                           ))}

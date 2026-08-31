@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, TableRow } from '@clerum/frontend-table-system'
 import { FilterSelect } from '@components/FilterSelect'
 import { MarketplaceTabs } from '@components/MarketplaceTabs'
 import { type RowActionMenuItem, RowActionsMenu } from '@components/RowActionsMenu'
@@ -14,21 +14,23 @@ import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
 import { useToast } from '@components/Toast'
-import { IconChevronRight } from '@components/icons'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { type RegistryEntry, deleteRegistryEntry, getRegistryCatalog } from '../lib/api'
 import { useRegistryCapability } from '../lib/hooks/useRegistryCapability'
 import { trustBgColor, trustColor } from '../lib/trustLevel'
 
-type CatalogSortKey = 'name' | 'version'
+type CatalogSortKey = 'name' | 'description' | 'type' | 'tags' | 'trust' | 'quality' | 'version'
 type SortDirection = 'asc' | 'desc'
 
 const REGISTRY_COLUMNS: TableHeaderColumn[] = [
-  { key: 'expand', ariaLabel: 'Expand Marketplace entry' },
   { key: 'name', label: 'Name' },
+  { key: 'description', label: 'Description' },
+  { key: 'type', label: 'Type' },
+  { key: 'tags', label: 'Tags' },
+  { key: 'trust', label: 'Trust' },
+  { key: 'quality', label: 'Verification' },
   { key: 'version', label: 'Version' },
-  { key: 'install', align: 'right', ariaLabel: 'Installation' },
-  { key: 'actions', align: 'right', ariaLabel: 'Edit or remove' },
+  { key: 'actions', align: 'right', ariaLabel: 'Actions' },
 ]
 
 function compareVersions(left: string, right: string): number {
@@ -58,7 +60,6 @@ export default function RegistryCatalog() {
   const [categoryFilter, setCategoryFilter] = useState('all')
   const [sortKey, setSortKey] = useState<CatalogSortKey | null>(null)
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
-  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set())
   const [removeTarget, setRemoveTarget] = useState<RegistryEntry | null>(null)
   const [removing, setRemoving] = useState(false)
   const [removeError, setRemoveError] = useState('')
@@ -74,10 +75,16 @@ export default function RegistryCatalog() {
   const connectionState = capability?.connectionState ?? null
   // Curators administer the shared catalog, so they keep inline edit/remove;
   // everyone else manages their own entries from the ownership area (§5.4).
-  const columns = (
-    isCurator ? REGISTRY_COLUMNS : REGISTRY_COLUMNS.filter(c => c.key !== 'actions')
-  ).map(column => {
-    if (column.key === 'name' || column.key === 'version') {
+  const columns = REGISTRY_COLUMNS.map(column => {
+    if (
+      column.key === 'name' ||
+      column.key === 'description' ||
+      column.key === 'type' ||
+      column.key === 'tags' ||
+      column.key === 'trust' ||
+      column.key === 'quality' ||
+      column.key === 'version'
+    ) {
       return { ...column, label: renderSortHeader(column.key, column.label as string) }
     }
     return column
@@ -153,10 +160,23 @@ export default function RegistryCatalog() {
     const direction = sortDirection === 'asc' ? 1 : -1
     return [...visibleEntries].sort((left, right) => {
       const comparison =
-        sortKey === 'name'
-          ? left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
-          : compareVersions(left.version, right.version)
-      return comparison * direction
+        sortKey === 'version'
+          ? compareVersions(left.version, right.version)
+          : sortKey === 'description'
+            ? left.description.localeCompare(right.description, undefined, { sensitivity: 'base' })
+            : sortKey === 'type'
+              ? `${left.server_mode ?? ''}/${left.transport ?? ''}`.localeCompare(
+                  `${right.server_mode ?? ''}/${right.transport ?? ''}`
+                )
+              : sortKey === 'tags'
+                ? left.tags.join(',').localeCompare(right.tags.join(','))
+                : sortKey === 'trust'
+                  ? left.trust_level.localeCompare(right.trust_level)
+                  : sortKey === 'quality'
+                    ? left.quality_tier.localeCompare(right.quality_tier)
+                    : left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
+      if (comparison !== 0) return comparison * direction
+      return `${left.name}@${left.version}`.localeCompare(`${right.name}@${right.version}`)
     })
   }, [categoryFilter, connectorEntries, search, sortDirection, sortKey])
 
@@ -201,40 +221,10 @@ export default function RegistryCatalog() {
     )
   }
 
-  function renderInstallButton(entry: RegistryEntry) {
-    const installed = isEntryInstalled(entry)
-    return installed ? (
-      <button type="button" className="cu-btn cu-btn--sm" disabled>
-        Installed
-      </button>
-    ) : (
-      <button
-        type="button"
-        className="cu-btn cu-btn--sm cu-btn--primary"
-        onClick={() =>
-          router.push(
-            CONTROL_ROUTES.marketplace.install({ entry: entry.name, version: entry.version })
-          )
-        }
-      >
-        Install
-      </button>
-    )
-  }
-
   // An entry belongs to this deployment's org when its name carries the org
   // scope prefix (publishes are stored as `@org/name`, see applyPublishScope).
   function isOwnedEntry(entry: RegistryEntry): boolean {
     return !!orgScope && entry.name.startsWith(`${orgScope}/`)
-  }
-
-  function toggleExpanded(key: string) {
-    setExpandedKeys(current => {
-      const next = new Set(current)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
   }
 
   const showConnectBanner =
@@ -345,153 +335,125 @@ export default function RegistryCatalog() {
                 <SkeletonTableRows columns={columns.length} rows={5} />
               ) : (
                 filtered.map(entry => {
-                  const expandKey = `${entry.name}@${entry.version}`
-                  const expanded = expandedKeys.has(expandKey)
                   const typeMeta = entry.server_mode
                     ? `${entry.server_mode}${entry.transport ? ` / ${entry.transport}` : ''}`
                     : '—'
+                  const detailRoute = CONTROL_ROUTES.marketplace.entry(entry.name, entry.version)
+                  const installed = isEntryInstalled(entry)
                   return (
-                    <Fragment key={entry.id}>
-                      <tr
-                        className="cu-table__row cu-table__row--clickable cu-expandable-row"
-                        onClick={() => toggleExpanded(expandKey)}
-                        onKeyDown={event => {
-                          if (event.key === 'Enter' || event.key === ' ') {
-                            event.preventDefault()
-                            toggleExpanded(expandKey)
-                          }
-                        }}
-                        tabIndex={0}
-                        aria-expanded={expanded}
-                        aria-controls={`marketplace-details-${entry.id}`}
-                      >
-                        <td className="cu-expandable-row__chevron" aria-hidden="true">
-                          <IconChevronRight
-                            className={expanded ? 'is-expanded' : undefined}
-                            width={18}
-                            height={18}
-                          />
-                        </td>
-                        <td>
-                          <Link
-                            className="cu-registry-name cu-link"
-                            href={CONTROL_ROUTES.marketplace.entry(entry.name, entry.version)}
-                            onClick={event => event.stopPropagation()}
-                            onKeyDown={event => event.stopPropagation()}
-                          >
-                            {entry.name}
-                          </Link>
-                          <div className="cu-registry-description" title={entry.description}>
-                            {entry.description}
-                          </div>
-                          {!isCurator && isOwnedEntry(entry) ? (
-                            <div className="cu-registry-owned">
-                              <Link
-                                className="cu-link"
-                                href={CONTROL_ROUTES.publisher.entries}
-                                onClick={event => event.stopPropagation()}
-                                onKeyDown={event => event.stopPropagation()}
-                              >
-                                You own this
-                              </Link>
-                            </div>
-                          ) : null}
-                        </td>
-                        <td className="cu-code-text">{entry.version}</td>
-                        <td
-                          className="cu-table__cell-actions cu-marketplace-action-cell"
-                          onClick={event => event.stopPropagation()}
-                          onKeyDown={event => event.stopPropagation()}
-                        >
-                          {renderInstallButton(entry)}
-                        </td>
-                        {isCurator ? (
-                          <td
-                            className="cu-table__cell-actions cu-marketplace-action-cell"
-                            onClick={event => event.stopPropagation()}
-                            onKeyDown={event => event.stopPropagation()}
-                          >
-                            <RowActionsMenu
-                              ariaLabel={`Actions for ${entry.name} v${entry.version}`}
-                              actions={
-                                [
-                                  {
-                                    key: 'edit',
-                                    label: 'Edit',
-                                    onClick: () =>
-                                      router.push(
-                                        CONTROL_ROUTES.marketplace.editEntry(
-                                          entry.name,
-                                          entry.version
-                                        )
-                                      ),
-                                  },
-                                  {
-                                    key: 'remove',
-                                    label: 'Remove from Marketplace',
-                                    danger: true,
-                                    onClick: () => {
-                                      setRemoveError('')
-                                      setRemoveTarget(entry)
-                                    },
-                                  },
-                                ] satisfies RowActionMenuItem[]
-                              }
-                            />
-                          </td>
+                    <TableRow
+                      className="cu-table__row cu-table__row--clickable"
+                      key={entry.id}
+                      onNavigate={() => router.push(detailRoute)}
+                    >
+                      <td>
+                        <span className="cu-registry-name">{entry.name}</span>
+                        {!isCurator && isOwnedEntry(entry) ? (
+                          <div className="cu-registry-owned">Owned by your organization</div>
                         ) : null}
-                      </tr>
-                      {expanded ? (
-                        <tr
-                          id={`marketplace-details-${entry.id}`}
-                          className="cu-expandable-detail-row"
+                      </td>
+                      <td>
+                        <span className="cu-cell-truncate" title={entry.description}>
+                          {entry.description || '—'}
+                        </span>
+                      </td>
+                      <td className="cu-registry-type-meta">{typeMeta}</td>
+                      <td>{entry.tags.join(', ') || '—'}</td>
+                      <td>
+                        <span
+                          className="cu-registry-chip"
+                          style={{
+                            color: trustColor(entry.trust_level),
+                            background: trustBgColor(entry.trust_level),
+                            borderColor: trustColor(entry.trust_level),
+                          }}
                         >
-                          <td colSpan={columns.length}>
-                            <div className="cu-expandable-detail cu-marketplace-row-detail">
-                              <div className="cu-expandable-detail__fields">
-                                <div className="cu-expandable-field">
-                                  <span className="cu-expandable-field__label">Type</span>
-                                  <span className="cu-registry-type-meta">{typeMeta}</span>
-                                </div>
-                                <div className="cu-expandable-field">
-                                  <span className="cu-expandable-field__label">Trust</span>
-                                  <span
-                                    className="cu-registry-chip"
-                                    style={{
-                                      color: trustColor(entry.trust_level),
-                                      background: trustBgColor(entry.trust_level),
-                                      borderColor: trustColor(entry.trust_level),
-                                    }}
-                                  >
-                                    {entry.trust_level.toUpperCase()}
-                                  </span>
-                                </div>
-                                <div className="cu-expandable-field">
-                                  <span className="cu-expandable-field__label">Verification</span>
-                                  <span
-                                    className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
-                                  >
-                                    {entry.quality_tier}
-                                  </span>
-                                </div>
-                                {entry.tags.length > 0 && (
-                                  <div className="cu-expandable-field">
-                                    <span className="cu-expandable-field__label">Tags</span>
-                                    <div className="cu-expandable-tags">
-                                      {entry.tags.map(tag => (
-                                        <span key={tag} className="cu-registry-tag">
-                                          {tag}
-                                        </span>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          </td>
-                        </tr>
-                      ) : null}
-                    </Fragment>
+                          {entry.trust_level.toUpperCase()}
+                        </span>
+                      </td>
+                      <td>
+                        <span
+                          className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
+                        >
+                          {entry.quality_tier}
+                        </span>
+                      </td>
+                      <td className="cu-code-text">{entry.version}</td>
+                      <td
+                        className="cu-table__cell-actions"
+                        onClick={event => event.stopPropagation()}
+                        onKeyDown={event => event.stopPropagation()}
+                      >
+                        <RowActionsMenu
+                          ariaLabel={`Actions for ${entry.name} v${entry.version}`}
+                          actions={
+                            [
+                              {
+                                key: 'view',
+                                label: 'View details',
+                                onClick: () => router.push(detailRoute),
+                              },
+                              ...(!isCurator && isOwnedEntry(entry)
+                                ? [
+                                    {
+                                      key: 'manage-owned',
+                                      label: 'Manage published entry',
+                                      onClick: () =>
+                                        router.push(CONTROL_ROUTES.marketplace.orgEntries),
+                                    },
+                                  ]
+                                : []),
+                              ...(installed
+                                ? [
+                                    {
+                                      key: 'installed',
+                                      label: 'Installed',
+                                      disabled: true,
+                                      onClick: () => undefined,
+                                    },
+                                  ]
+                                : [
+                                    {
+                                      key: 'install',
+                                      label: 'Install',
+                                      onClick: () =>
+                                        router.push(
+                                          CONTROL_ROUTES.marketplace.install({
+                                            entry: entry.name,
+                                            version: entry.version,
+                                          })
+                                        ),
+                                    },
+                                  ]),
+                              ...(isCurator
+                                ? [
+                                    {
+                                      key: 'edit',
+                                      label: 'Edit',
+                                      onClick: () =>
+                                        router.push(
+                                          CONTROL_ROUTES.marketplace.editEntry(
+                                            entry.name,
+                                            entry.version
+                                          )
+                                        ),
+                                    },
+                                    {
+                                      key: 'remove',
+                                      label: 'Remove from Marketplace',
+                                      danger: true,
+                                      onClick: () => {
+                                        setRemoveError('')
+                                        setRemoveTarget(entry)
+                                      },
+                                    },
+                                  ]
+                                : []),
+                            ] satisfies RowActionMenuItem[]
+                          }
+                        />
+                      </td>
+                    </TableRow>
                   )
                 })
               )}

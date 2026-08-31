@@ -3,6 +3,7 @@
 import React, { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { DataTable } from '@clerum/frontend-table-system'
+import { RowActionsMenu } from '@components/RowActionsMenu'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { LlmHookStatus } from '../lib/api'
 import type {
@@ -16,7 +17,7 @@ import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconChevronRight, IconRefresh, IconX } from './icons'
+import { IconRefresh } from './icons'
 
 const HOOK_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
@@ -25,7 +26,6 @@ const HOOK_COLUMNS: TableHeaderColumn[] = [
   { key: 'failMode', label: 'Fail mode' },
   { key: 'status', label: 'Status' },
   { key: 'actions', align: 'right', ariaLabel: 'Actions' },
-  { key: 'navigation', align: 'right', ariaLabel: 'Navigation' },
 ]
 
 function StatusBadge({ status }: { status?: LlmHookStatus }) {
@@ -240,31 +240,23 @@ export function GuardrailHooksTable({
                       onClick={event => event.stopPropagation()}
                       onKeyDown={event => event.stopPropagation()}
                     >
-                      <div className="cu-table-actions">
-                        {onUninstall ? (
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void onUninstall({ name })}
-                            disabled={uninstallingKey === key}
-                            aria-label={
-                              uninstallingKey === key
-                                ? 'Uninstalling...'
-                                : `Uninstall guardrail ${name}`
-                            }
-                            title={
-                              uninstallingKey === key
-                                ? 'Uninstalling...'
-                                : `Uninstall guardrail ${name}`
-                            }
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
-                        ) : null}
-                      </div>
-                    </td>
-                    <td className="cu-installed-plugin__navigation" aria-hidden="true">
-                      <IconChevronRight width={18} height={18} />
+                      <RowActionsMenu
+                        ariaLabel={`Actions for guardrail ${name}`}
+                        actions={[
+                          { key: 'view', label: 'View details', onClick: () => openDetail(name) },
+                          ...(onUninstall
+                            ? [
+                                {
+                                  key: 'uninstall',
+                                  label: uninstallingKey === key ? 'Uninstalling…' : 'Uninstall',
+                                  danger: true,
+                                  disabled: uninstallingKey === key,
+                                  onClick: () => void onUninstall({ name }),
+                                },
+                              ]
+                            : []),
+                        ]}
+                      />
                     </td>
                   </tr>
                 )

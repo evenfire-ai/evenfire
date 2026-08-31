@@ -103,7 +103,9 @@ export function RecordList({ className, ...props }: HTMLAttributes<HTMLDivElemen
 }
 
 export function RecordListRow({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div {...props} className={classNames('eft-record-list__row', className)} role="listitem" />
+  return (
+    <div {...props} className={classNames('eft-record-list__row', className)} role="listitem" />
+  )
 }
 
 export function DataTable({
@@ -111,7 +113,9 @@ export function DataTable({
   variant = 'standard',
   ...props
 }: TableHTMLAttributes<HTMLTableElement> & { variant?: TableVariant }) {
-  return <table {...props} className={classNames('eft-table', `eft-table--${variant}`, className)} />
+  return (
+    <table {...props} className={classNames('eft-table', `eft-table--${variant}`, className)} />
+  )
 }
 
 export function TableRow({
@@ -121,7 +125,8 @@ export function TableRow({
 }: React.HTMLAttributes<HTMLTableRowElement> & { onNavigate?: () => void }) {
   const activate = (event: KeyboardEvent<HTMLTableRowElement>) => {
     props.onKeyDown?.(event)
-    if (event.defaultPrevented || !onNavigate || (event.key !== 'Enter' && event.key !== ' ')) return
+    if (event.defaultPrevented || !onNavigate || (event.key !== 'Enter' && event.key !== ' '))
+      return
     event.preventDefault()
     onNavigate()
   }
@@ -133,7 +138,8 @@ export function TableRow({
         props.onClick?.(event)
         if (event.defaultPrevented || !onNavigate) return
         const target = event.target as HTMLElement
-        if (target.closest('a,button,input,select,textarea,[role="button"],[role="menuitem"]')) return
+        if (target.closest('a,button,input,select,textarea,[role="button"],[role="menuitem"]'))
+          return
         onNavigate()
       }}
       onKeyDown={activate}
@@ -156,12 +162,14 @@ export function TableHeaderCell({
   kind = 'text',
   label,
   onSort,
+  sortLabel,
   ...props
 }: Omit<ThHTMLAttributes<HTMLTableCellElement>, 'children'> & {
   activeDirection?: SortDirection | null
   kind?: CellKind
   label: ReactNode
   onSort?: () => void
+  sortLabel?: ReactNode
 }) {
   const ariaSort = activeDirection
     ? activeDirection === 'asc'
@@ -177,7 +185,21 @@ export function TableHeaderCell({
       className={classNames(`eft-table__header--${kind}`, className)}
       scope={props.scope ?? 'col'}
     >
-      {onSort ? (
+      {onSort && sortLabel ? (
+        <span className="eft-table__sort-group">
+          {label}
+          <button
+            aria-label={`Sort by ${String(sortLabel)}`}
+            className="eft-table__sort eft-table__sort--icon"
+            onClick={onSort}
+            type="button"
+          >
+            <span aria-hidden="true" className="eft-table__sort-indicator">
+              {activeDirection === 'asc' ? '↑' : activeDirection === 'desc' ? '↓' : '↕'}
+            </span>
+          </button>
+        </span>
+      ) : onSort ? (
         <button className="eft-table__sort" onClick={onSort} type="button">
           <span>{label}</span>
           <span aria-hidden="true" className="eft-table__sort-indicator">
@@ -274,8 +296,12 @@ export function RowActionMenu({
       const anchor = trigger.getBoundingClientRect()
       const bounds = menu.getBoundingClientRect()
       const inset = 8
-      const left = Math.max(inset, Math.min(anchor.right - bounds.width, innerWidth - bounds.width - inset))
-      const above = anchor.bottom + bounds.height + inset > innerHeight && anchor.top > bounds.height
+      const left = Math.max(
+        inset,
+        Math.min(anchor.right - bounds.width, innerWidth - bounds.width - inset)
+      )
+      const above =
+        anchor.bottom + bounds.height + inset > innerHeight && anchor.top > bounds.height
       setPosition({ left, top: above ? anchor.top - bounds.height - inset : anchor.bottom + inset })
     }
     place()
@@ -374,7 +400,8 @@ export function compareSortValues(left: SortValue, right: SortValue): number {
   if (left == null) return right == null ? 0 : 1
   if (right == null) return -1
   const a = left instanceof Date ? left.getTime() : typeof left === 'boolean' ? Number(left) : left
-  const b = right instanceof Date ? right.getTime() : typeof right === 'boolean' ? Number(right) : right
+  const b =
+    right instanceof Date ? right.getTime() : typeof right === 'boolean' ? Number(right) : right
   if (typeof a === 'number' && typeof b === 'number') return a - b
   return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' })
 }

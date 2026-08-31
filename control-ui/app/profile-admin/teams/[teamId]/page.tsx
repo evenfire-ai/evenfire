@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-table-system'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
 import { SelectionDropdown } from '@components/SelectionDropdown'
@@ -14,7 +14,7 @@ import { partitionVisibleAccess } from '@lib/accessVisibility'
 import { getAgentDisplayName } from '@lib/agentName'
 import { InviteMemberDialog } from '../../../../components/InviteMemberDialog'
 import { IconUsers } from '../../../../components/Sidebar/icons'
-import { IconCheck, IconMoreHorizontal, IconPencil, IconX } from '../../../../components/icons'
+import { IconCheck, IconMoreHorizontal, IconX } from '../../../../components/icons'
 import {
   AdminTeamPendingInvitation,
   HostResource,
@@ -928,36 +928,27 @@ export default function TeamDetailsPage() {
                                       />
                                     </td>
                                     <td>
-                                      <div
-                                        style={{
-                                          display: 'flex',
-                                          gap: '0.35rem',
-                                          justifyContent: 'flex-end',
-                                        }}
-                                      >
-                                        <button
-                                          type="button"
-                                          className="cu-btn cu-btn--icon cu-btn--ghost"
-                                          onClick={() => {
-                                            setRoleEditMember(member)
-                                            setRoleEditDraft(member.role)
-                                          }}
-                                          disabled={busy}
-                                          aria-label="Edit role"
-                                        >
-                                          <IconPencil width={14} height={14} />
-                                        </button>
-                                        <button
-                                          type="button"
-                                          className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                                          onClick={() => void removeMember(member.id)}
-                                          disabled={busy}
-                                          title="Remove"
-                                          aria-label="Remove member"
-                                        >
-                                          <IconX width={16} height={16} />
-                                        </button>
-                                      </div>
+                                      <RowActionMenu
+                                        ariaLabel={`Actions for ${member.email}`}
+                                        actions={[
+                                          {
+                                            key: 'edit-role',
+                                            label: 'Edit role',
+                                            disabled: busy,
+                                            onSelect: () => {
+                                              setRoleEditMember(member)
+                                              setRoleEditDraft(member.role)
+                                            },
+                                          },
+                                          {
+                                            key: 'remove',
+                                            label: 'Remove member',
+                                            danger: true,
+                                            disabled: busy,
+                                            onSelect: () => void removeMember(member.id),
+                                          },
+                                        ]}
+                                      />
                                     </td>
                                   </tr>
                                 )
@@ -1015,9 +1006,9 @@ export default function TeamDetailsPage() {
                       No contexts linked.
                     </div>
                   ) : (
-                    <div role="list">
+                    <RecordList>
                       {assignedContextIds.map(contextId => (
-                        <div key={contextId} className="cu-access-row" role="listitem">
+                        <RecordListRow key={contextId} className="cu-access-row">
                           <button
                             type="button"
                             className="cu-link"
@@ -1025,19 +1016,27 @@ export default function TeamDetailsPage() {
                           >
                             {contextId}
                           </button>
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void removeContextAccess(contextId)}
-                            disabled={busy}
-                            title="Remove"
-                            aria-label="Remove context"
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
-                        </div>
+                          <RowActionMenu
+                            ariaLabel={`Actions for context ${contextId}`}
+                            actions={[
+                              {
+                                key: 'view',
+                                label: 'View context details',
+                                onSelect: () =>
+                                  router.push(CONTROL_ROUTES.contexts.detail(contextId)),
+                              },
+                              {
+                                key: 'remove',
+                                label: 'Remove context',
+                                danger: true,
+                                disabled: busy,
+                                onSelect: () => void removeContextAccess(contextId),
+                              },
+                            ]}
+                          />
+                        </RecordListRow>
                       ))}
-                    </div>
+                    </RecordList>
                   )}
                   {!initialLoading && deletedContextIds.length > 0 && (
                     <>
@@ -1099,9 +1098,9 @@ export default function TeamDetailsPage() {
                       No agent access yet.
                     </div>
                   ) : (
-                    <div role="list">
+                    <RecordList>
                       {assignedAgentNames.map(agentName => (
-                        <div key={agentName} className="cu-access-row" role="listitem">
+                        <RecordListRow key={agentName} className="cu-access-row">
                           <button
                             type="button"
                             className="cu-link"
@@ -1109,19 +1108,27 @@ export default function TeamDetailsPage() {
                           >
                             {agentName}
                           </button>
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void revokeAgentAccess(agentName)}
-                            disabled={busy}
-                            title="Revoke"
-                            aria-label="Revoke agent"
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
-                        </div>
+                          <RowActionMenu
+                            ariaLabel={`Actions for agent ${agentName}`}
+                            actions={[
+                              {
+                                key: 'view',
+                                label: 'View agent details',
+                                onSelect: () =>
+                                  router.push(CONTROL_ROUTES.agents.detail(agentName)),
+                              },
+                              {
+                                key: 'revoke',
+                                label: 'Revoke agent access',
+                                danger: true,
+                                disabled: busy,
+                                onSelect: () => void revokeAgentAccess(agentName),
+                              },
+                            ]}
+                          />
+                        </RecordListRow>
                       ))}
-                    </div>
+                    </RecordList>
                   )}
                 </>
               )}

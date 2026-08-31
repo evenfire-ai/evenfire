@@ -10,8 +10,9 @@ import {
   putHostEnv,
 } from '../lib/api'
 import { useConfirmDialog } from './ConfirmDialog'
+import { RowActionsMenu } from './RowActionsMenu'
 import { useToast } from './Toast'
-import { IconPencil, IconRefresh, IconX } from './icons'
+import { IconRefresh, IconX } from './icons'
 import { Button, CheckboxField, Field, TextInput } from './ui'
 
 const RESERVED_PROVIDER_KEYS = new Set([
@@ -292,25 +293,23 @@ export function HostEnvTable({ hostRef }: { hostRef: string }) {
                 <td>{entry.secret ? 'Secret' : 'Non-secret'}</td>
                 <td>{entry.updatedAt ? new Date(entry.updatedAt).toLocaleString() : '—'}</td>
                 <td>
-                  <button
-                    type="button"
-                    className="cu-btn cu-btn--icon cu-btn--toolbar"
-                    onClick={() => openEdit(entry)}
-                    aria-label={`Edit ${entry.key}`}
-                    title={`Edit ${entry.key}`}
-                  >
-                    <IconPencil width={16} height={16} />
-                  </button>{' '}
-                  <button
-                    type="button"
-                    className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                    onClick={() => void confirmDelete(entry.key)}
-                    disabled={deletingKey === entry.key}
-                    aria-label={`Delete ${entry.key}`}
-                    title={`Delete ${entry.key}`}
-                  >
-                    <IconX width={16} height={16} />
-                  </button>
+                  <RowActionsMenu
+                    ariaLabel={`Actions for ${entry.key}`}
+                    actions={[
+                      {
+                        key: 'edit',
+                        label: 'Edit',
+                        onClick: () => openEdit(entry),
+                      },
+                      {
+                        key: 'delete',
+                        label: 'Delete',
+                        onClick: () => void confirmDelete(entry.key),
+                        disabled: deletingKey === entry.key,
+                        danger: true,
+                      },
+                    ]}
+                  />
                 </td>
               </tr>
             ))

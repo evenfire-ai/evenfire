@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, RowActionMenu } from '@clerum/frontend-table-system'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { IconSharedFiles } from '@components/Sidebar/icons'
@@ -268,17 +268,23 @@ export default function SharedFileSystemsPage() {
                             : mountedBy.map(c => `${c.namespace}/${c.name}`).join(', ')}
                         </td>
                         <td style={{ textAlign: 'right' }} onClick={e => e.stopPropagation()}>
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => setDeleteTarget(name)}
-                            disabled={isDeleting}
-                            aria-label={
-                              isDeleting ? `Deleting ${name}` : `Delete shared filesystem ${name}`
-                            }
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
+                          <RowActionMenu
+                            ariaLabel={`Actions for shared filesystem ${name}`}
+                            actions={[
+                              {
+                                key: 'view',
+                                label: 'View details',
+                                onSelect: () => router.push(CONTROL_ROUTES.agentFiles.detail(name)),
+                              },
+                              {
+                                key: 'delete',
+                                label: isDeleting ? 'Deleting…' : 'Delete',
+                                danger: true,
+                                disabled: isDeleting,
+                                onSelect: () => setDeleteTarget(name),
+                              },
+                            ]}
+                          />
                         </td>
                       </tr>
                     )

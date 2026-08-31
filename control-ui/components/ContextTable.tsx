@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, useTableSort } from '@clerum/frontend-table-system'
 import { ContextResource } from '../lib/api'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
@@ -16,6 +16,8 @@ type ContextRef = { name: string }
 
 const CONTEXT_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Context Name' },
+  { key: 'identifier', label: 'Identifier' },
+  { key: 'description', label: 'Description' },
   { key: 'servers', label: 'Connectors', width: '7rem' },
   { key: 'actions', label: 'Actions', width: '8rem', align: 'right' },
 ]
@@ -68,18 +70,35 @@ export function ContextTable({
         .includes(normalizedSearch)
     })
   }, [normalizedSearch, rows])
+  const contextSort = useTableSort<
+    (typeof filteredRows)[number],
+    'name' | 'identifier' | 'description' | 'servers'
+  >({
+    rows: filteredRows,
+    defaultKey: 'name',
+    accessors: {
+      name: row => row.displayName,
+      identifier: row => row.name,
+      description: row => String(row.item.spec?.description || ''),
+      servers: row => row.mcpServers.length,
+    },
+    identity: row => row.key,
+  })
+  const contextColumns = CONTEXT_COLUMNS.map(column => ({
+    ...column,
+    ...(column.key !== 'actions'
+      ? {
+          activeDirection: contextSort.key === column.key ? contextSort.direction : null,
+          onSort: () =>
+            contextSort.sortBy(column.key as 'name' | 'identifier' | 'description' | 'servers'),
+        }
+      : {}),
+  }))
 
   const isInitialLoad = loading && items.length === 0
 
   function openContext(name: string) {
     onView({ name })
-  }
-
-  function handleRowKeyDown(event: React.KeyboardEvent<HTMLTableRowElement>, name: string) {
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault()
-      openContext(name)
-    }
   }
 
   return (
@@ -125,10 +144,10 @@ export function ContextTable({
         <div className="eft-table-viewport cu-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
-              <TableHeaderRow columns={CONTEXT_COLUMNS} />
+              <TableHeaderRow columns={contextColumns} />
             </thead>
             <tbody>
-              <SkeletonTableRows columns={CONTEXT_COLUMNS.length} rows={4} />
+              <SkeletonTableRows columns={contextColumns.length} rows={4} />
             </tbody>
           </DataTable>
         </div>
@@ -140,26 +159,22 @@ export function ContextTable({
         <div className="eft-table-viewport cu-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
-              <TableHeaderRow columns={CONTEXT_COLUMNS} />
+              <TableHeaderRow columns={contextColumns} />
             </thead>
             <tbody>
-              {filteredRows.map(({ key, name, displayName, item, mcpServers }) => (
-                <tr
+              {contextSort.sortedRows.map(({ key, name, displayName, item, mcpServers }) => (
+                <TableRow
                   key={key}
                   className="cu-table__row cu-table__row--clickable"
-                  onClick={() => openContext(name)}
-                  onKeyDown={event => handleRowKeyDown(event, name)}
-                  tabIndex={0}
+                  onNavigate={() => openContext(name)}
                   aria-label={`Open context ${name}`}
                 >
                   <td>
                     <span className="cu-expandable-row__name">{displayName}</span>
-                    {displayName !== name ? (
-                      <div className="cu-table__cell-subtle">{name}</div>
-                    ) : null}
-                    <div className="cu-registry-description" title={item.spec?.description || '—'}>
-                      {item.spec?.description || '—'}
-                    </div>
+                  </td>
+                  <td className="cu-table__cell-subtle">{name}</td>
+                  <td className="cu-registry-description" title={item.spec?.description || '—'}>
+                    {item.spec?.description || '—'}
                   </td>
                   <td style={{ color: 'var(--cu-text-muted)', fontVariantNumeric: 'tabular-nums' }}>
                     {mcpServers.length}
@@ -186,7 +201,7 @@ export function ContextTable({
                       />
                     </div>
                   </td>
-                </tr>
+                </TableRow>
               ))}
             </tbody>
           </DataTable>

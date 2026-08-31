@@ -1,9 +1,8 @@
 'use client'
 
 import React from 'react'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, RowActionMenu } from '@clerum/frontend-table-system'
 import type { WorkflowApprovalMediumAccount } from '../lib/workflowApprovalMediums'
-import { IconX } from './icons'
 
 function formatAccount(account: WorkflowApprovalMediumAccount): string {
   if (account.medium === 'telegram') {
@@ -66,29 +65,29 @@ export function UserApprovalMediumsTable({
                 <td>{account.medium}</td>
                 <td>{formatAccount(account)}</td>
                 <td>{account.isPreferred ? 'Preferred' : 'Verified'}</td>
-                <td>
-                  <div style={{ display: 'flex', gap: '0.35rem', justifyContent: 'flex-end' }}>
-                    {!account.isPreferred && (
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--ghost cu-btn--sm"
-                        onClick={() => onPrefer(account.id)}
-                        disabled={busy}
-                      >
-                        Prefer
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                      onClick={() => onRevoke(account.id)}
-                      disabled={busy}
-                      title="Revoke"
-                      aria-label={`Revoke ${account.medium} approval DM`}
-                    >
-                      <IconX width={16} height={16} />
-                    </button>
-                  </div>
+                <td className="cu-table__cell-actions">
+                  <RowActionMenu
+                    ariaLabel={`Actions for ${account.medium} approval account`}
+                    actions={[
+                      ...(!account.isPreferred
+                        ? [
+                            {
+                              key: 'prefer',
+                              label: 'Make preferred',
+                              disabled: busy,
+                              onSelect: () => onPrefer(account.id),
+                            },
+                          ]
+                        : []),
+                      {
+                        key: 'revoke',
+                        label: 'Revoke',
+                        danger: true,
+                        disabled: busy,
+                        onSelect: () => onRevoke(account.id),
+                      },
+                    ]}
+                  />
                 </td>
               </tr>
             ))

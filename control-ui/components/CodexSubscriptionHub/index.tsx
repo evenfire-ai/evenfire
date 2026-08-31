@@ -26,14 +26,14 @@ import {
 } from '../CodexSubscriptionConnection/types'
 import { useConfirmDialog } from '../ConfirmDialog'
 import { LlmProviderIcon } from '../LlmProviderIcon'
-import { LlmSecretsSubTabs } from '../LlmSecretsSubTabs'
+import { RowActionsMenu } from '../RowActionsMenu'
 import { SecretsScopeTabs } from '../SecretsScopeTabs'
 import { SectionSearchInput } from '../SectionSearchInput'
 import { SelectionDropdown } from '../SelectionDropdown'
 import { IconKey } from '../Sidebar/icons'
 import { TablePanelHeader } from '../TablePanelHeader'
 import { useToast } from '../Toast'
-import { IconPencil, IconRefresh, IconX } from '../icons'
+import { IconRefresh, IconX } from '../icons'
 
 function grantLabel(row: CodexSubscriptionConnectionView): string {
   return row.displayName || row.connectionKey
@@ -285,8 +285,7 @@ export function CodexSubscriptionHub() {
           subtitle="Manage LLM, connector, and recipe credentials in one place."
         />
         <div className="cu-card__body cu-card__body--auto cu-secrets-strip">
-          <SecretsScopeTabs activeValue="llm" />
-          <LlmSecretsSubTabs activeValue="subscriptions" />
+          <SecretsScopeTabs activeValue="llm-subscriptions" />
         </div>
         <div className="cu-empty">
           {capability.error || error || 'ChatGPT subscriptions are disabled.'}
@@ -347,8 +346,7 @@ export function CodexSubscriptionHub() {
         />
 
         <div className="cu-card__body cu-card__body--auto cu-secrets-strip">
-          <SecretsScopeTabs activeValue="llm" />
-          <LlmSecretsSubTabs activeValue="subscriptions" />
+          <SecretsScopeTabs activeValue="llm-subscriptions" />
         </div>
 
         {error && !creating && !editing ? (
@@ -409,30 +407,24 @@ export function CodexSubscriptionHub() {
                       <td>
                         <span className={statusTagClass(mapped)}>{statusLabel(mapped)}</span>
                       </td>
-                      <td style={{ textAlign: 'right' }}>
-                        <div style={{ display: 'inline-flex', gap: '0.35rem' }}>
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--toolbar"
-                            onClick={() => void openEdit(row)}
-                            aria-label={`Update ChatGPT subscription ${grantLabel(row)}`}
-                          >
-                            <IconPencil width={16} height={16} />
-                          </button>
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void handleRevoke(row)}
-                            disabled={busyKey === row.connectionKey}
-                            aria-label={
-                              busyKey === row.connectionKey
-                                ? 'Deleting…'
-                                : `Delete ChatGPT subscription ${grantLabel(row)}`
-                            }
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
-                        </div>
+                      <td className="cu-table__cell-actions">
+                        <RowActionsMenu
+                          ariaLabel={`Actions for ChatGPT subscription ${grantLabel(row)}`}
+                          actions={[
+                            {
+                              key: 'edit',
+                              label: 'Edit',
+                              onClick: () => void openEdit(row),
+                            },
+                            {
+                              key: 'delete',
+                              label: busyKey === row.connectionKey ? 'Deleting…' : 'Delete',
+                              danger: true,
+                              disabled: busyKey === row.connectionKey,
+                              onClick: () => void handleRevoke(row),
+                            },
+                          ]}
+                        />
                       </td>
                     </tr>
                   )

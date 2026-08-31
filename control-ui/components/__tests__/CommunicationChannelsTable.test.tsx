@@ -186,7 +186,7 @@ describe('CommunicationChannelsTable — row actions kebab', () => {
 
     const editItem = screen.getByRole('menuitem', { name: 'Edit' })
     const deleteItem = screen.getByRole('menuitem', { name: 'Delete' })
-    expect(deleteItem).toHaveClass('cu-kebab__item--danger')
+    expect(deleteItem).toHaveClass('eft-row-actions__item--danger')
 
     fireEvent.click(editItem)
     expect(onEditChannel).toHaveBeenCalledWith('teams-channel')

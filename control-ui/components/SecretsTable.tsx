@@ -17,7 +17,6 @@ import { collectWorkflowRecipeSecretRefs } from '../lib/workflowRecipeSecretRefs
 import { useConfirmDialog } from './ConfirmDialog'
 import { LlmProviderIcon } from './LlmProviderIcon'
 import { LlmSecretUpdateModal } from './LlmSecretUpdateModal'
-import { LlmSecretsSubTabs } from './LlmSecretsSubTabs'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SecretsScopeTabs } from './SecretsScopeTabs'
 import { SectionSearchInput } from './SectionSearchInput'
@@ -470,7 +469,6 @@ export function SecretsTable({
 
         <div className="cu-card__body cu-card__body--auto cu-secrets-strip">
           <SecretsScopeTabs activeValue={scope} />
-          {scope === 'llm' ? <LlmSecretsSubTabs activeValue="api-key" /> : null}
         </div>
 
         {scope === 'llm' && error && (

@@ -35,6 +35,9 @@ vi.mock('next/navigation', () => ({
 function render(ui: React.ReactNode) {
   return rtlRender(<ToastProvider>{ui}</ToastProvider>)
 }
+async function openActions(entry = '@acme/db', version = '1.0.0') {
+  fireEvent.click(await screen.findByRole('button', { name: `Actions for ${entry} v${version}` }))
+}
 afterEach(cleanup)
 beforeEach(() => {
   vi.clearAllMocks()
@@ -120,8 +123,9 @@ describe('OwnedEntries', () => {
       ],
     })
     render(<OwnedEntries orgScope="acme" />)
-    await screen.findByText('@acme/db')
-    expect(screen.getAllByRole('button', { name: /share access/i })).toHaveLength(1)
+    await screen.findAllByText('@acme/db')
+    await openActions()
+    expect(screen.getByRole('menuitem', { name: /share access/i })).toBeInTheDocument()
     expect(screen.queryByText(/no grant needed/i)).toBeNull()
   })
 
@@ -132,7 +136,8 @@ describe('OwnedEntries', () => {
     render(<OwnedEntries orgScope="acme" />)
     // Modal is not in the DOM until the button is clicked.
     expect(screen.queryByRole('dialog')).toBeNull()
-    fireEvent.click(await screen.findByRole('button', { name: /share access/i }))
+    await openActions()
+    fireEvent.click(screen.getByRole('menuitem', { name: /share access/i }))
     expect(await screen.findByRole('dialog', { name: /grant access/i })).toBeInTheDocument()
     expect(await screen.findByLabelText(/grantee org/i)).toBeInTheDocument()
     expect(api.listOrgGrants).toHaveBeenCalledWith('@acme/db')
@@ -146,7 +151,8 @@ describe('OwnedEntries', () => {
       new Promise(() => undefined) as ReturnType<typeof api.listOrgGrants>
     )
     const view = render(<OwnedEntries orgScope="acme" />)
-    fireEvent.click(await screen.findByRole('button', { name: /share access/i }))
+    await openActions()
+    fireEvent.click(screen.getByRole('menuitem', { name: /share access/i }))
     expect(screen.getByRole('status', { name: /loading grants/i })).toBeInTheDocument()
     expect(screen.queryByText(/Loading grants/i)).toBeNull()
     expect(view.container.querySelectorAll('.cu-skeleton').length).toBeGreaterThan(0)
@@ -157,7 +163,8 @@ describe('OwnedEntries', () => {
       data: [{ name: '@acme/db', version: '1.0.0', visibility: 'private', status: 'published' }],
     })
     render(<OwnedEntries orgScope="acme" />)
-    fireEvent.click(await screen.findByRole('button', { name: /share access/i }))
+    await openActions()
+    fireEvent.click(screen.getByRole('menuitem', { name: /share access/i }))
     expect(await screen.findByRole('dialog', { name: /grant access/i })).toBeInTheDocument()
     // Disambiguate from the icon close button (aria-label="Close") using text.
     fireEvent.click(screen.getByText('Close', { selector: 'button' }))
@@ -270,7 +277,8 @@ describe('OwnedEntries', () => {
       data: [{ name: '@acme/db', version: '1.0.0', visibility: 'private', status: 'published' }],
     })
     render(<OwnedEntries orgScope="acme" />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Install' }))
+    await openActions()
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Install' }))
     expect(navigation.push).toHaveBeenCalledWith(expect.stringContaining('/marketplace/install'))
   })
 
@@ -284,8 +292,9 @@ describe('OwnedEntries', () => {
       installed: { catalogKeys: [], serverNames: [], recipeKeys: ['@acme/db@1.0.0'] },
     } as never)
     render(<OwnedEntries orgScope="acme" />)
-    expect(await screen.findByRole('button', { name: 'Installed' })).toBeDisabled()
-    expect(screen.queryByRole('button', { name: 'Install' })).toBeNull()
+    await openActions()
+    expect(screen.getByRole('menuitem', { name: 'Installed' })).toBeDisabled()
+    expect(screen.queryByRole('menuitem', { name: 'Install' })).toBeNull()
   })
 
   it('removes an entry from the row actions menu after confirmation', async () => {
@@ -314,7 +323,7 @@ describe('OwnedEntries', () => {
     expect(api.deleteRegistryEntry).not.toHaveBeenCalled()
   })
 
-  it('collapses same-named versions into one row showing the latest, expandable to previous', async () => {
+  it('renders every published version as a first-class record row', async () => {
     vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
       data: [
         { name: '@acme/db', version: '1.0.0', visibility: 'private', status: 'published' },
@@ -323,21 +332,15 @@ describe('OwnedEntries', () => {
       ],
     })
     render(<OwnedEntries orgScope="acme" />)
-    await screen.findByText('@acme/db')
-    // One collapsed row: latest version leads, previous count summarized.
+    await screen.findAllByText('@acme/db')
+    expect(screen.getAllByText('@acme/db')).toHaveLength(3)
     expect(screen.getByText('1.2.0')).toBeInTheDocument()
-    expect(screen.getByText('+2 more')).toBeInTheDocument()
-    // Previous versions are hidden until the row is expanded.
-    expect(screen.queryByText('1.1.0')).toBeNull()
-    expect(screen.queryByText('1.0.0')).toBeNull()
-
-    fireEvent.click(screen.getByText('@acme/db'))
-    expect(await screen.findByText('Previous versions')).toBeInTheDocument()
     expect(screen.getByText('1.1.0')).toBeInTheDocument()
     expect(screen.getByText('1.0.0')).toBeInTheDocument()
+    expect(screen.queryByText('Previous versions')).toBeNull()
   })
 
-  it('row Install targets the latest version; expanded rows install previous versions', async () => {
+  it('each version row installs that exact published version', async () => {
     vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
       data: [
         { name: '@acme/db', version: '1.0.0', visibility: 'private', status: 'published' },
@@ -345,18 +348,14 @@ describe('OwnedEntries', () => {
       ],
     })
     render(<OwnedEntries orgScope="acme" />)
-    await screen.findByText('@acme/db')
-    // Collapsed row's Install goes to the latest version.
-    fireEvent.click(screen.getByRole('button', { name: 'Install' }))
+    await screen.findAllByText('@acme/db')
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for @acme/db v2.0.0' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Install' }))
     expect(navigation.push).toHaveBeenCalledWith(expect.stringContaining('version=2.0.0'))
 
     navigation.push.mockClear()
-    fireEvent.click(screen.getByText('@acme/db'))
-    await screen.findByText('Previous versions')
-    // Now there are two Installs: the latest (main row) then the previous (detail).
-    const installs = screen.getAllByRole('button', { name: 'Install' })
-    expect(installs).toHaveLength(2)
-    fireEvent.click(installs[1])
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for @acme/db v1.0.0' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Install' }))
     expect(navigation.push).toHaveBeenCalledWith(expect.stringContaining('version=1.0.0'))
   })
 

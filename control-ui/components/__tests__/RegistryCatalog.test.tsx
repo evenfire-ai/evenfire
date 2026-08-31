@@ -146,21 +146,23 @@ describe('RegistryCatalog tabs and columns', () => {
     expect(screen.queryByText('market-report')).not.toBeInTheDocument()
   })
 
-  it('uses compact connector columns', async () => {
+  it('uses explicit record columns and one actions column', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
     await screen.findByText('brave-search')
 
-    for (const heading of ['Name', 'Version']) {
+    for (const heading of [
+      'Name',
+      'Description',
+      'Type',
+      'Tags',
+      'Trust',
+      'Verification',
+      'Version',
+    ]) {
       expect(screen.getByRole('columnheader', { name: heading })).toBeInTheDocument()
     }
-    for (const actionHeading of ['Installation', 'Edit or remove']) {
-      expect(screen.getByRole('columnheader', { name: actionHeading })).toBeInTheDocument()
-    }
-    expect(screen.queryByRole('columnheader', { name: 'View details' })).not.toBeInTheDocument()
-    for (const removed of ['Type', 'Category', 'Trust', 'Quality', 'Downloads', 'Visibility']) {
-      expect(screen.queryByRole('columnheader', { name: removed })).not.toBeInTheDocument()
-    }
+    expect(screen.getByRole('columnheader', { name: 'Actions' })).toBeInTheDocument()
   })
 
   it('excludes private entries from the Marketplace', async () => {
@@ -202,14 +204,12 @@ describe('RegistryCatalog tabs and columns', () => {
     )
   })
 
-  it('links entry names to their shareable detail routes', async () => {
+  it('navigates a record row to its shareable detail route', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
 
-    expect(await screen.findByRole('link', { name: 'brave-search' })).toHaveAttribute(
-      'href',
-      '/marketplace/entries/brave-search/1.0.0'
-    )
+    fireEvent.click((await screen.findByText('brave-search')).closest('tr')!)
+    expect(navigation.push).toHaveBeenCalledWith('/marketplace/entries/brave-search/1.0.0')
   })
 
   it('sorts connectors by name and version from their headers', async () => {
@@ -237,52 +237,44 @@ describe('RegistryCatalog tabs and columns', () => {
   })
 })
 
-describe('RegistryCatalog expansion and actions', () => {
-  it('keeps installation and metadata actions in separate columns', async () => {
+describe('RegistryCatalog record navigation and actions', () => {
+  it('keeps all record actions in one overflow menu', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
     const row = (await screen.findByText('brave-search')).closest('tr')!
-    const installCell = within(row).getByRole('button', { name: 'Install' }).closest('td')
-    const actionsCell = within(row)
-      .getByRole('button', { name: 'Actions for brave-search v1.0.0' })
-      .closest('td')
-
-    expect(installCell).not.toBe(actionsCell)
-    expect(within(row).queryByRole('button', { name: 'View details' })).not.toBeInTheDocument()
+    const trigger = within(row).getByRole('button', {
+      name: 'Actions for brave-search v1.0.0',
+    })
+    expect(within(row).queryByRole('button', { name: 'Install' })).toBeNull()
+    fireEvent.click(trigger)
+    expect(screen.getByRole('menuitem', { name: 'View details' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'Install' })).toBeInTheDocument()
   })
 
-  it('reveals metadata only after the full row is expanded', async () => {
+  it('shows former detail metadata in ordinary columns without expansion', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
     const row = (await screen.findByText('brave-search')).closest('tr')!
 
-    expect(screen.queryByText('local / streamableHttp')).not.toBeInTheDocument()
-    fireEvent.click(row)
-
-    expect(screen.getByText('Type')).toBeInTheDocument()
-    const detailRow = screen.getByText('Type').closest('tr')!
-    expect(within(detailRow).getAllByText('search')).toHaveLength(1)
-    expect(screen.getByText('Trust')).toBeInTheDocument()
-    expect(screen.getByText('Verification')).toBeInTheDocument()
-    expect(screen.getByText('Tags')).toBeInTheDocument()
-    expect(screen.getByText('HIGH')).toBeInTheDocument()
-    expect(screen.getByText('verified')).toBeInTheDocument()
-    expect(screen.getByText('web')).toBeInTheDocument()
-    expect(screen.getByText('local / streamableHttp')).toBeInTheDocument()
-    expect(row).toHaveAttribute('aria-expanded', 'true')
+    expect(within(row).getByText('local / streamableHttp')).toBeInTheDocument()
+    expect(within(row).getByText('HIGH')).toBeInTheDocument()
+    expect(within(row).getByText('verified')).toBeInTheDocument()
+    expect(within(row).getByText('search, web')).toBeInTheDocument()
+    expect(row).not.toHaveAttribute('aria-expanded')
   })
 
-  it('opens the connector install flow without expanding the row', async () => {
+  it('opens the connector install flow from the overflow menu', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
     const row = (await screen.findByText('brave-search')).closest('tr')!
 
-    fireEvent.click(within(row).getByRole('button', { name: 'Install' }))
+    fireEvent.click(within(row).getByRole('button', { name: 'Actions for brave-search v1.0.0' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Install' }))
 
     expect(navigation.push).toHaveBeenCalledWith(
       '/marketplace/install?entry=brave-search&version=1.0.0'
     )
-    expect(row).toHaveAttribute('aria-expanded', 'false')
+    expect(row).not.toHaveAttribute('aria-expanded')
   })
 
   it('marks installed connectors as unavailable for repeat installation', async () => {
@@ -290,7 +282,9 @@ describe('RegistryCatalog expansion and actions', () => {
     render(<RegistryCatalog />)
     const row = (await screen.findByText('brave-search')).closest('tr')!
 
-    expect(within(row).getByRole('button', { name: 'Installed' })).toBeDisabled()
+    fireEvent.click(within(row).getByRole('button', { name: 'Actions for brave-search v1.0.0' }))
+    expect(screen.getByRole('menuitem', { name: 'Installed' })).toBeDisabled()
+    expect(screen.queryByRole('menuitem', { name: 'Install' })).toBeNull()
   })
 
   it('removes an entry after confirmation', async () => {
@@ -354,7 +348,7 @@ describe('RegistryCatalog state handling', () => {
     vi.mocked(api.getPublishScope).mockReturnValue(new Promise(() => {}))
     const { container } = render(<RegistryCatalog />)
 
-    expect(container.querySelectorAll('.cu-skeleton')).toHaveLength(20)
+    expect(container.querySelectorAll('.cu-skeleton')).toHaveLength(40)
   })
 
   it('shows an API error', async () => {
@@ -466,10 +460,10 @@ describe('RegistryCatalog - capability-gated controls (§5.1)', () => {
     expect(screen.queryByRole('button', { name: 'Marketplace actions' })).not.toBeInTheDocument()
     // Editing/removing moves to the ownership area, so the discovery row no
     // longer offers them (design spec §5.4).
-    expect(
-      within(row).queryByRole('button', { name: 'Actions for brave-search v1.0.0' })
-    ).not.toBeInTheDocument()
-    expect(screen.queryByRole('columnheader', { name: 'Edit or remove' })).not.toBeInTheDocument()
+    fireEvent.click(within(row).getByRole('button', { name: 'Actions for brave-search v1.0.0' }))
+    expect(screen.getByRole('menuitem', { name: 'View details' })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'Edit' })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: 'Remove from Marketplace' })).toBeNull()
   })
 
   it('org owner: owned entries are badged and lead to the ownership area', async () => {
@@ -478,10 +472,14 @@ describe('RegistryCatalog - capability-gated controls (§5.1)', () => {
     render(<RegistryCatalog />)
 
     const ownedRow = (await screen.findByText('@acme/internal-tool')).closest('tr')!
-    expect(within(ownedRow).getByRole('link', { name: 'You own this' })).toHaveAttribute(
-      'href',
-      '/publisher/entries'
+    expect(within(ownedRow).getByText('Owned by your organization')).toBeInTheDocument()
+    fireEvent.click(
+      within(ownedRow).getByRole('button', {
+        name: 'Actions for @acme/internal-tool v1.0.0',
+      })
     )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Manage published entry' }))
+    expect(navigation.push).toHaveBeenCalledWith('/marketplace/org/entries')
     // A catalog entry the org does not own carries no ownership badge.
     const otherRow = screen.getByText('brave-search').closest('tr')!
     expect(within(otherRow).queryByRole('link', { name: 'You own this' })).not.toBeInTheDocument()

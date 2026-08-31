@@ -194,8 +194,8 @@ describe('HostTable display name column (UT-9)', () => {
     renderHostTable([makeDisplayHost('prod-x', '   ')])
 
     const row = screen.getByLabelText('Open agent prod-x')
-    // Only the slug renders — no separate secondary line duplicating it.
-    expect(within(row).getAllByText('prod-x')).toHaveLength(1)
+    // The fallback is visible in the primary and explicit identifier columns.
+    expect(within(row).getAllByText('prod-x')).toHaveLength(2)
   })
 
   it('filters rows by the display name', () => {
@@ -321,7 +321,7 @@ describe('HostTable — row actions kebab', () => {
 
     const viewItem = screen.getByRole('menuitem', { name: 'View agent details' })
     const deleteItem = screen.getByRole('menuitem', { name: 'Delete' })
-    expect(deleteItem).toHaveClass('cu-kebab__item--danger')
+    expect(deleteItem).toHaveClass('eft-row-actions__item--danger')
 
     fireEvent.click(viewItem)
     expect(onOpen).toHaveBeenCalledWith({ namespace: 'mcp-host', name: 'chatllm' })

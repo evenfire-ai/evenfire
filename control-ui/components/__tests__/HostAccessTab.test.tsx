@@ -135,7 +135,8 @@ describe('HostAccessTab — extracted access behavior', () => {
 
     await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument())
 
-    fireEvent.click(screen.getByRole('button', { name: /Revoke member access/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Alice' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke access' }))
 
     // ConfirmDialog opens; click the danger "Revoke" button.
     const confirmDialog = await screen.findByRole('alertdialog')

@@ -1,8 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { DataTable } from '@clerum/frontend-table-system'
-import { IconTrash } from '@components/icons'
+import { DataTable, RowActionMenu } from '@clerum/frontend-table-system'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { formatCommunicationChannelConfirmedAt } from '@lib/communicationChannels'
 import type {
@@ -111,15 +110,17 @@ export function CommunicationChannelConversationsTable({
                 <td>{formatCommunicationChannelConfirmedAt(conversation.confirmedAt)}</td>
                 {onDelete ? (
                   <td className="cu-table__actions">
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                      onClick={() => onDelete(conversation)}
-                      aria-label={`Delete ${displayName(conversation)}`}
-                      title={`Delete ${displayName(conversation)}`}
-                    >
-                      <IconTrash width={16} height={16} />
-                    </button>
+                    <RowActionMenu
+                      ariaLabel={`Actions for ${displayName(conversation)}`}
+                      actions={[
+                        {
+                          key: 'delete',
+                          label: 'Delete',
+                          danger: true,
+                          onSelect: () => onDelete(conversation),
+                        },
+                      ]}
+                    />
                   </td>
                 ) : null}
               </tr>

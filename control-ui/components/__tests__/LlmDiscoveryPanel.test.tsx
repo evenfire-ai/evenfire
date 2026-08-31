@@ -72,7 +72,7 @@ afterEach(() => {
 })
 
 describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
-  it('groups discovery review by provider and excludes stale rows', async () => {
+  it('shows review records with provider identity and excludes stale rows', async () => {
     render(
       <LlmDiscoveryPanel
         items={[reviewModel, staleModel]}
@@ -84,14 +84,10 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     expect(screen.getByText('LLM Models')).toBeInTheDocument()
     expect(screen.getByText(/Newly synced models land here disabled/)).toBeInTheDocument()
 
-    const reviewGroup = screen.getByRole('button', { name: 'Expand OpenAI review models' })
-    expect(reviewGroup).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.queryByText('gpt-5')).toBeNull()
-    expect(screen.queryByText('claude-retired')).toBeNull()
-
-    fireEvent.click(reviewGroup)
+    expect(screen.getByRole('columnheader', { name: /Provider/i })).toBeInTheDocument()
     expect(screen.getByText('gpt-5')).toBeInTheDocument()
     expect(screen.queryByText('claude-retired')).toBeNull()
+    expect(screen.queryByRole('button', { name: /Expand .* review models/ })).toBeNull()
 
     await waitFor(() => expect(screen.getByText('Live catalog')).toBeInTheDocument())
     expect(screen.getByText('+3 new')).toBeInTheDocument()
@@ -103,7 +99,6 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     const onRefresh = vi.fn().mockResolvedValue(undefined)
     render(<LlmDiscoveryPanel items={[reviewModel]} loading={false} onRefresh={onRefresh} />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI review models' }))
     fireEvent.click(screen.getByRole('button', { name: 'Enable' }))
 
     await waitFor(() =>
@@ -168,7 +163,7 @@ describe('LlmDiscoveryPanel sorting', () => {
   }
 
   function expandOpenAi() {
-    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI review models' }))
+    // Review rows are always visible; retained as a no-op for the sorting tests.
   }
 
   const discoveryModel = (overrides: Partial<LlmAllowedModel>): LlmAllowedModel => ({
@@ -188,7 +183,7 @@ describe('LlmDiscoveryPanel sorting', () => {
         onRefresh={vi.fn().mockResolvedValue(undefined)}
       />
     )
-    expect(document.querySelector('.cu-panel-title')?.textContent).toContain('LLM Models')
+    expect(screen.getByRole('heading', { name: /LLM Models/ })).toBeInTheDocument()
   })
 
   it('sorts queued models by model name ascending when clicked', () => {

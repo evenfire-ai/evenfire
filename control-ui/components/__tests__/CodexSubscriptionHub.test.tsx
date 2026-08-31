@@ -103,7 +103,7 @@ describe('CodexSubscriptionHub', () => {
     expect(revokeCodexSubscription).not.toHaveBeenCalled()
   })
 
-  it('renders subscriptions as a Secrets table with pencil and delete actions', async () => {
+  it('renders subscriptions as a Secrets table with row actions', async () => {
     render(
       <ToastProvider>
         <CodexSubscriptionHub />
@@ -112,19 +112,19 @@ describe('CodexSubscriptionHub', () => {
     expect(await screen.findByText('Team A')).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'Name' })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'Status' })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: 'API-KEY' })).toHaveAttribute('href', '/secrets/llm')
-    expect(screen.getByRole('tab', { name: 'Subscriptions' })).toHaveAttribute(
+    expect(screen.getByRole('tab', { name: 'LLM API keys' })).toHaveAttribute(
+      'href',
+      '/secrets/llm'
+    )
+    expect(screen.getByRole('tab', { name: 'LLM subscriptions' })).toHaveAttribute(
       'href',
       '/secrets/llm/subscriptions'
     )
     expect(screen.queryByRole('columnheader', { name: 'Agents' })).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Add agents to this subscription')).not.toBeInTheDocument()
-    expect(
-      screen.getByRole('button', { name: 'Update ChatGPT subscription Team A' })
-    ).toBeInTheDocument()
-    expect(
-      screen.getByRole('button', { name: 'Delete ChatGPT subscription Team A' })
-    ).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for ChatGPT subscription Team A' }))
+    expect(screen.getByRole('menuitem', { name: 'Edit' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument()
   })
 
   it('opens the grant modal for Sign in, Sync, and model toggles without binding hosts', async () => {
@@ -155,8 +155,9 @@ describe('CodexSubscriptionHub', () => {
       </ToastProvider>
     )
     fireEvent.click(
-      await screen.findByRole('button', { name: 'Update ChatGPT subscription Team A' })
+      await screen.findByRole('button', { name: 'Actions for ChatGPT subscription Team A' })
     )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit' }))
     expect(await screen.findByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Sync catalog' })).toBeInTheDocument()
     expect(listCodexConnectionModels).toHaveBeenCalledWith('codex-aaa')
@@ -188,8 +189,9 @@ describe('CodexSubscriptionHub', () => {
       </ToastProvider>
     )
     fireEvent.click(
-      await screen.findByRole('button', { name: 'Delete ChatGPT subscription Team A' })
+      await screen.findByRole('button', { name: 'Actions for ChatGPT subscription Team A' })
     )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
     await waitFor(() => {
       expect(revokeCodexSubscription).toHaveBeenCalledWith('codex-aaa')
     })

@@ -4,8 +4,8 @@ import React, { useCallback, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { DataTable } from '@clerum/frontend-table-system'
 import { useConfirmDialog } from '@components/ConfirmDialog'
+import { RowActionsMenu } from '@components/RowActionsMenu'
 import { useToast } from '@components/Toast'
-import { IconX } from '@components/icons'
 import { GUARDRAIL_ENTRY_TYPE } from '@constants/marketplaceEntryTypes'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { GUARDRAIL_PHASES, GUARDRAIL_PHASE_LABELS } from './constants'
@@ -137,20 +137,26 @@ export function HostGuardrailsSection({
                     </td>
                     <td>{GUARDRAIL_PHASE_LABELS[row.phase]}</td>
                     <td className="cu-table__cell-actions">
-                      <div className="cu-row-actions">
-                        {canWrite ? (
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void removeHook(row)}
-                            disabled={disabled}
-                            title="Remove"
-                            aria-label={`Remove hook ${row.ref.id} from ${GUARDRAIL_PHASE_LABELS[row.phase]}`}
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
-                        ) : null}
-                      </div>
+                      {canWrite ? (
+                        <RowActionsMenu
+                          ariaLabel={`Actions for ${row.ref.id}`}
+                          actions={[
+                            {
+                              key: 'view',
+                              label: 'View details',
+                              onClick: () =>
+                                router.push(CONTROL_ROUTES.guardrails.detail(row.ref.id)),
+                            },
+                            {
+                              key: 'remove',
+                              label: `Remove from ${GUARDRAIL_PHASE_LABELS[row.phase]}`,
+                              onClick: () => void removeHook(row),
+                              disabled,
+                              danger: true,
+                            },
+                          ]}
+                        />
+                      ) : null}
                     </td>
                   </tr>
                 ))

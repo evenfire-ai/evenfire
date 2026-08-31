@@ -6,6 +6,7 @@ import { useParams, useRouter } from 'next/navigation'
 import { DataTable } from '@clerum/frontend-table-system'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
+import { RowActionsMenu } from '@components/RowActionsMenu'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { TeamRolePermissionEditor } from '@components/TeamRolePermissionEditor'
 import { useToast } from '@components/Toast'
@@ -17,7 +18,7 @@ import type { DeleteCandidateTeam } from '@lib/profileAdminDelete'
 import { formatTeamNames, getSoloMemberTeamsForUser } from '@lib/profileAdminDelete'
 import { IconUsers } from '../../../../components/Sidebar/icons'
 import { UserApprovalMediumsPanel } from '../../../../components/UserApprovalMediumsPanel'
-import { IconPencil, IconX } from '../../../../components/icons'
+import { IconX } from '../../../../components/icons'
 import {
   AdminUserChannels,
   DeleteAdminUserRequest,
@@ -1009,24 +1010,23 @@ export default function UserDetailsPage() {
                         </button>
                       </td>
                       <td>
-                        <div
-                          style={{
-                            display: 'flex',
-                            gap: '0.35rem',
-                            justifyContent: 'flex-end',
-                          }}
-                        >
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void removeContextAccess(contextId)}
-                            disabled={busy}
-                            title="Remove"
-                            aria-label="Remove context"
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
-                        </div>
+                        <RowActionsMenu
+                          ariaLabel={`Actions for ${contextId}`}
+                          actions={[
+                            {
+                              key: 'view',
+                              label: 'View details',
+                              onClick: () => router.push(CONTROL_ROUTES.contexts.detail(contextId)),
+                            },
+                            {
+                              key: 'remove',
+                              label: 'Remove access',
+                              onClick: () => void removeContextAccess(contextId),
+                              disabled: busy,
+                              danger: true,
+                            },
+                          ]}
+                        />
                       </td>
                     </tr>
                   ))}
@@ -1177,36 +1177,33 @@ export default function UserDetailsPage() {
                           />
                         </td>
                         <td>
-                          <div
-                            style={{
-                              display: 'flex',
-                              gap: '0.35rem',
-                              justifyContent: 'flex-end',
-                            }}
-                          >
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--ghost"
-                              onClick={() => {
-                                setRoleEditTeam(team)
-                                setRoleEditDraft(team.role)
-                              }}
-                              disabled={busy}
-                              aria-label={`Edit permissions for ${team.name}`}
-                            >
-                              <IconPencil width={14} height={14} />
-                            </button>
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                              onClick={() => void removeUserFromTeam(team)}
-                              disabled={busy}
-                              aria-label={`Remove member from ${team.name}`}
-                              title="Remove"
-                            >
-                              <IconX width={16} height={16} />
-                            </button>
-                          </div>
+                          <RowActionsMenu
+                            ariaLabel={`Actions for ${team.name}`}
+                            actions={[
+                              {
+                                key: 'view',
+                                label: 'View details',
+                                onClick: () =>
+                                  router.push(CONTROL_ROUTES.usersAndTeams.team(team.id)),
+                              },
+                              {
+                                key: 'edit',
+                                label: 'Edit permissions',
+                                onClick: () => {
+                                  setRoleEditTeam(team)
+                                  setRoleEditDraft(team.role)
+                                },
+                                disabled: busy,
+                              },
+                              {
+                                key: 'remove',
+                                label: 'Remove from team',
+                                onClick: () => void removeUserFromTeam(team),
+                                disabled: busy,
+                                danger: true,
+                              },
+                            ]}
+                          />
                         </td>
                       </tr>
                     )
@@ -1292,24 +1289,23 @@ export default function UserDetailsPage() {
                         </button>
                       </td>
                       <td>
-                        <div
-                          style={{
-                            display: 'flex',
-                            gap: '0.35rem',
-                            justifyContent: 'flex-end',
-                          }}
-                        >
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void revokeAgentAccess(agentName)}
-                            disabled={busy}
-                            title="Revoke"
-                            aria-label="Revoke agent"
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
-                        </div>
+                        <RowActionsMenu
+                          ariaLabel={`Actions for ${agentName}`}
+                          actions={[
+                            {
+                              key: 'view',
+                              label: 'View details',
+                              onClick: () => router.push(CONTROL_ROUTES.agents.detail(agentName)),
+                            },
+                            {
+                              key: 'revoke',
+                              label: 'Revoke access',
+                              onClick: () => void revokeAgentAccess(agentName),
+                              disabled: busy,
+                              danger: true,
+                            },
+                          ]}
+                        />
                       </td>
                     </tr>
                   ))}

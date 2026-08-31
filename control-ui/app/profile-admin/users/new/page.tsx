@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable, RowActionMenu } from '@clerum/frontend-table-system'
 import { AuthGate } from '@components/AuthGate'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
@@ -11,7 +11,6 @@ import { DashboardLayout } from '@components/DashboardLayout'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { IconUsers } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
-import { IconTrash } from '@components/icons'
 import { Button, CheckboxField, Field, TextInput } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { createMemberFromControlAdmin, getAdminTeams, inviteAdminTeamMember } from '@lib/api'
@@ -330,19 +329,23 @@ export default function CreateMemberPage() {
                                         />
                                       </td>
                                       <td>
-                                        <button
-                                          type="button"
-                                          className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                                          onClick={() =>
-                                            updateSelectedTeams(
-                                              selectedTeamIds.filter(teamId => teamId !== team.id)
-                                            )
-                                          }
-                                          disabled={saving}
-                                          aria-label={`Remove ${team.name}`}
-                                        >
-                                          <IconTrash width={16} height={16} />
-                                        </button>
+                                        <RowActionMenu
+                                          ariaLabel={`Actions for ${team.name}`}
+                                          actions={[
+                                            {
+                                              key: 'remove',
+                                              label: 'Remove',
+                                              danger: true,
+                                              disabled: saving,
+                                              onSelect: () =>
+                                                updateSelectedTeams(
+                                                  selectedTeamIds.filter(
+                                                    teamId => teamId !== team.id
+                                                  )
+                                                ),
+                                            },
+                                          ]}
+                                        />
                                       </td>
                                     </tr>
                                   )
