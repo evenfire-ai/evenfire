@@ -2,7 +2,7 @@ import express from 'express'
 import OpenAI from 'openai'
 
 const app = express()
-const client = new OpenAI({ apiKey: 'test-key' })
+const client = new OpenAI()
 
 app.get('/unsafe', async (req, res) => {
   const persona = String(req.query.persona || '')
