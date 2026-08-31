@@ -472,3 +472,123 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
   })
 })
+
+// Mini-spec 05: below the minimum panel width the drawer is SUPPRESSED (hidden,
+// app takes full width) without clearing the user's open intent, so it reappears
+// when the window re-widens; a MANUAL close clears the intent, so it stays gone.
+// `SandboxUiPage.chatDrawerOpen` mirrors effective visibility (App passes
+// `chatDrawerVisible`), and the "Open chats" switcher only mounts while visible —
+// both are the observable outputs asserted here. The panel width is driven
+// through the real producer path: a stubbed ResizeObserver captures the hook's
+// sync callback, and the content-panel's clientWidth is made mutable so firing
+// the callback re-measures exactly as a window resize would.
+describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
+  let currentController: AppController
+  let panelClientWidth: number
+  let fireResize: () => void
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    sidebarHarness.props = null
+    sandboxUiPageHarness.props = null
+    appHeaderHarness.props = null
+    appHeaderHarness.openNotification = null
+    panelClientWidth = 2000
+    fireResize = () => {}
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(cb: () => void) {
+          fireResize = () => cb()
+        }
+        observe() {}
+        disconnect() {}
+      }
+    )
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      navItem: DESKTOP_ROUTES.chat,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    vi.mocked(useAppController).mockImplementation(() => currentController)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        shortcuts: { onCommand: vi.fn(() => vi.fn()) },
+        app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
+        sandboxUi: {
+          listApps: vi.fn().mockResolvedValue({ apps: [] }),
+          listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
+          clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
+          onDeepLink: vi.fn(() => vi.fn()),
+          setVisible: vi.fn().mockResolvedValue(undefined),
+          setBounds: vi.fn().mockResolvedValue(undefined),
+          focusActive: vi.fn().mockResolvedValue(true),
+          close: vi.fn().mockResolvedValue(undefined),
+        },
+      } as unknown as Window['clerum'],
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    delete (window as { clerum?: unknown }).clerum
+    vi.unstubAllGlobals()
+  })
+
+  // Make the live content-panel report a mutable clientWidth so the ResizeObserver
+  // callback measures our test width instead of jsdom's un-laid-out 0.
+  function bindPanelWidth() {
+    const el = document.querySelector('.content-panel') as HTMLElement | null
+    if (el && !Object.getOwnPropertyDescriptor(el, 'clientWidth')) {
+      Object.defineProperty(el, 'clientWidth', {
+        configurable: true,
+        get: () => panelClientWidth,
+      })
+    }
+  }
+
+  function resizeTo(width: number) {
+    panelClientWidth = width
+    bindPanelWidth()
+    act(() => fireResize())
+  }
+
+  it('suppresses the drawer below the threshold and restores it on re-widen, but a manual close stays closed', () => {
+    render(<App />)
+
+    // Launch from chat-1: the drawer opens over the live embed. The first sync
+    // reads a 0 panel (jsdom), which is not "too narrow", so it starts visible.
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(screen.queryByRole('button', { name: 'Open chats' })).not.toBeNull()
+
+    // Narrow the panel below CHAT_DRAWER_MIN_PANEL_WIDTH (846): the drawer is
+    // suppressed and the app takes the full width (no gutter class).
+    resizeTo(800)
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(screen.queryByRole('button', { name: 'Open chats' })).toBeNull()
+
+    // Re-widen above the threshold: the open intent was never cleared, so the
+    // drawer reappears on its own.
+    resizeTo(1200)
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(screen.queryByRole('button', { name: 'Open chats' })).not.toBeNull()
+
+    // Manual close while visible clears the intent.
+    act(() => sandboxUiPageHarness.props?.onToggleChatDrawer?.())
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+
+    // Widening (or any resize) must NOT bring a manually-closed drawer back.
+    resizeTo(2000)
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(screen.queryByRole('button', { name: 'Open chats' })).toBeNull()
+  })
+})

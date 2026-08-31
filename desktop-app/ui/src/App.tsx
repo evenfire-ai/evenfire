@@ -520,12 +520,22 @@ export function App() {
   // an orthogonal boolean axis over the shared `chatViewTabs`/<ChatPage> — never
   // a second tab store, never a foreground/background precedence module.
   const chatDrawerAvailable = vm.navItem === DESKTOP_ROUTES.apps && Boolean(activeSandboxUiApp)
-  const chatDrawerVisible = chatDrawerAvailable && chatDrawerOpen
-  chatDrawerVisibleRef.current = chatDrawerVisible
-  chatDrawerAvailableRef.current = chatDrawerAvailable
+  // Intention (what the user asked for) is kept separate from effective
+  // visibility. `chatDrawerDesired` is the user's open intent on an app-live
+  // route; below the minimum panel width the drawer can't coexist with the embed
+  // so it is SUPPRESSED — hidden without clearing the intent — and reappears on
+  // re-widen. A manual close flips `chatDrawerOpen`, so it stays closed. The
+  // resize hook measures the panel while the drawer is DESIRED (not only while
+  // visible) so it can observe the re-widen; `panelTooNarrow` comes from that
+  // measurement, and visibility derives from it — no dependency cycle with the
+  // hook's `active` input, which is the desire alone.
+  const chatDrawerDesired = chatDrawerAvailable && chatDrawerOpen
   // Session-only drawer sizing (always docked beside the native embed). Width is
   // not persisted by design; it resets to the default each launch.
-  const chatDrawerResize = useChatDrawerResize(contentPanelRef, chatDrawerVisible)
+  const chatDrawerResize = useChatDrawerResize(contentPanelRef, chatDrawerDesired)
+  const chatDrawerVisible = chatDrawerDesired && !chatDrawerResize.panelTooNarrow
+  chatDrawerVisibleRef.current = chatDrawerVisible
+  chatDrawerAvailableRef.current = chatDrawerAvailable
   // The notification tray's drawer form occupies the same fixed right-rail rect
   // as the chat drawer, so it only takes drawer form when the chat drawer is NOT
   // visible; while the chat drawer is up it reverts to its popover/overlay form
