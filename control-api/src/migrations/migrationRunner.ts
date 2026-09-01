@@ -34,7 +34,6 @@ async function runBoundedTransaction(db: DbClient, work: () => Promise<void>): P
     }
     await work()
     await db.query('COMMIT')
-    started = false
   } catch (error) {
     if (started) {
       try {
