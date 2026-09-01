@@ -274,10 +274,10 @@ export function CommunicationChannelsTable({
                       <td>
                         <span className="cu-table__cell-muted">{spec.hostRef || '-'}</span>
                       </td>
-                      <td className="cu-table__cell-actions">
+                      <td>
                         {providerTypes.map(communicationChannelProviderLabel).join(', ') || '-'}
                       </td>
-                      <td>
+                      <td className="cu-table__cell-actions">
                         <div className="cu-table-actions">
                           <RowActionsMenu
                             ariaLabel={`Actions for channel ${name}`}
