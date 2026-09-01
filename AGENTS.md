@@ -7,12 +7,21 @@ iterations. Do not create a new profile merely because the current commit,
 gate, or test command changes. Preserve the verified profile by passing its
 explicit `MINIKUBE_PROFILE` value into the next operation.
 
+Resolve that profile through the primary checkout
+`.local-notes/minikube-profiles/branch.mk`; do not derive a profile from the
+current `HEAD` or invent ports. Profile identity is stable for the canonical
+worktree path plus branch, while deployed freshness is owned by the exact
+`gitHead` + `worktreeId` + `clusterFingerprint` marker. A creation SHA in
+legacy profile metadata is historical, not a reason to allocate another
+profile. Reuse the persisted `ports.env` byte-for-byte; missing, corrupt, or
+ambiguous ownership metadata must fail closed instead of regenerating ports.
+
 Before reusing a profile, record and compare all of the following:
 
 - active worktree path, branch, `HEAD`, and `origin/dev`;
 - target Minikube profile and explicit Kubernetes context;
-- the pre-gate state marker: `worktreeId`, `gitHead`, and
-  `clusterFingerprint`;
+- the pre-gate state marker: `worktreeId`, `gitHead`, `clusterFingerprint`,
+  and the exact `imagesGeneratedAt` value from the image manifest;
 - profile status and currently running profile, pre-gate-sync, and
   port-forward processes.
 
@@ -23,6 +32,53 @@ also required when the selected profile is missing or unhealthy. Never use
 shared fixed localhost ports for branch-owned profiles; use the profile-owned
 random port mapping already recorded for that profile.
 
+## Branch-profile UI port-forwards
+
+First-hand entry point (gitignored helper at repo root — do not search for
+it). Implementation is `.local-notes/minikube-profiles/branch-profile.sh`.
+Do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+```
+
+This is the host-side hold for Control UI / Desktop. Run it on the host, not
+from a sandboxed agent shell. `make minikube-pf-all-bg` is a gate refresh
+only and must not replace `branch-profile-pf`. Do not kill this lane's
+forwards. `branch-profile-pf-health` starts then stops PFs on EXIT — do not
+use it as the lasting hold. Inner `pre-gate-sync` may use
+`--skip-port-forwards`; never pass that globally into `make minikube-t2`.
+
+Port-forwards are owned by atomic `0600` records bound to the exact profile,
+context, canonical worktree, namespace, Service, local/remote ports, PID,
+process start time, and `kubectl` argv. Never kill or adopt a live legacy
+`/tmp/pf-*.pid` process: it lacks enough provenance and must fail closed.
+After a user-facing health probe, revalidate the same live process, start time,
+argv, and binding. A registered but dead/reused/ambiguous pidfile is itself a
+`PORT_FORWARD_CONFLICT`; it must not disappear from the T2 verdict merely
+because `ps` no longer lists a child.
+
+All image acquisition, image builds, and targeted deploys must enter through
+the documented Make targets or the T2 orchestrator so they inherit the exact
+live profile mutation lease. Calling `scripts/minikube/build-images.sh` or
+`scripts/minikube/pull-images.sh` directly is unsupported for mutating work;
+`--verify-only` is the read-only exception. Docker and Minikube operations must
+use finite deadlines. Docker endpoint discovery must resolve
+to an explicit local Unix socket or loopback TCP endpoint before switching to
+an empty task-local Docker config. Ambient registry credentials are never
+copied; a private pull requires an explicit `MINIKUBE_DOCKER_AUTH_CONFIG`.
+The legacy `scripts/minikube/setup.sh` compatibility path follows the same
+boundary: it requires matching `MINIKUBE_PROFILE` and
+`CONTROL_API_REAL_PG_CONTEXT`, acquires the branch-owned lease before its first
+cluster operation for every invocation (with or without `--build`), and never
+falls back to the shared `clerum-test` profile. The published-image puller
+rejects invalid parallelism/retry/delay values and an empty successful
+`minikube docker-env`; neither condition may produce a green acquisition.
+
 ## Incremental local image updates
 
 For a service-only change in an already healthy profile, rebuild and restart
@@ -31,7 +87,7 @@ only the affected workload. Prefer the existing targeted path:
 ```bash
 MINIKUBE_PROFILE=<verified-profile> \
   make minikube-deploy-service SVC=<image-selector> NS=<namespace> \
-  MINIKUBE_DEPLOYMENT=<deployment>
+  DEPLOYMENT=<deployment>
 ```
 
 Examples: `control-api` / `control-plane` / `control-api`,
@@ -41,15 +97,22 @@ Examples: `control-api` / `control-plane` / `control-api`,
 image-only primitive; do not call the all-image builder for a known
 single-service change.
 
-Use `make minikube-pre-gate-sync` for a full T2 gate after T1 passes. It owns
-the cluster fingerprint, migration ordering, rollout checks, and runtime
-marker. It compares the deployed marker to the current worktree, rebuilds only
-the known affected image selectors, and restarts only their deployments. A
-fresh profile, an explicit forced sync, or an unmapped runtime path must fall
-back to the established complete image build. A service-only T2 may use the
-targeted path when the profile is already healthy; record it as a *targeted
-T2* and prove the affected deployment is Ready plus its user-facing health
-endpoint. Do not report that as a full reconcile.
+Use `make minikube-pre-gate-sync` to reconcile the owned profile after T1
+inputs change. It owns the cluster fingerprint, migration ordering, rollout
+checks, and runtime marker. It is not a T2 verdict. It compares the deployed
+marker to the current worktree, rebuilds only the known affected image
+selectors, and restarts only their deployments. A fresh profile, an explicit
+forced sync, or an unmapped runtime path must fall back to the established
+complete image build. A service-only update may use the targeted path when the
+profile is already healthy; record it as a *targeted sync* and prove the
+affected deployment is Ready plus its user-facing health endpoint. Do not
+report that as a full reconcile or as T2.
+
+The image acquisition stamp is part of the baseline in both GHCR and local
+image modes. If the manifest's `generated` value differs from the pre-gate
+marker, the incremental planner must invalidate the old `gitHead` baseline and
+reconcile before certifying; a matching commit alone does not prove that pods
+run the newly acquired image IDs.
 
 Expect a full reconcile when deployment manifests, CRDs, charts, network
 policy, or other infrastructure inputs changed; do not replace that safe path
@@ -64,24 +127,111 @@ branch-owned Minikube profile and its explicit Kubernetes context. It is not a
 production, GKE, Cloudflare, staging, shared-cluster, or customer-data
 runbook.
 
+Shell contract tests for this tooling must be hermetic. They may source the
+real harness scripts from the checkout, but any fixture that needs Git state
+must use a temporary fixture repository (the shared helper is
+`scripts/tests/lib/minikube-fixture-repo.sh`) and point `T2_PROJECT_DIR` at
+that repository. Tests must never `git switch`, create branches, or restore
+HEAD in the developer checkout, including when CI checks out a detached HEAD.
+Each such fixture must assert that the host checkout's HEAD, branch, and
+working-tree status are unchanged on exit. The source checkout remains the
+Makefile/script root; the temporary repository is only the lease identity
+under test.
+
 Use these canonical entry points:
 
 ```text
-make minikube-t2-preflight
-make minikube-t2
+MINIKUBE_PROFILE=<verified-profile> CONTROL_API_REAL_PG_CONTEXT=<verified-context> make minikube-t2-preflight
+MINIKUBE_PROFILE=<verified-profile> CONTROL_API_REAL_PG_CONTEXT=<verified-context> make minikube-t2
+MINIKUBE_PROFILE=<verified-profile> CONTROL_API_REAL_PG_CONTEXT=<verified-context> make minikube-t2-runtime
 ```
 
-A fresh or uninitialized profile must complete the supported bootstrap before
-`pre-gate-sync` is invoked. The preflight refuses to call that sync on an
-incomplete profile. Real PostgreSQL suites are opt-in in the ordinary test
+`make minikube-t2-preflight` is a cluster-read-only planner; it may write its
+ignored local lock/evidence metadata. It is not T0, T1, or T2.
+With the default `T2_PLAN_MODE=false` it fails loud on an unbootstrapped
+profile and does not call `pre-gate-sync`. `make minikube-t2` is the full
+orchestrator: T0, the selected bootstrap/reconcile, T1, then T2. A T2 verdict
+is produced only by the final exact-head preflight inside that orchestrator
+(`T2_PLAN_MODE=false` with plan state `already-synced`; `T2_PLAN_MODE=true` is
+only the internal planner so `full-bootstrap` is reachable).
+`make minikube-pre-gate-sync` alone never constitutes T2 evidence.
+Follow the rule `.cursor/rules/minikube-t0-t1-t2.mdc` and the skill
+`.cursor/skills/minikube-t0-t1-t2/SKILL.md` for the certification workflow.
+A T1 `next:` line or `REAL_PG_REQUIRED_BUT_UNAVAILABLE` is not a license to
+operate Docker: do not `docker run` probes, `docker desktop restart`, or
+experiment with published ports. Re-enter `make minikube-t2` or
+`make minikube-t2-real-postgres` on the owned profile.
+
+After T0 and T1 are already green on the same HEAD and owned profile, close
+T2 with `make minikube-t2-runtime` (`T2_RUN_T0=false T2_RUN_T1=false`). That
+path is valid only when the pre-gate marker already matches HEAD
+(`already-synced`). Do not set those flags to skip an uncertified lane.
+
+The active profile mutation lock is `$T2_LOCK_ROOT/<profile>.lock`; stale-lock
+reclaim coordination uses the sibling directory
+`$T2_LOCK_ROOT/<profile>.reclaim`. A killed reclaimer may leave that sibling
+claim behind. Before manual recovery, verify that the recorded owner PID, any
+reclaimer process, and every other profile-mutating session are gone. Operate
+only on those two exact paths: use `rmdir -- "$T2_LOCK_ROOT/<profile>.reclaim"`
+for an empty claim and
+`rm -rf -- "$T2_LOCK_ROOT/<profile>.lock"` for the stale lock. If only one
+path exists, remove only that path; never remove either path while its owner or
+reclaimer is live, and never remove the lock root.
+
+A fresh or uninitialized profile must complete the supported bootstrap. The
+standalone preflight refuses to call `pre-gate-sync` on an incomplete profile;
+`make minikube-t2` runs the supported setup when its planner selects
+`full-bootstrap`. The single run is self-healing: when a bootstrapped profile
+has an unready required deployment, the orchestrator planner selects
+`full-reconcile` (naming the deployment) instead of failing
+`PROFILE_UNHEALTHY` before a transition exists; the T1 lane restores
+branch-profile GFS credentials on exit and `pre-gate-sync` provisions GFS
+serving with `GFS_RESTORE_ACTIVE_NOLOGIN=true` and
+`GFS_RECOVER_ABANDONED_STATE=true` in the `minikube-t2` transition, so other
+security gates do not mutate GFS and no manual repair script belongs between
+plan and verdict. Harness GFS reconciles settle
+Ready-reader leftovers first (`settle-gfs-reader-rollout.sh`) and wait on
+reader readiness through the `gfs-rollout-shim` PATH prefix instead of a
+generation-based `rollout status`, because HCC's gfsReconciler strips the
+`restartedAt` annotation and makes that wait time out. The standalone preflight and
+the final exact-head T2 check stay fail-loud on an unready deployment.
+When REUSE_DB recovery is needed, the fence covers all four database writers:
+HCC, workflow-recipes, trace-maintenance-worker, and control-api. The durable
+recovery identity is the owned profile/context/worktree/branch; the interrupted
+HEAD is retained as audit data while the exact-head marker controls freshness.
+The trace-maintenance-worker fence must scale its Deployment to zero and prove
+both `.spec.replicas == 0` and no remaining writer pods before persisting the
+`trace-fenced` phase; restoring its saved replica count happens only after the
+recovery window.
+Real PostgreSQL suites are opt-in in the ordinary test
 matrix, but a T1 run that requires them must fail when the database/DSN is
 unavailable or when zero tests execute; a green run must never be produced by
-silently skipping the suites.
+silently skipping the suites. The JSON reporter must be complete and green,
+must identify the exact selected physical files, and the Vitest process must
+also exit zero; a green reporter cannot hide a teardown, worker, OOM, signal,
+or partial-selection failure. Run the local Node/package/Docker preflight
+before expensive T0 work. T1 is serial by safety contract
+(`VITEST_MAX_WORKERS=1`, no file parallelism); do not widen it for speed.
+Suites that drop or rewrite cluster-global roles must use the harness throwaway
+Postgres 16, never the shared `control-postgres`.
+
+NP08 observes the existing Host access-token lineage and may reread a newer,
+same-binding persisted access token. It must never consume a refresh token,
+call refresh/reissue, or weaken single-use rotation. After T0/T1 have emitted
+an exact-head lane attestation, failures in NP08, a user-facing health check, or
+Playwright retry through `minikube-t2-runtime`; T1 failures may use the
+standalone Real PostgreSQL target while iterating, followed by one full
+certification run once green.
 
 T0 (static/unit/contract checks), T1 (real PostgreSQL), T2 (validated runtime),
-CI, and Control UI/Desktop Playwright are separate evidence lanes. One lane
-does not stand in for another. Private operational state, generated ports,
-profile metadata, logs, and evidence belong under the ignored
+CI, Control UI/Desktop Playwright, and product E2E scripts such as
+`scripts/e2e/e2e-hcc-rollout-readiness.sh` are separate evidence lanes. One
+lane does not stand in for another. User-facing health is mandatory and bounded
+for a `targeted-sync` transition via `T2_HEALTHCHECK_COMMAND`; it remains
+opt-in for bootstrap, full reconcile, and already-synced runs. Playwright is
+opt-in via `T2_PLAYWRIGHT_COMMAND` (`T2_REQUIRE_PLAYWRIGHT=true` refuses
+`NOT_RUN`). Private operational state,
+generated ports, profile metadata, logs, and evidence belong under the ignored
 `.local-notes/infra/runs/` path and must never be committed.
 
 ## Desktop Electron installation invariant

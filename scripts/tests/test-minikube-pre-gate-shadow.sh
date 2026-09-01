@@ -57,6 +57,15 @@ make_stubs() {
 #!/usr/bin/env bash
 printf 'docker %s\n' "$*" >>"${TEST_LOG_FILE:?}"
 case "${1:-}" in
+  context)
+    if [[ "${2:-}" == inspect ]]; then
+      if [[ "$*" == *SkipTLSVerify* ]]; then
+        printf 'unix:///tmp/evenfire-docker.sock\tfalse\t{}\n'
+      else
+        printf 'unix:///tmp/evenfire-docker.sock\n'
+      fi
+    fi
+    ;;
   inspect)
     # The only inspect the pre-gate makes is the OCI revision-label read that
     # gives it the commit a release image was built from.
@@ -77,7 +86,17 @@ STUB
 #!/usr/bin/env bash
 printf 'minikube %s\n' "$*" >>"${TEST_LOG_FILE:?}"
 case "$*" in
-  *docker-env*) echo 'export DOCKER_HOST="tcp://127.0.0.1:2376"'; exit 0 ;;
+  *docker-env*)
+    if [ "${TEST_MINIKUBE_HANG_DOCKER_ENV:-0}" = "1" ]; then
+      trap '' TERM
+      while :; do sleep 1; done
+    fi
+    if [ "${TEST_EMPTY_DOCKER_ENV:-0}" = "1" ]; then
+      exit 0
+    fi
+    echo 'export DOCKER_HOST="tcp://127.0.0.1:2376"'
+    exit 0
+    ;;
 esac
 exit 0
 STUB
@@ -115,6 +134,11 @@ prepare_repo() {
   cp -R "$REPO_ROOT/deploy" "$d/repo/deploy"
   cp -R "$REPO_ROOT/scripts" "$d/repo/scripts"
   rm -rf "$d/repo/deploy/minikube"
+  cat > "$d/repo/scripts/minikube/require-t2-mutation-lock.sh" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+  chmod +x "$d/repo/scripts/minikube/require-t2-mutation-lock.sh"
   # patches/k8s-api-ip.yaml is GENERATED and gitignored (the overlay commits
   # only the .template), so whether the developer's tree has one is incidental.
   # Materialise it deterministically: by the time anything renders, `make
@@ -520,6 +544,32 @@ assert_a_re_acquisition_invalidates_the_marker_baseline_in_ghcr_mode() {
   rm -rf "$d"
 }
 
+# A local rebuild can also replace image IDs without changing gitHead. The
+# incremental planner must not treat that newer acquisition as proof that the
+# old deployment is still the image set being tested.
+assert_a_re_acquisition_invalidates_the_marker_baseline_in_local_mode() {
+  local d out rc head
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  head="$(repo_head "$d")"
+  mkdir -p "$d/marker"
+  printf '%s' "$head" > "$d/marker/gitHead"
+  printf '%s' "2026-08-06T00:00:00Z" > "$d/marker/imagesGeneratedAt"
+  write_manifest "$d" '{"generated":"2026-08-06T09:99:99Z","imageSource":"local","imageTag":"","images":{}}'
+  out="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+    IMAGE_SOURCE=local IMAGE_TAG="" IMAGES_GENERATED_AT="2026-08-06T09:99:99Z" \
+      run_incremental "$d" 'echo "baseline=[$(incremental_marker_git_head)]"'
+  )"
+  rc=$?
+  if [ "$rc" -eq 0 ] && grep -Fq 'baseline=[]' <<< "$out"; then
+    pass "a newer local image acquisition invalidates its gitHead baseline"
+  else
+    fail "expected an empty local baseline after a re-acquisition; rc=$rc out=$out"
+  fi
+  rm -rf "$d"
+}
+
 # The complement, so the fix cannot be "never trust the marker": an untouched
 # image set keeps its baseline, which is what makes the incremental path fast.
 assert_an_untouched_image_set_keeps_the_marker_baseline() {
@@ -770,7 +820,10 @@ assert_a_re_acquisition_forces_a_full_resync() {
 # were never built there -- cluster-wide ImagePullBackOff.
 assert_make_deploy_all_renders_the_mode_aware_overlay() {
   local out
-  out="$(cd "$REPO_ROOT" && make -n minikube-deploy-all 2>&1)"
+  # The public target now wraps its private body with the branch-profile lease;
+  # inspect that body for the overlay resolver while the wrapper contract is
+  # covered by test-minikube-makefile.sh.
+  out="$(cd "$REPO_ROOT" && make -n minikube-deploy-all-body 2>&1)"
   if grep -q 'image-mode.sh --render-dir' <<< "$out" \
      && ! grep -q 'kustomize deploy/overlays/minikube |' <<< "$out"; then
     pass "make minikube-deploy-all resolves the overlay from the cluster's image mode"
@@ -918,6 +971,9 @@ assert_a_targeted_build_carries_the_recorded_coordinate_forward() {
   (
     cd "$d/repo" || exit 1
     PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" \
+      T2_PROJECT_DIR="$d/repo" T2_PROFILE=clerum-test T2_CONTEXT=clerum-test \
+      MINIKUBE_PROFILE=clerum-test CONTROL_API_REAL_PG_CONTEXT=clerum-test \
+      DOCKER_HOST=unix:///tmp/evenfire-docker.sock \
       bash "$d/repo/scripts/minikube/build-images.sh" --only=control-api
   ) >"$d/build.log" 2>&1
   rc=$?
@@ -950,6 +1006,41 @@ assert_the_touched_scripts_parse() {
   fi
 }
 
+assert_incremental_runtime_calls_are_bounded() {
+  local d out rc=0
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  out="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" \
+    TEST_MINIKUBE_HANG_DOCKER_ENV=1 \
+    INCREMENTAL_RUNTIME_TIMEOUT_SECONDS=1 \
+    MINIKUBE_DOCKER_KILL_GRACE_SECONDS=1 \
+      run_incremental "$d" 'incremental_use_minikube_docker'
+  )" || rc=$?
+  if [ "$rc" -ne 0 ] \
+     && grep -Fq '[HARNESS_DEADLINE] label=incremental-docker-env event=timeout' <<< "$out"; then
+    pass "incremental Docker daemon selection terminates at its explicit deadline"
+  else
+    fail "incremental docker-env was not bounded (rc=$rc out=$out)"
+  fi
+  rm -rf "$d"
+}
+
+assert_empty_incremental_docker_env_fails_closed() {
+  local d out rc=0
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  export TEST_EMPTY_DOCKER_ENV=1
+  out="$(run_incremental "$d" 'incremental_use_minikube_docker')" || rc=$?
+  unset TEST_EMPTY_DOCKER_ENV
+  if [ "$rc" -ne 0 ] && grep -Fq 'DOCKER_ENV_UNRESOLVED' <<<"$out"; then
+    pass "empty incremental minikube docker-env output fails closed"
+  else
+    fail "incremental docker-env returned success without a Docker host: rc=$rc out=$out"
+  fi
+  rm -rf "$d"
+}
+
 assert_every_defined_case_is_invoked() {
   local self defined invoked missing
   self="$REPO_ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh"
@@ -977,6 +1068,7 @@ assert_the_release_image_revision_label_supplies_the_missing_baseline
 assert_no_marker_and_no_revision_label_fails_closed
 assert_an_unreachable_docker_daemon_cannot_become_a_baseline
 assert_a_re_acquisition_invalidates_the_marker_baseline_in_ghcr_mode
+assert_a_re_acquisition_invalidates_the_marker_baseline_in_local_mode
 assert_an_untouched_image_set_keeps_the_marker_baseline
 assert_the_pre_gate_adopts_the_recorded_cluster_mode_over_the_environment
 assert_a_recorded_local_build_renders_the_local_overlay
@@ -994,6 +1086,8 @@ assert_the_pinned_render_dir_is_not_gated_on_the_generated_patch
 assert_an_unknown_image_source_is_rejected
 assert_a_targeted_build_carries_the_recorded_coordinate_forward
 assert_the_touched_scripts_parse
+assert_incremental_runtime_calls_are_bounded
+assert_empty_incremental_docker_env_fails_closed
 assert_every_defined_case_is_invoked
 
 exit $FAIL

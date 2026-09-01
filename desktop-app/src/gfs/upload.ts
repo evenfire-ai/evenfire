@@ -3,9 +3,10 @@ import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { type Readable, Transform } from 'node:stream'
 
-const GFS_UPLOAD_V2_PRODUCT_MAX_BYTES = 200 * 1024 * 1024
+const GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES = 200 * 1024 * 1024
+export const GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES = 1024 * 1024 * 1024
 const GFS_UPLOAD_V2_PREFERRED_PART_BYTES = 8 * 1024 * 1024
-const GFS_UPLOAD_V2_MAX_PART_BYTES = 16 * 1024 * 1024
+export const GFS_UPLOAD_V2_MAX_PART_BYTES = 16 * 1024 * 1024
 const GFS_UPLOAD_V2_DEFAULT_CONCURRENCY = 4
 const GFS_UPLOAD_V2_FALLBACK_CONCURRENCY = 2
 const GFS_UPLOAD_V2_PART_TIMEOUT_MS = 5 * 60 * 1000
@@ -25,6 +26,18 @@ export const GFS_UPLOAD_RETRY_MAX_ATTEMPTS = 3
 export const GFS_UPLOAD_SERVICE_RETRY_MAX_ATTEMPTS = 6
 export const GFS_UPLOAD_RETRY_AFTER_CAP_MS = 5_000
 const GFS_UPLOAD_RETRY_BASE_DELAY_MS = 250
+const MEBIBYTE_BYTES = 1024 * 1024
+const GIBIBYTE_BYTES = 1024 * MEBIBYTE_BYTES
+
+/**
+ * Presentation only: GFSC remains the authority for the Upload v2 product policy.
+ */
+export function formatGfsUploadLimit(byteLength: number): string {
+  if (byteLength === 1) return '1 byte'
+  if (byteLength % GIBIBYTE_BYTES === 0) return `${byteLength / GIBIBYTE_BYTES} GiB`
+  if (byteLength % MEBIBYTE_BYTES === 0) return `${byteLength / MEBIBYTE_BYTES} MiB`
+  return `${byteLength} bytes`
+}
 
 export interface DesktopUploadSession {
   uploadId: string
@@ -105,27 +118,76 @@ interface UploadCapabilities {
 
 function parseUploadCapabilities(value: unknown): UploadCapabilities {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('invalid GFS upload capabilities response: expected a plain JSON object')
+    throw new DesktopUploadCapabilityError(
+      'invalid GFS upload capabilities response: expected a plain JSON object'
+    )
   }
   const upload = (value as { upload?: unknown }).upload
   if (!upload || typeof upload !== 'object' || Array.isArray(upload)) {
-    throw new Error('invalid GFS upload capabilities response: missing upload object')
+    throw new DesktopUploadCapabilityError(
+      'invalid GFS upload capabilities response: missing upload object'
+    )
   }
   const resumableV2 = (upload as { resumableV2?: unknown }).resumableV2
   if (!resumableV2 || typeof resumableV2 !== 'object' || Array.isArray(resumableV2)) {
-    throw new Error('invalid GFS upload capabilities response: missing resumableV2 object')
+    throw new DesktopUploadCapabilityError(
+      'invalid GFS upload capabilities response: missing resumableV2 object'
+    )
   }
   if (typeof (resumableV2 as { enabled?: unknown }).enabled !== 'boolean') {
-    throw new Error('invalid GFS upload capabilities response: resumableV2.enabled must be boolean')
+    throw new DesktopUploadCapabilityError(
+      'invalid GFS upload capabilities response: resumableV2.enabled must be boolean'
+    )
   }
   return value as UploadCapabilities
 }
 
 export class DesktopUploadCapabilityError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
+  readonly allowLegacyFallback: boolean
+
+  constructor(message: string, options?: { cause?: unknown; allowLegacyFallback?: boolean }) {
     super(message, options)
     this.name = 'DesktopUploadCapabilityError'
+    this.allowLegacyFallback = options?.allowLegacyFallback === true
   }
+}
+
+const LEGACY_FALLBACK_CAPABILITY_STATUSES = new Set([408, 404, 501, 502, 503, 504])
+
+export function allowsLegacyCapabilityFallback(error: unknown): boolean {
+  const status =
+    error && typeof error === 'object' && typeof (error as { status?: unknown }).status === 'number'
+      ? Number((error as { status: number }).status)
+      : undefined
+  if (status !== undefined) return LEGACY_FALLBACK_CAPABILITY_STATUSES.has(status)
+  if (!(error instanceof Error) || error.name === 'AbortError' || error instanceof SyntaxError)
+    return false
+  if (error.name === 'TimeoutError' || error instanceof TypeError) return true
+  const code = String(
+    (error as Error & { code?: unknown; cause?: { code?: unknown } }).cause?.code ||
+      (error as Error & { code?: unknown }).code ||
+      ''
+  )
+  return (
+    ['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT'].includes(
+      code
+    ) || /socket hang up|fetch failed|network error/i.test(error.message)
+  )
+}
+
+export function normalizeUploadProductMaxBytes(value: unknown): number {
+  if (value === undefined) return GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    throw new DesktopUploadCapabilityError(
+      'GFS resumable capabilities advertised an invalid file ceiling'
+    )
+  }
+  if ((value as number) > GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES) {
+    throw new DesktopUploadCapabilityError(
+      "GFS writer advertises a product limit beyond this Desktop's fixed 1 GiB Upload v2 protocol ceiling; update Desktop or use a compatible writer."
+    )
+  }
+  return value as number
 }
 
 export const GFS_UPLOAD_DEFAULT_INSTABILITY_FAILURE_THRESHOLD = 3
@@ -1312,48 +1374,53 @@ export class DesktopGfsUploadJob {
     const identity = await sourceIdentity(this.input.filePath)
     const file = await stat(this.input.filePath)
     this.input.sourceIdentity = identity
-    if (!Number.isSafeInteger(file.size) || file.size > GFS_UPLOAD_V2_PRODUCT_MAX_BYTES)
-      throw new Error(`GFS files are limited to ${GFS_UPLOAD_V2_PRODUCT_MAX_BYTES} bytes`)
+    if (
+      !Number.isSafeInteger(file.size) ||
+      file.size < 0 ||
+      file.size > GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES
+    ) {
+      throw new Error('GFS files cannot exceed the 1 GiB Upload v2 protocol maximum')
+    }
     this.totalBytes = file.size
-    let capabilities: UploadCapabilities
+    let capabilityData: unknown
     try {
       this.assertAuthEpoch()
       // GFSC capabilities are a plain JSON document. Only upload lifecycle
       // receipts use the { ok, data, error } envelope; accepting an envelope
       // here would hide drift between Desktop and the writer's public contract.
-      capabilities = parseUploadCapabilities(
-        await requestWithLifecycleRetries(
-          this.input,
-          () =>
-            this.input.transport.requestJson<UploadCapabilities>(
-              'GET',
-              joinUrl(this.input.baseUrl, uploadPath(drive, '/api/v1/me/gfs/capabilities')),
-              {
-                token: this.input.token,
-                timeoutMs: UPLOAD_TIMEOUT_MS,
-                signal: this.abortController.signal,
-              }
-            ),
-          { signal: this.abortController.signal }
-        )
+      capabilityData = await requestWithLifecycleRetries(
+        this.input,
+        () =>
+          this.input.transport.requestJson<UploadCapabilities>(
+            'GET',
+            joinUrl(this.input.baseUrl, uploadPath(drive, '/api/v1/me/gfs/capabilities')),
+            {
+              token: this.input.token,
+              timeoutMs: UPLOAD_TIMEOUT_MS,
+              signal: this.abortController.signal,
+            }
+          ),
+        { signal: this.abortController.signal }
       )
     } catch (error) {
+      const allowLegacyFallback = allowsLegacyCapabilityFallback(error)
       throw new DesktopUploadCapabilityError('GFS resumable upload capabilities are unavailable', {
         cause: error,
+        allowLegacyFallback,
       })
     }
+    const capabilities = parseUploadCapabilities(capabilityData)
     const resumable = capabilities.upload?.resumableV2
     if (!resumable?.enabled)
       throw new DesktopUploadCapabilityError(
-        'Resumable GFS uploads are not enabled on this writer.'
+        'Resumable GFS uploads are not enabled on this writer.',
+        { allowLegacyFallback: true }
       )
-    if (resumable.maxFileBytes !== undefined) {
-      if (!Number.isSafeInteger(resumable.maxFileBytes) || resumable.maxFileBytes < 0)
-        throw new DesktopUploadCapabilityError(
-          'GFS resumable capabilities advertised an invalid file ceiling'
-        )
-      if (file.size > resumable.maxFileBytes)
-        throw new Error(`GFS files are limited to ${resumable.maxFileBytes} bytes by the writer`)
+    const productMaxFileBytes = normalizeUploadProductMaxBytes(resumable.maxFileBytes)
+    if (resumable.maxFileBytes === undefined) {
+      console.warn(
+        `GFS Upload v2 writer omitted maxFileBytes; using the ${formatGfsUploadLimit(GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES)} compatibility limit`
+      )
     }
     this.input.advertisedConcurrency = resumable.maxConcurrentPartsPerSession
     this.input.instabilityFailureThreshold = normalizeInstabilityFailureThreshold(
@@ -1374,6 +1441,16 @@ export class DesktopGfsUploadJob {
           ? new Set<number>()
           : await validateResumedParts(this.input.filePath, session, parts)
       return { session, committed, resumable }
+    }
+    if (file.size > productMaxFileBytes) {
+      if (resumable.maxFileBytes === undefined) {
+        throw new Error(
+          `GFS files are limited to the ${formatGfsUploadLimit(GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES)} compatibility limit because the writer omitted maxFileBytes`
+        )
+      }
+      throw new Error(
+        `GFS writer permits files up to ${formatGfsUploadLimit(productMaxFileBytes)} for this upload`
+      )
     }
     const target = this.input.operation === 'create' ? this.input.parentRid : this.input.resourceRid
     if (!target) throw new Error(`${this.input.operation} upload target is required`)

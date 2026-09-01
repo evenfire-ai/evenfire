@@ -1,9 +1,9 @@
 import {
   GFS_FILE_UPLOAD_DEFAULT_CONCURRENCY,
+  GFS_FILE_UPLOAD_DEFAULT_PRODUCT_MAX_BYTES,
   GFS_FILE_UPLOAD_FALLBACK_CONCURRENCY,
-  GFS_FILE_UPLOAD_MAX_BYTES,
-  GFS_FILE_UPLOAD_MAX_MEGABYTES,
   GFS_FILE_UPLOAD_MAX_PART_BYTES,
+  GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES,
 } from '@constants/gfsFileUpload'
 import { apiSend } from './api'
 
@@ -28,6 +28,18 @@ const GFS_UPLOAD_RETRY_BASE_DELAY_MS = 250
 const GFS_UPLOAD_V2_PART_TIMEOUT_MS = 300_000
 const GFS_UPLOAD_V2_RECONCILE_TIMEOUT_MS = 60_000
 const GFS_UPLOAD_V2_RECONCILE_ATTEMPTS = 3
+const MEBIBYTE_BYTES = 1024 * 1024
+const GIBIBYTE_BYTES = 1024 * MEBIBYTE_BYTES
+
+/**
+ * Presentation only: GFSC remains the authority for the Upload v2 product policy.
+ */
+export function formatGfsUploadLimit(byteLength: number): string {
+  if (byteLength === 1) return '1 byte'
+  if (byteLength % GIBIBYTE_BYTES === 0) return `${byteLength / GIBIBYTE_BYTES} GiB`
+  if (byteLength % MEBIBYTE_BYTES === 0) return `${byteLength / MEBIBYTE_BYTES} MiB`
+  return `${byteLength} bytes`
+}
 
 export function isRetryableUploadStatus(status: number): boolean {
   return GFS_UPLOAD_RETRYABLE_STATUS.has(status)
@@ -144,10 +156,77 @@ interface UploadCapabilities {
 }
 
 export class GfsUploadCapabilityError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
+  readonly allowLegacyFallback: boolean
+
+  constructor(message: string, options?: { cause?: unknown; allowLegacyFallback?: boolean }) {
     super(message, options)
     this.name = 'GfsUploadCapabilityError'
+    this.allowLegacyFallback = options?.allowLegacyFallback === true
   }
+}
+
+const LEGACY_FALLBACK_CAPABILITY_STATUSES = new Set([408, 404, 501, 502, 503, 504])
+
+export function allowsLegacyCapabilityFallback(error: unknown): boolean {
+  const status = statusOf(error)
+  if (status !== undefined) return LEGACY_FALLBACK_CAPABILITY_STATUSES.has(status)
+  if (!(error instanceof Error) || error.name === 'AbortError' || error instanceof SyntaxError)
+    return false
+  if (error.name === 'TimeoutError' || error instanceof TypeError) return true
+  const code = String(
+    (error as Error & { code?: unknown; cause?: { code?: unknown } }).cause?.code ||
+      (error as Error & { code?: unknown }).code ||
+      ''
+  )
+  return (
+    ['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT'].includes(
+      code
+    ) || /socket hang up|fetch failed|network error/i.test(error.message)
+  )
+}
+
+function plainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function parseUploadCapabilities(value: unknown): NonNullable<UploadCapabilities['upload']> {
+  if (!plainObject(value)) {
+    throw new GfsUploadCapabilityError(
+      'Invalid GFS upload capabilities response: expected a plain JSON object.'
+    )
+  }
+  const upload = value.upload
+  if (!plainObject(upload)) {
+    throw new GfsUploadCapabilityError(
+      'Invalid GFS upload capabilities response: missing upload object.'
+    )
+  }
+  const resumableV2 = upload.resumableV2
+  if (!plainObject(resumableV2)) {
+    throw new GfsUploadCapabilityError(
+      'Invalid GFS upload capabilities response: missing resumableV2 object.'
+    )
+  }
+  if (typeof resumableV2.enabled !== 'boolean') {
+    throw new GfsUploadCapabilityError(
+      'Invalid GFS upload capabilities response: resumableV2.enabled must be Boolean.'
+    )
+  }
+  return upload as NonNullable<UploadCapabilities['upload']>
+}
+
+export function normalizeUploadProductMaxBytes(value: unknown): number {
+  if (value === undefined) return GFS_FILE_UPLOAD_DEFAULT_PRODUCT_MAX_BYTES
+  if (
+    !Number.isSafeInteger(value) ||
+    (value as number) < 1 ||
+    (value as number) > GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES
+  ) {
+    throw new GfsUploadCapabilityError(
+      'Resumable GFS upload capabilities advertised an invalid file ceiling.'
+    )
+  }
+  return value as number
 }
 
 export function normalizeInstabilityFailureThreshold(value: unknown): number {
@@ -185,15 +264,16 @@ function endpoint(path: string): string {
   return `${API_BASE}${path}`
 }
 
-function signalWithTimeout(
+export function signalWithTimeout(
   signal: AbortSignal | undefined,
   timeoutMs: number
 ): { signal: AbortSignal; cancel: () => void } {
   const controller = new AbortController()
-  const timer = window.setTimeout(
-    () => controller.abort(new Error('GFS upload request timed out')),
-    timeoutMs
-  )
+  const timer = window.setTimeout(() => {
+    const timeout = new Error('GFS upload request timed out')
+    timeout.name = 'TimeoutError'
+    controller.abort(timeout)
+  }, timeoutMs)
   const abort = () => controller.abort(signal?.reason)
   signal?.addEventListener('abort', abort, { once: true })
   return {
@@ -1090,11 +1170,11 @@ export class GfsUploadJob {
   }
 
   private async loadCapabilities(): Promise<UploadCapabilities['upload']> {
-    let capabilities: { data: UploadCapabilities }
+    let capabilityData: unknown
     try {
-      capabilities = await requestWithLifecycleRetries(
+      const capabilities = await requestWithLifecycleRetries(
         () =>
-          requestJson<UploadCapabilities>(
+          requestJson<unknown>(
             'GET',
             '/api/v1/gfs/proxy/v1/capabilities',
             undefined,
@@ -1102,14 +1182,19 @@ export class GfsUploadJob {
           ),
         { signal: this.abortController.signal }
       )
+      capabilityData = capabilities.data
     } catch (error) {
+      const allowLegacyFallback = allowsLegacyCapabilityFallback(error)
       throw new GfsUploadCapabilityError('Resumable GFS upload capabilities are unavailable.', {
         cause: error,
+        allowLegacyFallback,
       })
     }
-    const upload = capabilities.data.upload
-    if (!upload?.resumableV2?.enabled)
-      throw new GfsUploadCapabilityError('Resumable GFS uploads are not enabled on this writer.')
+    const upload = parseUploadCapabilities(capabilityData)
+    if (!upload.resumableV2?.enabled)
+      throw new GfsUploadCapabilityError('Resumable GFS uploads are not enabled on this writer.', {
+        allowLegacyFallback: true,
+      })
     return upload
   }
 
@@ -1120,13 +1205,11 @@ export class GfsUploadJob {
   }> {
     const upload = await this.loadCapabilities()
     const resumable = upload.resumableV2!
-    if (resumable.maxFileBytes !== undefined) {
-      if (!Number.isSafeInteger(resumable.maxFileBytes) || resumable.maxFileBytes < 0)
-        throw new GfsUploadCapabilityError(
-          'Resumable GFS upload capabilities advertised an invalid file ceiling.'
-        )
-      if (this.input.file.size > resumable.maxFileBytes)
-        throw new Error(`GFS writer limit is ${resumable.maxFileBytes} bytes for this upload.`)
+    const productMaxFileBytes = normalizeUploadProductMaxBytes(resumable.maxFileBytes)
+    if (resumable.maxFileBytes === undefined) {
+      console.warn(
+        `GFS Upload v2 writer omitted maxFileBytes; using the ${formatGfsUploadLimit(GFS_FILE_UPLOAD_DEFAULT_PRODUCT_MAX_BYTES)} compatibility limit.`
+      )
     }
     const resumeId = this.session?.uploadId ?? this.input.resumeUploadId
     if (resumeId) {
@@ -1141,6 +1224,16 @@ export class GfsUploadJob {
         return { session, committed: new Set(), resumable }
       const committed = await this.validateCommittedParts(session, parts)
       return { session, committed, resumable }
+    }
+    if (this.input.file.size > productMaxFileBytes) {
+      if (resumable.maxFileBytes === undefined) {
+        throw new Error(
+          `GFS uploads use the ${formatGfsUploadLimit(GFS_FILE_UPLOAD_DEFAULT_PRODUCT_MAX_BYTES)} compatibility limit because the writer omitted maxFileBytes.`
+        )
+      }
+      throw new Error(
+        `GFS writer permits files up to ${formatGfsUploadLimit(productMaxFileBytes)} for this upload.`
+      )
     }
     const createBody = {
       operation: this.input.target.operation,
@@ -1393,8 +1486,12 @@ export function createGfsUploadJob(input: GfsUploadJobInput): GfsUploadJob {
 }
 
 export function assertGfsFileUploadSize(byteLength: number): void {
-  if (byteLength > GFS_FILE_UPLOAD_MAX_BYTES) {
-    throw new Error(`GFS uploads are limited to ${GFS_FILE_UPLOAD_MAX_MEGABYTES} MB per file.`)
+  if (
+    !Number.isSafeInteger(byteLength) ||
+    byteLength < 0 ||
+    byteLength > GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES
+  ) {
+    throw new Error('GFS uploads cannot exceed the 1 GiB Upload v2 protocol maximum.')
   }
 }
 
@@ -1417,7 +1514,7 @@ export async function uploadGfsFileLegacy(input: {
 }): Promise<unknown> {
   if (input.file.size > GFS_LEGACY_UPLOAD_MAX_BYTES) {
     throw new Error(
-      `This writer does not advertise resumable uploads; legacy GFS is limited to ${GFS_LEGACY_UPLOAD_MAX_BYTES} bytes.`
+      `This writer does not advertise resumable uploads; legacy GFS is limited to ${formatGfsUploadLimit(GFS_LEGACY_UPLOAD_MAX_BYTES)}.`
     )
   }
   const contentBase64 = digestBase64(await input.file.arrayBuffer())

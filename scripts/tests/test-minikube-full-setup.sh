@@ -2,22 +2,84 @@
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=scripts/tests/lib/minikube-fixture-repo.sh
+source "${REPO_ROOT}/scripts/tests/lib/minikube-fixture-repo.sh"
 
 FAIL=0
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
 
+write_test_profile_metadata() {
+  local root="$1" profile="clerum-full-setup-fixture"
+  local repo="$root/repo" profile_dir="$root/profiles/$profile"
+  local branch short_sha
+  MINIKUBE_TEST_PROFILE="$profile"
+  MINIKUBE_TEST_CONTEXT="$profile"
+  minikube_test_fixture_repo_init "$REPO_ROOT" "$root"
+  repo="$MINIKUBE_TEST_PROJECT_DIR"
+  branch="$MINIKUBE_TEST_BRANCH"
+  short_sha="$(git -C "$repo" rev-parse --short=8 HEAD)"
+  mkdir -p "$profile_dir"
+  printf 'PROFILE=%s\nBRANCH=%s\nSHA_SHORT=%s\nDIRTY=false\nREPO_DIR=%s\n' \
+    "$profile" "$branch" "$short_sha" "$repo" >"$profile_dir/profile.env"
+  test_loopback_url() { printf 'http://%s:%s' 127.0.0.1 "$1"; }
+  cat >"$profile_dir/ports.env" <<EOF_PORTS
+PORT_BASE=28117
+CONTROL_UI_PORT=28117
+PROFILE_UI_PORT=28118
+MCP_HOST_PORT=28197
+REGISTRY_API_PORT=28202
+CONTROL_API_PORT=28207
+EXTERNAL_REST_API_PORT=28208
+MEMBER_REGISTRATION_SERVICE_PORT=28209
+RPC_PROXY_PORT=28211
+WORKFLOW_APPROVAL_READER_PORT=28215
+CONTROL_UI_URL=$(test_loopback_url 28117)
+PROFILE_UI_URL=$(test_loopback_url 28118)
+PROFILE_UI_BASE_URL=$(test_loopback_url 28118)
+CONTROL_API_URL=$(test_loopback_url 28207)
+EXTERNAL_REST_API_URL=$(test_loopback_url 28208)
+MEMBER_REGISTRATION_SERVICE_URL=$(test_loopback_url 28209)
+RPC_PROXY_URL=$(test_loopback_url 28211)
+REGISTRY_API_URL=$(test_loopback_url 28202)
+WORKFLOW_APPROVAL_READER_URL=$(test_loopback_url 28215)
+MCP_HOST_URL=$(test_loopback_url 28197)
+EOF_PORTS
+  TEST_PROFILE="$profile"
+  TEST_PROFILE_ROOT="$root/profiles"
+  TEST_PROFILE_ENV="$profile_dir/profile.env"
+  TEST_PORTS_ENV="$profile_dir/ports.env"
+  TEST_LOCK_ROOT="$root/locks"
+  TEST_PROJECT_DIR="$repo"
+}
+
+verify_fixture_host_unchanged() {
+  if ! minikube_test_assert_host_unchanged; then
+    fail "minikube fixture mutated the host checkout"
+    return 1
+  fi
+}
+
 assert_broken_profile_is_recreated() {
-  local tmp log_file
+  local tmp log_file setup_log_file
   tmp="$(mktemp -d)"
   log_file="$tmp/ops.log"
+  setup_log_file="$tmp/full-setup.log"
+  write_test_profile_metadata "$tmp"
 
   cat > "$tmp/docker" <<'STUB'
 #!/usr/bin/env bash
-if [[ "${1:-}" == "info" ]]; then
-  exit 0
-fi
+case "${1:-} ${2:-}" in
+  "context inspect")
+    if [[ "$*" == *'TLSMaterial'* ]]; then
+      printf 'unix:///private/tmp/evenfire-test-docker.sock\tfalse\t{}\n'
+    else
+      printf 'unix:///private/tmp/evenfire-test-docker.sock\n'
+    fi
+    ;;
+  "info ") ;;
+esac
 exit 0
 STUB
 
@@ -106,12 +168,16 @@ STUB
   if PATH="$tmp:$PATH" \
      TEST_LOG_FILE="$log_file" \
      TEST_STATE_DIR="$tmp/state" \
+     MINIKUBE_PROFILE="$TEST_PROFILE" \
+     T2_PROJECT_DIR="$TEST_PROJECT_DIR" \
+     T2_PROFILE_ROOT="$TEST_PROFILE_ROOT" T2_PROFILE_ENV="$TEST_PROFILE_ENV" \
+     T2_PORTS_ENV="$TEST_PORTS_ENV" T2_LOCK_ROOT="$TEST_LOCK_ROOT" \
      MINIKUBE_SETUP_EXIT_AFTER_CLUSTER=true \
      MINIKUBE_RECREATE_PROFILE=true \
-     CONFIRM_PROFILE=clerum-test \
+     CONFIRM_PROFILE="$TEST_PROFILE" \
      MINIKUBE_START_SCRIPT="$tmp/start.sh" \
-     bash scripts/minikube/full-setup.sh --skip-build >/dev/null 2>&1; then
-    if grep -q 'delete -p clerum-test' "$log_file" && grep -q 'start-helper' "$log_file"; then
+     bash scripts/minikube/full-setup.sh --skip-build >"$setup_log_file" 2>&1; then
+    if grep -q "delete -p $TEST_PROFILE" "$log_file" && grep -q 'start-helper' "$log_file"; then
       pass "full-setup recreates broken minikube profiles before start"
     else
       fail "full-setup did not delete and recreate broken profile"
@@ -119,21 +185,32 @@ STUB
     fi
   else
     fail "full-setup failed in broken-profile recovery test"
+    cat "$setup_log_file"
   fi
 
+  verify_fixture_host_unchanged
   rm -rf "$tmp"
 }
 
 assert_healthy_profile_skips_recreate() {
-  local tmp log_file
+  local tmp log_file setup_log_file
   tmp="$(mktemp -d)"
   log_file="$tmp/ops.log"
+  setup_log_file="$tmp/full-setup.log"
+  write_test_profile_metadata "$tmp"
 
   cat > "$tmp/docker" <<'STUB'
 #!/usr/bin/env bash
-if [[ "${1:-}" == "info" ]]; then
-  exit 0
-fi
+case "${1:-} ${2:-}" in
+  "context inspect")
+    if [[ "$*" == *'TLSMaterial'* ]]; then
+      printf 'unix:///private/tmp/evenfire-test-docker.sock\tfalse\t{}\n'
+    else
+      printf 'unix:///private/tmp/evenfire-test-docker.sock\n'
+    fi
+    ;;
+  "info ") ;;
+esac
 exit 0
 STUB
 
@@ -195,9 +272,13 @@ STUB
 
   if PATH="$tmp:$PATH" \
      TEST_LOG_FILE="$log_file" \
+     MINIKUBE_PROFILE="$TEST_PROFILE" \
+     T2_PROJECT_DIR="$TEST_PROJECT_DIR" \
+     T2_PROFILE_ROOT="$TEST_PROFILE_ROOT" T2_PROFILE_ENV="$TEST_PROFILE_ENV" \
+     T2_PORTS_ENV="$TEST_PORTS_ENV" T2_LOCK_ROOT="$TEST_LOCK_ROOT" \
      MINIKUBE_SETUP_EXIT_AFTER_CLUSTER=true \
      MINIKUBE_START_SCRIPT="$tmp/start.sh" \
-     bash scripts/minikube/full-setup.sh --skip-build >/dev/null 2>&1; then
+     bash scripts/minikube/full-setup.sh --skip-build >"$setup_log_file" 2>&1; then
     if ! grep -q 'delete -p clerum-test' "$log_file" && grep -q 'start-helper --validate-only' "$log_file"; then
       pass "full-setup leaves healthy minikube profiles alone"
     else
@@ -206,8 +287,10 @@ STUB
     fi
   else
     fail "full-setup failed in healthy-profile test"
+    cat "$setup_log_file"
   fi
 
+  verify_fixture_host_unchanged
   rm -rf "$tmp"
 }
 
@@ -282,7 +365,9 @@ assert_gfs_provisioning_follows_migrations_and_core_readiness() {
      grep -q 'scale deployment/gfsc-reader --replicas="\$RESET_READER_REPLICAS"' <<<"$reset_block" && \
      grep -q 'scale deployment/host-context-controller --replicas="\$RESET_HCC_REPLICAS"' <<<"$reset_block" && \
      ! grep -q 'delete pvc control-postgres-data' scripts/minikube/full-setup.sh && \
-     ! grep -q 'GFS_RESTORE_ACTIVE_NOLOGIN=true' scripts/minikube/full-setup.sh && \
+     [[ "$(grep -c 'GFS_RESTORE_ACTIVE_NOLOGIN=true GFS_RECOVER_ABANDONED_STATE=true' scripts/minikube/full-setup.sh)" -ge 2 ]] && \
+     [[ "$(grep -c 'scripts/minikube/settle-gfs-reader-rollout.sh' scripts/minikube/full-setup.sh)" -ge 2 ]] && \
+     [[ "$(grep -c 'gfs-rollout-shim' scripts/minikube/full-setup.sh)" -ge 2 ]] && \
      [[ "$core_block" != *"gfs-controller"* ]]; then
     pass "full-setup centralizes explicit UID-bound reset and never auto-deletes on WAL logs"
   else
@@ -353,6 +438,22 @@ assert_pipefail_head_guard_prevents_abort() {
     pass "pipefail SIGPIPE guard (|| true) prevents the abort the bare pipeline hits"
   else
     fail "SIGPIPE guard behaved unexpectedly (bare_rc=$bare_rc guarded_rc=$guarded_rc)"
+  fi
+}
+
+assert_setup_runtime_operations_are_bounded() {
+  local setup="scripts/minikube/full-setup.sh"
+  if grep -Fq 'run_setup_with_deadline minikube-setup-status' "$setup" && \
+     grep -Fq 'run_setup_with_deadline minikube-setup-delete' "$setup" && \
+     grep -Fq 'run_setup_with_deadline minikube-setup-start' "$setup" && \
+     grep -Fq 'run_setup_with_deadline minikube-setup-validate' "$setup" && \
+     grep -Fq 'bash "${SCRIPT_DIR}/docker-cli-env.sh" --check-info' "$setup" && \
+     grep -Fq 'if (( status >= 124 )); then' "$setup" && \
+     ! grep -Fq 'minikube -p "$PROFILE" status 2>/dev/null || true' "$setup" && \
+     ! grep -Eq '(^|[[:space:]])docker info([[:space:]]|$)' "$setup"; then
+    pass "full-setup bounds profile lifecycle and isolates its Docker probe"
+  else
+    fail "full-setup contains an unbounded profile lifecycle or ambient Docker probe"
   fi
 }
 
@@ -1213,6 +1314,188 @@ assert_the_unoverridden_path_generates_the_api_ip_patch_once() {
   rm -rf "$d"
 }
 
+assert_trace_writer_fence_closes_and_proves_zero_replicas() {
+  local fence_block
+  fence_block="$(sed -n '/^fence_partial_trace_worker()/,/^}/p' scripts/minikube/full-setup.sh)"
+  if grep -Fq -- '--replicas=0' <<<"$fence_block" && \
+     grep -Fq "jsonpath={.spec.replicas}" <<<"$fence_block" && \
+     grep -Fq 'trace-maintenance-worker did not converge to zero desired replicas' <<<"$fence_block" && \
+     grep -Fq 'trace-maintenance-worker pods remain after the zero-replica fence' <<<"$fence_block"; then
+    pass "trace-maintenance-worker recovery fence scales to zero and proves no writer pod remains"
+  else
+    fail "trace-maintenance-worker recovery can be marked fenced without proving a zero-replica state"
+  fi
+}
+
+assert_trace_writer_fence_is_behaviorally_fail_closed() {
+  local d fence_block run_script out rc problems=""
+  d="$(mktemp -d)"
+  fence_block="$(sed -n '/^fence_partial_trace_worker()/,/^}/p' scripts/minikube/full-setup.sh)"
+
+  mkdir -p "$d/bin"
+  cat > "$d/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+set -u
+state_dir="${TEST_TRACE_STATE_DIR:?}"
+case "$*" in
+  *"scale deployment/trace-maintenance-worker --replicas=0"*)
+    : >"$state_dir/scaled"
+    exit 0
+    ;;
+  *"get deployment/trace-maintenance-worker"*)
+    printf '%s' "${TEST_TRACE_DESIRED:-0}"
+    exit 0
+    ;;
+  *"get pods -l app=trace-maintenance-worker"*)
+    if [ -f "$state_dir/waited" ]; then
+      exit 0
+    fi
+    printf '%s' "${TEST_TRACE_PODS:-}"
+    exit 0
+    ;;
+  *"wait --for=delete pod"*)
+    : >"$state_dir/waited"
+    exit 0
+    ;;
+esac
+exit 0
+STUB
+  chmod +x "$d/bin/kubectl"
+
+  run_script="$d/run.sh"
+  {
+    printf 'set -u\n'
+    printf 'KC=%q\n' 'kubectl --context=test'
+    printf 'PARTIAL_TRACE_REPLICAS=2\n'
+    printf 'PARTIAL_TRACE_FENCED=false\n'
+    printf 'STATE_DIR=%q\n' "$d"
+    printf 'log() { :; }\n'
+    printf 'err() { printf "ERR:%%s\\n" "$*" >&2; }\n'
+    printf 'writer_recovery_state_phase() { printf "%%s\\n" "$1" >>"$STATE_DIR/phases"; }\n'
+    printf '%s\n' "$fence_block"
+    printf 'fence_partial_trace_worker\n'
+  } >"$run_script"
+
+  out="$(TEST_TRACE_STATE_DIR="$d" TEST_TRACE_DESIRED=0 TEST_TRACE_PODS='pod/trace-0' \
+    PATH="$d/bin:$PATH" bash "$run_script" 2>&1)"
+  rc=$?
+  [ "$rc" -eq 0 ] || problems+="zero-replica convergence exited $rc; "
+  [ -f "$d/scaled" ] || problems+="zero-replica convergence never scaled; "
+  grep -Fxq 'trace-fenced' "$d/phases" || problems+="successful fence never persisted trace-fenced; "
+
+  rm -f "$d/scaled" "$d/waited" "$d/phases"
+  out="$(TEST_TRACE_STATE_DIR="$d" TEST_TRACE_DESIRED=1 TEST_TRACE_PODS= \
+    PATH="$d/bin:$PATH" bash "$run_script" 2>&1)"
+  rc=$?
+  [ "$rc" -ne 0 ] || problems+="nonzero desired replicas were accepted; "
+  if [ -f "$d/phases" ] && grep -Fxq 'trace-fenced' "$d/phases"; then
+    problems+="trace-fenced was persisted after nonzero convergence; "
+  fi
+  grep -Fq 'did not converge to zero desired replicas' <<<"$out" \
+    || problems+="nonzero convergence did not report the stable failure; "
+
+  if [ -z "$problems" ]; then
+    pass "trace-maintenance-worker fence proves convergence and rejects nonzero desired replicas"
+  else
+    fail "$problems out=$out"
+  fi
+  rm -rf "$d"
+}
+
+assert_interrupted_recovery_resume_restores_all_writer_fences() {
+  local resume_block
+  resume_block="$(sed -n '/^    api-restored|overlay-applying|overlay-applied)/,/^      ;;$/p' scripts/minikube/full-setup.sh)"
+  if grep -Fq 'PARTIAL_HCC_FENCED=true' <<<"$resume_block" && \
+     grep -Fq 'PARTIAL_WORKFLOW_FENCED=true' <<<"$resume_block" && \
+     grep -Fq 'PARTIAL_TRACE_FENCED=true' <<<"$resume_block" && \
+     grep -Fq 'PARTIAL_CONTROL_API_FENCED=true' <<<"$resume_block"; then
+    pass "post-migration recovery resumes with all four writer fences active"
+  else
+    fail "post-migration recovery can omit a writer fence before restoring the journaled replicas"
+  fi
+}
+
+assert_interrupted_recovery_fence_is_behaviorally_fail_closed() {
+  local d helper run_script out rc problems=""
+  d="$(mktemp -d)"
+  helper="$(sed -n '/^guard_interrupted_writer_deployment()/,/^}/p' scripts/minikube/full-setup.sh)"
+
+  mkdir -p "$d/bin"
+  cat > "$d/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"scale deployment/"*)
+    [ "${TEST_FENCE_MODE:-}" = scale-fail ] && exit 1
+    exit 0
+    ;;
+  *"get deployment/"*)
+    printf '%s' "${TEST_FENCE_DESIRED:-0}"
+    exit 0
+    ;;
+  *"get pods -l"*)
+    printf '%s' "${TEST_FENCE_PODS:-}"
+    exit 0
+    ;;
+  *"wait --for=delete pod"*)
+    [ "${TEST_FENCE_MODE:-}" = wait-fail ] && exit 1
+    exit 0
+    ;;
+esac
+exit 0
+STUB
+  chmod +x "$d/bin/kubectl"
+
+  run_script="$d/run.sh"
+  {
+    printf 'set -u\n'
+    printf 'KC=%q\n' 'kubectl --context=test'
+    printf 'log() { :; }\n'
+    printf 'err() { printf "ERR:%%s\\n" "$*" >&2; }\n'
+    printf '%s\n' "$helper"
+    printf "guard_interrupted_writer_deployment host-context-controller 'app=host-context-controller'\n"
+  } >"$run_script"
+
+  out="$(TEST_FENCE_DESIRED=0 TEST_FENCE_PODS= PATH="$d/bin:$PATH" bash "$run_script" 2>&1)"
+  rc=$?
+  [ "$rc" -eq 0 ] || problems+="healthy zero-replica fence failed; "
+
+  out="$(TEST_FENCE_DESIRED=1 TEST_FENCE_PODS= PATH="$d/bin:$PATH" bash "$run_script" 2>&1)"
+  rc=$?
+  [ "$rc" -ne 0 ] || problems+="nonzero desired replicas were accepted; "
+  grep -Fq 'did not converge to zero desired replicas' <<<"$out" \
+    || problems+="nonzero desired replicas did not fail closed; "
+
+  out="$(TEST_FENCE_MODE=scale-fail TEST_FENCE_DESIRED=0 TEST_FENCE_PODS= \
+    PATH="$d/bin:$PATH" bash "$run_script" 2>&1)"
+  rc=$?
+  [ "$rc" -ne 0 ] || problems+="scale failure was swallowed; "
+
+  out="$(TEST_FENCE_MODE=wait-fail TEST_FENCE_DESIRED=0 TEST_FENCE_PODS='pod/hcc-0' \
+    PATH="$d/bin:$PATH" bash "$run_script" 2>&1)"
+  rc=$?
+  [ "$rc" -ne 0 ] || problems+="wait failure was swallowed; "
+
+  if [ -z "$problems" ]; then
+    pass "interrupted recovery fencing fails closed on scale, convergence, and pod-wait failures"
+  else
+    fail "$problems"
+  fi
+  rm -rf "$d"
+}
+
+assert_recovery_migrations_are_head_bound() {
+  local current_head_checks
+  current_head_checks="$(grep -Fc '[ "$WRITER_RECOVERY_STATE_HEAD" = "$T2_HEAD" ]' scripts/minikube/full-setup.sh)"
+  if grep -Fq 'writer_recovery_state_cli read --include-head' scripts/minikube/full-setup.sh && \
+     grep -Fq 'PARTIAL_CONTROL_API_REPLICAS WRITER_RECOVERY_STATE_HEAD' scripts/minikube/full-setup.sh && \
+     [ "$current_head_checks" -ge 2 ]; then
+    pass "recovery resumes with writers fenced and reruns migrations after a HEAD change"
+  else
+    fail "recovery can reuse a historical migration boundary after HEAD changes"
+  fi
+}
+
 # The guard that keeps this file honest: a case defined but never added to the
 # call block below reports nothing at all, which reads as a green run.
 assert_every_defined_case_is_invoked() {
@@ -1240,6 +1523,7 @@ assert_reuse_db_normalizer_precedes_flag_loop
 assert_reset_db_flag_backcompat
 assert_skip_build_staleness_find_is_sigpipe_guarded
 assert_pipefail_head_guard_prevents_abort
+assert_setup_runtime_operations_are_bounded
 assert_ghcr_is_the_default_image_source
 assert_image_source_local_is_honoured
 assert_bootstrap_seed_deferral_is_opt_in
@@ -1260,6 +1544,11 @@ assert_the_banner_prints_the_image_source_tag_and_origin
 assert_the_tag_origin_distinguishes_pin_from_override
 assert_the_tag_override_also_generates_the_api_ip_patch_in_the_working_tree
 assert_the_unoverridden_path_generates_the_api_ip_patch_once
+assert_trace_writer_fence_closes_and_proves_zero_replicas
+assert_trace_writer_fence_is_behaviorally_fail_closed
+assert_interrupted_recovery_resume_restores_all_writer_fences
+assert_interrupted_recovery_fence_is_behaviorally_fail_closed
+assert_recovery_migrations_are_head_bound
 assert_skip_build_follows_the_recorded_image_source
 assert_skip_build_says_it_is_following_the_cluster
 assert_an_acquiring_run_still_honours_image_source

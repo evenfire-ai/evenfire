@@ -66,8 +66,8 @@ describe('Sidebar publisher gating', () => {
       'Agents',
       'Contexts',
       'Marketplace',
-      'Installed connectors',
-      'Installed plugins',
+      'Installed Connectors',
+      'Installed Plugins',
       'Installed Guardrails',
       'Files',
       'External Channels',
@@ -133,6 +133,23 @@ describe('Sidebar publisher gating', () => {
     }
   })
 
+  it('uses a borderless solid output arrow for Agent Outputs', () => {
+    vi.mocked(hook.usePublishScope).mockReturnValue(
+      publishScopeState({ scope: null, loading: false, error: false })
+    )
+    render(<Sidebar currentTab="directories" />)
+
+    const agentOutputs = screen.getByRole('link', { name: 'Agent Outputs' })
+    const icon = agentOutputs.querySelector('.cu-sidebar__subitem-icon svg')
+    expect(icon).toHaveAttribute('data-solid', 'true')
+    expect(icon).toHaveAttribute('stroke-width', '0')
+    expect(icon?.querySelectorAll('path')).toHaveLength(1)
+    expect(icon?.querySelector('path')).toHaveAttribute(
+      'd',
+      'm17 17 5-5-5-5-1.41 1.41L18.17 11H9v2h9.17l-2.58 2.59z'
+    )
+  })
+
   it('renders an icon for the Files group', () => {
     vi.mocked(hook.usePublishScope).mockReturnValue(
       publishScopeState({ scope: null, loading: false, error: false })
@@ -140,7 +157,15 @@ describe('Sidebar publisher gating', () => {
     render(<Sidebar currentTab="directories" />)
 
     const directories = screen.getByRole('button', { name: 'Files' })
-    expect(directories.querySelector('.cu-sidebar__icon svg')).toBeInTheDocument()
+    const icon = directories.querySelector('.cu-sidebar__icon svg')
+    expect(icon).toBeInTheDocument()
+    expect(icon).toHaveAttribute('width', '18')
+    expect(icon).toHaveAttribute('height', '18')
+    expect(icon).toHaveAttribute('viewBox', '0 0 512 512')
+    expect(icon?.querySelector('path')).toHaveAttribute(
+      'd',
+      'M464 128H272l-64-64H48C21.49 64 0 85.49 0 112v288c0 26.51 21.49 48 48 48h416c26.51 0 48-21.49 48-48V176c0-26.51-21.49-48-48-48z'
+    )
   })
 
   it('hides Agent Files from the sidebar without changing its route', () => {

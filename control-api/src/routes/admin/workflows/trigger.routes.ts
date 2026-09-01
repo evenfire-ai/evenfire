@@ -11,7 +11,7 @@ import {
   triggerWorkflow,
 } from '../../../services/workflows/workflowTriggerService.js'
 import { requireAdminWorkflowCaller } from '../../workflows/shared/auth.js'
-import { workflowTriggerRateLimit } from '../../workflows/shared/rateLimit.js'
+import { adminWorkflowTriggerRateLimit } from '../../workflows/shared/rateLimit.js'
 
 const BASE = '/admin/workflows'
 const logger = rootLogger.child({ module: 'admin-workflows' })
@@ -21,7 +21,7 @@ export function createAdminWorkflowTriggerRoutes(gateway: K8sGateway): Router {
 
   router.post(
     `${BASE}/:ns/:name/trigger`,
-    workflowTriggerRateLimit(),
+    adminWorkflowTriggerRateLimit(),
     asyncHandler(async (req: Request, res: Response) => {
       const caller = await requireAdminWorkflowCaller(req, res)
       if (!caller) return

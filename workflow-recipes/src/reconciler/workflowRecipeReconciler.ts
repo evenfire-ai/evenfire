@@ -31,6 +31,7 @@ import {
   StatefulSetDef,
   StatusCondition,
   WorkflowRecipeCRD,
+  WorkflowRecipeSpec,
   WorkflowRecipeStatus,
   WorkloadDef,
 } from '../types'
@@ -41,6 +42,7 @@ import {
 import { HttpMcpHostClient } from '../workflow/httpMcpHostClient'
 import { JwtTokenFactory } from '../workflow/jwtTokenFactory'
 import { K8sSecretReaderImpl } from '../workflow/k8sSecretReaderImpl'
+import { readRecipeCodexConnectionRef } from '../workflow/llmAllowedModelsSnapshot'
 import { ModelConfigHandler } from '../workflow/modelConfigHandler'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
 import type { EagerSdkBootstrapProof } from '../workflow/pluginWorkloadSdkProvisioner'
@@ -1001,6 +1003,66 @@ export class WorkflowRecipeReconciler {
     return recipe.metadata.name
   }
 
+  private claimedCodexParent(recipe: WorkflowRecipeCRD): boolean {
+    const parentLabel = recipe.metadata.labels?.[PARENT_RECIPE_LABEL]?.trim()
+    const ownerRef = recipe.metadata.ownerReferences?.some(
+      ref =>
+        ref.kind === 'WorkflowRecipe' &&
+        ref.controller === true &&
+        typeof ref.name === 'string' &&
+        ref.name.trim().length > 0
+    )
+    return Boolean(parentLabel || ownerRef)
+  }
+
+  private async loadCodexParent(
+    recipe: WorkflowRecipeCRD,
+    runtimeScopeRecipeName: string
+  ): Promise<{ spec: WorkflowRecipeSpec | null; annotations?: Record<string, string> }> {
+    if (runtimeScopeRecipeName === recipe.metadata.name) return { spec: null }
+    try {
+      const live = (await this.customApi.getNamespacedCustomObject({
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: recipe.metadata.namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: runtimeScopeRecipeName,
+      })) as { metadata?: { annotations?: Record<string, string> }; spec?: WorkflowRecipeSpec }
+      return { spec: live.spec ?? null, annotations: live.metadata?.annotations }
+    } catch {
+      return { spec: null }
+    }
+  }
+
+  private async bindCodexReconcileContext(
+    recipe: WorkflowRecipeCRD,
+    runtimeScopeRecipeName: string
+  ): Promise<void> {
+    const setter = this.workflowReconciler?.setCodexReconcileContext
+    if (typeof setter !== 'function') return
+    const parent = await this.loadCodexParent(recipe, runtimeScopeRecipeName)
+    // The Codex grant (connection key) follows the same authority rule as the
+    // Codex spec: the runtime-scope parent's annotation when inherited, the
+    // recipe's own annotation when standalone. Missing/unreadable annotations
+    // resolve to the fail-closed `unassigned` sentinel inside the reader.
+    const recipeUid = recipe.metadata.uid?.trim()
+    // No Kubernetes uid yet → skip bind. Miss stays fail-closed `unassigned`;
+    // never key the Map by recipe name.
+    if (!recipeUid) return
+    const grantAnnotations =
+      runtimeScopeRecipeName !== recipe.metadata.name
+        ? parent.annotations
+        : recipe.metadata.annotations
+    setter.call(this.workflowReconciler, {
+      recipeUid,
+      recipeName: recipe.metadata.name,
+      runtimeScopeRecipeName,
+      claimedParent: this.claimedCodexParent(recipe),
+      parentSpec: parent.spec,
+      connectionKey: readRecipeCodexConnectionRef(grantAnnotations),
+    })
+  }
+
   private async hasVerifiedInheritedParentResources(recipe: WorkflowRecipeCRD): Promise<boolean> {
     if (!declaresInheritedParentResources(recipe)) return false
     const parentName = recipe.metadata.labels?.[PARENT_RECIPE_LABEL]?.trim()
@@ -1088,6 +1150,7 @@ export class WorkflowRecipeReconciler {
     if (!this.workflowReconciler) return
     const runtimeScopeRecipeName =
       resolvedRuntimeScopeRecipeName ?? (await this.workflowRuntimeScopeRecipeName(recipe))
+    await this.bindCodexReconcileContext(recipe, runtimeScopeRecipeName)
     const coordinatorRefresher = this.workflowReconciler as WorkflowReconciler & {
       ensureCoordinatorRuntimeCredentials?: (
         recipeNamespace: string,
@@ -1114,7 +1177,8 @@ export class WorkflowRecipeReconciler {
         recipe.metadata.namespace,
         recipe.metadata.name,
         recipe.spec,
-        runtimeScopeRecipeName
+        runtimeScopeRecipeName,
+        recipe.metadata.uid
       )
     } catch (error) {
       console.error(
@@ -1860,6 +1924,7 @@ export class WorkflowRecipeReconciler {
             resourceInstances: recipe.status.resourceInstances,
           }
         : undefined
+      await this.bindCodexReconcileContext(recipe, approvalScopeRecipeName)
       const result = await this.workflowReconciler.reconcile(
         name,
         recipe.metadata.uid ?? '',
@@ -2648,11 +2713,14 @@ export class WorkflowRecipeReconciler {
         message: 'Plugin Workload SDK subsystem not initialized — missing clerum-wrc-signing-key',
       }
     }
+    const runtimeScopeRecipeName = await this.workflowRuntimeScopeRecipeName(recipe)
+    await this.bindCodexReconcileContext(recipe, runtimeScopeRecipeName)
     return this.workflowReconciler.reconcilePluginWorkloadSdkOnly(
       recipe.metadata.name,
       recipe.metadata.uid ?? '',
       recipe.metadata.namespace,
-      recipe.spec
+      recipe.spec,
+      runtimeScopeRecipeName
     )
   }
 

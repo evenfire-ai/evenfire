@@ -122,7 +122,11 @@ follow the fail-closed migration and rollout order in
 before enabling the feature flag.
 
 When deployable code changed and the E2E runner will manage port-forwards
-itself, force the sync and skip the short-lived background port-forward refresh:
+itself, force the sync and skip the short-lived background port-forward refresh.
+Inner `pre-gate-sync` may use `--skip-port-forwards`; never pass that globally
+into `make minikube-t2`. Do not kill this lane's `branch-profile-pf`.
+`make minikube-pf-all-bg` is a gate refresh only; it must not replace
+`branch-profile-pf`.
 
 ```bash
 make minikube-pre-gate-sync GATE=<gate-name> ARGS="--force-cluster-sync --skip-port-forwards"
@@ -157,6 +161,25 @@ open http://localhost:3000
 ```
 
 `make minikube-setup` seeds the default test user and agent/context access. `npm run ui` keeps the required API port-forwards open while it runs the local frontends.
+
+For a branch-owned profile, the host-side hold for Control UI / Desktop is
+the first-hand entry point (gitignored helper at repo root — do not search
+for it). Implementation: `.local-notes/minikube-profiles/branch-profile.sh`.
+HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
+Profile-owned random ports only (never shared `:3000`/`:8090`).
+`make minikube-pf-all-bg` is a gate refresh only; it must not replace
+`branch-profile-pf`. Do not start UI PFs from a sandboxed agent shell. Run
+the make target on the host. Do not kill this lane's `branch-profile-pf`.
+`branch-profile-pf-health` starts PFs then STOPS them on EXIT — do not use
+it as the lasting hold.
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+```
 
 `make test-e2e-vitest` and `make test-e2e-all` install `tests/e2e`
 dependencies when missing and hold the minikube port-forwards for the Vitest
@@ -221,6 +244,11 @@ single-node as the default, adds `--nodes=<n>` only when
 `MINIKUBE_MULTI_NODE=true` or `MINIKUBE_NODES>1`, enables
 `default-storageclass` and `storage-provisioner`, and fails if native minikube
 status or required node/storage readiness checks do not pass.
+After the cluster is ready, startup performs an explicit MCP-only auth-key
+bootstrap for the documented shared profile. It passes
+`--shared-profile-bootstrap --skip-gfs --require-mcp`, so it does not mutate
+the GFS plane or claim a branch-owned T2 lease. Standalone auth-key sync and
+all T2/GFS mutations remain behind the branch-profile lease.
 If `full-setup.sh` detects a broken profile, it refuses destructive recreation
 unless `MINIKUBE_RECREATE_PROFILE=true` and `CONFIRM_PROFILE=<profile>` are both
 set for that exact profile.
@@ -289,10 +317,18 @@ Desktop App
 
 The committed Minikube overlay enables GFS Upload v2 through
 `patches/gfs-upload-v2.yaml`. It patches the host-context-controller, which is
-the owner of generated GFSC workload configuration, with the exact release
-contract: 200 MiB files, preferred 8 MiB / maximum 16 MiB parts, four parts per
-session, sixteen global part streams, and the documented TTL, admission, and
-free-space limits. `minikube-ghcr`, `minikube-no-uis`, and
+the owner of generated GFSC workload configuration, with the release defaults:
+a 200 MiB product file limit, preferred 8 MiB / maximum 16 MiB parts, four parts
+per session, sixteen global part streams, and the documented TTL, admission,
+and free-space limits. Operators may set
+`CONTEXT_MAPPER_GFSC_UPLOAD_PRODUCT_MAX_FILE_BYTES` from one byte through the
+compiled 1 GiB protocol maximum. HCC forwards the value as
+`GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES`; GFSC advertises and enforces that exact
+value for new sessions. Invalid, non-integer, or above-protocol values make
+GFSC fail startup rather than being clamped. The deprecated
+`CONTEXT_MAPPER_GFSC_UPLOAD_MAX_FILE_BYTES` alias may remain during rollout,
+but when both names are present they must carry the same value. `minikube-ghcr`,
+`minikube-no-uis`, and
 `minikube-no-uis-ghcr` inherit the same patch from the base Minikube overlay.
 
 The `GlobalFileSystem` resource intentionally does not carry
@@ -306,6 +342,14 @@ Validate the committed profile without touching a cluster:
 ```bash
 bash scripts/tests/test-minikube-gfs-upload-v2-profile.sh
 ```
+
+The opt-in packaged runtime journeys use the same built Desktop and deployed
+Control UI bundle while changing the owned HCC setting from 100 MiB to 300 MiB.
+They verify exact-cap acceptance, cap-plus-one rejection, and a 250 MiB upload
+after the increase. Set `GFS_UPLOAD_V2_RUNTIME_LIMIT_E2E=1` only after the
+branch-owned profile has passed pre-gate sync. The harness refuses an unowned,
+dirty, stale, or production-like context and restores the prior product limit
+in a `finally` block.
 
 ### Required Configuration Per Service
 
@@ -457,6 +501,26 @@ kubectl rollout restart deployment/rpc-proxy -n rpc-proxy --context clerum-test
 ---
 
 ## Port Forwards for the Desktop App
+
+On a branch-owned profile, do not use the shared `:3000`/`:8090` mapping
+below. First-hand entry point (gitignored helper at repo root — do not
+search for it):
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+```
+
+Implementation: `.local-notes/minikube-profiles/branch-profile.sh`.
+HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
+`make minikube-pf-all-bg` is a gate refresh only; it must not replace
+`branch-profile-pf`. `branch-profile-pf-health` starts PFs then STOPS them
+on EXIT — do not use it as the lasting hold.
+
+The shared `clerum-test` Desktop mapping remains:
 
 ```bash
 make minikube-pf-desktop

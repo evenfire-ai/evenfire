@@ -121,6 +121,81 @@ describe('GFS_UPLOAD_V2 strict disabled contract', () => {
     expect(() => loadConfig()).toThrow(/must match/)
   })
 
+  it('accepts matching canonical and deprecated runtime product limits', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES', String(300 * 1024 * 1024))
+    vi.stubEnv('GFS_UPLOAD_MAX_FILE_BYTES', String(300 * 1024 * 1024))
+    expect(loadConfig().uploadV2.productMaxFileBytes).toBe(300 * 1024 * 1024)
+  })
+
+  it.each([
+    ['one byte', 1],
+    ['100 MiB', 100 * 1024 * 1024],
+    ['200 MiB', 200 * 1024 * 1024],
+    ['250 MiB', 250 * 1024 * 1024],
+    ['300 MiB', 300 * 1024 * 1024],
+    ['the protocol maximum', 1024 * 1024 * 1024],
+  ] as const)('accepts a runtime product limit at %s', (_label, bytes) => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES', String(bytes))
+    expect(loadConfig().uploadV2.productMaxFileBytes).toBe(bytes)
+  })
+
+  it.each([
+    '',
+    '0',
+    '-1',
+    '1.5',
+    'NaN',
+    'Infinity',
+    '1e3',
+    '01',
+    '+1',
+    ' 1',
+    '1 ',
+    '9007199254740992',
+    '1073741825',
+  ])(
+    'rejects invalid runtime product limit %s',
+    raw => {
+      vi.stubEnv('GFS_DEV_MODE', 'true')
+      vi.stubEnv('GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES', raw)
+      expect(() => loadConfig()).toThrow(/GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES/)
+    }
+  )
+
+  it('rejects a product limit above the configured protocol maximum', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_PROTOCOL_MAX_FILE_BYTES', String(300 * 1024 * 1024))
+    vi.stubEnv('GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES', String(300 * 1024 * 1024 + 1))
+    expect(() => loadConfig()).toThrow(/GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES/)
+  })
+
+  it.each([
+    ['the configured minimum', 200 * 1024 * 1024],
+    ['a normal canonical value', 300 * 1024 * 1024],
+    ['the compiled maximum', 1024 * 1024 * 1024],
+  ] as const)('accepts %s as a canonical protocol maximum', (_label, bytes) => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_PROTOCOL_MAX_FILE_BYTES', String(bytes))
+    expect(loadConfig().uploadV2.protocolMaxFileBytes).toBe(bytes)
+  })
+
+  it.each([
+    '01073741824',
+    '+1073741824',
+    ' 1073741824',
+    '1073741824 ',
+    '1e9',
+    '1073741824.0',
+    '-1',
+    '9007199254740992',
+  ])('rejects non-canonical protocol maximum %s', raw => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_PROTOCOL_MAX_FILE_BYTES', raw)
+    expect(() => loadConfig()).toThrow(/GFS_UPLOAD_PROTOCOL_MAX_FILE_BYTES/)
+  })
+
   it('accepts the plan-owned chunk and millisecond TTL names', () => {
     vi.stubEnv('GFS_DEV_MODE', 'true')
     vi.stubEnv('GFS_UPLOAD_PREFERRED_CHUNK_BYTES', '8388608')
@@ -143,7 +218,7 @@ describe('GFS_UPLOAD_V2 strict disabled contract', () => {
     expect(() => loadConfig()).toThrow(/must be exactly 'true' or 'false'/)
   })
 
-  it('rejects a protocol ceiling below the product boundary or above 1 GiB', () => {
+  it('rejects a protocol ceiling below the default product boundary or above 1 GiB', () => {
     for (const raw of ['209715199', '1073741825']) {
       vi.stubEnv('GFS_DEV_MODE', 'true')
       vi.stubEnv('GFS_UPLOAD_PROTOCOL_MAX_FILE_BYTES', raw)

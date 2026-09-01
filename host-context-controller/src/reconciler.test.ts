@@ -935,7 +935,7 @@ describe('PR-B B1 — writeStatusCondition', () => {
         reason: 'ok',
         message: 'ok',
       })
-    ).resolves.toBeUndefined()
+    ).resolves.toBe(false)
 
     expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
   })
@@ -1868,6 +1868,55 @@ describe('updateStatusConditions', () => {
     expect(types).toContain('SecretResolved')
     expect(types).toContain('NetworkReady')
     expect(types).toContain('DeploymentReady')
+  })
+
+  it('does not log Updated status conditions when both writes were skipped', async () => {
+    const server = makeServer({ name: 'pg' })
+    let liveStatus: { conditions?: unknown[] } | undefined
+    customApi.getNamespacedCustomObjectStatus.mockImplementation(async () => ({
+      metadata: { resourceVersion: '1' },
+      ...(liveStatus ? { status: liveStatus } : {}),
+    }))
+    customApi.patchNamespacedCustomObjectStatus.mockImplementation(
+      async (req: { body: Array<{ op?: string; path?: string; value?: unknown }> }) => {
+        const op = req.body.find(
+          candidate =>
+            candidate.op === 'add' &&
+            (candidate.path === '/status' || candidate.path === '/status/conditions')
+        )
+        if (!op) throw new Error('status condition add operation was not emitted')
+        liveStatus =
+          op.path === '/status'
+            ? (op.value as { conditions?: unknown[] })
+            : { conditions: op.value as unknown[] }
+        return {}
+      }
+    )
+
+    const updateStatusConditions = (
+      reconciler as unknown as {
+        updateStatusConditions(server: McpServerCRD, deploymentReady: boolean): Promise<void>
+      }
+    ).updateStatusConditions.bind(reconciler)
+
+    await updateStatusConditions(server, true)
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalled()
+    expect(liveStatus?.conditions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'NetworkReady' }),
+        expect.objectContaining({ type: 'DeploymentReady' }),
+      ])
+    )
+
+    customApi.patchNamespacedCustomObjectStatus.mockClear()
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await updateStatusConditions(server, true)
+      expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+      expect(log.mock.calls.flat().join('\n')).not.toContain('Updated status conditions')
+    } finally {
+      log.mockRestore()
+    }
   })
 })
 

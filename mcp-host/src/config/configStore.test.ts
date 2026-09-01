@@ -1,7 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { register } from 'prom-client'
 import { ALL_PROVIDERS, descriptorFor } from '../llm/registryCore'
-import { ConfigStore, PROVIDER_ENV_NAMES } from './configStore'
+import {
+  CATALOG_REVISION_ANNOTATION,
+  CONNECTION_REVISION_ANNOTATION,
+  ConfigStore,
+  PROVIDER_ENV_NAMES,
+} from './configStore'
 
 const ALLOWLIST_CM = 'clerum-llm-allowed-models'
 const ALLOWLIST_WATCH_KEY = `/api/v1/namespaces/mcp-host/configmaps|metadata.name=${ALLOWLIST_CM}`
@@ -71,9 +76,11 @@ interface FakeCoreApi {
 function makeFakeCoreApi(initial: {
   secrets?: Record<string, Record<string, string>>
   configMaps?: Record<string, Record<string, string>>
+  configMapAnnotations?: Record<string, Record<string, string>>
 }): FakeCoreApi {
   const secrets = { ...(initial.secrets ?? {}) }
   const configMaps = { ...(initial.configMaps ?? {}) }
+  const configMapAnnotations = { ...(initial.configMapAnnotations ?? {}) }
   return {
     readNamespacedSecret: vi.fn(async (req: { name: string }) => {
       const data = secrets[req.name]
@@ -89,25 +96,35 @@ function makeFakeCoreApi(initial: {
         const err: { code?: number; statusCode?: number } = { code: 404, statusCode: 404 }
         throw err
       }
-      return { data }
+      return {
+        data,
+        metadata: { name: req.name, annotations: configMapAnnotations[req.name] },
+      }
     }),
   }
 }
 
 function build(opts: {
   llmSecretRef?: string | null
-  provider?: 'openai' | 'claude' | 'zai' | 'bailian' | null
+  provider?: 'openai' | 'claude' | 'zai' | 'bailian' | 'codex-subscription' | null
+  connectionRef?: string | null
   secrets?: Record<string, Record<string, string>>
   configMaps?: Record<string, Record<string, string>>
+  configMapAnnotations?: Record<string, Record<string, string>>
   allowlistConfigMapName?: string | null
 }): { store: ConfigStore; watch: FakeWatch; api: FakeCoreApi } {
   const watch = makeFakeWatch()
-  const api = makeFakeCoreApi({ secrets: opts.secrets, configMaps: opts.configMaps })
+  const api = makeFakeCoreApi({
+    secrets: opts.secrets,
+    configMaps: opts.configMaps,
+    configMapAnnotations: opts.configMapAnnotations,
+  })
   const store = new ConfigStore({
     namespace: 'mcp-host',
     hostRef: 'trader',
     llmSecretRef: opts.llmSecretRef ?? 'chatllm-api-keys',
     provider: opts.provider ?? 'openai',
+    connectionRef: opts.connectionRef,
     allowlistConfigMapName: opts.allowlistConfigMapName,
     coreApi: api as unknown as ConstructorParameters<typeof ConfigStore>[0]['coreApi'],
     watch: watch as unknown as ConstructorParameters<typeof ConfigStore>[0]['watch'],
@@ -539,6 +556,54 @@ describe('ConfigStore — allowlist tier (R3)', () => {
       { model: 'gpt-5.4', displayName: 'GPT 5.4', contextWindowTokens: 400000, vendor: 'OpenAI' },
     ])
     expect(store.allowedModels().get('claude')).toEqual([{ model: 'claude-opus-4-8' }])
+    expect(store.codexPolicyBinding()).toBeNull()
+  })
+
+  it('exposes Codex catalog/credential revisions from allowlist annotations', async () => {
+    const built = build({
+      provider: 'openai',
+      connectionRef: 'deployment-default',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {
+        [ALLOWLIST_CM]: { openai: JSON.stringify([{ model: 'gpt-5.4' }]) },
+      },
+      configMapAnnotations: {
+        [ALLOWLIST_CM]: {
+          [CATALOG_REVISION_ANNOTATION]: '7',
+          [CONNECTION_REVISION_ANNOTATION]: '3',
+        },
+      },
+    })
+    store = built.store
+    await store.start()
+
+    expect(store.codexPolicyBinding()).toEqual({
+      catalogRevision: 7,
+      credentialRevision: 3,
+      connectionKey: 'deployment-default',
+    })
+
+    const handle = built.watch.active.get(ALLOWLIST_WATCH_KEY)
+    expect(handle).toBeDefined()
+    handle!.emit('MODIFIED', {
+      metadata: {
+        name: ALLOWLIST_CM,
+        annotations: {
+          [CATALOG_REVISION_ANNOTATION]: '8',
+          [CONNECTION_REVISION_ANNOTATION]: '3',
+        },
+      },
+      data: { openai: JSON.stringify([{ model: 'gpt-5.4' }]) },
+    })
+    expect(store.codexPolicyBinding()).toEqual({
+      catalogRevision: 8,
+      credentialRevision: 3,
+      connectionKey: 'deployment-default',
+    })
+
+    handle!.emit('DELETED', { metadata: { name: ALLOWLIST_CM } })
+    expect(store.codexPolicyBinding()).toBeNull()
   })
 
   it('hot-reloads: a MODIFIED event makes the new allowlist visible + fires allowlistChanged', async () => {
@@ -725,5 +790,189 @@ describe('ConfigStore — allowlist tier (R3)', () => {
     expect(store.allowlistAvailable()).toBe(true)
     handle!.emit('DELETED', { metadata: { name: ALLOWLIST_CM } })
     expect(await counterValue('clerum_llm_allowlist_missing_total')).toBe(before + 2)
+  })
+
+  it('filters Codex models to the assigned grant catalog, not the union', async () => {
+    const built = build({
+      provider: 'codex-subscription',
+      connectionRef: 'personal-pro',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {
+        [ALLOWLIST_CM]: {
+          'codex-subscription': JSON.stringify([{ model: 'gpt-5.3-codex' }, { model: 'gpt-5.1' }]),
+        },
+      },
+      configMapAnnotations: {
+        [ALLOWLIST_CM]: {
+          'clerum.io/catalog-revision': '4',
+          'clerum.io/connection-revision': '2',
+          'clerum.io/codex-connections': JSON.stringify({
+            'personal-pro': {
+              catalogRevision: 4,
+              connectionRevision: 2,
+              models: ['gpt-5.1'],
+            },
+            'team-plus': {
+              catalogRevision: 3,
+              connectionRevision: 8,
+              models: ['gpt-5.3-codex'],
+            },
+          }),
+        },
+      },
+    })
+    store = built.store
+    await store.start()
+    expect(store.allowedModels().get('codex-subscription')).toEqual([{ model: 'gpt-5.1' }])
+    expect(store.codexPolicyBinding()?.connectionKey).toBe('personal-pro')
+    expect(store.codexPolicyBinding()?.models).toEqual(['gpt-5.1'])
+  })
+
+  it('does not inherit another grant when the assigned connection is missing from the map', async () => {
+    const built = build({
+      provider: 'codex-subscription',
+      connectionRef: 'ghost-grant',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {
+        [ALLOWLIST_CM]: {
+          'codex-subscription': JSON.stringify([{ model: 'gpt-5.3-codex' }]),
+        },
+      },
+      configMapAnnotations: {
+        [ALLOWLIST_CM]: {
+          'clerum.io/catalog-revision': '4',
+          'clerum.io/connection-revision': '2',
+          'clerum.io/codex-connections': JSON.stringify({
+            'personal-pro': {
+              catalogRevision: 4,
+              connectionRevision: 2,
+              models: ['gpt-5.3-codex'],
+            },
+          }),
+        },
+      },
+    })
+    store = built.store
+    await store.start()
+    expect(store.codexPolicyBinding()).toBeNull()
+    expect(store.allowedModels().get('codex-subscription')).toEqual([])
+  })
+
+  it('does not inherit deployment-default when the Host has no connectionRef', async () => {
+    const built = build({
+      provider: 'codex-subscription',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {
+        [ALLOWLIST_CM]: {
+          'codex-subscription': JSON.stringify([{ model: 'gpt-5.3-codex' }]),
+        },
+      },
+      configMapAnnotations: {
+        [ALLOWLIST_CM]: {
+          'clerum.io/catalog-revision': '4',
+          'clerum.io/connection-revision': '2',
+          'clerum.io/codex-connections': JSON.stringify({
+            'deployment-default': {
+              catalogRevision: 4,
+              connectionRevision: 2,
+              models: ['gpt-5.3-codex'],
+            },
+          }),
+        },
+      },
+    })
+    store = built.store
+    await store.start()
+    expect(store.codexPolicyBinding()).toBeNull()
+    expect(store.allowedModels().get('codex-subscription')).toEqual([])
+  })
+
+  it('keeps the legacy flat Codex catalog when the ConfigMap has no connections map', async () => {
+    const built = build({
+      provider: 'codex-subscription',
+      connectionRef: 'deployment-default',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {
+        [ALLOWLIST_CM]: {
+          'codex-subscription': JSON.stringify([{ model: 'gpt-5.3-codex' }, { model: 'gpt-5.1' }]),
+        },
+      },
+      configMapAnnotations: {
+        [ALLOWLIST_CM]: {
+          'clerum.io/catalog-revision': '4',
+          'clerum.io/connection-revision': '2',
+        },
+      },
+    })
+    store = built.store
+    await store.start()
+    expect(store.codexPolicyBinding()?.connectionKey).toBe('deployment-default')
+    expect(store.codexPolicyBinding()?.models).toBeUndefined()
+    expect(store.allowedModels().get('codex-subscription')).toEqual([
+      { model: 'gpt-5.3-codex' },
+      { model: 'gpt-5.1' },
+    ])
+  })
+
+  it('keeps the legacy flat catalog for a named grant when the ConfigMap has no connections map', async () => {
+    const built = build({
+      provider: 'codex-subscription',
+      connectionRef: 'personal-pro',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {
+        [ALLOWLIST_CM]: {
+          'codex-subscription': JSON.stringify([{ model: 'gpt-5.3-codex' }, { model: 'gpt-5.1' }]),
+        },
+      },
+      configMapAnnotations: {
+        [ALLOWLIST_CM]: {
+          'clerum.io/catalog-revision': '4',
+          'clerum.io/connection-revision': '2',
+        },
+      },
+    })
+    store = built.store
+    await store.start()
+    expect(store.codexPolicyBinding()?.connectionKey).toBe('personal-pro')
+    expect(store.codexPolicyBinding()?.models).toBeUndefined()
+    expect(store.allowedModels().get('codex-subscription')).toEqual([
+      { model: 'gpt-5.3-codex' },
+      { model: 'gpt-5.1' },
+    ])
+  })
+
+  it('does not inherit the reserved-grant union when a map entry omits models[]', async () => {
+    const built = build({
+      provider: 'codex-subscription',
+      connectionRef: 'personal-pro',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {
+        [ALLOWLIST_CM]: {
+          'codex-subscription': JSON.stringify([{ model: 'gpt-5.3-codex' }, { model: 'gpt-5.1' }]),
+        },
+      },
+      configMapAnnotations: {
+        [ALLOWLIST_CM]: {
+          'clerum.io/catalog-revision': '4',
+          'clerum.io/connection-revision': '2',
+          'clerum.io/codex-connections': JSON.stringify({
+            'personal-pro': {
+              catalogRevision: 4,
+              connectionRevision: 2,
+            },
+          }),
+        },
+      },
+    })
+    store = built.store
+    await store.start()
+    expect(store.codexPolicyBinding()).toBeNull()
+    expect(store.allowedModels().get('codex-subscription')).toEqual([])
   })
 })

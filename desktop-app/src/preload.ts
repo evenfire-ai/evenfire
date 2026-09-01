@@ -86,6 +86,9 @@ const clerum = Object.freeze({
     passwordLogin: (email: string, password: string) =>
       ipcRenderer.invoke('auth:passwordLogin', { email, password }),
     diagnoseLoginBackend: () => ipcRenderer.invoke('auth:diagnoseLoginBackend'),
+    probeLocalhostReachable: () => ipcRenderer.invoke('auth:probeLocalhostReachable'),
+    openDeploymentDocs: () => ipcRenderer.invoke('auth:openDeploymentDocs'),
+    openHostedSignup: () => ipcRenderer.invoke('auth:openHostedSignup'),
     startDesktopSetup: (email: string) => ipcRenderer.invoke('auth:startDesktopSetup', { email }),
     openForgotPassword: (email?: string) =>
       ipcRenderer.invoke('auth:openForgotPassword', { email }),
@@ -194,6 +197,8 @@ const clerum = Object.freeze({
     getPathForFile: (file: File) => webUtils.getPathForFile(file),
     renameResource: (resourceId: string, newName: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:renameResource', { resourceId, newName, drive, ifMatch }),
+    moveResource: (resourceId: string, destinationId: string, drive?: string, ifMatch?: number) =>
+      ipcRenderer.invoke('gfs:moveResource', { resourceId, destinationId, drive, ifMatch }),
     deleteResource: (resourceId: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:deleteResource', { resourceId, drive, ifMatch }),
     grant: (
@@ -454,6 +459,38 @@ const clerum = Object.freeze({
     setHostModel: (hostRef: string, chatId: string, model: string, hostRefs?: string[]) =>
       ipcRenderer.invoke('rpc:setHostModel', { hostRef, chatId, model, hostRefs }),
     getTokenMetadata: () => ipcRenderer.invoke('rpc:getTokenMetadata'),
+    // U5 (mcp-oauth reactive consent): "Connect <server>" — open the provider
+    // authorize-URL for a task that suspended with `connect_required`. Host-bound
+    // to the suspended conversation's hostRef (RPC tokens require a hostRef).
+    connectMcpServer: (
+      mcpServerName: string,
+      hostRef: string,
+      contextId?: string,
+      options?: { confirmShared?: boolean }
+    ) => ipcRenderer.invoke('rpc:connectMcpServer', { mcpServerName, hostRef, contextId, options }),
+    // Proactive connectors panel (spec 11 U2): the classified per-agent fleet.
+    listConnectors: () => ipcRenderer.invoke('rpc:listConnectors'),
+    // Proactive disconnect (spec 11 U4): revoke an mcp-server's OAuth grant.
+    // `options.shared` only drives the native confirm-dialog copy.
+    disconnectMcpServer: (
+      mcpServerName: string,
+      hostRef: string,
+      contextId?: string,
+      options?: { shared?: boolean }
+    ) =>
+      ipcRenderer.invoke('rpc:disconnectMcpServer', { mcpServerName, hostRef, contextId, options }),
+    // Fired when the OAuth deep-link returns with `source=mcp`. The renderer
+    // correlates `mcpServerName` to its suspended entries and resumes the task.
+    onMcpOauthCompleted: (
+      callback: (args: { mcpServerName: string; provider: string }) => void
+    ) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        args: { mcpServerName: string; provider: string }
+      ) => callback(args)
+      ipcRenderer.on('rpc:mcpOauthCompleted', listener)
+      return () => ipcRenderer.off('rpc:mcpOauthCompleted', listener)
+    },
   },
   workflows: {
     list: () => ipcRenderer.invoke('workflows:list'),

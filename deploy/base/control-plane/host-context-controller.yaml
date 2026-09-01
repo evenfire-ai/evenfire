@@ -23,21 +23,25 @@ spec:
   # single-writer assumption through the rollout too.
   strategy:
     type: Recreate
+  # CONTRACT: hcc-rollout-recovery=external-detection-only; owner=evenfire-infra
   # Recreate + replicas:1 means a botched rollout (new pod never Ready) leaves
-  # the control plane down until a manual `kubectl rollout undo` — the single-
-  # writer invariant forbids any overlap-based auto-recovery. This deadline is
-  # DETECTION ONLY: it flips Progressing=False (ProgressDeadlineExceeded) and
-  # fails `kubectl rollout status` for callers without their own --timeout; it
-  # does not roll back.
+  # /ready 503. Kubernetes will not self-heal that; the evenfire-infra deploy
+  # workflows own automatic `rollout undo --to-revision` for this Deployment
+  # only (evenfire#391). The deploy job still fails after a successful undo.
+  # This deadline is DETECTION ONLY: it flips Progressing=False
+  # (ProgressDeadlineExceeded) and fails `kubectl rollout status` for callers
+  # without their own --timeout; it does not roll back.
   #
   # Value (origin/dev, 2026-08-05): HCC's /ready stays 503 until its initial fleet
   # reconciliation finishes, so time-to-Ready scales with the McpServer/Context
   # fleet — clerum-dev took 651s at 108 McpServers / 22 Contexts. The unset default
   # (600s) governed the deploy because `kubectl rollout status` aborts the instant
-  # the deadline is exceeded, and the clock starts at apply-inter-service-tokens.sh's
-  # `rollout restart`, so the wait inherits only the remaining budget (600-160=440s
-  # vs a 480s timeout on 2026-08-05: #202's timeout never bound, deploy failed 50s
-  # short). 1200s covers the 900s wait plus a 300s head-start. Mitigation, not the
+  # the deadline is exceeded. apply-inter-service-tokens.sh used to start that
+  # clock on every token apply via `rollout restart`, even when
+  # INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET was unchanged; no-op token deploys no
+  # longer Recreate this Deployment, so they no longer consume this budget.
+  # A real HMAC change (or FORCE_CONSUMER_RESTART) still restarts HCC — then
+  # 1200s covers the 900s wait plus a 300s head-start. Mitigation, not the
   # fix — #205 decouples readiness from fleet convergence, after which this should
   # come back down.
   progressDeadlineSeconds: 1200

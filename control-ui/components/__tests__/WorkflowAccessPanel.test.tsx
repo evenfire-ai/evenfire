@@ -2,11 +2,13 @@ import React, { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import {
+  allowWorkflowApprovalTeam,
   getAdminTeams,
   getAdminUsers,
   listWorkflowApprovalAllowedTeams,
   listWorkflowGrants,
   listWorkflowTeamGrants,
+  revokeWorkflowApprovalTeam,
   setWorkflowGrants,
   setWorkflowTeamGrants,
 } from '@lib/api'
@@ -19,6 +21,8 @@ vi.mock('@lib/api', () => ({
   listWorkflowGrants: vi.fn(),
   listWorkflowTeamGrants: vi.fn(),
   listWorkflowApprovalAllowedTeams: vi.fn(),
+  isSilentApiError: (error: unknown) =>
+    Boolean(error && typeof error === 'object' && (error as { silent?: unknown }).silent),
   setWorkflowGrants: vi.fn(),
   setWorkflowTeamGrants: vi.fn(),
   allowWorkflowApprovalTeam: vi.fn(),
@@ -77,6 +81,8 @@ const triggerTeamGrant = {
   createdAt: '2026-01-01T00:00:00Z',
 }
 const nextTeamGrant = { id: 'team-next', name: 'Next Team', createdAt: '2026-01-01T00:00:00Z' }
+const finalTeamGrant = { id: 'team-final', name: 'Final Team', createdAt: '2026-01-01T00:00:00Z' }
+const lastTeamGrant = { id: 'team-last', name: 'Last Team', createdAt: '2026-01-01T00:00:00Z' }
 
 beforeEach(() => {
   vi.mocked(getAdminUsers).mockResolvedValue({
@@ -89,6 +95,8 @@ beforeEach(() => {
     items: [
       { ...triggerTeamGrant, memberCount: 2 },
       { ...nextTeamGrant, memberCount: 2 },
+      { ...finalTeamGrant, memberCount: 2 },
+      { ...lastTeamGrant, memberCount: 2 },
     ],
   })
   vi.mocked(listWorkflowGrants).mockResolvedValue({ items: [] })
@@ -259,5 +267,81 @@ describe('WorkflowAccessPanel', () => {
         'team-next',
       ])
     )
+  })
+
+  it('serializes approval-team writes, reloads after a rate limit, and shows one retry message', async () => {
+    const firstAllow = createDeferred<{ teamId: string }>()
+    const rateLimitError = Object.assign(new Error('429 Too Many Requests'), {
+      status: 429,
+      body: { error: 'Too Many Requests', retryAfterSeconds: 12 },
+    })
+    vi.mocked(listWorkflowApprovalAllowedTeams).mockResolvedValue({ items: [triggerTeamGrant] })
+    vi.mocked(allowWorkflowApprovalTeam)
+      .mockReturnValueOnce(firstAllow.promise)
+      .mockRejectedValueOnce(rateLimitError)
+
+    render(<EditHarness />)
+
+    fireEvent.click(screen.getByRole('tab', { name: /Approval target teams/ }))
+    const section = screen.getByTestId('workflow-access-approval-target-teams')
+    await waitFor(() => expect(within(section).getByText('Trigger Team')).toBeInTheDocument())
+
+    fireEvent.click(within(section).getByRole('option', { name: 'Next Team' }))
+    fireEvent.click(within(section).getByRole('option', { name: 'Final Team' }))
+    fireEvent.click(within(section).getByRole('option', { name: 'Last Team' }))
+    fireEvent.click(within(section).getByRole('button', { name: 'Allow teams' }))
+
+    await waitFor(() => expect(allowWorkflowApprovalTeam).toHaveBeenCalledTimes(1))
+    expect(allowWorkflowApprovalTeam).toHaveBeenCalledWith(
+      'sandbox-recipes',
+      'installed-recipe',
+      'team-next'
+    )
+    expect(allowWorkflowApprovalTeam).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      firstAllow.resolve({ teamId: 'team-next' })
+    })
+
+    await waitFor(() => expect(allowWorkflowApprovalTeam).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(listWorkflowApprovalAllowedTeams).toHaveBeenCalledTimes(2))
+    expect(allowWorkflowApprovalTeam).toHaveBeenLastCalledWith(
+      'sandbox-recipes',
+      'installed-recipe',
+      'team-final'
+    )
+    expect(allowWorkflowApprovalTeam).not.toHaveBeenCalledWith(
+      'sandbox-recipes',
+      'installed-recipe',
+      'team-last'
+    )
+    expect(revokeWorkflowApprovalTeam).not.toHaveBeenCalled()
+    expect(within(section).getByRole('alert')).toHaveTextContent(
+      'Some changes were saved. Too many approval target team changes. Try again in about 12 seconds.'
+    )
+    expect(screen.queryByText('Approval target teams updated.')).not.toBeInTheDocument()
+  })
+
+  it('stops approval-team writes when the session expires', async () => {
+    const authExpired = Object.assign(new Error('Session expired'), {
+      status: 401,
+      silent: true,
+    })
+    vi.mocked(allowWorkflowApprovalTeam).mockRejectedValueOnce(authExpired)
+
+    render(<EditHarness />)
+
+    fireEvent.click(screen.getByRole('tab', { name: /Approval target teams/ }))
+    const section = screen.getByTestId('workflow-access-approval-target-teams')
+    await waitFor(() =>
+      expect(within(section).getByRole('option', { name: 'Next Team' })).toBeInTheDocument()
+    )
+    fireEvent.click(within(section).getByRole('option', { name: 'Next Team' }))
+    fireEvent.click(within(section).getByRole('button', { name: 'Allow team' }))
+
+    await waitFor(() => expect(allowWorkflowApprovalTeam).toHaveBeenCalledOnce())
+    expect(revokeWorkflowApprovalTeam).not.toHaveBeenCalled()
+    expect(listWorkflowApprovalAllowedTeams).toHaveBeenCalledOnce()
+    expect(within(section).queryByRole('alert')).not.toBeInTheDocument()
   })
 })

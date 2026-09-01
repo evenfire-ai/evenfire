@@ -103,6 +103,13 @@ export interface ConfigureRequest {
 
 export interface ConfigureResponse {
   configured: boolean
+  /**
+   * oauth-broker identity is bound in-process. This is not execute permission;
+   * spend still requires a redeemable grant (WRC + authorize).
+   */
+  identityBound?: boolean
+  /** Present only when WRC observes a live redeemable grant. mcp-host omits it. */
+  grantRedeemable?: boolean
   capabilityFamily?: 'promptBridge' | 'clientNotifications'
   provider?: string
   model?: string

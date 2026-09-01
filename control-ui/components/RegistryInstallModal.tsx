@@ -306,7 +306,7 @@ export function RegistryInstallModal({ entry, isOpen, onClose, onInstalled }: Pr
                     fontSize: '0.7rem',
                     padding: '1px 5px',
                     borderRadius: 3,
-                    background: 'var(--cu-bg-surface)',
+                    background: 'var(--cu-surface-hover)',
                     color: 'var(--cu-text-muted)',
                   }}
                 >

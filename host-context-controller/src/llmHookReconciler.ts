@@ -38,11 +38,14 @@ import {
 import { isAllowedExternalEgressCidr, isPublicDnsHostname } from './networkPolicyReconciler'
 import { HostCRD, LlmHookCRD, LlmHookCondition, LlmHookImageTarget, LlmHookStatus } from './types'
 import {
+  deploymentMatchesDesired,
   getErrorCode,
+  networkPolicyMatchesDesired,
   preserveDeploymentAnnotations,
   preserveObjectAnnotations,
   preserveServiceAssignedFields,
   replaceWithConflictRetry,
+  serviceMatchesDesired,
 } from './utils'
 
 const GROUP = 'clerum.io'
@@ -766,6 +769,7 @@ export class LlmHookReconciler {
       logPrefix: LOG,
       body: deployment,
       mergeExisting: preserveDeploymentAnnotations,
+      isUpToDate: deploymentMatchesDesired,
       read: () =>
         this.appsApi.readNamespacedDeployment({ name, namespace: config.llmHooksNamespace }),
       replace: body =>
@@ -795,6 +799,7 @@ export class LlmHookReconciler {
       logPrefix: LOG,
       body: service,
       mergeExisting: preserveServiceAssignedFields,
+      isUpToDate: serviceMatchesDesired,
       read: () => this.coreApi.readNamespacedService({ name, namespace: config.llmHooksNamespace }),
       replace: body =>
         this.coreApi.replaceNamespacedService({ name, namespace: config.llmHooksNamespace, body }),
@@ -825,6 +830,7 @@ export class LlmHookReconciler {
       logPrefix: LOG,
       body: policy,
       mergeExisting: preserveObjectAnnotations,
+      isUpToDate: networkPolicyMatchesDesired,
       read: () => this.networkingApi.readNamespacedNetworkPolicy({ name, namespace }),
       replace: body => this.networkingApi.replaceNamespacedNetworkPolicy({ name, namespace, body }),
     })
