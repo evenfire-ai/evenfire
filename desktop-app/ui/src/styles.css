@@ -10845,7 +10845,11 @@ pre {
     transform: rotate(180deg);
   }
 
-  .sidebar-collapse-toggle {
+  /* Match the base rule's `.sidebar-collapse-toggle.ui-icon-button` specificity:
+     media queries don't add specificity, so a bare `.sidebar-collapse-toggle`
+     loses to it and the toggle would stay visible. In this viewport the sidebar
+     is an overlay menu with no persistent rail, so collapsing it is meaningless. */
+  .sidebar-collapse-toggle.ui-icon-button {
     display: none;
   }
 
