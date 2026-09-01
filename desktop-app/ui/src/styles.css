@@ -12757,6 +12757,17 @@ pre {
   padding: var(--space-1) var(--space-2);
 }
 
+/* The workspace head (session breadcrumb + token/context indicators) lives in
+   the nav-stack, which — unlike the thread, top and tabs below — had no
+   drawer-scoped inset, so its title and token pills sat flush against the slim
+   column's top-left edge. Give it the same horizontal rhythm the other sections
+   use so the breadcrumb aligns with the thread text; full-screen gets this inset
+   from `.content-panel--agent-chat` instead, which the drawer's <ChatPage>
+   renders outside of. Keep the nav-stack's sticky `padding-bottom` intact. */
+.chat-drawer .agent-workspace-shell .agent-chat-nav-stack {
+  padding: var(--space-2) var(--space-2) var(--space-1);
+}
+
 .chat-drawer .agent-workspace-shell .agent-workspace-tabs {
   padding: 0 var(--space-2);
 }
