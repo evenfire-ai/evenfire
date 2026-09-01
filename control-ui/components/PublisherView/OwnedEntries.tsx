@@ -79,10 +79,18 @@ export function OwnedEntries({
   orgScope,
   canShare = true,
   sharingUnavailable = false,
+  embedded = false,
+  hideHeader = false,
+  search = '',
+  refreshSignal = 0,
 }: {
   orgScope: string
   canShare?: boolean
   sharingUnavailable?: boolean
+  embedded?: boolean
+  hideHeader?: boolean
+  search?: string
+  refreshSignal?: number
 }) {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -126,6 +134,10 @@ export function OwnedEntries({
     void load()
   }, [load])
 
+  useEffect(() => {
+    if (refreshSignal > 0) void load()
+  }, [load, refreshSignal])
+
   const handleRemove = useCallback(
     async (e: OwnedRegistryEntry) => {
       const ok = await confirm({
@@ -162,9 +174,24 @@ export function OwnedEntries({
   // instead of an empty one.
   const typeFilter = searchParams?.get('type') ?? null
   const activeTypeLabel = typeFilter ? MARKETPLACE_ENTRY_TYPE_LABELS[typeFilter] : undefined
+  const normalizedSearch = search.trim().toLowerCase()
   const visibleEntries = useMemo(
-    () => (activeTypeLabel ? entries.filter(e => ownedEntryKind(e) === typeFilter) : entries),
-    [entries, typeFilter, activeTypeLabel]
+    () =>
+      (activeTypeLabel ? entries.filter(e => ownedEntryKind(e) === typeFilter) : entries).filter(
+        entry =>
+          [
+            entry.name,
+            entryTypeLabel(entry),
+            entry.version,
+            entry.visibility,
+            entry.status,
+            entry.entryType ?? entry.entry_type ?? '',
+          ]
+            .join(' ')
+            .toLowerCase()
+            .includes(normalizedSearch)
+      ),
+    [entries, typeFilter, activeTypeLabel, normalizedSearch]
   )
 
   // Deliberately org-wide, not `visibleEntries`: the notice describes what
@@ -205,9 +232,9 @@ export function OwnedEntries({
     })
   }, [entrySort.direction, entrySort.key, entrySort.sortedRows])
 
-  return (
-    <section>
-      <div className="cu-card cu-card--viewport-fill">
+  const content = (
+    <>
+      {hideHeader ? null : (
         <TablePanelHeader
           title="Published entries"
           subtitle={
@@ -216,143 +243,157 @@ export function OwnedEntries({
               : undefined
           }
         />
-        <div className="cu-card__body">
-          {!loading && !error && activeTypeLabel ? (
-            <p className="cu-banner cu-banner--info">
-              Showing {activeTypeLabel.toLowerCase()} only.{' '}
-              <button
-                type="button"
-                className="cu-link"
-                onClick={() => router.replace(CONTROL_ROUTES.marketplace.orgEntries)}
-              >
-                Show all entries
-              </button>
-            </p>
-          ) : null}
-          <div className="eft-table-viewport cu-table-wrap">
-            <DataTable className="eft-table cu-table">
-              <thead>
-                <TableHeaderRow columns={columns} />
-              </thead>
-              <tbody>
-                {loading ? (
-                  <TableStateRow
-                    colSpan={columns.length}
-                    kind="loading"
-                    message="Loading published entries…"
-                  />
-                ) : error ? (
-                  <TableStateRow
-                    action={
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--ghost cu-btn--sm"
-                        onClick={() => void load()}
-                      >
-                        Retry
-                      </button>
-                    }
-                    colSpan={columns.length}
-                    kind="error"
-                    message="Could not load your published entries."
-                  />
-                ) : visibleEntries.length === 0 ? (
-                  <TableStateRow
-                    colSpan={columns.length}
-                    message={
-                      entries.length === 0
+      )}
+      <div className="cu-card__body">
+        {hideHeader && sharingUnavailable && hasPrivateEntries ? (
+          <p className="cu-muted-note">
+            Cross-org sharing isn’t available on this deployment, so private entries stay visible
+            only to your org.
+          </p>
+        ) : null}
+        {!loading && !error && activeTypeLabel ? (
+          <p className="cu-banner cu-banner--info">
+            Showing {activeTypeLabel.toLowerCase()} only.{' '}
+            <button
+              type="button"
+              className="cu-link"
+              onClick={() => router.replace(CONTROL_ROUTES.marketplace.orgEntries)}
+            >
+              Show all entries
+            </button>
+          </p>
+        ) : null}
+        <div className="eft-table-viewport cu-table-wrap">
+          <DataTable className="eft-table cu-table">
+            <thead>
+              <TableHeaderRow columns={columns} />
+            </thead>
+            <tbody>
+              {loading ? (
+                <TableStateRow
+                  colSpan={columns.length}
+                  kind="loading"
+                  message="Loading published entries…"
+                />
+              ) : error ? (
+                <TableStateRow
+                  action={
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--ghost cu-btn--sm"
+                      onClick={() => void load()}
+                    >
+                      Retry
+                    </button>
+                  }
+                  colSpan={columns.length}
+                  kind="error"
+                  message="Could not load your published entries."
+                />
+              ) : visibleEntries.length === 0 ? (
+                <TableStateRow
+                  colSpan={columns.length}
+                  message={
+                    normalizedSearch
+                      ? 'No entries match this search.'
+                      : entries.length === 0
                         ? 'You haven’t published any registry entries yet.'
                         : `No ${activeTypeLabel?.toLowerCase() ?? 'entries'} published yet.`
-                    }
-                  />
-                ) : (
-                  sortedEntries.map(e => {
-                    const isPrivate = e.visibility === 'private'
-                    const detailRoute = CONTROL_ROUTES.marketplace.entry(e.name, e.version)
-                    const rowActions: RowActionMenuItem[] = [
-                      {
-                        key: 'view',
-                        label: 'View details',
-                        onClick: () => router.push(detailRoute),
-                      },
-                      ...(isInstalled(e)
-                        ? [
-                            {
-                              key: 'installed',
-                              label: 'Installed',
-                              disabled: true,
-                              onClick: () => undefined,
-                            },
-                          ]
-                        : [
-                            {
-                              key: 'install',
-                              label: 'Install',
-                              onClick: () =>
-                                router.push(
-                                  CONTROL_ROUTES.marketplace.install({
-                                    entry: e.name,
-                                    version: e.version,
-                                  })
-                                ),
-                            },
-                          ]),
-                      ...(isPrivate && canShare
-                        ? [
-                            {
-                              key: 'share',
-                              label: 'Share access',
-                              onClick: () =>
-                                setGrantTarget({
-                                  entryName: e.name,
-                                  opener: document.activeElement as HTMLButtonElement,
-                                }),
-                            },
-                          ]
-                        : []),
-                      {
-                        key: 'edit',
-                        label: 'Edit',
-                        onClick: () =>
-                          router.push(CONTROL_ROUTES.marketplace.editEntry(e.name, e.version)),
-                      },
-                      {
-                        key: 'remove',
-                        label: 'Remove from Marketplace',
-                        danger: true,
-                        onClick: () => void handleRemove(e),
-                      },
-                    ]
-                    return (
-                      <TableRow key={entryKey(e)} onNavigate={() => router.push(detailRoute)}>
-                        <td>
-                          <code>{e.name}</code>
-                        </td>
-                        <td>{entryTypeLabel(e)}</td>
-                        <td>{e.version}</td>
-                        <td>
-                          <span
-                            className={`cu-registry-chip cu-registry-chip--visibility-${e.visibility}`}
-                          >
-                            {e.visibility}
-                          </span>
-                        </td>
-                        <td>{e.status}</td>
-                        <td className="cu-table__cell-actions">
-                          <RowActionsMenu
-                            ariaLabel={`Actions for ${e.name} v${e.version}`}
-                            actions={rowActions}
-                          />
-                        </td>
-                      </TableRow>
-                    )
-                  })
-                )}
-              </tbody>
-            </DataTable>
-          </div>
+                  }
+                />
+              ) : (
+                sortedEntries.map(e => {
+                  const isPrivate = e.visibility === 'private'
+                  const detailRoute = CONTROL_ROUTES.marketplace.entry(e.name, e.version)
+                  const rowActions: RowActionMenuItem[] = [
+                    {
+                      key: 'view',
+                      label: 'View details',
+                      onClick: () => router.push(detailRoute),
+                    },
+                    ...(isInstalled(e)
+                      ? [
+                          {
+                            key: 'installed',
+                            label: 'Installed',
+                            disabled: true,
+                            onClick: () => undefined,
+                          },
+                        ]
+                      : [
+                          {
+                            key: 'install',
+                            label: 'Install',
+                            onClick: () =>
+                              router.push(
+                                CONTROL_ROUTES.marketplace.install({
+                                  entry: e.name,
+                                  version: e.version,
+                                })
+                              ),
+                          },
+                        ]),
+                    ...(isPrivate && canShare
+                      ? [
+                          {
+                            key: 'share',
+                            label: 'Share access',
+                            onClick: () =>
+                              setGrantTarget({
+                                entryName: e.name,
+                                opener: document.activeElement as HTMLButtonElement,
+                              }),
+                          },
+                        ]
+                      : []),
+                    {
+                      key: 'edit',
+                      label: 'Edit',
+                      onClick: () =>
+                        router.push(CONTROL_ROUTES.marketplace.editEntry(e.name, e.version)),
+                    },
+                    {
+                      key: 'remove',
+                      label: 'Remove from Marketplace',
+                      danger: true,
+                      onClick: () => void handleRemove(e),
+                    },
+                  ]
+                  return (
+                    <TableRow key={entryKey(e)} onNavigate={() => router.push(detailRoute)}>
+                      <td>
+                        <code>{e.name}</code>
+                      </td>
+                      <td>{entryTypeLabel(e)}</td>
+                      <td>{e.version}</td>
+                      <td>
+                        <span
+                          className={`cu-registry-chip cu-registry-chip--visibility-${e.visibility}`}
+                        >
+                          {e.visibility}
+                        </span>
+                      </td>
+                      <td>{e.status}</td>
+                      <td className="cu-table__cell-actions">
+                        <RowActionsMenu
+                          ariaLabel={`Actions for ${e.name} v${e.version}`}
+                          actions={rowActions}
+                        />
+                      </td>
+                    </TableRow>
+                  )
+                })
+              )}
+            </tbody>
+          </DataTable>
         </div>
       </div>
+    </>
+  )
+
+  return (
+    <section>
+      {embedded ? content : <div className="cu-card cu-card--viewport-fill">{content}</div>}
       {grantTarget ? (
         <GrantAccessModal
           entryName={grantTarget.entryName}

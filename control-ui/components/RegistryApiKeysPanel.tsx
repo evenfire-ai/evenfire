@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
@@ -54,12 +54,40 @@ function fmtExpiry(v: string | null): string {
   return d.getTime() < Date.now() ? `Expired ${d.toLocaleDateString()}` : d.toLocaleString()
 }
 
-export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKeysPanelProps) {
+export default function RegistryApiKeysPanel({
+  embedded = false,
+  hideHeader = false,
+  search = '',
+  refreshSignal = 0,
+  createSignal = 0,
+  onCreateAvailabilityChange,
+}: RegistryApiKeysPanelProps) {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [view, setView] = useState<View>({ kind: 'loading' })
   const [creating, setCreating] = useState(false)
   const [revealed, setRevealed] = useState<CreatedRegistryApiKey | null>(null)
+  const normalizedSearch = search.trim().toLowerCase()
+  const visibleKeys = useMemo(
+    () =>
+      view.kind === 'ready'
+        ? view.keys.filter(key =>
+            [
+              key.key_prefix,
+              key.description,
+              key.scopes.join(' '),
+              key.created_by_username,
+              key.created_at,
+              key.expires_at ?? '',
+              key.last_used_at ?? '',
+            ]
+              .join(' ')
+              .toLowerCase()
+              .includes(normalizedSearch)
+          )
+        : [],
+    [normalizedSearch, view]
+  )
   // The auth-disabled view needs mode-specific copy: self-hosted fixes it by
   // connecting, managed fixes it via CLERUM_REGISTRY_AUTH_ENABLED (no connect
   // flow exists there). Same best-effort detection RegistryCatalog uses for its
@@ -74,7 +102,7 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
     RegistryApiKey,
     'prefix' | 'description' | 'scopes' | 'created_by' | 'created' | 'expires' | 'last_used'
   >({
-    rows: view.kind === 'ready' ? view.keys : [],
+    rows: visibleKeys,
     defaultKey: 'created',
     defaultDirection: 'desc',
     identity: key => key.id,
@@ -140,6 +168,18 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
     void loadConnectionMode()
   }, [load, loadConnectionMode])
 
+  useEffect(() => {
+    if (refreshSignal > 0) void load()
+  }, [load, refreshSignal])
+
+  useEffect(() => {
+    if (createSignal > 0 && view.kind === 'ready') setCreating(true)
+  }, [createSignal, view.kind])
+
+  useEffect(() => {
+    onCreateAvailabilityChange?.(view.kind === 'ready')
+  }, [onCreateAvailabilityChange, view.kind])
+
   async function handleCreate(input: CreateRegistryApiKeyInput) {
     const created: CreatedRegistryApiKey = await createRegistryApiKey(input)
     setCreating(false)
@@ -175,16 +215,18 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
 
   const content = (
     <>
-      <TablePanelHeader
-        title={`API keys${isReady ? ` for @${(view as { org: string }).org}` : ''}`}
-        primaryAction={
-          isReady ? (
-            <Button type="button" variant="primary" size="sm" onClick={() => setCreating(true)}>
-              + Create key
-            </Button>
-          ) : null
-        }
-      />
+      {hideHeader ? null : (
+        <TablePanelHeader
+          title={`API keys${isReady ? ` for @${(view as { org: string }).org}` : ''}`}
+          primaryAction={
+            isReady ? (
+              <Button type="button" variant="primary" size="sm" onClick={() => setCreating(true)}>
+                + Create key
+              </Button>
+            ) : null
+          }
+        />
+      )}
 
       <div className="cu-card__body">
         {view.kind === 'not-owner' ? (
@@ -245,10 +287,14 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
                     kind="error"
                     message="Could not load API keys."
                   />
-                ) : view.keys.length === 0 ? (
+                ) : visibleKeys.length === 0 ? (
                   <TableStateRow
                     colSpan={columns.length}
-                    message={`No API keys yet. Create one to publish to @${view.org} from CI or scripts.`}
+                    message={
+                      normalizedSearch
+                        ? 'No API keys match this search.'
+                        : `No API keys yet. Create one to publish to @${view.org} from CI or scripts.`
+                    }
                   />
                 ) : (
                   keySort.sortedRows.map(k => (

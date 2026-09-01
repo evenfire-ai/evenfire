@@ -1,5 +1,6 @@
 'use client'
 
+import { useState } from 'react'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { useInboundGrants } from '../../lib/hooks/useInboundGrants'
 import { useRegistryCapability } from '../../lib/hooks/useRegistryCapability'
@@ -9,21 +10,19 @@ import { OwnedEntries } from '../PublisherView/OwnedEntries'
 import { RetryBanner } from '../PublisherView/RetryBanner'
 import RegistryApiKeysPanel from '../RegistryApiKeysPanel'
 import RegistryConnectPanel from '../RegistryConnectPanel'
+import { SectionSearchInput } from '../SectionSearchInput'
 import { IconStore } from '../Sidebar/icons'
-import { TabBar } from '../TabBar'
 import { TablePanelHeader } from '../TablePanelHeader'
+import { IconRefresh } from '../icons'
+import { Button } from '../ui'
 
 export type OrgAreaTab = 'entries' | 'images' | 'credentials' | 'connection'
 
-const SUB_TABS: { value: OrgAreaTab; href: string; label: string }[] = [
-  { value: 'credentials', href: CONTROL_ROUTES.marketplace.orgCredentials, label: 'API Keys' },
-  { value: 'entries', href: CONTROL_ROUTES.marketplace.orgEntries, label: 'Entries' },
-  { value: 'images', href: CONTROL_ROUTES.marketplace.orgImages, label: 'Images' },
-  // Connection sub-tab hidden for now: once connected it only shows a static,
-  // non-actionable status. Claiming still lives at the standalone connect page,
-  // and Phase 3 replaces it with an inline claim. Restore to bring it back.
-  // { value: 'connection', href: CONTROL_ROUTES.marketplace.orgConnection, label: 'Connection' },
-]
+type SearchableOrgAreaTab = Exclude<OrgAreaTab, 'connection'>
+
+function isSearchableTab(tab: OrgAreaTab): tab is SearchableOrgAreaTab {
+  return tab === 'credentials' || tab === 'entries' || tab === 'images'
+}
 
 function NotClaimed({ action }: { action: string }) {
   return (
@@ -47,12 +46,54 @@ function NotClaimed({ action }: { action: string }) {
 export function MarketplaceOrgArea({ activeTab }: { activeTab: OrgAreaTab }) {
   const { capability, loading, error, reload } = useRegistryCapability()
   const inbound = useInboundGrants()
+  const [searchByTab, setSearchByTab] = useState<Record<SearchableOrgAreaTab, string>>({
+    credentials: '',
+    entries: '',
+    images: '',
+  })
+  const [refreshSignalByTab, setRefreshSignalByTab] = useState<
+    Record<SearchableOrgAreaTab, number>
+  >({
+    credentials: 0,
+    entries: 0,
+    images: 0,
+  })
+  const [apiKeyCreateSignal, setApiKeyCreateSignal] = useState(0)
+  const [apiKeysCanCreate, setApiKeysCanCreate] = useState(false)
 
   const orgScope = capability?.scope ?? null
+  const orgLabel = orgScope ?? (capability?.orgName ? `@${capability.orgName}` : 'This deployment')
   const canManageOrg = capability?.canManageOrg === true
   // Cross-org sharing availability, mirrored from the inbound-grants probe.
   const canShare = inbound.status === 'available' || inbound.status === 'error'
   const sharingUnavailable = inbound.status === 'unavailable'
+  const activeSearch = isSearchableTab(activeTab) ? searchByTab[activeTab] : ''
+  const activeLabel =
+    activeTab === 'credentials'
+      ? 'API keys'
+      : activeTab === 'entries'
+        ? 'entries'
+        : activeTab === 'images'
+          ? 'images'
+          : 'connection'
+  const activeDescription =
+    activeTab === 'credentials'
+      ? `${orgLabel} API keys. Create and revoke registry keys for CI, scripts, and image publishing.`
+      : activeTab === 'entries'
+        ? `${orgLabel} entries. Review and manage registry entries published by this deployment.`
+        : activeTab === 'images'
+          ? `${orgLabel} images. Review container images pushed by this deployment.`
+          : `${orgLabel} registry connection. Review the deployment registry connection.`
+
+  function setActiveSearch(value: string) {
+    if (!isSearchableTab(activeTab)) return
+    setSearchByTab(current => ({ ...current, [activeTab]: value }))
+  }
+
+  function refreshActiveTab() {
+    if (!isSearchableTab(activeTab)) return
+    setRefreshSignalByTab(current => ({ ...current, [activeTab]: current[activeTab] + 1 }))
+  }
 
   return (
     <section>
@@ -64,57 +105,117 @@ export function MarketplaceOrgArea({ activeTab }: { activeTab: OrgAreaTab }) {
               Marketplace
             </>
           }
-          subtitle="Everything your org owns on the registry"
-        />
-        <MarketplaceTabs active="org" />
-        <div className="cu-card__body">
-          <TabBar<OrgAreaTab>
-            ariaLabel="Organization sections"
-            activeValue={activeTab}
-            className="cu-tabs--flush-top"
-            options={SUB_TABS}
-          />
-
-          {/* Entries is a publishing surface, so it follows the publishing-UI
-              toggle (canManageOrg). Credentials and Connection do NOT — turning
-              publishing off must not remove API keys or the connection status
-              (design spec §6). The Credentials tab is the single registry-key
-              surface (self-gating); a registry:publish key doubles as the Docker
-              push credential, surfaced in the key's reveal dialog. */}
-          {activeTab === 'entries' ? (
-            loading ? (
-              <p>Loading…</p>
-            ) : error ? (
-              // A transient capability-probe failure must NOT be read as an
-              // unclaimed org — that would falsely prompt a re-claim. Offer Retry.
-              <RetryBanner message="Couldn’t load your organization." onRetry={reload} />
-            ) : canManageOrg && orgScope ? (
-              <OwnedEntries
-                orgScope={orgScope}
-                canShare={canShare}
-                sharingUnavailable={sharingUnavailable}
+          subtitle={activeDescription}
+          actionsClassName="cu-registry-toolbar"
+          search={
+            isSearchableTab(activeTab) ? (
+              <SectionSearchInput
+                value={activeSearch}
+                onChange={setActiveSearch}
+                placeholder={`Search ${activeLabel}`}
+                ariaLabel={`Search ${activeLabel}`}
+                disabled={loading && !orgScope}
               />
-            ) : (
-              <NotClaimed action="publish and manage entries" />
-            )
-          ) : null}
+            ) : undefined
+          }
+          refreshAction={
+            isSearchableTab(activeTab) ? (
+              <button
+                type="button"
+                className="cu-btn cu-btn--icon cu-btn--toolbar"
+                onClick={refreshActiveTab}
+                aria-label={`Reload ${activeLabel}`}
+              >
+                <IconRefresh width={18} height={18} />
+              </button>
+            ) : undefined
+          }
+          primaryAction={
+            activeTab === 'credentials' ? (
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                onClick={() => setApiKeyCreateSignal(signal => signal + 1)}
+                disabled={!apiKeysCanCreate}
+              >
+                + Create key
+              </Button>
+            ) : undefined
+          }
+        />
+        <MarketplaceTabs active={isSearchableTab(activeTab) ? activeTab : 'credentials'} />
 
-          {activeTab === 'images' ? (
-            loading ? (
+        {/* Entries is a publishing surface, so it follows the publishing-UI
+            toggle (canManageOrg). Credentials do NOT — turning publishing off
+            must not remove API keys (design spec §6). The Credentials tab is
+            the single registry-key surface (self-gating); a registry:publish
+            key doubles as the Docker push credential, surfaced in the key's
+            reveal dialog. */}
+        {activeTab === 'entries' ? (
+          loading ? (
+            <div className="cu-card__body">
               <p>Loading…</p>
-            ) : error ? (
+            </div>
+          ) : error ? (
+            // A transient capability-probe failure must NOT be read as an
+            // unclaimed org — that would falsely prompt a re-claim. Offer Retry.
+            <div className="cu-card__body">
               <RetryBanner message="Couldn’t load your organization." onRetry={reload} />
-            ) : canManageOrg && orgScope ? (
-              <MarketplaceOrgImages orgScope={orgScope} />
-            ) : (
+            </div>
+          ) : canManageOrg && orgScope ? (
+            <OwnedEntries
+              orgScope={orgScope}
+              canShare={canShare}
+              sharingUnavailable={sharingUnavailable}
+              embedded
+              hideHeader
+              search={searchByTab.entries}
+              refreshSignal={refreshSignalByTab.entries}
+            />
+          ) : (
+            <div className="cu-card__body">
+              <NotClaimed action="publish and manage entries" />
+            </div>
+          )
+        ) : null}
+
+        {activeTab === 'images' ? (
+          loading ? (
+            <div className="cu-card__body">
+              <p>Loading…</p>
+            </div>
+          ) : error ? (
+            <div className="cu-card__body">
+              <RetryBanner message="Couldn’t load your organization." onRetry={reload} />
+            </div>
+          ) : canManageOrg && orgScope ? (
+            <MarketplaceOrgImages
+              orgScope={orgScope}
+              embedded
+              hideHeader
+              search={searchByTab.images}
+              refreshSignal={refreshSignalByTab.images}
+            />
+          ) : (
+            <div className="cu-card__body">
               <NotClaimed action="push and manage images" />
-            )
-          ) : null}
+            </div>
+          )
+        ) : null}
 
-          {activeTab === 'credentials' ? <RegistryApiKeysPanel embedded /> : null}
+        {activeTab === 'credentials' ? (
+          <RegistryApiKeysPanel
+            embedded
+            hideHeader
+            search={searchByTab.credentials}
+            refreshSignal={refreshSignalByTab.credentials}
+            createSignal={apiKeyCreateSignal}
+            onCreateAvailabilityChange={setApiKeysCanCreate}
+          />
+        ) : null}
 
-          {activeTab === 'connection' ? <RegistryConnectPanel /> : null}
-        </div>
+        {activeTab === 'connection' ? <RegistryConnectPanel /> : null}
       </div>
     </section>
   )

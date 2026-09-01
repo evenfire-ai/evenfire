@@ -100,7 +100,9 @@ application guidance that must be combined with this shared document.
   tertiary/ghost page-action variants. Place route-backed tabs below the page
   identity and toolbar, and flatten category-wrapper plus child-list double
   tabs into sibling destinations when no information-architecture decision is
-  required.
+  required. Do not keep an org, deploy, or category wrapper tab solely to hold
+  another row of list tabs; put that scope in the active tab description
+  instead.
 - Fill the available content width. Keep fixed widths for genuinely compact
   numeric, status, selection, icon, and action cells; allow ordinary text
   columns to size flexibly. Put secondary metadata such as descriptions,
