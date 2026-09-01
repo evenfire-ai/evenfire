@@ -21,8 +21,6 @@ export type ExternalUserRateLimitOperation =
   | 'authentication_attempt'
   | 'session_verify'
   | 'rpc_token'
-  | 'gfs_read'
-  | 'gfs_mutation'
   | 'team_user_read'
   | 'team_user_mutation'
 
@@ -71,8 +69,6 @@ const POLICIES: Readonly<Record<ExternalUserRateLimitOperation, Policy>> = {
   },
   session_verify: { bucketType: 'external_session_verify', maxPerMinute: 10 },
   rpc_token: { bucketType: 'external_rpc_token', maxPerMinute: 10 },
-  gfs_read: { bucketType: 'external_gfs_read', maxPerMinute: 30 },
-  gfs_mutation: { bucketType: 'external_gfs_mutation', maxPerMinute: 10 },
   team_user_read: { bucketType: 'external_team_user_read', maxPerMinute: 30 },
   team_user_mutation: { bucketType: 'external_team_user_mutation', maxPerMinute: 10 },
 }
