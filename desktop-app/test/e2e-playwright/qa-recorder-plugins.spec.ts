@@ -105,9 +105,7 @@ test('optional QA recorder: Desktop plugins journey', async ({}, testInfo) => {
           // Success = the trigger was acknowledged: the acting Trigger button
           // flips to its busy label, or the modal closes without an error.
           const triggering = page.getByRole('button', { name: 'Triggering…' })
-          await expect(triggering.or(page.getByRole('dialog')))
-            .toBeHidden({ timeout: 60_000 })
-            .catch(() => undefined)
+          await expect(triggering.or(page.getByRole('dialog'))).toBeHidden({ timeout: 60_000 })
         }
       }
     }
