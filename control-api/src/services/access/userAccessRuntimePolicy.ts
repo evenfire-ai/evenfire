@@ -14,6 +14,7 @@ import {
   type ConfiguredUserAccessIntent,
   type DeploymentReadiness,
   type EffectiveUserAccessPolicy,
+  USER_ACCESS_POLICY_VERSION,
   UserAccessPolicyConfigurationError,
   compileUserAccessPolicy,
   configuredUserAccessIntent,
@@ -35,6 +36,25 @@ type RuntimePolicyOptions = Readonly<{
   indexerEnabled?: boolean
   readinessMaxAgeMs?: number | null
   now?: Date
+  catalogActivationRecord?: string
+}>
+
+type CatalogComparisonEvidence = Readonly<{
+  family: CatalogFamily
+  attempted: number
+  completed: number
+  reference: string
+}>
+
+type CatalogActivationRecordV1 = Readonly<{
+  version: 1
+  active: boolean
+  revision: string
+  acceptedBy: string
+  acceptedAt: string
+  catalogConfigurationRevision: string
+  requiredFamilies: readonly CatalogFamily[]
+  comparisonEvidence: readonly CatalogComparisonEvidence[]
 }>
 
 const DATABASE_ONLY_FAMILIES: readonly CatalogFamily[] = Object.freeze([
@@ -68,6 +88,100 @@ function unavailableReadiness(): DeploymentReadiness {
     snapshot: 'unavailable',
     catalogOperationalFamilies: new Set<CatalogFamily>(),
   })
+}
+
+export function catalogConfigurationRevision(intent: ConfiguredUserAccessIntent): string {
+  return revisionOfValues([
+    'catalog-activation-configuration-v1',
+    USER_ACCESS_POLICY_VERSION,
+    intent.catalogMode,
+    intent.teamGfsMembershipAdmissionLimit,
+    CATALOG_FAMILIES,
+  ])
+}
+
+function boundedText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 1_024
+}
+
+function parseCatalogActivationRecord(value: string): CatalogActivationRecordV1 | null {
+  if (!value || value.length > 64 * 1_024) return null
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>
+    if (
+      parsed.version !== 1 ||
+      typeof parsed.active !== 'boolean' ||
+      !boundedText(parsed.revision) ||
+      !boundedText(parsed.acceptedBy) ||
+      !boundedText(parsed.acceptedAt) ||
+      !Number.isFinite(Date.parse(parsed.acceptedAt)) ||
+      !boundedText(parsed.catalogConfigurationRevision) ||
+      !Array.isArray(parsed.requiredFamilies) ||
+      !Array.isArray(parsed.comparisonEvidence)
+    ) {
+      return null
+    }
+    const requiredFamilies = parsed.requiredFamilies as unknown[]
+    const uniqueRequired = new Set(requiredFamilies)
+    if (
+      uniqueRequired.size !== CATALOG_FAMILIES.length ||
+      CATALOG_FAMILIES.some(family => !uniqueRequired.has(family))
+    ) {
+      return null
+    }
+    const evidence = parsed.comparisonEvidence as Record<string, unknown>[]
+    const evidenceByFamily = new Map<CatalogFamily, CatalogComparisonEvidence>()
+    for (const item of evidence) {
+      const family = item?.family as CatalogFamily
+      if (
+        !CATALOG_FAMILIES.includes(family) ||
+        evidenceByFamily.has(family) ||
+        !Number.isSafeInteger(item.attempted) ||
+        Number(item.attempted) < 1 ||
+        !Number.isSafeInteger(item.completed) ||
+        Number(item.completed) < 1 ||
+        Number(item.completed) > Number(item.attempted) ||
+        !boundedText(item.reference)
+      ) {
+        return null
+      }
+      evidenceByFamily.set(
+        family,
+        Object.freeze({
+          family,
+          attempted: Number(item.attempted),
+          completed: Number(item.completed),
+          reference: item.reference,
+        })
+      )
+    }
+    if (evidenceByFamily.size !== CATALOG_FAMILIES.length) return null
+    return Object.freeze({
+      version: 1,
+      active: parsed.active,
+      revision: parsed.revision,
+      acceptedBy: parsed.acceptedBy,
+      acceptedAt: parsed.acceptedAt,
+      catalogConfigurationRevision: parsed.catalogConfigurationRevision,
+      requiredFamilies: Object.freeze([...requiredFamilies] as CatalogFamily[]),
+      comparisonEvidence: Object.freeze(
+        CATALOG_FAMILIES.map(family => evidenceByFamily.get(family)!)
+      ),
+    })
+  } catch {
+    return null
+  }
+}
+
+function catalogParityAccepted(
+  intent: ConfiguredUserAccessIntent,
+  activationValue: string
+): boolean {
+  const record = parseCatalogActivationRecord(activationValue)
+  return (
+    record?.active === true &&
+    record.catalogConfigurationRevision === catalogConfigurationRevision(intent)
+  )
 }
 
 function parseSourceStates(
@@ -108,7 +222,9 @@ function parseSourceStates(
 function runtimeReadiness(
   states: readonly RuntimeSourceState[],
   now: Date,
-  maxAgeMs: number
+  maxAgeMs: number,
+  intent: ConfiguredUserAccessIntent,
+  activationValue: string
 ): DeploymentReadiness {
   const currentSources = new Set<OperationalSourceFamily>()
   for (const state of states) {
@@ -122,6 +238,7 @@ function runtimeReadiness(
     const required = REQUIRED_SOURCES[family]
     if (required?.every(source => currentSources.has(source))) operationalFamilies.add(family)
   }
+  const parityAccepted = catalogParityAccepted(intent, activationValue)
   return Object.freeze({
     ...reconstructionReadiness,
     revision: revisionOfValues([
@@ -134,9 +251,12 @@ function runtimeReadiness(
         state.status,
         state.lastSuccessAt.toISOString(),
       ]),
+      catalogConfigurationRevision(intent),
+      activationValue,
     ]),
     snapshot: 'current',
     catalogOperationalFamilies: operationalFamilies,
+    catalogParityAccepted: parityAccepted,
   })
 }
 
@@ -190,7 +310,13 @@ export async function resolveEffectiveUserAccessPolicy(
     const states = parseSourceStates(result.rows as Record<string, unknown>[])
     return compileUserAccessPolicy(
       intent,
-      runtimeReadiness(states, options.now ?? new Date(), validatedMaxAgeMs)
+      runtimeReadiness(
+        states,
+        options.now ?? new Date(),
+        validatedMaxAgeMs,
+        intent,
+        options.catalogActivationRecord ?? config.userAccessCatalogActivationRecord
+      )
     )
   } catch (error) {
     if (error instanceof UserAccessPolicyConfigurationError) throw error
