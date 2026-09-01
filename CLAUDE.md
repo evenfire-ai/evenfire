@@ -12,6 +12,10 @@ The local Minikube T0/T1/T2 contract is development-only. Follow the
 canonical `make minikube-t2-preflight`, `make minikube-t2`, and
 `make minikube-t2-runtime` entry points and the ownership, secret-safety, and
 evidence rules in `AGENTS.md` and `docs/testing/minikube-t2-runbook.md`.
+Hold Control UI / Desktop port-forwards on the host with
+`make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf`
+(`AGENTS.md` § Branch-profile UI port-forwards). Do not search for that
+helper and do not use `make minikube-pf-all-bg` as the hold.
 `make minikube-t2-preflight` is a planner, not a lane verdict. A T2 verdict is
 produced only by the final exact-head preflight inside `make minikube-t2` (or
 `make minikube-t2-runtime` after T0 and T1 are already green on the same HEAD).

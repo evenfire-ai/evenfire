@@ -3,12 +3,14 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
+import { CodexSubscriptionHub } from '@components/CodexSubscriptionHub'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { SecretsTable } from '@components/SecretsTable'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { apiGet, isSilentApiError } from '@lib/api'
 
 export type SecretScope = 'llm' | 'mcp' | 'recipe'
+export type LlmSecretsSubTab = 'api-key' | 'subscriptions'
 
 type SecretItem = {
   name?: string
@@ -16,7 +18,13 @@ type SecretItem = {
   keys?: string[]
 }
 
-export function SecretsPageContent({ activeScope }: { activeScope: SecretScope }) {
+export function SecretsPageContent({
+  activeScope,
+  llmSubTab = 'api-key',
+}: {
+  activeScope: SecretScope
+  llmSubTab?: LlmSecretsSubTab
+}) {
   const router = useRouter()
   const [secrets, setSecrets] = useState<SecretItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -39,6 +47,16 @@ export function SecretsPageContent({ activeScope }: { activeScope: SecretScope }
   useEffect(() => {
     void loadAll()
   }, [])
+
+  if (activeScope === 'llm' && llmSubTab === 'subscriptions') {
+    return (
+      <AuthGate>
+        <DashboardLayout>
+          <CodexSubscriptionHub />
+        </DashboardLayout>
+      </AuthGate>
+    )
+  }
 
   return (
     <AuthGate>

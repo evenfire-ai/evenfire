@@ -11,7 +11,11 @@ import {
   type Transactor,
   type TxClient,
 } from '../db/writeStore'
-import { GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES, partGeometry } from './protocol'
+import {
+  GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES,
+  GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES,
+  partGeometry,
+} from './protocol'
 import {
   GfsUploadSessionService,
   type UploadSessionServiceDeps,
@@ -611,9 +615,8 @@ describe('GfsUploadSessionService', () => {
     ['100 MiB', 100 * 1024 * 1024],
     ['250 MiB', 250 * 1024 * 1024],
     ['300 MiB', 300 * 1024 * 1024],
-    ['the protocol maximum', 1024 * 1024 * 1024],
   ] as const)(
-    'advertises and enforces the configured %s product limit before allocation',
+    'advertises and enforces the configured %s product policy before allocation',
     async (_label, productMaxFileBytes) => {
       tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-runtime-boundary-'))
       const config = { ...CONFIG, productMaxFileBytes }
@@ -642,10 +645,33 @@ describe('GfsUploadSessionService', () => {
           sizeBytes: productMaxFileBytes + 1,
           idempotencyKey: '21111111-1111-4111-8111-111111111113',
         })
-      ).rejects.toMatchObject({ code: 'payload_too_large' })
+      ).rejects.toMatchObject({
+        code: 'payload_too_large',
+        message: `sizeBytes must be between 0 and ${productMaxFileBytes}`,
+      })
       expect(overDb.sessions).toHaveLength(0)
     }
   )
+
+  it('admits exactly 1 GiB when product policy permits the protocol boundary', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-protocol-boundary-'))
+    const config = { ...CONFIG, productMaxFileBytes: GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES }
+    const input = {
+      ...principal,
+      operation: 'create' as const,
+      parentRid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      name: 'protocol-boundary.bin',
+    }
+
+    const exactDb = new MemoryDb()
+    const exact = await service(exactDb, config).create({
+      ...input,
+      sizeBytes: GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES,
+      idempotencyKey: '21111111-1111-4111-8111-111111111115',
+    })
+    expect(exact.session.expectedBytes).toBe(GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES)
+    expect(exactDb.sessions).toHaveLength(1)
+  })
 
   it('keeps zero-byte uploads valid with a positive configured product limit', async () => {
     tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-empty-file-'))

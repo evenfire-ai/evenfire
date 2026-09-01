@@ -255,7 +255,9 @@ function isPromptBridgeTarget(value: unknown): value is PromptBridgeTarget {
     typeof target.targetRef === 'string' &&
     typeof target.provider === 'string' &&
     typeof target.model === 'string' &&
-    typeof target.credentialSlot === 'string'
+    typeof target.credentialSlot === 'string' &&
+    // Optional Codex subscription grant identity (oauth-broker targets only).
+    (target.connectionRef === undefined || typeof target.connectionRef === 'string')
   )
 }
 
@@ -375,6 +377,7 @@ export class PluginWorkloadSdkControlApiClient {
             Authorization: `Bearer ${this.opts.getAccessToken()}`,
           },
           body: JSON.stringify(body),
+          signal: AbortSignal.timeout(15_000),
         })
       } catch (err) {
         // Network failure — retryable.

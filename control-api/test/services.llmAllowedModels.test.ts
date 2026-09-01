@@ -341,8 +341,10 @@ describe('llmAllowedModels service', () => {
     })
 
     it('materializes an enabled row even when it is stale (R3.7: stale never de-serves)', async () => {
-      // The materializer query filters `WHERE enabled` and never references
-      // `stale`, so an enabled model discovery flagged stale still reaches the CM.
+      // R3.7: enabled non-Codex rows still reach the ConfigMap even if discovery
+      // flagged them stale. Codex subscription is the documented exception:
+      // a stale row must not be served because the broker catalog is the only
+      // live model source.
       const query = vi.fn().mockResolvedValue({
         rows: [
           {
@@ -358,7 +360,8 @@ describe('llmAllowedModels service', () => {
       const grouped = await listEnabledGroupedByProvider(fakeDb(query))
       const [sql] = query.mock.calls[0]
       expect(String(sql)).toMatch(/WHERE enabled/)
-      expect(String(sql)).not.toMatch(/stale/)
+      expect(String(sql)).toContain("NOT (provider = 'codex-subscription' AND stale)")
+      expect(String(sql)).not.toMatch(/AND NOT stale\b/)
       expect(grouped.openai).toEqual([{ model: 'gpt-legacy' }])
     })
   })

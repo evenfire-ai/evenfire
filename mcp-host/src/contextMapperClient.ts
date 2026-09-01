@@ -121,6 +121,16 @@ function decodeMcpServer(value: unknown): McpServerInfo {
   if (value.authRequired && typeof value.credentialRevision !== 'string') {
     throw new Error('HCC authenticated server is missing its credential revision')
   }
+  // authKind is non-secret policy (mini-spec §3.3): an absent value degrades to
+  // `static` at dispatch (fail-closed); a present-but-unknown value is rejected,
+  // consistent with the strictness of the rest of the decoder. authKind is NOT
+  // on the forbidden-metadata denylist, so accepting it leaves that guard intact.
+  if (
+    value.authKind !== undefined &&
+    !['static', 'oauth-user', 'oauth-context'].includes(String(value.authKind))
+  ) {
+    throw new Error('HCC inventory response contains an invalid authKind')
+  }
 
   return {
     name: value.name,
@@ -134,6 +144,9 @@ function decodeMcpServer(value: unknown): McpServerInfo {
     authRequired: value.authRequired,
     ...(typeof value.credentialRevision === 'string'
       ? { credentialRevision: value.credentialRevision }
+      : {}),
+    ...(typeof value.authKind === 'string'
+      ? { authKind: value.authKind as McpServerInfo['authKind'] }
       : {}),
     status: {
       deployed: value.status.deployed,

@@ -6,6 +6,11 @@ const MCP_TOOL_MAX_TOTAL_TIMEOUT_ENV = 'CLERUM_MCP_TOOL_MAX_TOTAL_TIMEOUT_MS'
 export interface McpToolCallOptions {
   timeoutMs?: number
   signal?: AbortSignal
+  /**
+   * Caller identity used by McpManager to dispatch the per-connection partition
+   * of an oauth grantScope='user' server. Ignored by McpClient itself.
+   */
+  userId?: string
 }
 
 export interface McpSdkRequestOptions {

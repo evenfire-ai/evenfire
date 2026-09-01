@@ -983,17 +983,17 @@ if (
   eval "$hcc_ready_after_revoke_function"
   rc=0
   hcc_ready_after_stale_policy_revoked || rc=$?
-  # A 200 observed WITH the stale policy present is a fatal ordering violation
-  # (rc=2), not a benign retryable "not ready" (rc=1).
-  [ "$rc" -eq 2 ] &&
-    [ "$HCC_READY_PROBE_DIAGNOSTIC" = 'HCC_READY_PROBE category=ready-200-with-stale-policy-present' ]
+  # A1: /ready 200 WITH the stale policy present is the kubelet window.
+  # Retry (rc=1). rc=2 here would abort the first poll after watches sync.
+  [ "$rc" -eq 1 ]
 ); then
-  pass "global readiness evidence flags a surviving divergent policy as a fatal rc=2 ordering violation"
+  pass "global readiness retries while a divergent policy still survives after /ready 200"
 else
-  fail "global readiness can self-confirm (or only soft-fail) while a divergent policy survives"
+  fail "global readiness treats /ready 200 with a surviving divergent policy as terminal"
 fi
-# The loop must PROPAGATE the fatal rc=2 immediately, not retry until a later
-# clean poll turns the violation into a false PASS (the round-2 bug).
+# The loop must KEEP polling through that window and PASS only once the
+# stale policy is gone. wait_until_fast still treats rc=2 as fatal for the
+# identity-stable retain path; this predicate must not emit rc=2.
 wait_until_fast_function="$(
   sed -n '/^wait_until_fast() {$/,/^}$/p' "$MCP_READINESS_GATE"
 )"
@@ -1001,21 +1001,19 @@ if (
   HCC_READY_PROBE_DIAGNOSTIC=""
   POLL=0
   probe_new_hcc_ready_endpoint() { return 0; }
-  # Stale policy present for the first polls, revoked only later. The buggy
-  # retry loop would poll past the fatal first observation and PASS here.
+  # Stale for the first polls, revoked later. A1 must retry, not die on poll 1.
   external_egress_policy_absent() { POLL=$((POLL + 1)); [ "$POLL" -gt 4 ]; }
   eval "$hcc_ready_after_revoke_function"
   eval "$wait_until_fast_function"
   rc=0
-  wait_until_fast 10 "rc=2 propagation" hcc_ready_after_stale_policy_revoked || rc=$?
-  # rc must be the fatal 2, and it must have stopped inside the first predicate
-  # poll (which calls external_egress_policy_absent twice) — POLL<3 proves no
-  # retry occurred.
-  [ "$rc" -eq 2 ] && [ "$POLL" -lt 3 ]
+  wait_until_fast 10 "A1 probe window retry" hcc_ready_after_stale_policy_revoked || rc=$?
+  # Each predicate call samples absence twice. Success needs POLL>4 so the
+  # before/after pair is both absent.
+  [ "$rc" -eq 0 ] && [ "$POLL" -gt 4 ]
 ); then
-  pass "wait_until_fast propagates a fatal rc=2 on the first poll instead of retrying to a false PASS"
+  pass "wait_until_fast retries /ready 200 with a surviving policy until revocation"
 else
-  fail "wait_until_fast retried past a fatal ordering violation to a later clean poll"
+  fail "wait_until_fast no longer waits through the A1 probe window"
 fi
 
 # M6: the third contract signal adjudicates a real /metrics scrape. Extract the

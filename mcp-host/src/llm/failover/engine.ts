@@ -40,6 +40,8 @@ import type {
 export interface ClassifiedLike {
   code: LlmErrorCode
   retryable: boolean
+  /** Provider-native code (e.g. `budget_denied`) used for terminal gates. */
+  providerCode?: string
 }
 
 export interface FailoverEngineOptions {
@@ -76,7 +78,15 @@ export interface Attempt<T> {
  * thunk (served model = `target.model`) or an {@link Attempt} carrying an
  * explicit `servedModel` override.
  */
-export type AttemptBuilder<T> = (target: FailoverTarget) => (() => Promise<T>) | Attempt<T> | null
+export type PhysicalAttempt = {
+  /** 1-based index of this physical attempt in the engine's lifetime. */
+  providerAttemptIndex: number
+}
+
+export type AttemptBuilder<T> = (
+  target: FailoverTarget,
+  physicalAttempt: PhysicalAttempt
+) => (() => Promise<T>) | Attempt<T> | null
 
 function pairLabel(p: ModelPair): string {
   return `${p.provider}/${p.model}`
@@ -85,6 +95,7 @@ function pairLabel(p: ModelPair): string {
 export class FailoverEngine {
   private cooldownUntil: number | null = null
   private served: ServedBy | null = null
+  private nextProviderAttemptIndex = 1
 
   constructor(
     private policy: LlmPolicy,
@@ -104,6 +115,7 @@ export class FailoverEngine {
     this.policy = policy
     this.cooldownUntil = null
     this.served = null
+    this.nextProviderAttemptIndex = 1
   }
 
   /** Is this `(code, retryable)` eligible for fallback under the current policy? */
@@ -177,8 +189,10 @@ export class FailoverEngine {
     let prevFailure: { pair: ModelPair; reason: FailoverClass } | null = null
 
     for (const target of targets) {
-      const built = build(target)
+      const physicalAttempt = { providerAttemptIndex: this.nextProviderAttemptIndex }
+      const built = build(target, physicalAttempt)
       if (!built) continue // not constructible → skip this target
+      this.nextProviderAttemptIndex += 1
       const attempt = typeof built === 'function' ? built : built.run
       // Report the model REALLY served (a same-provider fallback serves the
       // session model, not `entry.model`) so `servedBy` + the metric's `to`
@@ -198,6 +212,9 @@ export class FailoverEngine {
       } catch (err) {
         lastErr = err
         const classified = classify(err)
+        if (classified?.providerCode === 'budget_denied' && !this.policy.budgetDeniedFailover) {
+          throw err
+        }
         const failClass = classified
           ? classifyFailoverClass(classified.code, classified.retryable)
           : null

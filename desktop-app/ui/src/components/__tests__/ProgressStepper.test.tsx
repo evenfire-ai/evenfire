@@ -241,6 +241,23 @@ describe('ProgressStepper — suspended status (approval flow)', () => {
     expect(screen.getByText('Waiting for approval...')).toBeDefined()
   })
 
+  it('announces the suspended state to assistive tech via a polite live region (R4-L8c)', () => {
+    // The label that changes when a task parks on approval/connect/OAuth must be a
+    // live region so a screen reader announces the transition without stealing focus.
+    render(
+      <ProgressStepper
+        progress={makeProgress({
+          status: 'suspended',
+          suspendedInfo: { requestId: 'req-1', displayName: 'Tool X' },
+        })}
+      />
+    )
+    const status = screen.getByRole('status')
+    expect(status.textContent).toBe('Tool X requires approval')
+    expect(status.getAttribute('aria-live')).toBe('polite')
+    expect(status.getAttribute('aria-atomic')).toBe('true')
+  })
+
   it('shows tool display name when suspendedInfo is populated', () => {
     render(
       <ProgressStepper
@@ -407,6 +424,99 @@ describe('ProgressStepper — suspended status (approval flow)', () => {
     expect(screen.getByTestId('approval-approve-btn')).toBeDefined()
     expandDetails()
     expect(screen.getByText('MongoDB')).toBeDefined()
+  })
+})
+
+describe('ProgressStepper — connect_required suspension (U5, T5 invariant c)', () => {
+  const connectProgress = () =>
+    makeProgress({
+      status: 'suspended',
+      suspendedInfo: {
+        requestId: 'req-1',
+        displayName: 'monday tool',
+        reason: 'connect_required',
+        mcpServerName: 'monday',
+      },
+    })
+
+  it('renders a "Connect <server>" prompt, NOT the generic approval prompt', () => {
+    render(<ProgressStepper progress={connectProgress()} onConnect={vi.fn()} />)
+    expect(screen.getByText('Connect monday to continue')).toBeDefined()
+    // The generic approval label / buttons must NOT appear for a connect suspension.
+    expect(screen.queryByText(/requires approval/)).toBeNull()
+    expect(screen.queryByTestId('approval-approve-btn')).toBeNull()
+    expect(screen.queryByTestId('approval-deny-btn')).toBeNull()
+  })
+
+  it('renders a Connect button that fires onConnect and shows "Connecting..." on click', () => {
+    const onConnect = vi.fn()
+    render(<ProgressStepper progress={connectProgress()} onConnect={onConnect} />)
+    const btn = screen.getByTestId('connect-mcp-btn')
+    expect(btn.textContent).toBe('Connect monday')
+    fireEvent.click(btn)
+    expect(onConnect).toHaveBeenCalledOnce()
+    expect(btn.textContent).toBe('Connecting...')
+  })
+
+  it('does NOT render Approve/Deny even when those callbacks are supplied (connect wins)', () => {
+    render(
+      <ProgressStepper
+        progress={connectProgress()}
+        onApprove={vi.fn()}
+        onDeny={vi.fn()}
+        onConnect={vi.fn()}
+      />
+    )
+    expect(screen.getByTestId('connect-mcp-btn')).toBeDefined()
+    expect(screen.queryByTestId('approval-approve-btn')).toBeNull()
+    expect(screen.queryByTestId('approval-deny-btn')).toBeNull()
+  })
+
+  it('a generic approval suspension still renders Approve/Deny (connect branch is scoped)', () => {
+    render(
+      <ProgressStepper
+        progress={makeProgress({
+          status: 'suspended',
+          suspendedInfo: { requestId: 'req-1', displayName: 'Tool X' },
+        })}
+        onApprove={vi.fn()}
+        onDeny={vi.fn()}
+        onConnect={vi.fn()}
+      />
+    )
+    expect(screen.getByTestId('approval-approve-btn')).toBeDefined()
+    expect(screen.queryByTestId('connect-mcp-btn')).toBeNull()
+  })
+
+  it('connect_required WITHOUT an actionable onConnect never renders Approve/Deny (R3-L2)', () => {
+    // Defensive: if mcpServerName were ever empty the caller leaves onConnect
+    // undefined. This must NOT fall back to Approve/Deny — approving would resume
+    // with no grant → another 401 → a re-suspension loop. It renders an
+    // explanatory suspended state instead; Cancel remains available.
+    render(
+      <ProgressStepper
+        progress={makeProgress({
+          status: 'suspended',
+          suspendedInfo: {
+            requestId: 'req-1',
+            displayName: 'monday tool',
+            reason: 'connect_required',
+            mcpServerName: '',
+          },
+        })}
+        onApprove={vi.fn()}
+        onDeny={vi.fn()}
+        onCancel={vi.fn()}
+        // onConnect intentionally omitted
+      />
+    )
+    // Nothing to connect to, and — the fix — no Approve/Deny loop trap either.
+    expect(screen.queryByTestId('connect-mcp-btn')).toBeNull()
+    expect(screen.queryByTestId('approval-approve-btn')).toBeNull()
+    expect(screen.queryByTestId('approval-deny-btn')).toBeNull()
+    // An explanatory suspended state, with Cancel still available.
+    expect(screen.getByText(/must be reconnected to continue/)).toBeDefined()
+    expect(screen.getByTestId('progress-cancel-btn')).toBeDefined()
   })
 })
 

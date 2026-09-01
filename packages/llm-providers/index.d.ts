@@ -28,6 +28,7 @@ export declare const PROVIDER_IDS: readonly [
   'novita',
   'minimax',
   'azure',
+  'codex-subscription',
 ]
 
 /** Union of the canonical provider ids. */
@@ -89,3 +90,23 @@ export declare function isCredentialSlotOwnedByProvider(
   provider: string,
   credentialSlot: string,
 ): boolean
+
+export type ProviderAuthMode = 'static-credentials' | 'oauth-broker'
+export type ProviderModelCatalogMode = 'static' | 'dynamic'
+
+export interface ProviderDescriptor {
+  id: LlmProviderId
+  displayLabel: string
+  authMode: ProviderAuthMode
+  modelCatalogMode: ProviderModelCatalogMode
+  credentialSlots: readonly CredentialSlot[]
+  nonSecretEnv: readonly NonSecretEnvVar[]
+  defaultModel?: string
+}
+
+export declare const PROVIDER_AUTH_MODE: Record<LlmProviderId, ProviderAuthMode>
+export declare const PROVIDER_MODEL_CATALOG_MODE: Record<LlmProviderId, ProviderModelCatalogMode>
+export declare function providerDescriptor(id: LlmProviderId): ProviderDescriptor
+export declare function requireStaticCredentialSlot(
+  descriptor: Pick<ProviderDescriptor, 'authMode' | 'credentialSlots'>,
+): CredentialSlot

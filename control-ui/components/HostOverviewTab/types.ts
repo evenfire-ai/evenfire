@@ -18,13 +18,13 @@ export type HostOverviewTabProps = {
   contextMcpTotal: number
   modelPrimary: string
   modelProviderLine: string
-  stateless: boolean
-  lifecycleState: string
-  lifecycleReason: string
-  statelessRejectionMessage: string
   accessSummary: HostOverviewAccessSummary
+  editingName: boolean
+  nameDraft: string
+  onCancelNameEdit: () => void
+  onNameDraftChange: (value: string) => void
   onNavigate: (tab: HostTabKey) => void
   onSaveDisplayName: (displayName: string) => Promise<boolean>
-  onSaveLifecycle: (stateless: boolean) => Promise<boolean>
+  onStartNameEdit: () => void
   createdAt: string
 }
