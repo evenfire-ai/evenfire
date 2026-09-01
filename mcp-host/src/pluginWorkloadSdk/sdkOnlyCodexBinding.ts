@@ -77,11 +77,24 @@ export function verifySdkOnlyCodexBindingHash(
  * This must run for every bootstrap request that carries a binding object;
  * the request provider/version must not decide whether the hash is verified.
  */
+export function sanitizePluginWorkloadSdkCodexBindingProof(
+  binding: PluginWorkloadSdkCodexBindingProof
+): PluginWorkloadSdkCodexBindingProof {
+  return {
+    connectionKey: binding.connectionKey,
+    catalogRevision: binding.catalogRevision,
+    credentialRevision: binding.credentialRevision,
+    model: binding.model,
+    bindingHash: binding.bindingHash,
+  }
+}
+
 export function readVerifiedSdkOnlyCodexBinding(
   value: unknown,
   model: string
 ): PluginWorkloadSdkCodexBindingProof | null {
   if (!isPluginWorkloadSdkCodexBindingProof(value)) return null
   if (value.model !== model) return null
-  return verifySdkOnlyCodexBindingHash(value) ? value : null
+  if (!verifySdkOnlyCodexBindingHash(value)) return null
+  return sanitizePluginWorkloadSdkCodexBindingProof(value)
 }

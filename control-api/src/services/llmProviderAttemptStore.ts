@@ -105,6 +105,38 @@ export async function applyLlmProviderAttemptSdkLinkSchema(db: DbClient): Promis
   `)
 }
 
+export async function applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema(
+  db: DbClient
+): Promise<void> {
+  await db.query(`
+    DO $$
+    DECLARE
+      constraint_name text;
+    BEGIN
+      SELECT c.conname INTO constraint_name
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (c.conkey)
+       WHERE t.relname = 'llm_provider_attempts'
+         AND c.contype = 'f'
+         AND a.attname = 'plugin_workload_sdk_provider_attempt_id'
+       LIMIT 1;
+      IF constraint_name IS NOT NULL THEN
+        EXECUTE format(
+          'ALTER TABLE llm_provider_attempts DROP CONSTRAINT %I',
+          constraint_name
+        );
+      END IF;
+    END $$;
+
+    ALTER TABLE llm_provider_attempts
+      ADD CONSTRAINT llm_provider_attempts_plugin_workload_sdk_provider_attempt_id_fkey
+      FOREIGN KEY (plugin_workload_sdk_provider_attempt_id)
+      REFERENCES plugin_workload_sdk_provider_attempts(id)
+      ON DELETE SET NULL;
+  `)
+}
+
 export async function applyLlmProviderAttemptTicketSchema(db: DbClient): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS llm_provider_attempt_tickets (

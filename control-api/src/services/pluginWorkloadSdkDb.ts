@@ -1493,6 +1493,84 @@ export async function getPluginWorkloadSdkProviderAttempt(
   return row ? mapProviderAttemptRow(row) : null
 }
 
+export async function lockPluginWorkloadSdkRecipe(
+  db: DbClient,
+  recipeNamespace: string,
+  recipeName: string
+): Promise<void> {
+  const recipeLock = `plugin_workload_sdk:${recipeNamespace}/${recipeName}`
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [recipeLock])
+}
+
+export async function getPluginWorkloadSdkProviderAttemptForUpdate(
+  id: string,
+  db: DbClient
+): Promise<PluginWorkloadSdkProviderAttempt | null> {
+  const result = await db.query(
+    `SELECT * FROM plugin_workload_sdk_provider_attempts WHERE id = $1 FOR UPDATE`,
+    [id]
+  )
+  const row = result.rows[0] as Record<string, unknown> | undefined
+  return row ? mapProviderAttemptRow(row) : null
+}
+
+export async function pluginWorkloadSdkSpendOutcomeExists(
+  providerAttemptId: string,
+  db: DbClient
+): Promise<boolean> {
+  const result = await db.query(
+    `SELECT 1 FROM plugin_workload_sdk_spend_outcomes WHERE provider_attempt_id = $1`,
+    [providerAttemptId]
+  )
+  return result.rows.length > 0
+}
+
+/**
+ * JTI-free reserved → in_progress for Codex authorize-link. Does not write
+ * credential_jti. The secret-ticket path still promotes through
+ * registerPluginWorkloadSdkCredentialTicketJti.
+ */
+export async function promoteReservedOauthBrokerProviderAttempt(
+  input: {
+    id: string
+    invocationId: string
+    recipeNamespace: string
+    recipeName: string
+    attemptGeneration: number
+    attemptIndex: number
+    model: string
+    targetRef: string
+  },
+  db: DbClient
+): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE plugin_workload_sdk_provider_attempts
+        SET status = 'in_progress'
+      WHERE id = $1
+        AND invocation_id = $2
+        AND recipe_namespace = $3
+        AND recipe_name = $4
+        AND attempt_generation = $5
+        AND attempt_index = $6
+        AND provider = 'codex-subscription'
+        AND model = $7
+        AND target_ref = $8
+        AND status = 'reserved'
+        AND credential_jti IS NULL`,
+    [
+      input.id,
+      input.invocationId,
+      input.recipeNamespace,
+      input.recipeName,
+      input.attemptGeneration,
+      input.attemptIndex,
+      input.model,
+      input.targetRef,
+    ]
+  )
+  return (result.rowCount ?? 0) === 1
+}
+
 export async function markPluginWorkloadSdkProviderAttemptStatus(input: {
   id: string
   invocationId: string
@@ -2175,6 +2253,20 @@ export async function prunePluginWorkloadSdkExpiredIdempotency(): Promise<number
        WHERE attempts.invocation_id = inv.id
          AND inv.created_at < now() - interval '1 hour' * $1
          AND inv.status <> 'in_progress'`,
+      [IDEMPOTENCY_TTL_HOURS]
+    )
+    // Unlink the durable Codex ledger before deleting SDK attempt rows.
+    // 0108 also SET NULLs the FK on delete; this UPDATE keeps prune from
+    // depending on that constraint name and never CASCADE-deletes spend.
+    await db.query(
+      `UPDATE llm_provider_attempts a
+          SET plugin_workload_sdk_provider_attempt_id = NULL
+         FROM plugin_workload_sdk_provider_attempts attempts
+         JOIN plugin_workload_sdk_invocations inv
+           ON attempts.invocation_id = inv.id
+        WHERE a.plugin_workload_sdk_provider_attempt_id = attempts.id
+          AND inv.created_at < now() - interval '1 hour' * $1
+          AND inv.status <> 'in_progress'`,
       [IDEMPOTENCY_TTL_HOURS]
     )
     await db.query(

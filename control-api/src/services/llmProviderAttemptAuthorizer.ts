@@ -23,7 +23,12 @@ import {
   insertLlmProviderAttempt,
 } from './llmProviderAttemptStore.js'
 import { issueRegisteredCodexExecutionTicket } from './llmProviderAttemptTicket.js'
-import { getPluginWorkloadSdkProviderAttempt } from './pluginWorkloadSdkDb.js'
+import {
+  getPluginWorkloadSdkProviderAttemptForUpdate,
+  lockPluginWorkloadSdkRecipe,
+  pluginWorkloadSdkSpendOutcomeExists,
+  promoteReservedOauthBrokerProviderAttempt,
+} from './pluginWorkloadSdkDb.js'
 
 const log = rootLogger.child({ module: 'llm-provider-attempt-authorizer' })
 const CODEX_EXECUTE_SCOPE = 'llm:codex:execute'
@@ -43,6 +48,7 @@ const AUTHORIZE_BODY_KEYS = new Set([
   'recipeName',
   'userId',
   'pluginWorkloadSdkProviderAttemptId',
+  'targetRef',
 ])
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -363,6 +369,17 @@ export async function authorizeLlmProviderAttempt(
       typeof body.pluginWorkloadSdkProviderAttemptId === 'string'
         ? body.pluginWorkloadSdkProviderAttemptId.trim()
         : ''
+    const presentedTargetRef = typeof body.targetRef === 'string' ? body.targetRef.trim() : ''
+    let reservedSdkAttemptToPromote: {
+      id: string
+      invocationId: string
+      recipeNamespace: string
+      recipeName: string
+      attemptGeneration: number
+      attemptIndex: number
+      model: string
+      targetRef: string
+    } | null = null
     if (pluginWorkloadSdkProviderAttemptId) {
       if (!UUID_RE.test(pluginWorkloadSdkProviderAttemptId)) {
         throw new LlmProviderAttemptAuthorizeError(
@@ -370,24 +387,56 @@ export async function authorizeLlmProviderAttempt(
           'pluginWorkloadSdkProviderAttemptId must be a UUID'
         )
       }
-      const sdkAttempt = await getPluginWorkloadSdkProviderAttempt(
+      if (caller.callerKind === 'host') {
+        throw new LlmProviderAttemptAuthorizeError(
+          'no_grant',
+          'host Codex chat cannot bind a Plugin Workload SDK provider attempt'
+        )
+      }
+      if (!caller.recipeNamespace || !caller.recipeName) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'no_grant',
+          'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
+        )
+      }
+      await lockPluginWorkloadSdkRecipe(db, caller.recipeNamespace, caller.recipeName)
+      const sdkAttempt = await getPluginWorkloadSdkProviderAttemptForUpdate(
         pluginWorkloadSdkProviderAttemptId,
         db
       )
+      const spendExists = sdkAttempt
+        ? await pluginWorkloadSdkSpendOutcomeExists(sdkAttempt.id, db)
+        : false
       if (
         !sdkAttempt ||
+        spendExists ||
         sdkAttempt.invocationId !== invocationId ||
         sdkAttempt.attemptGeneration !== attemptGeneration ||
         sdkAttempt.attemptIndex !== providerAttemptIndex ||
         sdkAttempt.recipeNamespace !== caller.recipeNamespace ||
         sdkAttempt.recipeName !== caller.recipeName ||
         sdkAttempt.provider !== PROVIDER ||
+        sdkAttempt.model !== request.model ||
+        !sdkAttempt.targetRef.trim() ||
+        (presentedTargetRef !== '' && presentedTargetRef !== sdkAttempt.targetRef) ||
         !['reserved', 'in_progress'].includes(sdkAttempt.status)
       ) {
         throw new LlmProviderAttemptAuthorizeError(
           'no_grant',
           'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
         )
+      }
+      if (sdkAttempt.status === 'reserved') {
+        reservedSdkAttemptToPromote = {
+          id: sdkAttempt.id,
+          invocationId: sdkAttempt.invocationId,
+          recipeNamespace: sdkAttempt.recipeNamespace,
+          recipeName: sdkAttempt.recipeName,
+          attemptGeneration: sdkAttempt.attemptGeneration,
+          attemptIndex: sdkAttempt.attemptIndex,
+          model: sdkAttempt.model,
+          targetRef: sdkAttempt.targetRef,
+        }
       }
     }
 
@@ -409,6 +458,27 @@ export async function authorizeLlmProviderAttempt(
         connectionId: connection.id,
         ...(pluginWorkloadSdkProviderAttemptId ? { pluginWorkloadSdkProviderAttemptId } : {}),
       })
+      if (reservedSdkAttemptToPromote) {
+        const promoted = await promoteReservedOauthBrokerProviderAttempt(
+          reservedSdkAttemptToPromote,
+          db
+        )
+        if (!promoted) {
+          throw new LlmProviderAttemptAuthorizeError(
+            'no_grant',
+            'pluginWorkloadSdkProviderAttemptId is no longer reserved for Codex authorize'
+          )
+        }
+        log.info(
+          {
+            event: 'sdk_oauth_attempt_promoted',
+            pluginWorkloadSdkProviderAttemptId: reservedSdkAttemptToPromote.id,
+            providerAttemptId: attempt.id,
+            credentialJtiPresent: false,
+          },
+          'promoted reserved SDK oauth attempt after Codex authorize-link'
+        )
+      }
       const issued = await resolvedDeps.issueTicket(db, {
         sub: claims.sub,
         hostRef: caller.hostRef,

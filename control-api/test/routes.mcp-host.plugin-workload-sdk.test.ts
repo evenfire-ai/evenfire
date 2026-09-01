@@ -855,6 +855,47 @@ describe('POST /mcp-host/plugin-workload-sdk/invocations/:id/finalize', () => {
     expect(res.body).toMatchObject({ error: 'idempotency_conflict', retryable: false })
   })
 
+  it('accepts empty Codex credential fields and defers auth-mode rules to the service', async () => {
+    vi.mocked(finalizer.finalizePromptBridge).mockResolvedValue({
+      invocationId: 'inv-1',
+      providerAttemptId: finalizationBody.providerAttemptId,
+      status: 'complete',
+      outcome: 'exact',
+      idempotent: false,
+      usageAccepted: false,
+    })
+    const res = await request(buildApp())
+      .post('/mcp-host/plugin-workload-sdk/invocations/inv-1/finalize')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+      .send({
+        ...finalizationBody,
+        target: {
+          targetRef: 'codex-primary',
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          credentialSlot: '',
+        },
+        usage: {
+          llmSecretName: '',
+          callerRef: 'api',
+          fallbackUsed: false,
+          attemptCount: 1,
+          inputTokens: 0,
+          outputTokens: 0,
+        },
+      })
+    expect(res.status).toBe(201)
+    expect(finalizer.finalizePromptBridge).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target: expect.objectContaining({
+          provider: 'codex-subscription',
+          credentialSlot: '',
+        }),
+        usage: expect.objectContaining({ llmSecretName: '' }),
+      })
+    )
+  })
+
   it('accepts a failed no-execution finalization without usage claims', async () => {
     vi.mocked(finalizer.finalizePromptBridge).mockResolvedValue({
       invocationId: 'inv-1',

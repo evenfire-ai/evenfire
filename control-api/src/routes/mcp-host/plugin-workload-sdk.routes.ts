@@ -1,6 +1,5 @@
 import { type NextFunction, type Request, type Response, Router } from 'express'
 import { rateLimit } from 'express-rate-limit'
-import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
@@ -193,9 +192,7 @@ function parsePromptBridgeFinalizationBody(
     reason.length > 128 ||
     !targetRef ||
     !provider ||
-    !model ||
-    (!(isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker') &&
-      !credentialSlot)
+    !model
   ) {
     res.status(400).json({
       error:
@@ -219,9 +216,7 @@ function parsePromptBridgeFinalizationBody(
     const outputTokens = Number.isInteger(rawUsage.outputTokens)
       ? Number(rawUsage.outputTokens)
       : -1
-    const oauthBroker = isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker'
     if (
-      (!oauthBroker && !llmSecretName) ||
       !callerRef ||
       typeof rawUsage.fallbackUsed !== 'boolean' ||
       attemptCount < 1 ||

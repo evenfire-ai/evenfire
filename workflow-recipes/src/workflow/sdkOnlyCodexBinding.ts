@@ -50,6 +50,28 @@ export function verifySdkOnlyCodexBindingHash(
   )
 }
 
+export function sanitizePluginWorkloadSdkCodexBindingProof(
+  binding: PluginWorkloadSdkCodexBindingProof
+): PluginWorkloadSdkCodexBindingProof {
+  return {
+    connectionKey: binding.connectionKey,
+    catalogRevision: binding.catalogRevision,
+    credentialRevision: binding.credentialRevision,
+    model: binding.model,
+    bindingHash: binding.bindingHash,
+  }
+}
+
+export function readVerifiedSdkOnlyCodexBinding(
+  value: unknown,
+  model?: string
+): PluginWorkloadSdkCodexBindingProof | null {
+  if (!isPluginWorkloadSdkCodexBindingProof(value)) return null
+  if (model !== undefined && value.model !== model) return null
+  if (!verifySdkOnlyCodexBindingHash(value)) return null
+  return sanitizePluginWorkloadSdkCodexBindingProof(value)
+}
+
 /**
  * Derive the sanitized v3 Codex execution proof from one WRC snapshot.
  * Returns null when the grant is unassigned, the catalog is not executable,

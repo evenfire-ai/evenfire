@@ -752,4 +752,65 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
       httpStatus: 403,
     })
   })
+
+  it('rejects Codex complete while the physical attempt is still reserved', async () => {
+    await expect(
+      finalizePromptBridgeInTransaction(
+        {
+          ...inputBase,
+          target: {
+            targetRef: 'codex-primary',
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+            credentialSlot: '',
+          },
+          status: 'complete',
+          usage: {
+            llmSecretName: '',
+            callerRef: 'scanner',
+            fallbackUsed: false,
+            attemptCount: 1,
+            inputTokens: 0,
+            outputTokens: 0,
+          },
+        },
+        dbWithRows(
+          [],
+          [],
+          {
+            id: IDS.invocation,
+            recipe_namespace: inputBase.recipeNamespace,
+            recipe_name: inputBase.recipeName,
+            method: 'promptBridge',
+            status: 'in_progress',
+            attempt_generation: 1,
+          },
+          {
+            invocation_id: IDS.invocation,
+            recipe_namespace: inputBase.recipeNamespace,
+            recipe_name: inputBase.recipeName,
+            attempt_generation: 1,
+            method: 'promptBridge',
+            status: 'in_progress',
+          },
+          {
+            id: IDS.providerAttempt,
+            invocation_id: IDS.invocation,
+            recipe_namespace: inputBase.recipeNamespace,
+            recipe_name: inputBase.recipeName,
+            attempt_generation: 1,
+            attempt_index: 1,
+            target_ref: 'codex-primary',
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+            credential_slot: '',
+            status: 'reserved',
+          }
+        ) as never
+      )
+    ).rejects.toMatchObject({
+      code: 'conflict',
+      httpStatus: 409,
+    })
+  })
 })

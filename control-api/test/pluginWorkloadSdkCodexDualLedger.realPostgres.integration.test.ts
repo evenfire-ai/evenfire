@@ -12,6 +12,7 @@ import {
   recordCodexCatalogOutcome,
 } from '../src/services/codexSubscriptionConnection.js'
 import {
+  LlmProviderAttemptAuthorizeError,
   type LlmProviderAttemptAuthorizerDeps,
   authorizeLlmProviderAttempt,
   computeCodexPolicyHash,
@@ -23,6 +24,7 @@ import {
   loadLlmProviderAttemptBySdkAttemptId,
 } from '../src/services/llmProviderAttemptStore.js'
 import { issueRegisteredCodexExecutionTicket } from '../src/services/llmProviderAttemptTicket.js'
+import { prunePluginWorkloadSdkExpiredIdempotency } from '../src/services/pluginWorkloadSdkDb.js'
 import { finalizePromptBridgeInTransaction } from '../src/services/pluginWorkloadSdkFinalization.js'
 import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
 import './realPostgres.requirement.ts'
@@ -304,6 +306,13 @@ describeRealPostgres('Plugin Workload SDK Codex dual ledger on real PostgreSQL',
     expect(linked?.id).toBe(authorized.providerAttemptId)
     expect(linked?.pluginWorkloadSdkProviderAttemptId).toBe(sdkAttemptId)
     expect(linked?.invocationId).toBe(invocationId)
+    const promoted = await pool.query<{ status: string; credential_jti: string | null }>(
+      `SELECT status, credential_jti
+         FROM plugin_workload_sdk_provider_attempts
+        WHERE id = $1`,
+      [sdkAttemptId]
+    )
+    expect(promoted.rows[0]).toEqual({ status: 'in_progress', credential_jti: null })
     expect(JSON.stringify(authorized)).not.toContain('refresh-sdk-dual')
   })
 
@@ -340,14 +349,69 @@ describeRealPostgres('Plugin Workload SDK Codex dual ledger on real PostgreSQL',
     expect(stored.rows[0]?.plugin_workload_sdk_provider_attempt_id).toBeNull()
   })
 
+  it('rejects Codex complete while the reserved SDK attempt has not been authorized', async () => {
+    const { invocationId, sdkAttemptId } = await seedSdkAttempt({ status: 'reserved' })
+    await expect(
+      finalizePromptBridgeInTransaction(
+        {
+          invocationId,
+          recipeNamespace: NS,
+          recipeName: RECIPE,
+          hostRef: `${NS}/${RECIPE}`,
+          attemptGeneration: 1,
+          providerAttemptId: sdkAttemptId,
+          providerAttemptIndex: 1,
+          status: 'complete',
+          target: {
+            targetRef: 'codex-primary',
+            provider: 'codex-subscription',
+            model: MODEL,
+            credentialSlot: '',
+          },
+          reason: 'provider_completed',
+          usage: {
+            llmSecretName: '',
+            callerRef: 'scanner',
+            fallbackUsed: false,
+            attemptCount: 1,
+            inputTokens: 0,
+            outputTokens: 0,
+          },
+        },
+        pool
+      )
+    ).rejects.toMatchObject({
+      name: 'PromptBridgeFinalizationError',
+      code: 'conflict',
+      httpStatus: 409,
+    })
+  })
+
   it('finalizes complete plus linked Codex success as exact using Codex usage', async () => {
-    const { invocationId, sdkAttemptId } = await seedSdkAttempt({ status: 'in_progress' })
-    const codex = await insertLlmProviderAttempt(
-      pool,
-      attemptInput({
+    const current = await getSafeCodexSubscriptionConnection(pool)
+    const { invocationId, sdkAttemptId } = await seedSdkAttempt({ status: 'reserved' })
+    const authorized = await authorizeLlmProviderAttempt(
+      recipeClaims(),
+      {
+        request: {
+          ...REQUEST,
+          requestId: `req-exact-${invocationId}`,
+          idempotencyKey: `idem-exact-${invocationId}`,
+        },
         invocationId,
+        attemptGeneration: 1,
+        providerAttemptIndex: 1,
+        policyRevision: current!.catalogRevision,
+        policyHash: computeCodexPolicyHash({
+          model: MODEL,
+          catalogRevision: current!.catalogRevision,
+          credentialRevision: current!.credentialRevision,
+          connectionKey: current!.connectionKey,
+        }),
         pluginWorkloadSdkProviderAttemptId: sdkAttemptId,
-      })
+        targetRef: 'codex-primary',
+      },
+      testDeps()
     )
     await pool.query(
       `UPDATE llm_provider_attempts
@@ -357,7 +421,7 @@ describeRealPostgres('Plugin Workload SDK Codex dual ledger on real PostgreSQL',
               usage_output_tokens = 7,
               finalized_at = now()
         WHERE id = $1`,
-      [codex.id]
+      [authorized.providerAttemptId]
     )
 
     const result = await finalizePromptBridgeInTransaction(
@@ -538,5 +602,119 @@ describeRealPostgres('Plugin Workload SDK Codex dual ledger on real PostgreSQL',
         pool
       )
     ).resolves.toMatchObject({ idempotent: true, outcome: 'unknown', usageAccepted: false })
+  })
+
+  it('refuses authorize-link after finalize failed already wrote spend', async () => {
+    const current = await getSafeCodexSubscriptionConnection(pool)
+    const { invocationId, sdkAttemptId } = await seedSdkAttempt({ status: 'reserved' })
+    await finalizePromptBridgeInTransaction(
+      {
+        invocationId,
+        recipeNamespace: NS,
+        recipeName: RECIPE,
+        hostRef: `${NS}/${RECIPE}`,
+        attemptGeneration: 1,
+        providerAttemptId: sdkAttemptId,
+        providerAttemptIndex: 1,
+        status: 'failed',
+        target: {
+          targetRef: 'codex-primary',
+          provider: 'codex-subscription',
+          model: MODEL,
+          credentialSlot: '',
+        },
+        reason: 'codex_execution_binding_missing',
+      },
+      pool
+    )
+    await expect(
+      authorizeLlmProviderAttempt(
+        recipeClaims(),
+        {
+          request: {
+            ...REQUEST,
+            requestId: `req-race-${invocationId}`,
+            idempotencyKey: `idem-race-${invocationId}`,
+          },
+          invocationId,
+          attemptGeneration: 1,
+          providerAttemptIndex: 1,
+          policyRevision: current!.catalogRevision,
+          policyHash: computeCodexPolicyHash({
+            model: MODEL,
+            catalogRevision: current!.catalogRevision,
+            credentialRevision: current!.credentialRevision,
+            connectionKey: current!.connectionKey,
+          }),
+          pluginWorkloadSdkProviderAttemptId: sdkAttemptId,
+          targetRef: 'codex-primary',
+        },
+        testDeps()
+      )
+    ).rejects.toBeInstanceOf(LlmProviderAttemptAuthorizeError)
+    expect(await loadLlmProviderAttemptBySdkAttemptId(pool, sdkAttemptId)).toBeNull()
+  })
+
+  it('prunes a linked terminal SDK attempt without deleting the Codex ledger row', async () => {
+    const { invocationId, sdkAttemptId } = await seedSdkAttempt({ status: 'reserved' })
+    const current = await getSafeCodexSubscriptionConnection(pool)
+    const authorized = await authorizeLlmProviderAttempt(
+      recipeClaims(),
+      {
+        request: {
+          ...REQUEST,
+          requestId: `req-prune-${invocationId}`,
+          idempotencyKey: `idem-prune-${invocationId}`,
+        },
+        invocationId,
+        attemptGeneration: 1,
+        providerAttemptIndex: 1,
+        policyRevision: current!.catalogRevision,
+        policyHash: computeCodexPolicyHash({
+          model: MODEL,
+          catalogRevision: current!.catalogRevision,
+          credentialRevision: current!.credentialRevision,
+          connectionKey: current!.connectionKey,
+        }),
+        pluginWorkloadSdkProviderAttemptId: sdkAttemptId,
+        targetRef: 'codex-primary',
+      },
+      testDeps()
+    )
+    await pool.query(
+      `UPDATE plugin_workload_sdk_invocations
+          SET status = 'complete', created_at = now() - interval '25 hours'
+        WHERE id = $1`,
+      [invocationId]
+    )
+    const deleteRule = await pool.query<{ delete_rule: string }>(
+      `SELECT rc.delete_rule
+         FROM information_schema.referential_constraints rc
+         JOIN information_schema.key_column_usage kcu
+           ON rc.constraint_name = kcu.constraint_name
+        WHERE kcu.table_name = 'llm_provider_attempts'
+          AND kcu.column_name = 'plugin_workload_sdk_provider_attempt_id'`
+    )
+    expect(deleteRule.rows[0]?.delete_rule).toBe('SET NULL')
+    const pruned = await prunePluginWorkloadSdkExpiredIdempotency()
+    expect(pruned).toBeGreaterThan(0)
+    const leftoverSdk = await pool.query(
+      `SELECT id FROM plugin_workload_sdk_provider_attempts WHERE id = $1`,
+      [sdkAttemptId]
+    )
+    expect(leftoverSdk.rows).toHaveLength(0)
+    const ledger = await pool.query<{
+      id: string
+      plugin_workload_sdk_provider_attempt_id: string | null
+    }>(
+      `SELECT id, plugin_workload_sdk_provider_attempt_id
+         FROM llm_provider_attempts
+        WHERE id = $1`,
+      [authorized.providerAttemptId]
+    )
+    expect(ledger.rows[0]).toEqual({
+      id: authorized.providerAttemptId,
+      plugin_workload_sdk_provider_attempt_id: null,
+    })
   })
 })

@@ -33,6 +33,9 @@ describe('readVerifiedSdkOnlyCodexBinding', () => {
     ).toBeNull()
     expect(readVerifiedSdkOnlyCodexBinding(binding, 'gpt-5.4-mini')).toBeNull()
     expect(readVerifiedSdkOnlyCodexBinding(undefined, model)).toBeNull()
+    expect(readVerifiedSdkOnlyCodexBinding({ ...binding, extra: 'drop-me' }, model)).toEqual(
+      binding
+    )
   })
 })
 
@@ -304,6 +307,43 @@ describe('Plugin Workload SDK bootstrap identity', () => {
       codexBinding: binding,
     })
     expect(readSdkOnlyCodexBinding()).toEqual(binding)
+    replaceSdkOnlyCodexBinding(null)
+  })
+
+  it('echoes a sanitized five-field Codex binding instead of extra request keys', async () => {
+    const binding = {
+      connectionKey: 'team-plus',
+      catalogRevision: 4,
+      credentialRevision: 1,
+      model: 'gpt-5.6-luna',
+      bindingHash: computeCodexPolicyHash({
+        model: 'gpt-5.6-luna',
+        catalogRevision: 4,
+        credentialRevision: 1,
+        connectionKey: 'team-plus',
+      }),
+    }
+    const verify = vi.fn().mockResolvedValue({
+      ready: true,
+      contractVersion: 3,
+      provider: 'codex-subscription',
+      model: 'gpt-5.6-luna',
+      policyReady: true,
+      policyState: 'active',
+      codexBindingReady: true,
+    })
+    const result = await configurePluginWorkloadSdkBootstrapIdentity(
+      {
+        capabilityFamily: 'promptBridge',
+        provider: 'codex-subscription',
+        model: 'gpt-5.6-luna',
+        contractVersion: 3,
+        codexBinding: { ...binding, leaked: 'drop-me' },
+      },
+      { capabilityFamily: 'promptBridge', verify }
+    )
+    expect(result.codexBinding).toEqual(binding)
+    expect(result.codexBinding).not.toHaveProperty('leaked')
     replaceSdkOnlyCodexBinding(null)
   })
 })

@@ -26,6 +26,7 @@ export type AuthorizeAttemptBody = {
   userId?: string
   budgetReservationId?: string
   pluginWorkloadSdkProviderAttemptId?: string
+  targetRef?: string
 }
 
 export type ProviderAttemptAuthorizerOptions = {

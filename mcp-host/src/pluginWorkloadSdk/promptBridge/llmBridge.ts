@@ -161,6 +161,7 @@ function captureSdkOnlyCodexAttemptContext(
     attemptGeneration: request.attemptGeneration,
     providerAttemptIndex: ticket.providerAttemptIndex,
     pluginWorkloadSdkProviderAttemptId: ticket.providerAttemptId,
+    targetRef: target.targetRef,
     policyRevision: binding.catalogRevision,
     policyHash: binding.bindingHash,
     ...(request.hostRef ? { hostRef: request.hostRef } : {}),

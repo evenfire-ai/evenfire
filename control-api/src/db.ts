@@ -22,6 +22,7 @@ import {
 import {
   applyLlmProviderAttemptConnectionIdSchema,
   applyLlmProviderAttemptSchema,
+  applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema,
   applyLlmProviderAttemptSdkLinkSchema,
   applyLlmProviderAttemptTicketSchema,
 } from './services/llmProviderAttemptStore.js'
@@ -6008,6 +6009,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0107_llm_provider_attempts_sdk_link',
     apply: applyLlmProviderAttemptSdkLinkSchema,
+  },
+  {
+    version: '0108_llm_provider_attempts_sdk_link_on_delete_set_null',
+    apply: applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema,
   },
 ]
 

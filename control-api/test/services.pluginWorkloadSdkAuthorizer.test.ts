@@ -806,6 +806,83 @@ describe('reissuePromptBridgeCredentialTicket', () => {
     expect(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).not.toHaveBeenCalled()
   })
 
+  it('returns a reservation-only Codex ticket and leaves the physical row reserved', async () => {
+    const policy = grant({
+      promptTargets: [
+        {
+          targetRef: 'codex-primary',
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          credentialSlot: '',
+        },
+      ],
+      defaultTargetRef: 'codex-primary',
+    })
+    const policyHash = sdkDb.hashPromptTargetPolicy(policy)
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(policy)
+    vi.mocked(sdkDb.getInvocationById).mockResolvedValue(
+      invocation({
+        promptAuthorization: {
+          policyRevision: 1,
+          policyHash,
+          authorizedTargetRefs: ['codex-primary'],
+        },
+      })
+    )
+    vi.mocked(sdkDb.getPluginWorkloadSdkAttemptReceipt).mockResolvedValue({
+      invocationId: 'inv-1',
+      recipeNamespace: NS,
+      recipeName: RECIPE,
+      attemptGeneration: 1,
+      method: 'promptBridge',
+      targetRefs: ['codex-primary'],
+      policyRevision: 1,
+      policyHash,
+      status: 'in_progress',
+      startedAt: '2026-06-09T00:00:00.000Z',
+      leaseExpiresAt: '2026-06-09T00:01:00.000Z',
+      completedAt: null,
+    })
+    vi.mocked(sdkDb.reservePluginWorkloadSdkProviderAttempt).mockResolvedValue({
+      id: '44444444-4444-4444-8444-444444444444',
+      invocationId: 'inv-1',
+      recipeNamespace: NS,
+      recipeName: RECIPE,
+      attemptGeneration: 1,
+      attemptIndex: 1,
+      targetRef: 'codex-primary',
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+      credentialSlot: '',
+      status: 'reserved',
+      credentialJti: null,
+      startedAt: '2026-06-09T00:00:00.000Z',
+      leaseExpiresAt: '2026-06-09T00:01:00.000Z',
+      completedAt: null,
+      usageRequestId: null,
+    })
+
+    const result = await reissuePromptBridgeCredentialTicket({
+      claims: claims(),
+      invocationId: 'inv-1',
+      targetRef: 'codex-primary',
+      attemptGeneration: 1,
+    })
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        invocationId: 'inv-1',
+        targetRef: 'codex-primary',
+        credentialTicket: '',
+        reservationOnly: true,
+        providerAttemptId: '44444444-4444-4444-8444-444444444444',
+      },
+    })
+    expect(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).not.toHaveBeenCalled()
+    expect(sdkDb.markPluginWorkloadSdkProviderAttemptStatus).not.toHaveBeenCalled()
+  })
+
   it('fails closed when policy changes or the invocation is terminal', async () => {
     const policy = twoTargetGrant()
     authorizedSuffix.policyHash = sdkDb.hashPromptTargetPolicy(policy)

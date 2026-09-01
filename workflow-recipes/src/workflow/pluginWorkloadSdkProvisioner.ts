@@ -33,8 +33,7 @@ import {
 import type { WorkflowRuntimePlan } from './runtimePlan'
 import {
   type PluginWorkloadSdkCodexBindingProof,
-  isPluginWorkloadSdkCodexBindingProof,
-  verifySdkOnlyCodexBindingHash,
+  readVerifiedSdkOnlyCodexBinding,
 } from './sdkOnlyCodexBinding'
 import { buildPluginWorkloadSdkTokenSecret } from './secretFactory'
 import type { WorkflowConfig } from './types'
@@ -106,6 +105,13 @@ export type PluginWorkloadSdkProvisionerDeps = {
   ensureMcpHostHeadlessService: (recipeName: string) => Promise<void>
   createIfNotExists: (createFn: () => Promise<unknown>, label: string) => Promise<boolean>
   safeDelete: (deleteFn: () => Promise<unknown>) => Promise<void>
+  resolveCodexBinding?: (input: {
+    provider: string
+    model: string
+    recipeName: string
+    recipeUid: string
+    runtimeScopeRecipeName: string
+  }) => PluginWorkloadSdkCodexBindingProof | null
 }
 
 /**
@@ -337,8 +343,19 @@ export class PluginWorkloadSdkProvisioner {
     }
 
     if (promptBridge && !mcpHostAgent) return 'failed'
+    const resolvedCodexBinding =
+      opts.codexBinding ??
+      (mcpHostAgent
+        ? (this.deps.resolveCodexBinding?.({
+            provider: mcpHostAgent.provider,
+            model: mcpHostAgent.model,
+            recipeName,
+            recipeUid,
+            runtimeScopeRecipeName,
+          }) ?? null)
+        : null)
     const capabilityFamily = promptBridge ? 'promptBridge' : 'clientNotifications'
-    const configureKey = `${readiness.uid}:${capabilityFamily}:${mcpHostAgent?.provider ?? 'none'}:${mcpHostAgent?.model ?? 'none'}:${opts.codexBinding?.bindingHash ?? 'none'}`
+    const configureKey = `${readiness.uid}:${capabilityFamily}:${mcpHostAgent?.provider ?? 'none'}:${mcpHostAgent?.model ?? 'none'}:${resolvedCodexBinding?.bindingHash ?? 'none'}`
     try {
       const wrcConfigureToken = await this.deps.tokenFactory.signWrcConfigureToken(
         recipeName,
@@ -353,7 +370,7 @@ export class PluginWorkloadSdkProvisioner {
               mcpHostEndpoint,
               wrcConfigureToken,
               'promptBridge',
-              opts.codexBinding ?? null
+              resolvedCodexBinding
             )
           : await modelConfigHandler.configurePluginWorkloadSdkBootstrap(
               undefined,
@@ -661,7 +678,5 @@ function parseEagerSdkBootstrapProof(
 }
 
 function parseCodexBindingProof(value: unknown): PluginWorkloadSdkCodexBindingProof | undefined {
-  if (!isPluginWorkloadSdkCodexBindingProof(value)) return undefined
-  if (!verifySdkOnlyCodexBindingHash(value)) return undefined
-  return value
+  return readVerifiedSdkOnlyCodexBinding(value) ?? undefined
 }

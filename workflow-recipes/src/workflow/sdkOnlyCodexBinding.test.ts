@@ -3,6 +3,7 @@ import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import {
   deriveSdkOnlyCodexBinding,
   isPluginWorkloadSdkCodexBindingProof,
+  readVerifiedSdkOnlyCodexBinding,
   verifySdkOnlyCodexBindingHash,
 } from './sdkOnlyCodexBinding'
 
@@ -56,5 +57,23 @@ describe('deriveSdkOnlyCodexBinding', () => {
         configMap: undefined,
       })
     ).toBeNull()
+  })
+
+  it('rebuilds a five-field proof and drops extra keys', () => {
+    const proof = {
+      connectionKey: 'team-plus',
+      catalogRevision: 3,
+      credentialRevision: 1,
+      model: 'gpt-5.6-luna',
+      bindingHash: HASH,
+      extra: true,
+    }
+    expect(readVerifiedSdkOnlyCodexBinding(proof)).toEqual({
+      connectionKey: 'team-plus',
+      catalogRevision: 3,
+      credentialRevision: 1,
+      model: 'gpt-5.6-luna',
+      bindingHash: HASH,
+    })
   })
 })

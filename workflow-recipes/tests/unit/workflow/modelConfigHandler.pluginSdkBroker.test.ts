@@ -221,7 +221,7 @@ describe('ModelConfigHandler Plugin SDK per-attempt credential broker', () => {
           contractVersion: 3,
           policyReady: true,
           policyState: 'active',
-          codexBinding: binding,
+          codexBinding: { ...binding, leaked: 'drop-me' },
         },
       })),
     }
@@ -243,6 +243,7 @@ describe('ModelConfigHandler Plugin SDK per-attempt credential broker', () => {
       model: 'gpt-5.1',
       codexBinding: binding,
     })
+    expect(result.body.codexBinding).not.toHaveProperty('leaked')
     expect(mcpHost.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledWith(
       'http://mcp-host:8090',
       'wrc-token',

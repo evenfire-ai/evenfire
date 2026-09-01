@@ -21,12 +21,15 @@ describe('0101 oauth_grants owner generalization migration', () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const versions = CONTROL_API_MIGRATIONS.map(m => m.version)
     expect(versions).toContain('0106_oauth_grants_owner_generalization')
-    expect(versions.at(-1)).toBe('0107_llm_provider_attempts_sdk_link')
+    expect(versions.at(-1)).toBe('0108_llm_provider_attempts_sdk_link_on_delete_set_null')
     expect(versions.indexOf('0100_seed_minimax_allowed_model')).toBeLessThan(
       versions.indexOf('0106_oauth_grants_owner_generalization')
     )
     expect(versions.indexOf('0106_oauth_grants_owner_generalization')).toBeLessThan(
       versions.indexOf('0107_llm_provider_attempts_sdk_link')
+    )
+    expect(versions.indexOf('0107_llm_provider_attempts_sdk_link')).toBeLessThan(
+      versions.indexOf('0108_llm_provider_attempts_sdk_link_on_delete_set_null')
     )
     expect(versions).toContain('0099_gfs_upload_finalizing_recovery')
     expect(versions).toContain('0100_seed_minimax_allowed_model')

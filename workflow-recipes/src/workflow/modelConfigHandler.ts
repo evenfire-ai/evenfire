@@ -21,6 +21,10 @@ import {
   isRunnableLlmModelId,
 } from '@clerum/llm-providers'
 import { createLogger } from '../observability/logger'
+import {
+  isPluginWorkloadSdkCodexBindingProof,
+  sanitizePluginWorkloadSdkCodexBindingProof,
+} from './sdkOnlyCodexBinding'
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -309,10 +313,8 @@ export class ModelConfigHandler {
           model,
           contractVersion: expectedContractVersion,
           capabilityFamily,
-          ...(result.body.codexBinding &&
-          typeof result.body.codexBinding === 'object' &&
-          !Array.isArray(result.body.codexBinding)
-            ? { codexBinding: result.body.codexBinding }
+          ...(isPluginWorkloadSdkCodexBindingProof(result.body.codexBinding)
+            ? { codexBinding: sanitizePluginWorkloadSdkCodexBindingProof(result.body.codexBinding) }
             : {}),
           ...(typeof result.body.policyReady === 'boolean'
             ? { policyReady: result.body.policyReady }

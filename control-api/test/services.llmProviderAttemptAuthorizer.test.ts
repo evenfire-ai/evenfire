@@ -8,7 +8,10 @@ import {
 } from '../src/services/llmProviderAttemptAuthorizer.js'
 import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
 
-const getPluginWorkloadSdkProviderAttempt = vi.hoisted(() => vi.fn())
+const lockPluginWorkloadSdkRecipe = vi.hoisted(() => vi.fn())
+const getPluginWorkloadSdkProviderAttemptForUpdate = vi.hoisted(() => vi.fn())
+const pluginWorkloadSdkSpendOutcomeExists = vi.hoisted(() => vi.fn())
+const promoteReservedOauthBrokerProviderAttempt = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
   const actual = await vi.importActual<typeof import('../src/services/pluginWorkloadSdkDb.js')>(
@@ -16,9 +19,34 @@ vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
   )
   return {
     ...actual,
-    getPluginWorkloadSdkProviderAttempt,
+    lockPluginWorkloadSdkRecipe,
+    getPluginWorkloadSdkProviderAttemptForUpdate,
+    pluginWorkloadSdkSpendOutcomeExists,
+    promoteReservedOauthBrokerProviderAttempt,
   }
 })
+
+function reservedSdkAttempt(overrides: Record<string, unknown> = {}) {
+  return {
+    id: '44444444-4444-4444-8444-444444444444',
+    invocationId: 'invocation-1',
+    recipeNamespace: 'sandbox-recipes',
+    recipeName: 'prompt-notify',
+    attemptGeneration: 1,
+    attemptIndex: 1,
+    targetRef: 'codex-primary',
+    provider: 'codex-subscription',
+    model: 'gpt-5.1',
+    credentialSlot: '',
+    status: 'reserved',
+    credentialJti: null,
+    startedAt: new Date().toISOString(),
+    leaseExpiresAt: null,
+    completedAt: null,
+    usageRequestId: null,
+    ...overrides,
+  }
+}
 
 const REQUEST = {
   schemaVersion: 'codex-completion-request.v1' as const,
@@ -116,7 +144,10 @@ describe('authorizeLlmProviderAttempt', () => {
 
   beforeEach(() => {
     current = deps()
-    getPluginWorkloadSdkProviderAttempt.mockReset()
+    lockPluginWorkloadSdkRecipe.mockReset().mockResolvedValue(undefined)
+    getPluginWorkloadSdkProviderAttemptForUpdate.mockReset()
+    pluginWorkloadSdkSpendOutcomeExists.mockReset().mockResolvedValue(false)
+    promoteReservedOauthBrokerProviderAttempt.mockReset().mockResolvedValue(true)
   })
 
   it('authorizes a bound attempt and returns a ticket without persisting messages', async () => {
@@ -194,34 +225,24 @@ describe('authorizeLlmProviderAttempt', () => {
 
   it('binds a reserved Plugin Workload SDK attempt onto the Codex ledger row', async () => {
     const sdkAttemptId = '44444444-4444-4444-8444-444444444444'
-    getPluginWorkloadSdkProviderAttempt.mockResolvedValue({
-      id: sdkAttemptId,
-      invocationId: 'invocation-1',
-      recipeNamespace: 'sandbox-recipes',
-      recipeName: 'prompt-notify',
-      attemptGeneration: 1,
-      attemptIndex: 1,
-      targetRef: 'codex-primary',
-      provider: 'codex-subscription',
-      model: 'gpt-5.1',
-      credentialSlot: '',
-      status: 'reserved',
-      credentialJti: null,
-      startedAt: new Date().toISOString(),
-      leaseExpiresAt: null,
-      completedAt: null,
-      usageRequestId: null,
-    })
+    getPluginWorkloadSdkProviderAttemptForUpdate.mockResolvedValue(
+      reservedSdkAttempt({ id: sdkAttemptId })
+    )
     await authorizeLlmProviderAttempt(
       claims({
         recipeNamespace: 'sandbox-recipes',
         recipeName: 'prompt-notify',
         hostRefs: ['sandbox-recipes/prompt-notify'],
       }),
-      body({ pluginWorkloadSdkProviderAttemptId: sdkAttemptId }),
+      body({ pluginWorkloadSdkProviderAttemptId: sdkAttemptId, targetRef: 'codex-primary' }),
       current
     )
-    expect(getPluginWorkloadSdkProviderAttempt).toHaveBeenCalledWith(
+    expect(lockPluginWorkloadSdkRecipe).toHaveBeenCalledWith(
+      expect.anything(),
+      'sandbox-recipes',
+      'prompt-notify'
+    )
+    expect(getPluginWorkloadSdkProviderAttemptForUpdate).toHaveBeenCalledWith(
       sdkAttemptId,
       expect.anything()
     )
@@ -233,10 +254,21 @@ describe('authorizeLlmProviderAttempt', () => {
         hostRef: 'sandbox-recipes/prompt-notify',
       })
     )
+    expect(promoteReservedOauthBrokerProviderAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: sdkAttemptId,
+        model: 'gpt-5.1',
+        targetRef: 'codex-primary',
+      }),
+      expect.anything()
+    )
+    expect(promoteReservedOauthBrokerProviderAttempt.mock.invocationCallOrder[0]).toBeGreaterThan(
+      current.insertAttempt.mock.invocationCallOrder[0]!
+    )
   })
 
   it('rejects a Plugin Workload SDK attempt that does not match the reserved receipt', async () => {
-    getPluginWorkloadSdkProviderAttempt.mockResolvedValue(null)
+    getPluginWorkloadSdkProviderAttemptForUpdate.mockResolvedValue(null)
     await expect(
       authorizeLlmProviderAttempt(
         claims({
@@ -245,6 +277,73 @@ describe('authorizeLlmProviderAttempt', () => {
           hostRefs: ['sandbox-recipes/prompt-notify'],
         }),
         body({ pluginWorkloadSdkProviderAttemptId: '44444444-4444-4444-8444-444444444444' }),
+        current
+      )
+    ).rejects.toMatchObject({ code: 'no_grant' })
+    expect(current.insertAttempt).not.toHaveBeenCalled()
+    expect(promoteReservedOauthBrokerProviderAttempt).not.toHaveBeenCalled()
+  })
+
+  it('rejects a reserved SDK attempt whose model does not match the Codex request', async () => {
+    getPluginWorkloadSdkProviderAttemptForUpdate.mockResolvedValue(
+      reservedSdkAttempt({ model: 'gpt-5.4-mini' })
+    )
+    await expect(
+      authorizeLlmProviderAttempt(
+        claims({
+          recipeNamespace: 'sandbox-recipes',
+          recipeName: 'prompt-notify',
+          hostRefs: ['sandbox-recipes/prompt-notify'],
+        }),
+        body({ pluginWorkloadSdkProviderAttemptId: reservedSdkAttempt().id }),
+        current
+      )
+    ).rejects.toMatchObject({ code: 'no_grant' })
+    expect(current.insertAttempt).not.toHaveBeenCalled()
+  })
+
+  it('rejects a reserved SDK attempt whose targetRef does not match the authorize body', async () => {
+    getPluginWorkloadSdkProviderAttemptForUpdate.mockResolvedValue(reservedSdkAttempt())
+    await expect(
+      authorizeLlmProviderAttempt(
+        claims({
+          recipeNamespace: 'sandbox-recipes',
+          recipeName: 'prompt-notify',
+          hostRefs: ['sandbox-recipes/prompt-notify'],
+        }),
+        body({
+          pluginWorkloadSdkProviderAttemptId: reservedSdkAttempt().id,
+          targetRef: 'other-target',
+        }),
+        current
+      )
+    ).rejects.toMatchObject({ code: 'no_grant' })
+    expect(current.insertAttempt).not.toHaveBeenCalled()
+  })
+
+  it('rejects a host caller that presents a Plugin Workload SDK attempt id', async () => {
+    await expect(
+      authorizeLlmProviderAttempt(
+        claims(),
+        body({ pluginWorkloadSdkProviderAttemptId: reservedSdkAttempt().id }),
+        current
+      )
+    ).rejects.toMatchObject({ code: 'no_grant' })
+    expect(getPluginWorkloadSdkProviderAttemptForUpdate).not.toHaveBeenCalled()
+    expect(current.insertAttempt).not.toHaveBeenCalled()
+  })
+
+  it('rejects linking after a spend outcome already exists', async () => {
+    getPluginWorkloadSdkProviderAttemptForUpdate.mockResolvedValue(reservedSdkAttempt())
+    pluginWorkloadSdkSpendOutcomeExists.mockResolvedValue(true)
+    await expect(
+      authorizeLlmProviderAttempt(
+        claims({
+          recipeNamespace: 'sandbox-recipes',
+          recipeName: 'prompt-notify',
+          hostRefs: ['sandbox-recipes/prompt-notify'],
+        }),
+        body({ pluginWorkloadSdkProviderAttemptId: reservedSdkAttempt().id }),
         current
       )
     ).rejects.toMatchObject({ code: 'no_grant' })

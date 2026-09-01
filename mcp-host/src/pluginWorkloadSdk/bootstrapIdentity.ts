@@ -137,7 +137,7 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
       policyState: proof.policyState,
       policyReason: 'codex_execution_binding_missing',
       message: 'Control API rejected the SDK-only Codex execution binding',
-      ...(req.codexBinding ? { codexBinding: req.codexBinding } : {}),
+      ...(verifiedBinding ? { codexBinding: verifiedBinding } : {}),
     }
   }
   deps.onConfigured?.({ provider: req.provider, defaultModel: model })
@@ -165,8 +165,8 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
     ...(proof?.clientNotificationsPolicyReason !== undefined
       ? { clientNotificationsPolicyReason: proof.clientNotificationsPolicyReason }
       : {}),
-    ...(req.provider === 'codex-subscription' && req.codexBinding
-      ? { codexBinding: req.codexBinding }
+    ...(req.provider === 'codex-subscription' && verifiedBinding
+      ? { codexBinding: verifiedBinding }
       : {}),
   }
 }

@@ -926,6 +926,15 @@ export class WorkflowReconciler {
       ensureMcpHostHeadlessService: recipeName => this.ensureMcpHostHeadlessService(recipeName),
       createIfNotExists: (createFn, label) => this.createIfNotExists(createFn, label),
       safeDelete: deleteFn => this.safeDelete(deleteFn),
+      resolveCodexBinding: ({ provider, model, recipeName, recipeUid, runtimeScopeRecipeName }) => {
+        const context = this.resolveCodexContext(recipeUid, recipeName, runtimeScopeRecipeName)
+        return deriveSdkOnlyCodexBinding({
+          provider,
+          model,
+          connectionKey: context.connectionKey,
+          configMap: this.lastCodexConfigMap,
+        })
+      },
     })
   }
 
