@@ -1,13 +1,8 @@
 // control-ui/e2e/qa-recorder-member-removed-access.spec.ts
 //
-// Optional QA recorder journey (MUTATING). Requires QA_RECORDER_CONFIRM_MUTATIONS=1.
-// Video-tours the member Access tab's tombstone story (D8): a scope granted
-// to a member whose backing Context is then deleted out-of-band renders under
-// the "Removed access" heading (cu-deleted-access-heading) with the resolved
-// agent display name and a "Deleted" marker — never a bare contextId row in
-// the active table. The member's original contextIds AND agentNames are
-// restored via PUT and the seeded host is deleted in the finally; the Context
-// stays deleted (it is the journey's fixture), so it is never deleted twice.
+// MUTATING journey: seeds an access scope for the first member, deletes the
+// backing context out-of-band, and proves the Access tab shows
+// bookkeeping and is never rendered).
 //
 // Contract: docs/testing/optional-playwright-qa-recorder.md ("Extending the
 // recorder").
@@ -140,17 +135,17 @@ test.describe('optional QA recorder: Control UI member removed access', () => {
         })
       ).toBeVisible({ timeout: 20_000 })
 
+      // D9: the deleted mapping leaves NO residue — no "Removed access"
+      // section, no tombstone row, no raw context id anywhere on the page.
+      await expect(page.locator('.cu-deleted-access-heading')).toHaveCount(0)
+      await expect(page.getByText('Removed access')).toHaveCount(0)
       await expect(
-        page.locator('.cu-deleted-access-heading').filter({ hasText: 'Removed access' })
-      ).toBeVisible({ timeout: 20_000 })
-
-      const removedRow = page
-        .getByRole('row')
-        .filter({ has: page.getByRole('cell', { name: hostDisplayName, exact: true }) })
-      await expect(removedRow).toBeVisible({ timeout: 20_000 })
-      await expect(removedRow.getByText('Deleted', { exact: true })).toBeVisible()
-      // The raw wire contextId never renders for the tombstone.
-      await expect(removedRow).not.toContainText(contextId)
+        page
+          .getByRole('row')
+          .filter({ has: page.getByRole('cell', { name: hostDisplayName, exact: true }) })
+      ).toHaveCount(0)
+      await expect(page.getByText(contextId)).toHaveCount(0)
+      await expect(page.getByText('No access assigned yet.', { exact: true })).toBeVisible()
       await screenshotAndLog(page, testInfo, `${journey}-deleted-scope`)
 
       // Restore: the member's original contextIds, which never contained the

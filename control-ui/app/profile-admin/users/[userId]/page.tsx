@@ -1107,42 +1107,6 @@ export default function UserDetailsPage() {
               </table>
             </div>
           )}
-          {!initialLoading && (deletedAgentNames.length > 0 || deletedContextIds.length > 0) ? (
-            <>
-              <p className="cu-muted cu-deleted-access-heading">Removed access</p>
-              <div className="cu-table-wrap">
-                <table className="cu-table">
-                  <tbody>
-                    {deletedAgentNames.map(agentName => (
-                      <tr key={agentName}>
-                        <td>{agentDisplay(agentName)}</td>
-                        <td className="cu-muted">Deleted</td>
-                      </tr>
-                    ))}
-                    {deletedContextIds
-                      .filter(contextId => {
-                        // Scope tombstones that a still-listed agent owns are
-                        // represented by the agent row above instead.
-                        const owned = [...hostsByName.values()].some(
-                          host =>
-                            String(
-                              (host.spec as { contextRef?: string } | undefined)?.contextRef || ''
-                            ).trim() === contextId &&
-                            grantedAgentNames.includes(String(host.metadata?.name ?? ''))
-                        )
-                        return !owned
-                      })
-                      .map(contextId => (
-                        <tr key={contextId}>
-                          <td className="cu-muted">{accessLabelFor(contextId).label}</td>
-                          <td className="cu-muted">Deleted</td>
-                        </tr>
-                      ))}
-                  </tbody>
-                </table>
-              </div>
-            </>
-          ) : null}
         </>
       )}
 

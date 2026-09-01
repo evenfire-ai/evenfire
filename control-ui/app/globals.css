@@ -9050,11 +9050,6 @@ textarea.cu-input {
   justify-content: flex-end;
 }
 
-.cu-deleted-access-heading {
-  margin-top: var(--cu-space-4);
-  font-size: 0.875rem;
-}
-
 .cu-grant-row {
   display: flex;
   flex-wrap: wrap;

@@ -158,8 +158,8 @@ test.describe('optional QA recorder: Control UI team Access tab', () => {
       await expect(
         page.getByRole('status').filter({ hasText: 'Team access updated.' })
       ).toBeVisible({ timeout: 20_000 })
-      // The mapping moves to the "Removed access" tombstone (deleted history),
-      // so the actionable row disappears but a read-only row may remain.
+      // Removed mappings leave no residue (D9): deleted history is backend
+      // bookkeeping and is no longer rendered.
       await expect(row.getByLabel('Remove access')).toHaveCount(0)
       await expect(page.getByText('No access assigned yet.', { exact: true })).toBeVisible()
       await screenshotAndLog(page, testInfo, `${journey}-removed`)
