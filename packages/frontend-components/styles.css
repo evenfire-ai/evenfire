@@ -120,7 +120,7 @@
 }
 .eft-table thead th {
   background: var(--eft-surface-muted);
-  background-clip: padding-box;
+  background-clip: border-box;
   border-bottom: 1px solid var(--eft-border);
   color: var(--eft-muted);
   font-size: var(--eft-table-header-font-size);
@@ -130,15 +130,15 @@
   position: sticky;
   text-align: left;
   text-transform: uppercase;
-  top: 0;
+  top: -1px;
   white-space: nowrap;
   z-index: 2;
 }
 .eft-table thead th::before {
   background: var(--eft-surface-muted);
   content: '';
-  inset: -1px 0 auto;
-  height: 1px;
+  inset: -2px 0 auto;
+  height: 2px;
   position: absolute;
 }
 .eft-table tbody td {

@@ -2620,6 +2620,14 @@ textarea.cu-input {
   line-clamp: 2;
 }
 
+td.cu-registry-description {
+  display: table-cell;
+  margin-top: 0;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+}
+
 .cu-registry-tags {
   display: flex;
   flex-wrap: wrap;

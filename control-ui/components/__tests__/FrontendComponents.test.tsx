@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, within } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import {
   DataTable,
   RowActionMenu,
@@ -9,6 +11,13 @@ import {
   TruncatedText,
   stableSortRows,
 } from '@clerum/frontend-components'
+
+function cssRule(css: string, selector: string) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = css.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, 'm'))
+  expect(match, `Expected CSS rule for ${selector}`).not.toBeNull()
+  return match?.[1] ?? ''
+}
 
 describe('shared frontend components', () => {
   it('exposes sortable header state and a keyboard sort control', () => {
@@ -110,6 +119,26 @@ describe('shared frontend components', () => {
     expect(screen.getByText('No data')).toBeInTheDocument()
     expect(screen.getByText(/default bounde\.\.\./)).toBeInTheDocument()
     expect(screen.getByRole('tooltip')).toHaveTextContent(longDescription)
+  })
+
+  it('keeps table paint contracts compatible with supported browsers', () => {
+    const frontendStyles = readFileSync(
+      resolve(process.cwd(), '../packages/frontend-components/styles.css'),
+      'utf8'
+    )
+    const controlStyles = readFileSync(resolve(process.cwd(), 'app/globals.css'), 'utf8')
+    const tableHeaderRule = cssRule(frontendStyles, '.eft-table thead th')
+    const tableHeaderPaintRule = cssRule(frontendStyles, '.eft-table thead th::before')
+    const descriptionCellRule = cssRule(controlStyles, 'td.cu-registry-description')
+
+    expect(frontendStyles).not.toContain(':has(')
+    expect(tableHeaderRule).toContain('background-clip: border-box;')
+    expect(tableHeaderRule).toContain('top: -1px;')
+    expect(tableHeaderPaintRule).toContain('height: 2px;')
+    expect(descriptionCellRule).toContain('display: table-cell;')
+    expect(descriptionCellRule).toContain('overflow: visible;')
+    expect(descriptionCellRule).toContain('-webkit-line-clamp: unset;')
+    expect(descriptionCellRule).toContain('line-clamp: unset;')
   })
 
   it('opens one accessible action menu and executes its destructive action', () => {
