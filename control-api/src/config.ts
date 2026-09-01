@@ -234,6 +234,7 @@ type Config = {
   operationalAccessIndexerEnabled: boolean
   operationalAccessIndexerRetryMs: number
   operationalAccessReadinessMaxAgeMs: number | null
+  userAccessCatalogActivationRecord: string
   // Audience claim used by browsing JWTs; must match WSF_JWT_AUDIENCE on
   // the per-SFS wfc Deployment. The signing key is reused from rpcJwtPrivateKey.
   wfcJwtAudience: string
@@ -1044,6 +1045,11 @@ export const config: Config = {
   operationalAccessReadinessMaxAgeMs: optionalPositiveIntegerFromEnv(
     'CONTROL_API_OPERATIONAL_ACCESS_READINESS_MAX_AGE_MS'
   ),
+  // Versioned operator acceptance for aggregate catalog serving. The runtime
+  // validates the complete record against the active catalog configuration;
+  // absence or mismatch keeps serving fail-closed.
+  userAccessCatalogActivationRecord:
+    process.env.CONTROL_API_USER_ACCESS_CATALOG_ACTIVATION_RECORD ?? '',
   wfcJwtAudience: process.env.CONTROL_API_WFC_JWT_AUDIENCE || 'workspace-files-controller',
   wfcTokenTtlSeconds: Number(process.env.CONTROL_API_WFC_TOKEN_TTL_SECONDS || 300),
   gfsTokenAudience: process.env.CONTROL_API_GFS_JWT_AUDIENCE || 'gfs-controller',
