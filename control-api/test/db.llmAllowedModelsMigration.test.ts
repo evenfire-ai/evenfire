@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { onlineIndexAwareQuery } from './helpers/onlineIndexCatalogMock.js'
 
 const clientQuery = vi.fn()
 const clientRelease = vi.fn()
@@ -19,7 +20,7 @@ describe('0056_llm_allowed_models migration', () => {
     vi.resetModules()
     vi.clearAllMocks()
     mockConnect.mockResolvedValue({
-      query: clientQuery,
+      query: onlineIndexAwareQuery(clientQuery),
       release: clientRelease,
     })
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })

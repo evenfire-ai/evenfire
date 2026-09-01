@@ -4,6 +4,7 @@ import {
   DECISION_SOURCE_KINDS,
   LEGACY_DECISION_SOURCE_KINDS,
 } from '../src/services/tracing/contracts.js'
+import { onlineIndexAwareQuery } from './helpers/onlineIndexCatalogMock.js'
 
 const clientQuery = vi.fn()
 const clientRelease = vi.fn()
@@ -18,7 +19,10 @@ describe('0061_governed_run_trace_schema_foundation migration', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.clearAllMocks()
-    mockConnect.mockResolvedValue({ query: clientQuery, release: clientRelease })
+    mockConnect.mockResolvedValue({
+      query: onlineIndexAwareQuery(clientQuery),
+      release: clientRelease,
+    })
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
   })
 
