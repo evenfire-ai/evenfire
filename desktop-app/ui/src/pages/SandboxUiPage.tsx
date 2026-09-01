@@ -112,8 +112,13 @@ function useEmbedBounds(
   enabled: boolean,
   parked: boolean,
   refreshKey: string | number,
-  onBoundsApplied?: () => void
+  onBoundsApplied?: () => void,
+  onSlotTopChange?: (topPx: number) => void
 ): void {
+  // Dedupe the emitted slot-top across pushes AND across effect re-runs, so a
+  // resize/scroll storm (or a dep change) never churns the parent's state when
+  // the measured top is unchanged.
+  const lastEmittedTopRef = useRef<number | null>(null)
   useLayoutEffect(() => {
     if (!enabled) return
     const target = ref.current
@@ -124,6 +129,13 @@ function useEmbedBounds(
       cancelAnimationFrame(raf)
       raf = requestAnimationFrame(() => {
         const rect = target.getBoundingClientRect()
+        if (onSlotTopChange) {
+          const top = Math.round(rect.top)
+          if (lastEmittedTopRef.current !== top) {
+            lastEmittedTopRef.current = top
+            onSlotTopChange(top)
+          }
+        }
         void window.clerum.sandboxUi
           .setBounds(boundsFromRect(rect))
           .then(() => onBoundsApplied?.())
@@ -141,7 +153,7 @@ function useEmbedBounds(
       window.removeEventListener('resize', push)
       window.removeEventListener('scroll', push, true)
     }
-  }, [parked, ref, enabled, onBoundsApplied, refreshKey])
+  }, [parked, ref, enabled, onBoundsApplied, onSlotTopChange, refreshKey])
 }
 
 const APP_PAGE_SIZE = 6
@@ -160,12 +172,15 @@ export function SandboxUiPage({
   shortcutApp = null,
   shortcutOpenRequestId = 0,
   localSearchRequestId = 0,
+  chatDrawerOpen = false,
+  onToggleChatDrawer,
   onBackToConversation,
   onEmbeddedAppOpening,
   onEmbeddedAppMounted,
   onEmbeddedAppBack,
   onEmbeddedAppRemoved,
   onEmbedBoundsApplied,
+  onEmbedSlotTopChange,
   onNotify,
   onShortcutOpenResult,
 }: SandboxUiPageProps = {}) {
@@ -494,7 +509,8 @@ export function SandboxUiPage({
     launch.kind === 'mounted' || launch.kind === 'minting',
     shellOverlayOpen,
     boundsRefreshKey,
-    onEmbedBoundsApplied
+    onEmbedBoundsApplied,
+    onEmbedSlotTopChange
   )
 
   // Native WebContentsView content always paints above renderer DOM. Capture
@@ -555,15 +571,24 @@ export function SandboxUiPage({
     return (
       <section className="page">
         <div className="sandbox-ui-mounted-header">
-          {conversationOrigin && onBackToConversation ? (
+          {conversationOrigin && (onToggleChatDrawer || onBackToConversation) ? (
+            // The originating conversation lives in the drawer beside the live
+            // embed now, so "Back to {title}" toggles the drawer instead of
+            // destroying the embed and reconstructing the chat full-screen. When
+            // no drawer toggle is wired it falls back to the destroy-and-
+            // reconstitute path (also reachable via the app.backToConversation
+            // command).
             <Button
               color="neutral"
-              variant="soft"
+              variant={onToggleChatDrawer && chatDrawerOpen ? 'solid' : 'soft'}
               size="sm"
               className="sandbox-ui-conversation-btn"
               aria-label={`Back to ${conversationOrigin.title}`}
+              aria-pressed={onToggleChatDrawer ? chatDrawerOpen : undefined}
               title={`Back to ${conversationOrigin.title}`}
-              onClick={() => void handleBackToConversation()}
+              onClick={
+                onToggleChatDrawer ? onToggleChatDrawer : () => void handleBackToConversation()
+              }
             >
               <IconChat />
               <span>Back to {conversationOrigin.title}</span>
@@ -581,6 +606,22 @@ export function SandboxUiPage({
             <IconClose />
             <span>Back to apps</span>
           </Button>
+          {launch.kind === 'mounted' && onToggleChatDrawer && !conversationOrigin && (
+            // No originating conversation to return to — a plain drawer toggle.
+            <Button
+              color="neutral"
+              variant={chatDrawerOpen ? 'solid' : 'soft'}
+              size="sm"
+              className="sandbox-ui-chat-drawer-btn"
+              aria-label="Toggle chat drawer"
+              aria-pressed={chatDrawerOpen}
+              title="Toggle chat drawer"
+              onClick={onToggleChatDrawer}
+            >
+              <IconChat />
+              <span>Chat</span>
+            </Button>
+          )}
           {launch.kind === 'mounted' && (
             <>
               <Button
