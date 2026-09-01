@@ -465,6 +465,10 @@ export function App() {
         chatDrawerAvailableRef.current &&
         notification.kind !== 'workflow_completed' &&
         notification.kind !== 'sdk_notification' &&
+        // Mirror the controller's `if (!targetAgent) return`: an agent-less
+        // conversation notification has nothing to load, so it never surfaces —
+        // opening the drawer for it would leave it up with a blank composer.
+        String(notification.agentName || '').trim() !== '' &&
         (!notification.teamId || notification.teamId === vm.getCurrentTeamId())
       if (surfacesInDrawer) {
         setChatDrawerOpen(true)

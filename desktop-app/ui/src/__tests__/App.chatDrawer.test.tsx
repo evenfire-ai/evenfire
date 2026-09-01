@@ -538,6 +538,51 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     })
     expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
   })
+
+  // An agent-conversation notification with an empty agentName has nothing to
+  // load — the controller bails on `if (!targetAgent) return`. The in-drawer wrap
+  // re-encodes that routing, so it must mirror the same guard; otherwise it opens
+  // the drawer and passes keepNavItem for a gesture that loads nothing, leaving the
+  // drawer up with a blank composer.
+  it('does not open the drawer for a conversation notification with an empty agentName', async () => {
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: null,
+      navItem: DESKTOP_ROUTES.chat,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    const { rerender } = render(<App />)
+
+    // Launch from the picker (no origin) → app live, apps route, drawer CLOSED.
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+
+    // Conversation notification whose agentName is blank → nothing to surface.
+    await act(async () => {
+      await appHeaderHarness.openNotification?.({
+        id: 'n3',
+        kind: 'approval_required',
+        agentName: '   ',
+        chatId: 'chat-2',
+      } as unknown as Parameters<NonNullable<typeof appHeaderHarness.openNotification>>[0])
+    })
+    act(() => rerender(<App />))
+
+    // The drawer never opened, and the gesture ran through the plain path WITHOUT
+    // keepNavItem (the controller itself will then no-op on the empty agent).
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(currentController.handleOpenNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ agentName: '   ' }),
+      undefined
+    )
+  })
 })
 
 // Mini-spec 05: below the minimum panel width the drawer is SUPPRESSED (hidden,
