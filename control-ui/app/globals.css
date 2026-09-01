@@ -1841,6 +1841,10 @@ textarea.cu-input {
   border-top: 1px solid var(--cu-border-subtle);
 }
 
+.cu-table-wrap--section-gap {
+  margin-top: var(--cu-space-4);
+}
+
 .cu-table {
   width: 100%;
   border-collapse: collapse;

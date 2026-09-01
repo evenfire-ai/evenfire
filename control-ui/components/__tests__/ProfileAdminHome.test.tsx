@@ -125,6 +125,31 @@ describe('ProfileAdminHome — members invitations', () => {
     expect(screen.getByRole('menuitem', { name: 'Resend' })).toBeInTheDocument()
   })
 
+  it('hides the pending invitations section when there are no pending invitations', async () => {
+    vi.mocked(getProfileAdminOverview).mockResolvedValueOnce({
+      teams: [{ id: 'team-1', name: 'Marketing', memberCount: 1 }],
+      users: [
+        {
+          id: 'user-1',
+          email: 'member@example.com',
+          name: 'Member Example',
+          picture: null,
+          displayName: 'Member Example',
+          activeTeamCount: 1,
+        },
+      ],
+      pendingInvitations: [],
+      teamAgentCounts: { 'team-1': 0 },
+      teamContextCounts: { 'team-1': 0 },
+    })
+
+    renderProfileAdminHome()
+
+    expect(await screen.findByText('Member Example')).toBeInTheDocument()
+    expect(screen.queryByText('Pending invitations')).toBeNull()
+    expect(screen.queryByText('No pending invitations.')).toBeNull()
+  })
+
   it('keeps the new create member route as the add-member flow', async () => {
     renderProfileAdminHome()
 

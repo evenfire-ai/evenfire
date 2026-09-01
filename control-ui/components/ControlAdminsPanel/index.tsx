@@ -113,6 +113,7 @@ export function ControlAdminsPanel({
         .some(value => value.toLowerCase().includes(normalizedSearch))
     )
   }, [invitations, normalizedSearch])
+  const showInvitationsTable = loading || invitations.length > 0
 
   const filteredAdmins = useMemo(() => {
     // Disabled admins are retained for audit/lifecycle history, but they are
@@ -359,78 +360,83 @@ export function ControlAdminsPanel({
   return (
     <div className="cu-profile-section">
       {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
-      <div className="eft-table-viewport cu-table-wrap cu-table-wrap--border-top">
-        <DataTable className="eft-table cu-table cu-table--header-band">
-          <thead>
-            <tr>
-              <TableHeaderCell
-                activeDirection={invitationSort.key === 'email' ? invitationSort.direction : null}
-                label="Pending invitation"
-                onSort={() => invitationSort.sortBy('email')}
-              />
-              <TableHeaderCell
-                activeDirection={invitationSort.key === 'status' ? invitationSort.direction : null}
-                label="Status"
-                onSort={() => invitationSort.sortBy('status')}
-              />
-              <TableHeaderCell
-                activeDirection={invitationSort.key === 'expires' ? invitationSort.direction : null}
-                label="Expires"
-                onSort={() => invitationSort.sortBy('expires')}
-              />
-              <TableHeaderCell
-                activeDirection={invitationSort.key === 'created' ? invitationSort.direction : null}
-                label="Created"
-                onSort={() => invitationSort.sortBy('created')}
-              />
-              <th aria-label="Actions" />
-            </tr>
-          </thead>
-          <tbody>
-            {loading ? (
-              <TableStateRow colSpan={5} kind="loading" message="Loading invitations…" />
-            ) : error && filteredInvitations.length === 0 ? (
-              <TableStateRow colSpan={5} kind="error" message={error} />
-            ) : filteredInvitations.length === 0 ? (
-              <TableStateRow
-                colSpan={5}
-                message={
-                  normalizedSearch
-                    ? 'No pending invitations match this search.'
-                    : 'No pending invitations.'
-                }
-              />
-            ) : (
-              invitationSort.sortedRows.map(invitation => (
-                <tr key={invitation.id}>
-                  <td>{invitation.email}</td>
-                  <td>{invitation.status}</td>
-                  <td>{formatDate(invitation.expiresAt)}</td>
-                  <td>{formatDate(invitation.createdAt)}</td>
-                  <td className="cu-table__cell-actions">
-                    <RowActionsMenu
-                      ariaLabel={`Actions for invitation ${invitation.email}`}
-                      actions={[
-                        {
-                          key: 'cancel',
-                          label:
-                            cancellingInvitationId === invitation.id
-                              ? 'Canceling…'
-                              : 'Cancel invitation',
-                          disabled: cancellingInvitationId === invitation.id,
-                          onClick: () => void handleCancelInvitation(invitation),
-                          danger: true,
-                        },
-                      ]}
-                    />
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </DataTable>
-      </div>
-      <div className="eft-table-viewport cu-table-wrap cu-table-wrap--border-top">
+      {showInvitationsTable ? (
+        <div className="eft-table-viewport cu-table-wrap cu-table-wrap--border-top">
+          <DataTable className="eft-table cu-table cu-table--header-band">
+            <thead>
+              <tr>
+                <TableHeaderCell
+                  activeDirection={invitationSort.key === 'email' ? invitationSort.direction : null}
+                  label="Pending invitation"
+                  onSort={() => invitationSort.sortBy('email')}
+                />
+                <TableHeaderCell
+                  activeDirection={
+                    invitationSort.key === 'status' ? invitationSort.direction : null
+                  }
+                  label="Status"
+                  onSort={() => invitationSort.sortBy('status')}
+                />
+                <TableHeaderCell
+                  activeDirection={
+                    invitationSort.key === 'expires' ? invitationSort.direction : null
+                  }
+                  label="Expires"
+                  onSort={() => invitationSort.sortBy('expires')}
+                />
+                <TableHeaderCell
+                  activeDirection={
+                    invitationSort.key === 'created' ? invitationSort.direction : null
+                  }
+                  label="Created"
+                  onSort={() => invitationSort.sortBy('created')}
+                />
+                <th aria-label="Actions" />
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <TableStateRow colSpan={5} kind="loading" message="Loading invitations…" />
+              ) : error && filteredInvitations.length === 0 ? (
+                <TableStateRow colSpan={5} kind="error" message={error} />
+              ) : filteredInvitations.length === 0 ? (
+                <TableStateRow colSpan={5} message="No pending invitations match this search." />
+              ) : (
+                invitationSort.sortedRows.map(invitation => (
+                  <tr key={invitation.id}>
+                    <td>{invitation.email}</td>
+                    <td>{invitation.status}</td>
+                    <td>{formatDate(invitation.expiresAt)}</td>
+                    <td>{formatDate(invitation.createdAt)}</td>
+                    <td className="cu-table__cell-actions">
+                      <RowActionsMenu
+                        ariaLabel={`Actions for invitation ${invitation.email}`}
+                        actions={[
+                          {
+                            key: 'cancel',
+                            label:
+                              cancellingInvitationId === invitation.id
+                                ? 'Canceling…'
+                                : 'Cancel invitation',
+                            disabled: cancellingInvitationId === invitation.id,
+                            onClick: () => void handleCancelInvitation(invitation),
+                            danger: true,
+                          },
+                        ]}
+                      />
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </DataTable>
+        </div>
+      ) : null}
+      <div
+        className={`eft-table-viewport cu-table-wrap cu-table-wrap--border-top${
+          showInvitationsTable ? ' cu-table-wrap--section-gap' : ''
+        }`}
+      >
         <DataTable className="eft-table cu-table cu-table--header-band">
           <thead>
             <tr>

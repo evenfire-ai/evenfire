@@ -161,6 +161,8 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
           .includes(q)
     )
   }, [pendingInvitations, searchInput])
+  const showPendingInvitations =
+    (busy && !loaded) || pendingInvitations.length > 0 || (Boolean(error) && !loaded)
 
   const visibleUsers = useMemo(() => {
     const pendingEmails = new Set(
@@ -673,101 +675,104 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
             </div>
           ) : (
             <>
-              <div className="cu-profile-section">
-                <p className="cu-profile-section__label">Pending invitations</p>
-                <div className="eft-table-viewport cu-table-wrap">
-                  <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
-                    <thead>
-                      <tr>
-                        <th>Team</th>
-                        <th>Email</th>
-                        <th className="cu-table__col-role">Role</th>
-                        <th className="cu-table__col-date">Invited</th>
-                        <th className="cu-table__col-actions" aria-label="Actions" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {busy && !loaded ? (
-                        <TableStateRow
-                          colSpan={5}
-                          kind="loading"
-                          message="Loading pending invitations…"
-                        />
-                      ) : error && filteredPendingInvitations.length === 0 ? (
-                        <TableStateRow colSpan={5} kind="error" message={error} />
-                      ) : filteredPendingInvitations.length === 0 ? (
-                        <TableStateRow
-                          colSpan={5}
-                          message={
-                            searchInput.trim()
-                              ? 'No pending invitations match this search.'
-                              : 'No pending invitations.'
-                          }
-                        />
-                      ) : (
-                        filteredPendingInvitations.map(invitation => (
-                          <tr key={invitation.id}>
-                            <td>
-                              {invitation.team_id ? (
-                                <button
-                                  type="button"
-                                  className="cu-link"
-                                  onClick={() =>
-                                    router.push(
-                                      CONTROL_ROUTES.usersAndTeams.team(invitation.team_id)
-                                    )
-                                  }
-                                >
-                                  {pendingInvitationTeamLabel(invitation)}
-                                </button>
-                              ) : (
-                                <span className="cu-muted">No team</span>
-                              )}
-                            </td>
-                            <td className="cu-table__cell-soft">{invitation.email}</td>
-                            <td>{formatTeamRole(invitation.role)}</td>
-                            <td className="cu-table__cell-muted">
-                              {new Date(invitation.created_at).toLocaleString()}
-                            </td>
-                            <td className="cu-table__cell-actions">
-                              <RowActionsMenu
-                                ariaLabel={`Actions for invitation to ${invitation.email}`}
-                                horizontalTrigger
-                                actions={[
-                                  {
-                                    key: 'resend',
-                                    label:
-                                      resendingInvitationId === invitation.id
-                                        ? 'Sending…'
-                                        : 'Resend',
-                                    disabled:
-                                      (busy && !loaded) || resendingInvitationId === invitation.id,
-                                    onClick: () => void resendPendingInvitation(invitation),
-                                  },
-                                  {
-                                    key: 'cancel',
-                                    label:
-                                      revokingInvitationId === invitation.id
-                                        ? 'Cancelling…'
-                                        : 'Cancel',
-                                    danger: true,
-                                    disabled:
-                                      (busy && !loaded) || revokingInvitationId === invitation.id,
-                                    onClick: () => {
-                                      setDeleteDialogError('')
-                                      setInvitationToCancel(invitation)
+              {showPendingInvitations ? (
+                <div className="cu-profile-section">
+                  <p className="cu-profile-section__label">Pending invitations</p>
+                  <div className="eft-table-viewport cu-table-wrap">
+                    <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
+                      <thead>
+                        <tr>
+                          <th>Team</th>
+                          <th>Email</th>
+                          <th className="cu-table__col-role">Role</th>
+                          <th className="cu-table__col-date">Invited</th>
+                          <th className="cu-table__col-actions" aria-label="Actions" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {busy && !loaded ? (
+                          <TableStateRow
+                            colSpan={5}
+                            kind="loading"
+                            message="Loading pending invitations…"
+                          />
+                        ) : error && filteredPendingInvitations.length === 0 ? (
+                          <TableStateRow colSpan={5} kind="error" message={error} />
+                        ) : filteredPendingInvitations.length === 0 ? (
+                          <TableStateRow
+                            colSpan={5}
+                            message={
+                              searchInput.trim()
+                                ? 'No pending invitations match this search.'
+                                : 'No pending invitations.'
+                            }
+                          />
+                        ) : (
+                          filteredPendingInvitations.map(invitation => (
+                            <tr key={invitation.id}>
+                              <td>
+                                {invitation.team_id ? (
+                                  <button
+                                    type="button"
+                                    className="cu-link"
+                                    onClick={() =>
+                                      router.push(
+                                        CONTROL_ROUTES.usersAndTeams.team(invitation.team_id)
+                                      )
+                                    }
+                                  >
+                                    {pendingInvitationTeamLabel(invitation)}
+                                  </button>
+                                ) : (
+                                  <span className="cu-muted">No team</span>
+                                )}
+                              </td>
+                              <td className="cu-table__cell-soft">{invitation.email}</td>
+                              <td>{formatTeamRole(invitation.role)}</td>
+                              <td className="cu-table__cell-muted">
+                                {new Date(invitation.created_at).toLocaleString()}
+                              </td>
+                              <td className="cu-table__cell-actions">
+                                <RowActionsMenu
+                                  ariaLabel={`Actions for invitation to ${invitation.email}`}
+                                  horizontalTrigger
+                                  actions={[
+                                    {
+                                      key: 'resend',
+                                      label:
+                                        resendingInvitationId === invitation.id
+                                          ? 'Sending…'
+                                          : 'Resend',
+                                      disabled:
+                                        (busy && !loaded) ||
+                                        resendingInvitationId === invitation.id,
+                                      onClick: () => void resendPendingInvitation(invitation),
                                     },
-                                  },
-                                ]}
-                              />
-                            </td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </DataTable>
+                                    {
+                                      key: 'cancel',
+                                      label:
+                                        revokingInvitationId === invitation.id
+                                          ? 'Cancelling…'
+                                          : 'Cancel',
+                                      danger: true,
+                                      disabled:
+                                        (busy && !loaded) || revokingInvitationId === invitation.id,
+                                      onClick: () => {
+                                        setDeleteDialogError('')
+                                        setInvitationToCancel(invitation)
+                                      },
+                                    },
+                                  ]}
+                                />
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </DataTable>
+                  </div>
                 </div>
-              </div>
+              ) : null}
               <div className="eft-table-viewport cu-table-wrap">
                 <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
                   <thead>

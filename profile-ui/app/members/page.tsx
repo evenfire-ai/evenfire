@@ -53,6 +53,7 @@ export default function MembersPage() {
       expires: (invitation: ManagedPendingInvitation) => new Date(invitation.expiresAt),
     },
   })
+  const showInvitationsTable = state === 'loading' || invitations.length > 0
   const memberSort = useTableSort<ManagedMember, 'name' | 'email' | 'teams'>({
     rows: members,
     defaultKey: 'name' as const,
@@ -179,80 +180,80 @@ export default function MembersPage() {
             </div>
           ) : null}
 
-          <section className="section members-section">
-            <div className="settings-section-head">
-              <div>
-                <h2 className="section-title">Pending invitations</h2>
+          {showInvitationsTable ? (
+            <section className="section members-section">
+              <div className="settings-section-head">
+                <div>
+                  <h2 className="section-title">Pending invitations</h2>
+                </div>
               </div>
-            </div>
-            <div className="eft-table-viewport">
-              <DataTable className="eft-table eft-table--wide">
-                <thead>
-                  <tr>
-                    <TableHeaderCell
-                      activeDirection={
-                        invitationSort.key === 'email' ? invitationSort.direction : null
-                      }
-                      label="Email"
-                      onSort={() => invitationSort.sortBy('email')}
-                    />
-                    <TableHeaderCell
-                      activeDirection={
-                        invitationSort.key === 'teams' ? invitationSort.direction : null
-                      }
-                      label="Teams"
-                      onSort={() => invitationSort.sortBy('teams')}
-                    />
-                    <TableHeaderCell
-                      activeDirection={
-                        invitationSort.key === 'expires' ? invitationSort.direction : null
-                      }
-                      label="Expires"
-                      onSort={() => invitationSort.sortBy('expires')}
-                    />
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {state === 'loading' ? (
-                    <TableStateRow colSpan={4} kind="loading" message="Loading invitations…" />
-                  ) : state === 'error' ? (
-                    <TableStateRow colSpan={4} kind="error" message="Invitations unavailable." />
-                  ) : invitationSort.sortedRows.length === 0 ? (
-                    <TableStateRow colSpan={4} message="No pending invitations." />
-                  ) : (
-                    invitationSort.sortedRows.map(invitation => (
-                      <tr key={invitation.id}>
-                        <td>{invitation.email}</td>
-                        <td>{invitation.teams.map(team => team.name).join(', ')}</td>
-                        <td>{new Date(invitation.expiresAt).toLocaleString()}</td>
-                        <td className="eft-table__cell--actions">
-                          <RowActionMenu
-                            ariaLabel={`Actions for invitation ${invitation.email}`}
-                            actions={[
-                              {
-                                key: 'resend',
-                                label: 'Resend invitation',
-                                disabled: busy || !invitation.canResend,
-                                onSelect: () => void resendInvitation(invitation),
-                              },
-                              {
-                                key: 'cancel',
-                                label: 'Cancel invitation',
-                                danger: true,
-                                disabled: busy || !invitation.canCancel,
-                                onSelect: () => void cancelInvitation(invitation),
-                              },
-                            ]}
-                          />
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </DataTable>
-            </div>
-          </section>
+              <div className="eft-table-viewport">
+                <DataTable className="eft-table eft-table--wide">
+                  <thead>
+                    <tr>
+                      <TableHeaderCell
+                        activeDirection={
+                          invitationSort.key === 'email' ? invitationSort.direction : null
+                        }
+                        label="Email"
+                        onSort={() => invitationSort.sortBy('email')}
+                      />
+                      <TableHeaderCell
+                        activeDirection={
+                          invitationSort.key === 'teams' ? invitationSort.direction : null
+                        }
+                        label="Teams"
+                        onSort={() => invitationSort.sortBy('teams')}
+                      />
+                      <TableHeaderCell
+                        activeDirection={
+                          invitationSort.key === 'expires' ? invitationSort.direction : null
+                        }
+                        label="Expires"
+                        onSort={() => invitationSort.sortBy('expires')}
+                      />
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {state === 'loading' ? (
+                      <TableStateRow colSpan={4} kind="loading" message="Loading invitations…" />
+                    ) : state === 'error' ? (
+                      <TableStateRow colSpan={4} kind="error" message="Invitations unavailable." />
+                    ) : (
+                      invitationSort.sortedRows.map(invitation => (
+                        <tr key={invitation.id}>
+                          <td>{invitation.email}</td>
+                          <td>{invitation.teams.map(team => team.name).join(', ')}</td>
+                          <td>{new Date(invitation.expiresAt).toLocaleString()}</td>
+                          <td className="eft-table__cell--actions">
+                            <RowActionMenu
+                              ariaLabel={`Actions for invitation ${invitation.email}`}
+                              actions={[
+                                {
+                                  key: 'resend',
+                                  label: 'Resend invitation',
+                                  disabled: busy || !invitation.canResend,
+                                  onSelect: () => void resendInvitation(invitation),
+                                },
+                                {
+                                  key: 'cancel',
+                                  label: 'Cancel invitation',
+                                  danger: true,
+                                  disabled: busy || !invitation.canCancel,
+                                  onSelect: () => void cancelInvitation(invitation),
+                                },
+                              ]}
+                            />
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </DataTable>
+              </div>
+            </section>
+          ) : null}
 
           <section className="section members-section">
             <div className="eft-table-viewport">

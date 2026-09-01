@@ -159,6 +159,14 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
     expect(await screen.findByTestId('gfs-operator-link-admin-2')).toHaveTextContent('Not linked')
   })
 
+  it('hides the pending invitations table when there are no pending admin invitations', async () => {
+    render(<ControlAdminsPanel />)
+
+    await screen.findByText('initial-admin')
+    expect(screen.queryByRole('columnheader', { name: 'Pending invitation' })).toBeNull()
+    expect(screen.queryByText('No pending invitations.')).toBeNull()
+  })
+
   it('views the matching member from the admin row menu', async () => {
     render(<ControlAdminsPanel />)
 
