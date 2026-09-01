@@ -1,7 +1,13 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-components'
+import {
+  DataTable,
+  TableRow,
+  TableStateRow,
+  TruncatedText,
+  useTableSort,
+} from '@clerum/frontend-components'
 import { ContextResource } from '../lib/api'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
@@ -15,8 +21,7 @@ type ContextRef = { name: string }
 
 const CONTEXT_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
-  { key: 'identifier', label: 'Identifier' },
-  { key: 'description', label: 'Description' },
+  { key: 'description', label: 'Description', minWidth: '20rem' },
   { key: 'servers', label: 'Connectors', width: '7rem' },
   { key: 'actions', label: 'Actions', width: '8rem', align: 'right' },
 ]
@@ -71,13 +76,12 @@ export function ContextTable({
   }, [normalizedSearch, rows])
   const contextSort = useTableSort<
     (typeof filteredRows)[number],
-    'name' | 'identifier' | 'description' | 'servers'
+    'name' | 'description' | 'servers'
   >({
     rows: filteredRows,
     defaultKey: 'name',
     accessors: {
       name: row => row.displayName,
-      identifier: row => row.name,
       description: row => String(row.item.spec?.description || ''),
       servers: row => row.mcpServers.length,
     },
@@ -88,8 +92,7 @@ export function ContextTable({
     ...(column.key !== 'actions'
       ? {
           activeDirection: contextSort.key === column.key ? contextSort.direction : null,
-          onSort: () =>
-            contextSort.sortBy(column.key as 'name' | 'identifier' | 'description' | 'servers'),
+          onSort: () => contextSort.sortBy(column.key as 'name' | 'description' | 'servers'),
         }
       : {}),
   }))
@@ -168,10 +171,10 @@ export function ContextTable({
                 >
                   <td>
                     <span className="cu-table__cell-name">{displayName}</span>
+                    <span className="cu-table__cell-subtle">{name}</span>
                   </td>
-                  <td className="cu-table__cell-subtle">{name}</td>
-                  <td className="cu-registry-description" title={item.spec?.description || '—'}>
-                    {item.spec?.description || '—'}
+                  <td className="cu-registry-description">
+                    <TruncatedText value={item.spec?.description} />
                   </td>
                   <td style={{ color: 'var(--cu-text-muted)', fontVariantNumeric: 'tabular-nums' }}>
                     {mcpServers.length}

@@ -36,7 +36,7 @@ describe('ContextTable', () => {
     expect(onView).toHaveBeenCalledWith({ name: 'business' })
   })
 
-  it('stacks a non-link context name and its description in one cell', () => {
+  it('keeps context identity in the Name column and uses Description as its own column', () => {
     const { container } = render(
       <ContextTable
         items={contexts}
@@ -51,8 +51,10 @@ describe('ContextTable', () => {
     )
 
     expect(screen.getAllByText('business')[0]).toHaveClass('cu-table__cell-name')
-    expect(screen.getByText('Business context')).toHaveClass('cu-registry-description')
-    expect(container.querySelectorAll('thead th')).toHaveLength(5)
+    expect(screen.queryByRole('columnheader', { name: 'Identifier' })).not.toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Description' })).toBeInTheDocument()
+    expect(screen.getByText('Business context')).toHaveClass('eft-truncated-text__value')
+    expect(container.querySelectorAll('thead th')).toHaveLength(4)
     expect(screen.queryByRole('button', { name: 'business' })).not.toBeInTheDocument()
   })
 
