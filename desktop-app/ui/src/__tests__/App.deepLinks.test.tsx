@@ -752,9 +752,11 @@ describe('App deep-link orchestration', () => {
     })
 
     // Retry clears the failure and re-drives the open in the same commit the
-    // predicates go null, so the dialog unmounts as the signal drops: there is
-    // no frame with a dialog mounted and the embed shown, and none with the
-    // embed hidden and no dialog. Retry never acknowledges (that is Dismiss).
+    // predicates go null, so the dialog unmounts as the signal drops. The
+    // dialog value and the overlay signal are a single derived expression, so
+    // they move in lockstep by construction. The assertions below check the
+    // settled final state (dialog unmounted, signal false), not each render
+    // frame. Retry never acknowledges (that is Dismiss).
     await waitFor(() => expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(false))
     expect(confirmDialogHarness.mountedCount).toBe(0)
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()

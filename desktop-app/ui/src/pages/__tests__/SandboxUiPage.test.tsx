@@ -897,6 +897,12 @@ describe('SandboxUiPage', () => {
     expect(sandboxUi.setVisible.mock.calls).toEqual([[true]])
   })
 
+  // This test pins the refcount-like behaviour of the overlay OR: two overlays
+  // open, closing one keeps the embed hidden, closing the last restores it. It
+  // does NOT discriminate the "collapse the whole OR" mutant on its own —
+  // `deepLinkShellOverlayOpen` stays true through every phase here, so that
+  // mutant is caught by the single-overlay tests above, not by this one. Keep
+  // those tests: this one does not subsume them.
   it('keeps the native view hidden until the last of several overlays closes', async () => {
     sandboxUi.listApps.mockResolvedValueOnce({
       apps: [
