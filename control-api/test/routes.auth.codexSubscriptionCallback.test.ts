@@ -5,6 +5,7 @@ import { CodexSubscriptionOAuthError } from '../src/services/codexSubscriptionOA
 
 const oauth = vi.hoisted(() => ({
   callback: vi.fn(),
+  runCatalogSync: vi.fn(),
 }))
 
 vi.mock('../src/services/codexSubscriptionOAuth.js', async () => {
@@ -12,6 +13,7 @@ vi.mock('../src/services/codexSubscriptionOAuth.js', async () => {
   return {
     ...actual,
     handleCodexBrowserCallback: oauth.callback,
+    runCodexCatalogSync: oauth.runCatalogSync,
   }
 })
 
@@ -59,12 +61,22 @@ describe('GET /auth/codex-subscription/callback', () => {
   beforeEach(() => {
     app = makeApp()
     oauth.callback.mockReset()
+    oauth.runCatalogSync.mockReset()
+    oauth.runCatalogSync.mockResolvedValue({
+      ok: true,
+      catalogStatus: 'ready',
+      added: 1,
+      refreshed: 0,
+      staled: 0,
+      connection: { connectionKey: 'codex-aaa', status: 'connected', catalogStatus: 'ready' },
+    })
     config.controlUiBaseUrl = 'http://127.0.0.1:3000'
   })
 
   it('redirects back to the Codex surface on success without tokens', async () => {
     oauth.callback.mockResolvedValue({
       status: 'connected',
+      connectionKey: 'codex-aaa',
       accountFingerprint: 'fp',
       credentialRevision: 1,
       refreshToken: 'refresh-secret',
@@ -86,6 +98,12 @@ describe('GET /auth/codex-subscription/callback', () => {
       { code: 'code-1', state: 'state-1' }
     )
     expect(res.headers['set-cookie']).toBeUndefined()
+    expect(oauth.runCatalogSync).toHaveBeenCalledTimes(1)
+    expect(oauth.runCatalogSync).toHaveBeenCalledWith(
+      expect.objectContaining({ connectionKey: 'codex-aaa' }),
+      'codex-aaa',
+      expect.anything()
+    )
     assertNoLeak(res.text)
   })
 
@@ -93,6 +111,29 @@ describe('GET /auth/codex-subscription/callback', () => {
     const materialize = vi.fn(async () => {})
     oauth.callback.mockResolvedValue({
       status: 'connected',
+      connectionKey: 'codex-aaa',
+      accountFingerprint: 'fp',
+      credentialRevision: 1,
+    })
+    const res = await request(makeApp({ llmAllowedModelsConfigMap: () => ({ materialize }) }))
+      .get('/auth/codex-subscription/callback')
+      .query({ code: 'code-1', state: 'state-1' })
+    expect(res.status).toBe(303)
+    expect(res.headers.location).toBe(
+      '/llm-models/providers/codex-subscription?codex_oauth=connected'
+    )
+    expect(oauth.runCatalogSync).toHaveBeenCalledTimes(1)
+    expect(materialize).toHaveBeenCalledTimes(1)
+    assertNoLeak(res.headers.location)
+  })
+
+  it('still redirects when ConfigMap publish fails after a successful callback', async () => {
+    const materialize = vi.fn(async () => {
+      throw new Error('apiserver down')
+    })
+    oauth.callback.mockResolvedValue({
+      status: 'connected',
+      connectionKey: 'codex-aaa',
       accountFingerprint: 'fp',
       credentialRevision: 1,
     })
@@ -107,23 +148,26 @@ describe('GET /auth/codex-subscription/callback', () => {
     assertNoLeak(res.headers.location)
   })
 
-  it('still redirects when ConfigMap publish fails after a successful callback', async () => {
-    const materialize = vi.fn(async () => {
-      throw new Error('apiserver down')
-    })
+  it('still redirects when automatic catalog sync fails after a successful callback', async () => {
     oauth.callback.mockResolvedValue({
       status: 'connected',
+      connectionKey: 'codex-aaa',
       accountFingerprint: 'fp',
       credentialRevision: 1,
     })
-    const res = await request(makeApp({ llmAllowedModelsConfigMap: () => ({ materialize }) }))
+    oauth.runCatalogSync.mockResolvedValue({
+      ok: false,
+      catalogStatus: 'unavailable',
+      reason: 'catalog_sync_failed',
+    })
+    const res = await request(app)
       .get('/auth/codex-subscription/callback')
       .query({ code: 'code-1', state: 'state-1' })
     expect(res.status).toBe(303)
     expect(res.headers.location).toBe(
       '/llm-models/providers/codex-subscription?codex_oauth=connected'
     )
-    expect(materialize).toHaveBeenCalledTimes(1)
+    expect(oauth.runCatalogSync).toHaveBeenCalledTimes(1)
     assertNoLeak(res.headers.location)
   })
 
