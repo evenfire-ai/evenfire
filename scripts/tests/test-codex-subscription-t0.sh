@@ -193,6 +193,7 @@ run_group "control-api" "control-api" \
   "test/services.pluginWorkloadSdkFinalization.test.ts" \
   "test/routes.mcp-host.plugin-workload-sdk.test.ts" \
   "test/db.llmProviderAttemptMigration.test.ts" \
+  "test/db.oauthGrantsOwnerGeneralization.test.ts" \
   "test/routes.usageEvents.test.ts"
 
 run_group "codex-llm-proxy" "codex-llm-proxy" \

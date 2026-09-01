@@ -168,23 +168,25 @@ describeRealPostgres('Plugin Workload SDK Codex dual ledger on real PostgreSQL',
       `INSERT INTO plugin_workload_sdk_invocations (
          id, recipe_namespace, recipe_name, caller_ref, method, detail,
          idempotency_key_hash, status, authorization_decision, contract_version,
-         attempt_generation
+         attempt_generation, lease_expires_at
        ) VALUES ($1, $2, $3, 'api', 'promptBridge', 'prompt', $4, 'in_progress',
-                 'allow', 2, 1)`,
+                 'allow', 2, 1, now() + interval '5 minutes')`,
       [invocationId, NS, RECIPE, randomBytes(32).toString('hex')]
     )
     await pool.query(
       `INSERT INTO plugin_workload_sdk_invocation_attempts (
          invocation_id, recipe_namespace, recipe_name, attempt_generation,
-         method, status
-       ) VALUES ($1, $2, $3, 1, 'promptBridge', 'in_progress')`,
+         method, status, lease_expires_at
+       ) VALUES ($1, $2, $3, 1, 'promptBridge', 'in_progress',
+                 now() + interval '5 minutes')`,
       [invocationId, NS, RECIPE]
     )
     const inserted = await pool.query<{ id: string }>(
       `INSERT INTO plugin_workload_sdk_provider_attempts (
          invocation_id, recipe_namespace, recipe_name, attempt_generation,
-         attempt_index, target_ref, provider, model, credential_slot, status
-       ) VALUES ($1, $2, $3, 1, 1, $4, $5, $6, $7, $8)
+         attempt_index, target_ref, provider, model, credential_slot, status,
+         lease_expires_at
+       ) VALUES ($1, $2, $3, 1, 1, $4, $5, $6, $7, $8, now() + interval '5 minutes')
        RETURNING id::text AS id`,
       [
         invocationId,
