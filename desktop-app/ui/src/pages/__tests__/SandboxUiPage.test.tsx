@@ -185,6 +185,60 @@ describe('SandboxUiPage', () => {
     expect(screen.getAllByRole('button', { name: /^Back to / })).toHaveLength(1)
   })
 
+  it('exposes a chat-drawer toggle in the mounted header that reflects and drives drawer state', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    const onToggleChatDrawer = vi.fn()
+
+    const view = render(
+      <SandboxUiPage chatDrawerOpen={false} onToggleChatDrawer={onToggleChatDrawer} />
+    )
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+
+    const toggle = await screen.findByRole('button', { name: 'Toggle chat drawer' })
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+
+    fireEvent.click(toggle)
+    expect(onToggleChatDrawer).toHaveBeenCalledTimes(1)
+
+    view.rerender(<SandboxUiPage chatDrawerOpen={true} onToggleChatDrawer={onToggleChatDrawer} />)
+    expect(
+      screen.getByRole('button', { name: 'Toggle chat drawer' }).getAttribute('aria-pressed')
+    ).toBe('true')
+  })
+
+  it('omits the chat-drawer toggle when no toggle handler is provided', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+
+    render(<SandboxUiPage />)
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    await screen.findByRole('button', { name: 'Back to apps' })
+    expect(screen.queryByRole('button', { name: 'Toggle chat drawer' })).toBeNull()
+  })
+
   it('routes controlled refresh and back requests through mounted-app owners', async () => {
     sandboxUi.listApps.mockResolvedValue({
       apps: [
@@ -723,6 +777,40 @@ describe('SandboxUiPage', () => {
     await waitFor(() => {
       expect(onEmbedBoundsApplied).toHaveBeenCalled()
     })
+  })
+
+  it('publishes the measured embed slot top through onEmbedSlotTopChange', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    const onEmbedSlotTopChange = vi.fn()
+
+    render(<SandboxUiPage onEmbedSlotTopChange={onEmbedSlotTopChange} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    await screen.findByRole('button', { name: 'Back to apps' })
+
+    // The slot rect (getBoundingClientRect mock -> top: 12) flows through the real
+    // useEmbedBounds push, so the callback fires with Math.round(rect.top) = 12.
+    await waitFor(() => {
+      expect(onEmbedSlotTopChange).toHaveBeenCalledWith(12)
+    })
+    const calls = onEmbedSlotTopChange.mock.calls.length
+
+    // A push that measures the same top must NOT re-emit (dedupe against churn).
+    fireEvent.scroll(window)
+    await new Promise(resolve => window.setTimeout(resolve, 0))
+    expect(onEmbedSlotTopChange.mock.calls.length).toBe(calls)
   })
 
   it('reloads the embed in place when the Refresh button is clicked (no navigate-away needed)', async () => {
