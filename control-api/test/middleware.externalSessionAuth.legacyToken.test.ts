@@ -66,18 +66,22 @@ function app() {
 describe('external session legacy token cut-over', () => {
   beforeEach(() => {
     poolQuery.mockClear()
-    poolQuery.mockResolvedValue({
-      rows: [
-        {
-          id: '11111111-1111-4111-8111-111111111111',
-          lifecycle_state: 'active',
-          lifecycle_version: '1',
-          valid_after: null,
-          token_revoked: false,
-        },
-      ],
-      rowCount: 1,
-    })
+    poolQuery.mockImplementation(async (sql: string) =>
+      sql.includes('clock_timestamp()')
+        ? { rows: [{ db_now: new Date() }], rowCount: 1 }
+        : {
+            rows: [
+              {
+                id: '11111111-1111-4111-8111-111111111111',
+                lifecycle_state: 'active',
+                lifecycle_version: '1',
+                valid_after: null,
+                token_revoked: false,
+              },
+            ],
+            rowCount: 1,
+          }
+    )
   })
 
   it('accepts a producer-shaped pre-generation token only as lifecycle generation one', async () => {
@@ -99,6 +103,7 @@ describe('external session legacy token cut-over', () => {
 
     expect(response.status).toBe(200)
     expect(response.body).toEqual({ ok: true })
-    expect(poolQuery).toHaveBeenCalledTimes(1)
+    expect(poolQuery).toHaveBeenCalledTimes(2)
+    expect(String(poolQuery.mock.calls[0]?.[0])).toContain('clock_timestamp()')
   })
 })

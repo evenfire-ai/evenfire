@@ -3,13 +3,19 @@ import express from 'express'
 import { rateLimit } from 'express-rate-limit'
 import { DatabaseError } from 'pg'
 import request from 'supertest'
+import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 
 const poolQuery = vi.hoisted(() => vi.fn())
+const poolConnect = vi.hoisted(() => vi.fn())
 const verifyToken = vi.hoisted(() => vi.fn())
+let authorityRows: Array<Record<string, unknown>> = []
 const loggerWarn = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/db.js', () => ({
-  pool: { query: (...args: unknown[]) => poolQuery(...args) },
+  pool: {
+    query: (...args: unknown[]) => poolQuery(...args),
+    connect: (...args: unknown[]) => poolConnect(...args),
+  },
 }))
 vi.mock('../src/observability/logger.js', () => ({
   rootLogger: { warn: (...args: unknown[]) => loggerWarn(...args) },
@@ -17,13 +23,13 @@ vi.mock('../src/observability/logger.js', () => ({
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: (...args: unknown[]) => verifyToken(...args),
 }))
-
 const claims = {
   userId: '11111111-1111-4111-8111-111111111111',
   email: 'user@example.com',
   teamId: null,
   role: 'member' as const,
   authGeneration: 4,
+  iat: Math.floor(Date.now() / 1000) - 60,
   exp: Math.floor(Date.now() / 1000) + 3600,
 }
 
@@ -34,12 +40,18 @@ function databaseError(sqlstate: string): DatabaseError {
   return error
 }
 
-function app() {
+function app(budget?: AccessExecutionBudget) {
   const server = express()
   server.get(
     '/protected',
     rateLimit({ windowMs: 60_000, limit: 100, standardHeaders: 'draft-7', legacyHeaders: false }),
     async (req, res, next) => {
+      if (budget) {
+        const budgetedRequest = req as express.Request & {
+          accessExecutionBudget?: AccessExecutionBudget
+        }
+        budgetedRequest.accessExecutionBudget = budget
+      }
       const { requireValidExternalSessionToken } =
         await import('../src/middleware/externalSessionAuth.js')
       await requireValidExternalSessionToken(req as never, res, next)
@@ -57,20 +69,27 @@ function app() {
 describe('external session lifecycle gate', () => {
   beforeEach(() => {
     poolQuery.mockReset()
+    poolConnect.mockReset()
     verifyToken.mockReset()
     loggerWarn.mockReset()
-    poolQuery.mockResolvedValue({
-      rows: [{ lifecycle_state: 'active', lifecycle_version: '4' }],
-      rowCount: 1,
-    })
+    authorityRows = [
+      {
+        id: claims.userId,
+        lifecycle_state: 'active',
+        lifecycle_version: '4',
+        valid_after: null,
+        token_revoked: false,
+      },
+    ]
+    poolQuery.mockImplementation(async (sql: string) =>
+      sql.includes('clock_timestamp()')
+        ? { rows: [{ db_now: new Date() }], rowCount: 1 }
+        : { rows: authorityRows, rowCount: authorityRows.length }
+    )
   })
 
   it('accepts an active session whose generation matches the user row', async () => {
     verifyToken.mockReturnValueOnce(claims)
-    poolQuery.mockResolvedValueOnce({
-      rows: [{ lifecycle_state: 'active', lifecycle_version: '4' }],
-      rowCount: 1,
-    })
     const response = await request(app()).get('/protected').set('x-user-session-token', 'session')
     expect(response.status).toBe(200)
   })
@@ -81,7 +100,7 @@ describe('external session lifecycle gate', () => {
     [[]],
   ])('denies retired, stale, or missing authoritative rows', async row => {
     verifyToken.mockReturnValueOnce(claims)
-    poolQuery.mockResolvedValueOnce({ rows: row, rowCount: row.length })
+    authorityRows = row
     const response = await request(app()).get('/protected').set('x-user-session-token', 'session')
     expect(response.status).toBe(401)
   })
@@ -101,14 +120,50 @@ describe('external session lifecycle gate', () => {
     expect(response.body).toEqual({ error: 'session_backend_unavailable', retryAfterSeconds: 2 })
     expect(response.headers['retry-after']).toBe('2')
     expect(response.headers['cache-control']).toBe('no-store')
-    // Witness: the lookup was attempted exactly once, for the token's user.
+    // Witness: session validation reached the database-authoritative clock.
     expect(poolQuery).toHaveBeenCalledTimes(1)
-    expect(poolQuery.mock.calls[0]?.[1]).toEqual([claims.userId])
+    expect(String(poolQuery.mock.calls[0]?.[0])).toContain('clock_timestamp()')
     expect(loggerWarn).toHaveBeenCalledTimes(1)
-    expect(loggerWarn.mock.calls[0]?.[0]).toEqual({
+    expect(loggerWarn.mock.calls[0]?.[0]).toMatchObject({
       event: 'external_session_backend_unavailable',
-      err: 'timeout exceeded when trying to connect',
+      err: expect.objectContaining({ message: 'timeout exceeded when trying to connect' }),
     })
+  })
+
+  it('answers 503 for a no-SQLSTATE database connection-acquire failure', async () => {
+    verifyToken.mockReturnValueOnce(claims)
+    const acquireFailure = new Error('private pg-pool acquire timeout sentinel')
+    poolConnect.mockRejectedValueOnce(acquireFailure)
+    const budget = AccessExecutionBudget.create('action')
+
+    const response = await request(app(budget))
+      .get('/protected')
+      .set('x-user-session-token', 'session-with-budget')
+    budget.close()
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'session_backend_unavailable', retryAfterSeconds: 2 })
+    expect(response.headers['retry-after']).toBe('2')
+    expect(JSON.stringify(response.body)).not.toContain(acquireFailure.message)
+    expect(JSON.stringify(response.headers)).not.toContain(acquireFailure.message)
+    expect(poolConnect).toHaveBeenCalledTimes(1)
+    expect(verifyToken).toHaveBeenCalledWith('session-with-budget')
+    expect(loggerWarn).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a successful-query session clock invariant failure on the ordinary 500 path', async () => {
+    verifyToken.mockReturnValueOnce(claims)
+    poolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+
+    const response = await request(app()).get('/protected').set('x-user-session-token', 'session')
+
+    expect(response.status).toBe(500)
+    expect(response.body).toEqual({ error: 'internal' })
+    expect(JSON.stringify(response.body)).not.toContain('database session clock unavailable')
+    expect(response.headers['retry-after']).toBeUndefined()
+    expect(response.headers['cache-control']).toBeUndefined()
+    expect(String(poolQuery.mock.calls[0]?.[0])).toContain('clock_timestamp()')
+    expect(loggerWarn).not.toHaveBeenCalled()
   })
 
   it.each([

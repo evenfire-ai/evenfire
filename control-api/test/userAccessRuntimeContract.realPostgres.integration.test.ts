@@ -116,7 +116,6 @@ describeRealPostgres('user-access runtime role contract on real PostgreSQL', () 
     const renewed = await runAsControlApiRuntime(db =>
       renewUserSession(issuedClaims!, {
         db,
-        now: new Date((issuedClaims!.iat + 1) * 1_000),
       })
     )
     expect(renewed).toMatchObject({ expiresInSeconds: 60 * 60 })
