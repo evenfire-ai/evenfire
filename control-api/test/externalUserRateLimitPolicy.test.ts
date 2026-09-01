@@ -28,8 +28,6 @@ const operations = [
   ['authentication_attempt', 'external_authentication_attempt', 5],
   ['session_verify', 'external_session_verify', 10],
   ['rpc_token', 'external_rpc_token', 10],
-  ['gfs_read', 'external_gfs_read', 30],
-  ['gfs_mutation', 'external_gfs_mutation', 10],
   ['team_user_read', 'external_team_user_read', 30],
   ['team_user_mutation', 'external_team_user_mutation', 10],
 ] as const
