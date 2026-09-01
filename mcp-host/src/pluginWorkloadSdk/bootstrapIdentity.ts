@@ -7,11 +7,7 @@ import type {
   PluginWorkloadSdkBootstrapProof,
   PluginWorkloadSdkClientNotificationsBootstrapProof,
 } from './promptBridge/controlApiClient'
-import {
-  isPluginWorkloadSdkCodexBindingProof,
-  replaceSdkOnlyCodexBinding,
-  verifySdkOnlyCodexBindingHash,
-} from './sdkOnlyCodexBinding'
+import { readVerifiedSdkOnlyCodexBinding, replaceSdkOnlyCodexBinding } from './sdkOnlyCodexBinding'
 
 export interface PluginWorkloadSdkBootstrapIdentityDeps {
   /**
@@ -91,14 +87,11 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
   if (!isRunnableLlmModelId(model)) {
     return { configured: false, message: 'model is required and has an invalid format' }
   }
+  // Always integrity-check a supplied binding before the provider protocol
+  // branch. Request-controlled provider/version must not skip this check.
+  const verifiedBinding = readVerifiedSdkOnlyCodexBinding(req.codexBinding, model)
   if (req.provider === 'codex-subscription') {
-    const binding = req.codexBinding
-    const bindingValid =
-      req.contractVersion === 3 &&
-      isPluginWorkloadSdkCodexBindingProof(binding) &&
-      binding.model === model &&
-      verifySdkOnlyCodexBindingHash(binding)
-    if (!bindingValid) {
+    if (!verifiedBinding) {
       replaceSdkOnlyCodexBinding(null)
       return {
         configured: true,
@@ -113,7 +106,7 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
         message: 'SDK-only Codex bootstrap requires a live v3 execution binding',
       }
     }
-    replaceSdkOnlyCodexBinding(binding)
+    replaceSdkOnlyCodexBinding(verifiedBinding)
   } else {
     replaceSdkOnlyCodexBinding(null)
   }

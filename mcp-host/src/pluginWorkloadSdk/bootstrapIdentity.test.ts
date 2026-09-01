@@ -4,7 +4,37 @@ import {
   configurePluginWorkloadSdkBootstrapIdentity,
   resolvePluginWorkloadSdkBootstrapCapabilityFamily,
 } from './bootstrapIdentity'
-import { readSdkOnlyCodexBinding, replaceSdkOnlyCodexBinding } from './sdkOnlyCodexBinding'
+import * as sdkOnlyCodexBinding from './sdkOnlyCodexBinding'
+import {
+  readSdkOnlyCodexBinding,
+  readVerifiedSdkOnlyCodexBinding,
+  replaceSdkOnlyCodexBinding,
+} from './sdkOnlyCodexBinding'
+
+describe('readVerifiedSdkOnlyCodexBinding', () => {
+  const model = 'gpt-5.6-luna'
+  const binding = {
+    connectionKey: 'team-plus',
+    catalogRevision: 4,
+    credentialRevision: 1,
+    model,
+    bindingHash: computeCodexPolicyHash({
+      model,
+      catalogRevision: 4,
+      credentialRevision: 1,
+      connectionKey: 'team-plus',
+    }),
+  }
+
+  it('accepts only a hash that matches the bound fields and expected model', () => {
+    expect(readVerifiedSdkOnlyCodexBinding(binding, model)).toEqual(binding)
+    expect(
+      readVerifiedSdkOnlyCodexBinding({ ...binding, bindingHash: 'a'.repeat(64) }, model)
+    ).toBeNull()
+    expect(readVerifiedSdkOnlyCodexBinding(binding, 'gpt-5.4-mini')).toBeNull()
+    expect(readVerifiedSdkOnlyCodexBinding(undefined, model)).toBeNull()
+  })
+})
 
 describe('Plugin Workload SDK bootstrap identity', () => {
   it('uses the host capability projection instead of a request-selected family', async () => {
@@ -154,6 +184,123 @@ describe('Plugin Workload SDK bootstrap identity', () => {
       contractVersion: 3,
       provider: 'codex-subscription',
       model: 'gpt-5.6-luna',
+      codexBinding: binding,
+    })
+    expect(readSdkOnlyCodexBinding()).toEqual(binding)
+    replaceSdkOnlyCodexBinding(null)
+  })
+
+  it('integrity-checks a supplied Codex binding even when the request provider is not Codex', async () => {
+    replaceSdkOnlyCodexBinding(null)
+    const verifyBinding = vi.spyOn(sdkOnlyCodexBinding, 'readVerifiedSdkOnlyCodexBinding')
+    const binding = {
+      connectionKey: 'team-plus',
+      catalogRevision: 4,
+      credentialRevision: 1,
+      model: 'gpt-5.4-mini',
+      bindingHash: computeCodexPolicyHash({
+        model: 'gpt-5.4-mini',
+        catalogRevision: 4,
+        credentialRevision: 1,
+        connectionKey: 'team-plus',
+      }),
+    }
+    const verify = vi.fn().mockResolvedValue({
+      ready: true,
+      contractVersion: 2,
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+      policyReady: true,
+      policyState: 'active',
+    })
+    const result = await configurePluginWorkloadSdkBootstrapIdentity(
+      {
+        capabilityFamily: 'promptBridge',
+        provider: 'openai',
+        model: 'gpt-5.4-mini',
+        contractVersion: 2,
+        codexBinding: binding,
+      },
+      { capabilityFamily: 'promptBridge', verify }
+    )
+    expect(result).toMatchObject({
+      configured: true,
+      ready: true,
+      provider: 'openai',
+      contractVersion: 2,
+    })
+    expect(result).not.toHaveProperty('codexBinding')
+    expect(verifyBinding).toHaveBeenCalledWith(binding, 'gpt-5.4-mini')
+    expect(readSdkOnlyCodexBinding()).toBeNull()
+    verifyBinding.mockRestore()
+  })
+
+  it('rejects a Codex binding whose hash does not match the bound fields', async () => {
+    replaceSdkOnlyCodexBinding(null)
+    const verify = vi.fn()
+    const result = await configurePluginWorkloadSdkBootstrapIdentity(
+      {
+        capabilityFamily: 'promptBridge',
+        provider: 'codex-subscription',
+        model: 'gpt-5.6-luna',
+        contractVersion: 3,
+        codexBinding: {
+          connectionKey: 'team-plus',
+          catalogRevision: 4,
+          credentialRevision: 1,
+          model: 'gpt-5.6-luna',
+          bindingHash: 'a'.repeat(64),
+        },
+      },
+      { capabilityFamily: 'promptBridge', verify }
+    )
+    expect(result).toMatchObject({
+      configured: true,
+      ready: true,
+      contractVersion: 3,
+      policyReady: false,
+      policyReason: 'codex_execution_binding_missing',
+    })
+    expect(verify).not.toHaveBeenCalled()
+    expect(readSdkOnlyCodexBinding()).toBeNull()
+  })
+
+  it('accepts a hash-valid Codex binding even if the request echoes contract v2', async () => {
+    const binding = {
+      connectionKey: 'team-plus',
+      catalogRevision: 4,
+      credentialRevision: 1,
+      model: 'gpt-5.6-luna',
+      bindingHash: computeCodexPolicyHash({
+        model: 'gpt-5.6-luna',
+        catalogRevision: 4,
+        credentialRevision: 1,
+        connectionKey: 'team-plus',
+      }),
+    }
+    const verify = vi.fn().mockResolvedValue({
+      ready: true,
+      contractVersion: 3,
+      provider: 'codex-subscription',
+      model: 'gpt-5.6-luna',
+      policyReady: true,
+      policyState: 'active',
+      codexBindingReady: true,
+    })
+    const result = await configurePluginWorkloadSdkBootstrapIdentity(
+      {
+        capabilityFamily: 'promptBridge',
+        provider: 'codex-subscription',
+        model: 'gpt-5.6-luna',
+        contractVersion: 2,
+        codexBinding: binding,
+      },
+      { capabilityFamily: 'promptBridge', verify }
+    )
+    expect(result).toMatchObject({
+      configured: true,
+      ready: true,
+      contractVersion: 3,
       codexBinding: binding,
     })
     expect(readSdkOnlyCodexBinding()).toEqual(binding)
