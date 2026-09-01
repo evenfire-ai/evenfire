@@ -112,6 +112,51 @@ function assertSteplessSdkRecipePrecondition(): { provider: string; model: strin
   return { provider: spec.agent.provider, model: spec.agent.model }
 }
 
+type PluginWorkloadSdkStatus = {
+  state: string
+  bootstrapContractVersion: number | null
+  message: string
+}
+
+function readPluginWorkloadSdkStatus(): PluginWorkloadSdkStatus {
+  const context =
+    process.env.E2E_K8S_CONTEXT || process.env.KUBECONTEXT || process.env.K8S_CONTEXT || ''
+  if (!context) throw new Error('E2E_K8S_CONTEXT is required for the Plugin Workload SDK status.')
+  const raw = execFileSync(
+    'kubectl',
+    [
+      '--context',
+      context,
+      '-n',
+      RECIPE_NAMESPACE,
+      'get',
+      'workflowrecipe',
+      RECIPE_NAME,
+      '-o',
+      'json',
+    ],
+    { encoding: 'utf8', timeout: 30_000 }
+  )
+  const recipe = JSON.parse(raw) as {
+    status?: {
+      pluginWorkloadSdk?: {
+        state?: unknown
+        bootstrapContractVersion?: unknown
+        message?: unknown
+      }
+    }
+  }
+  const sdk = recipe.status?.pluginWorkloadSdk ?? {}
+  return {
+    state: typeof sdk.state === 'string' ? sdk.state : '',
+    bootstrapContractVersion:
+      sdk.bootstrapContractVersion === 2 || sdk.bootstrapContractVersion === 3
+        ? sdk.bootstrapContractVersion
+        : null,
+    message: typeof sdk.message === 'string' ? sdk.message : '',
+  }
+}
+
 async function findPromptNotifyContents(
   app: ElectronApplication
 ): Promise<EmbeddedContents | null> {
@@ -499,6 +544,12 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
   // Read-only setup assertion. Every functional action that follows is through
   // the real Desktop UI and its native WebContentsView.
   const recipeAgent = assertSteplessSdkRecipePrecondition()
+  await expect
+    .poll(() => readPluginWorkloadSdkStatus().state, { timeout: 180_000 })
+    .toBe('validated')
+  if (recipeAgent.provider.toLowerCase() === 'codex-subscription') {
+    expect(readPluginWorkloadSdkStatus().bootstrapContractVersion).toBe(3)
+  }
 
   let app: ElectronApplication | undefined
   let page: Page | undefined
@@ -732,6 +783,12 @@ test('Desktop Apps refuses a Codex prompt when the execution binding is missing'
     recipeAgent.provider.toLowerCase() !== 'codex-subscription',
     'No-grant guard requires a Codex SDK-only recipe.'
   )
+  const sdkStatus = readPluginWorkloadSdkStatus()
+  expect(sdkStatus.state).not.toBe('validated')
+  expect(sdkStatus.state).toBe('awaiting_policy')
+  expect(sdkStatus.message).toMatch(
+    /codex_execution_binding_missing|grant_missing|policy is not ready/i
+  )
   await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
   await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
 
@@ -744,10 +801,15 @@ test('Desktop Apps refuses a Codex prompt when the execution binding is missing'
     page = launched.page
     await login(page, credentials)
     await page.getByTestId('nav-sandbox-ui').click()
+    await expect(page.getByRole('heading', { name: 'Apps', exact: true })).toBeVisible()
     const appCard = page
       .getByRole('main')
       .getByRole('button', { name: `Open ${APP_TITLE}`, exact: true })
+    await expect(appCard).toBeVisible({ timeout: 30_000 })
     await appCard.click()
+    await expect(page.getByRole('button', { name: 'Back to apps' })).toBeVisible({
+      timeout: 30_000,
+    })
     let embedded: EmbeddedContents | null = null
     await expect
       .poll(async () => {
@@ -764,11 +826,22 @@ test('Desktop Apps refuses a Codex prompt when the execution binding is missing'
     await activateEmbedded(app, webContentsId, '#run')
     await expect
       .poll(() => embeddedText(app!, webContentsId, '#prompt-out'), { timeout: 60_000 })
-      .toMatch(/provider_unavailable|no_grant|not authorized|policy/i)
+      .toMatch(
+        /provider_unavailable|codex_execution_binding_missing|policy is not ready|not authorized/i
+      )
+    const promptResult = await embeddedText(app, webContentsId, '#prompt-out')
+    expect(promptResult).not.toMatch(/Running…/)
+    const after = sdkInvocationCount('promptBridge')
     const ledger = promptBridgeLedgerForRun(runStartedAt)
     expect(ledger.codexAttemptId).toBe('')
     expect(ledger.spendOutcome).not.toBe('exact')
-    expect(sdkInvocationCount('promptBridge')).toBeGreaterThanOrEqual(before)
+    expect(after).toBeGreaterThanOrEqual(before)
+    expect(after).toBeLessThanOrEqual(before + 1)
+    if (after > before) {
+      expect(latestSdkInvocationStatus('promptBridge')).not.toBe('complete')
+    }
+    await page.getByRole('button', { name: 'Back to apps' }).click()
+    await expect(page.getByRole('heading', { name: 'Apps', exact: true })).toBeVisible()
   } finally {
     await finalizeRecording(app, page)
   }

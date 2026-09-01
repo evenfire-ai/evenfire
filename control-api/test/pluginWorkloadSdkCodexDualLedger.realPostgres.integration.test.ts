@@ -387,6 +387,80 @@ describeRealPostgres('Plugin Workload SDK Codex dual ledger on real PostgreSQL',
     })
   })
 
+  it('refuses Codex complete while the linked attempt is still in flight', async () => {
+    const current = await getSafeCodexSubscriptionConnection(pool)
+    const { invocationId, sdkAttemptId } = await seedSdkAttempt({ status: 'reserved' })
+    await authorizeLlmProviderAttempt(
+      recipeClaims(),
+      {
+        request: {
+          ...REQUEST,
+          requestId: `req-pending-${invocationId}`,
+          idempotencyKey: `idem-pending-${invocationId}`,
+        },
+        invocationId,
+        attemptGeneration: 1,
+        providerAttemptIndex: 1,
+        policyRevision: current!.catalogRevision,
+        policyHash: computeCodexPolicyHash({
+          model: MODEL,
+          catalogRevision: current!.catalogRevision,
+          credentialRevision: current!.credentialRevision,
+          connectionKey: current!.connectionKey,
+        }),
+        pluginWorkloadSdkProviderAttemptId: sdkAttemptId,
+        targetRef: 'codex-primary',
+      },
+      testDeps()
+    )
+    const linked = await loadLlmProviderAttemptBySdkAttemptId(pool, sdkAttemptId)
+    expect(linked?.status).toBe('authorized')
+    expect(linked?.usageInputTokens ?? null).toBeNull()
+
+    await expect(
+      finalizePromptBridgeInTransaction(
+        {
+          invocationId,
+          recipeNamespace: NS,
+          recipeName: RECIPE,
+          hostRef: `${NS}/${RECIPE}`,
+          attemptGeneration: 1,
+          providerAttemptId: sdkAttemptId,
+          providerAttemptIndex: 1,
+          status: 'complete',
+          target: {
+            targetRef: 'codex-primary',
+            provider: 'codex-subscription',
+            model: MODEL,
+            credentialSlot: '',
+          },
+          reason: 'provider_completed',
+          usage: {
+            llmSecretName: '',
+            callerRef: 'scanner',
+            fallbackUsed: false,
+            attemptCount: 1,
+            inputTokens: 0,
+            outputTokens: 0,
+          },
+        },
+        pool
+      )
+    ).rejects.toMatchObject({
+      name: 'PromptBridgeFinalizationError',
+      code: 'ledger_pending',
+      httpStatus: 409,
+      retryable: true,
+    })
+    const spend = await pool.query(
+      `SELECT provider_attempt_id
+         FROM plugin_workload_sdk_spend_outcomes
+        WHERE provider_attempt_id = $1`,
+      [sdkAttemptId]
+    )
+    expect(spend.rows).toHaveLength(0)
+  })
+
   it('finalizes complete plus linked Codex success as exact using Codex usage', async () => {
     const current = await getSafeCodexSubscriptionConnection(pool)
     const { invocationId, sdkAttemptId } = await seedSdkAttempt({ status: 'reserved' })
