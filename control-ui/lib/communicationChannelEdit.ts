@@ -5,6 +5,14 @@ export type CommunicationChannelDraftState = {
   accessTeamIds: string[]
   accessUserIds: string[]
   credentialsSecretRef?: { name: string }
+  /**
+   * Carried through untouched. The edit page has no email controls, but the
+   * save is a full-spec PUT and control-api preserves only
+   * `credentialsSecretRef`, so a field the draft drops is deleted from the CR.
+   * Before this was carried, opening an email-backed channel and saving an
+   * unrelated change silently stopped the inbox being polled (#386).
+   */
+  email: CommunicationChannelGroup[]
   hostRef: string
   slack: CommunicationChannelGroup[]
   slackBotHandle: string
@@ -160,6 +168,7 @@ export function createCommunicationChannelDraft(
     ...(spec.credentialsSecretRef?.name
       ? { credentialsSecretRef: { name: spec.credentialsSecretRef.name } }
       : {}),
+    email: spec.email || [],
     hostRef: spec.hostRef || '',
     slack: spec.slack || [],
     slackBotHandle: slackBotHandleFromSpec || slackBotHandleFromLabel,
@@ -191,12 +200,49 @@ export function communicationChannelInitialTab(
   return 'telegram'
 }
 
+/**
+ * Every top-level `spec` field, and how the edit page treats it.
+ *
+ * `edited` means the draft models it and the operator can change it.
+ * `carried` means the page has no controls for it and passes it through
+ * untouched.
+ *
+ * This exists because the save is a full-spec PUT and control-api preserves
+ * only `credentialsSecretRef`, so a field missing from BOTH lists is deleted
+ * from the CR the next time anyone saves, silently. That is what happened to
+ * `email` (#386).
+ *
+ * `satisfies Record<CommunicationChannelSpecField, ...>` is the point: add a
+ * field to the spec type and `tsc --noEmit` fails here until someone decides
+ * which list it belongs in. It cannot catch a CRD field that was never added to
+ * the TypeScript type, but the UI cannot read such a field either.
+ */
+type CommunicationChannelSpecField = keyof NonNullable<CommunicationChannelItem['spec']>
+
+export const COMMUNICATION_CHANNEL_SPEC_FIELD_HANDLING = {
+  access: 'edited',
+  credentialsSecretRef: 'carried',
+  email: 'carried',
+  hostRef: 'edited',
+  slack: 'edited',
+  slackSettings: 'edited',
+  teams: 'edited',
+  teamsSettings: 'edited',
+  telegram: 'edited',
+  telegramSettings: 'edited',
+} satisfies Record<CommunicationChannelSpecField, 'edited' | 'carried'>
+
 export function buildCommunicationChannelSpec(draft: CommunicationChannelDraftState) {
   const telegramEnabled = hasTelegramConfig(draft)
   const slackEnabled = hasSlackConfig(draft)
   const teamsEnabled = hasTeamsConfig(draft)
   return {
     hostRef: draft.hostRef.trim(),
+    // Emitted only when populated. `email: []` is not the same as absent:
+    // channel-reader guards on `spec.email?.length`, and writing empty provider
+    // arrays onto every channel is the defect that made a Teams channel look
+    // like a misconfigured Telegram one.
+    ...(draft.email.length ? { email: draft.email } : {}),
     ...(draft.credentialsSecretRef?.name
       ? { credentialsSecretRef: { name: draft.credentialsSecretRef.name } }
       : {}),

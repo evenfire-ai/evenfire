@@ -6,7 +6,11 @@ export const CODEX_SUBSCRIPTION_API_BASE = '/api/v1/admin/llm/providers/codex-su
 export const CODEX_DEVICE_VERIFICATION_URI = 'https://auth.openai.com/codex/device'
 
 export type CodexConnectionStatus =
-  'disconnected' | 'connecting' | 'connected' | 'reauth_required' | 'revoked'
+  | 'disconnected'
+  | 'connecting'
+  | 'connected'
+  | 'reauth_required'
+  | 'revoked'
 
 export type CodexCatalogStatus = 'never_synced' | 'ready' | 'auth-rejected' | 'unavailable'
 
