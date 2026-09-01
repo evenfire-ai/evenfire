@@ -10890,7 +10890,19 @@ pre {
     display: none;
   }
 
-  .left-nav.collapsed .sidebar-logo-lockup {
+  /* Reveal the wordmark in the collapsed mobile bar, but keep the light/dark
+     toggle. Targeting the shared `.sidebar-logo-lockup` (0,3,0) would outrank
+     `.sidebar-logo-lockup--dark { display: none }` (0,1,0) and paint both
+     variants at once (double logo), so drive the variants directly. */
+  .left-nav.collapsed .sidebar-logo-lockup--light {
+    display: block;
+  }
+
+  :root[data-theme='dark'] .left-nav.collapsed .sidebar-logo-lockup--light {
+    display: none;
+  }
+
+  :root[data-theme='dark'] .left-nav.collapsed .sidebar-logo-lockup--dark {
     display: block;
   }
 
