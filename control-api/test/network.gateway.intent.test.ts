@@ -1087,7 +1087,7 @@ describe('network/gateway intent (manifest-level)', () => {
     )
 
     const controlApiConfig = read(`${BASE}/control-plane/configmaps.yaml`)
-    expect(controlApiConfig).toContain("CONTROL_API_OPERATIONAL_ACCESS_INDEXER_ENABLED: 'true'")
+    expect(controlApiConfig).toContain("CONTROL_API_OPERATIONAL_ACCESS_INDEXER_ENABLED: 'false'")
   })
 
   it('routes every rpc-proxy internal-service endpoint through the control-api-rpc-gateway allowlist', () => {
