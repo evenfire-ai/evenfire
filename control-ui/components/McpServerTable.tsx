@@ -2,7 +2,6 @@
 
 import React, { useMemo, useState } from 'react'
 import { DataTable, TableRow, TableStateRow, TruncatedText } from '@clerum/frontend-components'
-import { copyTextToClipboard } from '@lib/clipboard'
 import type {
   ConnectorContextBinding,
   McpServerStatus,
@@ -15,20 +14,19 @@ import { IconCable } from './Sidebar/icons'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconCopy, IconRefresh, IconX } from './icons'
+import { IconRefresh, IconX } from './icons'
 
 const ENABLED_TOOLTIP = 'Enabled controls whether this server is available to contexts and agents.'
-type ConnectorSortKey = 'name' | 'description' | 'endpoint' | 'managed' | 'enabled' | 'status'
+type ConnectorSortKey = 'name' | 'description' | 'managed' | 'enabled' | 'status'
 type SortDirection = 'asc' | 'desc'
 
 const CONNECTOR_COLUMNS: TableHeaderColumn[] = [
-  { key: 'name', label: 'Name' },
+  { key: 'name', label: 'Name', width: '24%' },
   { key: 'description', label: 'Description' },
-  { key: 'endpoint', label: 'Endpoint' },
-  { key: 'managed', label: 'Managed' },
-  { key: 'enabled', label: 'Enabled', title: ENABLED_TOOLTIP },
-  { key: 'status', label: 'Status' },
-  { key: 'actions', align: 'right', ariaLabel: 'Actions' },
+  { key: 'managed', label: 'Managed', width: '6rem' },
+  { key: 'enabled', label: 'Enabled', title: ENABLED_TOOLTIP, width: '6rem' },
+  { key: 'status', label: 'Status', width: '7rem' },
+  { key: 'actions', align: 'right', ariaLabel: 'Actions', width: '3.5rem' },
 ]
 
 function BoolBadge({
@@ -81,50 +79,6 @@ function StatusBadge({ status }: { status?: McpServerStatus }) {
   )
 }
 
-function CopyableValue({
-  copyLabel,
-  copied,
-  href,
-  onCopy,
-  value,
-}: {
-  copyLabel: string
-  copied: boolean
-  href?: string
-  onCopy: () => void
-  value: string
-}) {
-  if (!value) return <span className="cu-muted">—</span>
-  return (
-    <span className="cu-copy-field">
-      {href ? (
-        <a
-          className="cu-copy-field__value cu-link cu-cell-truncate"
-          href={href}
-          rel="noreferrer"
-          target="_blank"
-          title={value}
-        >
-          {value}
-        </a>
-      ) : (
-        <span className="cu-copy-field__value cu-cell-truncate" title={value}>
-          {value}
-        </span>
-      )}
-      <button
-        aria-label={copied ? `${copyLabel} copied` : `Copy ${copyLabel}`}
-        className="cu-btn cu-btn--icon cu-btn--ghost"
-        onClick={onCopy}
-        title={copied ? 'Copied' : `Copy ${copyLabel}`}
-        type="button"
-      >
-        <IconCopy height={14} width={14} />
-      </button>
-    </span>
-  )
-}
-
 export function McpServerTable({
   items,
   accessByConnectorKey,
@@ -149,7 +103,6 @@ export function McpServerTable({
   const [serverKeyAddingContexts, setServerKeyAddingContexts] = useState<string | null>(null)
   const [serverKeyViewingAccess, setServerKeyViewingAccess] = useState<string | null>(null)
   const [selectedContextNamesToAdd, setSelectedContextNamesToAdd] = useState<string[]>([])
-  const [copiedValueKey, setCopiedValueKey] = useState<string | null>(null)
   const accessDialogRef = React.useRef<HTMLElement | null>(null)
   const accessCloseButtonRef = React.useRef<HTMLButtonElement | null>(null)
   const accessOpenerRef = React.useRef<HTMLElement | null>(null)
@@ -206,19 +159,13 @@ export function McpServerTable({
                 undefined,
                 { sensitivity: 'base' }
               )
-            : sortKey === 'endpoint'
-              ? (left.item.spec?.transport?.url ?? left.item.spec?.image ?? '').localeCompare(
-                  right.item.spec?.transport?.url ?? right.item.spec?.image ?? ''
-                )
-              : sortKey === 'managed'
-                ? Number((left.item.spec?.managed ?? true) === true) -
-                  Number((right.item.spec?.managed ?? true) === true)
-                : sortKey === 'enabled'
-                  ? Number((left.item.spec?.enabled ?? true) === true) -
-                    Number((right.item.spec?.enabled ?? true) === true)
-                  : getStatusLabel(left.item.status).localeCompare(
-                      getStatusLabel(right.item.status)
-                    )
+            : sortKey === 'managed'
+              ? Number((left.item.spec?.managed ?? true) === true) -
+                Number((right.item.spec?.managed ?? true) === true)
+              : sortKey === 'enabled'
+                ? Number((left.item.spec?.enabled ?? true) === true) -
+                  Number((right.item.spec?.enabled ?? true) === true)
+                : getStatusLabel(left.item.status).localeCompare(getStatusLabel(right.item.status))
       if (comparison !== 0) return comparison * direction
       return left.key.localeCompare(right.key)
     })
@@ -298,10 +245,6 @@ export function McpServerTable({
     if (updatingContextMembershipKey) return
     setSelectedContextNamesToAdd([])
     setServerKeyAddingContexts(null)
-  }
-
-  async function copyValue(copyKey: string, value: string) {
-    if (await copyTextToClipboard(value)) setCopiedValueKey(copyKey)
   }
 
   function openAccessDetails(key: string) {
@@ -408,17 +351,6 @@ export function McpServerTable({
                     <td>{name}</td>
                     <td className="cu-registry-description">
                       <TruncatedText value={spec.description} />
-                    </td>
-                    <td className="cu-code-text">
-                      <CopyableValue
-                        copied={copiedValueKey === `${key}/endpoint`}
-                        copyLabel="endpoint"
-                        href={spec.transport?.url}
-                        onCopy={() =>
-                          void copyValue(`${key}/endpoint`, spec.transport?.url || spec.image || '')
-                        }
-                        value={spec.transport?.url || spec.image || ''}
-                      />
                     </td>
                     <td>
                       <BoolBadge value={spec.managed} trueLabel="Yes" falseLabel="No" />

@@ -333,31 +333,15 @@ describe('McpServerTable — connector access summaries', () => {
     expect(trigger).toHaveFocus()
   })
 
-  it('keeps connector endpoint links and copy actions available', async () => {
+  it('keeps connector endpoints searchable after removing the visible endpoint column', () => {
     const onEdit = vi.fn()
-    const writeText = vi.fn().mockResolvedValue(undefined)
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText },
-    })
     render(<McpServerTable items={[makeItem({ name: 'airtable-server' })]} onEdit={onEdit} />)
 
-    const endpointLink = screen.getByRole('link', { name: /brave-search\.mcp-server/ })
-    expect(endpointLink).toHaveAttribute(
-      'href',
-      'http://brave-search.mcp-server.svc.cluster.local:3000/mcp'
-    )
-    fireEvent.click(endpointLink)
-    fireEvent.keyDown(endpointLink, { key: 'Enter' })
-    const copyButton = screen.getByRole('button', { name: 'Copy endpoint' })
-    fireEvent.click(copyButton)
-    fireEvent.keyDown(copyButton, { key: 'Enter' })
-    await waitFor(() =>
-      expect(writeText).toHaveBeenCalledWith(
-        'http://brave-search.mcp-server.svc.cluster.local:3000/mcp'
-      )
-    )
-    expect(screen.getByRole('button', { name: 'endpoint copied' })).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: /Endpoint/i })).toBeNull()
+    fireEvent.change(screen.getByLabelText('Search connectors'), {
+      target: { value: 'brave-search.mcp-server' },
+    })
+    expect(screen.getByText('airtable-server')).toBeInTheDocument()
     expect(onEdit).not.toHaveBeenCalled()
   })
 
@@ -378,12 +362,12 @@ describe('McpServerTable — connector access summaries', () => {
     const url = 'http://brave-search.mcp-server.svc.cluster.local:3000/mcp'
     render(<McpServerTable items={[makeItem({ name: 'airtable-server', image })]} />)
 
-    expect(screen.getByRole('columnheader', { name: /Endpoint/i })).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: /Endpoint/i })).toBeNull()
     expect(screen.queryByRole('columnheader', { name: /Image/i })).toBeNull()
     expect(screen.queryByRole('columnheader', { name: /Transport/i })).toBeNull()
     expect(screen.queryByRole('columnheader', { name: /Access/i })).toBeNull()
     expect(screen.getByRole('columnheader', { name: /Managed/i })).toBeInTheDocument()
-    expect(screen.getByTitle(url)).toBeInTheDocument()
+    expect(screen.queryByTitle(url)).toBeNull()
     expect(screen.queryByTitle(image)).toBeNull()
   })
 
