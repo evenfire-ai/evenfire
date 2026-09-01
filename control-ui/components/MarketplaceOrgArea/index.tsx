@@ -14,7 +14,6 @@ import { SectionSearchInput } from '../SectionSearchInput'
 import { IconStore } from '../Sidebar/icons'
 import { TablePanelHeader } from '../TablePanelHeader'
 import { IconRefresh } from '../icons'
-import { Button } from '../ui'
 
 export type OrgAreaTab = 'entries' | 'images' | 'credentials' | 'connection'
 
@@ -130,15 +129,14 @@ export function MarketplaceOrgArea({ activeTab }: { activeTab: OrgAreaTab }) {
           }
           primaryAction={
             activeTab === 'credentials' ? (
-              <Button
+              <button
                 type="button"
-                variant="primary"
-                size="sm"
+                className="cu-btn cu-btn--primary cu-btn--sm"
                 onClick={() => setApiKeyCreateSignal(signal => signal + 1)}
                 disabled={!apiKeysCanCreate}
               >
                 + Create key
-              </Button>
+              </button>
             ) : undefined
           }
         />
