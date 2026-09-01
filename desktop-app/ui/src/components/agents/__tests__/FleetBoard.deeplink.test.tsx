@@ -9,7 +9,6 @@ import { FleetBoard } from '../FleetBoard'
 
 const nav = vi.hoisted(() => ({
   handleOpenAgentWorkspace: vi.fn(),
-  handleOpenTeamDetails: vi.fn(),
   handleSelectChatAgent: vi.fn(),
   selectedAgent: null as string | null,
 }))

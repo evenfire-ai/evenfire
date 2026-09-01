@@ -146,17 +146,11 @@ function WorkspaceHarness({
         {
           navItem: 'agents',
           selectedAgent: 'agent-x',
-          selectedAgentRoute: 'details',
-          selectedContext: null,
-          selectedTeam: null,
+          selectedAgentRoute: 'mcp-servers',
           handleNavSelect: vi.fn(),
           handleOpenAgentWorkspace: vi.fn(),
           handleSelectChatAgent: vi.fn(),
           handleBackToAgents: vi.fn(),
-          handleOpenContextDetails: vi.fn(),
-          handleBackToContexts: vi.fn(),
-          handleOpenTeamDetails: vi.fn(),
-          handleBackToTeams: vi.fn(),
         } as never
       }
     >
