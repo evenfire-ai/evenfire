@@ -1,9 +1,12 @@
 /**
  * Control UI — Member detail Access tab tests
  *
- * The member "Access" tab (the former "Contexts" tab) must present host-backed
- * access scopes by their agent display name (spec.host), never by the raw wire
- * contextId, and the add/remove flows must round-trip the admin context API.
+ * The member "Access" tab (the former "Contexts" tab) presents granted access
+ * as one table row per agent (D8): the Access/Connectors columns, the owning
+ * host's display name (spec.host) in cell 1 — never the raw wire contextId —
+ * and the shared Connectors count cell in cell 2. The add/remove flows are D8
+ * composite writes (user-agents AND user-contexts mappings), so cleanup
+ * restores both the original contextIds and the original agentNames.
  */
 import { controlApi } from '../helpers/api-client'
 import { expect, test } from '../helpers/auth-fixture'
@@ -16,6 +19,7 @@ const HOST_DISPLAY_NAME = `e2e-member-access-agent-${RUN}`
 
 let userId = ''
 let originalContextIds: string[] = []
+let originalAgentNames: string[] = []
 
 test.describe('Control UI — Member Access tab', () => {
   test.describe.configure({ mode: 'serial' })
@@ -28,6 +32,7 @@ test.describe('Control UI — Member Access tab', () => {
     }
     userId = items[0].id
     originalContextIds = (await controlApi.getUserContexts(userId)).contextIds ?? []
+    originalAgentNames = (await controlApi.getUserAgents(userId)).agentNames ?? []
 
     await controlApi.createContext({
       metadata: { name: CONTEXT_NAME },
@@ -49,6 +54,14 @@ test.describe('Control UI — Member Access tab', () => {
     if (userId) {
       try {
         await controlApi.updateUserContexts(userId, originalContextIds)
+        // D8 composite write: the tab's remove also rewrote the member↔agent
+        // mapping, so restore the original agentNames too (PUT is
+        // compare-and-swap: echo the full set we currently observe).
+        const current = await controlApi.getUserAgents(userId)
+        await controlApi.putUserAgents(userId, originalAgentNames, [
+          ...(current.agentNames ?? []),
+          ...(current.deletedAgentNames ?? []),
+        ])
       } catch {
         // best effort restore — cluster may already be unreachable
       }
@@ -60,9 +73,17 @@ test.describe('Control UI — Member Access tab', () => {
   test('shows the agent display name, not the raw scope id', async ({ authedPage }) => {
     await authedPage.goto(`/users-and-teams/users/${encodeURIComponent(userId)}/access`)
     await expect(
-      authedPage.getByText('Agents and connector scopes this member may access.')
+      authedPage.getByText('Agents this member may use — and the connectors each one carries.')
     ).toBeVisible({ timeout: 15_000 })
 
+    // D8: granted access renders as a real table — Access/Connectors columns,
+    // one row per granted agent, labelled by its display name.
+    await expect(
+      authedPage.getByRole('columnheader', { name: 'Access', exact: true })
+    ).toBeVisible()
+    await expect(
+      authedPage.getByRole('columnheader', { name: 'Connectors', exact: true })
+    ).toBeVisible()
     const row = authedPage
       .getByRole('row')
       .filter({ has: authedPage.getByRole('cell', { name: HOST_DISPLAY_NAME, exact: true }) })
@@ -73,7 +94,7 @@ test.describe('Control UI — Member Access tab', () => {
   test("'Add access' opens the access picker modal", async ({ authedPage }) => {
     await authedPage.goto(`/users-and-teams/users/${encodeURIComponent(userId)}/access`)
     await expect(
-      authedPage.getByText('Agents and connector scopes this member may access.')
+      authedPage.getByText('Agents this member may use — and the connectors each one carries.')
     ).toBeVisible({ timeout: 15_000 })
 
     await authedPage.getByRole('button', { name: 'Add access', exact: true }).click()
@@ -81,6 +102,7 @@ test.describe('Control UI — Member Access tab', () => {
     const dialog = authedPage.getByRole('dialog', { name: 'Add access' })
     await expect(dialog).toBeVisible()
     await expect(dialog.getByLabel('Access')).toBeVisible()
+    await expect(dialog.locator('#member-access-picker')).toBeVisible()
     await expect(dialog.getByRole('button', { name: 'Add access', exact: true })).toBeVisible()
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
     await expect(dialog).toHaveCount(0)
@@ -99,17 +121,22 @@ test.describe('Control UI — Member Access tab', () => {
 
     const confirmDialog = authedPage.getByRole('alertdialog', { name: 'Remove Access' })
     await expect(confirmDialog).toBeVisible()
+    await expect(confirmDialog).toContainText(
+      'This revokes the agent and every connector it carries.'
+    )
     await confirmDialog.getByRole('button', { name: 'Remove access', exact: true }).click()
 
     await expect(authedPage.getByRole('status').filter({ hasText: 'Access updated.' })).toBeVisible(
       { timeout: 15_000 }
     )
     await expect(row).toHaveCount(0)
-    if (originalContextIds.length === 0) {
+    if (originalContextIds.length === 0 && originalAgentNames.length === 0) {
       await expect(authedPage.getByText('No access assigned yet.')).toBeVisible()
     }
 
     const { contextIds } = await controlApi.getUserContexts(userId)
     expect(contextIds ?? []).not.toContain(CONTEXT_ID)
+    const { agentNames } = await controlApi.getUserAgents(userId)
+    expect(agentNames ?? []).not.toContain(HOST_NAME)
   })
 })

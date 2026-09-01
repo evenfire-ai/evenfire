@@ -5,14 +5,7 @@ interface UserTabPageProps {
   params: Promise<{ tab: string }>
 }
 
-const USER_DETAIL_TABS = [
-  'contact',
-  'approval-dms',
-  'communication-channels',
-  'access',
-  'teams',
-  'agents',
-]
+const USER_DETAIL_TABS = ['contact', 'approval-dms', 'communication-channels', 'access', 'teams']
 
 export default async function UserTabPage({ params }: UserTabPageProps) {
   const { tab } = await params

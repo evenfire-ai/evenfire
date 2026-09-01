@@ -1,13 +1,15 @@
 // control-ui/e2e/qa-recorder-member-access-multi.spec.ts
 //
 // Optional QA recorder journey (MUTATING). Requires QA_RECORDER_CONFIRM_MUTATIONS=1.
-// Records the member detail Access tab multi-select add flow: two host-backed
-// scopes are seeded out-of-band (one context + one host each), then the
-// "Add access" picker selects BOTH agent display names at once and submits —
-// toast "Access updated." — and both rows render with the agent display names
-// (never the raw contextIds). Each row is then removed through its confirm
-// dialog. The member's original contextIds are restored and the seeded hosts
-// + contexts are deleted in the finally (hosts before contexts).
+// Records the member detail Access tab multi-select add flow (D8): two
+// host-backed scopes are seeded out-of-band (one context + one host each),
+// then the "Add access" picker — options are AGENT display names — selects
+// BOTH at once and submits — toast "Access updated." — and both rows render
+// in the Access/Connectors table with the agent display names (never the raw
+// contextIds). Each row is then removed through its confirm dialog. The tab's
+// writes are D8 composite writes (agents AND contexts mappings), so the
+// member's original contextIds AND agentNames are restored and the seeded
+// hosts + contexts are deleted in the finally (hosts before contexts).
 //
 // Contract: docs/testing/optional-playwright-qa-recorder.md ("Extending the
 // recorder").
@@ -47,6 +49,7 @@ test.describe('optional QA recorder: Control UI member Access multi-select', () 
     const hostDisplayB = uniqueE2EName('qa-recorder-mam-agent-b')
     let userId = ''
     let originalContextIds: string[] | null = null
+    let originalAgentNames: string[] | null = null
 
     try {
       await loginThroughUi(page, credentials)
@@ -81,11 +84,14 @@ test.describe('optional QA recorder: Control UI member Access multi-select', () 
         timeout: 20_000,
       })
       await expect(
-        page.getByText('Agents and connector scopes this member may access.', { exact: true })
+        page.getByText('Agents this member may use — and the connectors each one carries.', {
+          exact: true,
+        })
       ).toBeVisible({ timeout: 20_000 })
       await screenshotAndLog(page, testInfo, `${journey}-tab`)
 
-      // Remember the member's original contextIds before any mutation.
+      // Remember the member's original contextIds and agentNames before any
+      // mutation — the tab's writes are D8 composite writes.
       const originalRes = await api<{ contextIds?: string[] }>(
         page.request,
         'GET',
@@ -96,6 +102,17 @@ test.describe('optional QA recorder: Control UI member Access multi-select', () 
         `get user contexts: ${JSON.stringify(originalRes.data)}`
       ).toBeLessThan(300)
       originalContextIds = originalRes.data.contextIds ?? []
+
+      const originalAgentsRes = await api<{ agentNames?: string[] }>(
+        page.request,
+        'GET',
+        `/api/v1/admin/users/${encodeURIComponent(userId)}/agents`
+      )
+      expect(
+        originalAgentsRes.status,
+        `get user agents: ${JSON.stringify(originalAgentsRes.data)}`
+      ).toBeLessThan(300)
+      originalAgentNames = originalAgentsRes.data.agentNames ?? []
 
       // Seed two host-backed scopes out-of-band; the behavior under test is
       // the picker granting BOTH in a single submit.
@@ -125,17 +142,20 @@ test.describe('optional QA recorder: Control UI member Access multi-select', () 
         expect(hostRes.status, `create host: ${JSON.stringify(hostRes.data)}`).toBeLessThan(300)
       }
 
-      // Reload the tab so the picker offers the freshly seeded scopes, then
+      // Reload the tab so the picker offers the freshly seeded agents, then
       // select BOTH agent display names at once and submit.
       await page.reload()
       await expect(
-        page.getByText('Agents and connector scopes this member may access.', { exact: true })
+        page.getByText('Agents this member may use — and the connectors each one carries.', {
+          exact: true,
+        })
       ).toBeVisible({ timeout: 20_000 })
 
       await page.getByRole('button', { name: 'Add access', exact: true }).click()
       const dialog = page.getByRole('dialog', { name: 'Add access' })
       await expect(dialog).toBeVisible()
       await expect(dialog.getByLabel('Access')).toBeVisible()
+      await expect(dialog.locator('#member-access-picker')).toBeVisible()
       const optionA = dialog.getByRole('option', { name: hostDisplayA, exact: true })
       const optionB = dialog.getByRole('option', { name: hostDisplayB, exact: true })
       await expect(optionA).toBeVisible({ timeout: 20_000 })
@@ -147,13 +167,18 @@ test.describe('optional QA recorder: Control UI member Access multi-select', () 
       await screenshotAndLog(page, testInfo, `${journey}-add-modal`)
       await dialog.getByRole('button', { name: 'Add access', exact: true }).click()
 
-      // One toast, both rows — each labelled with its agent display name,
-      // never the raw wire contextId.
+      // One toast, both rows — D8 renders one table row per granted agent,
+      // each labelled with its agent display name, never the raw wire
+      // contextId.
       await expect(
         page.getByRole('status').filter({ hasText: 'Access updated.' }).first()
       ).toBeVisible({
         timeout: 20_000,
       })
+      await expect(page.getByRole('columnheader', { name: 'Access', exact: true })).toBeVisible()
+      await expect(
+        page.getByRole('columnheader', { name: 'Connectors', exact: true })
+      ).toBeVisible()
       const rowA = page
         .getByRole('row')
         .filter({ has: page.getByRole('cell', { name: hostDisplayA, exact: true }) })
@@ -188,6 +213,29 @@ test.describe('optional QA recorder: Control UI member Access multi-select', () 
           `/api/v1/admin/users/${encodeURIComponent(userId)}/contexts`,
           { contextIds: originalContextIds }
         )
+      }
+      // D8 composite write: the picker submit and removals also rewrote the
+      // member↔agent mapping, so restore the original agentNames too (PUT is
+      // compare-and-swap: echo the full set we currently observe).
+      if (userId && originalAgentNames !== null) {
+        const currentAgentsRes = await api<{
+          agentNames?: string[]
+          deletedAgentNames?: string[]
+        }>(page.request, 'GET', `/api/v1/admin/users/${encodeURIComponent(userId)}/agents`)
+        if (currentAgentsRes.status < 300) {
+          await api(
+            page.request,
+            'PUT',
+            `/api/v1/admin/users/${encodeURIComponent(userId)}/agents`,
+            {
+              agentNames: originalAgentNames,
+              expectedCurrentAgentNames: [
+                ...(currentAgentsRes.data.agentNames ?? []),
+                ...(currentAgentsRes.data.deletedAgentNames ?? []),
+              ],
+            }
+          )
+        }
       }
       await api(page.request, 'DELETE', `/api/v1/admin/hosts/${encodeURIComponent(hostNameA)}`)
       await api(page.request, 'DELETE', `/api/v1/admin/hosts/${encodeURIComponent(hostNameB)}`)

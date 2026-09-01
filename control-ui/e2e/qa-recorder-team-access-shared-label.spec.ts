@@ -2,13 +2,15 @@
 //
 // Optional QA recorder journey (MUTATING). Requires QA_RECORDER_CONFIRM_MUTATIONS=1.
 // Creates a team through the Control API, seeds ONE host-backed access scope
-// shared by TWO hosts, and grants it via PUT /teams/<id>/contexts. The team
-// detail Access tab must render that shared scope as a SINGLE row labelled
-// with both agent display names joined by ", " (lib/accessScopeLabels joins
-// the sorted owner names), never two rows and never the raw contextId.
-// Removal confirms with the joined label in the dialog text and toasts
-// "Team access updated.". The team, hosts, and context are deleted via the
-// Control API in the finally (hosts before the context).
+// shared by TWO hosts, and grants it via PUT /teams/<id>/contexts. Under D8
+// the granted set is agent-centric (the team↔agent mapping UNION legacy scope
+// mappings resolved to their owning agents), so the shared scope renders as
+// TWO table rows — one per agent display name — never a joined "A, B" label
+// and never the raw contextId. Removal of ONE agent confirms with that
+// agent's own display name; the shared scope stays mapped for the other
+// agent, and the union resolves it back to BOTH owners, so both rows remain.
+// The team, hosts, and context are deleted via the Control API in the
+// finally (hosts before the context).
 //
 // Contract: docs/testing/optional-playwright-qa-recorder.md ("Extending the
 // recorder").
@@ -25,8 +27,8 @@ import {
   uniqueE2EName,
 } from './qa-recorder-helpers'
 
-test.describe('optional QA recorder: Control UI team Access shared-scope label', () => {
-  test('records the joined shared-scope label on the team Access tab and its removal', async ({
+test.describe('optional QA recorder: Control UI team Access shared-scope rows', () => {
+  test('records the per-agent shared-scope rows on the team Access tab and a single-agent removal', async ({
     page,
   }, testInfo) => {
     requireRecorderConfirm(
@@ -45,8 +47,9 @@ test.describe('optional QA recorder: Control UI team Access shared-scope label',
     const hostNameB = uniqueE2EName('qa-recorder-tas-host-b')
     const hostDisplayA = uniqueE2EName('qa-recorder-tas-agent-a')
     const hostDisplayB = uniqueE2EName('qa-recorder-tas-agent-b')
-    // accessScopeLabels joins the sorted owner names with ", " — the "a"
-    // agent sorts before the "b" agent, so the joined label is deterministic.
+    // Pre-D8 the shared scope rendered one row with the owners joined by
+    // ", "; D8 renders one row per agent, so this joined label is only used
+    // to assert it never appears.
     const joinedLabel = `${hostDisplayA}, ${hostDisplayB}`
     let teamId = ''
 
@@ -118,36 +121,49 @@ test.describe('optional QA recorder: Control UI team Access shared-scope label',
         timeout: 20_000,
       })
 
-      // The shared scope renders as ONE row with the joined "A, B" label —
-      // never the raw wire contextId, never one row per host.
+      // D8: the granted set is agent-centric. The legacy scope grant
+      // resolves to BOTH owning agents, so the shared scope renders as TWO
+      // table rows — one per agent display name — never a joined "A, B"
+      // label and never the raw contextId.
       await expect(
-        page.getByText('Agents and connector scopes this team may access.', { exact: true })
+        page.getByText('Agents this team may use — and the connectors each one carries.', {
+          exact: true,
+        })
       ).toBeVisible({ timeout: 20_000 })
-      const row = page.getByRole('listitem').filter({ hasText: joinedLabel })
-      await expect(row).toBeVisible({ timeout: 20_000 })
-      await expect(row).not.toContainText(contextId)
-      await expect(page.getByRole('listitem').getByText(hostDisplayA, { exact: true })).toHaveCount(
-        0
-      )
-      await expect(page.getByRole('listitem').getByText(hostDisplayB, { exact: true })).toHaveCount(
-        0
-      )
+      const rowA = page
+        .getByRole('row')
+        .filter({ has: page.getByRole('cell', { name: hostDisplayA, exact: true }) })
+      const rowB = page
+        .getByRole('row')
+        .filter({ has: page.getByRole('cell', { name: hostDisplayB, exact: true }) })
+      await expect(rowA).toBeVisible({ timeout: 20_000 })
+      await expect(rowB).toBeVisible({ timeout: 20_000 })
+      await expect(rowA).not.toContainText(contextId)
+      await expect(rowB).not.toContainText(contextId)
+      await expect(page.getByRole('cell', { name: joinedLabel, exact: true })).toHaveCount(0)
       await screenshotAndLog(page, testInfo, `${journey}-granted`)
 
-      // Remove the row: confirm dialog names the joined label → toast → row gone.
-      await row.getByLabel('Remove access').click()
+      // Remove agent A: the confirm dialog names A alone (not the joined
+      // label, not the raw id). Confirming revokes A's agent mapping, but
+      // the shared scope stays mapped for B and the D8 union resolves it
+      // back to BOTH owners, so both rows remain after the toast.
+      await rowA.getByLabel('Remove access').click()
       const confirmDialog = page.getByRole('alertdialog', { name: 'Remove Access' })
       await expect(confirmDialog).toBeVisible()
-      await expect(confirmDialog).toContainText(joinedLabel)
+      await expect(confirmDialog).toContainText(hostDisplayA)
+      await expect(confirmDialog).not.toContainText(joinedLabel)
       await expect(confirmDialog).not.toContainText(contextId)
+      await expect(confirmDialog).toContainText(
+        'This revokes the agent and every connector it carries.'
+      )
       await screenshotAndLog(page, testInfo, `${journey}-remove-confirm`)
       await confirmDialog.getByRole('button', { name: 'Remove access', exact: true }).click()
       await expect(
         page.getByRole('status').filter({ hasText: 'Team access updated.' })
       ).toBeVisible({ timeout: 20_000 })
-      await expect(row.getByLabel('Remove access')).toHaveCount(0)
-      await expect(page.getByText('No access assigned yet.', { exact: true })).toBeVisible()
-      await screenshotAndLog(page, testInfo, `${journey}-removed`)
+      await expect(rowA).toBeVisible({ timeout: 20_000 })
+      await expect(rowB).toBeVisible({ timeout: 20_000 })
+      await screenshotAndLog(page, testInfo, `${journey}-removed-one-agent`)
     } finally {
       try {
         const request = page.request

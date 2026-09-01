@@ -2,6 +2,7 @@
 
 import React, { useMemo, useState } from 'react'
 import { getProviderLabel } from '../lib/llm'
+import { ConnectorCountHoverCard } from './ConnectorCountCell'
 import type { HostItem, HostRef } from './HostTable.types'
 import { LlmProviderIcon } from './LlmProviderIcon'
 import { RowActionsMenu } from './RowActionsMenu'
@@ -39,69 +40,6 @@ export function collectProviderIds(spec: Record<string, unknown>): string[] {
     out.push(id)
   }
   return out
-}
-
-// Hover card over the connectors cell. The agent's private connector context
-// is an implementation detail, so the card shows a neutral "Connectors"
-// heading plus the attached MCP-server names — never the context slug. The
-// card is keyboard-accessible (focus + blur mirror hover) and `role="tooltip"`
-// keeps screen readers in sync with what's visible.
-function ConnectorCountHoverCard({
-  hostKey,
-  servers,
-  onOpenConnectors,
-}: {
-  hostKey: string
-  servers: string[]
-  onOpenConnectors: () => void
-}) {
-  const [open, setOpen] = useState(false)
-  const hasServers = servers.length > 0
-  const cardId = `agent-connectors-${hostKey}`
-
-  const trigger = (
-    <button
-      type="button"
-      className="cu-link cu-host-connectors-count"
-      onClick={e => {
-        e.stopPropagation()
-        onOpenConnectors()
-      }}
-      onKeyDown={e => e.stopPropagation()}
-      aria-describedby={hasServers && open ? cardId : undefined}
-    >
-      {servers.length}
-    </button>
-  )
-
-  if (!hasServers) return trigger
-
-  return (
-    <span
-      className="cu-host-connectors-hover"
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-      onFocus={() => setOpen(true)}
-      onBlur={() => setOpen(false)}
-    >
-      {trigger}
-      {open ? (
-        <div role="tooltip" id={cardId} className="cu-agent-connectors-summary">
-          <div className="cu-agent-connectors-summary__head">
-            <span>Connectors</span>
-            <span>{servers.length}</span>
-          </div>
-          <ul className="cu-agent-connectors-summary__list">
-            {servers.map(server => (
-              <li key={server} title={server}>
-                {server}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-    </span>
-  )
 }
 
 export function HostTable({

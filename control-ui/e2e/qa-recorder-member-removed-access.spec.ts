@@ -1,13 +1,13 @@
 // control-ui/e2e/qa-recorder-member-removed-access.spec.ts
 //
 // Optional QA recorder journey (MUTATING). Requires QA_RECORDER_CONFIRM_MUTATIONS=1.
-// Video-tours the member Access tab's tombstone story: a scope granted to a
-// member whose backing Context is then deleted out-of-band renders under the
-// "Removed access" heading (cu-deleted-access-heading) with the resolved
+// Video-tours the member Access tab's tombstone story (D8): a scope granted
+// to a member whose backing Context is then deleted out-of-band renders under
+// the "Removed access" heading (cu-deleted-access-heading) with the resolved
 // agent display name and a "Deleted" marker — never a bare contextId row in
-// the active table. The member's original contextIds are restored via PUT
-// and the seeded host is deleted in the finally; the Context stays deleted
-// (it is the journey's fixture), so it is never deleted twice.
+// the active table. The member's original contextIds AND agentNames are
+// restored via PUT and the seeded host is deleted in the finally; the Context
+// stays deleted (it is the journey's fixture), so it is never deleted twice.
 //
 // Contract: docs/testing/optional-playwright-qa-recorder.md ("Extending the
 // recorder").
@@ -43,6 +43,7 @@ test.describe('optional QA recorder: Control UI member removed access', () => {
     const hostDisplayName = uniqueE2EName('qa-member-removed-agent')
     let userId = ''
     let originalContextIds: string[] | null = null
+    let originalAgentNames: string[] | null = null
     let restored = false
 
     try {
@@ -62,7 +63,8 @@ test.describe('optional QA recorder: Control UI member removed access', () => {
       userId = String(usersRes.data.items?.[0]?.id || '')
       expect(userId, 'first user id').toBeTruthy()
 
-      // Remember the member's original contextIds before granting anything.
+      // Remember the member's original contextIds and agentNames before
+      // granting anything (shared-state hygiene for the D8 mappings).
       const originalRes = await api<{ contextIds?: string[] }>(
         page.request,
         'GET',
@@ -73,6 +75,17 @@ test.describe('optional QA recorder: Control UI member removed access', () => {
         `get user contexts: ${JSON.stringify(originalRes.data)}`
       ).toBeLessThan(300)
       originalContextIds = originalRes.data.contextIds ?? []
+
+      const originalAgentsRes = await api<{ agentNames?: string[] }>(
+        page.request,
+        'GET',
+        `/api/v1/admin/users/${encodeURIComponent(userId)}/agents`
+      )
+      expect(
+        originalAgentsRes.status,
+        `get user agents: ${JSON.stringify(originalAgentsRes.data)}`
+      ).toBeLessThan(300)
+      originalAgentNames = originalAgentsRes.data.agentNames ?? []
 
       // Seed: a host-backed scope, granted to the member.
       const ctxRes = await api(page.request, 'POST', '/api/v1/admin/contexts', {
@@ -122,7 +135,9 @@ test.describe('optional QA recorder: Control UI member removed access', () => {
         `${CONTROL_UI_URL}/users-and-teams/users/${encodeURIComponent(userId)}/access`
       )
       await expect(
-        page.getByText('Agents and connector scopes this member may access.', { exact: true })
+        page.getByText('Agents this member may use — and the connectors each one carries.', {
+          exact: true,
+        })
       ).toBeVisible({ timeout: 20_000 })
 
       await expect(
@@ -163,6 +178,28 @@ test.describe('optional QA recorder: Control UI member removed access', () => {
             `/api/v1/admin/users/${encodeURIComponent(userId)}/contexts`,
             { contextIds: originalContextIds }
           )
+        }
+        // D8 hygiene: restore the member↔agent mapping too (PUT is
+        // compare-and-swap: echo the full set we currently observe).
+        if (userId && originalAgentNames !== null) {
+          const currentAgentsRes = await api<{
+            agentNames?: string[]
+            deletedAgentNames?: string[]
+          }>(page.request, 'GET', `/api/v1/admin/users/${encodeURIComponent(userId)}/agents`)
+          if (currentAgentsRes.status < 300) {
+            await api(
+              page.request,
+              'PUT',
+              `/api/v1/admin/users/${encodeURIComponent(userId)}/agents`,
+              {
+                agentNames: originalAgentNames,
+                expectedCurrentAgentNames: [
+                  ...(currentAgentsRes.data.agentNames ?? []),
+                  ...(currentAgentsRes.data.deletedAgentNames ?? []),
+                ],
+              }
+            )
+          }
         }
         await api(page.request, 'DELETE', `/api/v1/admin/hosts/${encodeURIComponent(hostName)}`)
       } catch {

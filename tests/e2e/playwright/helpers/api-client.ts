@@ -53,6 +53,11 @@ export type HostCr = {
   }
 }
 
+export type AgentAccess = {
+  agentNames: string[]
+  deletedAgentNames?: string[]
+}
+
 export const controlApi = {
   async validateRecipe(recipe: unknown): Promise<{ valid: boolean; errors?: unknown[] }> {
     return apiFetch<{ valid: boolean; errors?: unknown[] }>(
@@ -244,6 +249,42 @@ export const controlApi = {
   async updateTeamContexts(teamId: string, contextIds: string[]): Promise<unknown> {
     return apiFetch<unknown>('PUT', `/api/v1/admin/teams/${encodeURIComponent(teamId)}/contexts`, {
       contextIds,
+    })
+  },
+
+  // ── D8 member/team ↔ agent mappings ──────────────────────────────────────
+  // The Access tab's writes are composite writes (agents AND contexts), so
+  // specs that seed mappings restore both. PUT is compare-and-swap:
+  // expectedCurrentAgentNames must echo the full set the caller last observed
+  // (active ∪ deleted history from a fresh GET).
+
+  async getUserAgents(userId: string): Promise<AgentAccess> {
+    return apiFetch<AgentAccess>('GET', `/api/v1/admin/users/${encodeURIComponent(userId)}/agents`)
+  },
+
+  async putUserAgents(
+    userId: string,
+    agentNames: string[],
+    expectedCurrentAgentNames: string[]
+  ): Promise<unknown> {
+    return apiFetch<unknown>('PUT', `/api/v1/admin/users/${encodeURIComponent(userId)}/agents`, {
+      agentNames,
+      expectedCurrentAgentNames,
+    })
+  },
+
+  async getTeamAgents(teamId: string): Promise<AgentAccess> {
+    return apiFetch<AgentAccess>('GET', `/api/v1/admin/teams/${encodeURIComponent(teamId)}/agents`)
+  },
+
+  async putTeamAgents(
+    teamId: string,
+    agentNames: string[],
+    expectedCurrentAgentNames: string[]
+  ): Promise<unknown> {
+    return apiFetch<unknown>('PUT', `/api/v1/admin/teams/${encodeURIComponent(teamId)}/agents`, {
+      agentNames,
+      expectedCurrentAgentNames,
     })
   },
 

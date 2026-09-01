@@ -1,10 +1,12 @@
 /**
  * Control UI — Team detail Access tab tests
  *
- * The team "Access" tab (the former "Contexts" tab) must present host-backed
- * access scopes by their agent display name, the add/remove flows must
- * round-trip the admin team-context API, and the legacy /contexts deep link
- * must redirect to /access.
+ * The team "Access" tab (the former "Contexts" tab) presents granted access
+ * as one table row per agent (D8): the Access/Connectors columns, the agent
+ * display name in cell 1 (never the raw scope id), the shared Connectors
+ * count cell in cell 2. The add/remove flows round-trip the D8 composite
+ * write (team-agents AND team-contexts mappings), and the legacy /contexts
+ * and /agents deep links redirect to /access.
  */
 import { controlApi } from '../helpers/api-client'
 import { expect, test } from '../helpers/auth-fixture'
@@ -53,11 +55,20 @@ test.describe('Control UI — Team Access tab', () => {
       timeout: 15_000,
     })
     await expect(
-      authedPage.getByText('Agents and connector scopes this team may access.')
+      authedPage.getByText('Agents this team may use — and the connectors each one carries.')
     ).toBeVisible()
 
-    // Access rows are role="listitem" divs (.cu-access-row), not table rows.
-    const row = authedPage.getByRole('listitem').filter({ hasText: HOST_DISPLAY_NAME })
+    // D8: granted access renders as a real table — Access/Connectors columns,
+    // one row per granted agent, labelled by its display name.
+    await expect(
+      authedPage.getByRole('columnheader', { name: 'Access', exact: true })
+    ).toBeVisible()
+    await expect(
+      authedPage.getByRole('columnheader', { name: 'Connectors', exact: true })
+    ).toBeVisible()
+    const row = authedPage
+      .getByRole('row')
+      .filter({ has: authedPage.getByRole('cell', { name: HOST_DISPLAY_NAME, exact: true }) })
     await expect(row).toHaveCount(1)
     await expect(row).not.toContainText(CONTEXT_ID)
   })
@@ -65,7 +76,7 @@ test.describe('Control UI — Team Access tab', () => {
   test("'Add access' opens the access picker modal", async ({ authedPage }) => {
     await authedPage.goto(`/users-and-teams/teams/${encodeURIComponent(teamId)}/access`)
     await expect(
-      authedPage.getByText('Agents and connector scopes this team may access.')
+      authedPage.getByText('Agents this team may use — and the connectors each one carries.')
     ).toBeVisible({ timeout: 15_000 })
 
     await authedPage.getByRole('button', { name: 'Add access', exact: true }).click()
@@ -73,6 +84,7 @@ test.describe('Control UI — Team Access tab', () => {
     const dialog = authedPage.getByRole('dialog', { name: 'Add access' })
     await expect(dialog).toBeVisible()
     await expect(dialog.getByLabel('Access')).toBeVisible()
+    await expect(dialog.locator('#team-access-picker')).toBeVisible()
     await expect(dialog.getByRole('button', { name: 'Add access', exact: true })).toBeVisible()
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
     await expect(dialog).toHaveCount(0)
@@ -82,13 +94,18 @@ test.describe('Control UI — Team Access tab', () => {
     authedPage,
   }) => {
     await authedPage.goto(`/users-and-teams/teams/${encodeURIComponent(teamId)}/access`)
-    const row = authedPage.getByRole('listitem').filter({ hasText: HOST_DISPLAY_NAME })
+    const row = authedPage
+      .getByRole('row')
+      .filter({ has: authedPage.getByRole('cell', { name: HOST_DISPLAY_NAME, exact: true }) })
     await expect(row).toBeVisible({ timeout: 15_000 })
 
     await row.getByLabel('Remove access').click()
 
     const confirmDialog = authedPage.getByRole('alertdialog', { name: 'Remove Access' })
     await expect(confirmDialog).toBeVisible()
+    await expect(confirmDialog).toContainText(
+      'This revokes the agent and every connector it carries.'
+    )
     await confirmDialog.getByRole('button', { name: 'Remove access', exact: true }).click()
 
     await expect(
@@ -99,10 +116,20 @@ test.describe('Control UI — Team Access tab', () => {
 
     const { contextIds } = await controlApi.getTeamContexts(teamId)
     expect(contextIds ?? []).not.toContain(CONTEXT_ID)
+    const { agentNames } = await controlApi.getTeamAgents(teamId)
+    expect(agentNames ?? []).not.toContain(HOST_NAME)
   })
 
   test('legacy /contexts deep link redirects to /access', async ({ authedPage }) => {
     await authedPage.goto(`/users-and-teams/teams/${encodeURIComponent(teamId)}/contexts`)
+    await authedPage.waitForURL('**/users-and-teams/teams/*/access', { timeout: 15_000 })
+    expect(authedPage.url()).toContain(`/teams/${teamId}/access`)
+  })
+
+  test('legacy /agents deep link redirects to /access (D8 folded the Agents tab)', async ({
+    authedPage,
+  }) => {
+    await authedPage.goto(`/users-and-teams/teams/${encodeURIComponent(teamId)}/agents`)
     await authedPage.waitForURL('**/users-and-teams/teams/*/access', { timeout: 15_000 })
     expect(authedPage.url()).toContain(`/teams/${teamId}/access`)
   })

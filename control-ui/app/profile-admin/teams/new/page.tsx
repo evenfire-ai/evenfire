@@ -28,9 +28,9 @@ import { permissionsForTeamRole, setDeletePermission, setInvitePermission } from
 
 type Role = 'admin' | 'inviter' | 'member'
 
-type TeamCreateStep = 0 | 1 | 2 | 3
+type TeamCreateStep = 0 | 1 | 2
 
-const STEPS = ['Team', 'Members', 'Access', 'Agents'] as const
+const STEPS = ['Team', 'Members', 'Access'] as const
 
 const STEP_DETAILS = [
   {
@@ -46,12 +46,7 @@ const STEP_DETAILS = [
   {
     description: 'Map access',
     title: 'Access',
-    subtitle: 'Choose the agents and connector scopes this team can use.',
-  },
-  {
-    description: 'Map agent access',
-    title: 'Agents',
-    subtitle: 'Select the agents this team can use.',
+    subtitle: 'Choose the agents this team can use — their connectors come along.',
   },
 ] as const
 
@@ -231,12 +226,7 @@ export default function CreateTeamPage() {
       return
     }
     if (step === 2) {
-      setSelectedContextIds([])
-      goNext()
-      return
-    }
-    if (step === 3) {
-      void handleCreateTeam({ agentNames: [] })
+      void handleCreateTeam({ agentNames: [], contextIds: [] })
     }
   }
 
@@ -258,8 +248,17 @@ export default function CreateTeamPage() {
       createdTeamId = createdTeam.id
       const teamId = createdTeamId
       const selectedMemberRoles = overrides?.memberRoles ?? memberRoleDrafts
-      const selectedContextValues = overrides?.contextIds ?? selectedContextIds
       const selectedAgentValues = overrides?.agentNames ?? selectedAgentNames
+      // D8 composite: the wizard's Access step picks AGENTS; both mappings are
+      // written so scope-based and agent-based enforcement agree.
+      const agentRefs = selectedAgentValues
+        .map(agentName => hosts.find(host => host.metadata?.name === agentName))
+        .map(host =>
+          String((host?.spec as { contextRef?: string } | undefined)?.contextRef || '').trim()
+        )
+        .filter(Boolean)
+      const selectedContextValues = Array.from(new Set([...agentRefs]))
+      void selectedContextIds
 
       await Promise.all(
         Object.entries(selectedMemberRoles).map(([userId, role]) =>
@@ -438,18 +437,18 @@ export default function CreateTeamPage() {
             {step === 2 ? (
               <div className="cu-form-stack cu-agent-form-stack--wide">
                 {loadingReferenceData ? (
-                  <div className="cu-muted cu-muted-note--compact">Loading access...</div>
-                ) : contextOptions.length > 0 ? (
+                  <div className="cu-muted cu-muted-note--compact">Loading agents...</div>
+                ) : agentOptions.length > 0 ? (
                   <Field htmlFor="new-team-access-picker" label="Access">
                     <SelectionDropdown
                       id="new-team-access-picker"
-                      options={contextOptions}
-                      value={selectedContextIds}
-                      onChange={setSelectedContextIds}
+                      options={agentOptions}
+                      value={selectedAgentNames}
+                      onChange={setSelectedAgentNames}
                       placeholder="Select access"
                       searchPlaceholder="Search access..."
                       selectionLabel="Selected access"
-                      emptyLabel="Nothing matches your search."
+                      emptyLabel="No agents match your search."
                       disabled={saving}
                       showSelectedChips={false}
                     />
@@ -458,31 +457,6 @@ export default function CreateTeamPage() {
                   <div className="cu-muted cu-muted-note--compact">
                     No access available to grant.
                   </div>
-                )}
-              </div>
-            ) : null}
-
-            {step === 3 ? (
-              <div className="cu-form-stack cu-agent-form-stack--wide">
-                {loadingReferenceData ? (
-                  <div className="cu-muted cu-muted-note--compact">Loading agents...</div>
-                ) : agentOptions.length > 0 ? (
-                  <Field htmlFor="new-team-agent-picker" label="Agents">
-                    <SelectionDropdown
-                      id="new-team-agent-picker"
-                      options={agentOptions}
-                      value={selectedAgentNames}
-                      onChange={setSelectedAgentNames}
-                      placeholder="Select agents"
-                      searchPlaceholder="Search agents..."
-                      selectionLabel="Selected agents"
-                      emptyLabel="No agents match your search."
-                      disabled={saving}
-                      showSelectedChips={false}
-                    />
-                  </Field>
-                ) : (
-                  <div className="cu-muted cu-muted-note--compact">No agents available.</div>
                 )}
               </div>
             ) : null}

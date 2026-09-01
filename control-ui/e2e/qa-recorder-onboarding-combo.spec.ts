@@ -67,7 +67,8 @@ test.describe('optional QA recorder: Control UI onboarding combo', () => {
       await page.getByLabel('Team name').fill(teamName)
       await page.getByRole('button', { name: 'Continue', exact: true }).click()
       await page.getByRole('button', { name: 'Skip', exact: true }).click()
-      await page.getByRole('button', { name: 'Skip', exact: true }).click()
+      // The Access step is the last one (D8 merged the Agents step in); its
+      // primary action creates the team directly — no further Skip exists.
       await page.getByRole('button', { name: 'Create team', exact: true }).click()
       await expect(page).toHaveURL(/\/users-and-teams\/teams$/, { timeout: 20_000 })
       teamId = await findTeamIdByName(page.request, teamName)
@@ -112,6 +113,20 @@ test.describe('optional QA recorder: Control UI onboarding combo', () => {
       })
       expect(ctxRes.status, `create context: ${JSON.stringify(ctxRes.data)}`).toBeLessThan(300)
 
+      // D8: the Access tab manages agents — grant rides an agent that owns
+      // the scope, so seed one host bound to the context.
+      const agentName = uniqueE2EName('qa-recorder-combo-agent')
+      const hostRes = await api(page.request, 'POST', '/api/v1/admin/hosts', {
+        metadata: { name: agentName },
+        spec: {
+          host: agentName,
+          contextRef: contextName,
+          secretRef: '',
+          channels: [],
+        },
+      })
+      expect(hostRes.status, `create host: ${JSON.stringify(hostRes.data)}`).toBeLessThan(300)
+
       // step 5: grant the access scope to the team from the team Access tab.
       await page.goto(
         `${CONTROL_UI_URL}/users-and-teams/teams/${encodeURIComponent(teamId)}/access`
@@ -124,8 +139,8 @@ test.describe('optional QA recorder: Control UI onboarding combo', () => {
       ).toBeVisible({ timeout: 20_000 })
       await page.getByRole('button', { name: 'Add access', exact: true }).click()
       await expect(page.locator('#team-access-picker')).toBeVisible({ timeout: 5_000 })
-      await page.locator('#team-access-picker').fill(contextName)
-      const accessOption = page.getByRole('option', { name: contextName, exact: true })
+      await page.locator('#team-access-picker').fill(agentName)
+      const accessOption = page.getByRole('option', { name: agentName, exact: true })
       await expect(accessOption).toBeVisible({ timeout: 10_000 })
       await accessOption.click()
       await page

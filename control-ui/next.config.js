@@ -150,6 +150,17 @@ const nextConfig = {
         destination: '/users-and-teams/teams/:id/access',
         permanent: true,
       },
+      // The member/team "Agents" tabs folded into "Access" (D8).
+      {
+        source: '/users-and-teams/users/:id/agents',
+        destination: '/users-and-teams/users/:id/access',
+        permanent: true,
+      },
+      {
+        source: '/users-and-teams/teams/:id/agents',
+        destination: '/users-and-teams/teams/:id/access',
+        permanent: true,
+      },
       { source: '/marketplace', destination: '/marketplace/connectors', permanent: true },
       { source: '/cost-and-usage', destination: '/cost-and-usage/usage', permanent: true },
       {
