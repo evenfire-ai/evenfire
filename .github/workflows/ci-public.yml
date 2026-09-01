@@ -221,20 +221,38 @@ jobs:
             echo 'real-Postgres control-api lane reported skipped tests' >&2
             exit 1
           fi
-          # Codex subscription suites must stay inside the real-Postgres filter.
-          # A rename or move that drops them from `*realPostgres*` would otherwise
-          # still pass the aggregate counts above.
+          # Critical suites must stay inside the real-Postgres filter. A rename or
+          # move that drops one from `*realPostgres*` would otherwise still pass
+          # the aggregate counts above.
           for suite in \
+            accessCatalogCoordinator.realPostgres.integration \
+            accessCatalogFamilies.realPostgres.integration \
+            accessCatalogPerformance.realPostgres.integration \
+            accessCatalogShadow.realPostgres.integration \
+            accessDatabaseCancellation.realPostgres.integration \
+            catalogDistinctPagination.realPostgres.integration \
+            catalogProducers.realPostgres.integration \
+            catalogRevisionComponents.realPostgres.integration \
             db.codexSubscriptionConnection.realPostgres.integration \
+            finalAuthorityLifecycle.realPostgres.integration \
+            gfsRevisionLockOrder.realPostgres.integration \
+            invitationAcceptedOnboarding.realPostgres.integration \
+            legacyPasswordEpochBackfill.realPostgres.integration \
+            legacySessionExchangeRace.realPostgres.integration \
+            migrationExecutionPolicy.realPostgres.integration \
+            migrationPreviousImageCompatibility.realPostgres.integration \
+            routes.externalTeamsFinalAuthority.realPostgres.integration \
+            routes.externalTeamsLegacyAdminRevocation.realPostgres.integration \
             services.codexSubscriptionOAuth.realPostgres.integration \
             services.codexSubscriptionCatalog.realPostgres.integration \
             services.llmProviderAttemptAuthorization.realPostgres.integration \
             services.llmProviderAttemptStore.realPostgres.integration \
             services.llmProviderAttemptRedemption.realPostgres.integration \
-            services.llmProviderAttemptFinalization.realPostgres.integration
+            services.llmProviderAttemptFinalization.realPostgres.integration \
+            userAccessRuntimeContract.realPostgres.integration
           do
             grep -Fq "$suite" "$normalized_log" || {
-              echo "real-Postgres control-api lane omitted Codex suite ${suite}" >&2
+              echo "real-Postgres control-api lane omitted critical suite ${suite}" >&2
               exit 1
             }
           done
