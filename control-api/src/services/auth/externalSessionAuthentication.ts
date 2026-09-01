@@ -147,7 +147,6 @@ export async function authenticateExternalUserSessionIdentity(
   const v2Claims = verifyUserSessionV2Token(token)
   if (v2Claims) {
     const validation = await validateUserSessionClaims(v2Claims, {
-      now: options.now,
       budget: options.budget,
     })
     if (validation.status !== 'valid') return validation
@@ -208,7 +207,6 @@ async function revalidateExternalUserSessionIdentity(
     const validation = await validateUserSessionClaims(
       identity.tokenClaims as UserSessionV2Claims,
       {
-        now: options.now,
         budget: options.budget,
       }
     )
@@ -285,7 +283,7 @@ export async function renewExternalUserSession(
   }
   const claims = verifyUserSessionV2Token(token)
   if (!claims) return { status: 'invalid', reason: 'invalid_representation' }
-  const result = await renewUserSession(claims, { now: options.now, budget: options.budget })
+  const result = await renewUserSession(claims, { budget: options.budget })
   if (!('token' in result)) {
     if (result.status === 'valid') {
       return { status: 'invalid', reason: 'session_renewal_failed' }
