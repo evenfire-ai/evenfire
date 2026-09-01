@@ -17,6 +17,7 @@ import * as k8s from '@kubernetes/client-node'
 import { STATE_ANNOTATION } from '@clerum/network-policy-core'
 import { OperatorConfig, loadConfig } from '../config'
 import { getPool } from '../db'
+import { createLogger } from '../observability/logger'
 import {
   ConfigMapResourceDef,
   CronJobDef,
@@ -161,6 +162,25 @@ function declaresInheritedParentResources(recipe: WorkflowRecipeCRD): boolean {
         ownerRef.controller === true
     )
   )
+}
+
+/**
+ * Order `a.b.c.d/32` strings by address, not by lexeme (issue #299).
+ *
+ * A plain string sort puts "140.82.112.4/32" before "93.184.216.10/32" because
+ * it compares '1' to '9' — the opposite of the numeric order, and confusing in
+ * a record meant to be read. The accumulator already emits its entries in a
+ * stable key order, so this is about the record's OWN readable contract rather
+ * than about rescuing an unordered input.
+ */
+function compareCidrByAddress(a: string, b: string): number {
+  const octets = (cidr: string) => cidr.split('/')[0].split('.').map(Number)
+  const left = octets(a)
+  const right = octets(b)
+  for (let i = 0; i < 4; i += 1) {
+    if (left[i] !== right[i]) return left[i] - right[i]
+  }
+  return 0
 }
 
 function isTerminalWorkflowStatusPhase(phase: unknown): boolean {
@@ -4202,6 +4222,14 @@ export class WorkflowRecipeReconciler {
       },
       `NetworkPolicy "${policyName}" in ${ns}`
     )
+    // #299: the policy has landed — record the set it actually enforces.
+    this.logResolvedEgressSet(
+      recipe.metadata.name,
+      policyName,
+      externals.map(e => e.fqdn),
+      effectiveResolved,
+      egressStateChanged
+    )
   }
 
   /**
@@ -4623,6 +4651,14 @@ export class WorkflowRecipeReconciler {
         continue
       }
       await this.applyNetworkPolicy(policy, wlNs)
+      // #299: the policy has landed — record the set it actually enforces.
+      this.logResolvedEgressSet(
+        recipe.metadata.name,
+        wlPolicyName,
+        externalDeclared.map(e => e.fqdn),
+        effectiveExternal,
+        wlEgressStateChanged
+      )
     }
 
     // Now ingress side: for each target workload that any sibling pointed
@@ -4749,34 +4785,6 @@ export class WorkflowRecipeReconciler {
    * alarm cap and least-recently-observed entries were dropped (H3).
    */
   private warnEgressAccumulator(policyName: string, acc: AccumulateOutput): void {
-    // issue #299 — the resolved set, so the WRC lane leaves a history.
-    //
-    // WHY THIS EXISTS. HCC has emitted `[NetPol] Resolved <fqdn> → [ips]` since
-    // its initial commit (networkPolicyReconciler.ts), so its lane has a
-    // reconstructable 28-day record in Cloud Logging: which addresses a host
-    // used, whether the set is closed, whether it drifts. WRC gained its own
-    // resolution path later and never got the equivalent line, so `wl-egress-*`
-    // and `ui-egress-*` were observable only in the present, through the live
-    // annotation. That is the lane where the currently-exposed hosts live, so
-    // the half of the fleet that needs history is the half that had none.
-    //
-    // WHY ONLY ON CHANGE. HCC logs every resolution: 176 of 1510 log lines in a
-    // 3-minute sample. Copying that verbatim would add the same volume here for
-    // no extra information — the useful event is the set CHANGING, not the poll
-    // that confirmed it did not. `acc.changed` is exactly that predicate
-    // ((fqdn,ip,port,protocol), timestamp-only refreshes excluded), which is
-    // also what the H4 no-op gate keys on, so a logged line and a written policy
-    // stay in step.
-    //
-    // Called from BOTH lanes (ui and workload) on purpose: one emitter, not a
-    // copy per path.
-    if (acc.changed && acc.entries.length > 0) {
-      const ips = acc.entries
-        .map(e => e.ip)
-        .filter((ip, i, all) => all.indexOf(ip) === i)
-        .sort()
-      console.log(`[WR-Reconciler] Resolved egress set for ${policyName} → [${ips.join(', ')}]`)
-    }
     if (acc.frozenFqdns.length > 0) {
       console.warn(
         `[WR-Reconciler] ${policyName}: egress set FROZEN (fail-static) for ${acc.frozenFqdns.join(
@@ -4790,6 +4798,68 @@ export class WorkflowRecipeReconciler {
           acc.evicted.length === 1 ? 'y' : 'ies'
         } (never rejecting the policy).`
       )
+    }
+  }
+
+  /**
+   * Record the external egress set that was just written — one entry per
+   * declared FQDN — so the WRC lane leaves a reconstructable history (#299).
+   *
+   * WHY THIS EXISTS. HCC emits `[NetPol] Resolved <fqdn> → [cidrs]` per DNS
+   * binding (`host-context-controller/src/networkPolicyReconciler.ts`), so its
+   * lane can be replayed from retained logs: which addresses a host actually
+   * used over weeks, whether that universe is closed, whether it drifts. WRC has
+   * had its own resolution path since the SAME initial commit (`fqdnResolver.ts`)
+   * and simply never got the equivalent record; #299 later added the sliding
+   * window on top of it. The asymmetry is an omission, not a consequence of
+   * arriving later — and `wl-egress-*`/`ui-egress-*` is the lane where the hosts
+   * whose DNS round outruns their retention sit, so the half of the fleet that
+   * most needs the history is the half that had none.
+   *
+   * PER FQDN, NOT PER POLICY. `egress.external[]` is a list, so one policy
+   * routinely covers several hosts. Flattening their IPs into a single union
+   * cannot answer which host used which address — the only question the history
+   * exists for. Keyed by `source.fqdn`, this matches HCC's shape.
+   *
+   * AFTER THE WRITE, ON THE ENFORCED SET. Called once the policy has landed, and
+   * given the post-M3 (`isBlockedExternalIPv4`) filtered set that was actually
+   * rendered — not the accumulator's raw entries, which can still carry a
+   * rehydrated blocked address the policy then drops. A record that disagrees
+   * with the policy is worse than no record: it would attest to an allowance
+   * that never existed.
+   *
+   * ON CHANGE ONLY. `changed` is `acc.changed` — true iff the
+   * (fqdn,ip,port,protocol) set differs from the persisted state, so a
+   * timestamp-only refresh stays silent. It is ONE of the three terms the H4
+   * write gate keys on, so every entry here corresponds to a write that landed;
+   * the converse does not hold — a renewal (M1) or an annotation migration
+   * writes without emitting one.
+   *
+   * A DECLARED FQDN THAT RESOLVED TO NOTHING STILL EMITS, with `cidrs: []`. A
+   * set collapsing to empty is the most consequential event in the series and
+   * must not be indistinguishable from "nothing happened".
+   */
+  private logResolvedEgressSet(
+    recipeName: string,
+    policyName: string,
+    declaredFqdns: string[],
+    resolved: rb.ResolvedExternalEgressInput[],
+    changed: boolean
+  ): void {
+    if (!changed) return
+    const log = createLogger('wrc', recipeName)
+    for (const fqdn of [...new Set(declaredFqdns)].sort()) {
+      const forHost = resolved.filter(r => r.source.fqdn === fqdn)
+      log.info('resolved external egress set', {
+        policy: policyName,
+        fqdn,
+        // Sorted by ADDRESS so an unchanged set renders byte-identically and a
+        // real change is visible as a diff. Ports are carried separately because
+        // `changed` is defined over (fqdn,ip,port,protocol): a port-only change
+        // must not render an identical entry.
+        cidrs: [...new Set(forHost.map(r => r.cidr))].sort(compareCidrByAddress),
+        ports: [...new Set(forHost.map(r => r.port))].sort((a, b) => a - b),
+      })
     }
   }
 

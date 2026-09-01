@@ -3856,88 +3856,436 @@ describe('WorkflowRecipeReconciler', () => {
     expect(npCall.body.spec.egress).toHaveLength(2) // internal + external
   })
 
-  // issue #299 — the WRC lane must leave a resolution history in the log.
+  // issue #299 — the WRC lane must leave a per-host resolution history.
   //
-  // HCC has emitted `[NetPol] Resolved <fqdn> → [ips]` since its initial commit,
-  // so its lane can be reconstructed from Cloud Logging: which addresses a host
-  // used over weeks, whether its universe is closed, whether it drifts. WRC had
-  // no equivalent, so `wl-egress-*` and `ui-egress-*` were observable only in
-  // the present through the live annotation — and that is exactly the lane where
-  // the currently-exposed hosts sit. These tests pin both the emission and its
-  // change-gating, since the value of the line is the history it accumulates.
-  it('logs the resolved egress set for the ui lane on first render', async () => {
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
-    const kc = new k8s.KubeConfig()
-    const rec = new WorkflowRecipeReconciler(kc, undefined, {
-      fqdnLookup: async () => ({
-        kind: 'ok',
-        ipv4: ['93.184.216.10', '93.184.216.11'],
-        ipv6: [],
-        ttlSeconds: 300,
-      }),
-    })
-    const recipe = makeRecipe({
+  // HCC emits `[NetPol] Resolved <fqdn> → [cidrs]` per DNS binding, so its lane
+  // replays from retained logs: which addresses a host used, whether its
+  // universe is closed, whether it drifts. WRC has had its own resolution path
+  // since the same initial commit and simply never got the equivalent record,
+  // so `wl-egress-*`/`ui-egress-*` were observable only in the present through
+  // the live annotation — and that is the lane where the currently-exposed
+  // hosts sit.
+  //
+  // What these tests pin, and why each matters:
+  //   - the STRUCTURE of the record (a substring assert would let a rename of
+  //     every field pass while every downstream query broke);
+  //   - PER-FQDN attribution on a multi-host policy (a flat union cannot say
+  //     which host used which address, which is the only question it is for);
+  //   - that the record equals the set the written policy ENFORCES;
+  //   - that a declared host resolving to nothing still emits an empty set;
+  //   - both lanes, ui and workload;
+  //   - and the change gate, with a positive control so "correctly quiet" is
+  //     distinguishable from "never ran".
+  //
+  // The logger is `observability/logger.ts`, which writes one JSON line to
+  // stdout and is silent under NODE_ENV=test unless LOG_LEVEL is set — hence
+  // the capture helper below rather than a console spy.
+  type EgressRecord = Record<string, unknown>
+  function captureEgressRecords(): {
+    entries: EgressRecord[]
+    payloads: () => Array<{ policy: unknown; fqdn: unknown; cidrs: unknown; ports: unknown }>
+    restore: () => void
+  } {
+    const previousLevel = process.env.LOG_LEVEL
+    process.env.LOG_LEVEL = 'info'
+    const entries: EgressRecord[] = []
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+      const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString()
+      for (const line of text.split('\n')) {
+        if (!line.startsWith('{')) continue // vitest's own stdout, not ours
+        const parsed = JSON.parse(line) as EgressRecord
+        if (parsed.msg === 'resolved external egress set') entries.push(parsed)
+      }
+      return true
+    }) as unknown as typeof process.stdout.write)
+    return {
+      entries,
+      // The payload the record exists to carry, separated from the logger's
+      // envelope (ts/level/correlationId/component/...) so a test can pin the
+      // four fields a log query keys on without asserting a timestamp.
+      payloads: () =>
+        entries.map(e => ({ policy: e.policy, fqdn: e.fqdn, cidrs: e.cidrs, ports: e.ports })),
+      restore: () => {
+        spy.mockRestore()
+        if (previousLevel === undefined) delete process.env.LOG_LEVEL
+        else process.env.LOG_LEVEL = previousLevel
+      },
+    }
+  }
+
+  function uiRecipeWithExternals(external: Array<{ fqdn: string; port: number }>) {
+    return makeRecipe({
       spec: {
         workloads: [{ id: 'frontend', type: 'deployment', image: 'fe:1', port: 8080 }],
-        ui: {
-          workloadRef: 'frontend',
-          port: 8080,
-          egress: { external: [{ fqdn: 'api.stripe.com', port: 443 }] },
-        },
+        ui: { workloadRef: 'frontend', port: 8080, egress: { external } },
       },
     })
+  }
 
-    await rec.reconcile(recipe)
+  function createdPolicy(name: string): k8s.V1NetworkPolicy | undefined {
+    return mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls
+      .map(c => (c[0] as { body: k8s.V1NetworkPolicy }).body)
+      .find(b => b.metadata?.name === name)
+  }
 
-    // Both IPs, sorted, on one line — the shape Cloud Logging can be parsed back
-    // into a per-host time series.
-    expect(logSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Resolved egress set for ui-egress-test-recipe')
-    )
-    const line = logSpy.mock.calls
-      .map(c => String(c[0]))
-      .find(s => s.includes('Resolved egress set for'))
-    expect(line).toContain('93.184.216.10')
-    expect(line).toContain('93.184.216.11')
+  it('records the ui lane egress set with the exact enforced cidrs and ports', async () => {
+    const cap = captureEgressRecords()
+    try {
+      const kc = new k8s.KubeConfig()
+      const rec = new WorkflowRecipeReconciler(kc, undefined, {
+        // Deliberately chosen so the three candidate orders all differ: input
+        // order is 140 then 93; a plain string sort (and the accumulator's own
+        // key order) also puts "140" first because it compares '1' to '9'; only
+        // an address-wise sort puts 93 first.
+        fqdnLookup: async () => ({
+          kind: 'ok',
+          ipv4: ['140.82.112.4', '93.184.216.11'],
+          ipv6: [],
+          ttlSeconds: 300,
+        }),
+      })
+
+      await rec.reconcile(uiRecipeWithExternals([{ fqdn: 'api.stripe.com', port: 443 }]))
+
+      // The whole record, not a substring: field names and value shapes are the
+      // contract a log query depends on, so a rename must fail here.
+      expect(cap.payloads()).toEqual([
+        {
+          policy: 'ui-egress-test-recipe',
+          fqdn: 'api.stripe.com',
+          cidrs: ['93.184.216.11/32', '140.82.112.4/32'], // by address, not lexeme
+          ports: [443],
+        },
+      ])
+
+      // It must go through the service's structured logger, not a bare
+      // console.log: the envelope is what makes the record queryable and what
+      // gives operators a LOG_LEVEL switch. A regression to console.log emits
+      // no JSON line at all and fails above; this pins the envelope's shape.
+      expect(cap.entries[0]).toMatchObject({
+        level: 'info',
+        component: 'wrc',
+        recipeName: 'test-recipe',
+        msg: 'resolved external egress set',
+      })
+
+      // ...and it must equal what the policy actually enforces. This is the
+      // property the record exists to have: an audit trail that disagrees with
+      // the policy would attest to an allowance that never existed.
+      const written = createdPolicy('ui-egress-test-recipe')
+      const enforced = (written?.spec?.egress ?? [])
+        .flatMap(rule => rule.to ?? [])
+        .flatMap(peer => (peer.ipBlock ? [peer.ipBlock.cidr] : []))
+        .sort()
+      // Compared as content, not order — the record's order is its own readable
+      // contract, pinned above; what must match the policy is the SET.
+      expect([...(cap.payloads()[0].cidrs as string[])].sort()).toEqual(enforced)
+    } finally {
+      cap.restore()
+    }
   })
 
-  it('does NOT re-log when the resolved set is unchanged', async () => {
-    // The line is gated on acc.changed — the same predicate the H4 no-op gate
-    // uses — so a logged line and a written policy stay in step. Without the
-    // gate this would emit on every poll: HCC's ungated equivalent accounts for
-    // 176 of 1510 log lines in a 3-minute sample, which is volume without
-    // information.
+  it('attributes each address to its own host on a multi-FQDN policy', async () => {
+    // A flat union per policy — the shape this replaced — cannot answer "which
+    // addresses did THIS host use", which is the only question the history is
+    // for. `egress.external[]` is a list, so multi-host is the normal case.
+    const cap = captureEgressRecords()
+    try {
+      const kc = new k8s.KubeConfig()
+      const rec = new WorkflowRecipeReconciler(kc, undefined, {
+        fqdnLookup: async (fqdn: string) =>
+          fqdn === 'api.github.com'
+            ? { kind: 'ok' as const, ipv4: ['140.82.112.4'], ipv6: [], ttlSeconds: 60 }
+            : { kind: 'ok' as const, ipv4: ['93.184.216.10'], ipv6: [], ttlSeconds: 300 },
+      })
+
+      await rec.reconcile(
+        uiRecipeWithExternals([
+          { fqdn: 'api.stripe.com', port: 443 },
+          { fqdn: 'api.github.com', port: 443 },
+        ])
+      )
+
+      expect(cap.payloads()).toEqual([
+        {
+          policy: 'ui-egress-test-recipe',
+          fqdn: 'api.github.com',
+          cidrs: ['140.82.112.4/32'],
+          ports: [443],
+        },
+        {
+          policy: 'ui-egress-test-recipe',
+          fqdn: 'api.stripe.com',
+          cidrs: ['93.184.216.10/32'],
+          ports: [443],
+        },
+      ])
+      // Neither host's address leaks into the other's record.
+      expect(cap.payloads()[0].cidrs).not.toContain('93.184.216.10/32')
+      expect(cap.payloads()[1].cidrs).not.toContain('140.82.112.4/32')
+    } finally {
+      cap.restore()
+    }
+  })
+
+  it('keeps a port-only change visible when the address set is identical', async () => {
+    // `changed` is defined over (fqdn,ip,port,protocol), so the same host on a
+    // second port IS a change and rewrites the policy. Carrying only addresses
+    // would render an identical record and hide it.
+    const cap = captureEgressRecords()
+    try {
+      const kc = new k8s.KubeConfig()
+      const rec = new WorkflowRecipeReconciler(kc, undefined, {
+        fqdnLookup: async () => ({
+          kind: 'ok',
+          ipv4: ['93.184.216.10'],
+          ipv6: [],
+          ttlSeconds: 300,
+        }),
+      })
+
+      await rec.reconcile(
+        uiRecipeWithExternals([
+          { fqdn: 'api.stripe.com', port: 443 },
+          { fqdn: 'api.stripe.com', port: 8443 },
+        ])
+      )
+
+      expect(cap.payloads()).toEqual([
+        {
+          policy: 'ui-egress-test-recipe',
+          fqdn: 'api.stripe.com',
+          cidrs: ['93.184.216.10/32'],
+          ports: [443, 8443], // numeric sort, and both ports survive
+        },
+      ])
+    } finally {
+      cap.restore()
+    }
+  })
+
+  it('still records a declared host that resolved to no addresses', async () => {
+    // A set collapsing to empty is the most consequential event in the series.
+    // Suppressing the record when there is nothing to list would make it
+    // indistinguishable from "nothing happened" for a log-based replay.
+    const cap = captureEgressRecords()
+    try {
+      const kc = new k8s.KubeConfig()
+      const rec = new WorkflowRecipeReconciler(kc, undefined, {
+        fqdnLookup: async (fqdn: string) =>
+          fqdn === 'gone.example.com'
+            ? { kind: 'ok' as const, ipv4: [], ipv6: [], ttlSeconds: 60 }
+            : { kind: 'ok' as const, ipv4: ['93.184.216.10'], ipv6: [], ttlSeconds: 300 },
+      })
+
+      await rec.reconcile(
+        uiRecipeWithExternals([
+          { fqdn: 'api.stripe.com', port: 443 },
+          { fqdn: 'gone.example.com', port: 443 },
+        ])
+      )
+
+      const empty = cap.payloads().find(r => r.fqdn === 'gone.example.com')
+      expect(empty).toEqual({
+        policy: 'ui-egress-test-recipe',
+        fqdn: 'gone.example.com',
+        cidrs: [],
+        ports: [],
+      })
+    } finally {
+      cap.restore()
+    }
+  })
+
+  it('records the workload lane too, not only the ui lane', async () => {
+    // One emitter serves both call sites; without this test, silencing the
+    // `wl-egress-*` half would pass the whole suite.
+    const cap = captureEgressRecords()
+    try {
+      const kc = new k8s.KubeConfig()
+      const rec = new WorkflowRecipeReconciler(kc, undefined, {
+        fqdnLookup: async () => ({
+          kind: 'ok',
+          ipv4: ['93.184.216.10'],
+          ipv6: [],
+          ttlSeconds: 300,
+        }),
+      })
+
+      await rec.reconcile(
+        makeRecipe({
+          spec: {
+            contextRef: 'default',
+            workloads: [
+              {
+                id: 'worker',
+                type: 'deployment',
+                image: 'worker:latest',
+                port: 8080,
+                // The workload lane declares hosts as exact-host egressBindings,
+                // not ui.egress.external — the reconciler maps b.dns to the
+                // accumulator's fqdn.
+                egressBindings: [{ dns: 'api.stripe.com', port: 443 }],
+              },
+            ],
+          },
+        })
+      )
+
+      expect(cap.payloads()).toEqual([
+        {
+          policy: 'wl-egress-test-recipe-worker',
+          fqdn: 'api.stripe.com',
+          cidrs: ['93.184.216.10/32'],
+          ports: [443],
+        },
+      ])
+    } finally {
+      cap.restore()
+    }
+  })
+
+  it('never records an address the M3 filter kept OUT of the written policy', async () => {
+    // The record is taken from the post-filter set, so it cannot attest to an
+    // allowance that never existed. Fresh DNS cannot exercise this — the
+    // resolver fails a whole host closed if any A record is blocked — so the
+    // blocked address arrives the only way it can: rehydrated from the live
+    // policy's state annotation, which parseState validates for SYNTAX only.
+    const cap = captureEgressRecords()
+    try {
+      const now = Date.now()
+      const rehydrated = [
+        // A private address someone put on the annotation. Syntactically valid,
+        // still inside its window, and dropped by isBlockedExternalIPv4.
+        {
+          ip: '10.0.0.5',
+          port: 443,
+          protocol: 'TCP',
+          fqdn: 'api.stripe.com',
+          expiresAt: now + 600_000,
+          lastObservedAt: now,
+        },
+        {
+          ip: '93.184.216.10',
+          port: 443,
+          protocol: 'TCP',
+          fqdn: 'api.stripe.com',
+          expiresAt: now + 600_000,
+          lastObservedAt: now,
+        },
+      ]
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
+        metadata: {
+          name: 'ui-egress-test-recipe',
+          resourceVersion: '1',
+          annotations: { 'clerum.io/egress-fqdn-state': JSON.stringify(rehydrated) },
+        },
+      })
+
+      const kc = new k8s.KubeConfig()
+      const rec = new WorkflowRecipeReconciler(kc, undefined, {
+        // A NEW address this round, so the set changed and a record is due.
+        fqdnLookup: async () => ({
+          kind: 'ok',
+          ipv4: ['93.184.216.99'],
+          ipv6: [],
+          ttlSeconds: 300,
+        }),
+      })
+
+      await rec.reconcile(uiRecipeWithExternals([{ fqdn: 'api.stripe.com', port: 443 }]))
+
+      expect(cap.payloads()).toHaveLength(1)
+      const recorded = cap.payloads()[0].cidrs as string[]
+      expect(recorded).not.toContain('10.0.0.5/32')
+      expect(recorded).toEqual(['93.184.216.10/32', '93.184.216.99/32'])
+    } finally {
+      cap.restore()
+    }
+  })
+
+  it('does NOT record a renewal write, which writes without the set changing', async () => {
+    // The gate is `changed`, not "did we write". A renewal (audit M1) re-persists
+    // an aging window with an identical set: the policy IS rewritten and no
+    // record is due, because nothing about the resolved set changed. This is the
+    // direction the record does NOT run — every entry implies a write, not the
+    // converse — and it is the only path that still reaches the emitter with
+    // changed === false, since the no-op gate returns earlier.
+    const cap = captureEgressRecords()
+    try {
+      const now = Date.now()
+      // expiresAt within overlap/2 of now makes this round's fresh expiry an
+      // advance, which is exactly what renewalDue keys on.
+      const aging = [
+        {
+          ip: '93.184.216.10',
+          port: 443,
+          protocol: 'TCP',
+          fqdn: 'api.stripe.com',
+          expiresAt: now + 30_000,
+          lastObservedAt: now,
+        },
+      ]
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
+        metadata: {
+          name: 'ui-egress-test-recipe',
+          resourceVersion: '1',
+          annotations: { 'clerum.io/egress-fqdn-state': JSON.stringify(aging) },
+        },
+      })
+
+      const kc = new k8s.KubeConfig()
+      const rec = new WorkflowRecipeReconciler(kc, undefined, {
+        // The SAME address, so the (fqdn,ip,port,protocol) set is unchanged.
+        fqdnLookup: async () => ({
+          kind: 'ok',
+          ipv4: ['93.184.216.10'],
+          ipv6: [],
+          ttlSeconds: 300,
+        }),
+      })
+
+      await rec.reconcile(uiRecipeWithExternals([{ fqdn: 'api.stripe.com', port: 443 }]))
+
+      // POSITIVE CONTROL: the write really happened, so the emitter was reached
+      // and stayed silent by the gate — not skipped by an early return.
+      expect(createdPolicy('ui-egress-test-recipe')).toBeDefined()
+      expect(cap.payloads()).toHaveLength(0)
+    } finally {
+      cap.restore()
+    }
+  })
+
+  it('does NOT re-record when the resolved set is unchanged', async () => {
     const kc = new k8s.KubeConfig()
     const rec = new WorkflowRecipeReconciler(kc, undefined, {
       fqdnLookup: async () => ({ kind: 'ok', ipv4: ['93.184.216.10'], ipv6: [], ttlSeconds: 300 }),
     })
-    const recipe = makeRecipe({
-      spec: {
-        workloads: [{ id: 'frontend', type: 'deployment', image: 'fe:1', port: 8080 }],
-        ui: {
-          workloadRef: 'frontend',
-          port: 8080,
-          egress: { external: [{ fqdn: 'api.stripe.com', port: 443 }] },
-        },
-      },
-    })
+    const recipe = uiRecipeWithExternals([{ fqdn: 'api.stripe.com', port: 443 }])
 
     await rec.reconcile(recipe)
     // Feed the first render back as the live policy, exactly as the H-E test
     // below does — no hand-built fixture.
-    const created = mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls
-      .map(c => (c[0] as { body: k8s.V1NetworkPolicy }).body)
-      .find(b => b.metadata?.name === 'ui-egress-test-recipe')
+    const created = createdPolicy('ui-egress-test-recipe')
     expect(created).toBeDefined()
     mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(created!)
 
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
-    await rec.reconcile(recipe)
+    const cap = captureEgressRecords()
+    const noOpSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await rec.reconcile(recipe)
 
-    const relogged = logSpy.mock.calls
-      .map(c => String(c[0]))
-      .filter(s => s.includes('Resolved egress set for ui-egress-test-recipe'))
-    expect(relogged).toHaveLength(0)
+      expect(cap.payloads()).toHaveLength(0)
+      // POSITIVE CONTROL. Without it this assertion also passes when the second
+      // reconcile never reached the egress path at all, which would make the
+      // test a tautology rather than a check of the change gate.
+      expect(noOpSpy).toHaveBeenCalledWith(
+        expect.stringContaining('ui-egress-test-recipe" in sandbox-ui egress set unchanged — no-op')
+      )
+    } finally {
+      noOpSpy.mockRestore()
+      cap.restore()
+    }
   })
 
   // H-E (audit): a rename of the external FQDN onto the SAME resolved IP/port
