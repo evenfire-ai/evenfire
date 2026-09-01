@@ -368,7 +368,10 @@ describe('GfsBrowser', () => {
     fireEvent.click(newFile)
     const uploadDialog = await screen.findByRole('dialog', { name: 'Upload file' })
     expect(
-      within(uploadDialog).getByText(/writer advertises the Upload v2 file limit/i)
+      within(uploadDialog).getByText(/1 GiB Upload v2 protocol ceiling is the local safety bound/i)
+    ).toBeTruthy()
+    expect(
+      within(uploadDialog).getByText(/writer resolves and enforces the actual product file limit/i)
     ).toBeTruthy()
     expect(within(uploadDialog).getByText(/drag and drop, or click to browse/i)).toBeTruthy()
     fireEvent.click(within(uploadDialog).getByRole('button', { name: 'Cancel' }))
