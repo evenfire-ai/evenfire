@@ -249,6 +249,7 @@ describe('central user-access rollout compiler', () => {
       indexerEnabled: true,
       readinessMaxAgeMs: 5_000,
       now,
+      catalogReadiness: true,
     })
 
     expect(policy.computeCatalogShadow).toBe(true)
@@ -281,6 +282,7 @@ describe('central user-access rollout compiler', () => {
           indexerEnabled: true,
           readinessMaxAgeMs: 5_000,
           now,
+          catalogReadiness: true,
         })
       ).rejects.toThrowError(new UserAccessPolicyConfigurationError(code))
     }
@@ -306,6 +308,7 @@ describe('central user-access rollout compiler', () => {
         intent: intent({ catalogMode: 'shadow' }),
         indexerEnabled: true,
         readinessMaxAgeMs: null,
+        catalogReadiness: true,
       })
     ).rejects.toThrowError(new UserAccessPolicyConfigurationError('readiness_snapshot_unavailable'))
 
@@ -315,6 +318,7 @@ describe('central user-access rollout compiler', () => {
         db: { query: vi.fn().mockRejectedValue(new Error('authority unavailable')) } as never,
         indexerEnabled: true,
         readinessMaxAgeMs: 5_000,
+        catalogReadiness: true,
       })
     ).rejects.toThrowError(new UserAccessPolicyConfigurationError('readiness_snapshot_unavailable'))
   })
@@ -330,6 +334,7 @@ describe('central user-access rollout compiler', () => {
         } as never,
         indexerEnabled: true,
         readinessMaxAgeMs: 5_000,
+        catalogReadiness: true,
       })
     ).rejects.toThrowError(new UserAccessPolicyConfigurationError('runtime_readiness_invalid'))
   })
