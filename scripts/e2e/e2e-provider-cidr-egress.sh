@@ -254,6 +254,37 @@ ok "discovered Context '${CONTEXT_REF}' for McpServer.spec.contextRef"
 
 CREATED=1
 
+# ─── Phase 0b — Seed the catalog BEFORE anything declares the category ──
+#
+# This patch used to live at the top of Phase 4, i.e. AFTER the McpServer and the
+# WorkflowRecipe were applied. Both were therefore created against a catalog that
+# did not yet contain their category, and both failed on first reconcile with
+# `category "<name>.<cat>" is not present in the netblocks catalog`.
+#
+# The two controllers then diverge, and the divergence is the reason this had to
+# move rather than be worked around:
+#
+#   HCC  retries and recovers once the catalog gains the key   → reached
+#        ExternalEgressReady=True in Phase 4.
+#   WRC  marks the recipe `phase: failed`, and a failed recipe is TERMINAL —
+#        `Skipping non-deployable recipe (phase: failed)` on every subsequent
+#        pass. Patching the catalog afterwards never revives it.
+#
+# So the old ordering only ever worked for the HCC lane, and Phase 4b could not
+# pass on any tree where an unknown category is a non-retryable failure. Seeding
+# first makes both lanes exercise the render path they are meant to prove,
+# instead of exercising recovery-from-terminal, which is not this gate's subject.
+#
+# NOTE: the divergence itself is a product finding, not a test artefact — a
+# recipe applied during a catalog gap (a fresh cluster before the fetcher's
+# first tick, or the seed snap-back of #512) stays dead until someone touches
+# it by hand, while an McpServer in the same situation heals.
+log "Phase 0b — Seed the provider catalog before any object declares the category"
+kc patch configmap "$CM_NAME" -n "$CONTROL_NS" --type merge \
+  -p "{\"data\":{\"${CM_KEY}\":\"${TEST_CIDR}\"}}" >/dev/null \
+  || die "failed to patch test CIDR into ${CM_NAME}"
+ok "patched catalog key ${CM_KEY}=${TEST_CIDR} into ${CM_NAME}"
+
 # ─── Phase 1 — Field-survives-apply: McpServer (G3) ──────────────────
 log "Phase 1 — Field-survives-apply (McpServer provider field, G3)"
 kc apply -f - >/dev/null <<YAML || die "failed to apply provider-mode McpServer ${MCP_SERVER}"
@@ -564,10 +595,6 @@ YAML
 
 # ─── Phase 4 — Provider RENDER proof ─────────────────────────────────
 log "Phase 4 — Provider RENDER proof (real reconciler renders the catalog CIDR)"
-kc patch configmap "$CM_NAME" -n "$CONTROL_NS" --type merge \
-  -p "{\"data\":{\"${CM_KEY}\":\"${TEST_CIDR}\"}}" >/dev/null \
-  || die "failed to patch test CIDR into ${CM_NAME}"
-ok "patched catalog key ${CM_KEY}=${TEST_CIDR} into ${CM_NAME}"
 
 # Nudge a fresh reconcile so HCC re-reads the catalog for our McpServer.
 kc annotate mcpserver "$MCP_SERVER" -n "$MCP_NS" \
