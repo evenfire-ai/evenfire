@@ -35,3 +35,21 @@ export function requireExternalTeamParamMatch(
   fs.writeFileSync('/tmp/evenfire-codeql-team-match', 'value')
   next()
 }
+
+export async function requireExternalSessionLimiterIdentityWithPublicErrors(
+  _req: unknown,
+  _res: unknown,
+  next: () => void,
+) {
+  login()
+  next()
+}
+
+export async function requireEffectiveV2ContractWithPublicErrors(
+  _req: unknown,
+  _res: unknown,
+  next: () => void,
+) {
+  login()
+  next()
+}
