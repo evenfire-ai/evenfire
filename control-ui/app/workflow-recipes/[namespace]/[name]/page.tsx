@@ -15,6 +15,7 @@ import { RecipeEditor } from '@components/RecipeEditor'
 import { RecipeIntegrationsPanel } from '@components/RecipeIntegrationsPanel'
 import { RecipeSecretsPanel } from '@components/RecipeSecretsPanel'
 import { GrantsReadonlyPanel, RecipeStatusContent } from '@components/RecipeStatusContent'
+import { RowActionsMenu } from '@components/RowActionsMenu'
 import { SectionLoadingSkeleton } from '@components/SectionLoadingSkeleton'
 import { IconWorkflow } from '@components/Sidebar/icons'
 import { SkeletonTableRows } from '@components/SkeletonTableRows'
@@ -63,7 +64,7 @@ const RUNS_COLUMNS: TableHeaderColumn[] = [
   { key: 'startedAt', label: 'Started' },
   { key: 'completedAt', label: 'Completed' },
   { key: 'triggerer', label: 'Triggered by' },
-  { key: 'arrow', label: '' },
+  { key: 'actions', align: 'right', ariaLabel: 'Actions' },
 ]
 
 const STATUS_POLL_MS = 5000
@@ -841,8 +842,24 @@ function WorkflowRecipeDetailContent() {
                             <td style={{ padding: '10px' }}>{formatTime(run.startedAt)}</td>
                             <td style={{ padding: '10px' }}>{formatTime(run.completedAt)}</td>
                             <td style={{ padding: '10px' }}>{formatTriggerer(run)}</td>
-                            <td style={{ padding: '10px', textAlign: 'right' }} aria-hidden>
-                              ›
+                            <td
+                              className="cu-table__cell-actions"
+                              onClick={event => event.stopPropagation()}
+                              onKeyDown={event => event.stopPropagation()}
+                            >
+                              {canOpenRun ? (
+                                <RowActionsMenu
+                                  ariaLabel={`Actions for run ${shortId}`}
+                                  horizontalTrigger
+                                  actions={[
+                                    {
+                                      key: 'view',
+                                      label: 'View details',
+                                      onClick: openRun,
+                                    },
+                                  ]}
+                                />
+                              ) : null}
                             </td>
                           </tr>
                         )
