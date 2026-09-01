@@ -217,6 +217,11 @@ export const canonicalOnlineIndexDefinition = (value: string): string =>
     .replace(/\busing\s+btree\b/g, '')
     .replace(/::text\b/g, '')
     .replace(/;\s*$/, '')
+    // pg_get_indexdef inserts spaces around expression operators even when
+    // the immutable migration body does not. Normalize only the operators
+    // used by the accepted index plan; keyword and identifier boundaries
+    // remain significant.
+    .replace(/\s*(->>|\?|\|\||=)\s*/g, '$1')
     // PostgreSQL's deparser adds redundant grouping around expressions and
     // predicates. The complete token order, commas, operators, table, and
     // uniqueness remain, so different keys/includes/predicates still differ.
