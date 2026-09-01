@@ -207,4 +207,23 @@ describe('CONTROL_ROUTES App Router resolution', () => {
       ])
     )
   })
+
+  it('resolves public detail roots and their default tab slugs', async () => {
+    const redirects = ((await nextConfig.redirects?.()) ?? []) as RouteRule[]
+    const rewrites = ((await nextConfig.rewrites?.()) ?? []) as RouteRule[]
+    const appRoutes = appRoutePatterns()
+
+    for (const pathname of [
+      CONTROL_ROUTES.usersAndTeams.user('user-1'),
+      CONTROL_ROUTES.usersAndTeams.userTab('user-1', 'contact'),
+      CONTROL_ROUTES.usersAndTeams.team('team-1'),
+      CONTROL_ROUTES.usersAndTeams.teamTab('team-1', 'members'),
+      CONTROL_ROUTES.agents.detail('agent-1'),
+      CONTROL_ROUTES.agents.tab('agent-1', 'overview'),
+      CONTROL_ROUTES.contexts.detail('context-1'),
+      CONTROL_ROUTES.contexts.connectors('context-1'),
+    ]) {
+      expect(resolvesToAppRoute(pathname, redirects, rewrites, appRoutes)).toBe(true)
+    }
+  })
 })

@@ -103,7 +103,7 @@ export default function HostsPage() {
         {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
         <HostTable
           items={hosts}
-          onOpen={host => router.push(CONTROL_ROUTES.agents.tab(host.name, 'overview'))}
+          onOpen={host => router.push(CONTROL_ROUTES.agents.detail(host.name))}
           onOpenContext={contextName => {
             const trimmed = contextName.trim()
             if (trimmed) router.push(CONTROL_ROUTES.contexts.connectors(trimmed))

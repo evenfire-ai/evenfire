@@ -71,7 +71,7 @@ export default function ContextsPage() {
         {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
         <ContextTable
           items={contexts}
-          onView={context => router.push(CONTROL_ROUTES.contexts.connectors(context.name))}
+          onView={context => router.push(CONTROL_ROUTES.contexts.detail(context.name))}
           onEdit={context => router.push(CONTROL_ROUTES.contexts.connectors(context.name))}
           onDelete={handleDeleteContext}
           deletingKey={deletingKey}

@@ -141,15 +141,11 @@ describe('ProfileAdminHome — members invitations', () => {
     const memberRow = await screen.findByLabelText('Open member Accepted Invitee')
 
     fireEvent.click(memberRow)
-    expect(mockPush).toHaveBeenCalledWith(
-      '/users-and-teams/users/accepted-password-pending-user/contact'
-    )
+    expect(mockPush).toHaveBeenCalledWith('/users-and-teams/users/accepted-password-pending-user')
 
     mockPush.mockClear()
     fireEvent.keyDown(memberRow, { key: 'Enter' })
-    expect(mockPush).toHaveBeenCalledWith(
-      '/users-and-teams/users/accepted-password-pending-user/contact'
-    )
+    expect(mockPush).toHaveBeenCalledWith('/users-and-teams/users/accepted-password-pending-user')
   })
 
   it('does not open a member detail page from row action buttons', async () => {
@@ -209,11 +205,11 @@ describe('ProfileAdminHome — members invitations', () => {
     const teamRow = await screen.findByLabelText('Open team Marketing')
 
     fireEvent.click(teamRow)
-    expect(mockPush).toHaveBeenCalledWith('/users-and-teams/teams/team-1/members')
+    expect(mockPush).toHaveBeenCalledWith('/users-and-teams/teams/team-1')
 
     mockPush.mockClear()
     fireEvent.keyDown(teamRow, { key: ' ' })
-    expect(mockPush).toHaveBeenCalledWith('/users-and-teams/teams/team-1/members')
+    expect(mockPush).toHaveBeenCalledWith('/users-and-teams/teams/team-1')
   })
 
   it('does not open a team detail page from row action buttons', async () => {

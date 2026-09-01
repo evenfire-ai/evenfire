@@ -252,11 +252,11 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
       : 'Admins'
 
   function openTeam(team: TeamListItem) {
-    router.push(CONTROL_ROUTES.usersAndTeams.teamTab(team.id, 'members'))
+    router.push(CONTROL_ROUTES.usersAndTeams.team(team.id))
   }
 
   function openUser(user: AdminUser) {
-    router.push(CONTROL_ROUTES.usersAndTeams.userTab(user.id, 'contact'))
+    router.push(CONTROL_ROUTES.usersAndTeams.user(user.id))
   }
 
   function openAdminAccessForUser(user: AdminUser) {
