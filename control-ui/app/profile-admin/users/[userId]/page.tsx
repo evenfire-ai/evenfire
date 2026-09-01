@@ -552,10 +552,42 @@ export default function UserDetailsPage() {
     }
   }
 
+  const activeTabAction =
+    activeTab === 'contexts' ? (
+      <button
+        type="button"
+        className="cu-btn cu-btn--primary cu-btn--sm"
+        onClick={() => setShowAddContext(true)}
+        disabled={busy}
+      >
+        Add context
+      </button>
+    ) : activeTab === 'teams' ? (
+      <button
+        type="button"
+        className="cu-btn cu-btn--primary cu-btn--sm"
+        onClick={() => setShowAddTeam(true)}
+        disabled={busy}
+      >
+        Add to team
+      </button>
+    ) : activeTab === 'agents' ? (
+      <button
+        type="button"
+        className="cu-btn cu-btn--primary cu-btn--sm"
+        onClick={() => setShowAddAgent(true)}
+        disabled={busy}
+      >
+        Grant agent
+      </button>
+    ) : null
+
   return (
     <DetailPageShell<UserTab>
       activeTab={activeTab}
+      actions={activeTabAction}
       backLabel="Back to members"
+      contentMode="plain"
       error={error}
       icon={<IconUsers />}
       onBack={() => router.push(CONTROL_ROUTES.usersAndTeams.users)}
@@ -938,28 +970,7 @@ export default function UserDetailsPage() {
 
       {activeTab === 'contexts' && (
         <>
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: '0.5rem',
-              marginBottom: '1rem',
-            }}
-          >
-            <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-              Contexts this member may access.
-            </p>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={() => setShowAddContext(true)}
-              disabled={busy}
-            >
-              Add context
-            </button>
-          </div>
+          <p className="cu-muted cu-detail-section-copy">Contexts this member may access.</p>
           {initialLoading ? (
             <div className="eft-table-viewport cu-table-wrap">
               <DataTable className="eft-table cu-table">
@@ -1056,28 +1067,7 @@ export default function UserDetailsPage() {
 
       {activeTab === 'teams' && (
         <>
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: '0.5rem',
-              marginBottom: '1rem',
-            }}
-          >
-            <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-              Team memberships and roles.
-            </p>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={() => setShowAddTeam(true)}
-              disabled={busy}
-            >
-              Add to team
-            </button>
-          </div>
+          <p className="cu-muted cu-detail-section-copy">Team memberships and roles.</p>
           {initialLoading ? (
             <div className="eft-table-viewport cu-table-wrap">
               <DataTable className="eft-table cu-table">
@@ -1217,28 +1207,7 @@ export default function UserDetailsPage() {
 
       {activeTab === 'agents' && (
         <>
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: '0.5rem',
-              marginBottom: '1rem',
-            }}
-          >
-            <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-              Agents this member may use.
-            </p>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={() => setShowAddAgent(true)}
-              disabled={busy}
-            >
-              Grant agent
-            </button>
-          </div>
+          <p className="cu-muted cu-detail-section-copy">Agents this member may use.</p>
           {initialLoading ? (
             <div className="eft-table-viewport cu-table-wrap">
               <DataTable className="eft-table cu-table">
