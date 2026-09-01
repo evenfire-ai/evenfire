@@ -86,6 +86,20 @@ private predicate isCanonicalExternalContextHandler(Routing::Node useSite) {
   )
 }
 
+private predicate isCanonicalExternalLimiterIdentityImport(ImportSpecifier spec) {
+  spec.getImportDeclaration().getImportedFile().getRelativePath() =
+    "control-api/src/middleware/externalSessionAuth.ts" and
+  spec.getImportedName() = "requireExternalSessionLimiterIdentityWithPublicErrors"
+}
+
+private predicate isCanonicalExternalLimiterIdentityHandler(Routing::Node useSite) {
+  exists(ImportSpecifier spec, DataFlow::Node installedNode |
+    isCanonicalExternalLimiterIdentityImport(spec) and
+    useSite = Routing::getNode(installedNode) and
+    DataFlow::valueNode(spec).(DataFlow::SourceNode).flowsTo(installedNode)
+  )
+}
+
 private predicate hasSameRouteEvenfireLimiterAfterContext(Routing::Node useSite) {
   exists(EvenfireRateLimitingMiddleware middleware, Routing::Node limiterNode |
     limiterNode = middleware.getRoutingNode() and
@@ -147,6 +161,10 @@ private predicate hasEvenfireRateLimitingGuard(Routing::Node useSite) {
   )
   or
   isCanonicalExternalContextHandler(useSite) and
+  useSite.mayResumeDispatch() and
+  hasSameRouteEvenfireLimiterAfterContext(useSite)
+  or
+  isCanonicalExternalLimiterIdentityHandler(useSite) and
   useSite.mayResumeDispatch() and
   hasSameRouteEvenfireLimiterAfterContext(useSite)
   or
