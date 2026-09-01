@@ -391,6 +391,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
            WHERE uwt.user_id = $1
              AND uwt.recipe_namespace || '/' || uwt.recipe_name = edge.source_id
         )`,
+      duplicateCapable: true,
     },
     {
       sql: `SELECT edge.target_id AS logical_id
@@ -416,6 +417,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
            WHERE tm.user_id = $1 AND tm.status = 'active'
              AND twt.recipe_namespace || '/' || twt.recipe_name = edge.source_id
         )`,
+      duplicateCapable: true,
     },
   ]),
 })
