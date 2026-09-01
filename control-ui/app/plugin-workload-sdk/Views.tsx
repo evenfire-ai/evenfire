@@ -14,11 +14,13 @@ import type {
 } from '@lib/api'
 
 const GRANT_COLUMNS: TableHeaderColumn[] = [
-  { key: 'recipe', label: 'Recipe' },
-  { key: 'family', label: 'Capability' },
-  { key: 'allowlists', label: 'Allowlists' },
-  { key: 'quota', label: 'Quota' },
-  { key: 'actions', label: 'Actions', width: '8rem', align: 'right' },
+  { key: 'recipe', label: 'Recipe', width: '12rem' },
+  { key: 'namespace', label: 'Namespace', width: '10rem' },
+  { key: 'family', label: 'Capability', width: '13rem' },
+  { key: 'allowlist', label: 'Allowlist' },
+  { key: 'users', label: 'Users', width: '16rem' },
+  { key: 'quota', label: 'Quota', width: '10rem' },
+  { key: 'actions', label: 'Actions', width: '3.5rem', align: 'right' },
 ]
 
 const INVOCATION_COLUMNS: TableHeaderColumn[] = [
@@ -118,7 +120,7 @@ export function GrantsView({
         </div>
       ) : null}
       <div className="eft-table-viewport cu-table-wrap">
-        <DataTable className="eft-table cu-table">
+        <DataTable className="eft-table cu-table cu-plugin-sdk-grants-table">
           <thead>
             <TableHeaderRow columns={GRANT_COLUMNS} />
           </thead>
@@ -144,7 +146,9 @@ export function GrantsView({
                 <tr key={grant.id} className="cu-table__row">
                   <td>
                     <span className="cu-link">{grant.recipeName}</span>
-                    <span className="cu-field__hint"> ({grant.recipeNamespace})</span>
+                  </td>
+                  <td>
+                    <span className="cu-field__hint">{grant.recipeNamespace}</span>
                   </td>
                   <td>
                     <span className="cu-badge">{grant.capabilityFamily}</span>
@@ -162,13 +166,13 @@ export function GrantsView({
                   </td>
                   <td>
                     {allowlist.length === 0 ? '- (migration required)' : allowlist.join(', ')}
-                    {userRefsDisplay ? (
-                      <span className="cu-field__hint"> · users: {userRefsDisplay}</span>
-                    ) : null}
+                  </td>
+                  <td>
+                    <span className="cu-field__hint">{userRefsDisplay ?? '—'}</span>
                   </td>
                   {/* Per-run caps removed (issue #348). Shows API-set per-minute grant overrides when present (they take precedence over the platform ENV defaults); 'platform defaults' otherwise. The edit form does not manage these overrides. */}
                   <td>{quotaParts.length === 0 ? 'platform defaults' : quotaParts.join(', ')}</td>
-                  <td className="cu-cell--right">
+                  <td className="cu-table__cell-actions">
                     <RowActionsMenu
                       ariaLabel={`Actions for ${grant.recipeName}`}
                       actions={[
