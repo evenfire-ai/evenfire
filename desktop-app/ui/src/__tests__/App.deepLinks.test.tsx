@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, waitFor } from '@testing-library/react'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
@@ -9,6 +10,12 @@ import type { DesktopCommandId } from '../../../src/desktopCommands'
 
 const confirmDialogHarness = vi.hoisted(() => ({
   rendered: vi.fn(),
+  // Counts how many ConfirmDialogs are actually on screen right now,
+  // independently of the overlay signal, so the signal<->dialog invariant can
+  // be asserted without reading a stale `props` snapshot after unmount. A count
+  // (not a boolean) so a second concurrent dialog's cleanup cannot falsely mark
+  // the surface empty while the first is still mounted.
+  mountedCount: 0,
   props: null as null | {
     title: string
     onCancel: () => void
@@ -41,6 +48,7 @@ const sidebarHarness = vi.hoisted(() => ({
 const sandboxUiPageHarness = vi.hoisted(() => ({
   props: null as null | {
     headerShellOverlayOpen?: boolean
+    deepLinkShellOverlayOpen?: boolean
     shortcutOpenRequestId?: number
     localSearchRequestId?: number
     actionRequest?: {
@@ -96,6 +104,12 @@ vi.mock('@components/ConfirmDialog', () => ({
   ConfirmDialog: (props: { title: string; onCancel: () => void; onConfirm: () => void }) => {
     confirmDialogHarness.rendered(props)
     confirmDialogHarness.props = props
+    useEffect(() => {
+      confirmDialogHarness.mountedCount += 1
+      return () => {
+        confirmDialogHarness.mountedCount -= 1
+      }
+    }, [])
     return null
   },
 }))
@@ -230,6 +244,7 @@ describe('App deep-link orchestration', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     confirmDialogHarness.props = null
+    confirmDialogHarness.mountedCount = 0
     appHeaderHarness.props = null
     chatLocalSearchHarness.rendered.mockReset()
     commandPaletteHarness.props = null
@@ -727,6 +742,144 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(currentController.handleNavSelect).not.toHaveBeenCalledWith(DESKTOP_ROUTES.apps)
     expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBeUndefined()
+  })
+
+  it('signals a deep-link overlay to the sandbox page while the confirm dialog is open', async () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+    })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    render(<App />)
+    await waitFor(() => expect(sandboxUiPageHarness.props).not.toBeNull())
+    // The native WebContentsView paints above renderer DOM, so the overlay
+    // signal must stay off until a deep-link dialog actually needs to show.
+    expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(false)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app' })
+    })
+
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(true)
+
+    await confirmPendingAppLink()
+    await reportShortcutOpenResult()
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    await waitFor(() => expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(false))
+  })
+
+  it('keeps the deep-link overlay signal raised while the failure dialog is open', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const ensureTeamContext = vi.fn(async () => {
+      throw Object.assign(new Error('fetch failed'), { code: 'ECONNRESET' })
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+      handleEnsureTeamContext: ensureTeamContext,
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
+    })
+    await confirmPendingAppLink()
+
+    for (const delay of [1_000, 2_000, 4_000, 8_000, 15_000]) {
+      await act(async () => {
+        vi.advanceTimersByTime(delay)
+        await Promise.resolve()
+      })
+    }
+
+    await waitFor(() =>
+      expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
+    )
+    expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(true)
+
+    await act(async () => {
+      confirmDialogHarness.props?.onCancel()
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    await waitFor(() => expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(false))
+  })
+
+  it('drops the overlay signal in lockstep with the dialog when Retry is chosen', async () => {
+    // T5: the deep-link overlay signal and the dialog derive from one App-level
+    // expression, so this pins that Retry (the failure dialog's onConfirm ->
+    // handleRetryFailedSandboxUiDeepLink) never leaves the embed hidden with a
+    // dialog still owning the screen, nor a dialog on screen with the embed
+    // shown. The invariant asserted: a mounted deep-link dialog implies the
+    // signal is raised, and once the signal drops no deep-link dialog is
+    // mounted. Retry is distinct from Dismiss here — it must not acknowledge
+    // the link, it re-drives the open.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const ensureTeamContext = vi.fn(async () => {
+      throw Object.assign(new Error('fetch failed'), { code: 'ECONNRESET' })
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+      handleEnsureTeamContext: ensureTeamContext,
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
+    })
+    await confirmPendingAppLink()
+
+    for (const delay of [1_000, 2_000, 4_000, 8_000, 15_000]) {
+      await act(async () => {
+        vi.advanceTimersByTime(delay)
+        await Promise.resolve()
+      })
+    }
+
+    // Failure dialog is up: a mounted deep-link dialog must keep the signal
+    // raised so the native WebContentsView does not paint over it.
+    await waitFor(() =>
+      expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
+    )
+    expect(confirmDialogHarness.mountedCount).toBeGreaterThan(0)
+    expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(true)
+
+    const ensureCallsBeforeRetry = ensureTeamContext.mock.calls.length
+
+    // Retry — the failure dialog's onConfirm, not onCancel.
+    await act(async () => {
+      confirmDialogHarness.props?.onConfirm()
+      await Promise.resolve()
+    })
+
+    // Retry clears the failure and re-drives the open in the same commit the
+    // predicates go null, so the dialog unmounts as the signal drops. The
+    // dialog value and the overlay signal are a single derived expression, so
+    // they move in lockstep by construction. The assertions below check the
+    // settled final state (dialog unmounted, signal false), not each render
+    // frame. Retry never acknowledges (that is Dismiss).
+    await waitFor(() => expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(false))
+    expect(confirmDialogHarness.mountedCount).toBe(0)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+    // The retry actually re-attempted the open (handleRetryFailedSandboxUiDeepLink
+    // ran), rather than just tearing the dialog down.
+    expect(ensureTeamContext.mock.calls.length).toBeGreaterThan(ensureCallsBeforeRetry)
   })
 
   it('does not duplicate an authenticated confirmation for the same link id', async () => {

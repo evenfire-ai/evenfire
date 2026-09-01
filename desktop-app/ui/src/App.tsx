@@ -2148,6 +2148,7 @@ export function App() {
                                     }
                                     sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
                                     toastShellOverlayOpen={vm.toasts.length > 0}
+                                    deepLinkShellOverlayOpen={sandboxUiDeepLinkDialog !== null}
                                     shortcutApp={activeSandboxUiApp}
                                     shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
                                     localSearchRequestId={sandboxLocalSearchRequestId}
