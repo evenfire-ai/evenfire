@@ -1125,7 +1125,8 @@ export function extractSecrets(
   const uiRef = (spec?.ui as Record<string, unknown> | undefined)?.workloadRef
   for (const workload of workloads ?? []) {
     const envSecret = workload.envSecret as
-      { name?: string; keys?: Array<{ secretKey?: string; envVar?: string }> } | undefined
+      | { name?: string; keys?: Array<{ secretKey?: string; envVar?: string }> }
+      | undefined
     if (!envSecret?.name || !Array.isArray(envSecret.keys)) continue
     const namespace =
       workload.transport !== undefined && workload.transport !== null

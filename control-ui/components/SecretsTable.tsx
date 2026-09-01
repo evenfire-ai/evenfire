@@ -41,7 +41,10 @@ type McpSecretRow = {
 }
 type RecipeSecretStatus = 'provisioned' | 'missing'
 type RecipeSecretRowOwnership =
-  { kind: 'shared' } | { kind: 'owner-recipe'; recipeName: string } | { kind: 'unlabeled' } | null // missing rows: not yet provisioned, ownership chosen at create time.
+  | { kind: 'shared' }
+  | { kind: 'owner-recipe'; recipeName: string }
+  | { kind: 'unlabeled' }
+  | null // missing rows: not yet provisioned, ownership chosen at create time.
 type RecipeSecretRow = {
   name: string
   namespace: string
