@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import * as api from '../../lib/api'
 import type { LlmAllowedModel } from '../../lib/api'
 import { LlmDiscoveryPanel } from '../LlmDiscoveryPanel'
@@ -45,6 +47,13 @@ const staleModel: LlmAllowedModel = {
 
 function render(children: ReactNode) {
   return rtlRender(<ToastProvider>{children}</ToastProvider>)
+}
+
+function cssRuleBody(selector: string) {
+  const css = readFileSync(resolve(__dirname, '../../app/globals.css'), 'utf8')
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = css.match(new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`, 'm'))
+  return match?.[1] ?? ''
 }
 
 beforeEach(() => {
@@ -105,6 +114,23 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
       expect(api.updateLlmModel).toHaveBeenCalledWith('review-openai', { enabled: true })
     )
     expect(onRefresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the per-row enable action cell wide enough for its button', () => {
+    render(
+      <LlmDiscoveryPanel
+        items={[reviewModel]}
+        loading={false}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+      />
+    )
+
+    const actionCell = screen.getByRole('button', { name: 'Enable' }).closest('td')
+    expect(actionCell).toHaveClass('cu-px-actions')
+    expect(actionCell).not.toHaveClass('cu-table__cell-actions')
+    expect(cssRuleBody('.cu-px-actions')).not.toMatch(/\b(?:max-width|min-width|width)\s*:/)
+    expect(cssRuleBody('.cu-tb-actions')).not.toMatch(/\b(?:max-width|min-width|width)\s*:/)
+    expect(cssRuleBody('.cu-table__cell-actions')).toMatch(/\bwidth:\s*3\.5rem\b/)
   })
 
   it('does not render a dedicated stale-model management section', () => {
