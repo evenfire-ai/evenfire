@@ -636,4 +636,120 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
       usageAccepted: false,
     })
   })
+
+  it('rejects empty static-key credential material from the persisted provider', async () => {
+    await expect(
+      finalizePromptBridgeInTransaction(
+        {
+          ...inputBase,
+          target: { ...inputBase.target, credentialSlot: '' },
+          status: 'complete',
+          usage: {
+            llmSecretName: '',
+            callerRef: 'scanner',
+            fallbackUsed: false,
+            attemptCount: 1,
+            inputTokens: 1,
+            outputTokens: 1,
+          },
+        },
+        dbWithRows(
+          [],
+          [],
+          {
+            id: IDS.invocation,
+            recipe_namespace: inputBase.recipeNamespace,
+            recipe_name: inputBase.recipeName,
+            method: 'promptBridge',
+            status: 'in_progress',
+            attempt_generation: 1,
+          },
+          {
+            invocation_id: IDS.invocation,
+            recipe_namespace: inputBase.recipeNamespace,
+            recipe_name: inputBase.recipeName,
+            attempt_generation: 1,
+            method: 'promptBridge',
+            status: 'in_progress',
+          },
+          {
+            id: IDS.providerAttempt,
+            invocation_id: IDS.invocation,
+            recipe_namespace: inputBase.recipeNamespace,
+            recipe_name: inputBase.recipeName,
+            attempt_generation: 1,
+            attempt_index: 1,
+            target_ref: inputBase.target.targetRef,
+            provider: inputBase.target.provider,
+            model: inputBase.target.model,
+            credential_slot: '',
+            status: 'in_progress',
+          }
+        ) as never
+      )
+    ).rejects.toMatchObject({
+      code: 'invalid_request',
+      httpStatus: 400,
+    })
+  })
+
+  it('does not let a request-claimed oauth provider skip a static-key binding', async () => {
+    await expect(
+      finalizePromptBridgeInTransaction(
+        {
+          ...inputBase,
+          target: {
+            ...inputBase.target,
+            provider: 'codex-subscription',
+            credentialSlot: '',
+          },
+          status: 'complete',
+          usage: {
+            llmSecretName: '',
+            callerRef: 'scanner',
+            fallbackUsed: false,
+            attemptCount: 1,
+            inputTokens: 1,
+            outputTokens: 1,
+          },
+        },
+        dbWithRows(
+          [],
+          [],
+          {
+            id: IDS.invocation,
+            recipe_namespace: inputBase.recipeNamespace,
+            recipe_name: inputBase.recipeName,
+            method: 'promptBridge',
+            status: 'in_progress',
+            attempt_generation: 1,
+          },
+          {
+            invocation_id: IDS.invocation,
+            recipe_namespace: inputBase.recipeNamespace,
+            recipe_name: inputBase.recipeName,
+            attempt_generation: 1,
+            method: 'promptBridge',
+            status: 'in_progress',
+          },
+          {
+            id: IDS.providerAttempt,
+            invocation_id: IDS.invocation,
+            recipe_namespace: inputBase.recipeNamespace,
+            recipe_name: inputBase.recipeName,
+            attempt_generation: 1,
+            attempt_index: 1,
+            target_ref: inputBase.target.targetRef,
+            provider: inputBase.target.provider,
+            model: inputBase.target.model,
+            credential_slot: inputBase.target.credentialSlot,
+            status: 'in_progress',
+          }
+        ) as never
+      )
+    ).rejects.toMatchObject({
+      code: 'binding_mismatch',
+      httpStatus: 403,
+    })
+  })
 })

@@ -80,6 +80,40 @@ function isOauthBrokerProvider(provider: string): boolean {
   return isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker'
 }
 
+function validateUsageFields(usage: PromptBridgeFinalizationUsage): void {
+  requireNonEmpty(usage.callerRef, 'usage.callerRef')
+  if (!Number.isInteger(usage.attemptCount) || usage.attemptCount < 1 || usage.attemptCount > 4) {
+    throw new PromptBridgeFinalizationError('invalid_request', 'usage.attemptCount is invalid', 400)
+  }
+  if (
+    !Number.isInteger(usage.inputTokens) ||
+    usage.inputTokens < 0 ||
+    !Number.isInteger(usage.outputTokens) ||
+    usage.outputTokens < 0
+  ) {
+    throw new PromptBridgeFinalizationError(
+      'invalid_request',
+      'usage token counts must be non-negative integers',
+      400
+    )
+  }
+}
+
+/**
+ * Credential-slot and secret-name emptiness follow the persisted attempt
+ * provider. The request body must not choose whether those checks run.
+ */
+function assertPersistedAuthModeCredentialRules(
+  persistedProvider: string,
+  input: PromptBridgeFinalizationInput
+): void {
+  if (isOauthBrokerProvider(persistedProvider)) return
+  requireNonEmpty(input.target.credentialSlot, 'target.credentialSlot')
+  if (input.usage) {
+    requireNonEmpty(input.usage.llmSecretName, 'usage.llmSecretName')
+  }
+}
+
 function validateInput(input: PromptBridgeFinalizationInput): void {
   requireUuid(input.invocationId, 'invocationId')
   requireUuid(input.providerAttemptId, 'providerAttemptId')
@@ -100,38 +134,12 @@ function validateInput(input: PromptBridgeFinalizationInput): void {
   requireNonEmpty(input.target.targetRef, 'target.targetRef')
   requireNonEmpty(input.target.provider, 'target.provider')
   requireNonEmpty(input.target.model, 'target.model')
-  if (!isOauthBrokerProvider(input.target.provider)) {
-    requireNonEmpty(input.target.credentialSlot, 'target.credentialSlot')
-  }
+  if (input.usage) validateUsageFields(input.usage)
   if (input.status === 'complete') {
-    const usage = input.usage
-    if (!usage) {
+    if (!input.usage) {
       throw new PromptBridgeFinalizationError(
         'invalid_request',
         'complete finalization requires exact usage',
-        400
-      )
-    }
-    if (!isOauthBrokerProvider(input.target.provider)) {
-      requireNonEmpty(usage.llmSecretName, 'usage.llmSecretName')
-    }
-    requireNonEmpty(usage.callerRef, 'usage.callerRef')
-    if (!Number.isInteger(usage.attemptCount) || usage.attemptCount < 1 || usage.attemptCount > 4) {
-      throw new PromptBridgeFinalizationError(
-        'invalid_request',
-        'usage.attemptCount is invalid',
-        400
-      )
-    }
-    if (
-      !Number.isInteger(usage.inputTokens) ||
-      usage.inputTokens < 0 ||
-      !Number.isInteger(usage.outputTokens) ||
-      usage.outputTokens < 0
-    ) {
-      throw new PromptBridgeFinalizationError(
-        'invalid_request',
-        'usage token counts must be non-negative integers',
         400
       )
     }
@@ -173,7 +181,7 @@ function replayOutcomeCompatible(
   input: PromptBridgeFinalizationInput,
   row: SpendOutcomeRow
 ): boolean {
-  const oauthBroker = isOauthBrokerProvider(input.target.provider)
+  const oauthBroker = isOauthBrokerProvider(row.provider)
   if (!oauthBroker) {
     const expectedOutcome =
       input.status === 'complete' ? 'exact' : input.status === 'failed' ? 'not_executed' : 'unknown'
@@ -212,6 +220,7 @@ function mapExistingOutcome(
   row: SpendOutcomeRow,
   input: PromptBridgeFinalizationInput
 ): PromptBridgeFinalizationResult {
+  assertPersistedAuthModeCredentialRules(row.provider, input)
   if (
     row.invocation_id !== input.invocationId ||
     row.recipe_namespace !== input.recipeNamespace ||
@@ -237,7 +246,7 @@ function mapExistingOutcome(
     status: input.status,
     outcome: row.outcome,
     idempotent: true,
-    usageAccepted: row.outcome === 'exact' && !isOauthBrokerProvider(input.target.provider),
+    usageAccepted: row.outcome === 'exact' && !isOauthBrokerProvider(row.provider),
   }
 }
 
@@ -343,6 +352,7 @@ export async function finalizePromptBridgeInTransaction(
       403
     )
   }
+  assertPersistedAuthModeCredentialRules(String(providerAttempt.provider), input)
 
   const expectedStatus = input.status
   const currentInvocationStatus = String(invocation.status)
@@ -374,7 +384,7 @@ export async function finalizePromptBridgeInTransaction(
     )
   }
 
-  const oauthBroker = isOauthBrokerProvider(input.target.provider)
+  const oauthBroker = isOauthBrokerProvider(String(providerAttempt.provider))
   const linkedCodex = oauthBroker
     ? await loadLlmProviderAttemptBySdkAttemptId(db, input.providerAttemptId)
     : null
@@ -400,7 +410,7 @@ export async function finalizePromptBridgeInTransaction(
     [input.invocationId, expectedStatus, input.attemptGeneration]
   )
 
-  if (input.status === 'complete' && input.target.provider !== 'codex-subscription') {
+  if (input.status === 'complete' && !oauthBroker) {
     const usage = input.usage!
     const event = {
       request_id: input.providerAttemptId,
