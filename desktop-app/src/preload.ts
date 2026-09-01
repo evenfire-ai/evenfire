@@ -12,6 +12,7 @@ import type {
 // desktopCommands.test.ts, matching the existing sandbox embed-preload pattern.
 const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
   'chat.newTab',
+  'chat.switcher',
   'chat.closeTab',
   'tabs.select1',
   'tabs.select2',
