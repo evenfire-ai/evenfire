@@ -285,12 +285,12 @@ export async function createUserSession(
 
 export async function validateUserSessionClaims(
   claims: UserSessionV2Claims,
-  options: { db?: SessionDatabase; budget?: AccessExecutionBudget } = {}
+  options: { db?: SessionDatabase; budget?: AccessExecutionBudget; touch?: boolean } = {}
 ): Promise<UserSessionValidation> {
   const work = async (db: SessionDatabase) => {
     const row = await loadSessionForUpdate(db, claims.sid)
     const now = await loadDatabaseNow(db)
-    return validateLoadedSession(db, row, claims, now, true)
+    return validateLoadedSession(db, row, claims, now, options.touch !== false)
   }
   if (options.db) {
     return work(options.budget ? budgetedSessionDatabase(options.db, options.budget) : options.db)
