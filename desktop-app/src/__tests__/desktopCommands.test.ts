@@ -104,6 +104,16 @@ describe('Desktop command registry', () => {
     expect(DESKTOP_COMMANDS.some(command => command.id === 'tabs.select9')).toBe(false)
   })
 
+  it('binds the chat switcher to Mod+E, gated on a mounted app, without colliding', () => {
+    const switcher = getDesktopCommand('chat.switcher')
+    expect(switcher.defaultBinding).toEqual({ key: 'e', modifier: 'mod' })
+    expect(switcher.eligibility).toBe('app-mounted')
+    expect(matchDesktopCommand(input({ key: 'e' }), 'darwin', 'host')?.id).toBe('chat.switcher')
+    expect(
+      matchDesktopCommand(input({ key: 'e', meta: false, control: true }), 'win32', 'host')?.id
+    ).toBe('chat.switcher')
+  })
+
   it('uses Control for tab cycling on macOS to avoid the reserved Command+Tab app switcher', () => {
     expect(
       matchDesktopCommand(input({ key: 'Tab', meta: false, control: true }), 'darwin', 'host')?.id
