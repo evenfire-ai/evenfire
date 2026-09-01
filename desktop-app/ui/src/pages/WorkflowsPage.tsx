@@ -206,8 +206,15 @@ export function WorkflowsPage() {
         // Load the recipe detail so we know whether it declares inputs, and so
         // the modal's InputContractForm binds to the controller's input state.
         contract = await handleSelectWorkflow(wf)
-      } catch {
+      } catch (error) {
+        // handleSelectWorkflow swallows its own read failures today, so this is
+        // defensive. Report rather than fail silently if it ever does throw —
+        // matching handleTriggerWorkflow's "Trigger failed" feedback.
         setPendingTriggerKey(null)
+        setStatus(
+          `Trigger failed: ${error instanceof Error ? error.message : String(error)}`,
+          'error'
+        )
         return
       }
       if (hasContractInputs(contract)) {
@@ -223,7 +230,7 @@ export function WorkflowsPage() {
         setPendingTriggerKey(null)
       }
     },
-    [handleSelectWorkflow, handleTriggerWorkflow]
+    [handleSelectWorkflow, handleTriggerWorkflow, setStatus]
   )
 
   const confirmModalTrigger = useCallback(() => {
