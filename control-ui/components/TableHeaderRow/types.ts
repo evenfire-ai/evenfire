@@ -1,9 +1,10 @@
-import type { SortDirection, TableHeaderCellProps } from '@clerum/frontend-components'
+import type { CellKind, SortDirection, TableHeaderCellProps } from '@clerum/frontend-components'
 
 export type TableHeaderColumn = {
   align?: 'left' | 'right' | 'center'
   ariaLabel?: string
   key: string
+  kind?: CellKind
   label?: TableHeaderCellProps['label']
   minWidth?: string
   title?: string

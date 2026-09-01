@@ -79,6 +79,7 @@
   max-width: 100%;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   width: 100%;
 }
 .eft-table-viewport:not(.eft-table-viewport--embedded) {
@@ -119,6 +120,7 @@
 }
 .eft-table thead th {
   background: var(--eft-surface-muted);
+  background-clip: padding-box;
   border-bottom: 1px solid var(--eft-border);
   color: var(--eft-muted);
   font-size: var(--eft-table-header-font-size);
@@ -131,6 +133,13 @@
   top: 0;
   white-space: nowrap;
   z-index: 2;
+}
+.eft-table thead th::before {
+  background: var(--eft-surface-muted);
+  content: '';
+  inset: -1px 0 auto;
+  height: 1px;
+  position: absolute;
 }
 .eft-table tbody td {
   border-bottom: 1px solid color-mix(in srgb, var(--eft-border) 75%, transparent);
@@ -164,8 +173,10 @@
 }
 .eft-table__header--actions,
 .eft-table__cell--actions {
+  max-width: 3.5rem;
+  min-width: 3rem;
   text-align: right;
-  width: 3rem;
+  width: 3.5rem;
 }
 .eft-table__cell--fixed {
   white-space: nowrap;
@@ -212,13 +223,14 @@
   margin-top: 0.5rem;
 }
 .eft-truncated-text {
-  display: inline-block;
+  display: block;
   max-width: 100%;
   min-width: 0;
   position: relative;
+  width: 100%;
 }
 .eft-truncated-text__value {
-  display: inline-block;
+  display: block;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;

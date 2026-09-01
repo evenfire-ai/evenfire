@@ -12,6 +12,7 @@ export function TableHeaderRow({ columns }: { columns: TableHeaderColumn[] }) {
           aria-label={column.ariaLabel}
           title={column.title}
           label={column.label}
+          kind={column.kind ?? (column.key === 'actions' ? 'actions' : undefined)}
           activeDirection={column.activeDirection}
           defaultDirection={column.defaultDirection}
           onSort={column.onSort}
