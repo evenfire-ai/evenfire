@@ -228,7 +228,24 @@ describe('McpServerTable — marketplace-aligned rows', () => {
     const row = screen.getByText('brave-search').closest('tr')
     expect(row).not.toBeNull()
     expect(row).toHaveTextContent('Search the public web.')
-    expect(within(row!).getByTitle('Search the public web.')).toBeInTheDocument()
+    expect(within(row!).getByText('Search the public web.')).toHaveClass(
+      'eft-truncated-text__value'
+    )
+  })
+
+  it('truncates long connector descriptions with a hoverable full-value affordance', async () => {
+    const longDescription =
+      'Searches the public web with a long connector description that should be bounded in tables.'
+    render(
+      <McpServerTable items={[makeItem({ name: 'brave-search', description: longDescription })]} />
+    )
+
+    const description = screen.getByText(
+      'Searches the public web with a long connector description that should be bounded...'
+    )
+    expect(description).toHaveClass('eft-truncated-text__value')
+    fireEvent.mouseEnter(description)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(longDescription)
   })
 })
 
@@ -316,17 +333,14 @@ describe('McpServerTable — connector access summaries', () => {
     expect(trigger).toHaveFocus()
   })
 
-  it('keeps connector endpoint links and image copy actions available', async () => {
+  it('keeps connector endpoint links and copy actions available', async () => {
     const onEdit = vi.fn()
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: { writeText },
     })
-    const image = 'ghcr.io/example/mcp:1.0'
-    render(
-      <McpServerTable items={[makeItem({ name: 'airtable-server', image })]} onEdit={onEdit} />
-    )
+    render(<McpServerTable items={[makeItem({ name: 'airtable-server' })]} onEdit={onEdit} />)
 
     const endpointLink = screen.getByRole('link', { name: /brave-search\.mcp-server/ })
     expect(endpointLink).toHaveAttribute(
@@ -335,11 +349,15 @@ describe('McpServerTable — connector access summaries', () => {
     )
     fireEvent.click(endpointLink)
     fireEvent.keyDown(endpointLink, { key: 'Enter' })
-    const copyButton = screen.getByRole('button', { name: 'Copy image reference' })
+    const copyButton = screen.getByRole('button', { name: 'Copy endpoint' })
     fireEvent.click(copyButton)
     fireEvent.keyDown(copyButton, { key: 'Enter' })
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(image))
-    expect(screen.getByRole('button', { name: 'image reference copied' })).toBeInTheDocument()
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(
+        'http://brave-search.mcp-server.svc.cluster.local:3000/mcp'
+      )
+    )
+    expect(screen.getByRole('button', { name: 'endpoint copied' })).toBeInTheDocument()
     expect(onEdit).not.toHaveBeenCalled()
   })
 
@@ -354,18 +372,19 @@ describe('McpServerTable — connector access summaries', () => {
     expect(screen.getByText('No users linked.')).toBeInTheDocument()
   })
 
-  it('shows endpoint, image, transport, and managed as explicit columns', () => {
+  it('shows the compact connector columns and omits removed metadata columns', () => {
     const image =
       'us-central1-docker.pkg.dev/example-project/example/nginx-egress-proxy:sha-3cbdf33'
     const url = 'http://brave-search.mcp-server.svc.cluster.local:3000/mcp'
     render(<McpServerTable items={[makeItem({ name: 'airtable-server', image })]} />)
 
     expect(screen.getByRole('columnheader', { name: /Endpoint/i })).toBeInTheDocument()
-    expect(screen.getByRole('columnheader', { name: /Image/i })).toBeInTheDocument()
-    expect(screen.getByRole('columnheader', { name: /Transport/i })).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: /Image/i })).toBeNull()
+    expect(screen.queryByRole('columnheader', { name: /Transport/i })).toBeNull()
+    expect(screen.queryByRole('columnheader', { name: /Access/i })).toBeNull()
     expect(screen.getByRole('columnheader', { name: /Managed/i })).toBeInTheDocument()
     expect(screen.getByTitle(url)).toBeInTheDocument()
-    expect(screen.getByTitle(image)).toBeInTheDocument()
+    expect(screen.queryByTitle(image)).toBeNull()
   })
 
   it('filters rows by agent, user, and team access labels', () => {

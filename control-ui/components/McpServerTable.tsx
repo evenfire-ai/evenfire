@@ -1,10 +1,9 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable, TableRow, TableStateRow } from '@clerum/frontend-components'
+import { DataTable, TableRow, TableStateRow, TruncatedText } from '@clerum/frontend-components'
 import { copyTextToClipboard } from '@lib/clipboard'
 import type {
-  ConnectorAccessSummary,
   ConnectorContextBinding,
   McpServerStatus,
   McpServerTableProps,
@@ -19,38 +18,18 @@ import { TablePanelHeader } from './TablePanelHeader'
 import { IconCopy, IconRefresh, IconX } from './icons'
 
 const ENABLED_TOOLTIP = 'Enabled controls whether this server is available to contexts and agents.'
-type ConnectorSortKey =
-  | 'name'
-  | 'description'
-  | 'transport'
-  | 'endpoint'
-  | 'image'
-  | 'access'
-  | 'managed'
-  | 'enabled'
-  | 'status'
+type ConnectorSortKey = 'name' | 'description' | 'endpoint' | 'managed' | 'enabled' | 'status'
 type SortDirection = 'asc' | 'desc'
 
 const CONNECTOR_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
   { key: 'description', label: 'Description' },
-  { key: 'transport', label: 'Transport' },
   { key: 'endpoint', label: 'Endpoint' },
-  { key: 'image', label: 'Image' },
-  { key: 'access', label: 'Access' },
   { key: 'managed', label: 'Managed' },
   { key: 'enabled', label: 'Enabled', title: ENABLED_TOOLTIP },
   { key: 'status', label: 'Status' },
   { key: 'actions', align: 'right', ariaLabel: 'Actions' },
 ]
-
-function TransportBadge({ type }: { type?: string }) {
-  return type ? (
-    <span className={`cu-connector-badge cu-connector-badge--transport-${type}`}>{type}</span>
-  ) : (
-    <span className="cu-muted">—</span>
-  )
-}
 
 function BoolBadge({
   value,
@@ -218,10 +197,6 @@ export function McpServerTable({
         })
     const direction = sortDirection === 'asc' ? 1 : -1
     return [...matchingRows].sort((left, right) => {
-      const leftAccess = accessByConnectorKey?.[left.key]
-      const rightAccess = accessByConnectorKey?.[right.key]
-      const accessCount = (access?: ConnectorAccessSummary) =>
-        (access?.agents.length ?? 0) + (access?.teams.length ?? 0) + (access?.users.length ?? 0)
       const comparison =
         sortKey === 'name'
           ? left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
@@ -231,27 +206,19 @@ export function McpServerTable({
                 undefined,
                 { sensitivity: 'base' }
               )
-            : sortKey === 'transport'
-              ? (left.item.spec?.transport?.type ?? '').localeCompare(
-                  right.item.spec?.transport?.type ?? ''
+            : sortKey === 'endpoint'
+              ? (left.item.spec?.transport?.url ?? left.item.spec?.image ?? '').localeCompare(
+                  right.item.spec?.transport?.url ?? right.item.spec?.image ?? ''
                 )
-              : sortKey === 'endpoint'
-                ? (left.item.spec?.transport?.url ?? left.item.spec?.image ?? '').localeCompare(
-                    right.item.spec?.transport?.url ?? right.item.spec?.image ?? ''
-                  )
-                : sortKey === 'image'
-                  ? (left.item.spec?.image ?? '').localeCompare(right.item.spec?.image ?? '')
-                  : sortKey === 'access'
-                    ? accessCount(leftAccess) - accessCount(rightAccess)
-                    : sortKey === 'managed'
-                      ? Number((left.item.spec?.managed ?? true) === true) -
-                        Number((right.item.spec?.managed ?? true) === true)
-                      : sortKey === 'enabled'
-                        ? Number((left.item.spec?.enabled ?? true) === true) -
-                          Number((right.item.spec?.enabled ?? true) === true)
-                        : getStatusLabel(left.item.status).localeCompare(
-                            getStatusLabel(right.item.status)
-                          )
+              : sortKey === 'managed'
+                ? Number((left.item.spec?.managed ?? true) === true) -
+                  Number((right.item.spec?.managed ?? true) === true)
+                : sortKey === 'enabled'
+                  ? Number((left.item.spec?.enabled ?? true) === true) -
+                    Number((right.item.spec?.enabled ?? true) === true)
+                  : getStatusLabel(left.item.status).localeCompare(
+                      getStatusLabel(right.item.status)
+                    )
       if (comparison !== 0) return comparison * direction
       return left.key.localeCompare(right.key)
     })
@@ -432,7 +399,6 @@ export function McpServerTable({
                 const spec = item.spec || {}
                 const assignedContexts = contextsForConnector(name)
                 const contextMembershipBusy = updatingContextMembershipKey === key
-                const access = accessByConnectorKey?.[key]
                 return (
                   <TableRow
                     className={onEdit ? 'cu-table__row cu-table__row--clickable' : undefined}
@@ -440,13 +406,8 @@ export function McpServerTable({
                     onNavigate={onEdit ? () => onEdit({ namespace, name }) : undefined}
                   >
                     <td>{name}</td>
-                    <td>
-                      <span className="cu-cell-truncate" title={spec.description}>
-                        {spec.description || '—'}
-                      </span>
-                    </td>
-                    <td>
-                      <TransportBadge type={spec.transport?.type} />
+                    <td className="cu-registry-description">
+                      <TruncatedText value={spec.description} />
                     </td>
                     <td className="cu-code-text">
                       <CopyableValue
@@ -458,27 +419,6 @@ export function McpServerTable({
                         }
                         value={spec.transport?.url || spec.image || ''}
                       />
-                    </td>
-                    <td className="cu-code-text">
-                      <CopyableValue
-                        copied={copiedValueKey === `${key}/image`}
-                        copyLabel="image reference"
-                        onCopy={() => void copyValue(`${key}/image`, spec.image || '')}
-                        value={spec.image || ''}
-                      />
-                    </td>
-                    <td>
-                      {assignedContexts.length} context{assignedContexts.length === 1 ? '' : 's'} ·{' '}
-                      {(access?.agents.length ?? 0) +
-                        (access?.teams.length ?? 0) +
-                        (access?.users.length ?? 0)}{' '}
-                      principal
-                      {(access?.agents.length ?? 0) +
-                        (access?.teams.length ?? 0) +
-                        (access?.users.length ?? 0) ===
-                      1
-                        ? ''
-                        : 's'}
                     </td>
                     <td>
                       <BoolBadge value={spec.managed} trueLabel="Yes" falseLabel="No" />
