@@ -2347,7 +2347,7 @@ textarea.cu-input {
 
 .cu-table-panel__head {
   display: flex;
-  align-items: flex-start;
+  align-items: stretch;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 0.65rem;
@@ -2379,11 +2379,34 @@ textarea.cu-input {
   color: var(--cu-text-soft);
 }
 
+.cu-table-panel__head > .eft-data-view-header__main {
+  flex-wrap: wrap;
+  width: 100%;
+  min-width: 0;
+}
+
+.cu-table-panel__head .eft-data-view-header__identity {
+  flex: 0 1 auto;
+}
+
+.cu-table-panel__head .eft-data-view-header__actions {
+  flex: 1 1 42rem;
+  min-width: 0;
+}
+
 .cu-table-panel__actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 0.4rem;
   align-self: flex-start;
+  width: 100%;
+}
+
+.cu-table-panel__actions > select.cu-input {
+  flex: 0 1 auto;
+  width: auto;
 }
 
 .cu-table-panel__actions--mcp .cu-section-search {
@@ -11053,6 +11076,22 @@ textarea.cu-input {
   .cu-section-search {
     width: 100%;
     min-width: 0;
+  }
+
+  .cu-table-panel__actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .cu-table-panel__actions > .cu-section-search {
+    flex: 0 1 13rem;
+    width: min(13rem, 100%);
+  }
+
+  .cu-table-panel__head .eft-data-view-header__actions {
+    flex: none;
+    width: 100%;
   }
 
   .cu-registry-toolbar .cu-section-search {

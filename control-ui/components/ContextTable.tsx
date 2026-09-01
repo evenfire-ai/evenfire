@@ -111,32 +111,34 @@ export function ContextTable({
         }
         subtitle="Group connectors into reusable access scopes."
         actions={
-          <>
-            <SectionSearchInput
-              value={searchQuery}
-              onChange={setSearchQuery}
-              placeholder="Search contexts"
-              ariaLabel="Search contexts"
-              disabled={isInitialLoad}
-            />
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--toolbar"
-              onClick={() => void onRefresh()}
-              disabled={refreshing || isInitialLoad}
-              aria-label={refreshing ? 'Refreshing…' : 'Reload contexts'}
-            >
-              <IconRefresh className={refreshing ? 'cu-spin' : undefined} width={18} height={18} />
-            </button>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={onCreate}
-              disabled={isInitialLoad}
-            >
-              Create context
-            </button>
-          </>
+          <button
+            type="button"
+            className="cu-btn cu-btn--primary cu-btn--sm"
+            onClick={onCreate}
+            disabled={isInitialLoad}
+          >
+            Create context
+          </button>
+        }
+        refreshAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--icon cu-btn--toolbar"
+            onClick={() => void onRefresh()}
+            disabled={refreshing || isInitialLoad}
+            aria-label={refreshing ? 'Refreshing…' : 'Reload contexts'}
+          >
+            <IconRefresh className={refreshing ? 'cu-spin' : undefined} width={18} height={18} />
+          </button>
+        }
+        search={
+          <SectionSearchInput
+            value={searchQuery}
+            onChange={setSearchQuery}
+            placeholder="Search contexts"
+            ariaLabel="Search contexts"
+            disabled={isInitialLoad}
+          />
         }
       />
       <div className="eft-table-viewport cu-table-wrap">

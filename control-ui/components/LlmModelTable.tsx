@@ -263,22 +263,6 @@ export function LlmModelTable({
                 <option value="discovery">Discovered</option>
               </SelectInput>
             ) : null}
-            <SectionSearchInput
-              value={searchQuery}
-              onChange={setSearchQuery}
-              placeholder="Search models"
-              ariaLabel="Search models"
-              disabled={isInitialLoad}
-            />
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--toolbar"
-              onClick={() => void onRefresh()}
-              disabled={refreshing || isInitialLoad}
-              aria-label={refreshing ? 'Refreshing…' : 'Reload models'}
-            >
-              <IconRefresh className={refreshing ? 'cu-spin' : undefined} width={18} height={18} />
-            </button>
             <button
               type="button"
               className="cu-btn cu-btn--primary cu-btn--sm"
@@ -288,6 +272,26 @@ export function LlmModelTable({
               Add model
             </button>
           </>
+        }
+        refreshAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--icon cu-btn--toolbar"
+            onClick={() => void onRefresh()}
+            disabled={refreshing || isInitialLoad}
+            aria-label={refreshing ? 'Refreshing…' : 'Reload models'}
+          >
+            <IconRefresh className={refreshing ? 'cu-spin' : undefined} width={18} height={18} />
+          </button>
+        }
+        search={
+          <SectionSearchInput
+            value={searchQuery}
+            onChange={setSearchQuery}
+            placeholder="Search models"
+            ariaLabel="Search models"
+            disabled={isInitialLoad}
+          />
         }
       />
       {navigation}

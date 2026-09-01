@@ -49,7 +49,7 @@ export function ResourceTable({
         <TablePanelHeader
           title={isInitialLoad ? title : `${title} (${rows.length})`}
           subtitle="Inspect linked resources and their summaries."
-          actions={
+          refreshAction={
             onRefresh ? (
               <button
                 type="button"

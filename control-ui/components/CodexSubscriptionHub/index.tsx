@@ -410,40 +410,42 @@ export function CodexSubscriptionHub() {
           }
           subtitle="Manage LLM, connector, and recipe credentials in one place."
           actions={
-            <>
-              <SectionSearchInput
-                value={searchQuery}
-                onChange={setSearchQuery}
-                placeholder="Search secrets"
-                ariaLabel="Search ChatGPT subscriptions"
-                disabled={initialLoad}
-              />
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                onClick={() =>
-                  void load().catch(err => {
-                    setError(
-                      err instanceof Error ? err.message : 'Failed to load ChatGPT subscriptions'
-                    )
-                  })
-                }
-                disabled={initialLoad || loading}
-                aria-label={loading ? 'Refreshing...' : 'Reload ChatGPT subscriptions'}
-              >
-                <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary cu-btn--sm"
-                onClick={() => {
-                  beginCreate()
-                }}
-                disabled={initialLoad}
-              >
-                Add subscription
-              </button>
-            </>
+            <button
+              type="button"
+              className="cu-btn cu-btn--primary cu-btn--sm"
+              onClick={() => {
+                beginCreate()
+              }}
+              disabled={initialLoad}
+            >
+              Add subscription
+            </button>
+          }
+          refreshAction={
+            <button
+              type="button"
+              className="cu-btn cu-btn--icon cu-btn--toolbar"
+              onClick={() =>
+                void load().catch(err => {
+                  setError(
+                    err instanceof Error ? err.message : 'Failed to load ChatGPT subscriptions'
+                  )
+                })
+              }
+              disabled={initialLoad || loading}
+              aria-label={loading ? 'Refreshing...' : 'Reload ChatGPT subscriptions'}
+            >
+              <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
+            </button>
+          }
+          search={
+            <SectionSearchInput
+              value={searchQuery}
+              onChange={setSearchQuery}
+              placeholder="Search secrets"
+              ariaLabel="Search ChatGPT subscriptions"
+              disabled={initialLoad}
+            />
           }
         />
 

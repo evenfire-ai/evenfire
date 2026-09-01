@@ -290,29 +290,29 @@ export function LlmDiscoveryPanel({
           }
           subtitle="Newly synced models land here disabled. Enable only the models you want available to agents and runtime."
           actions={
-            <>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                onClick={() => void handleRefresh()}
-                disabled={loading || statusLoading || isInitialLoad}
-                aria-label={loading || statusLoading ? 'Refreshing…' : 'Reload discovery review'}
-              >
-                <IconRefresh
-                  className={loading || statusLoading ? 'cu-spin' : undefined}
-                  width={18}
-                  height={18}
-                />
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary cu-btn--sm"
-                onClick={() => void handleSync()}
-                disabled={syncing || isInitialLoad}
-              >
-                {syncing ? 'Syncing…' : 'Sync catalog'}
-              </button>
-            </>
+            <button
+              type="button"
+              className="cu-btn cu-btn--primary cu-btn--sm"
+              onClick={() => void handleSync()}
+              disabled={syncing || isInitialLoad}
+            >
+              {syncing ? 'Syncing…' : 'Sync catalog'}
+            </button>
+          }
+          refreshAction={
+            <button
+              type="button"
+              className="cu-btn cu-btn--icon cu-btn--toolbar"
+              onClick={() => void handleRefresh()}
+              disabled={loading || statusLoading || isInitialLoad}
+              aria-label={loading || statusLoading ? 'Refreshing…' : 'Reload discovery review'}
+            >
+              <IconRefresh
+                className={loading || statusLoading ? 'cu-spin' : undefined}
+                width={18}
+                height={18}
+              />
+            </button>
           }
         />
         <div className="cu-discovery-bar">

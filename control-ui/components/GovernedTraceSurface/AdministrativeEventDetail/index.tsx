@@ -132,7 +132,7 @@ export function AdministrativeEventDetail({ eventId }: AdministrativeEventDetail
     <section className="cu-trace-layout">
       <div className="cu-card cu-card--viewport-fill cu-trace-detail">
         <TablePanelHeader
-          actions={
+          refreshAction={
             <button
               aria-label={
                 loading ? 'Refreshing administrative event' : 'Refresh administrative event'

@@ -167,40 +167,38 @@ export function GuardrailHooksTable({
         }
         subtitle="Installed LLM guardrail hooks across the cluster."
         actions={
-          <>
-            <SectionSearchInput
-              value={searchQuery}
-              onChange={setSearchQuery}
-              placeholder="Search guardrails"
-              ariaLabel="Search installed guardrails"
+          onInstall ? (
+            <button
+              type="button"
+              className="cu-btn cu-btn--primary cu-btn--sm"
+              onClick={onInstall}
               disabled={isInitialLoad}
-            />
-            {onRefresh ? (
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                onClick={() => void onRefresh()}
-                disabled={refreshing || isInitialLoad}
-                aria-label={refreshing ? 'Refreshing...' : 'Reload installed guardrails'}
-              >
-                <IconRefresh
-                  className={refreshing ? 'cu-spin' : undefined}
-                  width={18}
-                  height={18}
-                />
-              </button>
-            ) : null}
-            {onInstall ? (
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary cu-btn--sm"
-                onClick={onInstall}
-                disabled={isInitialLoad}
-              >
-                Install Guardrail
-              </button>
-            ) : null}
-          </>
+            >
+              Install Guardrail
+            </button>
+          ) : undefined
+        }
+        refreshAction={
+          onRefresh ? (
+            <button
+              type="button"
+              className="cu-btn cu-btn--icon cu-btn--toolbar"
+              onClick={() => void onRefresh()}
+              disabled={refreshing || isInitialLoad}
+              aria-label={refreshing ? 'Refreshing...' : 'Reload installed guardrails'}
+            >
+              <IconRefresh className={refreshing ? 'cu-spin' : undefined} width={18} height={18} />
+            </button>
+          ) : undefined
+        }
+        search={
+          <SectionSearchInput
+            value={searchQuery}
+            onChange={setSearchQuery}
+            placeholder="Search guardrails"
+            ariaLabel="Search installed guardrails"
+            disabled={isInitialLoad}
+          />
         }
       />
       <div className="eft-table-viewport cu-table-wrap cu-guardrails-table-wrap">

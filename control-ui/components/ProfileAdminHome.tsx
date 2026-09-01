@@ -434,102 +434,104 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
           }
           subtitle="Members and teams grant Desktop App access. Admins grant Control UI access."
           actions={
-            <>
-              <SectionSearchInput
-                value={
-                  activeTab === 'admins'
-                    ? adminSearchInput
-                    : activeTab === 'teams'
-                      ? teamSearchInput
-                      : searchInput
+            activeTab === 'admins' ? (
+              <button
+                type="button"
+                className="cu-btn cu-btn--primary cu-btn--sm"
+                onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.newAdmin())}
+                disabled={adminLoading}
+              >
+                Invite admin
+              </button>
+            ) : activeTab === 'teams' ? (
+              <button
+                type="button"
+                className="cu-btn cu-btn--primary cu-btn--sm"
+                onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.newTeam)}
+                disabled={busy && !loaded}
+              >
+                Create team
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="cu-btn cu-btn--primary cu-btn--sm"
+                onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.newUser())}
+                disabled={busy && !loaded}
+              >
+                Create member
+              </button>
+            )
+          }
+          refreshAction={
+            activeTab === 'admins' ? (
+              <button
+                type="button"
+                className="cu-btn cu-btn--icon cu-btn--toolbar"
+                onClick={() => setAdminRefreshKey(key => key + 1)}
+                disabled={adminLoading}
+                aria-label={adminLoading ? 'Refreshing admins...' : 'Reload admins'}
+              >
+                <IconRefresh
+                  className={adminLoading ? 'cu-spin' : undefined}
+                  width={18}
+                  height={18}
+                />
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="cu-btn cu-btn--icon cu-btn--toolbar"
+                onClick={() => void loadData()}
+                disabled={busy}
+                aria-label={
+                  isListRefreshing ? 'Refreshing users and teams...' : 'Reload users and teams'
                 }
-                onChange={value => {
-                  if (activeTab === 'admins') {
-                    setAdminSearchInput(value)
-                    return
-                  }
-                  if (activeTab === 'teams') {
-                    setTeamSearchInput(value)
-                    return
-                  }
-                  setSearchInput(value)
-                }}
-                placeholder={
-                  activeTab === 'admins'
-                    ? 'Search admins'
-                    : activeTab === 'teams'
-                      ? 'Search teams'
-                      : 'Search members'
+              >
+                <IconRefresh
+                  className={isListRefreshing ? 'cu-spin' : undefined}
+                  width={18}
+                  height={18}
+                />
+              </button>
+            )
+          }
+          search={
+            <SectionSearchInput
+              value={
+                activeTab === 'admins'
+                  ? adminSearchInput
+                  : activeTab === 'teams'
+                    ? teamSearchInput
+                    : searchInput
+              }
+              onChange={value => {
+                if (activeTab === 'admins') {
+                  setAdminSearchInput(value)
+                  return
                 }
-                ariaLabel={
-                  activeTab === 'admins'
-                    ? 'Search admins'
-                    : activeTab === 'teams'
-                      ? 'Search teams'
-                      : 'Search members'
+                if (activeTab === 'teams') {
+                  setTeamSearchInput(value)
+                  return
                 }
-                disabled={activeTab === 'admins' ? adminLoading : isInitialLoad}
-              />
-              {activeTab === 'admins' ? (
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--icon cu-btn--toolbar"
-                  onClick={() => setAdminRefreshKey(key => key + 1)}
-                  disabled={adminLoading}
-                  aria-label={adminLoading ? 'Refreshing admins...' : 'Reload admins'}
-                >
-                  <IconRefresh
-                    className={adminLoading ? 'cu-spin' : undefined}
-                    width={18}
-                    height={18}
-                  />
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--icon cu-btn--toolbar"
-                  onClick={() => void loadData()}
-                  disabled={busy}
-                  aria-label={
-                    isListRefreshing ? 'Refreshing users and teams...' : 'Reload users and teams'
-                  }
-                >
-                  <IconRefresh
-                    className={isListRefreshing ? 'cu-spin' : undefined}
-                    width={18}
-                    height={18}
-                  />
-                </button>
-              )}
-              {activeTab === 'admins' ? (
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--primary cu-btn--sm"
-                  onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.newAdmin())}
-                  disabled={adminLoading}
-                >
-                  Invite admin
-                </button>
-              ) : activeTab === 'teams' ? (
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--primary cu-btn--sm"
-                  onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.newTeam)}
-                  disabled={busy && !loaded}
-                >
-                  Create team
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--primary cu-btn--sm"
-                  onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.newUser())}
-                  disabled={busy && !loaded}
-                >
-                  Create member
-                </button>
-              )}
-            </>
+                setSearchInput(value)
+              }}
+              placeholder={
+                activeTab === 'admins'
+                  ? 'Search admins'
+                  : activeTab === 'teams'
+                    ? 'Search teams'
+                    : 'Search members'
+              }
+              ariaLabel={
+                activeTab === 'admins'
+                  ? 'Search admins'
+                  : activeTab === 'teams'
+                    ? 'Search teams'
+                    : 'Search members'
+              }
+              disabled={activeTab === 'admins' ? adminLoading : isInitialLoad}
+            />
           }
         />
         <div className="cu-card__body">

@@ -895,7 +895,7 @@ function WorkloadsTab({
               the current runtime pod state.
             </>
           }
-          actions={
+          refreshAction={
             <button
               type="button"
               className="cu-btn cu-btn--icon cu-btn--toolbar"

@@ -252,7 +252,7 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
             user is involved.
           </>
         }
-        actions={
+        refreshAction={
           <button
             type="button"
             className="cu-btn cu-btn--icon cu-btn--toolbar"

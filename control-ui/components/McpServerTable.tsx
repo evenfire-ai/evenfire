@@ -373,40 +373,38 @@ export function McpServerTable({
         subtitle="Browse connector deployments and context bindings."
         actionsClassName="cu-table-panel__actions--mcp"
         actions={
-          <>
-            <SectionSearchInput
-              value={searchQuery}
-              onChange={setSearchQuery}
-              placeholder="Search connectors"
-              ariaLabel="Search connectors"
+          onInstallFromRegistry ? (
+            <button
+              type="button"
+              className="cu-btn cu-btn--primary cu-btn--sm cu-btn--mcp-install"
+              onClick={onInstallFromRegistry}
               disabled={isInitialLoad}
-            />
-            {onRefresh ? (
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                onClick={() => void onRefresh()}
-                disabled={refreshing || isInitialLoad}
-                aria-label={refreshing ? 'Refreshing...' : 'Reload connectors'}
-              >
-                <IconRefresh
-                  className={refreshing ? 'cu-spin' : undefined}
-                  width={18}
-                  height={18}
-                />
-              </button>
-            ) : null}
-            {onInstallFromRegistry ? (
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary cu-btn--sm cu-btn--mcp-install"
-                onClick={onInstallFromRegistry}
-                disabled={isInitialLoad}
-              >
-                Install from Marketplace
-              </button>
-            ) : null}
-          </>
+            >
+              Install from Marketplace
+            </button>
+          ) : undefined
+        }
+        refreshAction={
+          onRefresh ? (
+            <button
+              type="button"
+              className="cu-btn cu-btn--icon cu-btn--toolbar"
+              onClick={() => void onRefresh()}
+              disabled={refreshing || isInitialLoad}
+              aria-label={refreshing ? 'Refreshing...' : 'Reload connectors'}
+            >
+              <IconRefresh className={refreshing ? 'cu-spin' : undefined} width={18} height={18} />
+            </button>
+          ) : undefined
+        }
+        search={
+          <SectionSearchInput
+            value={searchQuery}
+            onChange={setSearchQuery}
+            placeholder="Search connectors"
+            ariaLabel="Search connectors"
+            disabled={isInitialLoad}
+          />
         }
       />
       {detailContent ? <div className="cu-card__body">{detailContent}</div> : null}

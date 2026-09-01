@@ -309,73 +309,79 @@ export default function PluginWorkloadSdkPage() {
           }
           subtitle="Per-recipe capability grants, quota, and invocation audit for promptBridge and clientNotifications."
           actions={
-            <>
-              {view === 'grants' ? (
-                <>
-                  <SectionSearchInput
-                    value={grantSearch}
-                    onChange={setGrantSearch}
-                    placeholder="Search grants"
-                    ariaLabel="Search grants"
-                    disabled={
-                      grantsInitialLoad ||
-                      legacyInventoryLoading ||
-                      Boolean(legacyInventoryError) ||
-                      Boolean(grantsError)
-                    }
-                  />
-                  <Button
-                    type="button"
-                    className="cu-btn--icon cu-btn--toolbar"
-                    onClick={() => void loadGrants()}
-                    disabled={grantsLoading}
-                    aria-label="Refresh grants"
-                  >
-                    <IconRefresh
-                      className={grantsLoading ? 'cu-spin' : undefined}
-                      width={18}
-                      height={18}
-                    />
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setView('invocations')}
-                  >
-                    Invocations
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="primary"
-                    size="sm"
-                    onClick={() => setEditing('new')}
-                    disabled={
-                      grantsInitialLoad ||
-                      legacyInventoryLoading ||
-                      Boolean(legacyInventoryError) ||
-                      Boolean(grantsError)
-                    }
-                  >
-                    New grant
-                  </Button>
-                </>
-              ) : (
+            view === 'grants' ? (
+              <>
                 <Button
                   type="button"
-                  className="cu-btn--icon cu-btn--toolbar"
-                  onClick={() => void loadInvocations()}
-                  disabled={invocationsLoading}
-                  aria-label="Refresh invocations"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setView('invocations')}
                 >
-                  <IconRefresh
-                    className={invocationsLoading ? 'cu-spin' : undefined}
-                    width={18}
-                    height={18}
-                  />
+                  Invocations
                 </Button>
-              )}
-            </>
+                <Button
+                  type="button"
+                  variant="primary"
+                  size="sm"
+                  onClick={() => setEditing('new')}
+                  disabled={
+                    grantsInitialLoad ||
+                    legacyInventoryLoading ||
+                    Boolean(legacyInventoryError) ||
+                    Boolean(grantsError)
+                  }
+                >
+                  New grant
+                </Button>
+              </>
+            ) : undefined
+          }
+          refreshAction={
+            view === 'grants' ? (
+              <Button
+                type="button"
+                className="cu-btn--icon cu-btn--toolbar"
+                onClick={() => void loadGrants()}
+                disabled={grantsLoading}
+                aria-label="Refresh grants"
+              >
+                <IconRefresh
+                  className={grantsLoading ? 'cu-spin' : undefined}
+                  width={18}
+                  height={18}
+                />
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                className="cu-btn--icon cu-btn--toolbar"
+                onClick={() => void loadInvocations()}
+                disabled={invocationsLoading}
+                aria-label="Refresh invocations"
+              >
+                <IconRefresh
+                  className={invocationsLoading ? 'cu-spin' : undefined}
+                  width={18}
+                  height={18}
+                />
+              </Button>
+            )
+          }
+          search={
+            view === 'grants' ? (
+              <SectionSearchInput
+                value={grantSearch}
+                onChange={setGrantSearch}
+                placeholder="Search grants"
+                ariaLabel="Search grants"
+                disabled={
+                  grantsInitialLoad ||
+                  legacyInventoryLoading ||
+                  Boolean(legacyInventoryError) ||
+                  Boolean(grantsError)
+                }
+              />
+            ) : undefined
           }
         />
 

@@ -136,20 +136,18 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
     <section className="cu-trace-layout">
       <div className="cu-card cu-card--viewport-fill">
         <TablePanelHeader
-          actions={
-            <>
-              <TraceTimeWindowControl onChange={updateState} state={state} />
-              <button
-                aria-label={loading ? 'Refreshing governed events' : 'Refresh governed events'}
-                className="cu-trace-refresh"
-                disabled={loading || loadingMore}
-                onClick={() => setBoundaryEpoch(current => current + 1)}
-                title="Refresh"
-                type="button"
-              >
-                <IconRefresh className={loading ? 'cu-spin' : undefined} height={18} width={18} />
-              </button>
-            </>
+          actions={<TraceTimeWindowControl onChange={updateState} state={state} />}
+          refreshAction={
+            <button
+              aria-label={loading ? 'Refreshing governed events' : 'Refresh governed events'}
+              className="cu-trace-refresh"
+              disabled={loading || loadingMore}
+              onClick={() => setBoundaryEpoch(current => current + 1)}
+              title="Refresh"
+              type="button"
+            >
+              <IconRefresh className={loading ? 'cu-spin' : undefined} height={18} width={18} />
+            </button>
           }
           subtitle={subtitle}
           title={title}

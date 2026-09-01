@@ -192,29 +192,29 @@ function OutputsPageContent() {
             </>
           }
           subtitle="Browse generated artifacts from workflows and chat sessions."
-          actions={
-            <>
-              <SectionSearchInput
-                value={searchQuery}
-                onChange={setSearchQuery}
-                placeholder="Search agent outputs"
-                ariaLabel="Search agent outputs"
-                disabled={isRefreshing}
+          refreshAction={
+            <button
+              type="button"
+              className="cu-btn cu-btn--icon cu-btn--toolbar"
+              onClick={() => void loadAll()}
+              disabled={isRefreshing}
+              aria-label={isRefreshing ? 'Refreshing outputs…' : 'Reload outputs'}
+            >
+              <IconRefresh
+                className={isRefreshing ? 'cu-spin' : undefined}
+                width={18}
+                height={18}
               />
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                onClick={() => void loadAll()}
-                disabled={isRefreshing}
-                aria-label={isRefreshing ? 'Refreshing outputs…' : 'Reload outputs'}
-              >
-                <IconRefresh
-                  className={isRefreshing ? 'cu-spin' : undefined}
-                  width={18}
-                  height={18}
-                />
-              </button>
-            </>
+            </button>
+          }
+          search={
+            <SectionSearchInput
+              value={searchQuery}
+              onChange={setSearchQuery}
+              placeholder="Search agent outputs"
+              ariaLabel="Search agent outputs"
+              disabled={isRefreshing}
+            />
           }
         />
         <div className="cu-card__body cu-card__body--auto cu-outputs-strip">

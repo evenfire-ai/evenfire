@@ -90,22 +90,6 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
         subtitle="Select a plugin to view status, run history, and actions."
         actions={
           <>
-            <SectionSearchInput
-              value={searchQuery}
-              onChange={setSearchQuery}
-              placeholder="Search plugins"
-              ariaLabel="Search plugins"
-              disabled={isInitialLoad}
-            />
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--toolbar"
-              onClick={onRefresh}
-              disabled={loading || isInitialLoad}
-              aria-label={loading ? 'Refreshing…' : 'Reload plugins'}
-            >
-              <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
-            </button>
             <button
               type="button"
               className="cu-btn cu-btn--sm cu-nowrap"
@@ -123,6 +107,26 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
               Install Plugin
             </button>
           </>
+        }
+        refreshAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--icon cu-btn--toolbar"
+            onClick={onRefresh}
+            disabled={loading || isInitialLoad}
+            aria-label={loading ? 'Refreshing…' : 'Reload plugins'}
+          >
+            <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
+          </button>
+        }
+        search={
+          <SectionSearchInput
+            value={searchQuery}
+            onChange={setSearchQuery}
+            placeholder="Search plugins"
+            ariaLabel="Search plugins"
+            disabled={isInitialLoad}
+          />
         }
       />
       {error ? <div className="cu-banner cu-banner--error cu-table-error">{error}</div> : null}

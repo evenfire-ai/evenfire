@@ -241,13 +241,6 @@ export default function RegistryCatalog() {
           actionsClassName="cu-registry-toolbar"
           actions={
             <>
-              <SectionSearchInput
-                value={search}
-                onChange={setSearch}
-                placeholder="Search connectors..."
-                ariaLabel="Search the Marketplace"
-                disabled={isInitialLoad}
-              />
               <div className="cu-registry-filter-group">
                 <FilterSelect
                   value={categoryFilter}
@@ -287,6 +280,15 @@ export default function RegistryCatalog() {
               ) : null}
               */}
             </>
+          }
+          search={
+            <SectionSearchInput
+              value={search}
+              onChange={setSearch}
+              placeholder="Search connectors..."
+              ariaLabel="Search the Marketplace"
+              disabled={isInitialLoad}
+            />
           }
         />
         <MarketplaceTabs active="connectors" />

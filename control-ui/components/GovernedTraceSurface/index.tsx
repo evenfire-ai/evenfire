@@ -315,53 +315,55 @@ export function GovernedTraceSurface({
           title={title}
           subtitle={subtitle}
           actions={
-            <>
-              {!detail ? (
-                <>
-                  <SelectInput
-                    aria-label="Trace time window"
-                    compact
-                    onChange={event => {
-                      const nextWindow = event.target.value as TraceTimeWindow
-                      setTimeWindow(nextWindow)
-                      router.replace(
-                        buildTraceWindowUrl(
-                          pathname,
-                          new URLSearchParams(searchParamsValue),
-                          nextWindow
-                        ),
-                        { scroll: false }
-                      )
-                    }}
-                    value={timeWindow}
-                  >
-                    <option value="24h">Last 24 hours</option>
-                    <option value="7d">Last 7 days</option>
-                    <option value="30d">Last 30 days</option>
-                  </SelectInput>
-                  <TextInput
-                    aria-label="Filter loaded governed events"
-                    className="cu-section-search"
-                    onChange={event => setFilter(event.target.value)}
-                    placeholder="Filter loaded events"
-                    value={filter}
-                  />
-                </>
-              ) : null}
-              <button
-                aria-label={loading ? 'Refreshing governed events' : 'Refresh governed events'}
-                className="cu-trace-refresh"
-                disabled={loading || loadingMore}
-                onClick={() => {
-                  if (!detail) windowBounds.current = traceWindowBounds(timeWindow)
-                  void readPage()
+            !detail ? (
+              <SelectInput
+                aria-label="Trace time window"
+                compact
+                onChange={event => {
+                  const nextWindow = event.target.value as TraceTimeWindow
+                  setTimeWindow(nextWindow)
+                  router.replace(
+                    buildTraceWindowUrl(
+                      pathname,
+                      new URLSearchParams(searchParamsValue),
+                      nextWindow
+                    ),
+                    { scroll: false }
+                  )
                 }}
-                title="Refresh"
-                type="button"
+                value={timeWindow}
               >
-                <IconRefresh className={loading ? 'cu-spin' : undefined} height={18} width={18} />
-              </button>
-            </>
+                <option value="24h">Last 24 hours</option>
+                <option value="7d">Last 7 days</option>
+                <option value="30d">Last 30 days</option>
+              </SelectInput>
+            ) : undefined
+          }
+          refreshAction={
+            <button
+              aria-label={loading ? 'Refreshing governed events' : 'Refresh governed events'}
+              className="cu-trace-refresh"
+              disabled={loading || loadingMore}
+              onClick={() => {
+                if (!detail) windowBounds.current = traceWindowBounds(timeWindow)
+                void readPage()
+              }}
+              title="Refresh"
+              type="button"
+            >
+              <IconRefresh className={loading ? 'cu-spin' : undefined} height={18} width={18} />
+            </button>
+          }
+          search={
+            !detail ? (
+              <TextInput
+                aria-label="Filter loaded governed events"
+                className="cu-section-search"
+                onChange={event => setFilter(event.target.value)}
+                placeholder="Filter loaded events"
+                value={filter}
+              />
+            ) : undefined
           }
         />
         {error ? (

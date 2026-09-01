@@ -175,24 +175,24 @@ export function RecipeSecretsPanel({
           </>
         }
         actions={
-          <>
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--toolbar"
-              onClick={() => void load()}
-              disabled={loading}
-              aria-label={loading ? 'Refreshing…' : 'Reload secrets'}
-            >
-              <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
-            </button>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={navigateToCreateBlank}
-            >
-              Create secret
-            </button>
-          </>
+          <button
+            type="button"
+            className="cu-btn cu-btn--primary cu-btn--sm"
+            onClick={navigateToCreateBlank}
+          >
+            Create secret
+          </button>
+        }
+        refreshAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--icon cu-btn--toolbar"
+            onClick={() => void load()}
+            disabled={loading}
+            aria-label={loading ? 'Refreshing…' : 'Reload secrets'}
+          >
+            <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
+          </button>
         }
       />
 

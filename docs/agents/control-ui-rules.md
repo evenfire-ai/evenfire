@@ -107,6 +107,11 @@ leaning on either behaviour.
   while initial loading, empty, and error states render in the content area.
   Disable header CTAs during initial loading, and let only the content pane
   scroll when rows overflow.
+- In `TablePanelHeader`, pass page-action buttons through `actions`, the refresh
+  control through `refreshAction`, and the search input through `search`. The
+  adapter renders that semantic and focus order, keeps those controls on one
+  toolbar line whenever their combined minimum widths fit, and preserves their
+  order when a genuinely crowded toolbar must wrap.
 - Use `CreatePageHeader` plus `cu-create-panel`, `cu-create-content`, and
   `cu-form-grid` for full-screen create/install pages. Put Cancel in a ghost
   button and Submit in a primary button inside `cu-create-actions`. Use `<h2>`

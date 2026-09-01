@@ -422,85 +422,87 @@ export function SecretsTable({
           }
           subtitle="Manage LLM, connector, and recipe credentials in one place."
           actions={
-            <>
-              <SectionSearchInput
-                value={
-                  scope === 'llm'
-                    ? llmSearchQuery
-                    : scope === 'mcp'
-                      ? mcpSearchQuery
-                      : recipeSearchQuery
-                }
-                onChange={value => {
-                  if (scope === 'llm') setLlmSearchQuery(value)
-                  else if (scope === 'mcp') setMcpSearchQuery(value)
-                  else setRecipeSearchQuery(value)
-                }}
-                placeholder="Search secrets"
-                ariaLabel={
-                  scope === 'llm'
-                    ? 'Search LLM secrets'
-                    : scope === 'mcp'
-                      ? 'Search connector secrets'
-                      : 'Search recipe secrets'
-                }
-                disabled={activeInitialLoad}
-              />
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                onClick={() => {
-                  if (scope === 'llm') void onRefresh?.()
-                  else if (scope === 'mcp') void loadMcpSecretReferences()
-                  else void loadRecipeSecretsAndUsage()
-                }}
-                disabled={
-                  activeInitialLoad ||
-                  (scope === 'llm' ? refreshing : scope === 'mcp' ? mcpLoading : recipeLoading)
-                }
-                aria-label={
-                  scope === 'llm'
-                    ? refreshing
-                      ? 'Refreshing...'
-                      : 'Reload LLM secrets'
-                    : scope === 'mcp'
-                      ? mcpLoading
-                        ? 'Refreshing...'
-                        : 'Reload connector secret references'
-                      : recipeLoading
-                        ? 'Refreshing...'
-                        : 'Reload recipe secrets'
-                }
-              >
-                <IconRefresh
-                  className={
-                    (scope === 'llm' && refreshing) ||
-                    (scope === 'mcp' && mcpLoading) ||
-                    (scope === 'recipe' && recipeLoading)
-                      ? 'cu-spin'
-                      : undefined
-                  }
-                  width={18}
-                  height={18}
-                />
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary cu-btn--sm"
-                onClick={() => {
-                  if (scope === 'llm') onCreateLlmSecret()
-                  else if (scope === 'mcp') onCreateMcpSecret()
-                  else onCreateRecipeSecret()
-                }}
-                disabled={activeInitialLoad}
-              >
-                {scope === 'llm'
-                  ? 'Add LLM secret'
+            <button
+              type="button"
+              className="cu-btn cu-btn--primary cu-btn--sm"
+              onClick={() => {
+                if (scope === 'llm') onCreateLlmSecret()
+                else if (scope === 'mcp') onCreateMcpSecret()
+                else onCreateRecipeSecret()
+              }}
+              disabled={activeInitialLoad}
+            >
+              {scope === 'llm'
+                ? 'Add LLM secret'
+                : scope === 'mcp'
+                  ? 'Add connector secret'
+                  : 'Add recipe secret'}
+            </button>
+          }
+          refreshAction={
+            <button
+              type="button"
+              className="cu-btn cu-btn--icon cu-btn--toolbar"
+              onClick={() => {
+                if (scope === 'llm') void onRefresh?.()
+                else if (scope === 'mcp') void loadMcpSecretReferences()
+                else void loadRecipeSecretsAndUsage()
+              }}
+              disabled={
+                activeInitialLoad ||
+                (scope === 'llm' ? refreshing : scope === 'mcp' ? mcpLoading : recipeLoading)
+              }
+              aria-label={
+                scope === 'llm'
+                  ? refreshing
+                    ? 'Refreshing...'
+                    : 'Reload LLM secrets'
                   : scope === 'mcp'
-                    ? 'Add connector secret'
-                    : 'Add recipe secret'}
-              </button>
-            </>
+                    ? mcpLoading
+                      ? 'Refreshing...'
+                      : 'Reload connector secret references'
+                    : recipeLoading
+                      ? 'Refreshing...'
+                      : 'Reload recipe secrets'
+              }
+            >
+              <IconRefresh
+                className={
+                  (scope === 'llm' && refreshing) ||
+                  (scope === 'mcp' && mcpLoading) ||
+                  (scope === 'recipe' && recipeLoading)
+                    ? 'cu-spin'
+                    : undefined
+                }
+                width={18}
+                height={18}
+              />
+            </button>
+          }
+          search={
+            <SectionSearchInput
+              value={
+                scope === 'llm'
+                  ? llmSearchQuery
+                  : scope === 'mcp'
+                    ? mcpSearchQuery
+                    : recipeSearchQuery
+              }
+              onChange={value => {
+                if (scope === 'llm') setLlmSearchQuery(value)
+                else if (scope === 'mcp') setMcpSearchQuery(value)
+                else setRecipeSearchQuery(value)
+              }}
+              placeholder="Search secrets"
+              ariaLabel={
+                scope === 'llm'
+                  ? 'Search LLM secrets'
+                  : scope === 'mcp'
+                    ? 'Search connector secrets'
+                    : 'Search recipe secrets'
+              }
+              disabled={activeInitialLoad}
+            />
           }
         />
 

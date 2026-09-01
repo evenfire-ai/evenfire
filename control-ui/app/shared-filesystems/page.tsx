@@ -200,32 +200,34 @@ export default function SharedFileSystemsPage() {
           }
           subtitle="Workspace volumes that Contexts can mount read-only into agent pods."
           actions={
-            <>
-              <SectionSearchInput
-                value={searchQuery}
-                onChange={setSearchQuery}
-                placeholder="Search agent files"
-                ariaLabel="Search agent files"
-                disabled={isInitialLoad}
-              />
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                onClick={() => void load()}
-                disabled={loading || isInitialLoad}
-                aria-label={loading ? 'Refreshing agent files' : 'Refresh agent files'}
-              >
-                <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary cu-btn--sm"
-                onClick={() => router.push(CONTROL_ROUTES.agentFiles.new)}
-                disabled={isInitialLoad}
-              >
-                New
-              </button>
-            </>
+            <button
+              type="button"
+              className="cu-btn cu-btn--primary cu-btn--sm"
+              onClick={() => router.push(CONTROL_ROUTES.agentFiles.new)}
+              disabled={isInitialLoad}
+            >
+              New
+            </button>
+          }
+          refreshAction={
+            <button
+              type="button"
+              className="cu-btn cu-btn--icon cu-btn--toolbar"
+              onClick={() => void load()}
+              disabled={loading || isInitialLoad}
+              aria-label={loading ? 'Refreshing agent files' : 'Refresh agent files'}
+            >
+              <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
+            </button>
+          }
+          search={
+            <SectionSearchInput
+              value={searchQuery}
+              onChange={setSearchQuery}
+              placeholder="Search agent files"
+              ariaLabel="Search agent files"
+              disabled={isInitialLoad}
+            />
           }
         />
 

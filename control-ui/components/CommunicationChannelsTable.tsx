@@ -195,38 +195,40 @@ export function CommunicationChannelsTable({
           }
           subtitle="Route channel messages to the selected agent."
           actions={
-            <>
-              <SectionSearchInput
-                value={searchQuery}
-                onChange={setSearchQuery}
-                placeholder="Search channels"
-                ariaLabel="Search communication channels"
-                disabled={isInitialLoad}
-              />
-              {onRefresh && (
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--icon cu-btn--toolbar"
-                  onClick={() => void onRefresh()}
-                  disabled={refreshing || isInitialLoad}
-                  aria-label={refreshing ? 'Refreshing…' : 'Reload communication channels'}
-                >
-                  <IconRefresh
-                    className={refreshing ? 'cu-spin' : undefined}
-                    width={18}
-                    height={18}
-                  />
-                </button>
-              )}
+            <button
+              type="button"
+              className="cu-btn cu-btn--primary cu-btn--sm"
+              onClick={() => onCreateChannel?.()}
+              disabled={!onCreateChannel || isInitialLoad}
+            >
+              Add channel
+            </button>
+          }
+          refreshAction={
+            onRefresh ? (
               <button
                 type="button"
-                className="cu-btn cu-btn--primary cu-btn--sm"
-                onClick={() => onCreateChannel?.()}
-                disabled={!onCreateChannel || isInitialLoad}
+                className="cu-btn cu-btn--icon cu-btn--toolbar"
+                onClick={() => void onRefresh()}
+                disabled={refreshing || isInitialLoad}
+                aria-label={refreshing ? 'Refreshing…' : 'Reload communication channels'}
               >
-                Add channel
+                <IconRefresh
+                  className={refreshing ? 'cu-spin' : undefined}
+                  width={18}
+                  height={18}
+                />
               </button>
-            </>
+            ) : undefined
+          }
+          search={
+            <SectionSearchInput
+              value={searchQuery}
+              onChange={setSearchQuery}
+              placeholder="Search channels"
+              ariaLabel="Search communication channels"
+              disabled={isInitialLoad}
+            />
           }
         />
         {error ? (

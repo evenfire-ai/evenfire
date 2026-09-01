@@ -8,13 +8,23 @@ import type { TablePanelHeaderProps } from './types'
 export function TablePanelHeader({
   actions,
   actionsClassName,
+  refreshAction,
+  search,
   subtitle,
   title,
   titleActions,
 }: TablePanelHeaderProps) {
   return (
     <DataViewHeader
-      actions={actions ? <div className={cn(actionsClassName)}>{actions}</div> : undefined}
+      actions={
+        actions || refreshAction || search ? (
+          <div className={cn('cu-table-panel__actions', actionsClassName)}>
+            {actions}
+            {refreshAction}
+            {search}
+          </div>
+        ) : undefined
+      }
       className="cu-table-panel__head"
       description={subtitle}
       title={
