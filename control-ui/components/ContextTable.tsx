@@ -20,7 +20,7 @@ import { IconRefresh } from './icons'
 type ContextRef = { name: string }
 
 const CONTEXT_COLUMNS: TableHeaderColumn[] = [
-  { key: 'name', label: 'Name' },
+  { key: 'name', label: 'Name', width: '28%' },
   { key: 'description', label: 'Description', minWidth: '20rem' },
   { key: 'servers', label: 'Connectors', width: '7rem' },
   { key: 'actions', label: 'Actions', width: '8rem', align: 'right' },
@@ -145,7 +145,7 @@ export function ContextTable({
         }
       />
       <div className="eft-table-viewport cu-table-wrap">
-        <DataTable className="eft-table cu-table cu-table--header-band">
+        <DataTable className="eft-table cu-table cu-table--header-band cu-context-table">
           <thead>
             <TableHeaderRow columns={contextColumns} />
           </thead>
@@ -171,7 +171,6 @@ export function ContextTable({
                 >
                   <td>
                     <span className="cu-table__cell-name">{displayName}</span>
-                    <span className="cu-table__cell-subtle">{name}</span>
                   </td>
                   <td className="cu-registry-description">
                     <TruncatedText value={item.spec?.description} />

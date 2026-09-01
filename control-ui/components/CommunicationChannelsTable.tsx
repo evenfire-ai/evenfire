@@ -29,10 +29,10 @@ function summary(item: CommunicationChannelItem): string {
 }
 
 const COMMUNICATION_CHANNEL_COLUMNS: TableHeaderColumn[] = [
-  { key: 'name', label: 'Name' },
-  { key: 'agent', label: 'Agent', width: '18%' },
-  { key: 'type', label: 'Type', width: '18%' },
-  { key: 'actions', width: '7rem', align: 'right', ariaLabel: 'Actions' },
+  { key: 'name', label: 'Name', width: '50%' },
+  { key: 'agent', label: 'Agent', width: '22%' },
+  { key: 'type', label: 'Type', width: '16%' },
+  { key: 'actions', width: '3.5rem', align: 'right', ariaLabel: 'Actions' },
 ]
 
 function hasConversationEntries(
@@ -237,7 +237,7 @@ export function CommunicationChannelsTable({
           </div>
         ) : null}
         <div className="eft-table-viewport cu-table-wrap">
-          <DataTable className="eft-table cu-table cu-table--header-band">
+          <DataTable className="eft-table cu-table cu-table--header-band cu-external-channels-table">
             <thead>
               <TableHeaderRow columns={columns} />
             </thead>
@@ -268,11 +268,13 @@ export function CommunicationChannelsTable({
                       key={key}
                       onNavigate={onOpenChannel ? () => onOpenChannel(name) : undefined}
                     >
-                      <td className="cu-channel-table__name">{name}</td>
+                      <td>
+                        <span className="cu-channel-table__name">{name}</span>
+                      </td>
                       <td>
                         <span className="cu-table__cell-muted">{spec.hostRef || '-'}</span>
                       </td>
-                      <td>
+                      <td className="cu-table__cell-actions">
                         {providerTypes.map(communicationChannelProviderLabel).join(', ') || '-'}
                       </td>
                       <td>
