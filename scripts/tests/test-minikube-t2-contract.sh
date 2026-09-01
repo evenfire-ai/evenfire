@@ -674,6 +674,10 @@ assert_public_boundary_rejects_postgres_fixture \
   "const example = 'postgresql://postgres@10.""20.30.40/catalog'" \
   'private PostgreSQL URL'
 assert_public_boundary_rejects_postgres_fixture \
+  later-private-url \
+  "const urls = ['postgresql://localhost/catalog', 'postgresql://database.""internal/catalog']" \
+  'private PostgreSQL URL'
+assert_public_boundary_rejects_postgres_fixture \
   credentialed-loopback \
   "const fixture = 'postgresql://app:""secret@127.0.0.1/catalog'" \
   'credentialed PostgreSQL URL'

@@ -227,23 +227,25 @@ for line in diff.splitlines():
         r"revision|fixture|placeholder|dummy|fake|example|changeme|local[-_]?only|"
         r"test[-_]?token)"
     )
+    line_rejected = False
     for expression, reason in patterns:
-        match = re.search(expression, value)
-        if match and reason == "private key" and "evidence-scanner" in current:
-            continue
-        if (
-            match
-            and reason == "credential assignment"
-            and match.group(1)
-            and (safe_fixture.search(match.group(1)) or "$" in match.group(1))
-        ):
-            continue
-        if match and safe_source_fixture_value(current, reason, value, match):
-            continue
-        if match and safe_contract_control_value(current, reason, value):
-            continue
-        if match:
+        for match in re.finditer(expression, value):
+            if reason == "private key" and "evidence-scanner" in current:
+                continue
+            if (
+                reason == "credential assignment"
+                and match.group(1)
+                and (safe_fixture.search(match.group(1)) or "$" in match.group(1))
+            ):
+                continue
+            if safe_source_fixture_value(current, reason, value, match):
+                continue
+            if safe_contract_control_value(current, reason, value):
+                continue
             bad.append((current or "<unknown>", reason))
+            line_rejected = True
+            break
+        if line_rejected:
             break
 
 if bad:
