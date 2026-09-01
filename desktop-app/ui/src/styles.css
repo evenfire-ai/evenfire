@@ -12788,6 +12788,17 @@ pre {
   padding: 0 var(--space-2);
 }
 
+/* New-chat greeting ("New chat with [agent ▾]"). Like the nav-stack head above,
+   this row has zero horizontal padding by design — full-screen chat insets it
+   via `.content-panel--agent-chat` (which the drawer's <ChatPage> renders
+   outside of) and its 1120px max-width + `margin: 0 auto` centers it there. In
+   the slim column neither applies, so the title sat flush against the left
+   edge. Give it the same `var(--space-2)` horizontal rhythm the thread and head
+   use; keep the base rule's hero top offset and bottom padding intact. */
+.chat-drawer .agent-workspace-shell .agent-workspace-greeting-row {
+  padding-inline: var(--space-2);
+}
+
 .chat-drawer .composer {
   margin-top: var(--space-1);
   padding: var(--space-2);
