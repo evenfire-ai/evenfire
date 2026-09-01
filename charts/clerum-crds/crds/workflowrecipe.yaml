@@ -2168,7 +2168,10 @@ spec:
                       format: date-time
                     bootstrapContractVersion:
                       type: integer
-                      enum: [2]
+                      # v2 = static-credential SDK bootstrap; v3 = Codex
+                      # reservation-only binding. WRC persists 3 for
+                      # spec.agent.provider=codex-subscription.
+                      enum: [2, 3]
                     bootstrapPodUid:
                       type: string
                     bootstrapProvider:
