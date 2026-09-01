@@ -273,6 +273,9 @@ function boundExternalWorkflowCaller(req: Request): WorkflowCaller | undefined {
  * fall back to IP so token rotation cannot mint raw-token buckets.
  */
 export function workflowTriggerRateLimitCredential(req: Request): string | null {
+  const stagedUserId = (req as Request & { externalAuth?: { userId?: string } }).externalAuth
+    ?.userId
+  if (stagedUserId) return `user:${stagedUserId}`
   const caller = boundExternalWorkflowCaller(req)
   if (caller?.kind === 'user-session') return `user:${caller.claims.userId}`
 

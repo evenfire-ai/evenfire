@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response } from 'express'
+import type { ExternalAuthedRequest } from '../../../middleware/externalSessionAuth.js'
 import { authenticateAdminSession } from '../../../services/adminSessionAuth.js'
 import { authenticateExternalUserSession } from '../../../services/auth/externalSessionAuthentication.js'
 import type { WorkflowCaller } from '../../../services/workflows/types.js'
@@ -150,6 +151,24 @@ export function bindExternalWorkflowAuth(req: Request, res: Response, next: Next
     res,
     next
   ).catch(next)
+}
+
+export function bindCompletedExternalWorkflowCaller(
+  req: ExternalWorkflowAuthedRequest & ExternalAuthedRequest,
+  res: Response,
+  next: NextFunction
+): void {
+  const authentication = req.externalSessionAuthentication
+  if (!authentication) {
+    unauthorized(res)
+    return
+  }
+  req.externalWorkflowCaller = {
+    kind: 'user-session',
+    claims: authentication.claims,
+    session: authentication.authorityContext,
+  }
+  next()
 }
 
 export function requireMcpHostControlWorkflowCaller(
