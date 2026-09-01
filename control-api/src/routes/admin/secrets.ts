@@ -3,6 +3,7 @@ import { PROVIDER_CREDENTIAL_SLOTS } from '@clerum/llm-providers'
 import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '@clerum/workflow-runtime-core'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
+import { extractK8sError } from '../../http/k8sError.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { isValidDNSSubdomain } from '../../http/rfc1123.js'
 import { K8sGateway, extractHttpStatus } from '../../k8s.js'
@@ -136,6 +137,14 @@ async function findFallbackCredentialReferences(
   // mutation through asyncHandler instead.
   const hosts = await gateway.listResource('hosts', config.hostsNamespace)
   return listFallbackCredentialReferences(hosts, secretName)
+}
+
+function auditErrorFields(err: unknown): { name: string; message: string } {
+  const k8sErr = extractK8sError(err)
+  return {
+    name: err instanceof Error ? err.name : typeof err,
+    message: k8sErr?.message ?? (err instanceof Error ? err.message : String(err)),
+  }
 }
 
 function secretWriteKeys(body: unknown): Set<string> {
@@ -513,7 +522,37 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
         stringData: data,
       }
 
-      await gateway.createSecret(secretReq)
+      // Key NAMES are safe to log; values never are. Emit after the write
+      // succeeds (a create that happened must never go unlogged) and on the
+      // failed write path so operators can still reconstruct the attempt.
+      const createdKeys = Object.keys(data).sort((a, b) => a.localeCompare(b))
+      try {
+        await gateway.createSecret(secretReq)
+      } catch (err) {
+        logger.warn(
+          {
+            module: 'admin-secrets',
+            event: 'mcp-secret-create-failed',
+            name: name.trim(),
+            namespace: targetNs,
+            createdKeys,
+            err: auditErrorFields(err),
+          },
+          'MCP Secret create failed'
+        )
+        throw err
+      }
+
+      logger.info(
+        {
+          module: 'admin-secrets',
+          event: 'mcp-secret-created',
+          name: name.trim(),
+          namespace: targetNs,
+          createdKeys,
+        },
+        'MCP Secret created'
+      )
       res.status(201).json({ name: name.trim(), namespace: targetNs, created: true })
     })
   )

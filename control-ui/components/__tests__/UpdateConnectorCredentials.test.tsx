@@ -6,21 +6,29 @@ import {
   POLL_TIMEOUT_MS,
   UpdateConnectorCredentials,
 } from '@components/UpdateConnectorCredentials'
-import { getMcpServer, getMcpServers, getRegistryCredentialSchema, updateMcpSecret } from '@lib/api'
+import type { CredentialSurface } from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
+import {
+  createMcpSecret,
+  getMcpServer,
+  getMcpServers,
+  getRegistryCredentialSchema,
+  updateMcpSecret,
+} from '@lib/api'
 import type { EnvSecret, McpServerResource } from '@lib/api'
-import { buildSecretSummary } from '../../test/fixtures/secretSummary'
 
 vi.mock('@lib/api', () => ({
   getMcpServer: vi.fn(),
   getMcpServers: vi.fn(),
   getRegistryCredentialSchema: vi.fn(),
   updateMcpSecret: vi.fn(),
+  createMcpSecret: vi.fn(),
 }))
 
 const mockGetMcpServer = vi.mocked(getMcpServer)
 const mockGetMcpServers = vi.mocked(getMcpServers)
 const mockGetRegistryCredentialSchema = vi.mocked(getRegistryCredentialSchema)
 const mockUpdateMcpSecret = vi.mocked(updateMcpSecret)
+const mockCreateMcpSecret = vi.mocked(createMcpSecret)
 
 const SERVER_NAME = 'my-connector'
 // secretKey and envVar are deliberately different strings so table/label
@@ -31,14 +39,6 @@ const ENV_SECRET: EnvSecret = {
     { secretKey: 'api-key', envVar: 'LINEAR_API_KEY' },
     { secretKey: 'workspace-id', envVar: 'LINEAR_WORKSPACE' },
   ],
-}
-
-function secretRotationResponse(keys: string[], affectedConnectors = [SERVER_NAME]) {
-  return {
-    ...buildSecretSummary({ name: ENV_SECRET.name, keys }),
-    namespace: 'mcp-server',
-    affectedConnectors,
-  }
 }
 
 function serverWithCondition(condition?: {
@@ -87,10 +87,19 @@ async function flush(ticks = 4) {
 // no-envSecret state, but a JS default parameter substitutes ENV_SECRET for
 // an explicit `undefined` argument, silently defeating that test. Callers
 // always pass explicitly.
-async function renderPanel(envSecret: EnvSecret | undefined) {
+async function renderPanel(
+  envSecret: EnvSecret | undefined,
+  surface: CredentialSurface = 'rotate',
+  recipeOwned = false
+) {
   const utils = render(
     <ToastProvider>
-      <UpdateConnectorCredentials serverName={SERVER_NAME} envSecret={envSecret} />
+      <UpdateConnectorCredentials
+        serverName={SERVER_NAME}
+        envSecret={envSecret}
+        surface={surface}
+        recipeOwned={recipeOwned}
+      />
     </ToastProvider>
   )
   // Flush the best-effort "who else uses this Secret" preview fetch
@@ -111,6 +120,52 @@ async function submitRotation(keys: Record<string, string>) {
   const dialog = screen.getByRole('alertdialog')
   fireEvent.click(within(dialog).getByRole('button', { name: 'Rotate & restart' }))
   await flush()
+}
+
+/** Fills `keys` (secretKey -> value), submits, and confirms the set-mode
+ *  dialog — draining the microtask chain in between so callers land on a
+ *  settled `phase`.
+ *
+ *  `exact: false` because set mode marks every Field `required`, which appends
+ *  the visual " *" to the label. */
+async function submitSet(keys: Record<string, string>) {
+  for (const [secretKey, value] of Object.entries(keys)) {
+    fireEvent.change(screen.getByLabelText(secretKey, { exact: false }), { target: { value } })
+  }
+  fireEvent.click(screen.getByRole('button', { name: 'Set credentials' }))
+  const dialog = screen.getByRole('alertdialog')
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Set & start' }))
+  await flush()
+}
+
+const ALL_KEYS = { 'api-key': 'a-value', 'workspace-id': 'w-value' }
+
+// Kubernetes Secret keys may use every own property name on Object.prototype.
+// Keep this derived rather than hand-picking a few examples: __proto__,
+// constructor, and toString are all valid keys and all must behave like normal
+// user-controlled strings in both create and merge-patch flows.
+const OBJECT_PROTOTYPE_KEYS = Object.getOwnPropertyNames(Object.prototype)
+const PROTOTYPE_KEY_SECRET: EnvSecret = {
+  name: 'prototype-key-credentials',
+  keys: OBJECT_PROTOTYPE_KEYS.map((secretKey, index) => ({
+    secretKey,
+    envVar: `PROTOTYPE_KEY_${index}`,
+  })),
+}
+
+function prototypeKeyValues(prefix: string): Record<string, string> {
+  // Object.fromEntries defines __proto__ as an own data property, unlike an
+  // object literal or assignment to a normal object.
+  return Object.fromEntries(
+    OBJECT_PROTOTYPE_KEYS.map((secretKey, index) => [secretKey, `${prefix}-${index}`])
+  )
+}
+
+/** The shape control-api actually returns for a duplicate create: a bare 500,
+ *  NOT a 409 (see spec Non-goals). Mocking 409 here would be a test that can
+ *  never fail against the real server. */
+function serverError() {
+  return Object.assign(new Error('500 Internal Server Error'), { status: 500 })
 }
 
 beforeEach(() => {
@@ -141,7 +196,6 @@ describe('UpdateConnectorCredentials — masked inputs', () => {
     await renderPanel(ENV_SECRET)
 
     expect(screen.getByText(ENV_SECRET.name)).toBeInTheDocument()
-    const rotateButton = screen.getByRole('button', { name: 'Rotate credentials' })
     const table = screen.getByRole('table')
     for (const key of ENV_SECRET.keys) {
       expect(within(table).getByText(key.secretKey)).toBeInTheDocument()
@@ -151,22 +205,13 @@ describe('UpdateConnectorCredentials — masked inputs', () => {
       expect(input).toHaveAttribute('autocomplete', 'new-password')
       expect(input.value).toBe('')
     }
-    expect(
-      rotateButton.compareDocumentPosition(screen.getByLabelText(ENV_SECRET.keys[0].secretKey))
-    ).toBe(Node.DOCUMENT_POSITION_PRECEDING)
   })
 
-  it('uses the Marketplace credential label when the connector retains its catalog source', async () => {
+  it('uses a Marketplace credential label while preserving the Secret key identifier', async () => {
     mockGetRegistryCredentialSchema.mockResolvedValueOnce({
       required: true,
       authType: 'api-key',
-      keys: [
-        {
-          name: 'api-key',
-          label: 'Linear API key',
-          kind: 'api-key',
-        },
-      ],
+      keys: [{ name: 'api-key', label: 'Linear API key', kind: 'api-key' }],
     })
     render(
       <ToastProvider>
@@ -186,7 +231,12 @@ describe('UpdateConnectorCredentials — masked inputs', () => {
   })
 
   it('never renders a stored credential value — inputs stay empty through a full rotation cycle', async () => {
-    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key'],
+      affectedConnectors: [SERVER_NAME],
+    })
     mockGetMcpServer.mockResolvedValue(
       serverWithCondition({
         status: 'True',
@@ -208,7 +258,12 @@ describe('UpdateConnectorCredentials — masked inputs', () => {
 
 describe('UpdateConnectorCredentials — partial payload', () => {
   it('sends only the filled keys, never the untouched ones', async () => {
-    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key', 'workspace-id']))
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key', 'workspace-id'],
+      affectedConnectors: [SERVER_NAME],
+    })
     mockGetMcpServer.mockResolvedValue(serverWithCondition(undefined))
 
     await renderPanel(ENV_SECRET)
@@ -219,6 +274,56 @@ describe('UpdateConnectorCredentials — partial payload', () => {
       'api-key': 'new-key-value',
     })
   })
+})
+
+describe('UpdateConnectorCredentials — Object.prototype credential keys', () => {
+  it('creates every prototype-named key as an own property in set mode', async () => {
+    const values = prototypeKeyValues('set-value')
+    mockCreateMcpSecret.mockResolvedValue({
+      name: PROTOTYPE_KEY_SECRET.name,
+      namespace: 'mcp-server',
+    })
+
+    await renderPanel(PROTOTYPE_KEY_SECRET, 'set')
+
+    // An untouched prototype-named key is absent, not inherited text coerced
+    // into an input. This catches __proto__ before the submit path can hide it.
+    for (const secretKey of OBJECT_PROTOTYPE_KEYS) {
+      expect(screen.getByLabelText(secretKey, { exact: false })).toHaveValue('')
+    }
+
+    await submitSet(values)
+
+    expect(mockCreateMcpSecret).toHaveBeenCalledTimes(1)
+    const payload = mockCreateMcpSecret.mock.calls[0]?.[1]
+    expect(Object.keys(payload ?? {})).toEqual(OBJECT_PROTOTYPE_KEYS)
+    for (const secretKey of OBJECT_PROTOTYPE_KEYS) {
+      expect(Object.hasOwn(payload ?? {}, secretKey)).toBe(true)
+      expect(payload?.[secretKey]).toBe(values[secretKey])
+    }
+  })
+
+  it.each(OBJECT_PROTOTYPE_KEYS)(
+    'sends %s as the sole own-property merge patch in rotate mode',
+    async secretKey => {
+      const value = `rotate-${secretKey}`
+      mockUpdateMcpSecret.mockResolvedValue({
+        name: PROTOTYPE_KEY_SECRET.name,
+        namespace: 'mcp-server',
+        keys: [secretKey],
+        affectedConnectors: [SERVER_NAME],
+      })
+
+      await renderPanel(PROTOTYPE_KEY_SECRET)
+      await submitRotation(Object.fromEntries([[secretKey, value]]))
+
+      expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+      const payload = mockUpdateMcpSecret.mock.calls[0]?.[1]
+      expect(Object.keys(payload ?? {})).toEqual([secretKey])
+      expect(Object.hasOwn(payload ?? {}, secretKey)).toBe(true)
+      expect(payload?.[secretKey]).toBe(value)
+    }
+  )
 })
 
 describe('UpdateConnectorCredentials — client-side validation', () => {
@@ -249,17 +354,165 @@ describe('UpdateConnectorCredentials — PUT rejection', () => {
     expect(screen.getByText(/Rotation failed/i)).toBeInTheDocument()
     expect(screen.getByText(/not a valid Secret key/i)).toBeInTheDocument()
     expect(screen.queryByText(/Credentials rotated/i)).not.toBeInTheDocument()
+    // The toast must keep the rotate wording that matches the banner. A single
+    // mode-blind string ("Failed to save credentials.") reads as a regression on
+    // the default path, where the banner right next to it says "Rotation failed".
+    expect(screen.getByText('Failed to rotate credentials.')).toBeInTheDocument()
     // The PUT was actually attempted (not blocked client-side), and the failure
     // short-circuits before any DeploymentReady poll.
     expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
     expect(mockGetMcpServer).not.toHaveBeenCalled()
+  })
+
+  // The 404 branch is the ONLY status the rotate path may treat as "the Secret
+  // vanished". Widening it (e.g. `>= 400`) would swallow this real 409 —
+  // control-api/src/routes/admin/secrets.ts returns it for a WorkflowRecipe-owned
+  // Secret — into a silent mode flip that tells the operator to re-enter every
+  // key, hiding the message that actually points them at /admin/recipe-secrets.
+  // Every other rotate-rejection mock in this file carries NO `.status`, so
+  // `undefined >= 400` is false and none of them can catch that widening.
+  it('rethrows a status-carrying non-404 PUT rejection (409 recipe-owned) instead of flipping to set mode', async () => {
+    mockUpdateMcpSecret.mockRejectedValue(
+      Object.assign(
+        new Error(
+          '409 - Secret "linear-credentials" is owned by a WorkflowRecipe; rotate it through /admin/recipe-secrets'
+        ),
+        { status: 409 }
+      )
+    )
+    await renderPanel(ENV_SECRET, 'rotate')
+    await submitRotation({ 'api-key': 'new-key-value' })
+
+    // The operator sees the backend's own message, verbatim.
+    expect(screen.getByText(/Rotation failed:.*owned by a WorkflowRecipe/)).toBeInTheDocument()
+    expect(screen.getByText(/\/admin\/recipe-secrets/)).toBeInTheDocument()
+    // ...and NOT the vanished-Secret recovery, which would demand every key.
+    expect(screen.queryByText(/This Secret no longer exists\./)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rotate again' })).toBeInTheDocument()
+    expect(mockCreateMcpSecret).not.toHaveBeenCalled()
+  })
+})
+
+describe('UpdateConnectorCredentials — rotate mode against a vanished Secret', () => {
+  it('switches to set mode instead of creating a partial Secret', async () => {
+    mockUpdateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('404 - Secret "linear-credentials" not found in mcp-server'), {
+        status: 404,
+      })
+    )
+    await renderPanel(ENV_SECRET, 'rotate')
+
+    // Only ONE key filled — valid for a rotation, fatal for a create.
+    await submitRotation({ 'api-key': 'only-one' })
+
+    expect(screen.getByText(/This Secret no longer exists\./)).toBeInTheDocument()
+    // The partial data must NOT have been posted.
+    expect(mockCreateMcpSecret).not.toHaveBeenCalled()
+    // The form is now in set mode, demanding every key.
+    expect(screen.getByRole('button', { name: 'Set credentials' })).toBeInTheDocument()
+  })
+
+  // The recovery is a ROUND TRIP, and only its return leg proves the set-mode
+  // latch is not one-way. `recreateRequired` is never reset (resetToIdle does
+  // not touch it), so it must sit BEHIND the `secretCreated` guard: once the
+  // recreate lands, the Secret exists and every set-mode surface is a lie —
+  // "needs credentials before it can start", `Required` placeholders, all keys
+  // forced on the next submit, and a confirm dialog offering to create a Secret
+  // that is already there.
+  it('returns to rotate semantics once the recreate succeeds', async () => {
+    mockUpdateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('404 - Secret "linear-credentials" not found in mcp-server'), {
+        status: 404,
+      })
+    )
+    mockCreateMcpSecret.mockResolvedValue({ name: ENV_SECRET.name, namespace: 'mcp-server' })
+    mockGetMcpServer.mockResolvedValue(
+      serverWithCondition({
+        status: 'True',
+        message: 'Running',
+        lastTransitionTime: '2026-01-01T00:00:30.000Z',
+      })
+    )
+    await renderPanel(ENV_SECRET, 'rotate')
+
+    // Leg 1: rotate against a Secret that vanished — the form latches to set.
+    await submitRotation({ 'api-key': 'only-one' })
+    expect(screen.getByRole('button', { name: 'Set credentials' })).toBeInTheDocument()
+
+    // Leg 2: recreate it with every key, and let the connector come up.
+    await submitSet(ALL_KEYS)
+    await act(async () => {
+      vi.advanceTimersByTime(POLL_INTERVAL_MS)
+    })
+    await flush()
+    expect(screen.getByText(/Credentials set\./)).toBeInTheDocument()
+
+    // Leg 3: back to an editable form. The Secret EXISTS now, so every surface
+    // must have returned to rotate semantics.
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+
+    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/needs credentials before it can start/i)).not.toBeInTheDocument()
+    expect(screen.getByText(/Rotate values stored in Secret/i)).toBeInTheDocument()
+    // The per-field tell: `Required` is what forces every key on the next submit.
+    expect(screen.getByLabelText('api-key')).toHaveAttribute(
+      'placeholder',
+      'Leave blank to keep current value'
+    )
+  })
+
+  // The other direction of the same latch. `secretCreated` means "a create
+  // already landed", and it is what GATES set mode — so a later 404, which is
+  // proof the Secret is gone again, has to clear it. Otherwise the second
+  // vanish would leave the rotate button on screen while the error text demands
+  // every key, and each retry would 404 forever.
+  it('flips back to set mode when the Secret vanishes a SECOND time in the same session', async () => {
+    mockUpdateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('404 - Secret "linear-credentials" not found in mcp-server'), {
+        status: 404,
+      })
+    )
+    mockCreateMcpSecret.mockResolvedValue({ name: ENV_SECRET.name, namespace: 'mcp-server' })
+    mockGetMcpServer.mockResolvedValue(
+      serverWithCondition({
+        status: 'True',
+        message: 'Running',
+        lastTransitionTime: '2026-01-01T00:00:30.000Z',
+      })
+    )
+    await renderPanel(ENV_SECRET, 'rotate')
+
+    // First vanish, recreate, and return to the rotate form.
+    await submitRotation({ 'api-key': 'only-one' })
+    await submitSet(ALL_KEYS)
+    await act(async () => {
+      vi.advanceTimersByTime(POLL_INTERVAL_MS)
+    })
+    await flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+
+    // Deleted again out-of-band: the rotate PUT 404s a second time.
+    await submitRotation({ 'api-key': 'only-one-again' })
+
+    expect(screen.getByText(/This Secret no longer exists\./)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Set credentials' })).toBeInTheDocument()
+    // Still no partial create.
+    expect(mockCreateMcpSecret).toHaveBeenCalledTimes(1)
   })
 })
 
 // ─── Polling / DeploymentReady correlation — the CRD contract (Fase 3 §6) ───
 describe('UpdateConnectorCredentials — rollout polling', () => {
   it('reports success once a FRESH DeploymentReady=True is observed after the PUT', async () => {
-    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key'],
+      affectedConnectors: [SERVER_NAME],
+    })
     // First poll: a False condition that predates the PUT (stale) — must NOT
     // be read as an outcome of this rotation.
     mockGetMcpServer.mockResolvedValueOnce(
@@ -303,7 +556,12 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     // reason WaitingForReplicas (fresh, post-PUT) for the whole rollout window,
     // then True once the new pod is Ready. The UI must NOT read the transitory
     // False as failure — doing so would abort almost every successful rotation.
-    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key'],
+      affectedConnectors: [SERVER_NAME],
+    })
     // First two polls: transitory False, timestamped AFTER the PUT.
     mockGetMcpServer
       .mockResolvedValueOnce(
@@ -359,7 +617,12 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     // failure on the first sighting; it reports failure only when its OWN
     // POLL_TIMEOUT_MS expires with the diagnostic still uncorrected — and then
     // with the HCC's rollout numbers, never a bare "timed out".
-    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key'],
+      affectedConnectors: [SERVER_NAME],
+    })
     mockGetMcpServer.mockResolvedValue(
       serverWithCondition({
         status: 'False',
@@ -398,7 +661,12 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     // still observing". The UI must keep polling and report SUCCESS on the later
     // True, not latch 'failed' on the first RolloutIncomplete. This is the
     // false-negative a slow/loaded cluster reproduces (convergence 120s..180s).
-    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key'],
+      affectedConnectors: [SERVER_NAME],
+    })
     mockGetMcpServer
       .mockResolvedValueOnce(
         serverWithCondition({
@@ -439,7 +707,12 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
   })
 
   it('keeps waiting when DeploymentReady=True predates the PUT (stale success must not count)', async () => {
-    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key'],
+      affectedConnectors: [SERVER_NAME],
+    })
     mockGetMcpServer.mockResolvedValue(
       serverWithCondition({
         status: 'True',
@@ -460,7 +733,12 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
   })
 
   it('reports failure with the condition message when RolloutIncomplete persists after the PUT', async () => {
-    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key'],
+      affectedConnectors: [SERVER_NAME],
+    })
     mockGetMcpServer.mockResolvedValue(
       serverWithCondition({
         status: 'False',
@@ -498,7 +776,12 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     // this condition is judged stale, the rotation wedges until timeout, and
     // this assertion goes red — which the pre-existing success test (whose
     // timestamp sits AFTER system time) could not detect.
-    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key'],
+      affectedConnectors: [SERVER_NAME],
+    })
     mockGetMcpServer.mockResolvedValue(
       serverWithCondition({
         status: 'True',
@@ -519,7 +802,12 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
   })
 
   it('reports a bounded timeout — never success — when the condition never transitions', async () => {
-    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key']))
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key'],
+      affectedConnectors: [SERVER_NAME],
+    })
     // Always stale: predates the PUT on every single poll.
     mockGetMcpServer.mockResolvedValue(
       serverWithCondition({
@@ -549,7 +837,12 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     // them (a false-positive: SERVER_NAME could converge while the other pod
     // CrashLoopBackOffs, yet the old banner said both "restarted and is serving").
     const OTHER = 'other-connector-b'
-    mockUpdateMcpSecret.mockResolvedValue(secretRotationResponse(['api-key'], [SERVER_NAME, OTHER]))
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key'],
+      affectedConnectors: [SERVER_NAME, OTHER],
+    })
     mockGetMcpServer.mockResolvedValue(
       serverWithCondition({
         status: 'True',
@@ -574,5 +867,568 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     // Regression guard for the overclaim: the unobserved connector must never be
     // asserted as already serving the new credential.
     expect(banner.textContent).not.toMatch(new RegExp(`${OTHER}[^.]*restarted and is serving`))
+  })
+})
+
+describe('UpdateConnectorCredentials — recipe-owned', () => {
+  it('renders an explanation and no form when the Secret belongs to a WorkflowRecipe', async () => {
+    await renderPanel(ENV_SECRET, 'recipe-owned')
+
+    expect(screen.getByText(/managed by its WorkflowRecipe/i)).toBeInTheDocument()
+    // No form at all: neither the inputs nor either submit button.
+    expect(screen.queryByLabelText('api-key')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
+  })
+})
+
+// ─── R1-H1: ownership must not depend on the observed condition ────────────
+//
+// `surface` is derived from status. A managed:false connector whose status is
+// absent, Unknown, or stale carries NO SecretNotFound condition, so it resolves
+// to `rotate` — and the PUT's own 404 is then the FIRST evidence the Secret is
+// missing. If that 404 were allowed to open the create form, the ownership
+// guard would be defeated exactly when it matters: the operator would POST an
+// unlabeled Secret outside the WorkflowRecipe flow, collide with the recipe's
+// later provisioning, and then wait forever for an HCC rollout that
+// managed:false connectors never receive.
+//
+// `recipeOwned` is therefore threaded from the page as an ownership FACT
+// (spec.managed === false), independent of any condition.
+describe('UpdateConnectorCredentials — recipe-owned, late 404', () => {
+  it('lands on explanation-only when a rotate PUT 404s on a recipe-owned connector', async () => {
+    mockUpdateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('404 - Secret "linear-credentials" not found in mcp-server'), {
+        status: 404,
+      })
+    )
+    // Status has not been written yet, so the resolver can only say 'rotate'.
+    await renderPanel(ENV_SECRET, 'rotate', true)
+    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+
+    await submitRotation({ 'api-key': 'only-one' })
+
+    // The 404 must point at the recipe, not at a create form.
+    expect(screen.getByText(/managed by its WorkflowRecipe/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('api-key')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Enter every key to recreate it/)).not.toBeInTheDocument()
+    expect(mockCreateMcpSecret).not.toHaveBeenCalled()
+  })
+
+  // Defense in depth: even if a caller (or a future resolver change) handed
+  // this component `surface: 'set'` for a recipe-owned connector, POST must
+  // stay unreachable. `mode` may never resolve to 'set' by ANY path.
+  it('never renders the create form for a recipe-owned connector handed surface="set"', async () => {
+    await renderPanel(ENV_SECRET, 'set', true)
+
+    expect(screen.getByText(/managed by its WorkflowRecipe/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/needs credentials before it can start/i)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('api-key')).not.toBeInTheDocument()
+  })
+
+  // The managed:TRUE control for the same journey — the recovery this screen
+  // exists to provide must keep working, so the guard above cannot be a blanket
+  // "never recover from a 404".
+  it('still opens the create form on a late 404 for a managed connector', async () => {
+    mockUpdateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('404 - Secret "linear-credentials" not found in mcp-server'), {
+        status: 404,
+      })
+    )
+    await renderPanel(ENV_SECRET, 'rotate', false)
+    await submitRotation({ 'api-key': 'only-one' })
+
+    expect(screen.getByRole('button', { name: 'Set credentials' })).toBeInTheDocument()
+    expect(screen.queryByText(/managed by its WorkflowRecipe/i)).not.toBeInTheDocument()
+  })
+})
+
+describe('UpdateConnectorCredentials — set mode', () => {
+  it('renders set-mode copy instead of rotation copy', async () => {
+    await renderPanel(ENV_SECRET, 'set')
+
+    expect(screen.getByText(/needs credentials before it can start/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Set credentials' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
+  })
+
+  it('blocks submit until every declared key has a value and names the missing ones', async () => {
+    await renderPanel(ENV_SECRET, 'set')
+
+    // Only one of the two declared keys filled.
+    fireEvent.change(screen.getByLabelText('api-key', { exact: false }), {
+      target: { value: 'secret-value' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Set credentials' }))
+    await flush()
+
+    expect(
+      screen.getByText(/Enter every credential value\. Missing: workspace-id/)
+    ).toBeInTheDocument()
+    // No confirm dialog, so nothing was sent.
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+})
+
+// ─── R1-L1: requiredness and validation must be programmatic ───────────────
+//
+// Set mode used to signal "every key is mandatory" only through a `Required`
+// placeholder and one aggregate alert at the bottom of the form. A screen
+// reader user could not tell which inputs were required before submitting, nor
+// which ones were rejected afterwards, and focus stayed wherever it was.
+describe('UpdateConnectorCredentials — required semantics and validation', () => {
+  it('marks every input required in set mode, and none of them in rotate mode', async () => {
+    const { unmount } = await renderPanel(ENV_SECRET, 'set')
+    for (const key of ENV_SECRET.keys) {
+      const input = screen.getByLabelText(key.secretKey, { exact: false })
+      expect(input).toBeRequired()
+      expect(input).toHaveAttribute('aria-required', 'true')
+    }
+    unmount()
+
+    // Rotate mode: a blank field means "keep the current value", so requiring
+    // it would be a lie.
+    await renderPanel(ENV_SECRET, 'rotate')
+    for (const key of ENV_SECRET.keys) {
+      const input = screen.getByLabelText(key.secretKey)
+      expect(input).not.toBeRequired()
+      expect(input).not.toHaveAttribute('aria-required', 'true')
+    }
+  })
+
+  // ─── The focus TARGET needs three cases to be pinned, not one ─────────────
+  //
+  // `rejectSubmit` focuses `missing[0]`, and `missing` is built by filtering the
+  // DECLARED key order — so the assertion "focus the first invalid input" has
+  // two independent claims inside it: that focus follows declaration ORDER, and
+  // that it follows INVALIDITY rather than mere position. A single fixture can
+  // only ever pin one of them:
+  //
+  //   - fill nothing            -> first invalid IS field #1. Pins order only;
+  //                                indistinguishable from "focus field #1".
+  //   - fill the SECOND key     -> first invalid is STILL field #1. Pins
+  //                                nothing about focus at all — it is exactly
+  //                                the coincidence that makes a hardcoded
+  //                                "focus field #1" pass.
+  //   - fill the FIRST key      -> first invalid is field #2. The only fixture
+  //                                where position and invalidity DISAGREE, so
+  //                                the only one that can catch a focus target
+  //                                that ignores which fields are actually bad.
+  //
+  // All three are below. The last one is the discriminating one; the first two
+  // exist so a regression that breaks ordering is still caught.
+
+  it('flags only the missing inputs and points them at the error (missing key first)', async () => {
+    await renderPanel(ENV_SECRET, 'set')
+
+    // The SECOND declared key is filled, so the missing one happens to be field
+    // #1. Deliberately NOT the case that pins the focus target — see the
+    // "focuses the first INVALID input" test below for that. This one carries
+    // the per-input aria wiring.
+    fireEvent.change(screen.getByLabelText('workspace-id', { exact: false }), {
+      target: { value: 'w-value' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Set credentials' }))
+    await flush()
+
+    const missing = screen.getByLabelText('api-key', { exact: false })
+    const filled = screen.getByLabelText('workspace-id', { exact: false })
+    const alert = screen.getByRole('alert')
+
+    expect(missing).toHaveAttribute('aria-invalid', 'true')
+    expect(filled).not.toHaveAttribute('aria-invalid', 'true')
+    // The alert that names the missing keys is programmatically associated with
+    // the input that caused it.
+    expect(alert).toHaveAttribute('id')
+    expect(missing.getAttribute('aria-describedby')).toContain(alert.getAttribute('id'))
+    expect(filled).not.toHaveAttribute('aria-describedby')
+    // ...and the operator is put on the field they have to repair.
+    expect(missing).toHaveFocus()
+  })
+
+  it('focuses the FIRST declared key when every input is empty', async () => {
+    await renderPanel(ENV_SECRET, 'set')
+
+    // Nothing filled: both keys are invalid, so the focus target is decided
+    // purely by declaration ORDER. Reverse that order in `rejectSubmit` (focus
+    // `missing[missing.length - 1]`) and only this case goes red.
+    fireEvent.click(screen.getByRole('button', { name: 'Set credentials' }))
+    await flush()
+
+    const first = screen.getByLabelText('api-key', { exact: false })
+    const second = screen.getByLabelText('workspace-id', { exact: false })
+
+    expect(screen.getByText(/Missing: api-key, workspace-id/)).toBeInTheDocument()
+    expect(first).toHaveAttribute('aria-invalid', 'true')
+    expect(second).toHaveAttribute('aria-invalid', 'true')
+    expect(first).toHaveFocus()
+    expect(second).not.toHaveFocus()
+  })
+
+  it('focuses the first INVALID input, not the first input, when an earlier key is already filled', async () => {
+    await renderPanel(ENV_SECRET, 'set')
+
+    // The DISCRIMINATING fixture: field #1 is valid and field #2 is not, so
+    // position and invalidity point at different elements. Replace the focus
+    // target with an unconditional `envSecret.keys[0]` (i.e. "focus the first
+    // field on the form") and this is the assertion that fails — every other
+    // focus case in this file keeps passing, because in all of them the first
+    // field IS the first invalid one.
+    fireEvent.change(screen.getByLabelText('api-key', { exact: false }), {
+      target: { value: 'a-value' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Set credentials' }))
+    await flush()
+
+    const filled = screen.getByLabelText('api-key', { exact: false })
+    const missing = screen.getByLabelText('workspace-id', { exact: false })
+    const alert = screen.getByRole('alert')
+
+    expect(
+      screen.getByText(/Enter every credential value\. Missing: workspace-id/)
+    ).toBeInTheDocument()
+    expect(missing).toHaveAttribute('aria-invalid', 'true')
+    expect(filled).not.toHaveAttribute('aria-invalid', 'true')
+    expect(missing.getAttribute('aria-describedby')).toContain(alert.getAttribute('id'))
+    expect(filled).not.toHaveAttribute('aria-describedby')
+    // The whole point: focus is on field #2, and demonstrably NOT on field #1.
+    expect(missing).toHaveFocus()
+    expect(filled).not.toHaveFocus()
+  })
+
+  it('clears the invalid state as soon as the operator types into the flagged input', async () => {
+    await renderPanel(ENV_SECRET, 'set')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Set credentials' }))
+    await flush()
+    expect(screen.getByLabelText('api-key', { exact: false })).toHaveAttribute(
+      'aria-invalid',
+      'true'
+    )
+
+    fireEvent.change(screen.getByLabelText('api-key', { exact: false }), {
+      target: { value: 'a-value' },
+    })
+
+    const repaired = screen.getByLabelText('api-key', { exact: false })
+    expect(repaired).not.toHaveAttribute('aria-invalid', 'true')
+    expect(repaired).not.toHaveAttribute('aria-describedby')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('focuses the first input when a rotate submit carries no values at all', async () => {
+    await renderPanel(ENV_SECRET, 'rotate')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate credentials' }))
+    await flush()
+
+    expect(screen.getByText('Enter at least one credential value to rotate.')).toBeInTheDocument()
+    expect(screen.getByLabelText('api-key')).toHaveFocus()
+  })
+})
+
+describe('UpdateConnectorCredentials — set mode submit', () => {
+  it('calls createMcpSecret and not updateMcpSecret', async () => {
+    mockCreateMcpSecret.mockResolvedValue({ name: ENV_SECRET.name, namespace: 'mcp-server' })
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(mockCreateMcpSecret).toHaveBeenCalledWith(ENV_SECRET.name, {
+      'api-key': 'a-value',
+      'workspace-id': 'w-value',
+    })
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+  })
+
+  // The AlreadyExists race. control-api collapses it to 500, so the retry must
+  // NOT be gated on a status code.
+  it('falls back to updateMcpSecret when the create fails, and reports success', async () => {
+    mockCreateMcpSecret.mockRejectedValue(serverError())
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key', 'workspace-id'],
+      affectedConnectors: [SERVER_NAME],
+    })
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(mockUpdateMcpSecret).toHaveBeenCalledWith(ENV_SECRET.name, ALL_KEYS)
+    // A successful retry must actually land the submit in the set-mode
+    // in-flight state, not merely avoid the ROTATE failure copy (which can
+    // never render in set mode regardless of outcome — see index.tsx:479-481 —
+    // so asserting its absence alone would pass vacuously).
+    expect(screen.getByText(/Setting credentials — waiting for/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Could not set credentials/i)).not.toBeInTheDocument()
+  })
+
+  // ─── R1-H3: the retry must stay STATUS-AGNOSTIC ──────────────────────────
+  //
+  // control-api collapses the Kubernetes AlreadyExists into a bare 500 and can
+  // never emit 409 today (spec Non-goals), so a `postError.status === 409`
+  // branch would be dead code and the retry fires on ANY POST failure. The
+  // 500-only success test above cannot detect a regression that GATES the retry
+  // on 500 — the reviewer confirmed that mutation left all 28 component tests
+  // green. These two close that hole from both sides.
+
+  // FORWARD-COMPATIBILITY ONLY. control-api does NOT return 409 for a duplicate
+  // create today; this asserts the client would still recover if the server
+  // were ever fixed to send the correct status. Do not read this fixture as
+  // current server behavior — `serverError()` above is the real shape.
+  it('forward-compatibility: still falls back to the merge-patch if the create ever answers 409', async () => {
+    mockCreateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('409 - secrets "linear-credentials" already exists'), { status: 409 })
+    )
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key', 'workspace-id'],
+      affectedConnectors: [SERVER_NAME],
+    })
+    mockGetMcpServer.mockResolvedValue(
+      serverWithCondition({
+        status: 'True',
+        message: 'Running',
+        lastTransitionTime: '2026-01-01T00:00:30.000Z',
+      })
+    )
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(mockUpdateMcpSecret).toHaveBeenCalledWith(ENV_SECRET.name, ALL_KEYS)
+    // The operator must reach the real set-mode progress state, not a failure.
+    expect(screen.getByText(/Setting credentials — waiting for/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Could not set credentials/i)).not.toBeInTheDocument()
+
+    // ...and all the way to the set-mode success banner.
+    await act(async () => {
+      vi.advanceTimersByTime(POLL_INTERVAL_MS)
+    })
+    await flush()
+    expect(screen.getByText(/Credentials set\./)).toBeInTheDocument()
+  })
+
+  // The other half of the same invariant: a NON-500 create failure must still
+  // produce exactly one merge-patch attempt. Gating the retry on 500 makes this
+  // zero.
+  it('attempts the merge-patch exactly once after a NON-500 create failure', async () => {
+    mockCreateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('400 Bad Request'), { status: 400 })
+    )
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key', 'workspace-id'],
+      affectedConnectors: [SERVER_NAME],
+    })
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(mockCreateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(screen.getByText(/Setting credentials — waiting for/i)).toBeInTheDocument()
+  })
+
+  // The third side, and the one that makes "status-agnostic" actually mean ANY:
+  // every other retry fixture in this file carries a `.status`, so a gate
+  // written as `if (postError.status === undefined) throw postError` — the shape
+  // a well-meaning "only retry real HTTP failures" refactor produces — survives
+  // all of them green. A transport failure (fetch rejects before any response
+  // exists, so there is no status to read) is the real-world case that gate
+  // would break, and it is exactly when the Secret may well have been created
+  // by a request whose response never came back.
+  it('retries the merge-patch and still succeeds when the create rejects with NO status at all', async () => {
+    // A bare Error: no `.status` property whatsoever, not even undefined-valued.
+    const transportFailure = new Error('Failed to fetch')
+    expect('status' in transportFailure).toBe(false)
+    mockCreateMcpSecret.mockRejectedValue(transportFailure)
+    mockUpdateMcpSecret.mockResolvedValue({
+      name: ENV_SECRET.name,
+      namespace: 'mcp-server',
+      keys: ['api-key', 'workspace-id'],
+      affectedConnectors: [SERVER_NAME],
+    })
+    mockGetMcpServer.mockResolvedValue(
+      serverWithCondition({
+        status: 'True',
+        message: 'Running',
+        lastTransitionTime: '2026-01-01T00:00:30.000Z',
+      })
+    )
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    // Exactly once — not zero (the gate above), not twice (a retry loop).
+    expect(mockCreateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(mockUpdateMcpSecret).toHaveBeenCalledWith(ENV_SECRET.name, ALL_KEYS)
+    expect(screen.queryByText(/Could not set credentials/i)).not.toBeInTheDocument()
+    expect(screen.getByText(/Setting credentials — waiting for/i)).toBeInTheDocument()
+
+    // ...and the operator reaches the user-visible success state, so this cannot
+    // pass on a retry that fired but left the screen stuck mid-flight.
+    await act(async () => {
+      vi.advanceTimersByTime(POLL_INTERVAL_MS)
+    })
+    await flush()
+    expect(screen.getByText(/Credentials set\./)).toBeInTheDocument()
+  })
+
+  // ─── R1-M1: which failure the operator is shown when BOTH legs fail ──────
+  //
+  // A 404 from the follow-up PUT is noise — the whole point of the retry is
+  // that the Secret might already exist, so "it does not exist" adds nothing to
+  // the create error the operator actually attempted.
+  it('reports the original create error when the retry fails with 404', async () => {
+    mockCreateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('data["api-key"] must be a string'), { status: 400 })
+    )
+    mockUpdateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('404 - Secret not found'), { status: 404 })
+    )
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(screen.getByText(/data\["api-key"\] must be a string/)).toBeInTheDocument()
+    expect(screen.queryByText(/404 - Secret not found/)).not.toBeInTheDocument()
+    // The PUT was genuinely attempted — otherwise this test would pass for the
+    // wrong reason (a retry that never ran also "reports the create error").
+    expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+  })
+
+  // The SAME rule against the PRODUCTION pair. The case above uses a 400 create,
+  // which is a legible error on its own; this one uses control-api's real
+  // duplicate-create answer — a bare 500 (see `serverError()`) — where the
+  // temptation to prefer the "more specific" 404 is strongest. It must still
+  // lose: the retry exists on the hypothesis "the Secret already exists", and a
+  // 404 only refutes that hypothesis. It explains nothing about why the create
+  // failed, and telling the operator the Secret does not exist on the screen
+  // whose whole job is creating it is worse than opaque — it is misleading.
+  it('reports the create error, not the PUT 404, for the production POST 500 + PUT 404 pair', async () => {
+    mockCreateMcpSecret.mockRejectedValue(serverError())
+    mockUpdateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('404 - Secret "linear-credentials" not found in mcp-server'), {
+        status: 404,
+      })
+    )
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(
+      screen.getByText(/Could not set credentials: 500 Internal Server Error/)
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/not found in mcp-server/)).not.toBeInTheDocument()
+    // Neither leg may be skipped: the create ran, and the retry it is being
+    // preferred over genuinely ran too.
+    expect(mockCreateMcpSecret).toHaveBeenCalledTimes(1)
+    expect(mockUpdateMcpSecret).toHaveBeenCalledTimes(1)
+    // A 404 must not be mistaken for the rotate path's vanished-Secret recovery:
+    // this IS the create path, so there is nothing to flip to.
+    expect(screen.queryByText(/This Secret no longer exists\./)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
+  })
+
+  // Any OTHER PUT failure describes the CURRENT state more precisely than the
+  // opaque create error does. The production pair: control-api answers a bare
+  // 500 for the AlreadyExists, then the merge-patch answers the real 409 that
+  // names the WorkflowRecipe and points at /admin/recipe-secrets. Showing the
+  // 500 hides the only actionable instruction the operator gets.
+  it('surfaces the retry error when the merge-patch fails with an actionable 409', async () => {
+    mockCreateMcpSecret.mockRejectedValue(serverError())
+    mockUpdateMcpSecret.mockRejectedValue(
+      Object.assign(
+        new Error(
+          '409 - Secret "linear-credentials" is owned by a WorkflowRecipe; rotate it through /admin/recipe-secrets'
+        ),
+        { status: 409 }
+      )
+    )
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(
+      screen.getByText(/Could not set credentials:.*owned by a WorkflowRecipe/)
+    ).toBeInTheDocument()
+    expect(screen.getByText(/\/admin\/recipe-secrets/)).toBeInTheDocument()
+    // The opaque create error must not be what the operator is left with.
+    expect(screen.queryByText(/500 Internal Server Error/)).not.toBeInTheDocument()
+  })
+
+  it('surfaces the retry error when the merge-patch fails with 403', async () => {
+    mockCreateMcpSecret.mockRejectedValue(serverError())
+    mockUpdateMcpSecret.mockRejectedValue(
+      Object.assign(new Error('403 - secrets is forbidden in namespace "mcp-server"'), {
+        status: 403,
+      })
+    )
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(screen.getByText(/Could not set credentials:.*is forbidden/)).toBeInTheDocument()
+  })
+
+  it('reaches the success banner once DeploymentReady turns True', async () => {
+    mockCreateMcpSecret.mockResolvedValue({ name: ENV_SECRET.name, namespace: 'mcp-server' })
+    mockGetMcpServer.mockResolvedValue(
+      serverWithCondition({
+        status: 'True',
+        message: 'Running',
+        lastTransitionTime: '2026-01-01T00:00:30.000Z',
+      })
+    )
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    await act(async () => {
+      vi.advanceTimersByTime(POLL_INTERVAL_MS)
+    })
+    await flush()
+
+    expect(screen.getByText(/Credentials set\./)).toBeInTheDocument()
+    expect(screen.getByText(new RegExp(`${SERVER_NAME} started`))).toBeInTheDocument()
+  })
+
+  it('shows a set-mode failure banner and toast when both the create and the retry fail', async () => {
+    mockCreateMcpSecret.mockRejectedValue(serverError())
+    mockUpdateMcpSecret.mockRejectedValue(serverError())
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    expect(screen.getByText(/Could not set credentials:/)).toBeInTheDocument()
+    // The toast is the only failure surface that could plausibly carry rotate
+    // wording here — the banner branch above can never render it in set mode, so
+    // asserting THAT absence would pass vacuously.
+    expect(screen.getByText('Failed to set credentials.')).toBeInTheDocument()
+    expect(screen.queryByText('Failed to rotate credentials.')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
+  })
+
+  it('offers to try setting the credentials again — never "the rotation" — when the poll times out', async () => {
+    // The timeout banner used to be the one retrospective surface with no mode
+    // branch, so a create that never converged told the operator to "try the
+    // rotation again" about a rotation that never happened.
+    mockCreateMcpSecret.mockResolvedValue({ name: ENV_SECRET.name, namespace: 'mcp-server' })
+    // Always stale: the condition predates the POST on every poll.
+    mockGetMcpServer.mockResolvedValue(
+      serverWithCondition({
+        status: 'False',
+        message: 'rolling out',
+        lastTransitionTime: '2020-01-01T00:00:00.000Z',
+      })
+    )
+    await renderPanel(ENV_SECRET, 'set')
+    await submitSet(ALL_KEYS)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_TIMEOUT_MS + POLL_INTERVAL_MS)
+    })
+
+    const banner = screen.getByText(/did not finish within/i)
+    expect(banner).toHaveTextContent('You can also try setting the credentials again.')
+    expect(banner.textContent).not.toMatch(/rotation/i)
   })
 })
