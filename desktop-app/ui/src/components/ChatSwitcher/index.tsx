@@ -98,7 +98,10 @@ export function ChatSwitcher({
         variant="soft"
       >
         <span className="chat-switcher__trigger-main">
-          <ChatStateBadge sessionState={badgeFor(active.agentRef, active.chatId)} unreadTerminal={false} />
+          <ChatStateBadge
+            sessionState={badgeFor(active.agentRef, active.chatId)}
+            unreadTerminal={false}
+          />
           <span className="chat-switcher__label">{active.title}</span>
         </span>
         <span aria-hidden="true" className="chat-switcher__chevron">
