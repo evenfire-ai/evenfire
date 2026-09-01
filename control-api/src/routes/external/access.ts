@@ -6,7 +6,6 @@ import {
   type ExternalAuthedRequest,
   requireCompletedExternalSessionAuthenticationWithPublicErrors,
   requireExternalSessionLimiterIdentityWithPublicErrors,
-  requireValidExternalSessionTokenWithPublicErrors,
 } from '../../middleware/externalSessionAuth.js'
 import {
   externalUserRateLimitOptions,
@@ -184,9 +183,10 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/access/capabilities',
-    requireValidExternalSessionTokenWithPublicErrors,
+    requireExternalSessionLimiterIdentityWithPublicErrors,
     requireAuthenticatedExternalUserRateLimitContext,
     rateLimitMiddleware(externalUserRateLimitOptions('access_capabilities', 'authenticated')),
+    requireCompletedExternalSessionAuthenticationWithPublicErrors,
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       try {
         const policy = await resolveEffectiveUserAccessPolicy({ budget: req.accessExecutionBudget })

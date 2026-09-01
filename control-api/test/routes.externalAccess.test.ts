@@ -203,7 +203,7 @@ describe('external user-access contracts', () => {
       'external_access_capabilities:user:10000000-0000-4000-8000-000000000001',
       10
     )
-    expect(mocks.resolvePolicy).toHaveBeenCalledTimes(1)
+    expect(mocks.resolvePolicy).not.toHaveBeenCalled()
   })
 
   it('uses the authoritative target schema for team management actions', async () => {

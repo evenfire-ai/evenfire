@@ -100,6 +100,7 @@ describe('external access authenticated rate-limit ordering', () => {
   })
 
   it.each([
+    ['GET', '/external/access/capabilities', 'external_access_capabilities'],
     ['GET', '/external/access/catalog', 'external_access_catalog'],
     ['POST', '/external/access/resolve', 'external_access_resolve'],
   ] as const)(
@@ -113,13 +114,18 @@ describe('external access authenticated rate-limit ordering', () => {
       expect(response.status).toBe(429)
       expect(response.body).toMatchObject({ error: { code: 'rate_limited' } })
       expect(response.headers['retry-after']).toBeDefined()
-      expect(rateLimiter.checkAndIncrement).toHaveBeenCalledWith(`${bucketType}:${userId}`, 10)
+      const key =
+        bucketType === 'external_access_capabilities'
+          ? `${bucketType}:user:${userId}`
+          : `${bucketType}:${userId}`
+      expect(rateLimiter.checkAndIncrement).toHaveBeenCalledWith(key, 10)
       expect(mocks.resolvePolicy).not.toHaveBeenCalled()
       expect(mocks.resolveAuthorization).not.toHaveBeenCalled()
     }
   )
 
   it.each([
+    ['GET', '/external/access/capabilities'],
     ['GET', '/external/access/catalog'],
     ['POST', '/external/access/resolve'],
   ] as const)(
