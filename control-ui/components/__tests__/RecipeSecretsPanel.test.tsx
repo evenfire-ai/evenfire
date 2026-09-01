@@ -131,4 +131,29 @@ describe('RecipeSecretsPanel', () => {
       '/secrets/recipe/operator-api-credentials/edit?namespace=sandbox-recipes'
     )
   })
+
+  it('does not invent an LLM secret row for a Codex-only recipe', async () => {
+    vi.mocked(getRecipe).mockResolvedValue({
+      ...recipe,
+      metadata: { ...recipe.metadata, name: 'codex-recipe' },
+      spec: {
+        agent: { provider: 'codex-subscription', model: 'gpt-5.1' },
+        steps: [{ id: 'draft', instruction: 'Write' }],
+      },
+    })
+    vi.mocked(getRecipeSecrets).mockResolvedValue({ items: [] })
+
+    render(
+      <ToastProvider>
+        <RecipeSecretsPanel recipeName="codex-recipe" />
+      </ToastProvider>
+    )
+
+    expect(
+      await screen.findByText(
+        'This recipe uses a broker-backed agent and does not require an LLM secret.'
+      )
+    ).toBeInTheDocument()
+    expect(screen.queryByText('Missing')).not.toBeInTheDocument()
+  })
 })

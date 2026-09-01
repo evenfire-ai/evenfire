@@ -5,7 +5,7 @@
  * Uses vi.mock with actual class stubs so `new Transport(...)` works.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { McpClient } from '../../mcp/client'
+import { McpClient, staticTokenProvider } from '../../mcp/client'
 import type { McpServerInfo } from '../../types'
 
 // ─── Stub classes (constructable) ─────────────────────────────────────────────
@@ -114,7 +114,7 @@ describe('McpClient — connect', () => {
   it('injects Authorization header when authToken is provided', async () => {
     const client = new McpClient(
       makeServerInfo({ transport: { type: 'streamableHttp', url: 'http://server/mcp' } }),
-      'my-auth-token'
+      staticTokenProvider('my-auth-token')
     )
     await client.connect()
     const opts = lastStreamableArgs[1] as { requestInit?: { headers?: Record<string, string> } }

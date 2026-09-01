@@ -1,10 +1,18 @@
 import { z } from 'zod'
 import {
   type LlmProviderId,
+  PROVIDER_AUTH_MODE,
   PROVIDER_CREDENTIAL_SLOTS,
   isLlmProviderId,
 } from '@clerum/llm-providers'
+import type { DbClient } from '../../db.js'
 import { rootLogger } from '../../observability/logger.js'
+import { isCodexAssignmentAllowed } from '../../services/codexSubscriptionCatalog.js'
+import {
+  CODEX_UNASSIGNED_CONNECTION_KEY,
+  isCodexUnassignedConnectionKey,
+  readHostCodexConnectionRef,
+} from '../../services/codexSubscriptionConnection.js'
 import {
   getModelAllowlistState as getModelAllowlistStateDefault,
   isModelAllowed as isModelAllowedDefault,
@@ -50,6 +58,101 @@ function providerSupportsFallbackCredentialSlot(provider: LlmProviderId): boolea
   return slots.length === 1 && !slots[0].multiline
 }
 
+function isCodexSubscriptionEnabled(): boolean {
+  return process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED === 'true'
+}
+
+type HostLlmTarget = {
+  provider: string
+  field: string
+  credentialSlot?: unknown
+}
+
+function collectHostLlmTargets(spec: Record<string, unknown>): HostLlmTarget[] {
+  const targets: HostLlmTarget[] = []
+  if (isPlainObject(spec.model) && typeof spec.model.provider === 'string') {
+    targets.push({
+      provider: spec.model.provider.trim(),
+      field: 'spec.model.provider',
+    })
+  }
+  if (Array.isArray(spec.allowedModels)) {
+    spec.allowedModels.forEach((entry, i) => {
+      if (isPlainObject(entry) && typeof entry.provider === 'string') {
+        targets.push({
+          provider: entry.provider.trim(),
+          field: `spec.allowedModels[${i}].provider`,
+        })
+      }
+    })
+  }
+  if (isPlainObject(spec.llmPolicy) && Array.isArray(spec.llmPolicy.fallbacks)) {
+    spec.llmPolicy.fallbacks.forEach((entry, i) => {
+      if (!isPlainObject(entry) || typeof entry.provider !== 'string') return
+      targets.push({
+        provider: entry.provider.trim(),
+        field: `spec.llmPolicy.fallbacks[${i}].provider`,
+        credentialSlot: entry.credentialSlot,
+      })
+    })
+  }
+  return targets
+}
+
+function validateCodexBrokerAdmission(
+  spec: Record<string, unknown>
+): { errors: Array<{ field: string; message: string }> } | null {
+  const targets = collectHostLlmTargets(spec)
+  const enabled = isCodexSubscriptionEnabled()
+  for (const target of targets) {
+    if (target.provider !== 'codex-subscription') continue
+    if (!enabled) {
+      return {
+        errors: [
+          {
+            field: target.field,
+            message:
+              'provider "codex-subscription" is disabled (set CONTROL_API_CODEX_SUBSCRIPTION_ENABLED=true)',
+          },
+        ],
+      }
+    }
+    if (target.credentialSlot !== undefined) {
+      return {
+        errors: [
+          {
+            field: target.field.replace('.provider', '.credentialSlot'),
+            message:
+              'credentialSlot is not supported for oauth-broker providers; drop credentialSlot',
+          },
+        ],
+      }
+    }
+  }
+
+  const hasBroker = targets.some(
+    target =>
+      isLlmProviderId(target.provider) && PROVIDER_AUTH_MODE[target.provider] === 'oauth-broker'
+  )
+  const hasStatic = targets.some(
+    target =>
+      isLlmProviderId(target.provider) &&
+      PROVIDER_AUTH_MODE[target.provider] === 'static-credentials'
+  )
+  const secretRef = typeof spec.secretRef === 'string' ? spec.secretRef.trim() : ''
+  if (hasBroker && hasStatic && !secretRef) {
+    return {
+      errors: [
+        {
+          field: 'spec.secretRef',
+          message: 'spec.secretRef is required when any static-credentials LLM target is present',
+        },
+      ],
+    }
+  }
+  return null
+}
+
 const HostApprovalSchema = z
   .object({
     defaultPolicy: z.string().optional(),
@@ -60,7 +163,7 @@ const HostApprovalSchema = z
   .optional()
 
 export interface HostSpecValidationDeps {
-  isModelAllowed: (provider: string, model: string) => Promise<boolean>
+  isModelAllowed: (provider: string, model: string, connectionRef?: string) => Promise<boolean>
   /**
    * Full `{ enabled, stale }` allowlist state for a pair (Fase 6). OPTIONAL and
    * defaulted so existing callers that inject only `isModelAllowed` keep working;
@@ -71,6 +174,21 @@ export interface HostSpecValidationDeps {
     provider: string,
     model: string
   ) => Promise<{ enabled: boolean; stale: boolean } | null>
+}
+
+/**
+ * Shared Host-write deps: Codex assignments check the grant catalog, not the
+ * global allowlist. Bind/unbind and Host PATCH must use this factory so a
+ * second writer cannot drop `connectionRef` or treat it as a DbClient.
+ */
+export function createHostValidationDeps(db: DbClient): HostSpecValidationDeps {
+  return {
+    isModelAllowed: (provider, model, connectionRef) =>
+      provider === 'codex-subscription'
+        ? isCodexAssignmentAllowed(db, readHostCodexConnectionRef(connectionRef), model)
+        : isModelAllowedDefault(provider, model, db),
+    getModelAllowlistState: (provider, model) => getModelAllowlistStateDefault(provider, model, db),
+  }
 }
 
 /**
@@ -152,7 +270,7 @@ const HostLifecycleSchema = z
 export async function validateHostSpec(
   spec: Record<string, unknown>,
   deps: HostSpecValidationDeps = {
-    isModelAllowed: isModelAllowedDefault,
+    isModelAllowed: (provider, model) => isModelAllowedDefault(provider, model),
     getModelAllowlistState: getModelAllowlistStateDefault,
   },
   context: HostSpecValidationContext = {}
@@ -195,6 +313,9 @@ export async function validateHostSpec(
     }
   }
   if (structuralErrors.length > 0) return { errors: structuralErrors }
+
+  const brokerErrors = validateCodexBrokerAdmission(spec)
+  if (brokerErrors) return brokerErrors
 
   // No-worsening tolerance context (Pieza D), computed once and shared by the 3
   // global-allowlist gates below. On create `context.stored` is absent, so
@@ -239,8 +360,30 @@ export async function validateHostSpec(
         ],
       }
     }
-    const allowed = await deps.isModelAllowed(provider, name)
-    if (!allowed && !toleratePair(provider, name, 'primary', tol)) {
+    const connectionRef =
+      provider === 'codex-subscription' ? resolvedCodexConnectionRef(model) : undefined
+    if (provider === 'codex-subscription' && isCodexUnassignedConnectionKey(connectionRef)) {
+      // Persist the sentinel so empty and unassigned are not two Host states.
+      model.connectionRef = CODEX_UNASSIGNED_CONNECTION_KEY
+    }
+    const skipCodexAllowlist =
+      provider === 'codex-subscription' && isCodexUnassignedConnectionKey(connectionRef)
+    const allowed = skipCodexAllowlist
+      ? true
+      : await deps.isModelAllowed(provider, name, connectionRef)
+    // Switching connectionRef is a new assignment even when (provider, model)
+    // already lived on the Host. A revoked/unknown grant must not ride the
+    // identity/channels full-replace tolerance. An unchanged revoked ref stays
+    // tolerable so operators can still save unrelated fields.
+    const storedConnectionRef = storedCodexConnectionRef(context.stored)
+    const connectionAssignmentChanged =
+      provider === 'codex-subscription' &&
+      storedConnectionRef !== undefined &&
+      storedConnectionRef !== connectionRef
+    if (
+      !allowed &&
+      (connectionAssignmentChanged || !toleratePair(provider, name, 'primary', tol))
+    ) {
       return {
         errors: [
           {
@@ -261,13 +404,16 @@ export async function validateHostSpec(
   // (same fail-closed gate as spec.model.name), so a broken fallback is caught
   // on write instead of surfacing only during the incident it was meant to
   // absorb (spec V16). `credentialSlot`, when present, is format-checked only.
-  const policyErrors = await validateLlmPolicy(spec.llmPolicy, deps, tol)
+  const hostCodexConnectionRef = resolvedCodexConnectionRef(
+    isPlainObject(spec.model) ? spec.model : undefined
+  )
+  const policyErrors = await validateLlmPolicy(spec.llmPolicy, deps, tol, hostCodexConnectionRef)
   if (policyErrors) return policyErrors
 
   // Topic 3a per-host allowlist. Runs AFTER the global-allowlist gates above, so
   // by the time coherence is checked the primary + fallbacks are already known
   // to be valid GLOBAL pairs; this narrows them to the host's offered subset.
-  const allowedModelsErrors = await validateAllowedModels(spec, deps, tol)
+  const allowedModelsErrors = await validateAllowedModels(spec, deps, tol, hostCodexConnectionRef)
   if (allowedModelsErrors) return allowedModelsErrors
 
   // The write PASSED validation: hand the queued tolerations to the caller via
@@ -426,6 +572,22 @@ async function maybeWarnStale(
  * audit event (not emitted until the whole write persists) and returns true so
  * the gate skips its rejection.
  */
+function resolvedCodexConnectionRef(model: unknown): string {
+  if (!isPlainObject(model)) return CODEX_UNASSIGNED_CONNECTION_KEY
+  return readHostCodexConnectionRef(
+    typeof model.connectionRef === 'string' ? model.connectionRef : null
+  )
+}
+
+function storedCodexConnectionRef(stored: Record<string, unknown> | undefined): string | undefined {
+  if (!isPlainObject(stored) || !isPlainObject(stored.model)) return undefined
+  const provider = typeof stored.model.provider === 'string' ? stored.model.provider.trim() : ''
+  if (provider !== 'codex-subscription') return undefined
+  return readHostCodexConnectionRef(
+    typeof stored.model.connectionRef === 'string' ? stored.model.connectionRef : null
+  )
+}
+
 function toleratePair(
   provider: string,
   model: string,
@@ -474,7 +636,8 @@ function toleratePair(
 async function validateAllowedModels(
   spec: Record<string, unknown>,
   deps: HostSpecValidationDeps,
-  tol: HostToleranceBundle
+  tol: HostToleranceBundle,
+  connectionRef: string
 ): Promise<{ errors: Array<{ field: string; message: string }> } | null> {
   const allowedModels = spec.allowedModels
   if (allowedModels === undefined) return null
@@ -516,7 +679,14 @@ async function validateAllowedModels(
     // catalog can never be offered by a host — unless tolerating a pre-existing
     // incoherence this write does not worsen (Pieza D). A tolerated pair is still
     // added to `offered` so the coherence gate below sees the host as offering it.
-    const allowed = await deps.isModelAllowed(provider, model)
+    const allowed =
+      provider === 'codex-subscription' && isCodexUnassignedConnectionKey(connectionRef)
+        ? true
+        : await deps.isModelAllowed(
+            provider,
+            model,
+            provider === 'codex-subscription' ? connectionRef : undefined
+          )
     if (!allowed && !toleratePair(provider, model, 'subset', tol)) {
       return {
         errors: [
@@ -595,7 +765,8 @@ async function validateAllowedModels(
 async function validateLlmPolicy(
   llmPolicy: unknown,
   deps: HostSpecValidationDeps,
-  tol: HostToleranceBundle
+  tol: HostToleranceBundle,
+  connectionRef: string
 ): Promise<{ errors: Array<{ field: string; message: string }> } | null> {
   if (llmPolicy === undefined) return null
   if (!isPlainObject(llmPolicy)) {
@@ -659,6 +830,16 @@ async function validateLlmPolicy(
       // secret pair) or a multiline service-account JSON (Vertex) — those MUST
       // reuse the primary's credentials. `provider` is already narrowed to a known
       // LlmProviderId above, so the registry lookup is total.
+      if (PROVIDER_AUTH_MODE[provider] === 'oauth-broker') {
+        return {
+          errors: [
+            {
+              field: `${base}.credentialSlot`,
+              message: `${base}.credentialSlot is not supported for oauth-broker providers; drop credentialSlot`,
+            },
+          ],
+        }
+      }
       if (!providerSupportsFallbackCredentialSlot(provider)) {
         return {
           errors: [
@@ -674,7 +855,14 @@ async function validateLlmPolicy(
     // Allowlist gate LAST: it is the only async (DB) check, so cheap structural
     // rejections above avoid a needless query. Tolerated (Pieza D) when the pair
     // is a pre-existing incoherence this write does not worsen.
-    const allowed = await deps.isModelAllowed(provider, model)
+    const allowed =
+      provider === 'codex-subscription' && isCodexUnassignedConnectionKey(connectionRef)
+        ? true
+        : await deps.isModelAllowed(
+            provider,
+            model,
+            provider === 'codex-subscription' ? connectionRef : undefined
+          )
     if (!allowed && !toleratePair(provider, model, 'fallback', tol)) {
       return {
         errors: [

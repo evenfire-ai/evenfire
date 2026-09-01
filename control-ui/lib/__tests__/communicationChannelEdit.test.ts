@@ -120,6 +120,7 @@ describe('communication channel edit helpers', () => {
   it('omits inactive provider settings from the saved spec', () => {
     const spec = buildCommunicationChannelSpec({
       accessTeamIds: [],
+      email: [],
       accessUserIds: ['user-1'],
       hostRef: ' chatllm ',
       slack: [],
@@ -155,6 +156,7 @@ describe('communication channel edit helpers', () => {
   it('does not save providers that only have default boolean settings', () => {
     const spec = buildCommunicationChannelSpec({
       accessTeamIds: [],
+      email: [],
       accessUserIds: ['user-1'],
       hostRef: 'chatllm',
       slack: [],
@@ -179,5 +181,66 @@ describe('communication channel edit helpers', () => {
         teams: [],
       },
     })
+  })
+})
+
+describe('spec fields the edit page does not model', () => {
+  // The edit page has no email controls, but the save is a full-spec PUT and
+  // control-api preserves only credentialsSecretRef. So anything the draft drops
+  // is deleted from the CR. Opening an email-backed channel and saving an
+  // unrelated change used to delete spec.email and stop the inbox being polled,
+  // with no error and nothing in the diff the operator looked at. See #386.
+  const emailGroups = [{ channelId: 'INBOX', emails: ['someone@example.com'] }]
+
+  it('round-trips spec.email through the draft untouched', () => {
+    const item: CommunicationChannelItem = channel({
+      spec: {
+        hostRef: 'agent-a',
+        access: { users: [], teams: [] },
+        email: emailGroups,
+        telegram: [{ channelId: '424242', chatType: 'private' }],
+        telegramSettings: { botHandle: '@bot', replyOnlyWhenMentioned: true },
+      },
+    })
+
+    const spec = buildCommunicationChannelSpec(createCommunicationChannelDraft(item))
+
+    expect(spec.email).toEqual(emailGroups)
+  })
+
+  it('does not invent an empty email array on a channel that never had one', () => {
+    // An empty array is not the same as absent: channel-reader guards on
+    // `spec.email?.length`, and writing `email: []` onto every channel is what
+    // put the provider arrays in that state in the first place.
+    const item: CommunicationChannelItem = channel({
+      spec: {
+        hostRef: 'agent-a',
+        access: { users: [], teams: [] },
+        telegram: [{ channelId: '424242', chatType: 'private' }],
+        telegramSettings: { botHandle: '@bot', replyOnlyWhenMentioned: true },
+      },
+    })
+
+    const spec = buildCommunicationChannelSpec(createCommunicationChannelDraft(item))
+
+    expect('email' in spec).toBe(false)
+  })
+
+  it('keeps email when the modelled providers are edited around it', () => {
+    const item: CommunicationChannelItem = channel({
+      spec: {
+        hostRef: 'agent-a',
+        access: { users: [], teams: [] },
+        email: emailGroups,
+        telegram: [{ channelId: '424242', chatType: 'private' }],
+        telegramSettings: { botHandle: '@old', replyOnlyWhenMentioned: true },
+      },
+    })
+
+    const draft = createCommunicationChannelDraft(item)
+    const spec = buildCommunicationChannelSpec({ ...draft, telegramBotHandle: '@new' })
+
+    expect(spec.telegramSettings?.botHandle).toBe('@new')
+    expect(spec.email).toEqual(emailGroups)
   })
 })

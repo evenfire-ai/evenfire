@@ -11,6 +11,7 @@ import type { LlmProvider } from './llm/registryCore'
 export interface ModelConfig {
   provider: LlmProvider
   name: string
+  connectionRef?: string
 }
 
 /** Phase 7–8: Workspace memory configuration. */
@@ -44,7 +45,7 @@ export interface HeartbeatConfig {
 export interface HostSpec {
   host: string
   contextRef: string
-  secretRef: string
+  secretRef?: string
   channels?: string[]
   model?: ModelConfig
   /** Phase 6: Tool approval configuration. */
@@ -146,9 +147,25 @@ export interface McpServerTransport {
  * McpServer authentication configuration.
  */
 export interface McpServerAuth {
-  type: 'none' | 'bearer' | 'basic' | 'apiKey'
+  type: 'none' | 'bearer' | 'basic' | 'apiKey' | 'oauth'
   secretRef?: string
   secretKey?: string
+}
+
+/**
+ * OAuth broker configuration for an mcp-server (auth.type === 'oauth').
+ *
+ * Mirrors the separate `spec.oauth` block on the CRD (projected by HCC). Only
+ * `grantScope` is strictly required for the mcp-host connection seam (dispatch
+ * of the per-connection partition); the rest is carried for the token-provider
+ * factory / diagnostics. `grantScope` defaults to 'user' when absent.
+ */
+export interface McpServerOAuth {
+  id?: string
+  provider?: string
+  grantScope?: 'user' | 'context'
+  scopes?: string[]
+  backgroundAccess?: boolean
 }
 
 /**
@@ -185,6 +202,11 @@ export interface McpServerInfo {
   transport: McpServerTransport
   /** Legacy development shape. HCC v2 returns only authRequired. */
   auth?: McpServerAuth
+  /**
+   * OAuth broker config; present iff auth.type === 'oauth'. Carries `grantScope`
+   * so the manager can dispatch the per-connection partition (user vs shared).
+   */
+  oauth?: McpServerOAuth
   /** Whether the scoped HCC credential route must return a bearer. */
   authRequired?: boolean
   /**
@@ -192,6 +214,15 @@ export interface McpServerInfo {
    * auth selector, or referenced Secret identity/resourceVersion changes.
    */
   credentialRevision?: string
+  /**
+   * Non-secret credential-mode policy emitted by the HCC v2 inventory. Drives the
+   * token-provider dispatch in the mcp-host seam (mini-spec §3.2): `static` uses
+   * the revision-locked getAuthToken route; `oauth-user`/`oauth-context` build a
+   * broker provider. Absent → treated as `static` (fail-closed). It carries NO
+   * authority (never contextRef/secretRef/token) — that is the invariant (I1)
+   * keeping it on the policy side of the decoder's forbidden-metadata guard.
+   */
+  authKind?: 'static' | 'oauth-user' | 'oauth-context'
   enabled: boolean
   status: McpServerStatus
 }
@@ -213,4 +244,18 @@ export interface ToolCallResult {
   toolName: string
   result: unknown
   isError: boolean
+  /**
+   * U5 reactive-consent marker. Present iff `manager.callTool` caught an
+   * `McpAuthError` with `status===401` on a server whose `auth.type==='oauth'`
+   * (both per-user and shared grantScope='context'): a live tool call surfaced a
+   * real 401 after the client's single forced-refresh retry, so the user must
+   * (re)connect. NEVER set for 403 (insufficient scope — terminal) nor for
+   * static/non-oauth servers. `toolRegistryAdapter` maps it to
+   * `metadata.connect_required`, which the tool-use loop turns into a durable
+   * `connect_required` suspension (spec §U5). Kept as a typed field so the marker
+   * is NOT flattened into an opaque error.
+   */
+  connectRequired?: {
+    mcpServerName: string
+  }
 }

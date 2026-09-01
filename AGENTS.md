@@ -32,6 +32,27 @@ also required when the selected profile is missing or unhealthy. Never use
 shared fixed localhost ports for branch-owned profiles; use the profile-owned
 random port mapping already recorded for that profile.
 
+## Branch-profile UI port-forwards
+
+First-hand entry point (gitignored helper at repo root — do not search for
+it). Implementation is `.local-notes/minikube-profiles/branch-profile.sh`.
+Do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+```
+
+This is the host-side hold for Control UI / Desktop. Run it on the host, not
+from a sandboxed agent shell. `make minikube-pf-all-bg` is a gate refresh
+only and must not replace `branch-profile-pf`. Do not kill this lane's
+forwards. `branch-profile-pf-health` starts then stops PFs on EXIT — do not
+use it as the lasting hold. Inner `pre-gate-sync` may use
+`--skip-port-forwards`; never pass that globally into `make minikube-t2`.
+
 Port-forwards are owned by atomic `0600` records bound to the exact profile,
 context, canonical worktree, namespace, Service, local/remote ports, PID,
 process start time, and `kubectl` argv. Never kill or adopt a live legacy
@@ -136,6 +157,10 @@ only the internal planner so `full-bootstrap` is reachable).
 `make minikube-pre-gate-sync` alone never constitutes T2 evidence.
 Follow the rule `.cursor/rules/minikube-t0-t1-t2.mdc` and the skill
 `.cursor/skills/minikube-t0-t1-t2/SKILL.md` for the certification workflow.
+A T1 `next:` line or `REAL_PG_REQUIRED_BUT_UNAVAILABLE` is not a license to
+operate Docker: do not `docker run` probes, `docker desktop restart`, or
+experiment with published ports. Re-enter `make minikube-t2` or
+`make minikube-t2-real-postgres` on the owned profile.
 
 After T0 and T1 are already green on the same HEAD and owned profile, close
 T2 with `make minikube-t2-runtime` (`T2_RUN_T0=false T2_RUN_T1=false`). That

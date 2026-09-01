@@ -1,168 +1,224 @@
 import { useMemo } from 'react'
-import { DataTable, EmptyState, ReferenceTag } from '@components/Common'
+import { Button, DataTable, EmptyState, Pill, ReferenceTag, StatusBanner } from '@components/Common'
+import { scopeCaption, statusPresentation } from '@lib/connectorPresentation'
+import { type ConnectorRow, deriveConnectorRows } from '@lib/connectorRows'
 import { formatMcpServerDisplayName } from '@lib/format'
-import type { ScopedMcpServer } from '@/uiTypes'
 import { useNavigationContext } from '../contexts/NavigationContext'
-import { useMcpServersDataController } from '../hooks/domain/useMcpServersDataController'
+import { useAgentsDataController } from '../hooks/domain/useAgentsDataController'
+import {
+  type ConnectorActionInput,
+  isActionableConnector,
+  useConnectorsController,
+} from '../hooks/domain/useConnectorsController'
+import { clickableRowProps } from '../lib/clickableRowProps'
+
+function ConnectorRowView({
+  row,
+  busy,
+  agentDisplayByName,
+  onAuthorize,
+  onDisconnect,
+  onOpenContext,
+  onOpenAgent,
+}: {
+  row: ConnectorRow
+  busy: boolean
+  // Visible agent name (spec.host) from the catalog map, as everywhere else in
+  // the app (AppHeader, ContextDetailsPage, TeamsPage). Falls back to the raw
+  // identifier for agents absent from the map (e.g. cross-team), not `|| name`.
+  agentDisplayByName: Record<string, string>
+  onAuthorize: (input: ConnectorActionInput) => void
+  onDisconnect: (input: ConnectorActionInput) => void
+  onOpenContext: (contextRef: string) => void
+  onOpenAgent: (agentName: string) => void
+}) {
+  const { connector, contextRef } = row
+  const presentation = statusPresentation(connector.status)
+  const caption = scopeCaption(connector)
+  // The action IPC needs a hostRef to mint the token; the row is per
+  // (server, context), so we act under the deterministic representative agent.
+  const actionInput: ConnectorActionInput = {
+    agentName: row.representativeAgent,
+    contextRef,
+    connector,
+  }
+
+  // The whole row deep-links to the context's Connectors tab — but ONLY when the
+  // connector has a context. Contextless rows stay non-interactive (no target).
+  const rowProps = contextRef
+    ? {
+        className: 'da-table__row--clickable',
+        ...clickableRowProps(() => onOpenContext(contextRef), {
+          ariaLabel: `Open connectors for context ${contextRef}`,
+        }),
+      }
+    : {}
+
+  return (
+    <tr {...rowProps}>
+      <td className="da-table__cell">
+        <span className="context-id-cell">
+          <strong>{formatMcpServerDisplayName(connector.name)}</strong>
+          {connector.provider ? <span className="muted"> · {connector.provider}</span> : null}
+        </span>
+      </td>
+
+      <td className="da-table__cell">
+        {contextRef ? (
+          <ReferenceTag kind="context" title={`Context: ${contextRef}`}>
+            {contextRef}
+          </ReferenceTag>
+        ) : (
+          <span className="agent-table-muted">—</span>
+        )}
+      </td>
+
+      <td className="da-table__cell">
+        {row.usedByAgents.length ? (
+          <span className="reference-tag-list">
+            {row.usedByAgents.map(agentName => (
+              <ReferenceTag
+                key={agentName}
+                kind="agent"
+                onClick={event => {
+                  event.stopPropagation()
+                  onOpenAgent(agentName)
+                }}
+                // The row's clickableRowProps installs an Enter/Space onKeyDown
+                // on the <tr>; stop keyboard activation from bubbling so a chip
+                // press opens the agent instead of navigating the row.
+                onKeyDown={event => event.stopPropagation()}
+                title={agentDisplayByName[agentName] ?? agentName}
+                aria-label={`Open agent ${agentDisplayByName[agentName] ?? agentName}`}
+              >
+                {agentDisplayByName[agentName] ?? agentName}
+              </ReferenceTag>
+            ))}
+          </span>
+        ) : (
+          <span className="agent-table-muted">None</span>
+        )}
+      </td>
+
+      <td className="da-table__cell">
+        <Pill tone={presentation.tone} size="sm" title={caption ?? undefined}>
+          {presentation.label}
+        </Pill>
+      </td>
+
+      <td className="da-table__cell da-table__cell--right">
+        {!isActionableConnector(connector) ? null : connector.status === 'authorized' ? (
+          <Button
+            color="danger"
+            disabled={busy}
+            loading={busy}
+            onClick={event => {
+              // Keep the click on the button — don't trigger the row navigation.
+              event.stopPropagation()
+              onDisconnect(actionInput)
+            }}
+            // Same guard for keyboard: Enter/Space on the button must not bubble
+            // to the row's onKeyDown and navigate as well.
+            onKeyDown={event => event.stopPropagation()}
+            size="sm"
+            variant="ghost"
+          >
+            Disconnect
+          </Button>
+        ) : (
+          <Button
+            color="primary"
+            disabled={busy}
+            loading={busy}
+            onClick={event => {
+              event.stopPropagation()
+              onAuthorize(actionInput)
+            }}
+            onKeyDown={event => event.stopPropagation()}
+            size="sm"
+            variant="soft"
+          >
+            Authorize
+          </Button>
+        )}
+      </td>
+    </tr>
+  )
+}
 
 export function McpServersPage() {
-  const {
-    agentNames,
-    agentDisplayByName,
-    mcpServersByAgent,
-    agentContextByName,
-    globalMcpServers,
-    mcpServerMappingUnavailableMessage,
-    loading,
-    error,
-  } = useMcpServersDataController()
-  const { handleOpenAgentWorkspace, handleOpenContextDetails } = useNavigationContext()
+  const { loading, error, actionError, agents, pendingKey, authorize, disconnect } =
+    useConnectorsController()
+  const { agentDisplayByName } = useAgentsDataController()
+  const { handleOpenContextDetails, handleOpenAgentWorkspace } = useNavigationContext()
 
-  const globalByName = useMemo(() => {
-    const index = new Map<string, ScopedMcpServer>()
-    for (const server of globalMcpServers) {
-      index.set(server.name, server)
-    }
-    return index
-  }, [globalMcpServers])
-
-  const serverRows = useMemo(() => {
-    const rowsByServer = new Map<
-      string,
-      {
-        agents: Set<string>
-        contexts: Set<string>
-        serverName: string
-        url?: string
-      }
-    >()
-
-    for (const agentName of agentNames) {
-      const servers = Array.from(
-        new Set(
-          (mcpServersByAgent[agentName] || [])
-            .map(name => String(name || '').trim())
-            .filter(Boolean)
-        )
-      ).sort((a, b) => a.localeCompare(b))
-      if (!servers.length) continue
-
-      const contextRefRaw = agentContextByName[agentName]
-      const contextId =
-        typeof contextRefRaw === 'string' && contextRefRaw.trim().length > 0
-          ? contextRefRaw.trim()
-          : 'Unassigned context'
-
-      for (const serverName of servers) {
-        const globalServer = globalByName.get(serverName)
-        const existing = rowsByServer.get(serverName)
-        if (existing) {
-          existing.agents.add(agentName)
-          existing.contexts.add(contextId)
-          if (!existing.url && globalServer?.url) existing.url = globalServer.url
-          continue
-        }
-        rowsByServer.set(serverName, {
-          agents: new Set([agentName]),
-          contexts: new Set([contextId]),
-          serverName,
-          ...(globalServer?.url ? { url: globalServer.url } : {}),
-        })
-      }
-    }
-
-    return [...rowsByServer.values()]
-      .map(row => ({
-        agents: [...row.agents].sort((a, b) => a.localeCompare(b)),
-        contexts: [...row.contexts].sort((a, b) => {
-          if (a === 'Unassigned context') return 1
-          if (b === 'Unassigned context') return -1
-          return a.localeCompare(b)
-        }),
-        serverName: row.serverName,
-        url: row.url,
-      }))
-      .sort((a, b) => a.serverName.localeCompare(b.serverName))
-  }, [agentContextByName, agentNames, globalByName, mcpServersByAgent])
+  const rows = useMemo(() => deriveConnectorRows(agents), [agents])
+  const hasRows = rows.length > 0
 
   return (
     <section className="page">
       <div className="page-header">
         <h2>Connectors</h2>
-        <p className="muted">Connectors mapped across available agents and contexts.</p>
+        <p className="muted">
+          Review the connectors available across your agents, authorize the ones that require setup,
+          and disconnect the ones you no longer want.
+        </p>
       </div>
 
       <div className="page-layout">
-        <section className="page-card mcp-servers-board-card">
-          {loading && serverRows.length === 0 ? (
-            <EmptyState title="Loading" body="Fetching connector inventory..." />
-          ) : error && serverRows.length === 0 ? (
-            <div className="composer-error" role="alert">
-              <p className="error-text">{error}</p>
-            </div>
-          ) : serverRows.length === 0 ? (
-            <EmptyState title="No connectors" body={mcpServerMappingUnavailableMessage} />
+        {(actionError ?? error) ? (
+          <StatusBanner tone="error">{actionError ?? error}</StatusBanner>
+        ) : null}
+
+        <section className="page-card mcp-servers-board-card" aria-label="Connectors">
+          {loading && !hasRows ? (
+            <EmptyState title="Loading" body="Fetching your connectors…" />
+          ) : !hasRows ? (
+            <EmptyState
+              title="No connectors"
+              body="No agents with connectors are available for your account yet."
+            />
           ) : (
             <DataTable frameless fullBleed className="mcp-servers-data-table">
               <thead>
                 <tr>
                   <th className="da-table__col-header" scope="col">
-                    Server
+                    Connector
                   </th>
                   <th className="da-table__col-header" scope="col">
-                    Contexts
+                    Context
                   </th>
                   <th className="da-table__col-header" scope="col">
                     Agents
                   </th>
+                  <th className="da-table__col-header" scope="col">
+                    Status
+                  </th>
+                  <th className="da-table__col-header da-table__col-header--right" scope="col">
+                    Actions
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                {serverRows.map(row => (
-                  <tr key={row.serverName}>
-                    <td className="da-table__cell">
-                      <span className="mcp-servers-server-cell">
-                        {formatMcpServerDisplayName(row.serverName)}
-                      </span>
-                      {row.url ? <code className="mcp-servers-url-inline">{row.url}</code> : null}
-                    </td>
-                    <td className="da-table__cell">
-                      <span className="reference-tag-list">
-                        {row.contexts.map(contextId => (
-                          <ReferenceTag
-                            key={`${row.serverName}:${contextId}`}
-                            kind="context"
-                            title={contextId}
-                            aria-label={`Open context ${contextId}`}
-                            disabled={contextId === 'Unassigned context'}
-                            onClick={() => {
-                              if (contextId === 'Unassigned context') return
-                              handleOpenContextDetails(contextId)
-                            }}
-                          >
-                            {contextId}
-                          </ReferenceTag>
-                        ))}
-                      </span>
-                    </td>
-                    <td className="da-table__cell">
-                      <span className="reference-tag-list">
-                        {row.agents.map(agentName => (
-                          <ReferenceTag
-                            key={`${row.serverName}:${agentName}`}
-                            kind="agent"
-                            onClick={() => handleOpenAgentWorkspace(agentName)}
-                            title={agentName}
-                            aria-label={`Open agent ${agentName}`}
-                          >
-                            {/* Visible agent name (spec.host) read directly from
-                                the producer-total map — no fallback (Decision #6). */}
-                            {agentDisplayByName[agentName]}
-                          </ReferenceTag>
-                        ))}
-                      </span>
-                    </td>
-                  </tr>
+                {rows.map(row => (
+                  <ConnectorRowView
+                    key={row.key}
+                    row={row}
+                    busy={pendingKey === row.key}
+                    agentDisplayByName={agentDisplayByName}
+                    onAuthorize={input => {
+                      // The hook records any write failure in `actionError` and
+                      // never rejects, so the call site no longer swallows it.
+                      void authorize(input)
+                    }}
+                    onDisconnect={input => {
+                      void disconnect(input)
+                    }}
+                    onOpenContext={contextRef =>
+                      handleOpenContextDetails(contextRef, 'mcp-servers')
+                    }
+                    onOpenAgent={agentName => handleOpenAgentWorkspace(agentName, 'mcp-servers')}
+                  />
                 ))}
               </tbody>
             </DataTable>

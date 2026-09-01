@@ -16,7 +16,7 @@ if [[ "${1:-}" == "--context" ]]; then
 fi
 
 if [[ "${1:-}" == "kustomize" ]]; then
-  cidr="203.0.113.10/32"
+  cidr="198.51.100.10/32"
   if [[ "${mode}" == "forbidden" ]]; then
     cidr="10.109.0.1/32"
   fi
@@ -71,7 +71,7 @@ if [[ "${1:-}" == "get" && "${2:-}" == "networkpolicy" ]]; then
     printf '{"items":[]}\n'
     exit 0
   fi
-  cidr="203.0.113.10/32"
+  cidr="198.51.100.10/32"
   if [[ "${mode}" == "drift" ]]; then
     cidr="35.199.192.1/32"
   fi
@@ -150,3 +150,10 @@ if run_case forbidden >/tmp/verify-netpol-forbidden.out 2>&1; then
 fi
 grep -q "forbidden CIDR" /tmp/verify-netpol-forbidden.out
 echo "PASS: verify-networkpolicies fails on forbidden CIDR"
+
+grep -q 'name: codex-llm-proxy-ingress' "${ROOT}/deploy/base/control-plane/networkpolicies.yaml"
+grep -q 'name: codex-llm-proxy-egress' "${ROOT}/deploy/base/control-plane/networkpolicies.yaml"
+grep -q 'name: control-api-to-codex-llm-proxy' "${ROOT}/deploy/base/control-plane/networkpolicies.yaml"
+grep -A20 'name: control-api-rpc-gateway' "${ROOT}/deploy/base/control-plane/networkpolicies.yaml" \
+  | grep -q 'app: codex-llm-proxy'
+echo "PASS: Codex proxy NetworkPolicies are declared and the RPC gateway admits the proxy"

@@ -4,7 +4,7 @@
 > `host-context-controller` (HCC). Addresses the "no design/decision doc for the
 > 500+-line external-egress coordinator and the certification barrier" review gap.
 
-![HCC readiness flows resolved by #382](./hcc-readiness-flows-diagram.png)
+![HCC readiness flows — probe vs data-path lanes after #477 A1](./hcc-readiness-flows-diagram.svg)
 
 ## 1. Readiness lifecycle — decoupled from initial fleet convergence
 
@@ -12,8 +12,9 @@ Before this work, `McpServerWatcher.start()` awaited full initial fleet
 reconciliation, so a large MCP/Context/Host fleet could keep `provider.start()`
 and `/ready` unavailable until every individual reconcile finished.
 
-Now readiness is gated on an **authoritative, fail-closed safety boundary**, not on
-full convergence:
+Readiness is now two lanes. Watch freshness (clauses 1–4) stays fail-closed on
+both. Phase-2 certification stays fail-closed on the **data path** and is off
+the kubelet probe (#477 A1):
 
 1. **HCC start** — four watch lanes (Context ingress, mcp-host egress, rpc-proxy
    egress, external egress) start. A transient LIST/WATCH failure on any lane enters
@@ -21,16 +22,20 @@ full convergence:
 2. **4-LIST inventory** — bounded inventory across the four lanes.
 3. **Certify safety inventory** — the authoritative pass revokes any stale /
    unprovable allow **before** recording a certificate (fail-closed).
-4. **`/ready = 200`** — served **only** when the inventory is certified and no stale
-   allow survives.
-5. **Additive convergence** — the remaining fleet converges **after** ready,
-   asynchronously, without blocking it.
+4. **`/ready = 200`** — served when the process is past warm-up and the three
+   watches are synced. Phase-2 certification does **not** hold the probe.
+5. **Per-request data path** — inventory, credential, and other API routes stay
+   on the 6-clause gate. An uncertified safety pass returns 503 without making
+   kubelet evict the Pod.
+6. **Additive convergence** — the remaining fleet converges **after** the probe
+   is ready, asynchronously, without blocking it.
 
 ## 2. Fail-closed fences
 
 | Fence | Rule | Source |
 |-------|------|--------|
-| Readiness gate | `/ready = ready && providerAuthoritativeFn()`; constructor default `() => false`; a throwing gate → 503 | `server.ts`, `readinessGate.ts` |
+| Probe gate | `/ready = ready && probeAuthoritativeFn()` (watch freshness). Omit the 10th constructor arg → fall back to the 6-clause gate so omission cannot weaken kubelet readiness. A throwing gate → 503 | `server.ts`, `readinessGate.ts` |
+| Per-request gate | data-path 503 unless `ready && providerAuthoritativeFn()` (6 clauses). Constructor default `() => false` | `server.ts`, `readinessGate.ts` |
 | G1 — unconfigured authority | `currentWhenUnconfigured()` returns `false` + warns once; prod always wires the source, dev never constructs the reconciler | `reconciler.ts` |
 | F1 — readiness-poll rebind | rebinds `isCurrent`/`server` on a superseding reconcile so the poll window does not self-destruct on a stale fence | `reconciler.ts` |
 | Authority fence — `isCurrent` | **required** (not an optional/defaulted arg) on all three allow-granting reconcilers — `bindingPolicyReconciler`, `reconcileContext` (L2 context-allow), `reconcileExternalEgress` (L3 external-egress ALLOW). No `?? (() => true)` fail-open default: a caller cannot compile without supplying the fence (TS2554/TS2345) | `networkPolicyReconciler.ts`, `bindingPolicyReconciler.ts` |
@@ -48,16 +53,20 @@ reconstructed from the **live** resolved CIDRs ("modulo cidr"). The decision:
 | Observed change | Classification | Action | Rationale |
 |-----------------|----------------|--------|-----------|
 | identity unchanged (same protocol, port, selector, ownership; cidrs only) | identity-stable | **RETAIN** while Ready; refresh cidrs in the additive lane | revoking a healthy binding every pass created a guaranteed deny window |
-| protocol drift (TCP→UDP) | identity-changed | **REVOKE before readiness** | old allow is unprovable/stale |
-| spec-level port drift | identity-changed | **REVOKE before readiness** | " |
-| ownership drift | identity-changed | **REVOKE before readiness** | " |
+| protocol drift (TCP→UDP) | identity-changed | **REVOKE before certifying the data path** | old allow is unprovable/stale |
+| spec-level port drift | identity-changed | **REVOKE before certifying the data path** | " |
+| ownership drift | identity-changed | **REVOKE before certifying the data path** | " |
 | zero-cidr (deny-in-disguise) | never retained | **REVOKE** | an empty cidr set is never a valid retained allow |
 
 Revocation of an unprovable policy runs immediately (`cleanupExternalEgress`) under
-the `isCurrent()` fence, **before** the safety inventory is certified — so `/ready`
-never reports 200 with a stale divergent policy present. The unit suite pins both
-directions (retain identity-stable; revoke on each drift), and the branch-owned
-Minikube gate `e2e-hcc-mcp-context-readiness.sh` exercises both phases live.
+the `isCurrent()` fence, **before** the safety inventory is certified — so the
+**data path** never serves 200 with a stale divergent policy present. After A1
+the kubelet `/ready` probe may return 200 while that revocation is still in
+flight; the cluster gate waits for `/ready` 200 **and** the stale policy to be
+absent, and treats `/ready` 200 with the stale allow still present as retryable.
+The unit suite pins both directions (retain identity-stable; revoke on each
+drift), and the branch-owned Minikube gate `e2e-hcc-mcp-context-readiness.sh`
+exercises both phases live.
 
 ## 4. ExternalEgressConvergenceCoordinator
 

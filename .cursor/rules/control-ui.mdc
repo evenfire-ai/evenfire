@@ -1,0 +1,9 @@
+---
+description: Control UI application-specific coding rules
+globs:
+  - control-ui/**
+alwaysApply: false
+---
+
+Read and apply the canonical Control UI rules in
+@docs/agents/control-ui-rules.md for every matching path.

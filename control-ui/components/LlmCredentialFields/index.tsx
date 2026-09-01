@@ -11,6 +11,7 @@ import { Button, Field, TextAreaInput, TextInput } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import {
   LLM_CREDENTIAL_GROUPS,
+  LLM_SECRET_EDITOR_GROUPS,
   type LlmCredentialGroup,
   type LlmProvider,
   getLlmGroupCompleteness,
@@ -145,8 +146,10 @@ export function LlmCredentialFields({
 
   // Filtering LLM_CREDENTIAL_GROUPS (instead of iterating the sets) keeps the
   // canonical package order regardless of the order providers were added.
-  const visibleGroups = LLM_CREDENTIAL_GROUPS.filter(group => visibleProviders.has(group.provider))
-  const addableGroups = LLM_CREDENTIAL_GROUPS.filter(
+  const visibleGroups = LLM_SECRET_EDITOR_GROUPS.filter(group =>
+    visibleProviders.has(group.provider)
+  )
+  const addableGroups = LLM_SECRET_EDITOR_GROUPS.filter(
     group => !visibleProviders.has(group.provider) && !excludedProviderSet.has(group.provider)
   )
 
@@ -298,7 +301,7 @@ export function LlmCredentialFields({
   }
 
   function addProvider(value: string) {
-    const group = LLM_CREDENTIAL_GROUPS.find(item => item.provider === value)
+    const group = LLM_SECRET_EDITOR_GROUPS.find(item => item.provider === value)
     if (!group) return
     setManuallyAdded(prev => new Set(prev).add(group.provider))
   }

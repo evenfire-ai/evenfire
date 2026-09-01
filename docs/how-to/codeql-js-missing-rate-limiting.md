@@ -43,6 +43,7 @@ Tier defaults (requests/minute, per verified admin session identity unless noted
 | [#82](https://github.com/evenfire-ai/evenfire/security/code-scanning/82) | `grants.routes.ts:197` | Fixed: same                                                       |
 | [#83](https://github.com/evenfire-ai/evenfire/security/code-scanning/83) | `grants.routes.ts:236` | Fixed: same                                                       |
 | [#63](https://github.com/evenfire-ai/evenfire/security/code-scanning/63) | `outputs.ts:35`        | Fixed: `adminOutputsReadRateLimits()` PG + edge backstop (30/min) |
+| [#1157](https://github.com/evenfire-ai/evenfire/security/code-scanning/1157) | `llmProviderAttempts.routes.ts` | Fixed: `express-rate-limit` + PG **before** `requireMcpHostJwt` |
 
 Edge backstop keys: a **verified admin session identity hash** for signed
 Control UI sessions/bearers and a **source-IP fallback** for credentials that
@@ -59,6 +60,9 @@ Additional tiers shipped in PR #428:
 | Admin workflow read    | 60    | `workflowAdminReadRateLimits`   |
 | Admin outputs read     | 30    | `adminOutputsReadRateLimits`    |
 | Admin workflow trigger | 10    | `adminWorkflowTriggerRateLimit` |
+| Admin Codex read / write | 30 / 20 | `adminCodexReadRateLimits` / `adminCodexWriteRateLimits` |
+| Codex OAuth callback     | 20       | `codexOAuthCallbackRateLimits` (IP) |
+| mcp-host attempt authorize | 60     | `llmProviderAttemptAuthorizeRateLimits` (edge before JWT) |
 
 ## Out-of-scope dispositions (Layer 3)
 

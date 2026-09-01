@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { VerifiedMcpHostPrincipal } from './mcpApiAuthentication'
-import type { McpServerAuth, McpServerStatus, McpServerTransport } from './types'
+import type { McpServerAuth, McpServerOAuth, McpServerStatus, McpServerTransport } from './types'
 
 export interface AuthorityMetadata {
   uid: string
@@ -29,6 +29,9 @@ export interface AuthorityMcpServer {
   description?: string
   transport: McpServerTransport
   auth?: McpServerAuth
+  // OAuth broker config (grantScope) from the CRD. Non-secret; used only to
+  // derive the inventory `authKind`. HCC never forwards it to mcp-host raw.
+  oauth?: McpServerOAuth
   enabled: boolean
   status: McpServerStatus
 }
@@ -60,6 +63,34 @@ export interface AuthorizedMcpServerInfo {
     Partial<Pick<McpServerStatus, 'authoritative'>>
   authRequired: boolean
   credentialRevision?: string
+  /**
+   * Non-secret credential-mode policy the mcp-host seam dispatches on
+   * (mini-spec 10 §3.2). Derived from the CRD auth selector; carries NO
+   * authority (no contextRef/secretRef/token). `none` is represented as an
+   * omitted field. Absent → mcp-host degrades to `static` (fail-closed).
+   */
+  authKind?: AuthorizedMcpAuthKind
+}
+
+export type AuthorizedMcpAuthKind = 'static' | 'oauth-user' | 'oauth-context'
+
+/**
+ * Derive the non-secret `authKind` policy for the inventory (mini-spec 10 §3.1).
+ * Pure: same inputs → same output; an oauth server never collapses to `static`.
+ * Returns undefined for the implicit `none` (no auth required) so the caller
+ * omits the field.
+ */
+export function deriveAuthKind(
+  auth: McpServerAuth | undefined,
+  // Only grantScope is read here; accepting the narrow shape documents the
+  // contract and lets callers pass a full McpServerOAuth (structurally wider).
+  oauth: Pick<McpServerOAuth, 'grantScope'> | undefined,
+  authRequired: boolean
+): AuthorizedMcpAuthKind | undefined {
+  if (auth?.type === 'oauth') {
+    return oauth?.grantScope === 'context' ? 'oauth-context' : 'oauth-user'
+  }
+  return authRequired ? 'static' : undefined
 }
 
 export interface AuthorizedCredential {
@@ -291,6 +322,7 @@ export class McpAuthorizationService {
         throw error
       }
       const authRequired = Boolean(grant.server.auth && grant.server.auth.type !== 'none')
+      const authKind = deriveAuthKind(grant.server.auth, grant.server.oauth, authRequired)
       servers.push({
         name: grant.server.name,
         ...(grant.server.description ? { description: grant.server.description } : {}),
@@ -305,6 +337,7 @@ export class McpAuthorizationService {
         },
         authRequired,
         ...(authRequired ? { credentialRevision: grant.credentialRevision } : {}),
+        ...(authKind ? { authKind } : {}),
       })
     }
     const revalidated = await this.resolveHostContext(principal)

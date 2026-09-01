@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   DesktopGfsUploadJob,
+  DesktopUploadCapabilityError,
   allowsLegacyCapabilityFallback,
+  formatGfsUploadLimit,
   isAmbiguousUploadStatus,
   isRetryableUploadStatus,
   normalizeInstabilityFailureThreshold,
@@ -28,6 +30,13 @@ function enabledCapabilities(overrides: Record<string, unknown> = {}) {
 describe('desktop GFS indexed uploader', () => {
   it('pins the missing-field compatibility default independently of the implementation', () => {
     expect(normalizeUploadProductMaxBytes(undefined)).toBe(209_715_200)
+  })
+
+  it('formats Upload v2 display values without becoming product policy authority', () => {
+    expect(formatGfsUploadLimit(300 * 1024 * 1024)).toBe('300 MiB')
+    expect(formatGfsUploadLimit(16 * 1024 * 1024)).toBe('16 MiB')
+    expect(formatGfsUploadLimit(1024 * 1024 * 1024)).toBe('1 GiB')
+    expect(formatGfsUploadLimit(1)).toBe('1 byte')
   })
 
   it('uses the writer threshold and rejects invalid capability values', () => {
@@ -141,7 +150,7 @@ describe('desktop GFS indexed uploader', () => {
           parentRid: 'parent-runtime-lower',
           transport,
         }).start()
-      ).rejects.toThrow(`GFS files are limited to ${100 * 1024 * 1024} bytes by the writer`)
+      ).rejects.toThrow('GFS writer permits files up to 100 MiB for this upload')
       expect(createCalls).toBe(0)
     } finally {
       await rm(root, { recursive: true, force: true })
@@ -248,7 +257,7 @@ describe('desktop GFS indexed uploader', () => {
         }).start()
       ).rejects.toThrow('session admission reached')
       expect(compatibilityWarning).toHaveBeenCalledWith(
-        'GFS Upload v2 writer omitted maxFileBytes; using the 209715200-byte compatibility limit'
+        'GFS Upload v2 writer omitted maxFileBytes; using the 200 MiB compatibility limit'
       )
       expect(createCalls).toBe(1)
       expect((await stat(filePath)).size).toBeLessThanOrEqual(compatibilityMaxFileBytes)
@@ -257,7 +266,7 @@ describe('desktop GFS indexed uploader', () => {
     }
   })
 
-  it.each([0, -1, 1.5, 1024 * 1024 * 1024 + 1, Number.MAX_SAFE_INTEGER + 1, '314572800', null])(
+  it.each([0, -1, 1.5, '314572800', null])(
     'rejects malformed writer maxFileBytes %s as a capability failure',
     async maxFileBytes => {
       const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-invalid-limit-'))
@@ -293,6 +302,15 @@ describe('desktop GFS indexed uploader', () => {
       }
     }
   )
+
+  it('reports a writer/client compatibility problem above the protocol maximum', () => {
+    expect(() => normalizeUploadProductMaxBytes(1024 * 1024 * 1024 + 1)).toThrow(
+      DesktopUploadCapabilityError
+    )
+    expect(() => normalizeUploadProductMaxBytes(1024 * 1024 * 1024 + 1)).toThrow(
+      /beyond this Desktop's fixed 1 GiB Upload v2 protocol ceiling/
+    )
+  })
 
   it('rejects above the 1 GiB protocol maximum before requesting capabilities', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-upload-protocol-max-'))
