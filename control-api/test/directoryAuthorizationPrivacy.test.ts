@@ -39,6 +39,13 @@ const TARGET = '00000000-0000-4000-8000-000000000002'
 const TEAM_A = '00000000-0000-4000-8000-000000000010'
 const TEAM_SECRET = '00000000-0000-4000-8000-000000000099'
 
+async function queryWithDatabaseClock(sql: string, values?: unknown[]) {
+  if (sql.includes('clock_timestamp()')) {
+    return { rows: [{ db_now: new Date('2026-09-01T12:00:00.000Z') }], rowCount: 1 }
+  }
+  return mocks.query(sql, values)
+}
+
 function activeInvitationWindow() {
   return {
     created_at: new Date(Date.now() - 60_000),
@@ -53,7 +60,7 @@ describe('directory privacy and atomic authorization', () => {
     mocks.appendEvents.mockClear()
     mocks.registerInvitation.mockReset()
     mocks.registerInvitation.mockResolvedValue(undefined)
-    mocks.withTransaction.mockImplementation(async work => work({ query: mocks.query }))
+    mocks.withTransaction.mockImplementation(async work => work({ query: queryWithDatabaseClock }))
   })
 
   it('projects managed members only through teams the caller currently manages', async () => {
@@ -232,7 +239,7 @@ describe('directory privacy and atomic authorization', () => {
     mocks.withTransaction.mockImplementation(async work => {
       transactionDepth += 1
       try {
-        return await work({ query: mocks.query })
+        return await work({ query: queryWithDatabaseClock })
       } finally {
         transactionDepth -= 1
       }
@@ -321,7 +328,7 @@ describe('directory privacy and atomic authorization', () => {
     mocks.withTransaction.mockImplementation(async work => {
       transactionDepth += 1
       try {
-        return await work({ query: mocks.query })
+        return await work({ query: queryWithDatabaseClock })
       } finally {
         transactionDepth -= 1
       }
@@ -831,7 +838,7 @@ describe('directory privacy and atomic authorization', () => {
     mocks.withTransaction.mockImplementation(async work => {
       transactionDepth += 1
       try {
-        return await work({ query: mocks.query })
+        return await work({ query: queryWithDatabaseClock })
       } finally {
         transactionDepth -= 1
       }
