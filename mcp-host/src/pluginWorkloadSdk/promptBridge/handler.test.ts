@@ -445,6 +445,49 @@ describe('PromptBridgeHandler', () => {
     expect(report).not.toHaveBeenCalled()
   })
 
+  it('retries a retryable complete finalization before treating the outcome as unknown', async () => {
+    const finalize = vi
+      .fn<FinalizePromptBridge>()
+      .mockRejectedValueOnce(
+        new PluginWorkloadError(
+          'provider_unavailable',
+          'linked Codex attempt has not finalized usage yet',
+          true,
+          'provider_unavailable'
+        )
+      )
+      .mockResolvedValueOnce({
+        invocationId: 'inv-1',
+        providerAttemptId: 'attempt-1',
+        status: 'complete',
+        outcome: 'exact',
+        idempotent: false,
+        usageAccepted: false,
+      })
+    const complete = vi.fn().mockResolvedValue({
+      model: fallback.model,
+      servedTarget: fallback,
+      fallbackUsed: true,
+      attemptCount: 2,
+      llmSecretName: 'provider-secret',
+      providerAttemptId: 'attempt-1',
+      providerAttemptIndex: 2,
+      content: 'summary text',
+      usage: { inputTokens: 10, outputTokens: 5 },
+      finishReason: 'complete',
+    })
+    const { handler, report } = makeDeps({ complete, finalize })
+
+    await expect(handler.handle(validBody, 'api')).resolves.toMatchObject({
+      invocationId: 'inv-1',
+      content: 'summary text',
+    })
+    expect(finalize).toHaveBeenCalledTimes(2)
+    expect(finalize).toHaveBeenNthCalledWith(1, expect.objectContaining({ status: 'complete' }))
+    expect(finalize).toHaveBeenNthCalledWith(2, expect.objectContaining({ status: 'complete' }))
+    expect(report).not.toHaveBeenCalled()
+  })
+
   it('reconciles an exact-finalization failure into a durable unknown receipt', async () => {
     const finalize = vi
       .fn<FinalizePromptBridge>()

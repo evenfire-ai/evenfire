@@ -36,6 +36,32 @@ import type { LlmBridge } from './llmBridge'
 const IDEMPOTENCY_KEY_RE = new RegExp(DEFAULT_IDEMPOTENCY_KEY_PATTERN)
 const PURPOSE_SET = new Set<string>(PLUGIN_WORKLOAD_SDK_PURPOSES)
 const MAX_METADATA_BYTES = 16 * 1024
+const FINALIZE_LEDGER_RETRIES = 4
+const FINALIZE_LEDGER_DELAY_MS = 50
+
+async function finalizeCompleteWithLedgerRetry(
+  finalize: NonNullable<PromptBridgeHandlerDeps['finalizePromptBridge']>,
+  input: Parameters<NonNullable<PromptBridgeHandlerDeps['finalizePromptBridge']>>[0]
+): Promise<void> {
+  let lastError: unknown
+  for (let attempt = 0; attempt < FINALIZE_LEDGER_RETRIES; attempt++) {
+    try {
+      await finalize(input)
+      return
+    } catch (error) {
+      lastError = error
+      if (
+        !(error instanceof PluginWorkloadError) ||
+        error.retryable !== true ||
+        attempt === FINALIZE_LEDGER_RETRIES - 1
+      ) {
+        throw error
+      }
+      await new Promise(resolve => setTimeout(resolve, FINALIZE_LEDGER_DELAY_MS))
+    }
+  }
+  throw lastError
+}
 
 /**
  * A provider response is already potentially billable when this acknowledgement
@@ -388,7 +414,7 @@ export class PromptBridgeHandler {
         providerAttemptIndex >= 1
       ) {
         try {
-          await this.deps.finalizePromptBridge({
+          await finalizeCompleteWithLedgerRetry(this.deps.finalizePromptBridge, {
             invocationId: authorized.invocationId,
             attemptGeneration: authorized.attemptGeneration,
             providerAttemptId,

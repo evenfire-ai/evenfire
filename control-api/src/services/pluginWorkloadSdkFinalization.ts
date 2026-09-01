@@ -51,13 +51,15 @@ export type PromptBridgeFinalizationErrorCode =
   | 'binding_mismatch'
   | 'stale_attempt'
   | 'conflict'
+  | 'ledger_pending'
   | 'invalid_request'
 
 export class PromptBridgeFinalizationError extends Error {
   constructor(
     readonly code: PromptBridgeFinalizationErrorCode,
     message: string,
-    readonly httpStatus: 400 | 403 | 404 | 409
+    readonly httpStatus: 400 | 403 | 404 | 409,
+    readonly retryable = false
   ) {
     super(message)
     this.name = 'PromptBridgeFinalizationError'
@@ -388,6 +390,24 @@ export async function finalizePromptBridgeInTransaction(
   const linkedCodex = oauthBroker
     ? await loadLlmProviderAttemptBySdkAttemptId(db, input.providerAttemptId)
     : null
+  if (oauthBroker && input.status === 'complete' && linkedCodex) {
+    const usageReady =
+      linkedCodex.outcome === 'success' &&
+      linkedCodex.usageInputTokens != null &&
+      linkedCodex.usageOutputTokens != null
+    const inFlight =
+      linkedCodex.status === 'authorized' ||
+      linkedCodex.status === 'redeemed' ||
+      (linkedCodex.status === 'finalized' && linkedCodex.outcome === 'success' && !usageReady)
+    if (!usageReady && inFlight) {
+      throw new PromptBridgeFinalizationError(
+        'ledger_pending',
+        'linked Codex attempt has not finalized usage yet',
+        409,
+        true
+      )
+    }
+  }
   const outcome = resolvePromptBridgeOutcome(input.status, oauthBroker, linkedCodex)
   let usageAccepted = false
 

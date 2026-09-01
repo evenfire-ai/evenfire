@@ -498,6 +498,101 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
     expect(insert?.[1]).toEqual(expect.arrayContaining([IDS.providerAttempt, 'exact', 12, 7]))
   })
 
+  it('refuses Codex complete while a linked attempt is still in flight', async () => {
+    ingest.mockReset()
+    project.mockReset()
+    const db = dbWithRows(
+      [],
+      [],
+      {
+        id: IDS.invocation,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        method: 'promptBridge',
+        status: 'in_progress',
+        attempt_generation: 1,
+      },
+      {
+        invocation_id: IDS.invocation,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        attempt_generation: 1,
+        method: 'promptBridge',
+        status: 'in_progress',
+      },
+      {
+        id: IDS.providerAttempt,
+        invocation_id: IDS.invocation,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        attempt_generation: 1,
+        attempt_index: 1,
+        target_ref: 'codex-primary',
+        host_ref: inputBase.hostRef,
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+        credential_slot: '',
+        status: 'in_progress',
+      },
+      {
+        id: '33333333-3333-4333-8333-333333333333',
+        caller_kind: 'recipe',
+        host_ref: inputBase.hostRef,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        invocation_id: IDS.invocation,
+        attempt_generation: 1,
+        provider_attempt_index: 1,
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+        request_hash: 'hash',
+        policy_revision: 1,
+        policy_hash: 'a'.repeat(64),
+        budget_reservation_id: 'budget-1',
+        connection_revision: 1,
+        status: 'authorized',
+        outcome: null,
+        usage_input_tokens: null,
+        usage_output_tokens: null,
+        created_at: new Date('2026-08-03T00:00:00.000Z'),
+      }
+    )
+
+    await expect(
+      finalizePromptBridgeInTransaction(
+        {
+          ...inputBase,
+          target: {
+            targetRef: 'codex-primary',
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+            credentialSlot: '',
+          },
+          status: 'complete',
+          usage: {
+            llmSecretName: '',
+            callerRef: 'scanner',
+            fallbackUsed: false,
+            attemptCount: 1,
+            inputTokens: 4,
+            outputTokens: 2,
+          },
+        },
+        db as never
+      )
+    ).rejects.toMatchObject({
+      code: 'ledger_pending',
+      httpStatus: 409,
+      retryable: true,
+    })
+    expect(
+      db.query.mock.calls.some(([statement]: [string]) =>
+        statement.includes('INSERT INTO plugin_workload_sdk_spend_outcomes')
+      )
+    ).toBe(false)
+    expect(ingest).not.toHaveBeenCalled()
+  })
+
   it('records Codex complete without a linked success as unknown without fabricated tokens', async () => {
     ingest.mockReset()
     project.mockReset()

@@ -68,6 +68,8 @@ export interface PluginWorkloadSdkCapabilities {
   defaultModel: string | null
   defaultConnectionRef: string | null
   v2Ready: boolean
+  /** Present only when the grant default is oauth-broker (reservation-only Codex). */
+  reservationOnlyOauthBroker?: true
   clientNotificationsPolicyState: string
   clientNotificationsReady: boolean
 }
@@ -210,6 +212,7 @@ function isPluginWorkloadSdkCapabilities(v: unknown): v is PluginWorkloadSdkCapa
       value.defaultConnectionRef === null ||
       typeof value.defaultConnectionRef === 'string') &&
     typeof value.v2Ready === 'boolean' &&
+    (value.reservationOnlyOauthBroker === undefined || value.reservationOnlyOauthBroker === true) &&
     typeof value.clientNotificationsPolicyState === 'string' &&
     typeof value.clientNotificationsReady === 'boolean'
   )
@@ -590,9 +593,13 @@ export class PluginWorkloadSdkControlApiClient {
       )
     }
     const binding = expectedProvider === 'codex-subscription' ? readSdkOnlyCodexBinding() : null
+    const reservationOnlyReady = capabilities.reservationOnlyOauthBroker === true
+    const contractReady =
+      capabilities.contractVersion === 3 && capabilities.supportedContractVersions.includes(3)
     const codexBindingReady =
       expectedProvider !== 'codex-subscription' ||
-      (capabilities.supportedContractVersions.includes(3) &&
+      (reservationOnlyReady &&
+        contractReady &&
         binding !== null &&
         capabilities.defaultProvider === expectedProvider &&
         capabilities.defaultModel === expectedModel &&
@@ -610,16 +617,16 @@ export class PluginWorkloadSdkControlApiClient {
       codexBindingReady
     const policyReason = policyReady
       ? undefined
-      : expectedProvider === 'codex-subscription' && !codexBindingReady
-        ? 'codex_execution_binding_missing'
-        : capabilities.policyState === 'missing'
-          ? 'grant_missing'
-          : capabilities.policyState === 'legacy_unreviewed'
-            ? 'policy_unreviewed'
-            : capabilities.policyState === 'revoking'
-              ? 'policy_revoking'
-              : capabilities.policyState === 'disabled'
-                ? 'policy_disabled'
+      : capabilities.policyState === 'missing'
+        ? 'grant_missing'
+        : capabilities.policyState === 'legacy_unreviewed'
+          ? 'policy_unreviewed'
+          : capabilities.policyState === 'revoking'
+            ? 'policy_revoking'
+            : capabilities.policyState === 'disabled'
+              ? 'policy_disabled'
+              : expectedProvider === 'codex-subscription' && !codexBindingReady
+                ? 'codex_execution_binding_missing'
                 : capabilities.v2Ready
                   ? 'bootstrap_target_mismatch'
                   : 'policy_not_ready'

@@ -267,6 +267,7 @@ describe('GET /mcp-host/plugin-workload-sdk/capabilities', () => {
 
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({
+      contractVersion: 2,
       policyState: 'active',
       policyRevision: 2,
       defaultTargetRef: 'primary-openai',
@@ -276,7 +277,54 @@ describe('GET /mcp-host/plugin-workload-sdk/capabilities', () => {
       supportedContractVersions: [2, 3],
       v2Ready: true,
     })
+    expect(res.body.reservationOnlyOauthBroker).toBeUndefined()
     expect(res.body.policyHash).toMatch(/^[a-f0-9]{64}$/)
+  })
+
+  it('advertises contract v3 only when the grant default is oauth-broker', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue({
+      id: 'grant-codex-capabilities',
+      recipeNamespace: NS,
+      recipeName: RECIPE,
+      capabilityFamily: 'promptBridge',
+      provider: 'codex-subscription',
+      allowedModels: ['gpt-5.1'],
+      allowedEventTypes: [],
+      allowedTargetRefs: [],
+      allowedUserRefs: [],
+      allowedCallers: ['api'],
+      quotaLimits: {},
+      modelPolicies: {},
+      promptTargets: [
+        {
+          targetRef: 'primary-codex',
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          credentialSlot: '',
+          connectionRef: 'team-plus',
+        },
+      ],
+      defaultTargetRef: 'primary-codex',
+      policyState: 'active',
+      policyRevision: 2,
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    })
+
+    const res = await request(buildApp())
+      .get('/mcp-host/plugin-workload-sdk/capabilities')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      contractVersion: 3,
+      supportedContractVersions: [2, 3],
+      reservationOnlyOauthBroker: true,
+      defaultProvider: 'codex-subscription',
+      defaultModel: 'gpt-5.1',
+      defaultConnectionRef: 'team-plus',
+      v2Ready: true,
+    })
   })
 })
 
@@ -853,6 +901,27 @@ describe('POST /mcp-host/plugin-workload-sdk/invocations/:id/finalize', () => {
       .send(finalizationBody)
     expect(res.status).toBe(409)
     expect(res.body).toMatchObject({ error: 'idempotency_conflict', retryable: false })
+  })
+
+  it('maps a pending Codex ledger to retryable provider_unavailable', async () => {
+    vi.mocked(finalizer.finalizePromptBridge).mockRejectedValue(
+      new finalizer.PromptBridgeFinalizationError(
+        'ledger_pending',
+        'linked Codex attempt has not finalized usage yet',
+        409,
+        true
+      )
+    )
+    const res = await request(buildApp())
+      .post('/mcp-host/plugin-workload-sdk/invocations/inv-1/finalize')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+      .send(finalizationBody)
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({
+      error: 'provider_unavailable',
+      retryable: true,
+      reason: 'provider_unavailable',
+    })
   })
 
   it('accepts empty Codex credential fields and defers auth-mode rules to the service', async () => {

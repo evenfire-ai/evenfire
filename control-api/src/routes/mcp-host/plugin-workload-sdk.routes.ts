@@ -1,5 +1,6 @@
 import { type NextFunction, type Request, type Response, Router } from 'express'
 import { rateLimit } from 'express-rate-limit'
+import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
@@ -718,8 +719,18 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         (await hasUsableClientNotificationRecipients(clientNotificationsGrant))
       )
       const primaryTarget = grant?.promptTargets[0] ?? null
+      const reservationOnlyOauthBroker = Boolean(
+        primaryTarget &&
+        isLlmProviderId(primaryTarget.provider) &&
+        PROVIDER_AUTH_MODE[primaryTarget.provider] === 'oauth-broker'
+      )
+      // Old mcp-host/WRC require capabilities.contractVersion === 2. Advertise
+      // 3 only for oauth-broker defaults so those binaries fail at reconcile
+      // instead of Validated-then-empty-ticket. Authorize/grant wire stays 2.
       res.status(200).json({
-        contractVersion: PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION,
+        contractVersion: reservationOnlyOauthBroker
+          ? 3
+          : PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION,
         supportedContractVersions: [2, 3],
         targetAwarePromptBridge: true,
         attemptLedger: true,
@@ -732,6 +743,7 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         defaultModel: primaryTarget?.model ?? null,
         defaultConnectionRef: primaryTarget?.connectionRef ?? null,
         v2Ready,
+        ...(reservationOnlyOauthBroker ? { reservationOnlyOauthBroker: true } : {}),
         clientNotificationsPolicyState: clientNotificationsGrant?.policyState ?? 'missing',
         clientNotificationsReady,
       })
@@ -1048,17 +1060,18 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
           const errorCode =
             error.code === 'conflict'
               ? 'idempotency_conflict'
-              : error.code === 'binding_mismatch'
-                ? 'provider_policy_denied'
-                : error.code === 'stale_attempt'
-                  ? 'provider_unavailable'
+              : error.code === 'ledger_pending' || error.code === 'stale_attempt'
+                ? 'provider_unavailable'
+                : error.code === 'binding_mismatch'
+                  ? 'provider_policy_denied'
                   : error.code === 'not_found'
                     ? 'invalid_request'
                     : error.code
           res.status(error.httpStatus).json({
             error: errorCode,
             message: error.message,
-            retryable: false,
+            retryable: error.retryable === true,
+            ...(error.code === 'ledger_pending' ? { reason: 'provider_unavailable' } : {}),
           })
           return
         }

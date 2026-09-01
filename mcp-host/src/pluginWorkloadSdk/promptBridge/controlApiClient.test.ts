@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import { CircuitBreaker } from '../domain/circuitBreaker'
 import { PluginWorkloadError } from '../domain/errors'
+import { replaceSdkOnlyCodexBinding } from '../sdkOnlyCodexBinding'
 import { PluginWorkloadSdkControlApiClient } from './controlApiClient'
 
 const promptBody = {
@@ -53,6 +55,27 @@ function makeClient(fetchImpl: typeof fetch, breaker?: CircuitBreaker) {
     breaker,
   })
 }
+
+function installCodexBinding(model = 'gpt-5.1') {
+  const binding = {
+    connectionKey: 'team-plus',
+    catalogRevision: 4,
+    credentialRevision: 1,
+    model,
+    bindingHash: computeCodexPolicyHash({
+      model,
+      catalogRevision: 4,
+      credentialRevision: 1,
+      connectionKey: 'team-plus',
+    }),
+  }
+  replaceSdkOnlyCodexBinding(binding)
+  return binding
+}
+
+afterEach(() => {
+  replaceSdkOnlyCodexBinding(null)
+})
 
 describe('PluginWorkloadSdkControlApiClient', () => {
   it('posts to the gateway with the mcp-host bearer token', async () => {
@@ -116,6 +139,75 @@ describe('PluginWorkloadSdkControlApiClient', () => {
       'http://gateway:8092/api/v1/mcp-host/plugin-workload-sdk/capabilities',
       expect.objectContaining({ method: 'GET' })
     )
+  })
+
+  it('requires reservation-only Codex capabilities before marking policy ready', async () => {
+    installCodexBinding()
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        contractVersion: 3,
+        supportedContractVersions: [2, 3],
+        reservationOnlyOauthBroker: true,
+        targetAwarePromptBridge: true,
+        attemptLedger: true,
+        credentialTickets: true,
+        policyState: 'active',
+        policyRevision: 2,
+        policyHash: 'a'.repeat(64),
+        defaultTargetRef: 'codex-primary',
+        defaultProvider: 'codex-subscription',
+        defaultModel: 'gpt-5.1',
+        defaultConnectionRef: 'team-plus',
+        v2Ready: true,
+        clientNotificationsPolicyState: 'missing',
+        clientNotificationsReady: false,
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({
+      ready: true,
+      contractVersion: 3,
+      policyReady: true,
+      policyState: 'active',
+      codexBindingReady: true,
+    })
+  })
+
+  it('keeps Codex policy not ready when an old API advertises contract v2', async () => {
+    installCodexBinding()
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        contractVersion: 2,
+        supportedContractVersions: [2, 3],
+        targetAwarePromptBridge: true,
+        attemptLedger: true,
+        credentialTickets: true,
+        policyState: 'active',
+        policyRevision: 2,
+        policyHash: 'a'.repeat(64),
+        defaultTargetRef: 'codex-primary',
+        defaultProvider: 'codex-subscription',
+        defaultModel: 'gpt-5.1',
+        defaultConnectionRef: 'team-plus',
+        v2Ready: true,
+        clientNotificationsPolicyState: 'missing',
+        clientNotificationsReady: false,
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({
+      ready: true,
+      contractVersion: 3,
+      policyReady: false,
+      policyReason: 'codex_execution_binding_missing',
+      codexBindingReady: false,
+    })
   })
 
   it('keeps request-time policy readiness separate from identity bootstrap', async () => {
