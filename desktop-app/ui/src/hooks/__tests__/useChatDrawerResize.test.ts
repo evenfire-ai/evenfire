@@ -14,6 +14,14 @@ describe('clampWidth', () => {
     expect(clampWidth(100, 2000)).toBe(CHAT_DRAWER_MIN_WIDTH) // 340
   })
 
+  it('pins the minimum floor at the literal 340 (drift guard, mirrors the 820 ceiling)', () => {
+    // Asserting the LITERAL, not the symbol: the other cases compare against
+    // CHAT_DRAWER_MIN_WIDTH, so a 340 → 341 edit would leave them all green. This
+    // closes the asymmetry with the literal-pinned 820 ceiling above.
+    expect(CHAT_DRAWER_MIN_WIDTH).toBe(340)
+    expect(clampWidth(0, 2000)).toBe(340)
+  })
+
   it('returns an in-range request rounded to a whole pixel', () => {
     expect(clampWidth(500.4, 2000)).toBe(500)
     expect(clampWidth(400.6, 2000)).toBe(401)
