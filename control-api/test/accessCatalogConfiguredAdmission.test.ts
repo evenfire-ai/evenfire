@@ -70,7 +70,8 @@ describe('configured Team-GFS catalog admission', () => {
     process.env[MODE] = 'serve'
     process.env[ADMISSION] = '3'
     vi.resetModules()
-    const { attachAccessExecutionBudget } = await import('../src/routes/external/access.js')
+    const { attachAccessExecutionBudget } =
+      await import('../src/middleware/accessExecutionBudget.js')
     const req = Object.assign(new EventEmitter(), {
       method: 'GET',
       path: '/external/access/catalog',
