@@ -129,7 +129,14 @@ export function deriveConnectorRows(agents: RpcAgentConnectors[]): ConnectorRow[
     for (const connector of agent.connectors) {
       const grantKey = connectorRowKey(agent.contextRef, connector.name)
       const current = canonicalStatus.get(grantKey)
-      if (current === undefined || STATUS_RANK[connector.status] > STATUS_RANK[current]) {
+      // `?? -1` keeps the fold total if the server ever ships a status not in
+      // STATUS_RANK: an unknown status ranks below every known one instead of
+      // making the comparison `undefined` (always false), which would silently
+      // let the first-seen status win and could hide an existing grant.
+      if (
+        current === undefined ||
+        (STATUS_RANK[connector.status] ?? -1) > (STATUS_RANK[current] ?? -1)
+      ) {
         canonicalStatus.set(grantKey, connector.status)
       }
     }

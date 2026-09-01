@@ -116,6 +116,26 @@ describe('deriveConnectorRows', () => {
     expect(rows.map(r => r.agentName)).toEqual(['agent-alpha', 'agent-mid', 'agent-zeta'])
   })
 
+  it('ranks an unknown server status below every known one, both orders (L1)', () => {
+    // Version-skew guard: if rpc-proxy ever ships a status absent from
+    // STATUS_RANK, `?? -1` keeps the fold total so a known 'authorized' still
+    // wins over the unknown regardless of iteration order. Without the guard the
+    // `x > undefined` comparison is always false, letting the FIRST-seen status
+    // win — which would hide an existing grant behind a stale unknown row.
+    const unknown = 'brand_new_status' as RpcConnector['status']
+    const authorizedFirst = deriveConnectorRows([
+      agent('agent-alpha', 'ctx-team', [connector({ name: 'monday', status: 'authorized' })]),
+      agent('agent-zeta', 'ctx-team', [connector({ name: 'monday', status: unknown })]),
+    ])
+    const unknownFirst = deriveConnectorRows([
+      agent('agent-alpha', 'ctx-team', [connector({ name: 'monday', status: unknown })]),
+      agent('agent-zeta', 'ctx-team', [connector({ name: 'monday', status: 'authorized' })]),
+    ])
+    // The unknownFirst case is the one that fails on the pre-guard head.
+    expect(authorizedFirst.every(r => r.connector.status === 'authorized')).toBe(true)
+    expect(unknownFirst.every(r => r.connector.status === 'authorized')).toBe(true)
+  })
+
   it('keeps contextless (oauth-user) grants clickable per-agent and exposes both keys', () => {
     const rows = deriveConnectorRows([
       agent('agent-alpha', null, [connector({ name: 'monday' })]),
