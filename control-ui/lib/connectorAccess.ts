@@ -2,7 +2,7 @@ import type {
   ConnectorAccessPrincipal,
   ConnectorAccessSummary,
 } from '../components/McpServerTable.types'
-import type { ContextResource } from './api'
+import type { ContextResource, HostResource } from './api'
 
 function comparePrincipals(
   left: ConnectorAccessPrincipal,
@@ -48,4 +48,25 @@ export function contextNamesForConnector(
         .filter(Boolean)
     )
   ).sort((left, right) => left.localeCompare(right))
+}
+
+/**
+ * Returns only connector scopes owned by at least one Host. Per-install,
+ * workflow-recipe, and other private scopes are intentionally excluded from
+ * operator-facing agent access views.
+ */
+export function hostOwnedContextNamesForConnector(
+  contexts: readonly ContextResource[],
+  hosts: readonly HostResource[],
+  connectorName: string
+): string[] {
+  const hostContextRefs = new Set(
+    hosts
+      .filter(host => String(host.metadata?.name ?? '').trim())
+      .map(host => String(host.spec?.contextRef ?? '').trim())
+      .filter(Boolean)
+  )
+  return contextNamesForConnector(contexts, connectorName).filter(contextName =>
+    hostContextRefs.has(contextName)
+  )
 }

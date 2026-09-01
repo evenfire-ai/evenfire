@@ -162,7 +162,11 @@ function ConnectorAgentsGroup({
                     type="button"
                     className="cu-btn cu-btn--icon cu-btn--danger-icon cu-connector-agent-access__remove"
                     disabled={busy}
-                    aria-label={`Remove connector ${connectorName} from agent ${agent.label}`}
+                    aria-label={
+                      binding.agents.length > 1
+                        ? `Remove connector ${connectorName} from agents ${binding.agents.map(a => a.label).join(', ')}`
+                        : `Remove connector ${connectorName} from agent ${agent.label}`
+                    }
                     title={
                       binding.agents.length > 1
                         ? `Remove from ${binding.agents.map(a => a.label).join(', ')}`

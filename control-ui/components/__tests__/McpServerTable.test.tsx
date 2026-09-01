@@ -458,6 +458,31 @@ describe('McpServerTable — agent membership', () => {
     )
   })
 
+  it('names shared-scope removal buttons with every affected agent', () => {
+    const sharedBinding: ConnectorAgentBinding = {
+      contextRef: 'ctx-shared',
+      agents: [
+        { id: 'agent-alpha', label: 'Alpha' },
+        { id: 'agent-beta', label: 'Beta' },
+      ],
+    }
+    render(
+      <McpServerTable
+        items={[makeItem({ name: 'airtable-server' })]}
+        agentBindingsByConnectorName={{ 'airtable-server': [sharedBinding] }}
+        onRemoveFromAgents={vi.fn().mockResolvedValue(undefined)}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand connector airtable-server' }))
+
+    expect(
+      screen.getAllByRole('button', {
+        name: 'Remove connector airtable-server from agents Alpha, Beta',
+      })
+    ).toHaveLength(2)
+  })
+
   it('uses the agent selection modal to give more agents access to the connector', async () => {
     const onAddToAgents = vi.fn().mockResolvedValue(undefined)
     const items = [makeItem({ name: 'airtable-server' })]

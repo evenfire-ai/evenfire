@@ -42,6 +42,8 @@ vi.mock('../../lib/api', async importOriginal => {
     getContextTeams: vi.fn(),
     getContextUsers: vi.fn(),
     getHosts: vi.fn(),
+    getAgentTeams: vi.fn(),
+    getAgentUsers: vi.fn(),
     getMcpServer: vi.fn(),
     updateMcpServer: vi.fn(),
   }
@@ -67,6 +69,7 @@ describe('connector edit agent access', () => {
         }),
       ])
     )
+    vi.mocked(api.getHosts).mockResolvedValue({ items: [] })
 
     render(<EditMcpServerPage />)
 
@@ -78,7 +81,81 @@ describe('connector edit agent access', () => {
     await waitFor(() => expect(api.getMcpServer).toHaveBeenCalledWith('search'))
     expect(api.getContextUsers).not.toHaveBeenCalled()
     expect(api.getContextTeams).not.toHaveBeenCalled()
-    expect(api.getHosts).not.toHaveBeenCalled()
+    expect(api.getHosts).toHaveBeenCalled()
+  })
+
+  it('hides private connector scopes that are not owned by an agent', async () => {
+    vi.mocked(api.getMcpServer).mockResolvedValue({
+      metadata: { name: 'search' },
+      spec: { image: 'example/search:latest' },
+    })
+    vi.mocked(api.getContexts).mockResolvedValue(
+      buildContextList([
+        buildContextResource({
+          metadata: { name: 'install-private', resourceVersion: 'rv-1' },
+          spec: { mcpServers: ['search'] },
+        }),
+        buildContextResource({
+          metadata: { name: 'recipe-private', resourceVersion: 'rv-2' },
+          spec: { mcpServers: ['search'] },
+        }),
+      ])
+    )
+    vi.mocked(api.getHosts).mockResolvedValue({ items: [] })
+
+    render(<EditMcpServerPage />)
+
+    expect(
+      await screen.findByText('No agents have access to this connector yet.')
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Teams' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Users' })).not.toBeInTheDocument()
+    expect(api.getAgentUsers).not.toHaveBeenCalled()
+    expect(api.getAgentTeams).not.toHaveBeenCalled()
+  })
+
+  it('shows access inherited through a host-owned connector scope', async () => {
+    vi.mocked(api.getMcpServer).mockResolvedValue({
+      metadata: { name: 'search' },
+      spec: { image: 'example/search:latest' },
+    })
+    vi.mocked(api.getContexts).mockResolvedValue(
+      buildContextList([
+        buildContextResource({
+          metadata: { name: 'agent-scope', resourceVersion: 'rv-1' },
+          spec: { mcpServers: ['search'] },
+        }),
+      ])
+    )
+    vi.mocked(api.getHosts).mockResolvedValue({
+      items: [
+        {
+          metadata: { name: 'agent-alpha' },
+          spec: { host: 'Alpha', contextRef: 'agent-scope' },
+        },
+      ],
+    })
+    vi.mocked(api.getAgentUsers).mockResolvedValue({
+      items: [
+        {
+          id: 'user-1',
+          email: 'ada@example.com',
+          name: 'Ada',
+          displayName: 'Ada Lovelace',
+        },
+      ],
+    })
+    vi.mocked(api.getAgentTeams).mockResolvedValue({
+      items: [{ id: 'team-1', name: 'Research' }],
+    })
+
+    render(<EditMcpServerPage />)
+
+    expect(await screen.findByText('Alpha')).toBeInTheDocument()
+    expect(screen.getByText('Ada Lovelace')).toBeInTheDocument()
+    expect(screen.getByText('Research')).toBeInTheDocument()
+    expect(api.getAgentUsers).toHaveBeenCalledWith('agent-alpha')
+    expect(api.getAgentTeams).toHaveBeenCalledWith('agent-alpha')
   })
 
   it('keeps credentials and egress usable when the agent access list is unavailable', async () => {

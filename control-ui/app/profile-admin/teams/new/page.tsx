@@ -13,6 +13,7 @@ import { useToast } from '@components/Toast'
 import { IconTrash } from '@components/icons'
 import { Button, Field, TextInput } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { accessScopeLabeler } from '@lib/accessScopeLabels'
 import { getAgentDisplayName } from '@lib/agentName'
 import {
   addAdminTeamMember,
@@ -129,37 +130,13 @@ export default function CreateTeamPage() {
   )
   // Options keep context IDs as values (the write model) but show what the
   // access means: the owning agent(s), else the stored display name.
-  const contextOptions = useMemo(
-    () => {
-      const resolveLabel = (contextId: string): string => {
-        const owners = hosts
-          .map(host => {
-            const ref = String(
-              (host.spec as { contextRef?: string } | undefined)?.contextRef || ''
-            ).trim()
-            if (ref !== contextId) return ''
-            return (
-              String((host.spec as { host?: string } | undefined)?.host || '').trim() ||
-              String(host.metadata?.name || '')
-            )
-          })
-          .filter(Boolean)
-          .sort((a, b) => a.localeCompare(b))
-        if (owners.length > 0) return owners.join(', ')
-        return (
-          contextResources
-            .find(item => contextIdFromResource(item as never) === contextId)
-            ?.spec?.displayName?.trim() || contextId
-        )
-      }
-      return availableContextIds.map(contextId => ({
-        value: contextId,
-        label: resolveLabel(contextId),
-      }))
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [availableContextIds, contextResources, hosts]
-  )
+  const contextOptions = useMemo(() => {
+    const labelFor = accessScopeLabeler(contextResources, hosts)
+    return availableContextIds.map(contextId => ({
+      value: contextId,
+      label: labelFor(contextId).label,
+    }))
+  }, [availableContextIds, contextResources, hosts])
   const agentOptions = useMemo(
     () =>
       Array.from(new Set(hosts.map(host => hostNameFromResource(host)).filter(Boolean)))
