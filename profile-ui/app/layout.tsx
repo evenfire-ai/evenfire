@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { Suspense } from 'react'
 import type { Metadata } from 'next'
-import '@clerum/frontend-table-system/styles.css'
+import '@clerum/frontend-components/styles.css'
 import { AuthProvider } from '@components/AuthContext'
 import { ProfileAppFrame } from '@components/ProfileAppFrame'
 import { ToastProvider } from '@components/Toast'

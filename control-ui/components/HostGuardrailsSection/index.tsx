@@ -2,7 +2,7 @@
 
 import React, { useCallback, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { RowActionsMenu } from '@components/RowActionsMenu'
 import { useToast } from '@components/Toast'

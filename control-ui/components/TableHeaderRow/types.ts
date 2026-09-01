@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import type { SortDirection } from '@clerum/frontend-table-system'
+import type { SortDirection } from '@clerum/frontend-components'
 
 export type TableHeaderColumn = {
   align?: 'left' | 'right' | 'center'

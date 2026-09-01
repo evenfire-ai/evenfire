@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '../../../app/constants/routes'
 import { useConfirmDialog } from '../../../components/ConfirmDialog'
 import { CreateFlowPanel } from '../../../components/CreateFlowPanel'

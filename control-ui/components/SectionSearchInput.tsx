@@ -1,6 +1,6 @@
 'use client'
 
-import { TableSearch } from '@clerum/frontend-table-system'
+import { TableSearch } from '@clerum/frontend-components'
 
 export function SectionSearchInput({
   disabled = false,

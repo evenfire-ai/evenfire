@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState } from 'react'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable } from '@clerum/frontend-components'
 import { HostApprovalSection } from '@components/HostApprovalSection'
 import { HostEnvTable } from '@components/HostEnvTable'
 import { HostGuardrailsSection } from '@components/HostGuardrailsSection'

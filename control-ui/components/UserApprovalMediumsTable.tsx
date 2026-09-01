@@ -1,7 +1,7 @@
 'use client'
 
 import React from 'react'
-import { DataTable, RowActionMenu } from '@clerum/frontend-table-system'
+import { DataTable, RowActionMenu } from '@clerum/frontend-components'
 import type { WorkflowApprovalMediumAccount } from '../lib/workflowApprovalMediums'
 
 function formatAccount(account: WorkflowApprovalMediumAccount): string {

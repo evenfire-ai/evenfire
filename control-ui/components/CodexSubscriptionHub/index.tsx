@@ -6,7 +6,7 @@ import {
   TableHeaderCell,
   TableStateRow,
   useTableSort,
-} from '@clerum/frontend-table-system'
+} from '@clerum/frontend-components'
 import { copyTextToClipboard } from '@lib/clipboard'
 import {
   CODEX_DEVICE_VERIFICATION_URI,

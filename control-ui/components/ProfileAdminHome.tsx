@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   AdminPendingInvitationListItem,

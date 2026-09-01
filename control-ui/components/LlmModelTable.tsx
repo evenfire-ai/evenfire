@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useEffect, useMemo, useState } from 'react'
-import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-components'
 import type { LlmAllowedModel } from '@lib/api'
 import { catalogGroupKey, formatContextWindow, getProviderDisplayLabel } from '@lib/llm'
 import { isUnpricedAllowedModel } from '@lib/llmModelUnpriced'

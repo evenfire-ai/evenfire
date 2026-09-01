@@ -1,4 +1,4 @@
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable } from '@clerum/frontend-components'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { GovernedTraceToolUsage } from '@lib/governedTrace'
 import { formatTraceTimestamp } from '../formatters'

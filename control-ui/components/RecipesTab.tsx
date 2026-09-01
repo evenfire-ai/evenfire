@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { DEFAULT_WORKFLOW_RECIPE_NAMESPACE } from '@constants/workflowRecipes'
 import type { WorkflowRecipeResource } from '../lib/api'

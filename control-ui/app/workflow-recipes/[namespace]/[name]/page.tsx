@@ -2,7 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable } from '@clerum/frontend-components'
 import { AuthGate } from '@components/AuthGate'
 import { BodyLoadingSkeleton } from '@components/BodyLoadingSkeleton'
 import { useConfirmDialog } from '@components/ConfirmDialog'

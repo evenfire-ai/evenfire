@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable } from '@clerum/frontend-components'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { GovernedTraceSessionDetail } from '@lib/governedTrace'

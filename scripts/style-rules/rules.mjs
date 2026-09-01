@@ -127,7 +127,7 @@ export const rules = [
     id: 'web-no-app-local-table',
     severity: 'error',
     description:
-      'Control UI and Profile UI production views must use @clerum/frontend-table-system instead of raw app-local table markup.',
+      'Control UI and Profile UI production views must use @clerum/frontend-components instead of raw app-local table markup.',
     applies(file) {
       return isWebProductionSource(file)
     },
@@ -138,7 +138,7 @@ export const rules = [
           violations.push({
             line: i + 1,
             message:
-              'raw <table> creates a parallel table shell — compose @clerum/frontend-table-system DataTable primitives',
+              'raw <table> creates a parallel table shell — compose @clerum/frontend-components DataTable primitives',
           })
         }
       })
@@ -160,7 +160,7 @@ export const rules = [
           if (legacy.pattern.test(line)) {
             violations.push({
               line: i + 1,
-              message: `${legacy.message} — use @clerum/frontend-table-system`,
+              message: `${legacy.message} — use @clerum/frontend-components`,
             })
           }
         }

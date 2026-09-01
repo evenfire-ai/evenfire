@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-table-system'
+import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
 import { Button } from '@components/Button'
 import { CheckboxField } from '@components/CheckboxField'
 import { FormField } from '@components/FormField'

@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useMemo } from 'react'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable } from '@clerum/frontend-components'
 import { SkeletonTableRows } from './SkeletonTableRows'
 import { TablePanelHeader } from './TablePanelHeader'
 import { IconRefresh } from './icons'

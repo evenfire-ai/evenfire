@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable } from '@clerum/frontend-components'
 import { FileUploadModal } from '@components/FileUploadModal'
 import { RowActionsMenu } from '@components/RowActionsMenu'
 import { CONTROL_ROUTES } from '@constants/routes'

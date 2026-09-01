@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-components'
 import { ContextResource } from '../lib/api'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'

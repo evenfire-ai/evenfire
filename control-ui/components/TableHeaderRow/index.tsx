@@ -1,6 +1,6 @@
 'use client'
 
-import { TableHeaderCell } from '@clerum/frontend-table-system'
+import { TableHeaderCell } from '@clerum/frontend-components'
 import type { TableHeaderColumn } from './types'
 
 export function TableHeaderRow({ columns }: { columns: TableHeaderColumn[] }) {

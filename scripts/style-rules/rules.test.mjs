@@ -47,13 +47,13 @@ test('rejects raw production tables in Control UI and Profile UI', () => {
   assert.equal(violationsFor('profile-ui/app/members/page.tsx', '<table />').length, 1)
 })
 
-test('allows shared table-system composition and test fixtures', () => {
+test('allows shared table composition and test fixtures', () => {
   const shared = '<DataTable><TableBody /></DataTable>'
   const fixture = '<table><tbody /></table>'
 
   assert.deepEqual(violationsFor('control-ui/app/agents/page.tsx', shared), [])
   assert.deepEqual(violationsFor('profile-ui/__tests__/members.test.tsx', fixture), [])
-  assert.deepEqual(violationsFor('packages/frontend-table-system/src/DataTable.tsx', fixture), [])
+  assert.deepEqual(violationsFor('packages/frontend-components/src/DataTable.tsx', fixture), [])
 })
 
 test('rejects retired production table and expansion families', () => {
@@ -75,14 +75,14 @@ test('does not confuse RowActionsMenu with the retired RowActions component', ()
   assert.deepEqual(
     violationsFor(
       'control-ui/components/Hosts.tsx',
-      "import { RowActionsMenu } from '@evenfire/frontend-table-system'\n<RowActionsMenu />"
+      "import { RowActionsMenu } from '@evenfire/frontend-components'\n<RowActionsMenu />"
     ),
     []
   )
 })
 
 test('shared table colors resolve through tokens declared by both web apps', () => {
-  const sharedCss = readFileSync('packages/frontend-table-system/styles.css', 'utf8')
+  const sharedCss = readFileSync('packages/frontend-components/styles.css', 'utf8')
   const controlCss = readFileSync('control-ui/app/globals.css', 'utf8')
   const profileCss = readFileSync('profile-ui/app/globals.css', 'utf8')
   const bindings = [...sharedCss.matchAll(/--eft-[^:]+:\s*var\((--cu-[^)]+)\);/g)]
@@ -99,7 +99,7 @@ test('shared table colors resolve through tokens declared by both web apps', () 
 })
 
 test('shared table typography uses each web app contract', () => {
-  const sharedCss = readFileSync('packages/frontend-table-system/styles.css', 'utf8')
+  const sharedCss = readFileSync('packages/frontend-components/styles.css', 'utf8')
   const controlCss = readFileSync('control-ui/app/globals.css', 'utf8')
   const profileCss = readFileSync('profile-ui/app/globals.css', 'utf8')
 

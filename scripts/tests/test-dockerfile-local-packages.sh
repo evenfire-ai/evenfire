@@ -146,15 +146,15 @@ assert_dockerignore_mutations_rejected() {
   extra_secret="$fixture_dir/extra-secret"
 
   printf '%s\n' \
-    '!packages/frontend-table-system/' \
-    '!packages/frontend-table-system/package.json' \
-    '!packages/frontend-table-system/src/' \
-    '!packages/frontend-table-system/src/index.tsx' \
-    '!packages/frontend-table-system/styles.css' \
-    '!packages/frontend-table-system/node_modules/' > "$negated_node_modules"
+    '!packages/frontend-components/' \
+    '!packages/frontend-components/package.json' \
+    '!packages/frontend-components/src/' \
+    '!packages/frontend-components/src/index.tsx' \
+    '!packages/frontend-components/styles.css' \
+    '!packages/frontend-components/node_modules/' > "$negated_node_modules"
   local before="$failures"
   assert_dockerignore_excludes_generated_dependencies \
-    "$negated_node_modules" frontend-table-system 2>/dev/null
+    "$negated_node_modules" frontend-components 2>/dev/null
   if [[ "$failures" -eq "$before" ]]; then
     fail 'Docker context contract must reject a negated node_modules rule'
   else
@@ -162,15 +162,15 @@ assert_dockerignore_mutations_rejected() {
   fi
 
   printf '%s\n' \
-    '!packages/frontend-table-system/' \
-    '!packages/frontend-table-system/package.json' \
-    '!packages/frontend-table-system/src/' \
-    '!packages/frontend-table-system/src/index.tsx' \
-    '!packages/frontend-table-system/styles.css' \
-    '!packages/frontend-table-system/.env' \
-    'packages/frontend-table-system/node_modules/' > "$extra_secret"
+    '!packages/frontend-components/' \
+    '!packages/frontend-components/package.json' \
+    '!packages/frontend-components/src/' \
+    '!packages/frontend-components/src/index.tsx' \
+    '!packages/frontend-components/styles.css' \
+    '!packages/frontend-components/.env' \
+    'packages/frontend-components/node_modules/' > "$extra_secret"
   before="$failures"
-  assert_dockerignore_narrow_package "$extra_secret" frontend-table-system 2>/dev/null
+  assert_dockerignore_narrow_package "$extra_secret" frontend-components 2>/dev/null
   if [[ "$failures" -eq "$before" ]]; then
     fail 'Docker context contract must reject an extra package-scoped allow rule'
   else
@@ -185,8 +185,8 @@ assert_dockerignore_mutations_rejected() {
 assert_copy_before_every_ci control-api/Dockerfile \
   display-field image-policy llm-providers workflow-recipe-capability-policy workflow-runtime-core
 assert_copy_before_every_ci control-ui/Dockerfile \
-  display-field frontend-table-system llm-providers workflow-recipe-capability-policy
-assert_copy_before_every_ci profile-ui/Dockerfile desktop-app-links frontend-table-system
+  display-field frontend-components llm-providers workflow-recipe-capability-policy
+assert_copy_before_every_ci profile-ui/Dockerfile desktop-app-links frontend-components
 assert_copy_before_every_ci host-context-controller/Dockerfile \
   image-policy llm-providers network-policy-core workflow-recipe-capability-policy
 assert_copy_before_every_ci mcp-host/Dockerfile llm-providers
@@ -205,19 +205,19 @@ assert_copy_before_last_ci workflow-recipes/Dockerfile.coordinator workflow-reci
 assert_copy_before_last_ci workflow-recipes/Dockerfile.coordinator image-policy
 
 assert_materialized control-ui/Dockerfile display-field
-assert_materialized control-ui/Dockerfile frontend-table-system
+assert_materialized control-ui/Dockerfile frontend-components
 assert_materialized control-ui/Dockerfile llm-providers
 assert_materialized control-ui/Dockerfile workflow-recipe-capability-policy
 assert_materialized profile-ui/Dockerfile desktop-app-links
-assert_materialized profile-ui/Dockerfile frontend-table-system
+assert_materialized profile-ui/Dockerfile frontend-components
 
 assert_dockerignore_allows control-api/Dockerfile.dockerignore display-field
 assert_dockerignore_allows control-api/Dockerfile.dockerignore llm-providers
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore display-field
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore llm-providers
-assert_dockerignore_narrow_package control-ui/Dockerfile.dockerignore frontend-table-system
+assert_dockerignore_narrow_package control-ui/Dockerfile.dockerignore frontend-components
 assert_dockerignore_excludes_generated_dependencies \
-  control-ui/Dockerfile.dockerignore frontend-table-system
+  control-ui/Dockerfile.dockerignore frontend-components
 assert_dockerignore_mutations_rejected
 
 if (( failures > 0 )); then

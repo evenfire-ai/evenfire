@@ -1,7 +1,7 @@
 'use client'
 
 import React from 'react'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable } from '@clerum/frontend-components'
 import { RowActionsMenu } from '@components/RowActionsMenu'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'

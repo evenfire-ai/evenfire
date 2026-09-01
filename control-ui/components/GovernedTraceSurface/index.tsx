@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable } from '@clerum/frontend-components'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'

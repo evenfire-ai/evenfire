@@ -5,7 +5,7 @@ import {
   type SortValue,
   compareSortValues,
   stableSortRows,
-} from '@clerum/frontend-table-system'
+} from '@clerum/frontend-components'
 
 const sortValue = fc.oneof(
   fc.string(),

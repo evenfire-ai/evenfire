@@ -1,6 +1,6 @@
 'use client'
 
-import { DataViewHeader } from '@clerum/frontend-table-system'
+import { DataViewHeader } from '@clerum/frontend-components'
 import { cn } from '@lib/cn'
 import type { TablePanelHeaderProps } from './types'
 

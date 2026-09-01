@@ -2,7 +2,7 @@
 
 import React, { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-components'
 import { RowActionsMenu } from '@components/RowActionsMenu'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { LlmHookStatus } from '../lib/api'

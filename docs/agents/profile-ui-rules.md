@@ -15,7 +15,7 @@ These provider-neutral rules apply only to `profile-ui/**`. Combine them with
   migrate Profile UI to Control UI's `components/ui/` structure.
 - Reusable configuration constants live under `app/constants/`.
 - Reuse Profile UI's existing form primitives, including `Button`, `TextInput`,
-  `SelectControl`, and `FormField`. Use `@clerum/frontend-table-system` for
+  `SelectControl`, and `FormField`. Use `@clerum/frontend-components` for
   tables and repeated record lists; the obsolete local `EditableList` has been
   removed.
 

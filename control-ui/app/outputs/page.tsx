@@ -7,7 +7,7 @@ import {
   TableHeaderCell,
   TableStateRow,
   useTableSort,
-} from '@clerum/frontend-table-system'
+} from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { AuthGate } from '../../components/AuthGate'
 import { DashboardLayout } from '../../components/DashboardLayout'

@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { DataTable, RowActionMenu } from '@clerum/frontend-table-system'
+import { DataTable, RowActionMenu } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { formatCommunicationChannelConfirmedAt } from '@lib/communicationChannels'
 import type {

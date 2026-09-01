@@ -8,7 +8,7 @@ import {
   TableRow,
   TableStateRow,
   useTableSort,
-} from '@clerum/frontend-table-system'
+} from '@clerum/frontend-components'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { IconSharedFiles } from '@components/Sidebar/icons'

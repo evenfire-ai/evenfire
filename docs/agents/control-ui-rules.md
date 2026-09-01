@@ -66,7 +66,7 @@ leaning on either behaviour.
 
 ## Tables and row actions
 
-- Use `@clerum/frontend-table-system` directly or the thin Control UI adapters
+- Use `@clerum/frontend-components` directly or the thin Control UI adapters
   `TablePanelHeader`, `TableHeaderRow`, `SectionSearchInput`, and
   `RowActionsMenu`. Those adapters preserve Control UI labels/routes/classes;
   they do not own a second semantic table implementation.
@@ -102,7 +102,8 @@ leaning on either behaviour.
 ## Page patterns
 
 - Use `TablePanelHeader` and `TableHeaderRow` for route tables and sections;
-  both delegate their semantic behavior to the shared table package.
+  both delegate their semantic behavior to the shared frontend components
+  package.
 - Keep the section icon, title, subtitle, search, refresh, and CTAs visible
   while initial loading, empty, and error states render in the content area.
   Disable header CTAs during initial loading, and let only the content pane

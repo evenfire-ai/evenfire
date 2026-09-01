@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { type OrgImage, listOrgImages } from '../../lib/api'
 import {

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { DataTable, RowActionMenu } from '@clerum/frontend-table-system'
+import { DataTable, RowActionMenu } from '@clerum/frontend-components'
 import { useAuth } from '@components/AuthContext'
 import { AuthGate } from '@components/AuthGate'
 import { Button } from '@components/Button'

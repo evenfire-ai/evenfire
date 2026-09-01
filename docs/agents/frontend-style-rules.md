@@ -82,7 +82,7 @@ application guidance that must be combined with this shared document.
 
 ## Tables and record lists
 
-- `packages/frontend-table-system` is the shared semantic and visual boundary
+- `packages/frontend-components` is the shared semantic and visual boundary
   for Control UI and Profile UI tables and table-like record lists. Import its
   `DataViewHeader`, `TableSearch`, `TableViewport`, `DataTable`, `TableRow`,
   table cells/state rows, `RecordList`, `RecordListRow`, `RowActionMenu`, and

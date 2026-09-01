@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-table-system'
+import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
 import { AuthGate } from '@components/AuthGate'
 import { Button } from '@components/Button'
 import { ProfileBodySkeleton } from '@components/ProfileBodySkeleton'

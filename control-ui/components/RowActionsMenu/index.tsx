@@ -1,6 +1,6 @@
 'use client'
 
-import { RowActionMenu } from '@clerum/frontend-table-system'
+import { RowActionMenu } from '@clerum/frontend-components'
 import type { RowActionsMenuProps } from './types'
 
 export type { RowActionMenuItem } from './types'

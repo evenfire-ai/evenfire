@@ -7,7 +7,7 @@ import {
   TableHeaderCell,
   TableStateRow,
   useTableSort,
-} from '@clerum/frontend-table-system'
+} from '@clerum/frontend-components'
 import { useAuth } from '@components/AuthContext'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { RowActionsMenu } from '@components/RowActionsMenu'

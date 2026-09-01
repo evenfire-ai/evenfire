@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable, TableRow, TableStateRow } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, TableStateRow } from '@clerum/frontend-components'
 import { copyTextToClipboard } from '@lib/clipboard'
 import type {
   ConnectorAccessSummary,

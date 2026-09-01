@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-components'
 import {
   COMMUNICATION_CHANNEL_PROVIDERS,
   type CommunicationChannelProvider,

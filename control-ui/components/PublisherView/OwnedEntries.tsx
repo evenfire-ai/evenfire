@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-components'
 import { MARKETPLACE_ENTRY_TYPE_LABELS } from '@constants/marketplaceEntryTypes'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {

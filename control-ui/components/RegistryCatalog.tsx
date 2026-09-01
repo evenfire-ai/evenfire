@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { DataTable, TableRow, TableStateRow } from '@clerum/frontend-table-system'
+import { DataTable, TableRow, TableStateRow } from '@clerum/frontend-components'
 import { FilterSelect } from '@components/FilterSelect'
 import { MarketplaceTabs } from '@components/MarketplaceTabs'
 import { type RowActionMenuItem, RowActionsMenu } from '@components/RowActionsMenu'

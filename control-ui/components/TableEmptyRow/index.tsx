@@ -1,6 +1,6 @@
 'use client'
 
-import { TableStateRow } from '@clerum/frontend-table-system'
+import { TableStateRow } from '@clerum/frontend-components'
 import { Button } from '@components/ui'
 import type { TableEmptyRowProps } from './types'
 

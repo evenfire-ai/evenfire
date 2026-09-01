@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type CreateRegistryApiKeyInput,

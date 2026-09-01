@@ -1,4 +1,4 @@
-import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-table-system'
+import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
 import { Button } from '@components/Button'
 import { TextInput } from '@components/TextInput'
 import type {

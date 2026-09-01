@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type CreatedRegistryApiKey,

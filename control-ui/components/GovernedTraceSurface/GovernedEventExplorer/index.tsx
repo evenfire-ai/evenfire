@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable } from '@clerum/frontend-components'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'

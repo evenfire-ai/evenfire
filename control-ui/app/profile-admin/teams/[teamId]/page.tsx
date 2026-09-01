@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { DataTable, RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-table-system'
+import { DataTable, RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
 import { SelectionDropdown } from '@components/SelectionDropdown'

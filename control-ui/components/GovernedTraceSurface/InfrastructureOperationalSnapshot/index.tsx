@@ -10,7 +10,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { DataTable } from '@clerum/frontend-table-system'
+import { DataTable } from '@clerum/frontend-components'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import type { GovernedTraceEvent } from '@lib/governedTrace'

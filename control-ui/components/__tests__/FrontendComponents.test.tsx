@@ -6,9 +6,9 @@ import {
   TableHeaderCell,
   TableRow,
   stableSortRows,
-} from '@clerum/frontend-table-system'
+} from '@clerum/frontend-components'
 
-describe('shared frontend table system', () => {
+describe('shared frontend components', () => {
   it('exposes sortable header state and a keyboard sort control', () => {
     const onSort = vi.fn()
     render(

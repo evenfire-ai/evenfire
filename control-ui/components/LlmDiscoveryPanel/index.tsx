@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-table-system'
+import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-components'
 import { LlmProviderIcon } from '@components/LlmProviderIcon'
 import { IconModels } from '@components/Sidebar/icons'
 import { TableHeaderRow } from '@components/TableHeaderRow'
