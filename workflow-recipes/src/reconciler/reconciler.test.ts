@@ -4204,54 +4204,78 @@ describe('WorkflowRecipeReconciler', () => {
     }
   })
 
-  it('does NOT record a renewal write, which writes without the set changing', async () => {
+  it('does NOT record a RENEWAL write, which writes with the set unchanged', async () => {
     // The gate is `changed`, not "did we write". A renewal (audit M1) re-persists
     // an aging window with an identical set: the policy IS rewritten and no
-    // record is due, because nothing about the resolved set changed. This is the
-    // direction the record does NOT run — every entry implies a write, not the
-    // converse — and it is the only path that still reaches the emitter with
-    // changed === false, since the no-op gate returns earlier.
+    // record is due, because nothing about the resolved set changed. That is the
+    // direction the record does NOT run — an entry implies a write, not the
+    // converse.
+    //
+    // ISOLATING renewalDue. The live policy fed back here is the reconciler's OWN
+    // first render, with only the state annotation's `expiresAt` rewound. That
+    // matters: it makes the rendered spec.egress byte-identical, so
+    // `egressWriteNeeded` is FALSE and `changed` is FALSE, leaving renewalDue as
+    // the only term of the H4 gate that can still authorise a write. A fixture
+    // carrying just `metadata` would leave egressWriteNeeded true and the test
+    // would pass without renewalDue ever being the cause.
+    const kc = new k8s.KubeConfig()
+    const rec = new WorkflowRecipeReconciler(kc, undefined, {
+      // The SAME address both rounds, so the (fqdn,ip,port,protocol) set is unchanged.
+      fqdnLookup: async () => ({
+        kind: 'ok',
+        ipv4: ['93.184.216.10'],
+        ipv6: [],
+        ttlSeconds: 300,
+      }),
+    })
+    const recipe = uiRecipeWithExternals([{ fqdn: 'api.stripe.com', port: 443 }])
+
+    await rec.reconcile(recipe)
+    const rendered = createdPolicy('ui-egress-test-recipe')
+    expect(rendered).toBeDefined()
+
+    // Rewind ONLY the persisted expiry, keeping every (fqdn,ip,port,protocol)
+    // tuple. renewalDue fires when a surviving entry's persisted expiry is within
+    // overlap/2 of now and this round would advance it.
+    const persisted = JSON.parse(
+      rendered!.metadata!.annotations!['clerum.io/egress-fqdn-state']
+    ) as Array<Record<string, unknown>>
+    const aging = persisted.map(e => ({ ...e, expiresAt: Date.now() + 30_000 }))
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
+      ...rendered,
+      metadata: {
+        ...rendered!.metadata,
+        resourceVersion: '1',
+        annotations: {
+          ...rendered!.metadata!.annotations,
+          'clerum.io/egress-fqdn-state': JSON.stringify(aging),
+        },
+      },
+    })
+
     const cap = captureEgressRecords()
+    const noOpSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     try {
-      const now = Date.now()
-      // expiresAt within overlap/2 of now makes this round's fresh expiry an
-      // advance, which is exactly what renewalDue keys on.
-      const aging = [
-        {
-          ip: '93.184.216.10',
-          port: 443,
-          protocol: 'TCP',
-          fqdn: 'api.stripe.com',
-          expiresAt: now + 30_000,
-          lastObservedAt: now,
-        },
-      ]
-      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
-        metadata: {
-          name: 'ui-egress-test-recipe',
-          resourceVersion: '1',
-          annotations: { 'clerum.io/egress-fqdn-state': JSON.stringify(aging) },
-        },
-      })
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
 
-      const kc = new k8s.KubeConfig()
-      const rec = new WorkflowRecipeReconciler(kc, undefined, {
-        // The SAME address, so the (fqdn,ip,port,protocol) set is unchanged.
-        fqdnLookup: async () => ({
-          kind: 'ok',
-          ipv4: ['93.184.216.10'],
-          ipv6: [],
-          ttlSeconds: 300,
-        }),
-      })
+      await rec.reconcile(recipe)
 
-      await rec.reconcile(uiRecipeWithExternals([{ fqdn: 'api.stripe.com', port: 443 }]))
+      // POSITIVE CONTROL: a write really happened. With the spec identical and the
+      // set unchanged, renewalDue is the only term left that could have caused it,
+      // so this also proves the no-op gate did NOT short-circuit.
+      const wrote =
+        mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.length +
+        mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls.length
+      expect(wrote).toBeGreaterThan(0)
+      expect(noOpSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('ui-egress-test-recipe" in sandbox-ui egress set unchanged — no-op')
+      )
 
-      // POSITIVE CONTROL: the write really happened, so the emitter was reached
-      // and stayed silent by the gate — not skipped by an early return.
-      expect(createdPolicy('ui-egress-test-recipe')).toBeDefined()
+      // ...and no record, because the resolved set did not change.
       expect(cap.payloads()).toHaveLength(0)
     } finally {
+      noOpSpy.mockRestore()
       cap.restore()
     }
   })

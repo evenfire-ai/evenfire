@@ -172,6 +172,13 @@ function declaresInheritedParentResources(recipe: WorkflowRecipeCRD): boolean {
  * a record meant to be read. The accumulator already emits its entries in a
  * stable key order, so this is about the record's OWN readable contract rather
  * than about rescuing an unordered input.
+ *
+ * INVARIANT IT RELIES ON: input is always a valid IPv4 `a.b.c.d/32`. That holds
+ * upstream — `resolveExternalEgress` emits `/32` only from `result.ipv4`
+ * (AAAA is resolved and dropped), and `parseState` admits an entry only if
+ * `isValidIpv4`. A non-numeric octet would yield NaN and an unstable order —
+ * never a throw — so if IPv6 egress is ever added, order silently degrades
+ * here and this comparator is the place to fix.
  */
 function compareCidrByAddress(a: string, b: string): number {
   const octets = (cidr: string) => cidr.split('/')[0].split('.').map(Number)
@@ -4838,6 +4845,12 @@ export class WorkflowRecipeReconciler {
    * A DECLARED FQDN THAT RESOLVED TO NOTHING STILL EMITS, with `cidrs: []`. A
    * set collapsing to empty is the most consequential event in the series and
    * must not be indistinguishable from "nothing happened".
+   *
+   * WHAT THE RECORD DOES NOT CARRY. `cidrs` and `ports` are two independent
+   * deduped projections, not pairs: a host on `(A,443)` and `(B,8443)` renders
+   * `cidrs:[A,B] ports:[443,8443]`, which reads the same as both addresses on
+   * both ports. The record is an ADDRESS history — that is what it is for — so
+   * it matches the enforced policy on each projection, not on their pairing.
    */
   private logResolvedEgressSet(
     recipeName: string,
