@@ -217,7 +217,8 @@ describe('GET /mcp-host/plugin-workload-sdk/capabilities', () => {
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({
       contractVersion: 2,
-      supportedContractVersions: [2],
+      supportedContractVersions: [2, 3],
+      defaultConnectionRef: null,
       targetAwarePromptBridge: true,
       attemptLedger: true,
       credentialTickets: true,
@@ -271,6 +272,8 @@ describe('GET /mcp-host/plugin-workload-sdk/capabilities', () => {
       defaultTargetRef: 'primary-openai',
       defaultProvider: 'openai',
       defaultModel: 'gpt-5.4-mini',
+      defaultConnectionRef: null,
+      supportedContractVersions: [2, 3],
       v2Ready: true,
     })
     expect(res.body.policyHash).toMatch(/^[a-f0-9]{64}$/)

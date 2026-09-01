@@ -22,6 +22,7 @@ import {
 import {
   applyLlmProviderAttemptConnectionIdSchema,
   applyLlmProviderAttemptSchema,
+  applyLlmProviderAttemptSdkLinkSchema,
   applyLlmProviderAttemptTicketSchema,
 } from './services/llmProviderAttemptStore.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
@@ -6003,6 +6004,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       '0091_oauth_grants_owner_generalization',
     ],
     apply: applyOAuthGrantsOwnerGeneralization,
+  },
+  {
+    version: '0107_llm_provider_attempts_sdk_link',
+    apply: applyLlmProviderAttemptSdkLinkSchema,
   },
 ]
 

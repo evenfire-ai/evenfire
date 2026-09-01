@@ -105,6 +105,14 @@ export interface McpHostClient {
       capabilityFamily?: 'promptBridge' | 'clientNotifications'
       provider?: string
       model?: string
+      contractVersion?: 2 | 3
+      codexBinding?: {
+        connectionKey: string
+        catalogRevision: number
+        credentialRevision: number
+        model: string
+        bindingHash: string
+      } | null
     }
   ): Promise<{ status: number; body: Record<string, unknown> }>
 }
@@ -228,7 +236,14 @@ export class ModelConfigHandler {
     model: string | undefined,
     mcpHostEndpoint: string,
     wrcConfigureToken: string,
-    capabilityFamily: 'promptBridge' | 'clientNotifications' = 'promptBridge'
+    capabilityFamily: 'promptBridge' | 'clientNotifications' = 'promptBridge',
+    codexBinding?: {
+      connectionKey: string
+      catalogRevision: number
+      credentialRevision: number
+      model: string
+      bindingHash: string
+    } | null
   ): Promise<ConfigureModelResult> {
     if (
       capabilityFamily === 'promptBridge' &&
@@ -247,6 +262,9 @@ export class ModelConfigHandler {
           ...(capabilityFamily === 'clientNotifications' ? { capabilityFamily } : {}),
           ...(provider ? { provider } : {}),
           ...(model ? { model } : {}),
+          ...(provider === 'codex-subscription'
+            ? { contractVersion: 3, ...(codexBinding ? { codexBinding } : {}) }
+            : { contractVersion: 2 }),
         }
       )
       if (result.status >= 400) {
@@ -258,10 +276,11 @@ export class ModelConfigHandler {
             typeof result.body.policyReady === 'boolean' &&
             typeof result.body.policyState === 'string'
           : isBootstrapIdentityProof(result.body)
+      const expectedContractVersion = provider === 'codex-subscription' ? 3 : 2
       if (
         result.body.configured !== true ||
         result.body.ready !== true ||
-        result.body.contractVersion !== 2 ||
+        result.body.contractVersion !== expectedContractVersion ||
         (capabilityFamily === 'clientNotifications'
           ? result.body.capabilityFamily !== capabilityFamily
           : result.body.capabilityFamily !== undefined &&
@@ -272,7 +291,12 @@ export class ModelConfigHandler {
       ) {
         return {
           status: 502,
-          body: { error: 'mcp_host bootstrap identity is not Plugin Workload SDK v2' },
+          body: {
+            error:
+              expectedContractVersion === 3
+                ? 'mcp_host bootstrap identity is not Plugin Workload SDK v3'
+                : 'mcp_host bootstrap identity is not Plugin Workload SDK v2',
+          },
         }
       }
       const policyProof = capabilityFamily === 'promptBridge' && isBootstrapPolicyProof(result.body)
@@ -283,8 +307,13 @@ export class ModelConfigHandler {
           ready: true,
           provider,
           model,
-          contractVersion: 2,
+          contractVersion: expectedContractVersion,
           capabilityFamily,
+          ...(result.body.codexBinding &&
+          typeof result.body.codexBinding === 'object' &&
+          !Array.isArray(result.body.codexBinding)
+            ? { codexBinding: result.body.codexBinding }
+            : {}),
           ...(typeof result.body.policyReady === 'boolean'
             ? { policyReady: result.body.policyReady }
             : {}),
@@ -735,10 +764,11 @@ function mcpHostConfigureRejected(result: {
 }
 
 function isBootstrapIdentityProof(body: Record<string, unknown>): boolean {
+  const expectedVersion = body.provider === 'codex-subscription' ? 3 : 2
   return (
     body.configured === true &&
     body.ready === true &&
-    body.contractVersion === 2 &&
+    body.contractVersion === expectedVersion &&
     typeof body.provider === 'string' &&
     body.provider.length > 0 &&
     typeof body.model === 'string' &&

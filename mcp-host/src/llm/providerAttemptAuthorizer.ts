@@ -25,6 +25,7 @@ export type AuthorizeAttemptBody = {
   recipeName?: string
   userId?: string
   budgetReservationId?: string
+  pluginWorkloadSdkProviderAttemptId?: string
 }
 
 export type ProviderAttemptAuthorizerOptions = {

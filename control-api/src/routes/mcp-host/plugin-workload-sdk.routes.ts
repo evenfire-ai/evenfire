@@ -1,5 +1,6 @@
 import { type NextFunction, type Request, type Response, Router } from 'express'
 import { rateLimit } from 'express-rate-limit'
+import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
@@ -193,7 +194,8 @@ function parsePromptBridgeFinalizationBody(
     !targetRef ||
     !provider ||
     !model ||
-    !credentialSlot
+    (!(isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker') &&
+      !credentialSlot)
   ) {
     res.status(400).json({
       error:
@@ -217,8 +219,9 @@ function parsePromptBridgeFinalizationBody(
     const outputTokens = Number.isInteger(rawUsage.outputTokens)
       ? Number(rawUsage.outputTokens)
       : -1
+    const oauthBroker = isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker'
     if (
-      !llmSecretName ||
+      (!oauthBroker && !llmSecretName) ||
       !callerRef ||
       typeof rawUsage.fallbackUsed !== 'boolean' ||
       attemptCount < 1 ||
@@ -722,7 +725,7 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
       const primaryTarget = grant?.promptTargets[0] ?? null
       res.status(200).json({
         contractVersion: PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION,
-        supportedContractVersions: [2],
+        supportedContractVersions: [2, 3],
         targetAwarePromptBridge: true,
         attemptLedger: true,
         credentialTickets: true,
@@ -732,6 +735,7 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         defaultTargetRef: grant?.defaultTargetRef ?? null,
         defaultProvider: primaryTarget?.provider ?? null,
         defaultModel: primaryTarget?.model ?? null,
+        defaultConnectionRef: primaryTarget?.connectionRef ?? null,
         v2Ready,
         clientNotificationsPolicyState: clientNotificationsGrant?.policyState ?? 'missing',
         clientNotificationsReady,

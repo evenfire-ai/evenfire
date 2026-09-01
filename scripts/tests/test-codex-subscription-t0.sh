@@ -191,6 +191,8 @@ run_group "control-api" "control-api" \
   "test/services.llmProviderAttemptFinalization.test.ts" \
   "test/services.usageEvents.test.ts" \
   "test/services.pluginWorkloadSdkFinalization.test.ts" \
+  "test/routes.mcp-host.plugin-workload-sdk.test.ts" \
+  "test/db.llmProviderAttemptMigration.test.ts" \
   "test/routes.usageEvents.test.ts"
 
 run_group "codex-llm-proxy" "codex-llm-proxy" \
@@ -208,6 +210,7 @@ run_group "mcp-host" "mcp-host" \
   "src/config/configStore.test.ts" \
   "src/llm/failover/__tests__/engine.test.ts" \
   "src/pluginWorkloadSdk/promptBridge/llmBridge.failover.test.ts" \
+  "src/pluginWorkloadSdk/bootstrapIdentity.test.ts" \
   "src/workflow/__tests__/configureHandler.test.ts" \
   "src/workflow/__tests__/workflowServiceUsageReporting.test.ts" \
   "src/pluginWorkloadSdk/server/index.test.ts" \
@@ -227,7 +230,10 @@ run_group "workflow-recipes" "workflow-recipes" \
   "src/workflow/workflowReconciler.codexScopeProvenance.test.ts" \
   "src/workflow/llmAllowedModelsSnapshot.test.ts" \
   "src/workflow/networkPolicyFactory.codex.test.ts" \
-  "tests/unit/workflow/modelConfigHandler.test.ts"
+  "src/workflow/sdkOnlyCodexBinding.test.ts" \
+  "src/reconciler/pluginWorkloadSdkValidator.test.ts" \
+  "tests/unit/workflow/modelConfigHandler.test.ts" \
+  "tests/unit/workflow/modelConfigHandler.pluginSdkBroker.test.ts"
 
 run_group "control-ui" "control-ui" \
   "components/__tests__/CodexSubscriptionHub.test.tsx" \

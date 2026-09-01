@@ -22,6 +22,7 @@ export type CodexAttemptContext = {
   invocationId?: string
   attemptGeneration?: number
   providerAttemptIndex?: number
+  pluginWorkloadSdkProviderAttemptId?: string
   policyRevision: number
   policyHash: string
   hostRef?: string
@@ -259,6 +260,9 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
       recipeNamespace: context.recipeNamespace,
       recipeName: context.recipeName,
       userId: context.userId,
+      ...(context.pluginWorkloadSdkProviderAttemptId
+        ? { pluginWorkloadSdkProviderAttemptId: context.pluginWorkloadSdkProviderAttemptId }
+        : {}),
     })
     if (!('accessToken' in authorized)) {
       // Bound: authorize returns ticket material only.

@@ -1,4 +1,6 @@
+import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import type { DbClient } from '../db.js'
+import { loadLlmProviderAttemptBySdkAttemptId } from './llmProviderAttemptStore.js'
 import { withTraceIngestTransaction } from './tracing/pools.js'
 import { projectAcceptedUsageEvents } from './tracing/usageProjection.js'
 import { ingestUsageEventsInTransaction } from './usageEvents.js'
@@ -74,6 +76,10 @@ function requireNonEmpty(value: string, field: string): void {
   }
 }
 
+function isOauthBrokerProvider(provider: string): boolean {
+  return isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker'
+}
+
 function validateInput(input: PromptBridgeFinalizationInput): void {
   requireUuid(input.invocationId, 'invocationId')
   requireUuid(input.providerAttemptId, 'providerAttemptId')
@@ -94,7 +100,9 @@ function validateInput(input: PromptBridgeFinalizationInput): void {
   requireNonEmpty(input.target.targetRef, 'target.targetRef')
   requireNonEmpty(input.target.provider, 'target.provider')
   requireNonEmpty(input.target.model, 'target.model')
-  requireNonEmpty(input.target.credentialSlot, 'target.credentialSlot')
+  if (!isOauthBrokerProvider(input.target.provider)) {
+    requireNonEmpty(input.target.credentialSlot, 'target.credentialSlot')
+  }
   if (input.status === 'complete') {
     const usage = input.usage
     if (!usage) {
@@ -104,7 +112,9 @@ function validateInput(input: PromptBridgeFinalizationInput): void {
         400
       )
     }
-    requireNonEmpty(usage.llmSecretName, 'usage.llmSecretName')
+    if (!isOauthBrokerProvider(input.target.provider)) {
+      requireNonEmpty(usage.llmSecretName, 'usage.llmSecretName')
+    }
     requireNonEmpty(usage.callerRef, 'usage.callerRef')
     if (!Number.isInteger(usage.attemptCount) || usage.attemptCount < 1 || usage.attemptCount > 4) {
       throw new PromptBridgeFinalizationError(
@@ -134,6 +144,53 @@ function validateInput(input: PromptBridgeFinalizationInput): void {
   }
 }
 
+function resolvePromptBridgeOutcome(
+  status: PromptBridgeFinalizationStatus,
+  oauthBroker: boolean,
+  linked: {
+    status: string
+    outcome: string | null
+    usageInputTokens?: number | null
+    usageOutputTokens?: number | null
+  } | null
+): 'exact' | 'unknown' | 'not_executed' {
+  if (!oauthBroker) {
+    return status === 'complete' ? 'exact' : status === 'failed' ? 'not_executed' : 'unknown'
+  }
+  if (
+    status === 'complete' &&
+    linked?.outcome === 'success' &&
+    linked.usageInputTokens != null &&
+    linked.usageOutputTokens != null
+  ) {
+    return 'exact'
+  }
+  if (status === 'failed' && !linked) return 'not_executed'
+  return 'unknown'
+}
+
+function replayOutcomeCompatible(
+  input: PromptBridgeFinalizationInput,
+  row: SpendOutcomeRow
+): boolean {
+  const oauthBroker = isOauthBrokerProvider(input.target.provider)
+  if (!oauthBroker) {
+    const expectedOutcome =
+      input.status === 'complete' ? 'exact' : input.status === 'failed' ? 'not_executed' : 'unknown'
+    if (row.outcome !== expectedOutcome) return false
+    return (
+      expectedOutcome !== 'exact' ||
+      (Number(row.input_tokens) === input.usage?.inputTokens &&
+        Number(row.output_tokens) === input.usage?.outputTokens)
+    )
+  }
+  if (input.status === 'complete') return row.outcome === 'exact' || row.outcome === 'unknown'
+  if (input.status === 'failed') {
+    return row.outcome === 'not_executed' || row.outcome === 'unknown'
+  }
+  return row.outcome === 'unknown'
+}
+
 type SpendOutcomeRow = {
   provider_attempt_id: string
   invocation_id: string
@@ -155,8 +212,6 @@ function mapExistingOutcome(
   row: SpendOutcomeRow,
   input: PromptBridgeFinalizationInput
 ): PromptBridgeFinalizationResult {
-  const expectedOutcome =
-    input.status === 'complete' ? 'exact' : input.status === 'failed' ? 'not_executed' : 'unknown'
   if (
     row.invocation_id !== input.invocationId ||
     row.recipe_namespace !== input.recipeNamespace ||
@@ -168,10 +223,7 @@ function mapExistingOutcome(
     row.provider !== input.target.provider ||
     row.model !== input.target.model ||
     row.credential_slot !== input.target.credentialSlot ||
-    row.outcome !== expectedOutcome ||
-    (expectedOutcome === 'exact' &&
-      (Number(row.input_tokens) !== input.usage?.inputTokens ||
-        Number(row.output_tokens) !== input.usage?.outputTokens))
+    !replayOutcomeCompatible(input, row)
   ) {
     throw new PromptBridgeFinalizationError(
       'conflict',
@@ -185,7 +237,7 @@ function mapExistingOutcome(
     status: input.status,
     outcome: row.outcome,
     idempotent: true,
-    usageAccepted: row.outcome === 'exact',
+    usageAccepted: row.outcome === 'exact' && !isOauthBrokerProvider(input.target.provider),
   }
 }
 
@@ -322,8 +374,11 @@ export async function finalizePromptBridgeInTransaction(
     )
   }
 
-  const outcome =
-    input.status === 'complete' ? 'exact' : input.status === 'failed' ? 'not_executed' : 'unknown'
+  const oauthBroker = isOauthBrokerProvider(input.target.provider)
+  const linkedCodex = oauthBroker
+    ? await loadLlmProviderAttemptBySdkAttemptId(db, input.providerAttemptId)
+    : null
+  const outcome = resolvePromptBridgeOutcome(input.status, oauthBroker, linkedCodex)
   let usageAccepted = false
 
   // Promote the immutable physical and attempt receipts before exact usage is
@@ -436,8 +491,8 @@ export async function finalizePromptBridgeInTransaction(
       input.target.credentialSlot,
       outcome,
       input.reason,
-      input.usage?.inputTokens ?? null,
-      input.usage?.outputTokens ?? null,
+      oauthBroker ? (linkedCodex?.usageInputTokens ?? null) : (input.usage?.inputTokens ?? null),
+      oauthBroker ? (linkedCodex?.usageOutputTokens ?? null) : (input.usage?.outputTokens ?? null),
       input.status === 'complete' ? input.providerAttemptId : null,
     ]
   )

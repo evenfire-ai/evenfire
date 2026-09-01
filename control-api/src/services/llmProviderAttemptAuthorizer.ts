@@ -23,6 +23,7 @@ import {
   insertLlmProviderAttempt,
 } from './llmProviderAttemptStore.js'
 import { issueRegisteredCodexExecutionTicket } from './llmProviderAttemptTicket.js'
+import { getPluginWorkloadSdkProviderAttempt } from './pluginWorkloadSdkDb.js'
 
 const log = rootLogger.child({ module: 'llm-provider-attempt-authorizer' })
 const CODEX_EXECUTE_SCOPE = 'llm:codex:execute'
@@ -41,7 +42,9 @@ const AUTHORIZE_BODY_KEYS = new Set([
   'recipeNamespace',
   'recipeName',
   'userId',
+  'pluginWorkloadSdkProviderAttemptId',
 ])
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export type LlmProviderAttemptAuthorizeErrorCode =
   | 'disabled'
@@ -356,6 +359,38 @@ export async function authorizeLlmProviderAttempt(
       budgetReservationId = budget.reservationIds?.[0] ?? 'unbudgeted'
     }
 
+    const pluginWorkloadSdkProviderAttemptId =
+      typeof body.pluginWorkloadSdkProviderAttemptId === 'string'
+        ? body.pluginWorkloadSdkProviderAttemptId.trim()
+        : ''
+    if (pluginWorkloadSdkProviderAttemptId) {
+      if (!UUID_RE.test(pluginWorkloadSdkProviderAttemptId)) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'invalid_request',
+          'pluginWorkloadSdkProviderAttemptId must be a UUID'
+        )
+      }
+      const sdkAttempt = await getPluginWorkloadSdkProviderAttempt(
+        pluginWorkloadSdkProviderAttemptId,
+        db
+      )
+      if (
+        !sdkAttempt ||
+        sdkAttempt.invocationId !== invocationId ||
+        sdkAttempt.attemptGeneration !== attemptGeneration ||
+        sdkAttempt.attemptIndex !== providerAttemptIndex ||
+        sdkAttempt.recipeNamespace !== caller.recipeNamespace ||
+        sdkAttempt.recipeName !== caller.recipeName ||
+        sdkAttempt.provider !== PROVIDER ||
+        !['reserved', 'in_progress'].includes(sdkAttempt.status)
+      ) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'no_grant',
+          'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
+        )
+      }
+    }
+
     try {
       const attempt = await resolvedDeps.insertAttempt(db, {
         callerKind: caller.callerKind,
@@ -372,6 +407,7 @@ export async function authorizeLlmProviderAttempt(
         budgetReservationId,
         connectionRevision: connection.credentialRevision,
         connectionId: connection.id,
+        ...(pluginWorkloadSdkProviderAttemptId ? { pluginWorkloadSdkProviderAttemptId } : {}),
       })
       const issued = await resolvedDeps.issueTicket(db, {
         sub: claims.sub,

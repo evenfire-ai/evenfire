@@ -17,6 +17,13 @@ import {
   sqlLiteral,
 } from './third-party-authn-first-party-mcphost/workflowApprovalJourney'
 
+/*
+ * E2E_GUARDIAN_IPC_FLOW: Desktop Apps opens the Plugin Workload SDK sandbox UI
+ * through the main-process WebContentsView and EmbeddedContents bridge. The
+ * renderer has no HTTP response to await for that transition; the recipe
+ * precondition, native view title, and persisted promptBridge ledger are the
+ * visible/business signals.
+ */
 const RUN_ENABLED = process.env.E2E_PLUGIN_SDK_DESKTOP === '1'
 const APP_TITLE = process.env.E2E_PLUGIN_SDK_APP_TITLE || 'Prompt & Notify'
 const RECIPE_NAME = process.env.E2E_PLUGIN_SDK_RECIPE_NAME || 'evenfire-prompt-notify-app'
@@ -40,7 +47,7 @@ type NativeLayout = {
   embeddedCaptureSize: { width: number; height: number } | null
 }
 
-function assertSteplessSdkRecipePrecondition(): void {
+function assertSteplessSdkRecipePrecondition(): { provider: string; model: string } {
   const context =
     process.env.E2E_K8S_CONTEXT || process.env.KUBECONTEXT || process.env.K8S_CONTEXT || ''
   if (!context) throw new Error('E2E_K8S_CONTEXT is required for the stepless recipe precondition.')
@@ -88,9 +95,9 @@ function assertSteplessSdkRecipePrecondition(): void {
   ) {
     throw new Error('Desktop candidate must declare a resolvable spec.agent bootstrap.')
   }
-  if (!['openai', 'claude'].includes(spec.agent.provider.toLowerCase())) {
+  if (!['openai', 'claude', 'codex-subscription'].includes(spec.agent.provider.toLowerCase())) {
     throw new Error(
-      `Desktop T3 candidate must use OpenAI or Claude; received provider ${spec.agent.provider}.`
+      `Desktop T3 candidate must use OpenAI, Claude, or Codex; received provider ${spec.agent.provider}.`
     )
   }
   if (!Array.isArray(spec.workloads) || spec.workloads.length === 0) {
@@ -102,6 +109,7 @@ function assertSteplessSdkRecipePrecondition(): void {
   ) {
     throw new Error('Desktop candidate must declare the pluginWorkloadSdk.promptBridge object.')
   }
+  return { provider: spec.agent.provider, model: spec.agent.model }
 }
 
 async function findPromptNotifyContents(
@@ -427,6 +435,38 @@ function sdkInvocationCount(method: 'promptBridge' | 'clientNotifications'): num
   return Number.parseInt(raw, 10) || 0
 }
 
+function promptBridgeLedgerForRun(startedAt: string): {
+  invocationId: string
+  sdkAttemptId: string
+  codexAttemptId: string
+  spendOutcome: string
+} {
+  const raw = profilesSql(`
+    SELECT inv.id::text || '|' || sdk.id::text || '|' ||
+           coalesce(codex.id::text, '') || '|' || coalesce(spend.outcome, '')
+      FROM plugin_workload_sdk_invocations inv
+      JOIN plugin_workload_sdk_provider_attempts sdk
+        ON sdk.invocation_id = inv.id
+      LEFT JOIN llm_provider_attempts codex
+        ON codex.plugin_workload_sdk_provider_attempt_id = sdk.id
+      LEFT JOIN plugin_workload_sdk_spend_outcomes spend
+        ON spend.provider_attempt_id = sdk.id
+     WHERE inv.recipe_namespace = ${sqlLiteral(RECIPE_NAMESPACE)}
+       AND inv.recipe_name = ${sqlLiteral(RECIPE_NAME)}
+       AND inv.method = 'promptBridge'
+       AND inv.created_at >= ${sqlLiteral(startedAt)}::timestamptz
+     ORDER BY inv.created_at ASC, sdk.attempt_index ASC
+     LIMIT 1;
+  `)
+  const [invocationId, sdkAttemptId, codexAttemptId, spendOutcome] = raw.trim().split('|')
+  return {
+    invocationId: invocationId ?? '',
+    sdkAttemptId: sdkAttemptId ?? '',
+    codexAttemptId: codexAttemptId ?? '',
+    spendOutcome: spendOutcome ?? '',
+  }
+}
+
 function latestSdkInvocationStatus(method: 'promptBridge' | 'clientNotifications'): string {
   return profilesSql(`
     SELECT status
@@ -458,7 +498,7 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
   await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
   // Read-only setup assertion. Every functional action that follows is through
   // the real Desktop UI and its native WebContentsView.
-  assertSteplessSdkRecipePrecondition()
+  const recipeAgent = assertSteplessSdkRecipePrecondition()
 
   let app: ElectronApplication | undefined
   let page: Page | undefined
@@ -532,6 +572,7 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
     }
 
     const marker = `desktop-sdk-${Date.now()}`
+    const runStartedAt = new Date().toISOString()
 
     await test.step('reject an empty prompt without creating an invocation', async () => {
       const before = sdkInvocationCount('promptBridge')
@@ -569,6 +610,15 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
     })
     const promptResult = await embeddedText(app, webContentsId, '#prompt-out')
     expect(promptResult).not.toMatch(/"error"|provider_unavailable|requires a resolvable agent/i)
+    const ledger = promptBridgeLedgerForRun(runStartedAt)
+    expect(ledger.invocationId).toMatch(/^[0-9a-f-]{36}$/i)
+    expect(ledger.sdkAttemptId).toMatch(/^[0-9a-f-]{36}$/i)
+    expect(ledger.sdkAttemptId).not.toBe(ledger.invocationId)
+    if (recipeAgent.provider.toLowerCase() === 'codex-subscription') {
+      expect(ledger.codexAttemptId).toMatch(/^[0-9a-f-]{36}$/i)
+      expect(ledger.codexAttemptId).not.toBe(ledger.sdkAttemptId)
+      expect(ledger.spendOutcome).toBe('exact')
+    }
 
     // Business signal for notifications: the real app loaded the grant-backed
     // recipient list and the native view selected a visible email handle. The
@@ -667,6 +717,58 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
     expect(await findPromptNotifyContents(app)).toMatchObject({ id: webContentsId })
     await page.getByRole('button', { name: 'Back to apps' }).click()
     await expect(page.getByRole('heading', { name: 'Apps', exact: true })).toBeVisible()
+  } finally {
+    await finalizeRecording(app, page)
+  }
+})
+
+test('Desktop Apps refuses a Codex prompt when the execution binding is missing', async ({}, testInfo) => {
+  test.skip(
+    process.env.E2E_PLUGIN_SDK_NO_GRANT !== '1',
+    'Set E2E_PLUGIN_SDK_NO_GRANT=1 to exercise the no-grant Codex guard.'
+  )
+  const recipeAgent = assertSteplessSdkRecipePrecondition()
+  test.skip(
+    recipeAgent.provider.toLowerCase() !== 'codex-subscription',
+    'No-grant guard requires a Codex SDK-only recipe.'
+  )
+  await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
+  await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
+
+  let app: ElectronApplication | undefined
+  let page: Page | undefined
+  try {
+    const credentials = desktopCredentials()
+    const launched = await launchDesktopApp(testInfo)
+    app = launched.app
+    page = launched.page
+    await login(page, credentials)
+    await page.getByTestId('nav-sandbox-ui').click()
+    const appCard = page
+      .getByRole('main')
+      .getByRole('button', { name: `Open ${APP_TITLE}`, exact: true })
+    await appCard.click()
+    let embedded: EmbeddedContents | null = null
+    await expect
+      .poll(async () => {
+        embedded = await findPromptNotifyContents(app!)
+        return embedded?.url ?? ''
+      })
+      .toContain(
+        `/api/v1/sandbox-ui/${encodeURIComponent(RECIPE_NAMESPACE)}/${encodeURIComponent(RECIPE_NAME)}/view/`
+      )
+    const webContentsId = embedded!.id
+    const runStartedAt = new Date().toISOString()
+    const before = sdkInvocationCount('promptBridge')
+    await typeEmbedded(app, webContentsId, '#prompt', 'This prompt must not dispatch Codex.')
+    await activateEmbedded(app, webContentsId, '#run')
+    await expect
+      .poll(() => embeddedText(app!, webContentsId, '#prompt-out'), { timeout: 60_000 })
+      .toMatch(/provider_unavailable|no_grant|not authorized|policy/i)
+    const ledger = promptBridgeLedgerForRun(runStartedAt)
+    expect(ledger.codexAttemptId).toBe('')
+    expect(ledger.spendOutcome).not.toBe('exact')
+    expect(sdkInvocationCount('promptBridge')).toBeGreaterThanOrEqual(before)
   } finally {
     await finalizeRecording(app, page)
   }

@@ -1,3 +1,4 @@
+import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import { pluginWorkloadSdkAuthDecisionsTotal } from '../observability/metrics.js'
 import type { McpHostAccessClaims } from '../utils/auth/mcpHostJwtToken.js'
 import {
@@ -514,6 +515,7 @@ export type ReissuedPromptBridgeCredentialTicket = {
   providerAttemptId: string
   providerAttemptIndex: number
   credentialTicket: string
+  reservationOnly?: true
   policyRevision: number
   policyHash: string
   expiresInSeconds: number
@@ -609,6 +611,26 @@ export async function reissuePromptBridgeCredentialTicket(
       'provider_policy_denied',
       'promptBridge attempt is stale, fenced, or exceeds the physical-attempt budget'
     )
+  }
+
+  const reservationOnly =
+    isLlmProviderId(target.provider) && PROVIDER_AUTH_MODE[target.provider] === 'oauth-broker'
+  if (reservationOnly) {
+    return {
+      ok: true,
+      value: {
+        invocationId: invocation.id,
+        targetRef: target.targetRef,
+        attemptGeneration: invocation.attemptGeneration,
+        providerAttemptId: providerAttempt.id,
+        providerAttemptIndex: providerAttempt.attemptIndex,
+        credentialTicket: '',
+        reservationOnly: true,
+        policyRevision: grant.policyRevision,
+        policyHash,
+        expiresInSeconds: PLUGIN_SDK_CREDENTIAL_TICKET_TTL_SECONDS,
+      },
+    }
   }
 
   const issued = issuePluginWorkloadSdkCredentialTicketWithClaims({

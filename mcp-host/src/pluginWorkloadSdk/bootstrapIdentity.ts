@@ -7,6 +7,11 @@ import type {
   PluginWorkloadSdkBootstrapProof,
   PluginWorkloadSdkClientNotificationsBootstrapProof,
 } from './promptBridge/controlApiClient'
+import {
+  isPluginWorkloadSdkCodexBindingProof,
+  replaceSdkOnlyCodexBinding,
+  verifySdkOnlyCodexBindingHash,
+} from './sdkOnlyCodexBinding'
 
 export interface PluginWorkloadSdkBootstrapIdentityDeps {
   /**
@@ -86,23 +91,71 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
   if (!isRunnableLlmModelId(model)) {
     return { configured: false, message: 'model is required and has an invalid format' }
   }
+  if (req.provider === 'codex-subscription') {
+    const binding = req.codexBinding
+    const bindingValid =
+      req.contractVersion === 3 &&
+      isPluginWorkloadSdkCodexBindingProof(binding) &&
+      binding.model === model &&
+      verifySdkOnlyCodexBindingHash(binding)
+    if (!bindingValid) {
+      replaceSdkOnlyCodexBinding(null)
+      return {
+        configured: true,
+        ready: true,
+        capabilityFamily: 'promptBridge',
+        provider: req.provider,
+        model,
+        contractVersion: 3,
+        policyReady: false,
+        policyState: 'binding_missing',
+        policyReason: 'codex_execution_binding_missing',
+        message: 'SDK-only Codex bootstrap requires a live v3 execution binding',
+      }
+    }
+    replaceSdkOnlyCodexBinding(binding)
+  } else {
+    replaceSdkOnlyCodexBinding(null)
+  }
   const proof = deps.verify ? await deps.verify(req.provider, model) : null
   if (deps.verify && !proof) {
+    if (req.provider === 'codex-subscription') replaceSdkOnlyCodexBinding(null)
     return {
       configured: false,
       ready: false,
-      contractVersion: 2,
+      contractVersion: req.provider === 'codex-subscription' ? 3 : 2,
       message: 'Plugin Workload SDK identity bootstrap contract is not ready',
     }
   }
+  if (
+    req.provider === 'codex-subscription' &&
+    proof &&
+    (proof.codexBindingReady === false || proof.policyReason === 'codex_execution_binding_missing')
+  ) {
+    replaceSdkOnlyCodexBinding(null)
+    return {
+      configured: true,
+      ready: true,
+      capabilityFamily: 'promptBridge',
+      provider: req.provider,
+      model,
+      contractVersion: 3,
+      policyReady: false,
+      policyState: proof.policyState,
+      policyReason: 'codex_execution_binding_missing',
+      message: 'Control API rejected the SDK-only Codex execution binding',
+      ...(req.codexBinding ? { codexBinding: req.codexBinding } : {}),
+    }
+  }
   deps.onConfigured?.({ provider: req.provider, defaultModel: model })
+  const contractVersion = req.provider === 'codex-subscription' ? 3 : 2
   return {
     configured: true,
     ready: true,
     capabilityFamily: 'promptBridge',
     provider: req.provider,
     model,
-    contractVersion: 2,
+    contractVersion,
     ...(proof ? { policyReady: proof.policyReady, policyState: proof.policyState } : {}),
     ...(proof?.policyReason ? { policyReason: proof.policyReason } : {}),
     ...(proof?.policyRevision !== undefined ? { policyRevision: proof.policyRevision } : {}),
@@ -118,6 +171,9 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
       : {}),
     ...(proof?.clientNotificationsPolicyReason !== undefined
       ? { clientNotificationsPolicyReason: proof.clientNotificationsPolicyReason }
+      : {}),
+    ...(req.provider === 'codex-subscription' && req.codexBinding
+      ? { codexBinding: req.codexBinding }
       : {}),
   }
 }

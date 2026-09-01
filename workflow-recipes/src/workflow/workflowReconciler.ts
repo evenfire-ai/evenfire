@@ -38,7 +38,7 @@ import type {
   WorkflowRecipeSpec,
   WorkflowSnippetRunSpec,
 } from '../types'
-import { resolveMcpHostAgent } from './agentResolution'
+import { resolveEagerSdkMcpHostAgent, resolveMcpHostAgent } from './agentResolution'
 import {
   type CodexCatalogSnapshot,
   projectRecipeCodexExecution,
@@ -137,6 +137,7 @@ import {
   deleteScheduling,
   reconcileScheduling,
 } from './schedulingHandler'
+import { deriveSdkOnlyCodexBinding } from './sdkOnlyCodexBinding'
 import { buildMcpHostRuntimeTokenSecret, createCoordinatorTokens } from './secretFactory'
 import { SNIPPET_RUN_KEYS } from './snippetRunSchema'
 import {
@@ -1104,6 +1105,19 @@ export class WorkflowReconciler {
       throw new Error('SDK-only runtime requires spec.steps to be absent or empty')
     }
 
+    await this.refreshCodexSnapshot()
+    const agent = resolveEagerSdkMcpHostAgent(spec)
+    const context = this.resolveCodexContext(recipeUid, recipeName, runtimeScopeRecipeName)
+    const codexBinding =
+      agent?.provider && agent.model
+        ? deriveSdkOnlyCodexBinding({
+            provider: agent.provider,
+            model: agent.model,
+            connectionKey: context.connectionKey,
+            configMap: this.lastCodexConfigMap,
+          })
+        : null
+
     const runtime = deriveWorkflowRuntimePlan(spec, {
       recipeName,
       runtimeScopeRecipeName,
@@ -1121,7 +1135,7 @@ export class WorkflowReconciler {
       runtimeScopeRecipeName,
       spec,
       runtime,
-      { mcpHostPhase }
+      { mcpHostPhase, codexBinding }
     )
     const bootstrapProof = this.pluginWorkloadSdkProvisioner.getBootstrapProof(recipeName)
     switch (status) {

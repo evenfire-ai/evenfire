@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
+import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import {
   configurePluginWorkloadSdkBootstrapIdentity,
   resolvePluginWorkloadSdkBootstrapCapabilityFamily,
 } from './bootstrapIdentity'
+import { readSdkOnlyCodexBinding, replaceSdkOnlyCodexBinding } from './sdkOnlyCodexBinding'
 
 describe('Plugin Workload SDK bootstrap identity', () => {
   it('uses the host capability projection instead of a request-selected family', async () => {
@@ -89,5 +91,72 @@ describe('Plugin Workload SDK bootstrap identity', () => {
     expect(resolvePluginWorkloadSdkBootstrapCapabilityFamily(['clientNotifications'])).toBe(
       'clientNotifications'
     )
+  })
+
+  it('keeps Codex identity ready while the v3 execution binding is missing', async () => {
+    replaceSdkOnlyCodexBinding(null)
+    const verify = vi.fn()
+    const result = await configurePluginWorkloadSdkBootstrapIdentity(
+      {
+        capabilityFamily: 'promptBridge',
+        provider: 'codex-subscription',
+        model: 'gpt-5.6-luna',
+        contractVersion: 2,
+      },
+      { capabilityFamily: 'promptBridge', verify }
+    )
+    expect(result).toMatchObject({
+      configured: true,
+      ready: true,
+      contractVersion: 3,
+      policyReady: false,
+      policyReason: 'codex_execution_binding_missing',
+    })
+    expect(verify).not.toHaveBeenCalled()
+    expect(readSdkOnlyCodexBinding()).toBeNull()
+  })
+
+  it('stores a verified v3 Codex binding before identity verification', async () => {
+    const binding = {
+      connectionKey: 'team-plus',
+      catalogRevision: 4,
+      credentialRevision: 1,
+      model: 'gpt-5.6-luna',
+      bindingHash: computeCodexPolicyHash({
+        model: 'gpt-5.6-luna',
+        catalogRevision: 4,
+        credentialRevision: 1,
+        connectionKey: 'team-plus',
+      }),
+    }
+    const verify = vi.fn().mockResolvedValue({
+      ready: true,
+      contractVersion: 3,
+      provider: 'codex-subscription',
+      model: 'gpt-5.6-luna',
+      policyReady: true,
+      policyState: 'active',
+      codexBindingReady: true,
+    })
+    const result = await configurePluginWorkloadSdkBootstrapIdentity(
+      {
+        capabilityFamily: 'promptBridge',
+        provider: 'codex-subscription',
+        model: 'gpt-5.6-luna',
+        contractVersion: 3,
+        codexBinding: binding,
+      },
+      { capabilityFamily: 'promptBridge', verify }
+    )
+    expect(result).toMatchObject({
+      configured: true,
+      ready: true,
+      contractVersion: 3,
+      provider: 'codex-subscription',
+      model: 'gpt-5.6-luna',
+      codexBinding: binding,
+    })
+    expect(readSdkOnlyCodexBinding()).toEqual(binding)
+    replaceSdkOnlyCodexBinding(null)
   })
 })

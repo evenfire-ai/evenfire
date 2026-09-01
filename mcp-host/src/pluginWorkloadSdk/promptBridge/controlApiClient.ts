@@ -5,6 +5,7 @@ import {
   isKnownPluginWorkloadErrorReason,
 } from '../domain/errors'
 import type { PromptBridgeTarget } from '../domain/types'
+import { readSdkOnlyCodexBinding } from '../sdkOnlyCodexBinding'
 
 /**
  * Anti-corruption layer (plan §3.4): encapsulates the HTTP call to
@@ -54,7 +55,7 @@ export interface AuthorizePromptBridgeResponse {
 }
 
 export interface PluginWorkloadSdkCapabilities {
-  contractVersion: 2
+  contractVersion: 2 | 3
   supportedContractVersions: number[]
   targetAwarePromptBridge: true
   attemptLedger: true
@@ -65,6 +66,7 @@ export interface PluginWorkloadSdkCapabilities {
   defaultTargetRef: string | null
   defaultProvider: string | null
   defaultModel: string | null
+  defaultConnectionRef: string | null
   v2Ready: boolean
   clientNotificationsPolicyState: string
   clientNotificationsReady: boolean
@@ -72,7 +74,7 @@ export interface PluginWorkloadSdkCapabilities {
 
 export interface PluginWorkloadSdkBootstrapProof {
   ready: true
-  contractVersion: 2
+  contractVersion: 2 | 3
   provider: string
   model: string
   policyReady: boolean
@@ -84,6 +86,9 @@ export interface PluginWorkloadSdkBootstrapProof {
     | 'policy_disabled'
     | 'bootstrap_target_mismatch'
     | 'policy_not_ready'
+    | 'codex_execution_binding_missing'
+  /** Control API attested the live Codex connection against the v3 binding. */
+  codexBindingReady?: boolean
   /**
    * Policy metadata is deliberately optional at identity bootstrap. A recipe
    * may be installed and publish an awaiting-policy SDK runtime before an
@@ -121,6 +126,7 @@ export interface ReissuedPromptBridgeCredentialTicket {
   providerAttemptIndex: number
   targetRef: string
   credentialTicket: string
+  reservationOnly?: true
   policyRevision: number
   policyHash: string
   expiresInSeconds: number
@@ -187,7 +193,7 @@ function isPluginWorkloadSdkCapabilities(v: unknown): v is PluginWorkloadSdkCapa
   if (typeof v !== 'object' || v === null) return false
   const value = v as Record<string, unknown>
   return (
-    value.contractVersion === 2 &&
+    (value.contractVersion === 2 || value.contractVersion === 3) &&
     Array.isArray(value.supportedContractVersions) &&
     value.supportedContractVersions.includes(2) &&
     value.targetAwarePromptBridge === true &&
@@ -200,6 +206,9 @@ function isPluginWorkloadSdkCapabilities(v: unknown): v is PluginWorkloadSdkCapa
     (value.defaultTargetRef === null || typeof value.defaultTargetRef === 'string') &&
     (value.defaultProvider === null || typeof value.defaultProvider === 'string') &&
     (value.defaultModel === null || typeof value.defaultModel === 'string') &&
+    (value.defaultConnectionRef === undefined ||
+      value.defaultConnectionRef === null ||
+      typeof value.defaultConnectionRef === 'string') &&
     typeof value.v2Ready === 'boolean' &&
     typeof value.clientNotificationsPolicyState === 'string' &&
     typeof value.clientNotificationsReady === 'boolean'
@@ -221,7 +230,7 @@ function isReissuedPromptBridgeCredentialTicket(
     (ticket.providerAttemptIndex as number) >= 1 &&
     typeof ticket.targetRef === 'string' &&
     typeof ticket.credentialTicket === 'string' &&
-    ticket.credentialTicket.length > 0 &&
+    (ticket.credentialTicket.length > 0 || ticket.reservationOnly === true) &&
     Number.isInteger(ticket.policyRevision) &&
     (ticket.policyRevision as number) >= 1 &&
     typeof ticket.policyHash === 'string' &&
@@ -522,7 +531,10 @@ export class PluginWorkloadSdkControlApiClient {
             true
           )
         }
-        return result
+        return {
+          ...result,
+          defaultConnectionRef: result.defaultConnectionRef ?? null,
+        }
       })
       .finally(() => {
         if (this.capabilitiesInFlight === request) this.capabilitiesInFlight = null
@@ -561,7 +573,7 @@ export class PluginWorkloadSdkControlApiClient {
   ): Promise<PluginWorkloadSdkBootstrapProof> {
     const capabilities = await this.getPromptBridgeCapabilities()
     if (
-      capabilities.contractVersion !== 2 ||
+      (capabilities.contractVersion !== 2 && capabilities.contractVersion !== 3) ||
       !capabilities.supportedContractVersions.includes(2) ||
       capabilities.targetAwarePromptBridge !== true ||
       capabilities.attemptLedger !== true ||
@@ -577,6 +589,16 @@ export class PluginWorkloadSdkControlApiClient {
         true
       )
     }
+    const binding = expectedProvider === 'codex-subscription' ? readSdkOnlyCodexBinding() : null
+    const codexBindingReady =
+      expectedProvider !== 'codex-subscription' ||
+      (capabilities.supportedContractVersions.includes(3) &&
+        binding !== null &&
+        capabilities.defaultProvider === expectedProvider &&
+        capabilities.defaultModel === expectedModel &&
+        binding.model === expectedModel &&
+        typeof capabilities.defaultConnectionRef === 'string' &&
+        capabilities.defaultConnectionRef === binding.connectionKey)
     const policyReady =
       capabilities.v2Ready &&
       capabilities.policyRevision >= 1 &&
@@ -584,27 +606,31 @@ export class PluginWorkloadSdkControlApiClient {
       /^[a-f0-9]{64}$/.test(capabilities.policyHash) &&
       !!capabilities.defaultTargetRef &&
       capabilities.defaultProvider === expectedProvider &&
-      capabilities.defaultModel === expectedModel
+      capabilities.defaultModel === expectedModel &&
+      codexBindingReady
     const policyReason = policyReady
       ? undefined
-      : capabilities.policyState === 'missing'
-        ? 'grant_missing'
-        : capabilities.policyState === 'legacy_unreviewed'
-          ? 'policy_unreviewed'
-          : capabilities.policyState === 'revoking'
-            ? 'policy_revoking'
-            : capabilities.policyState === 'disabled'
-              ? 'policy_disabled'
-              : capabilities.v2Ready
-                ? 'bootstrap_target_mismatch'
-                : 'policy_not_ready'
+      : expectedProvider === 'codex-subscription' && !codexBindingReady
+        ? 'codex_execution_binding_missing'
+        : capabilities.policyState === 'missing'
+          ? 'grant_missing'
+          : capabilities.policyState === 'legacy_unreviewed'
+            ? 'policy_unreviewed'
+            : capabilities.policyState === 'revoking'
+              ? 'policy_revoking'
+              : capabilities.policyState === 'disabled'
+                ? 'policy_disabled'
+                : capabilities.v2Ready
+                  ? 'bootstrap_target_mismatch'
+                  : 'policy_not_ready'
     return {
       ready: true,
-      contractVersion: 2,
+      contractVersion: expectedProvider === 'codex-subscription' ? 3 : 2,
       provider: expectedProvider,
       model: expectedModel,
       policyReady,
       policyState: capabilities.policyState,
+      ...(expectedProvider === 'codex-subscription' ? { codexBindingReady } : {}),
       ...(policyReason ? { policyReason } : {}),
       ...(capabilities.v2Ready &&
       capabilities.policyRevision >= 1 &&

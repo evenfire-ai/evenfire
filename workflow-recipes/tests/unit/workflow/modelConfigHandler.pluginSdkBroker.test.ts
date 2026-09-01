@@ -150,7 +150,7 @@ describe('ModelConfigHandler Plugin SDK per-attempt credential broker', () => {
     expect(mcpHost.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledWith(
       'http://mcp-host:8090',
       'wrc-token',
-      { provider: 'openai', model: 'gpt-5.4-mini' }
+      { provider: 'openai', model: 'gpt-5.4-mini', contractVersion: 2 }
     )
     expect(k8s.readConfigMapWithPresence).not.toHaveBeenCalled()
     expect(k8s.readSecret).not.toHaveBeenCalled()
@@ -197,6 +197,62 @@ describe('ModelConfigHandler Plugin SDK per-attempt credential broker', () => {
         policyReason: 'grant_missing',
       },
     })
+    expect(k8s.readConfigMapWithPresence).not.toHaveBeenCalled()
+    expect(k8s.readSecret).not.toHaveBeenCalled()
+  })
+
+  it('publishes Codex SDK bootstrap as v3 without reading ConfigMaps or Secrets', async () => {
+    const binding = {
+      connectionKey: 'team-plus',
+      catalogRevision: 4,
+      credentialRevision: 1,
+      model: 'gpt-5.1',
+      bindingHash: 'a'.repeat(64),
+    }
+    const mcpHost: McpHostClient = {
+      configure: vi.fn(async () => ({ status: 500, body: {} })),
+      configurePluginWorkloadSdkBootstrap: vi.fn(async () => ({
+        status: 200,
+        body: {
+          configured: true,
+          ready: true,
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          contractVersion: 3,
+          policyReady: true,
+          policyState: 'active',
+          codexBinding: binding,
+        },
+      })),
+    }
+    const k8s = reader()
+    const handler = new ModelConfigHandler(k8s, mcpHost)
+    const result = await handler.configurePluginWorkloadSdkBootstrap(
+      'codex-subscription',
+      'gpt-5.1',
+      'http://mcp-host:8090',
+      'wrc-token',
+      'promptBridge',
+      binding
+    )
+
+    expect(result.status).toBe(202)
+    expect(result.body).toMatchObject({
+      contractVersion: 3,
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+      codexBinding: binding,
+    })
+    expect(mcpHost.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledWith(
+      'http://mcp-host:8090',
+      'wrc-token',
+      {
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+        contractVersion: 3,
+        codexBinding: binding,
+      }
+    )
     expect(k8s.readConfigMapWithPresence).not.toHaveBeenCalled()
     expect(k8s.readSecret).not.toHaveBeenCalled()
   })

@@ -43,6 +43,22 @@ describe('00a2/00a3 LLM provider-attempt ledger', () => {
     )
   })
 
+  it('registers the unique SDK-attempt link after the latest Codex OAuth owner migration', () => {
+    expect(dbSource).toContain("version: '0106_oauth_grants_owner_generalization'")
+    expect(dbSource).toContain("version: '0107_llm_provider_attempts_sdk_link'")
+    expect(dbSource).toContain('apply: applyLlmProviderAttemptSdkLinkSchema')
+    expect(dbSource.indexOf("version: '0106_oauth_grants_owner_generalization'")).toBeLessThan(
+      dbSource.indexOf("version: '0107_llm_provider_attempts_sdk_link'")
+    )
+    expect(storeSource).toContain('plugin_workload_sdk_provider_attempt_id UUID')
+    expect(storeSource).toContain('REFERENCES plugin_workload_sdk_provider_attempts(id)')
+    expect(storeSource).toContain(
+      'CREATE UNIQUE INDEX IF NOT EXISTS llm_provider_attempts_sdk_attempt_uidx'
+    )
+    expect(storeSource).toContain('WHERE plugin_workload_sdk_provider_attempt_id IS NOT NULL')
+    expect(storeSource).toContain('loadLlmProviderAttemptBySdkAttemptId')
+  })
+
   it('persists immutable attempt bindings, lifecycle, safe usage, and redacted correlation', () => {
     expect(storeSource).toContain('CREATE TABLE IF NOT EXISTS llm_provider_attempts')
     expect(storeSource).toContain(

@@ -184,8 +184,15 @@ export interface PluginWorkloadSdkStatusProjection {
 
 export interface PluginWorkloadSdkBootstrapProofInput {
   ready: true
-  contractVersion: 2
+  contractVersion: 2 | 3
   podUid: string
+  codexBinding?: {
+    connectionKey: string
+    catalogRevision: number
+    credentialRevision: number
+    model: string
+    bindingHash: string
+  }
   provider?: string
   model?: string
   policyReady?: boolean
@@ -338,8 +345,17 @@ export function buildPluginWorkloadSdkStatus(args: {
     clientNotifications &&
     bootstrapProof?.ready === true &&
     bootstrapProof.clientNotificationsPolicyReady !== true
-  if (policyPending || clientNotificationsPolicyPending) {
-    const family = promptBridge && policyPending ? 'promptBridge' : 'clientNotifications'
+  const codexBindingPending =
+    promptBridge &&
+    bootstrapProof?.provider === 'codex-subscription' &&
+    (bootstrapProof.policyReason === 'codex_execution_binding_missing' ||
+      bootstrapProof.contractVersion !== 3 ||
+      !bootstrapProof.codexBinding)
+  if (policyPending || clientNotificationsPolicyPending || codexBindingPending) {
+    const family =
+      promptBridge && (policyPending || codexBindingPending)
+        ? 'promptBridge'
+        : 'clientNotifications'
     const policyReason =
       family === 'clientNotifications'
         ? (bootstrapProof?.clientNotificationsPolicyReason ??

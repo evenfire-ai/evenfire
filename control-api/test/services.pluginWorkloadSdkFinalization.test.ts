@@ -447,8 +447,15 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
         host_ref: inputBase.hostRef,
         provider: 'codex-subscription',
         model: 'gpt-5.1',
-        credential_slot: 'codex-oauth',
+        credential_slot: '',
         status: 'in_progress',
+      },
+      {
+        id: '33333333-3333-4333-8333-333333333333',
+        status: 'finalized',
+        outcome: 'success',
+        usage_input_tokens: 12,
+        usage_output_tokens: 7,
       },
       { rows: [], rowCount: 1 },
       { rows: [], rowCount: 1 },
@@ -463,11 +470,11 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
           targetRef: 'codex-primary',
           provider: 'codex-subscription',
           model: 'gpt-5.1',
-          credentialSlot: 'codex-oauth',
+          credentialSlot: '',
         },
         status: 'complete',
         usage: {
-          llmSecretName: 'unused-codex-secret',
+          llmSecretName: '',
           callerRef: 'scanner',
           fallbackUsed: false,
           attemptCount: 1,
@@ -485,5 +492,148 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
     })
     expect(ingest).not.toHaveBeenCalled()
     expect(project).not.toHaveBeenCalled()
+    const insert = db.query.mock.calls.find(([statement]: [string]) =>
+      statement.includes('INSERT INTO plugin_workload_sdk_spend_outcomes')
+    )
+    expect(insert?.[1]).toEqual(expect.arrayContaining([IDS.providerAttempt, 'exact', 12, 7]))
+  })
+
+  it('records Codex complete without a linked success as unknown without fabricated tokens', async () => {
+    ingest.mockReset()
+    project.mockReset()
+    const db = dbWithRows(
+      [],
+      [],
+      {
+        id: IDS.invocation,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        method: 'promptBridge',
+        status: 'in_progress',
+        attempt_generation: 1,
+      },
+      {
+        invocation_id: IDS.invocation,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        attempt_generation: 1,
+        method: 'promptBridge',
+        status: 'in_progress',
+      },
+      {
+        id: IDS.providerAttempt,
+        invocation_id: IDS.invocation,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        attempt_generation: 1,
+        attempt_index: 1,
+        target_ref: 'codex-primary',
+        host_ref: inputBase.hostRef,
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+        credential_slot: '',
+        status: 'in_progress',
+      },
+      [],
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 }
+    )
+
+    const result = await finalizePromptBridgeInTransaction(
+      {
+        ...inputBase,
+        target: {
+          targetRef: 'codex-primary',
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          credentialSlot: '',
+        },
+        status: 'complete',
+        usage: {
+          llmSecretName: '',
+          callerRef: 'scanner',
+          fallbackUsed: false,
+          attemptCount: 1,
+          inputTokens: 4,
+          outputTokens: 2,
+        },
+      },
+      db as never
+    )
+
+    expect(result).toMatchObject({
+      status: 'complete',
+      outcome: 'unknown',
+      usageAccepted: false,
+    })
+    const insert = db.query.mock.calls.find(([statement]: [string]) =>
+      statement.includes('INSERT INTO plugin_workload_sdk_spend_outcomes')
+    )
+    expect(insert?.[1]).toEqual([
+      IDS.providerAttempt,
+      IDS.invocation,
+      inputBase.recipeNamespace,
+      inputBase.recipeName,
+      1,
+      1,
+      'codex-primary',
+      inputBase.hostRef,
+      'codex-subscription',
+      'gpt-5.1',
+      '',
+      'unknown',
+      'provider_completed',
+      null,
+      null,
+      IDS.providerAttempt,
+    ])
+  })
+
+  it('replays a Codex unknown complete finalization idempotently', async () => {
+    const row = {
+      provider_attempt_id: IDS.providerAttempt,
+      invocation_id: IDS.invocation,
+      recipe_namespace: inputBase.recipeNamespace,
+      recipe_name: inputBase.recipeName,
+      attempt_generation: 1,
+      attempt_index: 1,
+      target_ref: 'codex-primary',
+      host_ref: inputBase.hostRef,
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+      credential_slot: '',
+      outcome: 'unknown',
+      input_tokens: null,
+      output_tokens: null,
+    }
+    await expect(
+      finalizePromptBridgeInTransaction(
+        {
+          ...inputBase,
+          target: {
+            targetRef: 'codex-primary',
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+            credentialSlot: '',
+          },
+          status: 'complete',
+          usage: {
+            llmSecretName: '',
+            callerRef: 'scanner',
+            fallbackUsed: false,
+            attemptCount: 1,
+            inputTokens: 4,
+            outputTokens: 2,
+          },
+        },
+        dbWithRows([], row) as never
+      )
+    ).resolves.toMatchObject({
+      idempotent: true,
+      outcome: 'unknown',
+      usageAccepted: false,
+    })
   })
 })

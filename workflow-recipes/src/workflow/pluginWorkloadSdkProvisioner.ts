@@ -31,6 +31,11 @@ import {
   buildPluginWorkloadSdkTokenSecretName,
 } from './resourceNames'
 import type { WorkflowRuntimePlan } from './runtimePlan'
+import {
+  type PluginWorkloadSdkCodexBindingProof,
+  isPluginWorkloadSdkCodexBindingProof,
+  verifySdkOnlyCodexBindingHash,
+} from './sdkOnlyCodexBinding'
 import { buildPluginWorkloadSdkTokenSecret } from './secretFactory'
 import type { WorkflowConfig } from './types'
 
@@ -43,8 +48,9 @@ export type EagerSdkMcpHostStatus =
 
 export interface EagerSdkBootstrapProof {
   ready: true
-  contractVersion: 2
+  contractVersion: 2 | 3
   podUid: string
+  codexBinding?: PluginWorkloadSdkCodexBindingProof
   provider?: string
   model?: string
   policyReady?: boolean
@@ -175,6 +181,7 @@ export class PluginWorkloadSdkProvisioner {
     runtime: WorkflowRuntimePlan,
     opts: {
       mcpHostPhase: string | undefined
+      codexBinding?: PluginWorkloadSdkCodexBindingProof | null
     }
   ): Promise<EagerSdkMcpHostStatus> {
     const log = createLogger('wrc', recipeName)
@@ -331,7 +338,7 @@ export class PluginWorkloadSdkProvisioner {
 
     if (promptBridge && !mcpHostAgent) return 'failed'
     const capabilityFamily = promptBridge ? 'promptBridge' : 'clientNotifications'
-    const configureKey = `${readiness.uid}:${capabilityFamily}:${mcpHostAgent?.provider ?? 'none'}:${mcpHostAgent?.model ?? 'none'}`
+    const configureKey = `${readiness.uid}:${capabilityFamily}:${mcpHostAgent?.provider ?? 'none'}:${mcpHostAgent?.model ?? 'none'}:${opts.codexBinding?.bindingHash ?? 'none'}`
     try {
       const wrcConfigureToken = await this.deps.tokenFactory.signWrcConfigureToken(
         recipeName,
@@ -344,7 +351,9 @@ export class PluginWorkloadSdkProvisioner {
               mcpHostAgent!.provider,
               mcpHostAgent!.model,
               mcpHostEndpoint,
-              wrcConfigureToken
+              wrcConfigureToken,
+              'promptBridge',
+              opts.codexBinding ?? null
             )
           : await modelConfigHandler.configurePluginWorkloadSdkBootstrap(
               undefined,
@@ -371,6 +380,15 @@ export class PluginWorkloadSdkProvisioner {
       this.eagerSdkBootstrapProofByRecipe.set(recipeName, proof)
       this.eagerSdkConfigureFailuresByRecipe.delete(recipeName)
       if (promptBridge && proof.policyReady === false) {
+        return 'awaiting_policy'
+      }
+      if (
+        promptBridge &&
+        mcpHostAgent?.provider === 'codex-subscription' &&
+        (proof.contractVersion !== 3 ||
+          !proof.codexBinding ||
+          proof.policyReason === 'codex_execution_binding_missing')
+      ) {
         return 'awaiting_policy'
       }
       if (clientNotifications && proof.clientNotificationsPolicyReady === false) {
@@ -565,12 +583,35 @@ function parseEagerSdkBootstrapProof(
   if (
     body.configured !== true ||
     body.ready !== true ||
-    body.contractVersion !== 2 ||
+    (body.contractVersion !== 2 && body.contractVersion !== 3) ||
     typeof body.provider !== 'string' ||
     typeof body.model !== 'string' ||
     body.provider.length === 0 ||
     body.model.length === 0
   ) {
+    return null
+  }
+  if (body.provider === 'codex-subscription' && body.contractVersion !== 3) {
+    return null
+  }
+  const codexBinding = parseCodexBindingProof(body.codexBinding)
+  if (
+    body.provider === 'codex-subscription' &&
+    body.policyReason === 'codex_execution_binding_missing'
+  ) {
+    return {
+      ready: true,
+      contractVersion: 3,
+      podUid,
+      provider: body.provider,
+      model: body.model,
+      policyReady: false,
+      policyState: typeof body.policyState === 'string' ? body.policyState : 'binding_missing',
+      policyReason: 'codex_execution_binding_missing',
+      verifiedAt: new Date().toISOString(),
+    }
+  }
+  if (body.provider === 'codex-subscription' && !codexBinding) {
     return null
   }
   const hasPolicyProof =
@@ -586,11 +627,15 @@ function parseEagerSdkBootstrapProof(
     body.defaultModel === body.model
   return {
     ready: true,
-    contractVersion: 2,
+    contractVersion: body.contractVersion === 3 ? 3 : 2,
     podUid,
     provider: body.provider,
     model: body.model,
-    policyReady: body.policyReady !== false && hasPolicyProof,
+    ...(codexBinding ? { codexBinding } : {}),
+    policyReady:
+      body.policyReady !== false &&
+      hasPolicyProof &&
+      (body.provider !== 'codex-subscription' || Boolean(codexBinding)),
     policyState: typeof body.policyState === 'string' ? body.policyState : 'unknown',
     ...(typeof body.policyReason === 'string' ? { policyReason: body.policyReason } : {}),
     verifiedAt: new Date().toISOString(),
@@ -613,4 +658,10 @@ function parseEagerSdkBootstrapProof(
       ? { clientNotificationsPolicyReason: body.clientNotificationsPolicyReason }
       : {}),
   }
+}
+
+function parseCodexBindingProof(value: unknown): PluginWorkloadSdkCodexBindingProof | undefined {
+  if (!isPluginWorkloadSdkCodexBindingProof(value)) return undefined
+  if (!verifySdkOnlyCodexBindingHash(value)) return undefined
+  return value
 }

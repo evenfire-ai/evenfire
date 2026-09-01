@@ -1,11 +1,13 @@
 import { LlmErrorCode } from '../../core/errors'
 import { type ChatMessage, FinishReason } from '../../core/types'
 import { type SingleTurnProvider, createLLMProvider } from '../../llm'
+import type { CodexAttemptContext } from '../../llm/codexSubscription'
 import { type ClassifiedLike, type FailoverClass, classifyFailoverClass } from '../../llm/failover'
 import { descriptorFor, isLlmProvider } from '../../llm/registryCore'
 import { CircuitBreaker } from '../domain/circuitBreaker'
 import { PluginWorkloadError, type PluginWorkloadProviderAttemptContext } from '../domain/errors'
 import type { PromptBridgeTarget } from '../domain/types'
+import { readSdkOnlyCodexBinding, verifySdkOnlyCodexBindingHash } from '../sdkOnlyCodexBinding'
 import type { BrokeredCredential } from './credentialBrokerClient'
 
 class ClassifiedProviderError extends Error {
@@ -79,6 +81,9 @@ export interface LlmBridgeRequest {
   temperature?: number
   timeoutMs: number
   triggerOn?: FailoverClass[]
+  recipeNamespace?: string
+  recipeName?: string
+  hostRef?: string
 }
 
 export interface LlmBridgeResult {
@@ -134,6 +139,34 @@ const DEFAULT_PROMPT_BRIDGE_FAILOVER_CLASSES: readonly FailoverClass[] = [
 
 function remainingTimeoutMs(deadlineAt: number): number {
   return deadlineAt - Date.now()
+}
+
+function captureSdkOnlyCodexAttemptContext(
+  request: LlmBridgeRequest,
+  target: PromptBridgeTarget,
+  ticket: { providerAttemptId?: string; providerAttemptIndex?: number }
+): CodexAttemptContext | null {
+  const binding = readSdkOnlyCodexBinding()
+  if (
+    !binding ||
+    !verifySdkOnlyCodexBindingHash(binding) ||
+    binding.model !== target.model ||
+    !ticket.providerAttemptId ||
+    ticket.providerAttemptIndex === undefined
+  ) {
+    return null
+  }
+  return {
+    invocationId: request.invocationId,
+    attemptGeneration: request.attemptGeneration,
+    providerAttemptIndex: ticket.providerAttemptIndex,
+    pluginWorkloadSdkProviderAttemptId: ticket.providerAttemptId,
+    policyRevision: binding.catalogRevision,
+    policyHash: binding.bindingHash,
+    ...(request.hostRef ? { hostRef: request.hostRef } : {}),
+    ...(request.recipeNamespace ? { recipeNamespace: request.recipeNamespace } : {}),
+    ...(request.recipeName ? { recipeName: request.recipeName } : {}),
+  }
 }
 
 function providerOutcomeUnknownError(
@@ -299,58 +332,26 @@ export class LlmBridge {
       }
 
       const breaker = this.breakerFor(authorized.target)
-      if (
+      const oauthBroker =
         isLlmProvider(authorized.target.provider) &&
         descriptorFor(authorized.target.provider).authMode === 'oauth-broker'
-      ) {
-        if (!breaker.allow()) {
-          lastProviderError = new ClassifiedProviderError(
-            { code: LlmErrorCode.ApiCallFailed, retryable: true },
-            new PluginWorkloadError(
-              'provider_unavailable',
-              'LLM provider circuit is open',
-              true,
-              'provider_unavailable'
-            )
-          )
-          if (index === request.targets.length - 1) {
-            throw lastProviderError.toPluginWorkloadError()
+      if (oauthBroker) {
+        const skippedOrReserved = await this.completeOauthBrokerTarget({
+          authorized,
+          index,
+          request,
+          breaker,
+          triggerOn,
+          deadlineAt,
+        })
+        if (skippedOrReserved.kind === 'error') {
+          lastProviderError = skippedOrReserved.error
+          if (skippedOrReserved.terminal) {
+            throw skippedOrReserved.error.toPluginWorkloadError()
           }
           continue
         }
-        try {
-          const completion = await this.attempt(
-            { target: authorized.target, keys: {}, llmSecretName: '' },
-            { ...request, timeoutMs: remainingTimeoutMs(deadlineAt) },
-            breaker
-          )
-          return {
-            ...completion,
-            servedTarget: authorized.target,
-            fallbackUsed: index > 0,
-            attemptCount: index + 1,
-            llmSecretName: '',
-            providerAttemptAcknowledgement: 'owned_by_finalizer',
-          }
-        } catch (error) {
-          if (
-            error instanceof ClassifiedProviderError &&
-            error.classified.providerCode === 'budget_denied'
-          ) {
-            throw error.toPluginWorkloadError()
-          }
-          if (!(error instanceof ClassifiedProviderError)) throw error
-          lastProviderError = error
-          const failureClass = classifyFailoverClass(
-            error.classified.code,
-            error.classified.retryable
-          )
-          const eligible = failureClass !== null && triggerOn.has(failureClass)
-          if (!eligible || index === request.targets.length - 1) {
-            throw error.toPluginWorkloadError()
-          }
-          continue
-        }
+        return skippedOrReserved.result
       }
       if (!breaker.allow()) {
         // A circuit-open target still consumes an ordered, auditable physical
@@ -573,10 +574,162 @@ export class LlmBridge {
     )
   }
 
+  private async completeOauthBrokerTarget(input: {
+    authorized: { target: PromptBridgeTarget }
+    index: number
+    request: LlmBridgeRequest
+    breaker: CircuitBreaker
+    triggerOn: Set<FailoverClass>
+    deadlineAt: number
+  }): Promise<
+    | { kind: 'result'; result: LlmBridgeResult }
+    | { kind: 'error'; error: ClassifiedProviderError; terminal: boolean }
+  > {
+    const { authorized, index, request, breaker, triggerOn, deadlineAt } = input
+    const ticket = await withinDeadline(
+      () =>
+        request.credentialTicketIssuer.issue({
+          invocationId: request.invocationId,
+          attemptGeneration: request.attemptGeneration,
+          target: authorized.target,
+          policyRevision: request.policyRevision,
+          policyHash: request.policyHash,
+        }),
+      remainingTimeoutMs(deadlineAt),
+      'timeout'
+    )
+    const providerAttemptContext =
+      ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined
+        ? {
+            providerAttemptId: ticket.providerAttemptId,
+            providerAttemptIndex: ticket.providerAttemptIndex,
+            target: authorized.target,
+            attemptCount: index + 1,
+            fallbackUsed: index > 0,
+          }
+        : undefined
+
+    if (!breaker.allow()) {
+      if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
+        await reportProviderAttemptBestEffort(request.providerAttemptReporter, {
+          providerAttemptId: ticket.providerAttemptId,
+          providerAttemptIndex: ticket.providerAttemptIndex,
+          status: 'skipped',
+        })
+      }
+      const error = new ClassifiedProviderError(
+        { code: LlmErrorCode.ApiCallFailed, retryable: true },
+        new PluginWorkloadError(
+          'provider_unavailable',
+          'LLM provider is temporarily unavailable',
+          true,
+          'provider_unavailable',
+          false,
+          providerAttemptContext
+        )
+      )
+      const failureClass = classifyFailoverClass(error.classified.code, error.classified.retryable)
+      const eligible = failureClass !== null && triggerOn.has(failureClass)
+      return { kind: 'error', error, terminal: !eligible || index === request.targets.length - 1 }
+    }
+
+    const captured = captureSdkOnlyCodexAttemptContext(request, authorized.target, ticket)
+    if (!captured) {
+      if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
+        await reportProviderAttemptBestEffort(request.providerAttemptReporter, {
+          providerAttemptId: ticket.providerAttemptId,
+          providerAttemptIndex: ticket.providerAttemptIndex,
+          status: 'failed',
+        })
+      }
+      const error = new ClassifiedProviderError(
+        { code: LlmErrorCode.ApiCallFailed, retryable: true },
+        new PluginWorkloadError(
+          'provider_unavailable',
+          'Codex execution binding is missing after reserving the SDK attempt',
+          true,
+          'provider_unavailable',
+          false,
+          providerAttemptContext
+        )
+      )
+      const failureClass = classifyFailoverClass(error.classified.code, error.classified.retryable)
+      const eligible = failureClass !== null && triggerOn.has(failureClass)
+      return { kind: 'error', error, terminal: !eligible || index === request.targets.length - 1 }
+    }
+
+    try {
+      const completion = await this.attempt(
+        { target: authorized.target, keys: {}, llmSecretName: '' },
+        { ...request, timeoutMs: remainingTimeoutMs(deadlineAt) },
+        breaker,
+        captured
+      )
+      return {
+        kind: 'result',
+        result: {
+          ...completion,
+          servedTarget: authorized.target,
+          fallbackUsed: index > 0,
+          attemptCount: index + 1,
+          llmSecretName: '',
+          providerAttemptId: ticket.providerAttemptId,
+          providerAttemptIndex: ticket.providerAttemptIndex,
+          providerAttemptAcknowledgement: 'owned_by_finalizer',
+        },
+      }
+    } catch (error) {
+      if (
+        error instanceof ClassifiedProviderError &&
+        (error.classified.providerCode === 'budget_denied' ||
+          error.classified.providerCode === 'no_grant' ||
+          error.classified.providerCode === 'host_binding_mismatch' ||
+          error.classified.providerCode === 'insufficient_scope' ||
+          error.classified.code === LlmErrorCode.AuthenticationFailed)
+      ) {
+        if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
+          await reportProviderAttemptBestEffort(request.providerAttemptReporter, {
+            providerAttemptId: ticket.providerAttemptId,
+            providerAttemptIndex: ticket.providerAttemptIndex,
+            status: 'failed',
+          })
+        }
+        return {
+          kind: 'error',
+          error,
+          terminal: true,
+        }
+      }
+      if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
+        const providerMayHaveExecuted =
+          (error instanceof PluginWorkloadError && error.providerMayHaveExecuted) ||
+          (error instanceof ClassifiedProviderError && error.providerMayHaveExecuted)
+        await reportProviderAttemptBestEffort(request.providerAttemptReporter, {
+          providerAttemptId: ticket.providerAttemptId,
+          providerAttemptIndex: ticket.providerAttemptIndex,
+          status: providerMayHaveExecuted ? 'provider_unavailable' : 'failed',
+        })
+      }
+      if (!(error instanceof ClassifiedProviderError)) {
+        throw providerAttemptContext
+          ? withProviderAttemptContext(error, providerAttemptContext)
+          : error
+      }
+      const failureClass = classifyFailoverClass(error.classified.code, error.classified.retryable)
+      const eligible = failureClass !== null && triggerOn.has(failureClass)
+      return {
+        kind: 'error',
+        error,
+        terminal: !eligible || index === request.targets.length - 1,
+      }
+    }
+  }
+
   private async attempt(
     credential: BrokeredCredential,
     request: LlmBridgeRequest,
-    breaker: CircuitBreaker
+    breaker: CircuitBreaker,
+    capturedCodexAttemptContext?: CodexAttemptContext
   ): Promise<
     Pick<
       LlmBridgeResult,
@@ -601,10 +754,14 @@ export class LlmBridge {
         'configuration'
       )
     }
-    const provider: SingleTurnProvider | null = factory(credential.keys, {
-      provider: providerId,
-      name: credential.target.model,
-    })
+    const provider: SingleTurnProvider | null = factory(
+      credential.keys,
+      {
+        provider: providerId,
+        name: credential.target.model,
+      },
+      capturedCodexAttemptContext ? { capturedCodexAttemptContext } : undefined
+    )
     if (!provider) {
       throw new PluginWorkloadError(
         'provider_unavailable',

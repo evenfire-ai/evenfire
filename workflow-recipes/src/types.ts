@@ -571,7 +571,7 @@ export interface PluginWorkloadSdkCapabilityStatus {
   // explicitly send null so a previous validated record cannot survive a
   // later degraded/awaiting-policy transition.
   validatedAt?: string | null
-  bootstrapContractVersion?: 2 | null
+  bootstrapContractVersion?: 2 | 3 | null
   bootstrapPodUid?: string | null
   bootstrapProvider?: string | null
   bootstrapModel?: string | null

@@ -22,6 +22,7 @@ export type LlmProviderAttemptInsert = {
   connectionRevision: number
   connectionId?: string | null
   correlationId?: string | null
+  pluginWorkloadSdkProviderAttemptId?: string | null
 }
 
 export type LlmProviderAttemptRow = LlmProviderAttemptInsert & {
@@ -29,6 +30,8 @@ export type LlmProviderAttemptRow = LlmProviderAttemptInsert & {
   provider: typeof LLM_PROVIDER_ATTEMPT_PROVIDER
   status: LlmProviderAttemptStatus
   outcome: LlmProviderAttemptOutcome | null
+  usageInputTokens?: number | null
+  usageOutputTokens?: number | null
   createdAt: Date
 }
 
@@ -90,6 +93,18 @@ export async function applyLlmProviderAttemptConnectionIdSchema(db: DbClient): P
   `)
 }
 
+export async function applyLlmProviderAttemptSdkLinkSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE llm_provider_attempts
+      ADD COLUMN IF NOT EXISTS plugin_workload_sdk_provider_attempt_id UUID
+        REFERENCES plugin_workload_sdk_provider_attempts(id);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS llm_provider_attempts_sdk_attempt_uidx
+      ON llm_provider_attempts (plugin_workload_sdk_provider_attempt_id)
+      WHERE plugin_workload_sdk_provider_attempt_id IS NOT NULL;
+  `)
+}
+
 export async function applyLlmProviderAttemptTicketSchema(db: DbClient): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS llm_provider_attempt_tickets (
@@ -120,15 +135,16 @@ export async function insertLlmProviderAttempt(
        caller_kind, host_ref, recipe_namespace, recipe_name, invocation_id,
        attempt_generation, provider_attempt_index, provider, model, request_hash,
        policy_revision, policy_hash, budget_reservation_id, connection_revision,
-       connection_id, status, correlation_id
+       connection_id, plugin_workload_sdk_provider_attempt_id, status, correlation_id
      ) VALUES (
        $1, $2, $3, $4, $5, $6, $7, 'codex-subscription', $8, $9, $10, $11, $12, $13,
-       $14, 'authorized', $15
+       $14, $15, 'authorized', $16
      )
      RETURNING id, caller_kind, host_ref, recipe_namespace, recipe_name, invocation_id,
                attempt_generation, provider_attempt_index, provider, model, request_hash,
                policy_revision, policy_hash, budget_reservation_id, connection_revision,
-               connection_id, status, outcome, created_at`,
+               connection_id, plugin_workload_sdk_provider_attempt_id, status, outcome,
+               usage_input_tokens, usage_output_tokens, created_at`,
     [
       input.callerKind,
       input.hostRef,
@@ -144,10 +160,15 @@ export async function insertLlmProviderAttempt(
       input.budgetReservationId,
       input.connectionRevision,
       input.connectionId ?? null,
+      input.pluginWorkloadSdkProviderAttemptId ?? null,
       input.correlationId ?? null,
     ]
   )
   const row = result.rows[0] as Record<string, unknown>
+  return mapLlmProviderAttemptRow(row)
+}
+
+function mapLlmProviderAttemptRow(row: Record<string, unknown>): LlmProviderAttemptRow {
   return {
     id: String(row.id),
     callerKind: row.caller_kind as 'host' | 'recipe',
@@ -165,8 +186,13 @@ export async function insertLlmProviderAttempt(
     budgetReservationId: String(row.budget_reservation_id),
     connectionRevision: Number(row.connection_revision),
     connectionId: row.connection_id ? String(row.connection_id) : null,
+    pluginWorkloadSdkProviderAttemptId: row.plugin_workload_sdk_provider_attempt_id
+      ? String(row.plugin_workload_sdk_provider_attempt_id)
+      : null,
     status: row.status as LlmProviderAttemptStatus,
     outcome: (row.outcome as LlmProviderAttemptOutcome | null) ?? null,
+    usageInputTokens: row.usage_input_tokens == null ? null : Number(row.usage_input_tokens),
+    usageOutputTokens: row.usage_output_tokens == null ? null : Number(row.usage_output_tokens),
     createdAt: row.created_at instanceof Date ? row.created_at : new Date(String(row.created_at)),
   }
 }
@@ -199,34 +225,32 @@ export async function loadLlmProviderAttempt(
     `SELECT id, caller_kind, host_ref, recipe_namespace, recipe_name, invocation_id,
             attempt_generation, provider_attempt_index, provider, model, request_hash,
             policy_revision, policy_hash, budget_reservation_id, connection_revision,
-            connection_id, status, outcome, created_at
+            connection_id, plugin_workload_sdk_provider_attempt_id, status, outcome,
+            usage_input_tokens, usage_output_tokens, created_at
        FROM llm_provider_attempts
       WHERE id = $1`,
     [id]
   )
   const row = result.rows[0] as Record<string, unknown> | undefined
-  if (!row) return null
-  return {
-    id: String(row.id),
-    callerKind: row.caller_kind as 'host' | 'recipe',
-    hostRef: String(row.host_ref),
-    recipeNamespace: (row.recipe_namespace as string | null) ?? null,
-    recipeName: (row.recipe_name as string | null) ?? null,
-    invocationId: String(row.invocation_id),
-    attemptGeneration: Number(row.attempt_generation),
-    providerAttemptIndex: Number(row.provider_attempt_index),
-    provider: LLM_PROVIDER_ATTEMPT_PROVIDER,
-    model: String(row.model),
-    requestHash: String(row.request_hash),
-    policyRevision: Number(row.policy_revision),
-    policyHash: String(row.policy_hash),
-    budgetReservationId: String(row.budget_reservation_id),
-    connectionRevision: Number(row.connection_revision),
-    connectionId: row.connection_id ? String(row.connection_id) : null,
-    status: row.status as LlmProviderAttemptStatus,
-    outcome: (row.outcome as LlmProviderAttemptOutcome | null) ?? null,
-    createdAt: row.created_at instanceof Date ? row.created_at : new Date(String(row.created_at)),
-  }
+  return row ? mapLlmProviderAttemptRow(row) : null
+}
+
+export async function loadLlmProviderAttemptBySdkAttemptId(
+  db: DbClient,
+  pluginWorkloadSdkProviderAttemptId: string
+): Promise<LlmProviderAttemptRow | null> {
+  const result = await db.query(
+    `SELECT id, caller_kind, host_ref, recipe_namespace, recipe_name, invocation_id,
+            attempt_generation, provider_attempt_index, provider, model, request_hash,
+            policy_revision, policy_hash, budget_reservation_id, connection_revision,
+            connection_id, plugin_workload_sdk_provider_attempt_id, status, outcome,
+            usage_input_tokens, usage_output_tokens, created_at
+       FROM llm_provider_attempts
+      WHERE plugin_workload_sdk_provider_attempt_id = $1`,
+    [pluginWorkloadSdkProviderAttemptId]
+  )
+  const row = result.rows[0] as Record<string, unknown> | undefined
+  return row ? mapLlmProviderAttemptRow(row) : null
 }
 
 export async function lockLlmProviderAttemptTicket(

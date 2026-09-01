@@ -356,6 +356,9 @@ export class PromptBridgeHandler {
         maxTokens: clampMaxTokens(request.maxTokens, authorized.maxOutputTokens),
         temperature: request.temperature ?? authorized.modelPolicy?.temperature,
         timeoutMs: this.deps.promptTimeoutMs,
+        recipeNamespace: this.deps.recipeNamespace,
+        recipeName: this.deps.recipeName,
+        hostRef: `${this.deps.recipeNamespace}/${this.deps.recipeName}`,
       })
 
       const providerAttemptAcknowledgement =
