@@ -13,18 +13,16 @@ import { useToast } from '@components/Toast'
 import { IconTrash } from '@components/icons'
 import { Button, Field, TextInput } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { accessScopeLabeler } from '@lib/accessScopeLabels'
 import { getAgentDisplayName } from '@lib/agentName'
 import {
   addAdminTeamMember,
   createAdminTeam,
   getAdminUsers,
-  getContexts,
   getHosts,
   updateAdminTeamAgents,
   updateAdminTeamContexts,
 } from '@lib/api'
-import type { AdminUser, ContextResource, HostResource } from '@lib/api'
+import type { AdminUser, HostResource } from '@lib/api'
 import { permissionsForTeamRole, setDeletePermission, setInvitePermission } from '@lib/teamRoles'
 
 type Role = 'admin' | 'inviter' | 'member'
@@ -51,13 +49,6 @@ const STEP_DETAILS = [
   },
 ] as const
 
-function contextIdFromResource(item: {
-  metadata?: { name?: string }
-  spec?: { contextId?: string }
-}) {
-  return String(item.spec?.contextId || item.metadata?.name || '').trim()
-}
-
 function hostNameFromResource(item: HostResource) {
   return String(item.metadata?.name || '').trim()
 }
@@ -68,13 +59,10 @@ export default function CreateTeamPage() {
 
   const [loadingReferenceData, setLoadingReferenceData] = useState(true)
   const [users, setUsers] = useState<AdminUser[]>([])
-  const [contextResources, setContextResources] = useState<ContextResource[]>([])
-  const [availableContextIds, setAvailableContextIds] = useState<string[]>([])
   const [hosts, setHosts] = useState<HostResource[]>([])
   const [teamName, setTeamName] = useState('')
   const [step, setStep] = useState<TeamCreateStep>(0)
   const [memberRoleDrafts, setMemberRoleDrafts] = useState<Record<string, Role>>({})
-  const [selectedContextIds, setSelectedContextIds] = useState<string[]>([])
   const [selectedAgentNames, setSelectedAgentNames] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -87,19 +75,8 @@ export default function CreateTeamPage() {
       setLoadingReferenceData(true)
       setError('')
       try {
-        const [usersResponse, contextsResponse, hostsResponse] = await Promise.all([
-          getAdminUsers(''),
-          getContexts(),
-          getHosts(),
-        ])
+        const [usersResponse, hostsResponse] = await Promise.all([getAdminUsers(''), getHosts()])
         setUsers(Array.isArray(usersResponse.items) ? usersResponse.items : [])
-        setContextResources((contextsResponse.items || []) as ContextResource[])
-        setAvailableContextIds(
-          (contextsResponse.items || [])
-            .map((item: ContextResource) => contextIdFromResource(item))
-            .filter(Boolean)
-            .sort((a, b) => a.localeCompare(b))
-        )
         setHosts(Array.isArray(hostsResponse.items) ? hostsResponse.items : [])
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : 'Failed to load team options')
@@ -128,15 +105,6 @@ export default function CreateTeamPage() {
       })),
     [users]
   )
-  // Options keep context IDs as values (the write model) but show what the
-  // access means: the owning agent(s), else the stored display name.
-  const contextOptions = useMemo(() => {
-    const labelFor = accessScopeLabeler(contextResources, hosts)
-    return availableContextIds.map(contextId => ({
-      value: contextId,
-      label: labelFor(contextId).label,
-    }))
-  }, [availableContextIds, contextResources, hosts])
   const agentOptions = useMemo(
     () =>
       Array.from(new Set(hosts.map(host => hostNameFromResource(host)).filter(Boolean)))
@@ -203,13 +171,12 @@ export default function CreateTeamPage() {
       return
     }
     if (step === 2) {
-      void handleCreateTeam({ agentNames: [], contextIds: [] })
+      void handleCreateTeam({ agentNames: [] })
     }
   }
 
   async function handleCreateTeam(overrides?: {
     agentNames?: string[]
-    contextIds?: string[]
     memberRoles?: Record<string, Role>
   }) {
     if (!canCreate) {
@@ -235,7 +202,6 @@ export default function CreateTeamPage() {
         )
         .filter(Boolean)
       const selectedContextValues = Array.from(new Set([...agentRefs]))
-      void selectedContextIds
 
       await Promise.all(
         Object.entries(selectedMemberRoles).map(([userId, role]) =>
