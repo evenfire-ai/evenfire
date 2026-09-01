@@ -516,7 +516,7 @@ describe('SecretsTable — recipe pending refs', () => {
 })
 
 describe('SecretsTable — LLM empty state', () => {
-  it('keeps LLM nested under API-KEY without a sibling Subscription scope', async () => {
+  it('shows LLM API Keys and LLM Subscriptions as sibling top-level scopes', async () => {
     rtlRender(
       <ToastProvider>
         <SecretsTable
@@ -531,12 +531,16 @@ describe('SecretsTable — LLM empty state', () => {
       </ToastProvider>
     )
     expect(await screen.findByText('No LLM secrets found.')).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: 'API-KEY' })).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByRole('tab', { name: 'Subscriptions' })).toHaveAttribute(
+    expect(screen.getByRole('tab', { name: 'LLM API Keys' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    )
+    expect(screen.getByRole('tab', { name: 'LLM Subscriptions' })).toHaveAttribute(
       'href',
       '/secrets/llm/subscriptions'
     )
-    expect(screen.getByRole('tab', { name: 'LLM' })).toBeInTheDocument()
-    expect(screen.queryByRole('tab', { name: /^Subscription$/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Connector' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Recipe' })).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'API-KEY' })).not.toBeInTheDocument()
   })
 })

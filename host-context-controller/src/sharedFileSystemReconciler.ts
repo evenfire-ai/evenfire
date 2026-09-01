@@ -46,6 +46,7 @@ import type {
 } from './types'
 import {
   applyNetworkPolicy,
+  deploymentMatchesDesired,
   getErrorCode,
   preserveDeploymentAnnotations,
   replaceWithConflictRetry,
@@ -366,6 +367,7 @@ export class SharedFileSystemReconciler {
         // otherwise HCC would immediately create a second Recreate outage and
         // defeat the reconciler's one-rollout contract.
         mergeExisting: preserveDeploymentAnnotations,
+        isUpToDate: deploymentMatchesDesired,
         replace: body =>
           this.appsApi.replaceNamespacedDeployment({
             namespace: this.factoryConfig.hostNamespace,

@@ -322,6 +322,12 @@ body.cu-body {
   max-width: min(28rem, 100%);
 }
 
+/* Detail-page forms that need more room for their selects and embedded cards
+   (agent Models & creds). */
+.cu-form-stack--wide {
+  max-width: min(35rem, 100%);
+}
+
 .cu-connector-credentials-form {
   display: grid;
   gap: var(--cu-space-3);
@@ -1808,6 +1814,10 @@ textarea.cu-input {
 
 .cu-tabs--flush {
   margin: 0;
+}
+
+.cu-tabs--nested {
+  margin-top: var(--cu-space-4);
 }
 
 .cu-tabs--tight {
@@ -6633,8 +6643,14 @@ textarea.cu-input {
   line-height: 1.25;
 }
 
-.cu-agent-select__providers-label {
-  margin-right: 0.1rem;
+.cu-agent-select__group {
+  display: block;
+  padding: var(--cu-space-2) 0.65rem var(--cu-space-05);
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-2xs);
+  font-weight: var(--cu-font-weight-bold);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
 .cu-agent-select__provider {
@@ -8509,19 +8525,9 @@ textarea.cu-input {
 }
 
 /* OpenAI ships a white-on-transparent mark, so on light surfaces it needs to be
-   knocked back to black. Scoped to provider-level controls — the model dropdown
-   reuses the same icon on a different treatment and must not inherit this. */
+   knocked back to black — provider pickers, credential dropdowns, model
+   dropdowns, chips, and filters all sit on light surfaces in this theme. */
 :root[data-theme='light']
-  :is(
-    .cu-llm-config__provider-select,
-    .cu-llm-cred-add,
-    .cu-llm-model-group__toggle,
-    .cu-filter-select__copy,
-    .cu-filter-select__icon,
-    .cu-chip,
-    .cu-px-provider,
-
-  )
   .cu-llm-provider-icon:is([data-provider='openai'], [data-provider='codex-subscription'])
   img {
   filter: brightness(0);
@@ -8575,6 +8581,51 @@ textarea.cu-input {
 
 .cu-llm-config__allowed-intro {
   margin: 0;
+}
+
+/* ChatGPT device sign-in card shown while the subscription modal waits for the
+   operator to approve the device code in the auto-opened ChatGPT tab. */
+.cu-device-setup {
+  display: grid;
+  gap: var(--cu-space-2);
+  padding: var(--cu-space-3) var(--cu-space-4);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-elevated);
+}
+
+.cu-device-setup__step {
+  margin: 0;
+  color: var(--cu-text-soft);
+  font-size: var(--cu-font-size-sm);
+}
+
+.cu-device-setup__link {
+  color: var(--cu-accent);
+}
+
+.cu-device-setup__code {
+  font-size: var(--cu-font-size-xl);
+  font-weight: var(--cu-font-weight-semibold);
+  letter-spacing: 0.14em;
+  text-align: center;
+}
+
+.cu-device-setup__note {
+  margin: 0;
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-xs);
+}
+
+/* Wrapper that keeps a tooltip available on a disabled button (disabled
+   elements suppress their own title in some browsers). */
+.cu-hover-hint {
+  display: inline-flex;
+  cursor: not-allowed;
+}
+
+.cu-hover-hint > .cu-btn:not(:disabled) {
+  cursor: pointer;
 }
 
 /* Read-only model configuration summary. It mirrors the editor's provider
@@ -11276,6 +11327,30 @@ textarea.cu-input {
   align-items: center;
   justify-content: space-between;
   gap: var(--cu-space-2);
+}
+
+.cu-codex-device-code {
+  display: grid;
+  gap: var(--cu-space-2);
+}
+
+.cu-codex-device-code a {
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+}
+
+.cu-codex-device-code__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--cu-space-2);
+}
+
+.cu-codex-device-code__value {
+  font-family: var(--cu-font-mono);
+  font-size: var(--cu-font-size-lg);
+  font-weight: var(--cu-font-weight-semibold);
+  letter-spacing: 0.04em;
 }
 
 .cu-agent-select.cu-llm-provider-filter {

@@ -13,7 +13,6 @@ import {
   listOfferedCodexModelsForAssignment,
   pickCodexGrantModel,
   setCodexCatalogModelEnabled,
-  syncCodexSubscriptionCatalog,
 } from '../../services/codexSubscriptionCatalog.js'
 import {
   CODEX_UNASSIGNED_CONNECTION_KEY,
@@ -23,18 +22,18 @@ import {
   generateCodexConnectionKey,
   getSafeCodexSubscriptionConnection,
   listSafeCodexSubscriptionConnections,
-  loadCodexSubscriptionSecrets,
   normalizeCodexConnectionKey,
   updateCodexSubscriptionConnectionMetadata,
 } from '../../services/codexSubscriptionConnection.js'
 import {
   type CodexOAuthDeps,
   CodexSubscriptionOAuthError,
-  ensureFreshCodexAccessToken,
   getCodexSubscriptionConnection,
+  isCodexOAuthErrorCode,
   pollCodexDevice,
   refreshCodexSubscriptionConnection,
   revokeCodexSubscription,
+  runCodexCatalogSync,
   startCodexBrowserConnect,
   startCodexDeviceConnect,
 } from '../../services/codexSubscriptionOAuth.js'
@@ -408,11 +407,25 @@ export function createAdminCodexSubscriptionRouter(
   const devicePollHandler = asyncHandler(async (req, res) => {
     try {
       const state = typeof req.query.state === 'string' ? req.query.state : ''
-      const result = await pollCodexDevice(
-        oauthDeps(req, resolveBrowserRedirectUri(req), keyFromReq(req)),
-        state
-      )
-      if (result.status === 'connected' && (await publishRuntimeAllowlistOrFail(res))) return
+      const connectionKey = keyFromReq(req)
+      const deps = oauthDeps(req, resolveBrowserRedirectUri(req), connectionKey)
+      let result = await pollCodexDevice(deps, state)
+      if (result.status === 'connected') {
+        const sync = await runCodexCatalogSync(
+          deps,
+          result.connection.connectionKey,
+          catalogTransport
+        )
+        if (sync.connection) {
+          result = { ...result, connection: sync.connection }
+        } else if (!sync.ok) {
+          result = {
+            ...result,
+            connection: { ...result.connection, catalogStatus: sync.catalogStatus },
+          }
+        }
+        if (await publishRuntimeAllowlistOrFail(res)) return
+      }
       res.status(200).json(result)
     } catch (err) {
       sendOAuthError(res, err)
@@ -437,32 +450,16 @@ export function createAdminCodexSubscriptionRouter(
         res.status(404).json({ error: 'disabled' })
         return
       }
-      const db = dbClient()
       const connectionKey = keyFromReq(req)
-      await ensureFreshCodexAccessToken(
-        oauthDeps(req, resolveBrowserRedirectUri(req), connectionKey)
-      )
-      const secrets = await loadCodexSubscriptionSecrets(
-        db,
-        deriveOAuthEncryptionKey(config.oauthEncryptionKey),
-        connectionKey
-      )
-      if (!secrets?.accessToken) {
-        res.status(404).json({ error: 'no_grant' })
-        return
-      }
-      const synced = await syncCodexSubscriptionCatalog(db, catalogTransport, secrets.accessToken, {
+      const synced = await runCodexCatalogSync(
+        oauthDeps(req, resolveBrowserRedirectUri(req), connectionKey),
         connectionKey,
-      })
-      if (!synced.connection) {
-        res.status(409).json({ error: 'stale_revision' })
-        return
-      }
-      if (synced.outcome !== 'ready') {
+        catalogTransport
+      )
+      if (synced.ok) {
         if (await publishRuntimeAllowlistOrFail(res)) return
-        res.status(503).json({
-          error: 'catalog_sync_failed',
-          outcome: synced.outcome,
+        res.status(200).json({
+          outcome: synced.catalogStatus,
           added: synced.added,
           refreshed: synced.refreshed,
           staled: synced.staled,
@@ -470,13 +467,26 @@ export function createAdminCodexSubscriptionRouter(
         })
         return
       }
+      if (synced.reason === 'no_grant' || synced.reason === 'disabled') {
+        res.status(404).json({ error: synced.reason })
+        return
+      }
+      if (synced.reason === 'stale_revision') {
+        res.status(409).json({ error: 'stale_revision' })
+        return
+      }
+      if (isCodexOAuthErrorCode(synced.reason)) {
+        sendOAuthError(res, new CodexSubscriptionOAuthError(synced.reason, synced.reason))
+        return
+      }
       if (await publishRuntimeAllowlistOrFail(res)) return
-      res.status(200).json({
-        outcome: synced.outcome,
-        added: synced.added,
-        refreshed: synced.refreshed,
-        staled: synced.staled,
-        connection: synced.connection,
+      res.status(503).json({
+        error: 'catalog_sync_failed',
+        outcome: synced.catalogStatus === 'never_synced' ? 'unavailable' : synced.catalogStatus,
+        added: synced.added ?? 0,
+        refreshed: synced.refreshed ?? 0,
+        staled: synced.staled ?? 0,
+        connection: synced.connection ?? null,
       })
     } catch (err) {
       sendOAuthError(res, err)
