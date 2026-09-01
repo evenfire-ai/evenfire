@@ -1325,7 +1325,11 @@ export function App() {
         (vm.navItem === DESKTOP_ROUTES.apps && Boolean(activeSandboxUiApp)) ||
         (vm.navItem === DESKTOP_ROUTES.chat && Boolean(vm.activeChatId)),
       composerAvailable:
-        vm.navItem === DESKTOP_ROUTES.chat &&
+        // The drawer surfaces the same live composer as the full-screen chat
+        // route, so `composer.focus` must be eligible there too — not only when
+        // `navItem === chat`. The command handler's reveal is already
+        // drawer-aware; the gate was the only thing pinning it to the route.
+        (vm.navItem === DESKTOP_ROUTES.chat || chatDrawerVisible) &&
         Boolean(activeChatViewTab(chatViewTabs).agentRef) &&
         vm.hostRuntimeStatus?.degraded?.reason !== 'llm_key_missing',
       appMounted:
@@ -1339,6 +1343,7 @@ export function App() {
     }),
     [
       activeSandboxUiApp,
+      chatDrawerVisible,
       chatViewTabs,
       sandboxUiConversationOrigin,
       sandboxUiMounted,

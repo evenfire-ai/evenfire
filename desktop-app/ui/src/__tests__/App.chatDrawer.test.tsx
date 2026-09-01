@@ -332,6 +332,70 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(screen.queryAllByRole('option').length).toBeGreaterThan(0)
   })
 
+  // `composer.focus` (Mod+Shift+L) must reach the loaded composer shown IN the
+  // drawer, not only the full-screen chat route. The command's reveal is already
+  // drawer-aware (revealChatViewTab with keepNavItem); the eligibility gate was
+  // the only thing pinning it to `navItem === chat`. With the app live and the
+  // drawer showing a loaded chat, the command must run through in-drawer chat
+  // selection instead of being dropped as ineligible.
+  it('runs composer.focus against the loaded chat shown in the drawer', () => {
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      navItem: DESKTOP_ROUTES.chat,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    let commandCb: ((commandId: string, source: string) => void) | null = null
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        shortcuts: {
+          onCommand: vi.fn((cb: (commandId: string, source: string) => void) => {
+            commandCb = cb
+            return vi.fn()
+          }),
+        },
+        app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
+        sandboxUi: {
+          listApps: vi.fn().mockResolvedValue({ apps: [] }),
+          listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
+          clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
+          onDeepLink: vi.fn(() => vi.fn()),
+          setVisible: vi.fn().mockResolvedValue(undefined),
+          setBounds: vi.fn().mockResolvedValue(undefined),
+          focusActive: vi.fn().mockResolvedValue(true),
+          close: vi.fn().mockResolvedValue(undefined),
+        },
+      } as unknown as Window['clerum'],
+    })
+
+    render(<App />)
+
+    // Launch from chat-1: drawer opens over the live embed with chat-1 active.
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+
+    // Ignore any selection the launch itself performed; assert only on the command.
+    vi.mocked(currentController.handleSelectChatAgent).mockClear()
+
+    act(() => commandCb?.('composer.focus', 'shortcut-host'))
+
+    // Observable: the command was eligible in the drawer and reached in-drawer
+    // chat selection (keepNavItem — it must not eject to the full-screen route).
+    expect(currentController.handleSelectChatAgent).toHaveBeenLastCalledWith(
+      'alpha',
+      expect.objectContaining({ keepNavItem: true })
+    )
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+  })
+
   it('reverts the notification tray to overlay form while the chat drawer is visible', () => {
     currentController = makeController({
       selectedAgent: 'alpha',
