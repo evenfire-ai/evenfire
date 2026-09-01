@@ -69,7 +69,10 @@ async function requireEffectiveV2Contract(
   next: () => void
 ): Promise<void> {
   try {
-    const policy = await resolveEffectiveUserAccessPolicy({ budget: req.accessExecutionBudget })
+    const policy = await resolveEffectiveUserAccessPolicy({
+      budget: req.accessExecutionBudget,
+      catalogReadiness: feature === 'catalog',
+    })
     const enabled = feature === 'catalog' ? policy.serveCatalog : policy.actionContextV2
     if (req.externalAuth?.sessionContract === 'v2' && enabled) {
       next()
@@ -149,7 +152,10 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
     requireCompletedExternalSessionAuthenticationWithPublicErrors,
     asyncHandler(async (req: ExternalAuthedRequest, res) => {
       try {
-        const policy = await resolveEffectiveUserAccessPolicy({ budget: req.accessExecutionBudget })
+        const policy = await resolveEffectiveUserAccessPolicy({
+          budget: req.accessExecutionBudget,
+          catalogReadiness: true,
+        })
         res.status(200).json({
           contractVersion: '2',
           currentSessionContract: req.externalAuth!.sessionContract ?? 'v1',

@@ -115,7 +115,7 @@ export async function compareAccessCatalogShadow(
   if (!legacy) return record(input.family, 'skipped_legacy_incomplete')
   if (options.enabled === undefined) {
     try {
-      const policy = await resolveEffectiveUserAccessPolicy()
+      const policy = await resolveEffectiveUserAccessPolicy({ catalogReadiness: true })
       if (!policy.computeCatalogShadow) return 'skipped_unavailable'
     } catch {
       return record(input.family, 'skipped_unavailable')

@@ -37,6 +37,7 @@ type RuntimePolicyOptions = Readonly<{
   readinessMaxAgeMs?: number | null
   now?: Date
   catalogActivationRecord?: string
+  catalogReadiness?: boolean
 }>
 
 type CatalogComparisonEvidence = Readonly<{
@@ -263,7 +264,10 @@ function runtimeReadiness(
 export async function resolveEffectiveUserAccessPolicy(
   options: RuntimePolicyOptions = {}
 ): Promise<EffectiveUserAccessPolicy> {
-  const intent = options.intent ?? configuredUserAccessIntent
+  const configuredIntent = options.intent ?? configuredUserAccessIntent
+  const intent = options.catalogReadiness
+    ? configuredIntent
+    : Object.freeze({ ...configuredIntent, catalogMode: 'off' as const })
   if (!needsOperationalReadiness(intent)) {
     return compileUserAccessPolicy(intent, reconstructionReadiness)
   }
