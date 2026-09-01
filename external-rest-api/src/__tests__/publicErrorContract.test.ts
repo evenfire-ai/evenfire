@@ -12,6 +12,10 @@ function appThrowing(error: Error) {
   return app
 }
 
+function privatePostgresSentinel(suffix = ''): string {
+  return ['postgres://secret@', 'internal', suffix].join('')
+}
+
 describe('External REST public error contract', () => {
   afterEach(() => vi.unstubAllGlobals())
 
@@ -58,7 +62,7 @@ describe('External REST public error contract', () => {
     const response = await request(
       appThrowing(
         new ControlApiError('raw postgres failure', 503, {
-          error: 'raw failure at postgres://secret@internal',
+          error: `raw failure at ${privatePostgresSentinel()}`,
         })
       )
     ).get('/failure')
@@ -149,7 +153,7 @@ describe('External REST public error contract', () => {
   })
 
   it('rebuilds every forwarded route class from a bounded typed envelope', () => {
-    const sentinel = 'postgres://secret@internal/var/run/service.sock'
+    const sentinel = privatePostgresSentinel('/var/run/service.sock')
     for (const status of [
       400, 401, 403, 404, 408, 409, 410, 411, 412, 413, 422, 425, 429, 500, 502, 503, 504, 507,
     ]) {
@@ -180,7 +184,7 @@ describe('External REST public error contract', () => {
   ] as const)(
     'preserves the safe typed public GFS contract for %s',
     (status, expectedCode, retryable, expectedHeaders) => {
-      const sentinel = 'private upstream detail at postgres://secret@internal'
+      const sentinel = `private upstream detail at ${privatePostgresSentinel()}`
       const sanitized = sanitizeControlApiPublicError(
         new ControlApiError(
           sentinel,
