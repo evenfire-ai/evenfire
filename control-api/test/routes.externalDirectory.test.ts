@@ -99,6 +99,11 @@ describe('external directory authorization', () => {
     expect(response.headers['x-ratelimit-limit']).toBe('30')
     expect(response.headers['x-ratelimit-remaining']).toBe('29')
     expect(response.headers['x-ratelimit-reset']).toBeDefined()
+    expect(mocks.membership).toHaveBeenCalledWith(
+      'user-1',
+      'team-1',
+      expect.objectContaining({ budget: expect.anything() })
+    )
     expect(mocks.searchDirectory).toHaveBeenCalledWith('team-1', 'person', undefined)
   })
 

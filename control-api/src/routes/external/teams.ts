@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
+import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import type { ExternalAuthedRequest } from '../../middleware/externalSessionAuth.js'
 import {
@@ -49,7 +50,12 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
     config.approvalRlExternalClientIpPerMin,
     config.approvalRlExternalEdgePerMin
   )
-  router.use('/external/teams', ...externalTeamsRateLimits, requireValidExternalSessionToken)
+  router.use(
+    '/external/teams',
+    ...externalTeamsRateLimits,
+    attachAccessExecutionBudget,
+    requireValidExternalSessionToken
+  )
 
   router.get(
     '/external/teams/:teamId/users/:userId/current',

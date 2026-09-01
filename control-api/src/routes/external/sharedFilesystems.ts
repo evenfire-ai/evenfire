@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
+import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
@@ -73,7 +74,8 @@ class ContextAuthorizationUnavailableError extends Error {
 async function loadAccessibleContextIds(
   gateway: K8sGateway,
   userId: string,
-  teamId: string | null
+  teamId: string | null,
+  budget: NonNullable<ExternalAuthedRequest['accessExecutionBudget']>
 ): Promise<Set<string>> {
   const accessible = new Set<string>()
   let activeContextIds: string[]
@@ -92,7 +94,7 @@ async function loadAccessibleContextIds(
     const compatibilityTeamId = teamId.trim()
     let membership
     try {
-      membership = await getLiveTeamMembership(userId, compatibilityTeamId)
+      membership = await getLiveTeamMembership(userId, compatibilityTeamId, { budget })
     } catch (err) {
       throw new ContextAuthorizationUnavailableError(err)
     }
@@ -121,7 +123,12 @@ function loadAccessibleContextIdsForRequest(
 ): Promise<Set<string>> {
   const cache = requestCache(res)
   const claims = req.externalAuth!
-  cache.accessibleContextIds ??= loadAccessibleContextIds(gateway, claims.userId, claims.teamId)
+  cache.accessibleContextIds ??= loadAccessibleContextIds(
+    gateway,
+    claims.userId,
+    claims.teamId,
+    req.accessExecutionBudget!
+  )
   return cache.accessibleContextIds
 }
 
@@ -218,6 +225,7 @@ export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Rout
   router.use(
     '/external/contexts/:contextId/shared-filesystems',
     ...externalSharedFilesystemsRateLimits,
+    attachAccessExecutionBudget,
     requireValidExternalSessionToken
   )
 
