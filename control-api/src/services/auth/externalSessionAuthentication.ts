@@ -148,6 +148,7 @@ export async function authenticateExternalUserSessionIdentity(
   if (v2Claims) {
     const validation = await validateUserSessionClaims(v2Claims, {
       budget: options.budget,
+      touch: false,
     })
     if (validation.status !== 'valid') return validation
     return {
