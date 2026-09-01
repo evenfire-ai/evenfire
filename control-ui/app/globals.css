@@ -2425,6 +2425,7 @@ textarea.cu-input {
 .cu-section-search {
   width: min(13rem, 100%);
   min-width: 9rem;
+  max-width: 250px !important;
 }
 
 .cu-registry-layout {
