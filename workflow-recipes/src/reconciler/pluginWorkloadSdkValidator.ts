@@ -361,7 +361,13 @@ export function buildPluginWorkloadSdkStatus(args: {
         ? (bootstrapProof?.clientNotificationsPolicyReason ??
           bootstrapProof?.clientNotificationsPolicyState ??
           'unknown')
-        : (bootstrapProof?.policyReason ?? bootstrapProof?.policyState ?? 'unknown')
+        : (bootstrapProof?.policyReason ??
+          bootstrapProof?.policyState ??
+          (codexBindingPending
+            ? bootstrapProof?.contractVersion !== 3
+              ? 'codex_bootstrap_contract_stale'
+              : 'codex_execution_binding_missing'
+            : 'unknown'))
     const message =
       policyReason === 'grant_missing'
         ? `Plugin Workload SDK ${family} is awaiting an operator grant`

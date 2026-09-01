@@ -1,4 +1,7 @@
-import type { CodexPolicyBinding } from '@clerum/codex-catalog-projection'
+import {
+  CODEX_UNASSIGNED_CONNECTION_KEY,
+  type CodexPolicyBinding,
+} from '@clerum/codex-catalog-projection'
 import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 
 const POLICY_HASH_RE = /^[a-f0-9]{64}$/
@@ -46,7 +49,7 @@ export function isPluginWorkloadSdkCodexBindingProof(
   return (
     typeof candidate.connectionKey === 'string' &&
     candidate.connectionKey.trim().length > 0 &&
-    candidate.connectionKey !== 'unassigned' &&
+    candidate.connectionKey !== CODEX_UNASSIGNED_CONNECTION_KEY &&
     Number.isInteger(candidate.catalogRevision) &&
     Number(candidate.catalogRevision) >= 1 &&
     Number.isInteger(candidate.credentialRevision) &&

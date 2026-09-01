@@ -718,11 +718,17 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         isClientNotificationsPolicyReady(clientNotificationsGrant) &&
         (await hasUsableClientNotificationRecipients(clientNotificationsGrant))
       )
-      const primaryTarget = grant?.promptTargets[0] ?? null
+      const alignedPrimary =
+        grant &&
+        grant.promptTargets[0] &&
+        grant.defaultTargetRef !== null &&
+        grant.promptTargets[0].targetRef === grant.defaultTargetRef
+          ? grant.promptTargets[0]
+          : null
       const reservationOnlyOauthBroker = Boolean(
-        primaryTarget &&
-        isLlmProviderId(primaryTarget.provider) &&
-        PROVIDER_AUTH_MODE[primaryTarget.provider] === 'oauth-broker'
+        alignedPrimary &&
+        isLlmProviderId(alignedPrimary.provider) &&
+        PROVIDER_AUTH_MODE[alignedPrimary.provider] === 'oauth-broker'
       )
       // Old mcp-host/WRC require capabilities.contractVersion === 2. Advertise
       // 3 only for oauth-broker defaults so those binaries fail at reconcile
@@ -739,9 +745,9 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         policyRevision: grant?.policyRevision ?? 0,
         policyHash: v2Ready && grant ? hashPromptTargetPolicy(grant) : null,
         defaultTargetRef: grant?.defaultTargetRef ?? null,
-        defaultProvider: primaryTarget?.provider ?? null,
-        defaultModel: primaryTarget?.model ?? null,
-        defaultConnectionRef: primaryTarget?.connectionRef ?? null,
+        defaultProvider: alignedPrimary?.provider ?? null,
+        defaultModel: alignedPrimary?.model ?? null,
+        defaultConnectionRef: alignedPrimary?.connectionRef ?? null,
         v2Ready,
         ...(reservationOnlyOauthBroker ? { reservationOnlyOauthBroker: true } : {}),
         clientNotificationsPolicyState: clientNotificationsGrant?.policyState ?? 'missing',

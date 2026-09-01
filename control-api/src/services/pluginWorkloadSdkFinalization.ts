@@ -1,6 +1,10 @@
 import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import type { DbClient } from '../db.js'
-import { loadLlmProviderAttemptBySdkAttemptId } from './llmProviderAttemptStore.js'
+import {
+  isLinkedCodexInFlightWithoutUsage,
+  isLinkedCodexUsageReady,
+  loadLlmProviderAttemptBySdkAttemptId,
+} from './llmProviderAttemptStore.js'
 import { withTraceIngestTransaction } from './tracing/pools.js'
 import { projectAcceptedUsageEvents } from './tracing/usageProjection.js'
 import { ingestUsageEventsInTransaction } from './usageEvents.js'
@@ -167,12 +171,7 @@ function resolvePromptBridgeOutcome(
   if (!oauthBroker) {
     return status === 'complete' ? 'exact' : status === 'failed' ? 'not_executed' : 'unknown'
   }
-  if (
-    status === 'complete' &&
-    linked?.outcome === 'success' &&
-    linked.usageInputTokens != null &&
-    linked.usageOutputTokens != null
-  ) {
+  if (status === 'complete' && linked && isLinkedCodexUsageReady(linked)) {
     return 'exact'
   }
   if (status === 'failed' && !linked) return 'not_executed'
@@ -284,7 +283,24 @@ export async function finalizePromptBridgeInTransaction(
     [input.providerAttemptId]
   )
   const existing = existingResult.rows[0] as SpendOutcomeRow | undefined
-  if (existing) return mapExistingOutcome(existing, input)
+  if (existing) {
+    if (
+      isOauthBrokerProvider(existing.provider) &&
+      input.status === 'complete' &&
+      existing.outcome === 'unknown'
+    ) {
+      const linkedCodex = await loadLlmProviderAttemptBySdkAttemptId(db, input.providerAttemptId)
+      if (linkedCodex && isLinkedCodexInFlightWithoutUsage(linkedCodex)) {
+        throw new PromptBridgeFinalizationError(
+          'ledger_pending',
+          'linked Codex attempt has not finalized usage yet',
+          409,
+          true
+        )
+      }
+    }
+    return mapExistingOutcome(existing, input)
+  }
 
   const invocationResult = await db.query(
     `SELECT id, recipe_namespace, recipe_name, method, status, attempt_generation
@@ -391,15 +407,7 @@ export async function finalizePromptBridgeInTransaction(
     ? await loadLlmProviderAttemptBySdkAttemptId(db, input.providerAttemptId)
     : null
   if (oauthBroker && input.status === 'complete' && linkedCodex) {
-    const usageReady =
-      linkedCodex.outcome === 'success' &&
-      linkedCodex.usageInputTokens != null &&
-      linkedCodex.usageOutputTokens != null
-    const inFlight =
-      linkedCodex.status === 'authorized' ||
-      linkedCodex.status === 'redeemed' ||
-      (linkedCodex.status === 'finalized' && linkedCodex.outcome === 'success' && !usageReady)
-    if (!usageReady && inFlight) {
+    if (isLinkedCodexInFlightWithoutUsage(linkedCodex)) {
       throw new PromptBridgeFinalizationError(
         'ledger_pending',
         'linked Codex attempt has not finalized usage yet',

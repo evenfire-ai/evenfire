@@ -387,11 +387,17 @@ describe('WorkflowReconciler Codex scope provenance', () => {
 
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalled()
     expect(issuedScopes()).not.toContain('llm:codex:execute')
-    expect(crashRecoveryMocks.deletePodIfExists).toHaveBeenCalledWith(
+    expect(crashRecoveryMocks.deletePodIfExists).not.toHaveBeenCalledWith(
       expect.anything(),
       'codex-recipe-mcp-host',
       sandboxNamespace
     )
+    const remintPatch = coreApi.patchNamespacedSecret.mock.calls.at(-1)?.[0] as {
+      body?: { metadata?: { annotations?: Record<string, string> } }
+    }
+    expect(
+      remintPatch.body?.metadata?.annotations?.['clerum.io/mcp-host-runtime-token-generation']
+    ).toBe('1')
     expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
       name: CODEX_PROXY_POLICY,
       namespace: sandboxNamespace,
@@ -440,7 +446,7 @@ describe('WorkflowReconciler Codex scope provenance', () => {
 
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalled()
     expect(issuedScopes()).not.toContain('llm:codex:execute')
-    expect(crashRecoveryMocks.deletePodIfExists).toHaveBeenCalledWith(
+    expect(crashRecoveryMocks.deletePodIfExists).not.toHaveBeenCalledWith(
       expect.anything(),
       'codex-recipe-mcp-host',
       sandboxNamespace

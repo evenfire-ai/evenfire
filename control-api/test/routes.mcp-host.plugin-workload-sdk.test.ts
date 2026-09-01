@@ -326,6 +326,58 @@ describe('GET /mcp-host/plugin-workload-sdk/capabilities', () => {
       v2Ready: true,
     })
   })
+
+  it('does not advertise oauth-broker v3 when promptTargets[0] is not the default', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue({
+      id: 'grant-misaligned-capabilities',
+      recipeNamespace: NS,
+      recipeName: RECIPE,
+      capabilityFamily: 'promptBridge',
+      provider: 'codex-subscription',
+      allowedModels: ['gpt-5.1'],
+      allowedEventTypes: [],
+      allowedTargetRefs: [],
+      allowedUserRefs: [],
+      allowedCallers: ['api'],
+      quotaLimits: {},
+      modelPolicies: {},
+      promptTargets: [
+        {
+          targetRef: 'primary-codex',
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          credentialSlot: '',
+          connectionRef: 'team-plus',
+        },
+        {
+          targetRef: 'fallback-openai',
+          provider: 'openai',
+          model: 'gpt-5.4-mini',
+          credentialSlot: 'openai-api-key',
+        },
+      ],
+      defaultTargetRef: 'fallback-openai',
+      policyState: 'active',
+      policyRevision: 2,
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    })
+
+    const res = await request(buildApp())
+      .get('/mcp-host/plugin-workload-sdk/capabilities')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      contractVersion: 2,
+      defaultTargetRef: 'fallback-openai',
+      defaultProvider: null,
+      defaultModel: null,
+      defaultConnectionRef: null,
+      v2Ready: false,
+    })
+    expect(res.body.reservationOnlyOauthBroker).toBeUndefined()
+  })
 })
 
 describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge/v2', () => {

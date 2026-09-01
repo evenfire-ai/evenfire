@@ -141,7 +141,13 @@ import {
   reconcileScheduling,
 } from './schedulingHandler'
 import { deriveSdkOnlyCodexBinding } from './sdkOnlyCodexBinding'
-import { buildMcpHostRuntimeTokenSecret, createCoordinatorTokens } from './secretFactory'
+import {
+  MCP_HOST_RUNTIME_TOKEN_GENERATION_ANNOTATION,
+  buildMcpHostRuntimeTokenSecret,
+  createCoordinatorTokens,
+  nextMcpHostRuntimeTokenGeneration,
+  readMcpHostRuntimeTokenGeneration,
+} from './secretFactory'
 import { SNIPPET_RUN_KEYS } from './snippetRunSchema'
 import {
   CyclicDependencyError,
@@ -4812,7 +4818,10 @@ export class WorkflowReconciler {
       gfsAccessExp - nowSecs < refreshBeforeSeconds
 
     if (!needsMcpHostRuntimeRefresh && !needsWorkflowControlRefresh && !needsGfsAccessRefresh) {
-      return NO_MCP_HOST_RUNTIME_TOKEN_REFRESH
+      const tokenGeneration = readMcpHostRuntimeTokenGeneration(existing)
+      return tokenGeneration
+        ? { reminted: false, tokenGeneration }
+        : NO_MCP_HOST_RUNTIME_TOKEN_REFRESH
     }
 
     const refreshReason: McpHostRuntimeTokenRefreshReason =
@@ -4885,12 +4894,26 @@ export class WorkflowReconciler {
         data['mcp-host-gfs-token'] = Buffer.from(gfs.token).toString('base64')
       }
 
+      const currentGeneration = readMcpHostRuntimeTokenGeneration(existing)
+      const tokenGeneration =
+        refreshReason === 'scope' || refreshReason === 'binding'
+          ? nextMcpHostRuntimeTokenGeneration(currentGeneration)
+          : currentGeneration
       await this.deps.coreApi.patchNamespacedSecret(
         {
           name: `wf-${recipeName}-mcp-host-runtime-tokens`,
           namespace: this.deps.config.sandboxNamespace,
           body: {
             data,
+            ...(tokenGeneration && (refreshReason === 'scope' || refreshReason === 'binding')
+              ? {
+                  metadata: {
+                    annotations: {
+                      [MCP_HOST_RUNTIME_TOKEN_GENERATION_ANNOTATION]: tokenGeneration,
+                    },
+                  },
+                }
+              : {}),
           },
         },
         { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
@@ -4898,16 +4921,16 @@ export class WorkflowReconciler {
       this.log.info(
         `Refreshed workflow auth Secret for ${recipeName} (mcpHostRuntime=${needsMcpHostRuntimeRefresh}, mcpHostControl=${needsWorkflowControlRefresh}, reason=${refreshReason})`
       )
-      if (refreshReason === 'scope' || refreshReason === 'binding') {
-        // Access/refresh JWTs are env-injected. A Secret patch does not update
-        // the running process; refresh/reissue copy the stale scopes.
-        await deletePodIfExists(
-          this.deps.coreApi,
-          `${recipeName}-mcp-host`,
-          this.deps.config.sandboxNamespace
-        )
+      // Do not delete ${recipeName}-mcp-host here. This helper also runs on the
+      // in-progress step-based credential refresh path, where a mid-run pod
+      // delete is not recreated. Eager sdk-only hosts roll via
+      // eagerMcpHostRequiresTokenRoll → rollEagerSdkMcpHostPod, including when
+      // this pass only reports the Secret generation residue.
+      return {
+        reminted: true,
+        reason: refreshReason,
+        ...(tokenGeneration ? { tokenGeneration } : {}),
       }
-      return { reminted: true, reason: refreshReason }
     } catch (err) {
       this.log.error(`Failed to refresh mcpHost runtime tokens for ${recipeName}`, {
         error: err instanceof Error ? err.message : String(err),

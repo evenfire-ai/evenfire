@@ -1,7 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import { type DbClient, type DbTransactionClient, pool, withTransaction } from '../db.js'
 import type { AdministrativeEventSubmitterPrincipalV1 } from '../middleware/tracingSubmitterAuth.js'
 import { stableStringify } from '../utils/stableStringify.js'
+import {
+  isLinkedCodexInFlightWithoutUsage,
+  loadLlmProviderAttemptBySdkAttemptId,
+} from './llmProviderAttemptStore.js'
 import {
   type ControlApiPermissionChange,
   appendControlApiPermissionEventsInTransaction,
@@ -2123,21 +2128,30 @@ export async function failStaleInvocationsInTransaction(
   db: DbClient
 ): Promise<number> {
   const timeoutSeconds = Math.max(1, Math.floor(olderThanSeconds))
-  const result = await db.query(
-    `UPDATE plugin_workload_sdk_invocations
-       SET status = 'provider_unavailable', updated_at = now(), completed_at = now()
-         WHERE status = 'in_progress'
-         AND (
-           (lease_expires_at IS NOT NULL AND lease_expires_at < now())
-           OR (
-             lease_expires_at IS NULL
-             AND updated_at < now() - interval '1 second' * $1
-           )
-         )
-       RETURNING id, attempt_generation`,
+  const stale = await db.query(
+    `SELECT id, attempt_generation, recipe_namespace, recipe_name
+       FROM plugin_workload_sdk_invocations
+      WHERE status = 'in_progress'
+        AND (
+          (lease_expires_at IS NOT NULL AND lease_expires_at < now())
+          OR (
+            lease_expires_at IS NULL
+            AND updated_at < now() - interval '1 second' * $1
+          )
+        )
+      FOR UPDATE`,
     [timeoutSeconds]
   )
-  for (const row of result.rows as Array<{ id: string; attempt_generation: number }>) {
+  let closed = 0
+  for (const row of stale.rows as Array<{
+    id: string
+    attempt_generation: number
+    recipe_namespace: string
+    recipe_name: string
+  }>) {
+    await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
+      `plugin_workload_sdk:${row.recipe_namespace}/${row.recipe_name}`,
+    ])
     const physicalAttempts = await db.query(
       `SELECT id, recipe_namespace, recipe_name, attempt_generation,
                 attempt_index, target_ref, provider, model, credential_slot
@@ -2148,6 +2162,35 @@ export async function failStaleInvocationsInTransaction(
           FOR UPDATE`,
       [row.id, row.attempt_generation]
     )
+    let linkedCodexInFlight = false
+    for (const attempt of physicalAttempts.rows as Array<Record<string, unknown>>) {
+      if (
+        !isLlmProviderId(String(attempt.provider)) ||
+        PROVIDER_AUTH_MODE[String(attempt.provider)] !== 'oauth-broker'
+      ) {
+        continue
+      }
+      const linked = await loadLlmProviderAttemptBySdkAttemptId(db, String(attempt.id))
+      if (linked && isLinkedCodexInFlightWithoutUsage(linked)) {
+        linkedCodexInFlight = true
+        break
+      }
+    }
+    // Codex still owns exact usage. Leave the invocation leased so finalize
+    // can 409 ledger_pending instead of freezing an unknown spend row.
+    if (linkedCodexInFlight) continue
+
+    const marked = await db.query(
+      `UPDATE plugin_workload_sdk_invocations
+          SET status = 'provider_unavailable', updated_at = now(), completed_at = now()
+        WHERE id = $1
+          AND attempt_generation = $2
+          AND status = 'in_progress'
+        RETURNING id`,
+      [row.id, row.attempt_generation]
+    )
+    if ((marked.rowCount ?? 0) !== 1) continue
+
     for (const attempt of physicalAttempts.rows as Array<Record<string, unknown>>) {
       // The host has disappeared, so no current JWT can prove a host_ref.
       // Persist an unattributed unknown outcome instead of inventing one
@@ -2188,8 +2231,9 @@ export async function failStaleInvocationsInTransaction(
             AND status IN ('reserved', 'in_progress')`,
       [row.id, row.attempt_generation]
     )
+    closed += 1
   }
-  return result.rowCount ?? 0
+  return closed
 }
 
 export interface ListInvocationsFilter {

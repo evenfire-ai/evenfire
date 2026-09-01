@@ -16,19 +16,21 @@ const RECIPE = 'demo'
 function podWithPhase(
   image: string,
   phase: 'Running' | 'Pending',
-  opts: { deleting?: boolean; runtimeContractHash?: string } = {}
+  opts: { deleting?: boolean; runtimeContractHash?: string; tokenGeneration?: string } = {}
 ) {
+  const annotations = {
+    ...(opts.runtimeContractHash
+      ? { 'clerum.io/plugin-workload-sdk-runtime-contract-hash': opts.runtimeContractHash }
+      : {}),
+    ...(opts.tokenGeneration
+      ? { 'clerum.io/mcp-host-runtime-token-generation': opts.tokenGeneration }
+      : {}),
+  }
   return {
     metadata: {
       uid: 'pod-uid-1',
       ...(opts.deleting ? { deletionTimestamp: '2026-06-19T18:00:00Z' } : {}),
-      ...(opts.runtimeContractHash
-        ? {
-            annotations: {
-              'clerum.io/plugin-workload-sdk-runtime-contract-hash': opts.runtimeContractHash,
-            },
-          }
-        : {}),
+      ...(Object.keys(annotations).length > 0 ? { annotations } : {}),
     },
     spec: { containers: [{ name: 'mcp-host', image }] },
     status: { phase, conditions: [], containerStatuses: [] },
@@ -41,10 +43,21 @@ function makeProvisioner(
   opts: {
     deleting?: boolean
     runtimeContractHash?: string
-    tokenRefresh?: { reminted: boolean; reason?: 'scope' | 'binding' | 'ttl' }
+    tokenRefresh?: {
+      reminted: boolean
+      reason?: 'scope' | 'binding' | 'ttl'
+      tokenGeneration?: string
+    }
+    tokenGeneration?: string
   } = {}
 ) {
-  const readNamespacedPod = vi.fn().mockResolvedValue(podWithPhase(podImage, phase, opts))
+  const readNamespacedPod = vi.fn().mockResolvedValue(
+    podWithPhase(podImage, phase, {
+      deleting: opts.deleting,
+      runtimeContractHash: opts.runtimeContractHash,
+      tokenGeneration: opts.tokenGeneration,
+    })
+  )
   const deleteNamespacedPod = vi.fn().mockResolvedValue({})
   const createNamespacedPod = vi.fn().mockResolvedValue({})
   const coreApi = {
@@ -536,6 +549,55 @@ describe('ensureEagerSdkMcpHost runtime token roll', () => {
     const { provisioner, deleteNamespacedPod } = makeProvisioner(DESIRED_IMAGE, 'Running', {
       runtimeContractHash: desiredRuntimeContractHash(),
       tokenRefresh: { reminted: true, reason: 'ttl' },
+    })
+
+    await provisioner.ensureEagerSdkMcpHost(
+      RECIPE,
+      'recipe-uid',
+      SANDBOX_NS,
+      RECIPE,
+      SPEC,
+      RUNTIME,
+      { mcpHostPhase: 'Running' }
+    )
+
+    expect(deleteNamespacedPod).not.toHaveBeenCalled()
+  })
+
+  it('rolls a healthy eager mcp-host when Secret token generation drifted after a failed roll', async () => {
+    const { provisioner, deleteNamespacedPod, createNamespacedPod } = makeProvisioner(
+      DESIRED_IMAGE,
+      'Running',
+      {
+        runtimeContractHash: desiredRuntimeContractHash(),
+        tokenGeneration: '1',
+        tokenRefresh: { reminted: false, tokenGeneration: '2' },
+      }
+    )
+
+    const status = await provisioner.ensureEagerSdkMcpHost(
+      RECIPE,
+      'recipe-uid',
+      SANDBOX_NS,
+      RECIPE,
+      SPEC,
+      RUNTIME,
+      { mcpHostPhase: 'Running' }
+    )
+
+    expect(status).toBe('deploying')
+    expect(deleteNamespacedPod).toHaveBeenCalledWith({
+      name: `${RECIPE}-mcp-host`,
+      namespace: SANDBOX_NS,
+    })
+    expect(createNamespacedPod).not.toHaveBeenCalled()
+  })
+
+  it('does not roll when Secret and pod token generations already match', async () => {
+    const { provisioner, deleteNamespacedPod } = makeProvisioner(DESIRED_IMAGE, 'Running', {
+      runtimeContractHash: desiredRuntimeContractHash(),
+      tokenGeneration: '2',
+      tokenRefresh: { reminted: false, tokenGeneration: '2' },
     })
 
     await provisioner.ensureEagerSdkMcpHost(

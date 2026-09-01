@@ -723,12 +723,79 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
             outputTokens: 2,
           },
         },
-        dbWithRows([], row) as never
+        dbWithRows([], row, []) as never
       )
     ).resolves.toMatchObject({
       idempotent: true,
       outcome: 'unknown',
       usageAccepted: false,
+    })
+  })
+
+  it('refuses to replay a sweeper unknown while the linked Codex attempt is still in flight', async () => {
+    const row = {
+      provider_attempt_id: IDS.providerAttempt,
+      invocation_id: IDS.invocation,
+      recipe_namespace: inputBase.recipeNamespace,
+      recipe_name: inputBase.recipeName,
+      attempt_generation: 1,
+      attempt_index: 1,
+      target_ref: 'codex-primary',
+      host_ref: inputBase.hostRef,
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+      credential_slot: '',
+      outcome: 'unknown',
+      input_tokens: null,
+      output_tokens: null,
+    }
+    await expect(
+      finalizePromptBridgeInTransaction(
+        {
+          ...inputBase,
+          target: {
+            targetRef: 'codex-primary',
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+            credentialSlot: '',
+          },
+          status: 'complete',
+          usage: {
+            llmSecretName: '',
+            callerRef: 'scanner',
+            fallbackUsed: false,
+            attemptCount: 1,
+            inputTokens: 4,
+            outputTokens: 2,
+          },
+        },
+        dbWithRows([], row, {
+          id: '33333333-3333-4333-8333-333333333333',
+          caller_kind: 'recipe',
+          host_ref: inputBase.hostRef,
+          recipe_namespace: inputBase.recipeNamespace,
+          recipe_name: inputBase.recipeName,
+          invocation_id: IDS.invocation,
+          attempt_generation: 1,
+          provider_attempt_index: 1,
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          request_hash: 'hash',
+          policy_revision: 1,
+          policy_hash: 'a'.repeat(64),
+          budget_reservation_id: 'budget-1',
+          connection_revision: 1,
+          status: 'authorized',
+          outcome: null,
+          usage_input_tokens: null,
+          usage_output_tokens: null,
+          created_at: new Date('2026-08-03T00:00:00.000Z'),
+        }) as never
+      )
+    ).rejects.toMatchObject({
+      code: 'ledger_pending',
+      httpStatus: 409,
+      retryable: true,
     })
   })
 

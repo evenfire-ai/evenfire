@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import { initDb } from '../src/db.js'
+import { insertLlmProviderAttempt } from '../src/services/llmProviderAttemptStore.js'
 import { failStaleInvocationsInTransaction } from '../src/services/pluginWorkloadSdkDb.js'
 import {
   PromptBridgeFinalizationError,
@@ -426,6 +427,58 @@ describeRealPostgres('Plugin Workload SDK finalization on real PostgreSQL', () =
       seedClient.release()
       finalizerClient.release()
       sweeperClient.release()
+    }
+  })
+
+  it('does not freeze oauth spend while a linked Codex attempt is still in flight', async () => {
+    const client = await dbPool.connect()
+    try {
+      await begin(client)
+      const input = await seedAttempt(client, { leaseExpired: true })
+      await client.query(
+        `UPDATE plugin_workload_sdk_provider_attempts
+            SET provider = 'codex-subscription',
+                model = 'gpt-5.1',
+                credential_slot = '',
+                target_ref = 'primary-codex'
+          WHERE id = $1`,
+        [input.providerAttemptId]
+      )
+      await insertLlmProviderAttempt(client, {
+        callerKind: 'recipe',
+        hostRef: input.hostRef,
+        recipeNamespace: input.recipeNamespace,
+        recipeName: input.recipeName,
+        invocationId: input.invocationId,
+        attemptGeneration: 1,
+        providerAttemptIndex: 1,
+        model: 'gpt-5.1',
+        requestHash: 'a'.repeat(64),
+        policyRevision: 1,
+        policyHash: 'b'.repeat(64),
+        budgetReservationId: randomUUID(),
+        connectionRevision: 1,
+        pluginWorkloadSdkProviderAttemptId: input.providerAttemptId,
+      })
+      const closed = await failStaleInvocationsInTransaction(1, client)
+      await commit(client)
+
+      expect(closed).toBe(0)
+      const spend = await dbPool.query(
+        `SELECT count(*)::int AS count
+           FROM plugin_workload_sdk_spend_outcomes
+          WHERE provider_attempt_id = $1`,
+        [input.providerAttemptId]
+      )
+      expect(spend.rows[0]?.count).toBe(0)
+      const invocation = await dbPool.query(
+        `SELECT status FROM plugin_workload_sdk_invocations WHERE id = $1`,
+        [input.invocationId]
+      )
+      expect(invocation.rows[0]?.status).toBe('in_progress')
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined)
+      client.release()
     }
   })
 })

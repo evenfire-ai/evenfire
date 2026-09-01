@@ -705,11 +705,26 @@ export class LlmBridge {
         const providerMayHaveExecuted =
           (error instanceof PluginWorkloadError && error.providerMayHaveExecuted) ||
           (error instanceof ClassifiedProviderError && error.providerMayHaveExecuted)
-        await reportProviderAttemptBestEffort(request.providerAttemptReporter, {
-          providerAttemptId: ticket.providerAttemptId,
-          providerAttemptIndex: ticket.providerAttemptIndex,
-          status: providerMayHaveExecuted ? 'provider_unavailable' : 'failed',
-        })
+        const acknowledged = await reportProviderAttemptBestEffort(
+          request.providerAttemptReporter,
+          {
+            providerAttemptId: ticket.providerAttemptId,
+            providerAttemptIndex: ticket.providerAttemptIndex,
+            status: providerMayHaveExecuted ? 'provider_unavailable' : 'failed',
+          }
+        )
+        // Mirror the non-oauth fence: a lost receipt after dispatch is not a
+        // safe failover signal. Codex may already have billed.
+        if (!acknowledged) {
+          return {
+            kind: 'error',
+            error: new ClassifiedProviderError(
+              { code: LlmErrorCode.ApiCallFailed, retryable: false },
+              providerOutcomeUnknownError(providerAttemptContext)
+            ),
+            terminal: true,
+          }
+        }
       }
       if (!(error instanceof ClassifiedProviderError)) {
         throw providerAttemptContext

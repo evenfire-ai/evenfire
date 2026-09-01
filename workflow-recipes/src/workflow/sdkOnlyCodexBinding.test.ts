@@ -40,6 +40,29 @@ describe('deriveSdkOnlyCodexBinding', () => {
     expect(isPluginWorkloadSdkCodexBindingProof(binding)).toBe(true)
   })
 
+  it('returns null when the assigned catalog excludes the requested model', () => {
+    expect(
+      deriveSdkOnlyCodexBinding({
+        provider: 'codex-subscription',
+        model: 'gpt-5.6-luna',
+        connectionKey: 'team-plus',
+        configMap: {
+          metadata: {
+            annotations: {
+              'clerum.io/codex-connections': JSON.stringify({
+                'team-plus': {
+                  models: ['gpt-5.1'],
+                  catalogRevision: 3,
+                  connectionRevision: 1,
+                },
+              }),
+            },
+          },
+        },
+      })
+    ).toBeNull()
+  })
+
   it('returns null for non-Codex providers and unassigned grants', () => {
     expect(
       deriveSdkOnlyCodexBinding({

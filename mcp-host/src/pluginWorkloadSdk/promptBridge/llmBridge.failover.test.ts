@@ -676,6 +676,63 @@ describe('LlmBridge authorized multi-provider fallback', () => {
     })
   })
 
+  it('does not fail over a Codex target when the post-dispatch acknowledgement is lost', async () => {
+    const codex: PromptBridgeTarget = {
+      targetRef: 'codex-primary',
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+      credentialSlot: '',
+      connectionRef: 'team-plus',
+    }
+    replaceSdkOnlyCodexBinding({
+      connectionKey: 'team-plus',
+      catalogRevision: 1,
+      credentialRevision: 0,
+      model: 'gpt-5.1',
+      bindingHash: computeCodexPolicyHash({
+        model: 'gpt-5.1',
+        catalogRevision: 1,
+        credentialRevision: 0,
+        connectionKey: 'team-plus',
+      }),
+    })
+    const first = new FakeProvider(() => Promise.reject(new Error('codex unavailable')))
+    const second = new FakeProvider(() => Promise.resolve(OK))
+    const { bridge, providerCalls } = makeBridge({
+      'gpt-5.1': first,
+      [fallback.model]: second,
+    })
+    const providerAttemptReporter = {
+      report: vi.fn().mockRejectedValue(new Error('control-api unreachable')),
+    }
+    const issuer = {
+      issue: vi.fn(async ({ target }: { target: PromptBridgeTarget }) => ({
+        credentialTicket:
+          target.provider === 'codex-subscription' ? '' : `fresh-${target.targetRef}`,
+        providerAttemptId: `sdk-${target.targetRef}`,
+        providerAttemptIndex: target.provider === 'codex-subscription' ? 1 : 2,
+      })),
+    }
+
+    await expect(
+      bridge.complete({
+        ...request,
+        targets: [{ target: codex }, { target: fallback }],
+        credentialTicketIssuer: issuer,
+        providerAttemptReporter,
+      })
+    ).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      retryable: false,
+      reason: 'outcome_unknown',
+      providerMayHaveExecuted: true,
+    })
+    expect(first.completeSingleTurn).toHaveBeenCalledOnce()
+    expect(second.completeSingleTurn).not.toHaveBeenCalled()
+    expect(providerCalls).toEqual(['codex-subscription/gpt-5.1'])
+    expect(issuer.issue).toHaveBeenCalledTimes(1)
+  })
+
   it('does not execute a Codex target while its circuit is open', async () => {
     const codex: PromptBridgeTarget = {
       targetRef: 'codex-primary',

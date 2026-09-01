@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { CODEX_UNASSIGNED_CONNECTION_KEY } from '@clerum/codex-catalog-projection'
 import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import {
   configurePluginWorkloadSdkBootstrapIdentity,
@@ -36,6 +37,24 @@ describe('readVerifiedSdkOnlyCodexBinding', () => {
     expect(readVerifiedSdkOnlyCodexBinding({ ...binding, extra: 'drop-me' }, model)).toEqual(
       binding
     )
+  })
+
+  it('rejects the shared unassigned connection sentinel', () => {
+    expect(
+      readVerifiedSdkOnlyCodexBinding(
+        {
+          ...binding,
+          connectionKey: CODEX_UNASSIGNED_CONNECTION_KEY,
+          bindingHash: computeCodexPolicyHash({
+            model,
+            catalogRevision: 4,
+            credentialRevision: 1,
+            connectionKey: CODEX_UNASSIGNED_CONNECTION_KEY,
+          }),
+        },
+        model
+      )
+    ).toBeNull()
   })
 })
 

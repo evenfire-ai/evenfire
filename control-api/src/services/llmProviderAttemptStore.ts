@@ -35,6 +35,24 @@ export type LlmProviderAttemptRow = LlmProviderAttemptInsert & {
   createdAt: Date
 }
 
+export function isLinkedCodexUsageReady(
+  row: Pick<LlmProviderAttemptRow, 'outcome' | 'usageInputTokens' | 'usageOutputTokens'>
+): boolean {
+  return row.outcome === 'success' && row.usageInputTokens != null && row.usageOutputTokens != null
+}
+
+/** Linked Codex still owns exact usage; sweepers must not freeze SDK spend. */
+export function isLinkedCodexInFlightWithoutUsage(
+  row: Pick<LlmProviderAttemptRow, 'status' | 'outcome' | 'usageInputTokens' | 'usageOutputTokens'>
+): boolean {
+  if (isLinkedCodexUsageReady(row)) return false
+  return (
+    row.status === 'authorized' ||
+    row.status === 'redeemed' ||
+    (row.status === 'finalized' && row.outcome === 'success')
+  )
+}
+
 export async function applyLlmProviderAttemptSchema(db: DbClient): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS llm_provider_attempts (

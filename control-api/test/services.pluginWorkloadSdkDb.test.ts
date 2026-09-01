@@ -400,9 +400,17 @@ describe('invocation retry lifecycle timestamps', () => {
   it('sweeps by the latest retry timestamp rather than the original reservation', async () => {
     vi.mocked(pool.query)
       .mockResolvedValueOnce({
-        rows: [{ id: 'inv-1', attempt_generation: 2 }],
+        rows: [
+          {
+            id: 'inv-1',
+            attempt_generation: 2,
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+          },
+        ],
         rowCount: 1,
       } as never)
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
       .mockResolvedValueOnce({
         rows: [
           {
@@ -419,27 +427,104 @@ describe('invocation retry lifecycle timestamps', () => {
         ],
         rowCount: 1,
       } as never)
-      .mockResolvedValue({ rows: [], rowCount: 1 } as never)
+      .mockResolvedValue({ rows: [{ id: 'inv-1' }], rowCount: 1 } as never)
     await expect(failStaleInvocations(150)).resolves.toBe(1)
     const [sql] = vi.mocked(pool.query).mock.calls[0] as unknown as [string, unknown[]]
-    expect(sql).toContain("SET status = 'provider_unavailable'")
+    expect(sql).toContain('FROM plugin_workload_sdk_invocations')
     expect(sql).toContain('lease_expires_at < now()')
     expect(sql).toContain('lease_expires_at IS NULL')
     expect(sql).toContain('updated_at < now()')
-    expect(sql).toContain('RETURNING id, attempt_generation')
-    expect(pool.query).toHaveBeenCalledTimes(5)
-    expect(vi.mocked(pool.query).mock.calls[1]?.[0] as string).toContain(
-      'FROM plugin_workload_sdk_provider_attempts'
-    )
+    expect(sql).toContain('FOR UPDATE')
+    expect(pool.query).toHaveBeenCalledTimes(7)
+    expect(vi.mocked(pool.query).mock.calls[1]?.[0] as string).toContain('pg_advisory_xact_lock')
     expect(vi.mocked(pool.query).mock.calls[2]?.[0] as string).toContain(
-      'INSERT INTO plugin_workload_sdk_spend_outcomes'
+      'FROM plugin_workload_sdk_provider_attempts'
     )
     expect(vi.mocked(pool.query).mock.calls[3]?.[0] as string).toContain(
       "SET status = 'provider_unavailable'"
     )
     expect(vi.mocked(pool.query).mock.calls[4]?.[0] as string).toContain(
+      'INSERT INTO plugin_workload_sdk_spend_outcomes'
+    )
+    expect(vi.mocked(pool.query).mock.calls[5]?.[0] as string).toContain(
       "SET status = 'provider_unavailable'"
     )
+    expect(vi.mocked(pool.query).mock.calls[6]?.[0] as string).toContain(
+      "SET status = 'provider_unavailable'"
+    )
+  })
+
+  it('does not freeze oauth spend while a linked Codex attempt is still in flight', async () => {
+    vi.mocked(pool.query)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'inv-codex',
+            attempt_generation: 1,
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'attempt-codex',
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+            attempt_generation: 1,
+            attempt_index: 1,
+            target_ref: 'primary-codex',
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+            credential_slot: '',
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'codex-1',
+            caller_kind: 'recipe',
+            host_ref: 'sandbox-recipes/sdk-recipe',
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+            invocation_id: 'inv-codex',
+            attempt_generation: 1,
+            provider_attempt_index: 1,
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+            request_hash: 'hash',
+            policy_revision: 1,
+            policy_hash: 'a'.repeat(64),
+            budget_reservation_id: 'budget-1',
+            connection_revision: 1,
+            plugin_workload_sdk_provider_attempt_id: 'attempt-codex',
+            status: 'authorized',
+            outcome: null,
+            usage_input_tokens: null,
+            usage_output_tokens: null,
+            created_at: new Date('2026-09-01T00:00:00.000Z'),
+          },
+        ],
+        rowCount: 1,
+      } as never)
+    await expect(failStaleInvocations(150)).resolves.toBe(0)
+    expect(
+      vi
+        .mocked(pool.query)
+        .mock.calls.some(([sql]: [string]) =>
+          sql.includes('INSERT INTO plugin_workload_sdk_spend_outcomes')
+        )
+    ).toBe(false)
+    expect(
+      vi
+        .mocked(pool.query)
+        .mock.calls.some(([sql]: [string]) => sql.includes("SET status = 'provider_unavailable'"))
+    ).toBe(false)
   })
 })
 
