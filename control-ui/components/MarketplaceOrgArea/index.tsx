@@ -37,11 +37,9 @@ function NotClaimed({ action }: { action: string }) {
 }
 
 /**
- * The org-named Marketplace tab (design spec §4): a single home for everything
- * this deployment owns — its published entries, push credentials, and its
- * registry connection. This folds the standalone Publisher console into the
- * Marketplace. Publishing being disabled must not hide credentials or the
- * connection status, so those sub-tabs are always reachable.
+ * The Marketplace-owned org surfaces: peer tabs for API keys, published entries,
+ * and pushed images. Publishing being disabled must not hide credentials, so API
+ * keys remain self-gated by the registry-key API instead of the publishing flag.
  */
 export function MarketplaceOrgArea({ activeTab }: { activeTab: OrgAreaTab }) {
   const { capability, loading, error, reload } = useRegistryCapability()
