@@ -51,23 +51,21 @@ import { formatTeamRole, permissionsForTeamRole } from '../../../../lib/teamRole
 
 type TeamRole = 'admin' | 'inviter' | 'member'
 
-type UserTab = 'contact' | 'approval-dms' | 'communication-channels' | 'access' | 'teams' | 'agents'
+type UserTab = 'contact' | 'approval-dms' | 'communication-channels' | 'agents' | 'teams'
 const USER_TABS: UserTab[] = [
   'contact',
   'approval-dms',
   'communication-channels',
-  'access',
-  'teams',
   'agents',
+  'teams',
 ]
 
 const USER_TAB_LABELS: Record<UserTab, string> = {
   contact: 'Contact',
   'approval-dms': 'Approval DMs',
   'communication-channels': 'Communication Channels',
-  access: 'Access',
-  teams: 'Teams',
   agents: 'Agents',
+  teams: 'Teams',
 }
 
 function parseUserTab(value: string | undefined): UserTab {

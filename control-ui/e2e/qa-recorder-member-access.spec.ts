@@ -102,6 +102,9 @@ test.describe('optional QA recorder: Control UI member Agents tab', () => {
 
       const memberTabs = page.getByRole('tablist', { name: 'Member sections' })
       await expect(memberTabs).toBeVisible({ timeout: 20_000 })
+      // D10 guard: the merged tab is Agents only — no dead 'Access' tab.
+      await expect(memberTabs.getByRole('tab', { name: 'Access', exact: true })).toHaveCount(0)
+      await expect(memberTabs).toBeVisible({ timeout: 20_000 })
       const agentsTab = memberTabs.getByRole('tab', { name: 'Agents', exact: true })
       await expect(agentsTab).toBeVisible()
       await agentsTab.click()
