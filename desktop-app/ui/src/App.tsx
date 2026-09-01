@@ -250,6 +250,13 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(
     getInitialSidebarCollapsed
   )
+  const sidebarCollapsedRef = React.useRef(sidebarCollapsed)
+  sidebarCollapsedRef.current = sidebarCollapsed
+  // When opening an app auto-collapses the sidebar, this remembers the user's
+  // prior state so closing the app can restore it. `null` = no app-driven
+  // collapse is in effect (no app open, or the user has since taken manual
+  // control of the sidebar while an app was open).
+  const sidebarCollapsedBeforeAppRef = React.useRef<boolean | null>(null)
   const [activeSandboxUiApp, setActiveSandboxUiApp] = React.useState<ActiveSandboxUiApp | null>(
     null
   )
@@ -659,13 +666,39 @@ export function App() {
     void window.clerum.pluginSdk?.setTheme?.(themeMode)?.catch?.(() => undefined)
   }, [themeMode])
 
-  React.useEffect(() => {
+  // Persist only user-driven sidebar changes. Auto-collapse on app open (and the
+  // restore on close) is ephemeral and must not overwrite the saved preference.
+  const handleSidebarCollapsedChange = React.useCallback((next: boolean) => {
+    // The user took manual control: their choice wins for the rest of the app
+    // session, and closing the app must not override it.
+    sidebarCollapsedBeforeAppRef.current = null
+    setSidebarCollapsed(next)
     try {
-      window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? '1' : '0')
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? '1' : '0')
     } catch {
       // Ignore storage failures in restricted environments.
     }
-  }, [sidebarCollapsed])
+  }, [])
+
+  // Opening an app collapses the sidebar to hand the app more workspace; closing
+  // it restores whatever the sidebar was before — unless the user manually
+  // toggled the sidebar while the app was open, in which case their choice
+  // stands (see handleSidebarCollapsedChange). Keyed on the open/closed edge so
+  // switching directly between apps neither re-collapses nor re-remembers.
+  const isSandboxUiAppOpen = Boolean(activeSandboxUiApp)
+  React.useEffect(() => {
+    if (isSandboxUiAppOpen) {
+      if (sidebarCollapsedBeforeAppRef.current === null) {
+        sidebarCollapsedBeforeAppRef.current = sidebarCollapsedRef.current
+        setSidebarCollapsed(true)
+      }
+      return
+    }
+    if (sidebarCollapsedBeforeAppRef.current !== null) {
+      setSidebarCollapsed(sidebarCollapsedBeforeAppRef.current)
+      sidebarCollapsedBeforeAppRef.current = null
+    }
+  }, [isSandboxUiAppOpen])
 
   React.useEffect(() => {
     void window.clerum.app.rendererReady().catch(error => {
@@ -2002,7 +2035,7 @@ export function App() {
                             activeSandboxUiApp={activeSandboxUiApp}
                             availableSandboxUiApps={availableSandboxUiApps}
                             collapsed={sidebarCollapsed}
-                            onCollapsedChange={setSidebarCollapsed}
+                            onCollapsedChange={handleSidebarCollapsedChange}
                             onNewChat={handleNewChatViewTab}
                             onOpenSandboxUiApp={handleOpenSandboxUiApp}
                             onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
