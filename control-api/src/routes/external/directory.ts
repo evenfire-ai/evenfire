@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { config } from '../../config.js'
 import { sendPublicApiError } from '../../http/publicApiError.js'
+import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
@@ -25,6 +26,7 @@ export function createExternalDirectoryRouter(): Router {
   router.use(
     '/external/directory',
     ...externalDirectoryRateLimits,
+    attachAccessExecutionBudget,
     requireValidExternalSessionTokenWithPublicErrors
   )
 

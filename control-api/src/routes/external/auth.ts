@@ -2,6 +2,7 @@ import { type NextFunction, type Request, type Response, Router } from 'express'
 import { pool } from '../../db.js'
 import { sendPublicApiError } from '../../http/publicApiError.js'
 import type { K8sGateway } from '../../k8s.js'
+import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import {
   type ExternalAuthedRequest,
   requireExternalSessionRateLimitContext,
@@ -529,6 +530,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
   router.post(
     '/external/rpc/token',
     rateLimitMiddleware(externalUserRateLimitOptions('rpc_token', 'pre_auth')),
+    attachAccessExecutionBudget,
     requireLegacyRpcSessionRateLimitContext,
     requireAuthenticatedExternalUserRateLimitContext,
     rateLimitMiddleware(externalUserRateLimitOptions('rpc_token', 'authenticated')),
@@ -539,7 +541,9 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         let liveTeam: Awaited<ReturnType<typeof getLiveTeamMembership>> = null
         try {
           liveTeam = claims.teamId
-            ? await getLiveTeamMembership(claims.userId, claims.teamId)
+            ? await getLiveTeamMembership(claims.userId, claims.teamId, {
+                budget: req.accessExecutionBudget,
+              })
             : null
         } catch {
           sendPublicApiError(

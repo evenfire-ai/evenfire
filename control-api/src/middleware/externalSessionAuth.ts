@@ -320,7 +320,9 @@ function externalTeamParamMatcher(paramName: string, publicErrors: boolean) {
       return
     }
     try {
-      const membership = await getLiveTeamMembership(claims.userId, requestedTeamId)
+      const membership = await getLiveTeamMembership(claims.userId, requestedTeamId, {
+        budget: req.accessExecutionBudget,
+      })
       if (!membership) {
         if (publicErrors) {
           sendPublicApiError(req, res, 403, 'forbidden', 'The requested operation is not allowed.')
