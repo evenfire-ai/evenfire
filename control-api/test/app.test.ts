@@ -194,22 +194,50 @@ describe('app router wiring', () => {
       .send(payload)
       .expect(401)
 
-    vi.spyOn(pool, 'query').mockResolvedValueOnce({
-      rows: [
-        {
-          id: payload.userId,
-          lifecycle_state: 'active',
-          lifecycle_version: 1,
-          valid_after: null,
-          token_revoked: false,
-        },
-      ],
-      rowCount: 1,
+    vi.spyOn(pool, 'query').mockImplementation(async sql => {
+      const text = String(sql)
+      if (text.includes('clock_timestamp()')) {
+        return { rows: [{ db_now: new Date('2026-09-01T12:00:00.000Z') }], rowCount: 1 } as never
+      }
+      if (text.includes('external_user_session_security_epochs')) {
+        return {
+          rows: [
+            {
+              id: payload.userId,
+              lifecycle_state: 'active',
+              lifecycle_version: 1,
+              valid_after: null,
+              token_revoked: false,
+            },
+          ],
+          rowCount: 1,
+        } as never
+      }
+      if (text.includes('FROM team_members')) {
+        return {
+          rows: [{ team_id: payload.teamId, role: payload.role }],
+          rowCount: 1,
+        } as never
+      }
+      return {
+        rows: [
+          {
+            id: payload.userId,
+            email: payload.email,
+            lifecycle_state: 'active',
+            lifecycle_version: 1,
+          },
+        ],
+        rowCount: 1,
+      } as never
     })
     const transactionQuery = vi.fn(async (sql: string) => {
       if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [], rowCount: 0 }
       if (sql.includes('SELECT id FROM users')) {
         return { rows: [{ id: payload.userId }], rowCount: 1 }
+      }
+      if (sql.includes('clock_timestamp()')) {
+        return { rows: [{ db_now: new Date('2026-09-01T12:00:00.000Z') }], rowCount: 1 }
       }
       if (sql.includes('external_user_session_security_epochs')) {
         return {
@@ -246,6 +274,7 @@ describe('app router wiring', () => {
     expect(transactionQuery.mock.calls.map(([sql]) => String(sql))).toEqual([
       'BEGIN',
       expect.stringContaining('SELECT id FROM users'),
+      expect.stringContaining('clock_timestamp()'),
       expect.stringContaining('external_user_session_security_epochs'),
       expect.stringContaining('JOIN team_members'),
       'COMMIT',
