@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { DataTable, TableRow, TableStateRow } from '@clerum/frontend-components'
+import { DataTable, TableRow, TableStateRow, TruncatedText } from '@clerum/frontend-components'
 import { FilterSelect } from '@components/FilterSelect'
 import { MarketplaceTabs } from '@components/MarketplaceTabs'
 import { type RowActionMenuItem, RowActionsMenu } from '@components/RowActionsMenu'
@@ -16,35 +16,16 @@ import { useToast } from '@components/Toast'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { type RegistryEntry, deleteRegistryEntry, getRegistryCatalog } from '../lib/api'
 import { useRegistryCapability } from '../lib/hooks/useRegistryCapability'
-import { trustBgColor, trustColor } from '../lib/trustLevel'
 
-type CatalogSortKey = 'name' | 'description' | 'type' | 'tags' | 'trust' | 'quality' | 'version'
+type CatalogSortKey = 'name' | 'description' | 'quality'
 type SortDirection = 'asc' | 'desc'
 
 const REGISTRY_COLUMNS: TableHeaderColumn[] = [
-  { key: 'name', label: 'Name' },
+  { key: 'name', label: 'Name', width: '24%' },
   { key: 'description', label: 'Description' },
-  { key: 'type', label: 'Type' },
-  { key: 'tags', label: 'Tags' },
-  { key: 'trust', label: 'Trust' },
-  { key: 'quality', label: 'Verification' },
-  { key: 'version', label: 'Version' },
-  { key: 'actions', align: 'right', ariaLabel: 'Actions' },
+  { key: 'quality', label: 'Verification', width: '9rem' },
+  { key: 'actions', align: 'right', ariaLabel: 'Actions', width: '3.5rem' },
 ]
-
-function compareVersions(left: string, right: string): number {
-  const leftParts = left.split('.')
-  const rightParts = right.split('.')
-  for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
-    const leftPart = Number.parseInt(leftParts[index] ?? '0', 10)
-    const rightPart = Number.parseInt(rightParts[index] ?? '0', 10)
-    if (Number.isNaN(leftPart) || Number.isNaN(rightPart)) {
-      return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
-    }
-    if (leftPart !== rightPart) return leftPart - rightPart
-  }
-  return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
-}
 
 export default function RegistryCatalog() {
   const router = useRouter()
@@ -75,19 +56,10 @@ export default function RegistryCatalog() {
   // Curators administer the shared catalog, so they keep inline edit/remove;
   // everyone else manages their own entries from the ownership area (§5.4).
   const columns: TableHeaderColumn[] = REGISTRY_COLUMNS.map(column => {
-    if (
-      column.key === 'name' ||
-      column.key === 'description' ||
-      column.key === 'type' ||
-      column.key === 'tags' ||
-      column.key === 'trust' ||
-      column.key === 'quality' ||
-      column.key === 'version'
-    ) {
+    if (column.key === 'name' || column.key === 'description' || column.key === 'quality') {
       return {
         ...column,
         activeDirection: sortKey === column.key ? sortDirection : null,
-        defaultDirection: column.key === 'version' ? 'desc' : 'asc',
         onSort: () => toggleSort(column.key as CatalogSortKey),
       }
     }
@@ -162,21 +134,11 @@ export default function RegistryCatalog() {
     const direction = sortDirection === 'asc' ? 1 : -1
     return [...visibleEntries].sort((left, right) => {
       const comparison =
-        sortKey === 'version'
-          ? compareVersions(left.version, right.version)
-          : sortKey === 'description'
-            ? left.description.localeCompare(right.description, undefined, { sensitivity: 'base' })
-            : sortKey === 'type'
-              ? `${left.server_mode ?? ''}/${left.transport ?? ''}`.localeCompare(
-                  `${right.server_mode ?? ''}/${right.transport ?? ''}`
-                )
-              : sortKey === 'tags'
-                ? left.tags.join(',').localeCompare(right.tags.join(','))
-                : sortKey === 'trust'
-                  ? left.trust_level.localeCompare(right.trust_level)
-                  : sortKey === 'quality'
-                    ? left.quality_tier.localeCompare(right.quality_tier)
-                    : left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
+        sortKey === 'description'
+          ? left.description.localeCompare(right.description, undefined, { sensitivity: 'base' })
+          : sortKey === 'quality'
+            ? left.quality_tier.localeCompare(right.quality_tier)
+            : left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
       if (comparison !== 0) return comparison * direction
       return `${left.name}@${left.version}`.localeCompare(`${right.name}@${right.version}`)
     })
@@ -190,7 +152,7 @@ export default function RegistryCatalog() {
       return
     }
     setSortKey(key)
-    setSortDirection(key === 'version' ? 'desc' : 'asc')
+    setSortDirection('asc')
   }
 
   function isEntryInstalled(entry: RegistryEntry): boolean {
@@ -314,9 +276,6 @@ export default function RegistryCatalog() {
                 />
               ) : (
                 filtered.map(entry => {
-                  const typeMeta = entry.server_mode
-                    ? `${entry.server_mode}${entry.transport ? ` / ${entry.transport}` : ''}`
-                    : '—'
                   const detailRoute = CONTROL_ROUTES.marketplace.entry(entry.name, entry.version)
                   const installed = isEntryInstalled(entry)
                   return (
@@ -332,23 +291,7 @@ export default function RegistryCatalog() {
                         ) : null}
                       </td>
                       <td>
-                        <span className="cu-cell-truncate" title={entry.description}>
-                          {entry.description || '—'}
-                        </span>
-                      </td>
-                      <td className="cu-registry-type-meta">{typeMeta}</td>
-                      <td>{entry.tags.join(', ') || '—'}</td>
-                      <td>
-                        <span
-                          className="cu-registry-chip"
-                          style={{
-                            color: trustColor(entry.trust_level),
-                            background: trustBgColor(entry.trust_level),
-                            borderColor: trustColor(entry.trust_level),
-                          }}
-                        >
-                          {entry.trust_level.toUpperCase()}
-                        </span>
+                        <TruncatedText value={entry.description} />
                       </td>
                       <td>
                         <span
@@ -357,7 +300,6 @@ export default function RegistryCatalog() {
                           {entry.quality_tier}
                         </span>
                       </td>
-                      <td className="cu-code-text">{entry.version}</td>
                       <td
                         className="cu-table__cell-actions"
                         onClick={event => event.stopPropagation()}

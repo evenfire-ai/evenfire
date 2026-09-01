@@ -151,16 +151,11 @@ describe('RegistryCatalog tabs and columns', () => {
     render(<RegistryCatalog />)
     await screen.findByText('brave-search')
 
-    for (const heading of [
-      'Name',
-      'Description',
-      'Type',
-      'Tags',
-      'Trust',
-      'Verification',
-      'Version',
-    ]) {
+    for (const heading of ['Name', 'Description', 'Verification']) {
       expect(screen.getByRole('columnheader', { name: heading })).toBeInTheDocument()
+    }
+    for (const heading of ['Type', 'Tags', 'Trust', 'Version']) {
+      expect(screen.queryByRole('columnheader', { name: heading })).toBeNull()
     }
     expect(screen.getByRole('columnheader', { name: 'Actions' })).toBeInTheDocument()
   })
@@ -212,7 +207,7 @@ describe('RegistryCatalog tabs and columns', () => {
     expect(navigation.push).toHaveBeenCalledWith('/marketplace/entries/brave-search/1.0.0')
   })
 
-  it('sorts connectors by name and version from their headers', async () => {
+  it('sorts connectors by name from its header', async () => {
     mockApiSuccess([
       MOCK_MCP_ENTRY,
       { ...MOCK_MCP_ENTRY, id: '3', name: 'zebra-search', version: '1.2.0' },
@@ -232,11 +227,11 @@ describe('RegistryCatalog tabs and columns', () => {
       'ascending'
     )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by Version descending' }))
-    expect(listedNames()).toEqual(['alpha-search', 'zebra-search', 'brave-search'])
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Name descending' }))
+    expect(listedNames()).toEqual(['zebra-search', 'brave-search', 'alpha-search'])
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by Version ascending' }))
-    expect(listedNames()).toEqual(['brave-search', 'zebra-search', 'alpha-search'])
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Name ascending' }))
+    expect(listedNames()).toEqual(['alpha-search', 'brave-search', 'zebra-search'])
   })
 })
 
@@ -254,15 +249,15 @@ describe('RegistryCatalog record navigation and actions', () => {
     expect(screen.getByRole('menuitem', { name: 'Install' })).toBeInTheDocument()
   })
 
-  it('shows former detail metadata in ordinary columns without expansion', async () => {
+  it('keeps requested catalog metadata columns without expansion', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
     const row = (await screen.findByText('brave-search')).closest('tr')!
 
-    expect(within(row).getByText('local / streamableHttp')).toBeInTheDocument()
-    expect(within(row).getByText('HIGH')).toBeInTheDocument()
     expect(within(row).getByText('verified')).toBeInTheDocument()
-    expect(within(row).getByText('search, web')).toBeInTheDocument()
+    expect(within(row).queryByText('local / streamableHttp')).toBeNull()
+    expect(within(row).queryByText('HIGH')).toBeNull()
+    expect(within(row).queryByText('search, web')).toBeNull()
     expect(row).not.toHaveAttribute('aria-expanded')
   })
 
@@ -355,7 +350,7 @@ describe('RegistryCatalog state handling', () => {
       screen.getByRole('status', { name: /loading marketplace connectors/i })
     ).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'Name' })).toBeInTheDocument()
-    expect(screen.getByRole('columnheader', { name: 'Version' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Verification' })).toBeInTheDocument()
   })
 
   it('shows an API error', async () => {
