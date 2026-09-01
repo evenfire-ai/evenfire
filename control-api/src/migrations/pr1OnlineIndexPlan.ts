@@ -317,7 +317,6 @@ async function prepareCatalogUtf8Function(db: DbClient): Promise<void> {
       $$
     `)
     await db.query('COMMIT')
-    started = false
   } catch (error) {
     if (started) {
       try {
