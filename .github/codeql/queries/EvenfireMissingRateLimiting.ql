@@ -47,45 +47,6 @@ private predicate sameSourceFile(Routing::Node left, Routing::Node right) {
   )
 }
 
-private predicate routeSetupHasEvenfireLimiter(Routing::RouteSetup setup) {
-  exists(EvenfireRateLimitingMiddleware middleware, Routing::Node limiterNode |
-    limiterNode = middleware.getRoutingNode() and
-    limiterNode.getParent() = setup and
-    sameSourceFile(setup, limiterNode) and
-    not exists(Routing::Node earlierNode |
-      earlierNode.getParent() = setup and
-      limiterNode = earlierNode.getNextSibling+() and
-      not earlierNode.mayResumeDispatch()
-    )
-  )
-}
-
-private predicate isCanonicalExternalContextImport(ImportSpecifier spec) {
-  spec.getImportDeclaration().getImportedFile().getRelativePath() =
-    "control-api/src/middleware/externalSessionAuth.ts" and
-  spec.getImportedName() =
-    [
-      "requireExternalSessionRateLimitContext",
-      "requireValidExternalSessionToken",
-      "requireValidExternalSessionTokenWithPublicErrors"
-    ]
-}
-
-private predicate isCanonicalExternalContextHandler(Routing::Node useSite) {
-  exists(ImportSpecifier spec, DataFlow::Node installedNode |
-    isCanonicalExternalContextImport(spec) and
-    useSite = Routing::getNode(installedNode) and
-    (
-      DataFlow::valueNode(spec).(DataFlow::SourceNode).flowsTo(installedNode)
-      or
-      exists(DataFlow::CallNode call |
-        call = installedNode and
-        DataFlow::valueNode(spec).(DataFlow::SourceNode).flowsTo(call.getCalleeNode())
-      )
-    )
-  )
-}
-
 private predicate isCanonicalExternalLimiterIdentityImport(ImportSpecifier spec) {
   spec.getImportDeclaration().getImportedFile().getRelativePath() =
     "control-api/src/middleware/externalSessionAuth.ts" and
@@ -113,76 +74,15 @@ private predicate hasSameRouteEvenfireLimiterAfterContext(Routing::Node useSite)
   )
 }
 
-private predicate hasGlobalEvenfireLimiterAfterContext(Routing::Node useSite) {
-  exists(
-    Routing::RouteSetup contextSetup, Routing::RouteSetup limiterSetup,
-    EvenfireRateLimitingMiddleware middleware, Routing::Node limiterNode
-  |
-    useSite.getParent() = contextSetup and
-    limiterNode = middleware.getRoutingNode() and
-    limiterNode.getParent() = limiterSetup and
-    limiterSetup.getRouter() = contextSetup.getRouter() and
-    limiterSetup = contextSetup.getNextSibling+() and
-    limiterSetup.getRelativePath() = contextSetup.getRelativePath() and
-    not exists(contextSetup.getOwnHttpMethod()) and
-    sameSourceFile(useSite, limiterNode) and
-    not exists(Routing::RouteSetup earlierSetup |
-      earlierSetup.getRouter() = contextSetup.getRouter() and
-      earlierSetup = contextSetup.getNextSibling+() and
-      limiterSetup = earlierSetup.getNextSibling+() and
-      not earlierSetup.mayResumeDispatch()
-    )
-  )
-}
-
-private predicate isCoveredHttpRouteAfterContext(
-  Routing::RouteSetup contextSetup, Routing::RouteSetup setup
-) {
-  exists(string contextPath, string setupPath |
-    contextPath = contextSetup.getRelativePath() and
-    setupPath = setup.getRelativePath() and
-    setup.getRouter() = contextSetup.getRouter() and
-    setup = contextSetup.getNextSibling+() and
-    sameSourceFile(contextSetup, setup) and
-    exists(setup.getOwnHttpMethod()) and
-    (
-      setupPath = contextPath
-      or
-      setupPath.length() > contextPath.length() and
-      setupPath.prefix(contextPath.length() + 1) = contextPath + "/"
-    )
-  )
-}
-
 private predicate hasEvenfireRateLimitingGuard(Routing::Node useSite) {
   exists(EvenfireRateLimitingMiddleware middleware |
     useSite.isGuardedByNode(middleware.getRoutingNode()) and
     sameSourceFile(useSite, middleware.getRoutingNode())
   )
   or
-  isCanonicalExternalContextHandler(useSite) and
-  useSite.mayResumeDispatch() and
-  hasSameRouteEvenfireLimiterAfterContext(useSite)
-  or
   isCanonicalExternalLimiterIdentityHandler(useSite) and
   useSite.mayResumeDispatch() and
   hasSameRouteEvenfireLimiterAfterContext(useSite)
-  or
-  isCanonicalExternalContextHandler(useSite) and
-  useSite.mayResumeDispatch() and
-  hasGlobalEvenfireLimiterAfterContext(useSite)
-  or
-  isCanonicalExternalContextHandler(useSite) and
-  useSite.mayResumeDispatch() and
-  exists(Routing::RouteSetup contextSetup |
-    useSite.getParent() = contextSetup and
-    not exists(contextSetup.getOwnHttpMethod()) and
-    exists(Routing::RouteSetup setup | isCoveredHttpRouteAfterContext(contextSetup, setup)) and
-    not exists(Routing::RouteSetup setup |
-      isCoveredHttpRouteAfterContext(contextSetup, setup) and
-      not routeSetupHasEvenfireLimiter(setup)
-    )
-  )
 }
 
 private predicate hasRateLimitingGuard(Routing::Node useSite) {
