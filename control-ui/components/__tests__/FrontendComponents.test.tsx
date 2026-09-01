@@ -5,6 +5,8 @@ import {
   RowActionMenu,
   TableHeaderCell,
   TableRow,
+  TableStateRow,
+  TruncatedText,
   stableSortRows,
 } from '@clerum/frontend-components'
 
@@ -86,6 +88,28 @@ describe('shared frontend components', () => {
       fireEvent.keyDown(child, { key: ' ' })
     }
     expect(onNavigate).toHaveBeenCalledTimes(2)
+  })
+
+  it('defaults empty table copy and exposes full truncated text', () => {
+    const longDescription =
+      'This description is deliberately long enough to exceed the shared default bounded text length for table descriptions.'
+
+    render(
+      <DataTable>
+        <tbody>
+          <TableStateRow colSpan={2} />
+          <tr>
+            <td>
+              <TruncatedText value={longDescription} />
+            </td>
+          </tr>
+        </tbody>
+      </DataTable>
+    )
+
+    expect(screen.getByText('No data')).toBeInTheDocument()
+    expect(screen.getByText(/default bounde\.\.\./)).toBeInTheDocument()
+    expect(screen.getByRole('tooltip')).toHaveTextContent(longDescription)
   })
 
   it('opens one accessible action menu and executes its destructive action', () => {

@@ -158,11 +158,7 @@ export function TokenBudgetTable({
             ) : filteredItems.length === 0 ? (
               <TableStateRow
                 colSpan={columns.length}
-                message={
-                  normalizedSearch
-                    ? 'No budgets match this search.'
-                    : 'No token budgets defined yet. Create one to start tracking spend against a limit.'
-                }
+                message={normalizedSearch ? 'No budgets match this search.' : undefined}
               />
             ) : (
               budgetSort.sortedRows.map((budget: TokenBudget) => (

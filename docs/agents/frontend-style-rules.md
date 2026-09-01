@@ -106,7 +106,12 @@ application guidance that must be combined with this shared document.
   columns to size flexibly. Put secondary metadata such as descriptions,
   emails, providers, aliases, or namespaces in accurately named columns rather
   than stacking it under a primary label. Truncate bounded, non-critical text
-  only when its complete value remains accessibly available.
+  only when its complete value remains accessibly available; use the shared
+  bounded-text primitive for table descriptions unless a domain-specific
+  control owns the full-value affordance.
+- Let shared table empty states default to `No data`. Override that copy only
+  when a search/filter, loading/error state, or domain-specific next action
+  changes what the user needs to know.
 - Make ordinary record rows navigate to their dedicated detail route. Do not
   use inline master/detail expansion for normal record tables; reserve
   expansion or hierarchy for a genuinely specialized tree, file, permission,
