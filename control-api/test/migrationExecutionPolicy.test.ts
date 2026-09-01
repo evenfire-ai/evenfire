@@ -162,6 +162,31 @@ describe('D34 migration execution policy', () => {
         canonicalOnlineIndexDefinition(notificationExpected)
       )
     }
+
+    const workflowCatalogExpected = `CREATE INDEX user_workflow_triggers_catalog_utf8_idx
+      ON user_workflow_triggers
+      (user_id, catalog_utf8_bytes(recipe_namespace || '/' || recipe_name))`
+    const workflowCatalogDeparsed = `CREATE INDEX user_workflow_triggers_catalog_utf8_idx
+      ON public.user_workflow_triggers USING btree
+      (user_id, catalog_utf8_bytes((((recipe_namespace)::text || '/'::text) ||
+        (recipe_name)::text)))`
+    const nonEquivalentWorkflowCatalog = [
+      workflowCatalogDeparsed.replace("|| '/'::text", "+ '/'::text"),
+      workflowCatalogDeparsed.replace('recipe_namespace', 'recipe_scope'),
+      workflowCatalogDeparsed.replace('recipe_name', 'recipe_version'),
+      workflowCatalogDeparsed.replace('(user_id,', '(team_id,'),
+      workflowCatalogDeparsed.replace('CREATE INDEX', 'CREATE UNIQUE INDEX'),
+      workflowCatalogDeparsed.replace('user_workflow_triggers', 'team_workflow_triggers'),
+    ]
+
+    expect(canonicalOnlineIndexDefinition(workflowCatalogDeparsed)).toBe(
+      canonicalOnlineIndexDefinition(workflowCatalogExpected)
+    )
+    for (const changed of nonEquivalentWorkflowCatalog) {
+      expect(canonicalOnlineIndexDefinition(changed)).not.toBe(
+        canonicalOnlineIndexDefinition(workflowCatalogExpected)
+      )
+    }
   })
 })
 
