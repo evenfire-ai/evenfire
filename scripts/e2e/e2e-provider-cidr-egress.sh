@@ -104,6 +104,10 @@ PROVIDER_CATEGORY="edge"
 CM_KEY="${PROVIDER_NAME}.${PROVIDER_CATEGORY}.ipv4"
 PROVIDER_DNS="${PROVIDER_DNS:-one.one.one.one}"
 PROVIDER_PORT="${PROVIDER_PORT:-443}"
+# #510 — the ceiling's LOWER bound. Not overridable: the pair [80, 443] is the
+# rule under test, so reading it from the environment would let a caller
+# silently disarm CEIL-0 the way an unpinned PROVIDER_PORT could disarm the rest.
+CEIL_LOW_PORT=80
 SIBLING_PORT="${E2E_SIBLING_PORT:-2222}"
 DRIFT_METRIC="clerum_hcc_external_egress_provider_drift_total"
 ANNOTATION_KEY="clerum.io/egress-provider-ranges"
@@ -129,6 +133,18 @@ ABSENT_CATEGORY="nope-${RID}"
 # ─── Logging + assertion accounting ──────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; NC='\033[0m'
 PASS_COUNT=0
+# The EXACT number of assertions a complete run executes. Not a minimum: every
+# assertion here is deterministic, so any deviation means the harness took a
+# path it should not have — an early return, a skipped phase, a duplicated call.
+#
+# Why this lives in the script and not in a comment or a PR body: this suite
+# spent three weeks reported as "32/32" and "33/33", neither of which the script
+# can emit (it prints one number, never a fraction). Both figures were retyped
+# by a human from a run whose real maximum was 33, where 32 meant "the throttled
+# H7 canary log did not appear" — an INCOMPLETE run recorded as complete. A
+# count that lives outside the program always drifts; one that lives inside it
+# cannot. Update this literal in the same commit that adds or removes an `ok`.
+EXPECTED_PASS_COUNT=37
 CREATED=0
 
 log()  { printf "\n${BOLD}[e2e-provider-cidr]${NC} %s\n" "$*"; }
@@ -308,6 +324,17 @@ spec:
         - egressClass: exact-host
           dns: ${PROVIDER_DNS}
           port: ${SIBLING_PORT}
+        # CEIL-0 (#510): the LOWER bound of the port ceiling. The whole suite
+        # ran on a single PROVIDER_PORT (443), so a regression narrowing the
+        # allowed pair to [443] alone would have gone green everywhere. Riding
+        # on this workload costs no extra object and no extra wait — Phase 4b
+        # already waits for this NetworkPolicy.
+        - egressClass: provider
+          dns: ${PROVIDER_DNS}
+          port: 80
+          provider:
+            name: ${PROVIDER_NAME}
+            categories: [${PROVIDER_CATEGORY}]
   ui:
     workloadRef: ui
     port: 8080
@@ -337,7 +364,14 @@ expect_reject() {
   fi
 }
 
-expect_reject "provider binding that also declares cidr" "provider" "$(cat <<YAML
+# NEEDLE DISCIPLINE: the needle must be unique to the rule under test.
+# These two negatives both used the bare needle "provider", which appears in
+# THREE different CEL messages on this CRD — so each assertion could pass for
+# the other's reason, and a rule could be deleted without either going red.
+# Each needle below is now copied verbatim from the `message:` of the exact
+# rule it exercises (charts/clerum-crds/crds/mcpserver.yaml).
+expect_reject "provider binding that also declares cidr" \
+  "provider requires dns and port (no cidr)" "$(cat <<YAML
 apiVersion: clerum.io/v1alpha1
 kind: McpServer
 metadata:
@@ -361,7 +395,8 @@ spec:
 YAML
 )"
 
-expect_reject "provider egressClass without a provider object" "provider" "$(cat <<YAML
+expect_reject "provider egressClass without a provider object" \
+  "egressClass 'provider' requires the provider object" "$(cat <<YAML
 apiVersion: clerum.io/v1alpha1
 kind: McpServer
 metadata:
@@ -380,6 +415,132 @@ spec:
       port: ${PROVIDER_PORT}
 YAML
 )"
+
+# ── #510 port ceiling — the rule THIS PR introduced, previously ungated ──
+#
+# The ceiling ([80, 443] for `provider` on the WorkflowRecipe surfaces) shipped
+# in three layers and had NO live coverage: the suite exercised a single
+# PROVIDER_PORT, defaulting to 443, so neither bound of the pair was tested and
+# no out-of-range value was ever rejected on a cluster.
+#
+# The needles are copied verbatim from workflowrecipe.yaml (:1016 and :125).
+# CEIL-1 and CEIL-2 share a needle on purpose — they exercise the SAME rule with
+# DIFFERENT inputs; what separates them is the `transport:` block in CEIL-2.
+
+expect_reject "CEIL-1: recipe workload provider binding outside [80,443]" \
+  "egressClass 'provider' is limited to port 80 or 443" "$(cat <<YAML
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: ${WFR}-neg-ceiling
+  namespace: ${WFR_NS}
+spec:
+  description: "#510 ceiling negative — non-transport workload."
+  workloads:
+    - id: fetcher
+      type: deployment
+      image: busybox:1.36.1
+      egressBindings:
+        - egressClass: provider
+          dns: ${PROVIDER_DNS}
+          port: 22
+          provider:
+            name: ${PROVIDER_NAME}
+            categories: [${PROVIDER_CATEGORY}]
+YAML
+)"
+
+# CEIL-2 is the regression net for the change 1f179c7f made: `transport` USED TO
+# lift the ceiling. Comments in the repo still described it as the intended
+# escape hatch. If someone restores that exemption, only this assertion notices.
+expect_reject "CEIL-2: TRANSPORT workload is capped too (transport is not an escape hatch)" \
+  "egressClass 'provider' is limited to port 80 or 443" "$(cat <<YAML
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: ${WFR}-neg-ceiling-transport
+  namespace: ${WFR_NS}
+spec:
+  description: "#510 ceiling negative — transport workload must NOT be exempt."
+  workloads:
+    - id: agent
+      type: deployment
+      image: busybox:1.36.1
+      port: 3000
+      transport:
+        type: streamableHttp
+      egressBindings:
+        - egressClass: provider
+          dns: ${PROVIDER_DNS}
+          port: 22
+          provider:
+            name: ${PROVIDER_NAME}
+            categories: [${PROVIDER_CATEGORY}]
+YAML
+)"
+
+# CEIL-3 covers the OTHER recipe surface. A ui.egress.external entry has no
+# `egressClass` field at all, so this rule keys on the `provider` object — the
+# same predicate the WRC reconciler now uses.
+expect_reject "CEIL-3: recipe ui.egress.external provider entry outside [80,443]" \
+  "spec.ui.egress.external[] provider entries are limited to port 80 or 443" "$(cat <<YAML
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: ${WFR}-neg-ceiling-ui
+  namespace: ${WFR_NS}
+spec:
+  description: "#510 ceiling negative — ui.egress.external surface."
+  workloads:
+    - id: ui
+      type: deployment
+      image: busybox:1.36.1
+      port: 8080
+  ui:
+    workloadRef: ui
+    port: 8080
+    egress:
+      external:
+        - fqdn: ${PROVIDER_DNS}
+          port: 22
+          provider:
+            name: ${PROVIDER_NAME}
+            categories: [${PROVIDER_CATEGORY}]
+YAML
+)"
+
+# CEIL-4 pins the INTENTIONAL asymmetry in the opposite direction: McpServer is
+# NOT capped, by design (a platform-authored server pays for its width with the
+# MCP runtime's supervision, and reaching this surface needs `create` on
+# mcpservers.clerum.io). Server-side dry-run: full admission, no persistence,
+# nothing to clean up. Without this, a "unification" that capped McpServer too
+# would pass every other assertion in this suite.
+ceil4_manifest="$(cat <<YAML
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: ${MCP_SERVER}-ceiling-accept
+  namespace: ${MCP_NS}
+spec:
+  contextRef: ${CONTEXT_REF}
+  image: clerum/nginx-egress-proxy:0.1.0
+  transport:
+    type: streamableHttp
+    url: http://x.${MCP_NS}.svc.cluster.local:3000/mcp
+    port: 3000
+  egressBindings:
+    - egressClass: provider
+      dns: ${PROVIDER_DNS}
+      port: 5432
+      provider:
+        name: ${PROVIDER_NAME}
+        categories: [${PROVIDER_CATEGORY}]
+YAML
+)"
+ceil4_out="$(printf '%s' "$ceil4_manifest" | kc apply --dry-run=server -f - 2>&1)" || {
+  die "admission REJECTED an McpServer provider binding on port 5432; McpServer is uncapped BY DESIGN — if a port ceiling was deliberately added to this surface, update this assertion and the contract in packages/network-policy-core/index.cjs. Output: ${ceil4_out}"
+}
+ok "CEIL-4: McpServer provider binding on port 5432 accepted (asymmetry with recipes is by design)"
 
 expect_reject "a bare unknown egressClass" "Unsupported value" "$(cat <<YAML
 apiVersion: clerum.io/v1alpha1
@@ -486,16 +647,31 @@ else
   die "WRC workload NP did not render the catalog CIDR (WRC render path regressed)"
 fi
 
-# The provider-CIDR rule(s) must be port-scoped to PROVIDER_PORT — a rule that
-# carries TEST_CIDR on any OTHER port is a scoping regression.
-misscoped="$(wfr_np_rules | grep -F "$TEST_CIDR" | grep -vw "$PROVIDER_PORT" || true)"
+# The provider-CIDR rule(s) must be port-scoped to a DECLARED provider port — a
+# rule carrying TEST_CIDR on any other port is a scoping regression.
+#
+# The fetcher declares provider on TWO ports now (PROVIDER_PORT and the ceiling's
+# lower bound), so the invariant is "only on declared provider ports", not "only
+# on PROVIDER_PORT". It still fails loud on the sibling exact-host port, which is
+# the leak WRC-002 guards.
+misscoped="$(wfr_np_rules | grep -F "$TEST_CIDR" \
+  | grep -vw "$PROVIDER_PORT" | grep -vw "$CEIL_LOW_PORT" || true)"
 if [ -n "$misscoped" ]; then
-  warn "rules carrying ${TEST_CIDR} without port ${PROVIDER_PORT}:"
+  warn "rules carrying ${TEST_CIDR} on a port other than ${PROVIDER_PORT}/${CEIL_LOW_PORT}:"
   printf '%s\n' "$misscoped"
   dump_wrc
-  die "WRC provider-CIDR rule is not port-scoped to ${PROVIDER_PORT}"
+  die "WRC provider-CIDR rule is not port-scoped to a declared provider port"
 fi
-ok "WRC provider-CIDR rule(s) are port-scoped to ${PROVIDER_PORT}"
+ok "WRC provider-CIDR rule(s) are port-scoped to declared provider ports (${PROVIDER_PORT}, ${CEIL_LOW_PORT})"
+
+# CEIL-0 (#510): the ceiling's LOWER bound actually renders. Asserted separately
+# from the scoping check above, which would stay green if port 80 rendered
+# NOTHING at all — an absent rule carries no CIDR on a wrong port either.
+ceil_low_rule="$(wfr_np_rules | awk -F'|' -v p="$CEIL_LOW_PORT" \
+  '{ n = split($1, a, " "); for (i = 1; i <= n; i++) if (a[i] == p) { print; next } }')"
+printf '%s' "$ceil_low_rule" | grep -qF "$TEST_CIDR" \
+  || { warn "rules: $(wfr_np_rules)"; dump_wrc; die "CEIL-0: provider binding on port ${CEIL_LOW_PORT} rendered no ${TEST_CIDR} rule — the ceiling's lower bound is not honoured; got '${ceil_low_rule}'"; }
+ok "CEIL-0: provider CIDR renders on the ceiling's lower bound port ${CEIL_LOW_PORT}"
 
 # WRC-002 isolation (the key new coverage): the sibling exact-host binding on
 # SIBLING_PORT must render its OWN rule (else the check would be vacuous) and
@@ -535,12 +711,23 @@ printf '%s' "$wfr_annot" | grep -qF "$PROVIDER_DNS" \
 ok "WFR NP carries provenance annotation ${ANNOTATION_KEY}='${wfr_annot}'"
 
 # The recipe must not have failed while rendering the provider binding.
+#
+# This assertion used to read .status.phase ONCE and pass whenever it was not
+# literally "failed" — including when it was EMPTY, which is what an unreconciled
+# recipe reports. It therefore counted toward PASS_COUNT while proving nothing.
+# Wait for a non-empty phase first, so "not failed" is a statement about an
+# observed phase rather than about the absence of one.
+wfr_phase_present() {
+  [ -n "$(kc get workflowrecipe "$WFR" -n "$WFR_NS" -o jsonpath='{.status.phase}' 2>/dev/null)" ]
+}
+wait_cond "WorkflowRecipe ${WFR} publishes a status.phase" "$TIMEOUT" wfr_phase_present \
+  || { dump_wrc; die "WorkflowRecipe ${WFR} published no status.phase within ${TIMEOUT}s — the reconciler never reached a verdict, so 'not failed' would assert nothing"; }
 wfr_phase="$(kc get workflowrecipe "$WFR" -n "$WFR_NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
 if [ "$wfr_phase" = "failed" ]; then
   dump_wrc
   die "WorkflowRecipe ${WFR} reached status.phase=failed while rendering the provider binding"
 fi
-ok "WorkflowRecipe ${WFR} status.phase='${wfr_phase}' (not failed)"
+ok "WorkflowRecipe ${WFR} status.phase='${wfr_phase}' (non-empty, not failed)"
 
 # ─── Phase 5 — Drift canary ──────────────────────────────────────────
 log "Phase 5 — Drift canary (dns resolves OUTSIDE the declared range)"
@@ -689,6 +876,13 @@ fi
 log "═════════════════════════════════════════════════════════════════"
 if [ "$PASS_COUNT" -le 0 ]; then
   die "zero assertions executed — the harness never reached a real assertion"
+fi
+# Scope guard: "nothing failed" is not "everything ran". Every assertion in this
+# suite is deterministic, so a count below EXPECTED means assertions were
+# silently skipped, and a count above it means one ran more times than intended.
+# Either way the run is not a verdict.
+if [ "$PASS_COUNT" -ne "$EXPECTED_PASS_COUNT" ]; then
+  die "assertion count mismatch: executed ${PASS_COUNT}, expected ${EXPECTED_PASS_COUNT}. Fewer means assertions were skipped and the green is partial; more means one ran twice. If you added or removed an assertion, update EXPECTED_PASS_COUNT in the same commit."
 fi
 printf "${GREEN}All ${PASS_COUNT} provider-CIDR assertions passed.${NC}\n"
 log "═════════════════════════════════════════════════════════════════"
