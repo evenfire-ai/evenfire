@@ -740,7 +740,10 @@ describeRealPostgres('distinct catalog key pagination on real PostgreSQL', () =>
         family: 'sandbox_app',
         userId: actor.userId,
         expected: apps,
-        minimumPathsForFirst: 3,
+        // Repeated physical relationships prove refill/no-loss behavior, but
+        // they do not mint additional authorization paths. Direct access has
+        // one user path; the team fixture intentionally has three team paths.
+        minimumPathsForFirst: mode === 'team' ? 3 : 1,
         minimumRelationshipsForFirst: 3,
       })
     }
