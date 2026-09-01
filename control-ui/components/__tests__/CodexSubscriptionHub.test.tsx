@@ -147,6 +147,9 @@ describe('CodexSubscriptionHub', () => {
         defaultModel: null,
       })
     })
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
     expect(revokeCodexSubscription).not.toHaveBeenCalled()
   })
 
