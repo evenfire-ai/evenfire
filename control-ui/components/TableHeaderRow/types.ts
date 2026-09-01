@@ -1,16 +1,15 @@
-import type { ReactNode } from 'react'
-import type { SortDirection } from '@clerum/frontend-components'
+import type { SortDirection, TableHeaderCellProps } from '@clerum/frontend-components'
 
 export type TableHeaderColumn = {
   align?: 'left' | 'right' | 'center'
   ariaLabel?: string
   key: string
-  label?: ReactNode
+  label?: TableHeaderCellProps['label']
   minWidth?: string
   title?: string
   width?: string
   activeDirection?: SortDirection | null
   defaultDirection?: SortDirection
   onSort?: () => void
-  sortLabel?: ReactNode
+  sortLabel?: TableHeaderCellProps['sortLabel']
 }

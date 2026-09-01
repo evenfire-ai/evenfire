@@ -1,12 +1,12 @@
-import type { ReactNode } from 'react'
+import type { DataViewHeaderProps } from '@clerum/frontend-components'
 
 export type TablePanelHeaderProps = {
   actionsClassName?: string
-  primaryAction?: ReactNode
-  refreshAction?: ReactNode
-  search?: ReactNode
-  secondaryActions?: ReactNode
-  subtitle?: ReactNode
-  title: ReactNode
-  titleActions?: ReactNode
+  primaryAction?: DataViewHeaderProps['actions']
+  refreshAction?: DataViewHeaderProps['actions']
+  search?: DataViewHeaderProps['actions']
+  secondaryActions?: DataViewHeaderProps['actions']
+  subtitle?: DataViewHeaderProps['description']
+  title: DataViewHeaderProps['title']
+  titleActions?: DataViewHeaderProps['actions']
 }

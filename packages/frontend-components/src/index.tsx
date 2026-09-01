@@ -26,6 +26,15 @@ function classNames(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(' ')
 }
 
+export type DataViewHeaderProps = {
+  actions?: ReactNode
+  className?: string
+  description?: ReactNode
+  icon?: ReactNode
+  tabs?: ReactNode
+  title: ReactNode
+}
+
 export function DataViewHeader({
   actions,
   className,
@@ -33,14 +42,7 @@ export function DataViewHeader({
   icon,
   tabs,
   title,
-}: {
-  actions?: ReactNode
-  className?: string
-  description?: ReactNode
-  icon?: ReactNode
-  tabs?: ReactNode
-  title: ReactNode
-}) {
+}: DataViewHeaderProps) {
   return (
     <header className={classNames('eft-data-view-header', className)}>
       <div className="eft-data-view-header__main">
@@ -162,6 +164,15 @@ export function TableCell({
   return <td {...props} className={classNames(`eft-table__cell--${kind}`, className)} />
 }
 
+export type TableHeaderCellProps = Omit<ThHTMLAttributes<HTMLTableCellElement>, 'children'> & {
+  activeDirection?: SortDirection | null
+  defaultDirection?: SortDirection
+  kind?: CellKind
+  label: ReactNode
+  onSort?: () => void
+  sortLabel?: ReactNode
+}
+
 export function TableHeaderCell({
   activeDirection,
   className,
@@ -171,14 +182,7 @@ export function TableHeaderCell({
   onSort,
   sortLabel,
   ...props
-}: Omit<ThHTMLAttributes<HTMLTableCellElement>, 'children'> & {
-  activeDirection?: SortDirection | null
-  defaultDirection?: SortDirection
-  kind?: CellKind
-  label: ReactNode
-  onSort?: () => void
-  sortLabel?: ReactNode
-}) {
+}: TableHeaderCellProps) {
   const ariaSort = activeDirection
     ? activeDirection === 'asc'
       ? 'ascending'
@@ -234,17 +238,19 @@ export function TableHeaderCell({
   )
 }
 
+export type TableStateRowProps = {
+  action?: ReactNode
+  colSpan: number
+  kind?: 'loading' | 'empty' | 'error'
+  message?: ReactNode
+}
+
 export function TableStateRow({
   action,
   colSpan,
   kind = 'empty',
   message = 'No data',
-}: {
-  action?: ReactNode
-  colSpan: number
-  kind?: 'loading' | 'empty' | 'error'
-  message?: ReactNode
-}) {
+}: TableStateRowProps) {
   return (
     <tr>
       <td className={classNames('eft-table__state', `eft-table__state--${kind}`)} colSpan={colSpan}>
