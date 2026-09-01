@@ -6,15 +6,19 @@ repo_root=$(cd "$(dirname "$0")/../../../.." && pwd)
 suite="$repo_root/.github/codeql/queries/evenfire-security-and-quality.qls"
 stock_suite="codeql/javascript-queries:codeql-suites/javascript-security-and-quality.qls"
 
+resolved_query_json=$("$codeql" resolve queries --format=json "$suite")
+jq -e 'type == "array" and length > 0' >/dev/null <<<"$resolved_query_json"
 resolved_queries=()
 while IFS= read -r query_path; do
   resolved_queries+=("$query_path")
-done < <("$codeql" resolve queries --format=json "$suite" | jq -r '.[]')
+done < <(jq -r '.[]' <<<"$resolved_query_json")
 
+stock_query_json=$("$codeql" resolve queries --format=json "$stock_suite")
+jq -e 'type == "array" and length > 0' >/dev/null <<<"$stock_query_json"
 stock_queries=()
 while IFS= read -r query_path; do
   stock_queries+=("$query_path")
-done < <("$codeql" resolve queries --format=json "$stock_suite" | jq -r '.[]')
+done < <(jq -r '.[]' <<<"$stock_query_json")
 
 count_suffix() {
   local suffix=$1
