@@ -204,6 +204,7 @@ export function CodexSubscriptionHub() {
 
   function closeEdit() {
     connectEpoch.current += 1
+    setCreating(false)
     setEditing(null)
     setEditName('')
     setEditDefault('')
