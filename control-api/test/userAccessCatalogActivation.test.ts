@@ -77,6 +77,7 @@ async function resolve(catalogActivationRecord: string) {
     readinessMaxAgeMs: 5_000,
     now,
     catalogActivationRecord,
+    catalogReadiness: true,
   })
 }
 
