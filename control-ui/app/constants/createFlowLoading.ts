@@ -62,7 +62,7 @@ export const CREATE_FLOW_LOADING = {
     title: 'Create team',
     subtitle: 'Create a team now. You can assign a leader later.',
     backLabel: 'Back to teams',
-    steps: ['Team', 'Members', 'Access'],
+    steps: ['Team', 'Members', 'Agents'],
     stepFlowClassName: 'cu-create-step-flow--3 cu-team-create-panel',
   },
   installRegistryEntry: {

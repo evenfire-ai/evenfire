@@ -30,7 +30,7 @@ type Role = 'admin' | 'inviter' | 'member'
 
 type TeamCreateStep = 0 | 1 | 2
 
-const STEPS = ['Team', 'Members', 'Access'] as const
+const STEPS = ['Team', 'Members', 'Agents'] as const
 
 const STEP_DETAILS = [
   {
@@ -44,8 +44,8 @@ const STEP_DETAILS = [
     subtitle: 'Choose initial team members and roles.',
   },
   {
-    description: 'Map access',
-    title: 'Access',
+    description: 'Map agent access',
+    title: 'Agents',
     subtitle: 'Choose the agents this team can use — their connectors come along.',
   },
 ] as const
@@ -439,15 +439,15 @@ export default function CreateTeamPage() {
                 {loadingReferenceData ? (
                   <div className="cu-muted cu-muted-note--compact">Loading agents...</div>
                 ) : agentOptions.length > 0 ? (
-                  <Field htmlFor="new-team-access-picker" label="Access">
+                  <Field htmlFor="new-team-agent-picker" label="Agents">
                     <SelectionDropdown
-                      id="new-team-access-picker"
+                      id="new-team-agent-picker"
                       options={agentOptions}
                       value={selectedAgentNames}
                       onChange={setSelectedAgentNames}
-                      placeholder="Select access"
-                      searchPlaceholder="Search access..."
-                      selectionLabel="Selected access"
+                      placeholder="Select agents"
+                      searchPlaceholder="Search agents..."
+                      selectionLabel="Selected agents"
                       emptyLabel="No agents match your search."
                       disabled={saving}
                       showSelectedChips={false}

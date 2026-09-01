@@ -45,12 +45,12 @@ import { formatTeamRole, permissionsForTeamRole } from '../../../../lib/teamRole
 
 type Role = 'admin' | 'inviter' | 'member'
 
-type TeamTab = 'members' | 'access'
-const TEAM_TABS: TeamTab[] = ['members', 'access']
+type TeamTab = 'members' | 'agents'
+const TEAM_TABS: TeamTab[] = ['members', 'agents']
 
 const TEAM_TAB_LABELS: Record<TeamTab, string> = {
   members: 'Members',
-  access: 'Access',
+  agents: 'Agents',
 }
 
 function parseTeamTab(value: string | undefined): TeamTab {
@@ -588,16 +588,16 @@ export default function TeamDetailsPage() {
   async function removeAccess(agentName: string) {
     const target = agentDisplay(agentName)
     const shouldRemove = await confirm({
-      title: 'Remove Access',
+      title: 'Remove Agent',
       message: `Remove ${teamName || 'this team'}'s access to ${target}? This revokes the agent and every connector it carries.`,
-      confirmLabel: 'Remove access',
+      confirmLabel: 'Remove',
       tone: 'danger',
     })
     if (!shouldRemove) return
 
     await saveAccess(
       grantedAgentNames.filter(name => name !== agentName),
-      'Team access updated.'
+      'Team agents updated.'
     )
   }
 
@@ -1026,7 +1026,7 @@ export default function TeamDetailsPage() {
                 </>
               )}
 
-              {activeTab === 'access' && (
+              {activeTab === 'agents' && (
                 <>
                   <div
                     style={{
@@ -1047,7 +1047,7 @@ export default function TeamDetailsPage() {
                       onClick={() => setShowAddContext(true)}
                       disabled={busy}
                     >
-                      Add access
+                      Add agents
                     </button>
                   </div>
                   {initialLoading ? (
@@ -1055,7 +1055,7 @@ export default function TeamDetailsPage() {
                       <table className="cu-table">
                         <thead>
                           <tr>
-                            <th>Access</th>
+                            <th>Agent</th>
                             <th>Connectors</th>
                             <th></th>
                           </tr>
@@ -1078,14 +1078,14 @@ export default function TeamDetailsPage() {
                     </div>
                   ) : grantedAgentNames.length === 0 ? (
                     <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
-                      No access assigned yet.
+                      No agents assigned yet.
                     </div>
                   ) : (
                     <div className="cu-table-wrap">
                       <table className="cu-table">
                         <thead>
                           <tr>
-                            <th>Access</th>
+                            <th>Agent</th>
                             <th>Connectors</th>
                             <th></th>
                           </tr>
@@ -1128,7 +1128,7 @@ export default function TeamDetailsPage() {
                                     onClick={() => void removeAccess(agentName)}
                                     disabled={busy}
                                     title="Remove"
-                                    aria-label="Remove access"
+                                    aria-label="Remove agent"
                                   >
                                     <IconX width={16} height={16} />
                                   </button>
@@ -1385,12 +1385,12 @@ export default function TeamDetailsPage() {
           <div
             className="cu-modal-panel cu-modal-panel--selection"
             role="dialog"
-            aria-labelledby="add-access-title"
+            aria-labelledby="add-agents-title"
             onClick={e => e.stopPropagation()}
           >
             <div className="cu-modal-panel__head">
-              <strong id="add-access-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add access
+              <strong id="add-agents-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
+                Add agents
               </strong>
               <button
                 type="button"
@@ -1404,9 +1404,9 @@ export default function TeamDetailsPage() {
             </div>
 
             <div className="cu-field">
-              <label htmlFor="team-access-picker">Access</label>
+              <label htmlFor="team-agent-picker">Agents</label>
               <SelectionDropdown
-                id="team-access-picker"
+                id="team-agent-picker"
                 inline
                 value={selectedAgentNamesToAdd}
                 onChange={setSelectedAgentNamesToAdd}
@@ -1414,10 +1414,10 @@ export default function TeamDetailsPage() {
                   .filter(agentName => !grantedAgentNames.includes(agentName))
                   .sort((a, b) => agentDisplay(a).localeCompare(agentDisplay(b)))
                   .map(agentName => ({ value: agentName, label: agentDisplay(agentName) }))}
-                placeholder="Select access"
-                searchPlaceholder="Search access..."
-                selectionLabel="Selected access"
-                emptyLabel="No additional access available."
+                placeholder="Select agents"
+                searchPlaceholder="Search agents..."
+                selectionLabel="Selected agents"
+                emptyLabel="No additional agents available."
                 disabled={busy}
               />
             </div>
@@ -1437,13 +1437,13 @@ export default function TeamDetailsPage() {
                 onClick={() => {
                   void saveAccess(
                     [...grantedAgentNames, ...selectedAgentNamesToAdd],
-                    'Team access updated.'
+                    'Team agents updated.'
                   )
                   setShowAddContext(false)
                 }}
                 disabled={busy || selectedAgentNamesToAdd.length === 0}
               >
-                Add access
+                Add agents
               </button>
             </div>
           </div>

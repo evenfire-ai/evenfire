@@ -1,8 +1,8 @@
 // control-ui/e2e/qa-recorder-member-removed-access.spec.ts
 //
 // MUTATING journey: seeds an access scope for the first member, deletes the
-// backing context out-of-band, and proves the Access tab shows
-// bookkeeping and is never rendered).
+// backing context out-of-band, and proves the Agents tab renders no
+// deleted-scope bookkeeping (no tombstone row is ever rendered).
 //
 // Contract: docs/testing/optional-playwright-qa-recorder.md ("Extending the
 // recorder").
@@ -125,9 +125,9 @@ test.describe('optional QA recorder: Control UI member removed access', () => {
         300
       )
 
-      // The Access tab renders the orphaned mapping under "Removed access".
+      // The Agents tab never renders the orphaned mapping.
       await page.goto(
-        `${CONTROL_UI_URL}/users-and-teams/users/${encodeURIComponent(userId)}/access`
+        `${CONTROL_UI_URL}/users-and-teams/users/${encodeURIComponent(userId)}/agents`
       )
       await expect(
         page.getByText('Agents this member may use — and the connectors each one carries.', {
@@ -145,7 +145,7 @@ test.describe('optional QA recorder: Control UI member removed access', () => {
           .filter({ has: page.getByRole('cell', { name: hostDisplayName, exact: true }) })
       ).toHaveCount(0)
       await expect(page.getByText(contextId)).toHaveCount(0)
-      await expect(page.getByText('No access assigned yet.', { exact: true })).toBeVisible()
+      await expect(page.getByText('No agents assigned yet.', { exact: true })).toBeVisible()
       await screenshotAndLog(page, testInfo, `${journey}-deleted-scope`)
 
       // Restore: the member's original contextIds, which never contained the

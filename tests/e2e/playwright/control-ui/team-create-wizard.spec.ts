@@ -1,10 +1,11 @@
 /**
- * Control UI — Team create wizard Access step tests
+ * Control UI — Team create wizard Agents step tests
  *
- * The wizard rail is Team → Members → Access (D8 dropped the fourth step);
- * the Access step offers agent display names (not raw scope ids) and a
- * selection made there lands on the created team as BOTH the team-contexts
- * and team-agents mappings (D8 composite write).
+ * The wizard rail is Team → Members → Agents (D8 dropped the fourth step;
+ * D10 renamed the merged Access step to Agents); the Agents step offers
+ * agent display names (not raw scope ids) and a selection made there lands
+ * on the created team as BOTH the team-contexts and team-agents mappings
+ * (D8 composite write).
  */
 import { controlApi } from '../helpers/api-client'
 import { expect, test } from '../helpers/auth-fixture'
@@ -59,17 +60,17 @@ test.describe('Control UI — Team create wizard', () => {
     await controlApi.ensureContextDeleted(CONTEXT_NAME)
   })
 
-  test('Access step grants by agent display name and lands the mapping on the team', async ({
+  test('Agents step grants by agent display name and lands the mapping on the team', async ({
     authedPage,
   }) => {
     test.setTimeout(120_000)
     await authedPage.goto('/users-and-teams/teams/new')
 
-    // D8 rail: three steps, no fourth.
+    // Three steps, no fourth (D8; D10 renamed the last step to Agents).
     await expect(authedPage.locator('.cu-agent-step-rail__title')).toHaveText([
       'Team',
       'Members',
-      'Access',
+      'Agents',
     ])
 
     // Step 0 — Team identity
@@ -82,8 +83,8 @@ test.describe('Control UI — Team create wizard', () => {
       authedPage.getByText('Choose the agents this team can use — their connectors come along.')
     ).toBeVisible({ timeout: 15_000 })
 
-    // Step 2 (last) — Access: options are agent display names, never raw ids
-    await authedPage.locator('#new-team-access-picker').click()
+    // Step 2 (last) — Agents: options are agent display names, never raw ids
+    await authedPage.locator('#new-team-agent-picker').click()
     const seededOption = authedPage.getByRole('option', {
       name: HOST_DISPLAY_NAME,
       exact: true,
@@ -91,7 +92,7 @@ test.describe('Control UI — Team create wizard', () => {
     await expect(seededOption).toBeVisible({ timeout: 15_000 })
     await expect(authedPage.getByRole('option', { name: CONTEXT_ID, exact: true })).toHaveCount(0)
     await seededOption.click()
-    await expect(authedPage.locator('#new-team-access-picker')).toContainText(HOST_DISPLAY_NAME)
+    await expect(authedPage.locator('#new-team-agent-picker')).toContainText(HOST_DISPLAY_NAME)
     await authedPage.keyboard.press('Escape')
 
     // Last step: the primary action creates the team (no fourth step).
@@ -107,7 +108,7 @@ test.describe('Control UI — Team create wizard', () => {
     const { agentNames } = await controlApi.getTeamAgents(teamId)
     expect(agentNames ?? []).toContain(HOST_NAME)
 
-    await authedPage.goto(`/users-and-teams/teams/${encodeURIComponent(teamId)}/access`)
+    await authedPage.goto(`/users-and-teams/teams/${encodeURIComponent(teamId)}/agents`)
     // D8: one table row per granted agent, labelled by its display name.
     const row = authedPage
       .getByRole('row')

@@ -1,9 +1,9 @@
 // control-ui/e2e/qa-recorder-team-create.spec.ts
 //
 // Optional QA recorder journey (MUTATING). Requires QA_RECORDER_CONFIRM_MUTATIONS=1.
-// Creates an empty team through the 3-step create-team wizard (D8 rail:
-// Team → Members → Access; skipping the Access step creates the team with no
-// access), tours its detail tabs (Members + Access — the separate Agents tab
+// Creates an empty team through the 3-step create-team wizard (rail: Team →
+// Members → Agents; skipping the Agents step creates the team with no
+// agents), tours its detail tabs (Members + Agents — the separate Access tab
 // is gone), then deletes the team via the Control API.
 import { type Page, expect, test } from '@playwright/test'
 import {
@@ -65,8 +65,8 @@ test.describe('optional QA recorder: Control UI team creation', () => {
         page.getByText('Choose initial team members and roles.', { exact: true })
       ).toBeVisible({ timeout: 20_000 })
 
-      // Step 2 (Access, last step) — agent picker; skipping it creates the
-      // team with no access. There is no fourth step.
+      // Step 2 (Agents, last step) — agent picker; skipping it creates the
+      // team with no agents. There is no fourth step.
       await continueWizard(page)
       await expect(
         page.getByText('Choose the agents this team can use — their connectors come along.', {
@@ -92,19 +92,19 @@ test.describe('optional QA recorder: Control UI team creation', () => {
         timeout: 20_000,
       })
 
-      const accessTab = page.getByRole('tab', { name: 'Access', exact: true })
-      await accessTab.click()
-      await expect(page).toHaveURL(/\/users-and-teams\/teams\/[^/]+\/access$/, {
+      const agentsTab = page.getByRole('tab', { name: 'Agents', exact: true })
+      await agentsTab.click()
+      await expect(page).toHaveURL(/\/users-and-teams\/teams\/[^/]+\/agents$/, {
         timeout: 20_000,
       })
-      await expect(accessTab).toHaveAttribute('aria-selected', 'true')
-      await expect(page.getByRole('button', { name: 'Add access', exact: true })).toBeVisible({
+      await expect(agentsTab).toHaveAttribute('aria-selected', 'true')
+      await expect(page.getByRole('button', { name: 'Add agents', exact: true })).toBeVisible({
         timeout: 20_000,
       })
 
-      // D8: the separate Agents tab is gone — the detail tour is Members +
-      // Access only.
-      await expect(page.getByRole('tab', { name: 'Agents', exact: true })).toHaveCount(0)
+      // D10: the separate Access tab is gone — the detail tour is Members +
+      // Agents only.
+      await expect(page.getByRole('tab', { name: 'Access', exact: true })).toHaveCount(0)
 
       const membersTab = page.getByRole('tab', { name: 'Members', exact: true })
       await membersTab.click()

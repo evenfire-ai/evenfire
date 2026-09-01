@@ -520,16 +520,16 @@ export default function UserDetailsPage() {
   async function removeAccess(agentName: string) {
     const target = agentDisplay(agentName)
     const shouldRemove = await confirm({
-      title: 'Remove Access',
+      title: 'Remove Agent',
       message: `Remove ${userName || emailDraft || 'this member'}'s access to ${target}? This revokes the agent and every connector it carries.`,
-      confirmLabel: 'Remove access',
+      confirmLabel: 'Remove',
       tone: 'danger',
     })
     if (!shouldRemove) return
 
     await saveAccess(
       grantedAgentNames.filter(name => name !== agentName),
-      'Access updated.'
+      'Agents updated.'
     )
   }
 
@@ -995,7 +995,7 @@ export default function UserDetailsPage() {
         </>
       )}
 
-      {activeTab === 'access' && (
+      {activeTab === 'agents' && (
         <>
           <div
             style={{
@@ -1016,7 +1016,7 @@ export default function UserDetailsPage() {
               onClick={() => setShowAddContext(true)}
               disabled={busy}
             >
-              Add access
+              Add agents
             </button>
           </div>
           {initialLoading ? (
@@ -1024,7 +1024,7 @@ export default function UserDetailsPage() {
               <table className="cu-table">
                 <thead>
                   <tr>
-                    <th>Access</th>
+                    <th>Agent</th>
                     <th>Connectors</th>
                     <th></th>
                   </tr>
@@ -1047,14 +1047,14 @@ export default function UserDetailsPage() {
             </div>
           ) : grantedAgentNames.length === 0 ? (
             <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
-              No access assigned yet.
+              No agents assigned yet.
             </div>
           ) : (
             <div className="cu-table-wrap">
               <table className="cu-table">
                 <thead>
                   <tr>
-                    <th>Access</th>
+                    <th>Agent</th>
                     <th>Connectors</th>
                     <th></th>
                   </tr>
@@ -1095,7 +1095,7 @@ export default function UserDetailsPage() {
                             onClick={() => void removeAccess(agentName)}
                             disabled={busy}
                             title="Remove"
-                            aria-label="Remove access"
+                            aria-label="Remove agent"
                           >
                             <IconX width={16} height={16} />
                           </button>
@@ -1357,12 +1357,12 @@ export default function UserDetailsPage() {
           <div
             className="cu-modal-panel cu-modal-panel--selection"
             role="dialog"
-            aria-labelledby="add-access-title"
+            aria-labelledby="add-agents-title"
             onClick={e => e.stopPropagation()}
           >
             <div className="cu-modal-panel__head">
-              <strong id="add-access-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add access
+              <strong id="add-agents-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
+                Add agents
               </strong>
               <button
                 type="button"
@@ -1376,9 +1376,9 @@ export default function UserDetailsPage() {
             </div>
 
             <div className="cu-field">
-              <label htmlFor="member-access-picker">Access</label>
+              <label htmlFor="member-agent-picker">Agents</label>
               <SelectionDropdown
-                id="member-access-picker"
+                id="member-agent-picker"
                 inline
                 value={selectedAgentNamesToAdd}
                 onChange={setSelectedAgentNamesToAdd}
@@ -1386,10 +1386,10 @@ export default function UserDetailsPage() {
                   .filter(agentName => !grantedAgentNames.includes(agentName))
                   .sort((a, b) => agentDisplay(a).localeCompare(agentDisplay(b)))
                   .map(agentName => ({ value: agentName, label: agentDisplay(agentName) }))}
-                placeholder="Select access"
-                searchPlaceholder="Search access..."
-                selectionLabel="Selected access"
-                emptyLabel="No additional access available."
+                placeholder="Select agents"
+                searchPlaceholder="Search agents..."
+                selectionLabel="Selected agents"
+                emptyLabel="No additional agents available."
                 disabled={busy}
               />
             </div>
@@ -1409,13 +1409,13 @@ export default function UserDetailsPage() {
                 onClick={() => {
                   void saveAccess(
                     [...grantedAgentNames, ...selectedAgentNamesToAdd],
-                    'Access updated.'
+                    'Agents updated.'
                   )
                   setShowAddContext(false)
                 }}
                 disabled={busy || selectedAgentNamesToAdd.length === 0}
               >
-                Add access
+                Add agents
               </button>
             </div>
           </div>

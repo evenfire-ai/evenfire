@@ -2,14 +2,15 @@
 //
 // Optional QA recorder journey (MUTATING). Requires QA_RECORDER_CONFIRM_MUTATIONS=1.
 // Creates a team through the Control API, seeds a host-backed access scope,
-// grants it via PUT /teams/<id>/contexts, then records the team detail Access
-// tab (D8): subtitle "Members, connector access, and agents.", intro "Agents
-// this team may use — and the connectors each one carries.", the Access /
-// Connectors table whose rows are granted agents labelled by display name
-// (never the raw contextId), the 'Add access' modal assertions, removal with
-// the "Team access updated." toast, and the legacy /contexts and /agents deep
-// links redirecting to /access. The team, host, and context are deleted via
-// the Control API in the finally (hosts before contexts).
+// grants it via PUT /teams/<id>/contexts, then records the team detail Agents
+// tab (D8 semantics, D10 name): subtitle "Members, connector access, and
+// agents.", intro "Agents this team may use — and the connectors each one
+// carries.", the Agent / Connectors table whose rows are granted agents
+// labelled by display name (never the raw contextId), the 'Add agents' modal
+// assertions, removal with the "Team agents updated." toast, and the legacy
+// /contexts and /access deep links redirecting to /agents. The team, host,
+// and context are deleted via the Control API in the finally (hosts before
+// contexts).
 //
 // Contract: docs/testing/optional-playwright-qa-recorder.md ("Extending the
 // recorder").
@@ -26,8 +27,8 @@ import {
   uniqueE2EName,
 } from './qa-recorder-helpers'
 
-test.describe('optional QA recorder: Control UI team Access tab', () => {
-  test('records granting, reviewing, and removing team access plus the legacy redirect', async ({
+test.describe('optional QA recorder: Control UI team Agents tab', () => {
+  test('records granting, reviewing, and removing team agents plus the legacy redirect', async ({
     page,
   }, testInfo) => {
     requireRecorderConfirm(
@@ -50,7 +51,7 @@ test.describe('optional QA recorder: Control UI team Access tab', () => {
       await loginThroughUi(page, credentials)
 
       // Stage the team and its host-backed access scope out-of-band; the
-      // behavior under test is the Access tab round-trip.
+      // behavior under test is the Agents tab round-trip.
       const teamRes = await api<{ id?: string }>(page.request, 'POST', '/api/v1/admin/teams', {
         name: teamName,
       })
@@ -88,7 +89,7 @@ test.describe('optional QA recorder: Control UI team Access tab', () => {
         300
       )
 
-      // Open the team from the Users & Teams directory and switch to Access.
+      // Open the team from the Users & Teams directory and switch to Agents.
       await page.getByRole('link', { name: 'Users & Teams', exact: true }).click()
       await expect(page).toHaveURL(/\/users-and-teams\/users$/, { timeout: 20_000 })
       const teamsTab = page.getByRole('tab', { name: 'Teams', exact: true })
@@ -107,9 +108,9 @@ test.describe('optional QA recorder: Control UI team Access tab', () => {
         teamId = decodeURIComponent(match?.[1] || '')
       }
 
-      const accessTab = page.getByRole('tab', { name: 'Access', exact: true })
-      await accessTab.click()
-      await expect(page).toHaveURL(/\/users-and-teams\/teams\/[^/]+\/access$/, {
+      const agentsTab = page.getByRole('tab', { name: 'Agents', exact: true })
+      await agentsTab.click()
+      await expect(page).toHaveURL(/\/users-and-teams\/teams\/[^/]+\/agents$/, {
         timeout: 20_000,
       })
 
@@ -124,7 +125,7 @@ test.describe('optional QA recorder: Control UI team Access tab', () => {
           exact: true,
         })
       ).toBeVisible()
-      await expect(page.getByRole('columnheader', { name: 'Access', exact: true })).toBeVisible()
+      await expect(page.getByRole('columnheader', { name: 'Agent', exact: true })).toBeVisible()
       await expect(
         page.getByRole('columnheader', { name: 'Connectors', exact: true })
       ).toBeVisible()
@@ -135,46 +136,46 @@ test.describe('optional QA recorder: Control UI team Access tab', () => {
       await expect(row).not.toContainText(contextId)
       await screenshotAndLog(page, testInfo, `${journey}-granted`)
 
-      // 'Add access' picker modal assertions, then cancel. The picker is
-      // still labelled 'Access' but its options are agent display names.
-      await page.getByRole('button', { name: 'Add access', exact: true }).click()
-      const dialog = page.getByRole('dialog', { name: 'Add access' })
+      // 'Add agents' picker modal assertions, then cancel. The picker is
+      // labelled 'Agents' and its options are agent display names.
+      await page.getByRole('button', { name: 'Add agents', exact: true }).click()
+      const dialog = page.getByRole('dialog', { name: 'Add agents' })
       await expect(dialog).toBeVisible()
-      await expect(dialog.getByLabel('Access')).toBeVisible()
-      await expect(dialog.locator('#team-access-picker')).toBeVisible()
-      await expect(dialog.getByRole('button', { name: 'Add access', exact: true })).toBeVisible()
+      await expect(dialog.getByLabel('Agents')).toBeVisible()
+      await expect(dialog.locator('#team-agent-picker')).toBeVisible()
+      await expect(dialog.getByRole('button', { name: 'Add agents', exact: true })).toBeVisible()
       await screenshotAndLog(page, testInfo, `${journey}-add-modal`)
       await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
       await expect(dialog).toHaveCount(0)
 
       // Remove the row: confirm dialog → toast → row gone.
-      await row.getByLabel('Remove access').click()
-      const confirmDialog = page.getByRole('alertdialog', { name: 'Remove Access' })
+      await row.getByLabel('Remove agent').click()
+      const confirmDialog = page.getByRole('alertdialog', { name: 'Remove Agent' })
       await expect(confirmDialog).toBeVisible()
       await expect(confirmDialog).toContainText(
         'This revokes the agent and every connector it carries.'
       )
-      await confirmDialog.getByRole('button', { name: 'Remove access', exact: true }).click()
+      await confirmDialog.getByRole('button', { name: 'Remove', exact: true }).click()
       await expect(
-        page.getByRole('status').filter({ hasText: 'Team access updated.' })
+        page.getByRole('status').filter({ hasText: 'Team agents updated.' })
       ).toBeVisible({ timeout: 20_000 })
       // Removed mappings leave no residue (D9): deleted history is backend
       // bookkeeping and is no longer rendered.
-      await expect(row.getByLabel('Remove access')).toHaveCount(0)
-      await expect(page.getByText('No access assigned yet.', { exact: true })).toBeVisible()
+      await expect(row.getByLabel('Remove agent')).toHaveCount(0)
+      await expect(page.getByText('No agents assigned yet.', { exact: true })).toBeVisible()
       await screenshotAndLog(page, testInfo, `${journey}-removed`)
 
-      // Legacy /contexts and /agents deep links redirect to /access.
+      // Legacy /contexts and /access deep links redirect to /agents.
       await page.goto(
         `${CONTROL_UI_URL}/users-and-teams/teams/${encodeURIComponent(teamId)}/contexts`
       )
-      await expect(page).toHaveURL(/\/users-and-teams\/teams\/[^/]+\/access$/, {
+      await expect(page).toHaveURL(/\/users-and-teams\/teams\/[^/]+\/agents$/, {
         timeout: 20_000,
       })
       await page.goto(
-        `${CONTROL_UI_URL}/users-and-teams/teams/${encodeURIComponent(teamId)}/agents`
+        `${CONTROL_UI_URL}/users-and-teams/teams/${encodeURIComponent(teamId)}/access`
       )
-      await expect(page).toHaveURL(/\/users-and-teams\/teams\/[^/]+\/access$/, {
+      await expect(page).toHaveURL(/\/users-and-teams\/teams\/[^/]+\/agents$/, {
         timeout: 20_000,
       })
       await screenshotAndLog(page, testInfo, `${journey}-legacy-redirect`)

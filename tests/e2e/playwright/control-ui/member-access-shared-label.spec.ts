@@ -1,8 +1,8 @@
 /**
- * Control UI — Member Access tab shared-scope rows (D8)
+ * Control UI — Member Agents tab shared-scope rows (D8)
  *
  * A single access scope (Context) may back multiple hosts. Under the D8
- * agent-centric Access tab the granted set is the member↔agent mapping UNION
+ * agent-centric Agents tab the granted set is the member↔agent mapping UNION
  * legacy scope mappings resolved to their owning agents, so a scope shared by
  * two hosts renders as TWO table rows — one per agent display name — never a
  * joined "A, B" label and never the raw wire contextId. Revoking one agent
@@ -27,7 +27,7 @@ let userId = ''
 let originalContextIds: string[] = []
 let originalAgentNames: string[] = []
 
-test.describe('Control UI — Member Access shared scope rows', () => {
+test.describe('Control UI — Member Agents shared scope rows', () => {
   test.describe.configure({ mode: 'serial' })
 
   test.beforeAll(async () => {
@@ -86,7 +86,7 @@ test.describe('Control UI — Member Access shared scope rows', () => {
   test('renders one row per owning agent, not a joined label or raw ids', async ({
     authedPage,
   }) => {
-    await authedPage.goto(`/users-and-teams/users/${encodeURIComponent(userId)}/access`)
+    await authedPage.goto(`/users-and-teams/users/${encodeURIComponent(userId)}/agents`)
     await expect(
       authedPage.getByText('Agents this member may use — and the connectors each one carries.')
     ).toBeVisible({ timeout: 15_000 })
@@ -111,15 +111,15 @@ test.describe('Control UI — Member Access shared scope rows', () => {
   test('remove confirm names the single agent; the shared scope keeps both rows', async ({
     authedPage,
   }) => {
-    await authedPage.goto(`/users-and-teams/users/${encodeURIComponent(userId)}/access`)
+    await authedPage.goto(`/users-and-teams/users/${encodeURIComponent(userId)}/agents`)
     const rowA = authedPage
       .getByRole('row')
       .filter({ has: authedPage.getByRole('cell', { name: HOST_DISPLAY_A, exact: true }) })
     await expect(rowA).toBeVisible({ timeout: 15_000 })
 
-    await rowA.getByLabel('Remove access').click()
+    await rowA.getByLabel('Remove agent').click()
 
-    const confirmDialog = authedPage.getByRole('alertdialog', { name: 'Remove Access' })
+    const confirmDialog = authedPage.getByRole('alertdialog', { name: 'Remove Agent' })
     await expect(confirmDialog).toBeVisible()
     await expect(confirmDialog).toContainText(HOST_DISPLAY_A)
     await expect(confirmDialog).not.toContainText(JOINED_LABEL)
@@ -128,9 +128,9 @@ test.describe('Control UI — Member Access shared scope rows', () => {
       'This revokes the agent and every connector it carries.'
     )
 
-    await confirmDialog.getByRole('button', { name: 'Remove access', exact: true }).click()
+    await confirmDialog.getByRole('button', { name: 'Remove', exact: true }).click()
 
-    await expect(authedPage.getByRole('status').filter({ hasText: 'Access updated.' })).toBeVisible(
+    await expect(authedPage.getByRole('status').filter({ hasText: 'Agents updated.' })).toBeVisible(
       { timeout: 15_000 }
     )
 

@@ -9,8 +9,9 @@
 // and never the raw contextId. Removal of ONE agent confirms with that
 // agent's own display name; the shared scope stays mapped for the other
 // agent, and the union resolves it back to BOTH owners, so both rows remain.
-// The team, hosts, and context are deleted via the Control API in the
-// finally (hosts before the context).
+// Recorded on the team Agents tab (D8 semantics, D10 name). The team, hosts,
+// and context are deleted via the Control API in the finally (hosts before
+// the context).
 //
 // Contract: docs/testing/optional-playwright-qa-recorder.md ("Extending the
 // recorder").
@@ -27,8 +28,8 @@ import {
   uniqueE2EName,
 } from './qa-recorder-helpers'
 
-test.describe('optional QA recorder: Control UI team Access shared-scope rows', () => {
-  test('records the per-agent shared-scope rows on the team Access tab and a single-agent removal', async ({
+test.describe('optional QA recorder: Control UI team Agents shared-scope rows', () => {
+  test('records the per-agent shared-scope rows on the team Agents tab and a single-agent removal', async ({
     page,
   }, testInfo) => {
     requireRecorderConfirm(
@@ -57,7 +58,7 @@ test.describe('optional QA recorder: Control UI team Access shared-scope rows', 
       await loginThroughUi(page, credentials)
 
       // Stage the team and its shared scope out-of-band; the behavior under
-      // test is the Access tab presentation and removal round-trip.
+      // test is the Agents tab presentation and removal round-trip.
       const teamRes = await api<{ id?: string }>(page.request, 'POST', '/api/v1/admin/teams', {
         name: teamName,
       })
@@ -100,7 +101,7 @@ test.describe('optional QA recorder: Control UI team Access shared-scope rows', 
         300
       )
 
-      // Open the team from the Users & Teams directory and switch to Access.
+      // Open the team from the Users & Teams directory and switch to Agents.
       await page.getByRole('link', { name: 'Users & Teams', exact: true }).click()
       await expect(page).toHaveURL(/\/users-and-teams\/users$/, { timeout: 20_000 })
       const teamsTab = page.getByRole('tab', { name: 'Teams', exact: true })
@@ -115,9 +116,9 @@ test.describe('optional QA recorder: Control UI team Access shared-scope rows', 
         timeout: 20_000,
       })
 
-      const accessTab = page.getByRole('tab', { name: 'Access', exact: true })
-      await accessTab.click()
-      await expect(page).toHaveURL(/\/users-and-teams\/teams\/[^/]+\/access$/, {
+      const agentsTab = page.getByRole('tab', { name: 'Agents', exact: true })
+      await agentsTab.click()
+      await expect(page).toHaveURL(/\/users-and-teams\/teams\/[^/]+\/agents$/, {
         timeout: 20_000,
       })
 
@@ -147,8 +148,8 @@ test.describe('optional QA recorder: Control UI team Access shared-scope rows', 
       // label, not the raw id). Confirming revokes A's agent mapping, but
       // the shared scope stays mapped for B and the D8 union resolves it
       // back to BOTH owners, so both rows remain after the toast.
-      await rowA.getByLabel('Remove access').click()
-      const confirmDialog = page.getByRole('alertdialog', { name: 'Remove Access' })
+      await rowA.getByLabel('Remove agent').click()
+      const confirmDialog = page.getByRole('alertdialog', { name: 'Remove Agent' })
       await expect(confirmDialog).toBeVisible()
       await expect(confirmDialog).toContainText(hostDisplayA)
       await expect(confirmDialog).not.toContainText(joinedLabel)
@@ -157,9 +158,9 @@ test.describe('optional QA recorder: Control UI team Access shared-scope rows', 
         'This revokes the agent and every connector it carries.'
       )
       await screenshotAndLog(page, testInfo, `${journey}-remove-confirm`)
-      await confirmDialog.getByRole('button', { name: 'Remove access', exact: true }).click()
+      await confirmDialog.getByRole('button', { name: 'Remove', exact: true }).click()
       await expect(
-        page.getByRole('status').filter({ hasText: 'Team access updated.' })
+        page.getByRole('status').filter({ hasText: 'Team agents updated.' })
       ).toBeVisible({ timeout: 20_000 })
       await expect(rowA).toBeVisible({ timeout: 20_000 })
       await expect(rowB).toBeVisible({ timeout: 20_000 })

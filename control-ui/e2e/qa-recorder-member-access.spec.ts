@@ -1,14 +1,15 @@
 // control-ui/e2e/qa-recorder-member-access.spec.ts
 //
 // Optional QA recorder journey (MUTATING). Requires QA_RECORDER_CONFIRM_MUTATIONS=1.
-// Records the E6 "Access" rename evidence in Users & Teams — the Teams table
-// 'Access' column header (no 'Contexts' header on either table) — then the
-// member detail Access tab (D8): a Control-API-seeded scope granted via PUT
-// /users/<id>/contexts is shown as an agent row in the Access/Connectors
-// table, labelled by the owning host's display name (never the raw
-// contextId), the 'Add access' picker modal opens (agent display names) and
-// cancels, and removal confirms ("Remove Access") → toasts "Access updated."
-// → clears the row. The tab's writes are D8 composite writes (agents AND
+// Records the D10 "Agents" rename evidence in Users & Teams — the Teams
+// table 'Agents' column header (no 'Contexts' header on either table) — then
+// the member detail Agents tab (D8 semantics, D10 name): a
+// Control-API-seeded scope granted via PUT /users/<id>/contexts is shown as
+// an agent row in the Agent/Connectors table, labelled by the owning host's
+// display name (never the raw contextId), the 'Add agents' picker modal
+// opens (agent display names) and cancels, and removal confirms ("Remove
+// Agent") → toasts "Agents updated." → clears the row. The tab's writes are
+// D8 composite writes (agents AND
 // contexts mappings), so the member's original contextIds AND agentNames are
 // restored and the seeded host + context are deleted in the finally (hosts
 // before contexts).
@@ -28,8 +29,8 @@ import {
   uniqueE2EName,
 } from './qa-recorder-helpers'
 
-test.describe('optional QA recorder: Control UI member Access tab', () => {
-  test('records the Users & Teams Access headers and the member access round-trip', async ({
+test.describe('optional QA recorder: Control UI member Agents tab', () => {
+  test('records the Users & Teams Agents headers and the member agents round-trip', async ({
     page,
   }, testInfo) => {
     requireRecorderConfirm(
@@ -52,7 +53,7 @@ test.describe('optional QA recorder: Control UI member Access tab', () => {
     try {
       await loginThroughUi(page, credentials)
 
-      // E6 evidence part 1 — Users table carries no 'Contexts' header.
+      // D10 evidence part 1 — Users table carries no 'Contexts' header.
       await page.getByRole('link', { name: 'Users & Teams', exact: true }).click()
       await expect(page).toHaveURL(/\/users-and-teams\/users$/, { timeout: 20_000 })
       await expect(page.getByRole('button', { name: 'Create member', exact: true })).toBeVisible({
@@ -61,7 +62,7 @@ test.describe('optional QA recorder: Control UI member Access tab', () => {
       await expect(page.getByRole('columnheader', { name: 'Contexts' })).toHaveCount(0)
       await screenshotAndLog(page, testInfo, `${journey}-users-table`)
 
-      // E6 evidence part 2 — Teams table column header is 'Access' (a sort
+      // D10 evidence part 2 — Teams table column header is 'Agents' (a sort
       // button), still with no 'Contexts' header.
       const teamsTab = page.getByRole('tab', { name: 'Teams', exact: true })
       await expect(teamsTab).toBeEnabled({ timeout: 20_000 })
@@ -71,7 +72,7 @@ test.describe('optional QA recorder: Control UI member Access tab', () => {
       // fresh environment shows the empty state instead.
       const teamsTable = page.locator('table', { hasText: 'Team name' })
       if (await teamsTable.isVisible({ timeout: 5_000 }).catch(() => false)) {
-        await expect(teamsTable.getByRole('button', { name: 'Sort by access' })).toBeVisible()
+        await expect(teamsTable.getByRole('button', { name: 'Sort by agents' })).toBeVisible()
       } else {
         await expect(page.getByText('No teams yet.', { exact: true })).toBeVisible()
       }
@@ -101,10 +102,10 @@ test.describe('optional QA recorder: Control UI member Access tab', () => {
 
       const memberTabs = page.getByRole('tablist', { name: 'Member sections' })
       await expect(memberTabs).toBeVisible({ timeout: 20_000 })
-      const accessTab = memberTabs.getByRole('tab', { name: 'Access', exact: true })
-      await expect(accessTab).toBeVisible()
-      await accessTab.click()
-      await expect(page).toHaveURL(/\/users-and-teams\/users\/[^/]+\/access$/, {
+      const agentsTab = memberTabs.getByRole('tab', { name: 'Agents', exact: true })
+      await expect(agentsTab).toBeVisible()
+      await agentsTab.click()
+      await expect(page).toHaveURL(/\/users-and-teams\/users\/[^/]+\/agents$/, {
         timeout: 20_000,
       })
       await expect(
@@ -179,7 +180,7 @@ test.describe('optional QA recorder: Control UI member Access tab', () => {
           exact: true,
         })
       ).toBeVisible({ timeout: 20_000 })
-      await expect(page.getByRole('columnheader', { name: 'Access', exact: true })).toBeVisible({
+      await expect(page.getByRole('columnheader', { name: 'Agent', exact: true })).toBeVisible({
         timeout: 20_000,
       })
       await expect(
@@ -192,29 +193,29 @@ test.describe('optional QA recorder: Control UI member Access tab', () => {
       await expect(row).not.toContainText(contextId)
       await screenshotAndLog(page, testInfo, `${journey}-granted`)
 
-      // 'Add access' picker modal opens and cancels. The picker is still
-      // labelled 'Access' but its options are agent display names.
-      await page.getByRole('button', { name: 'Add access', exact: true }).click()
-      const dialog = page.getByRole('dialog', { name: 'Add access' })
+      // 'Add agents' picker modal opens and cancels. The picker is labelled
+      // 'Agents' and its options are agent display names.
+      await page.getByRole('button', { name: 'Add agents', exact: true }).click()
+      const dialog = page.getByRole('dialog', { name: 'Add agents' })
       await expect(dialog).toBeVisible()
-      await expect(dialog.getByLabel('Access')).toBeVisible()
-      await expect(dialog.locator('#member-access-picker')).toBeVisible()
+      await expect(dialog.getByLabel('Agents')).toBeVisible()
+      await expect(dialog.locator('#member-agent-picker')).toBeVisible()
       await screenshotAndLog(page, testInfo, `${journey}-add-modal`)
       await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
       await expect(dialog).toHaveCount(0)
 
       // Remove the row: confirm dialog → toast → row gone.
-      await row.getByLabel('Remove access').click()
-      const confirmDialog = page.getByRole('alertdialog', { name: 'Remove Access' })
+      await row.getByLabel('Remove agent').click()
+      const confirmDialog = page.getByRole('alertdialog', { name: 'Remove Agent' })
       await expect(confirmDialog).toBeVisible()
       await expect(confirmDialog).toContainText(
         'This revokes the agent and every connector it carries.'
       )
-      await confirmDialog.getByRole('button', { name: 'Remove access', exact: true }).click()
-      await expect(page.getByRole('status').filter({ hasText: 'Access updated.' })).toBeVisible({
+      await confirmDialog.getByRole('button', { name: 'Remove', exact: true }).click()
+      await expect(page.getByRole('status').filter({ hasText: 'Agents updated.' })).toBeVisible({
         timeout: 20_000,
       })
-      await expect(row.getByLabel('Remove access')).toHaveCount(0)
+      await expect(row.getByLabel('Remove agent')).toHaveCount(0)
       await screenshotAndLog(page, testInfo, `${journey}-removed`)
     } finally {
       if (userId && originalContextIds !== null) {

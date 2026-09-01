@@ -1,12 +1,13 @@
 /**
- * Control UI — Member detail Access tab tests
+ * Control UI — Member detail Agents tab tests
  *
- * The member "Access" tab (the former "Contexts" tab) presents granted access
- * as one table row per agent (D8): the Access/Connectors columns, the owning
- * host's display name (spec.host) in cell 1 — never the raw wire contextId —
- * and the shared Connectors count cell in cell 2. The add/remove flows are D8
- * composite writes (user-agents AND user-contexts mappings), so cleanup
- * restores both the original contextIds and the original agentNames.
+ * The member "Agents" tab (the former "Access" tab, originally "Contexts")
+ * presents granted access as one table row per agent (D8): the
+ * Agent/Connectors columns, the owning host's display name (spec.host) in
+ * cell 1 — never the raw wire contextId — and the shared Connectors count
+ * cell in cell 2. The add/remove flows are D8 composite writes (user-agents
+ * AND user-contexts mappings), so cleanup restores both the original
+ * contextIds and the original agentNames.
  */
 import { controlApi } from '../helpers/api-client'
 import { expect, test } from '../helpers/auth-fixture'
@@ -21,7 +22,7 @@ let userId = ''
 let originalContextIds: string[] = []
 let originalAgentNames: string[] = []
 
-test.describe('Control UI — Member Access tab', () => {
+test.describe('Control UI — Member Agents tab', () => {
   test.describe.configure({ mode: 'serial' })
 
   test.beforeAll(async () => {
@@ -71,16 +72,14 @@ test.describe('Control UI — Member Access tab', () => {
   })
 
   test('shows the agent display name, not the raw scope id', async ({ authedPage }) => {
-    await authedPage.goto(`/users-and-teams/users/${encodeURIComponent(userId)}/access`)
+    await authedPage.goto(`/users-and-teams/users/${encodeURIComponent(userId)}/agents`)
     await expect(
       authedPage.getByText('Agents this member may use — and the connectors each one carries.')
     ).toBeVisible({ timeout: 15_000 })
 
-    // D8: granted access renders as a real table — Access/Connectors columns,
+    // D8: granted access renders as a real table — Agent/Connectors columns,
     // one row per granted agent, labelled by its display name.
-    await expect(
-      authedPage.getByRole('columnheader', { name: 'Access', exact: true })
-    ).toBeVisible()
+    await expect(authedPage.getByRole('columnheader', { name: 'Agent', exact: true })).toBeVisible()
     await expect(
       authedPage.getByRole('columnheader', { name: 'Connectors', exact: true })
     ).toBeVisible()
@@ -91,47 +90,47 @@ test.describe('Control UI — Member Access tab', () => {
     await expect(row).not.toContainText(CONTEXT_ID)
   })
 
-  test("'Add access' opens the access picker modal", async ({ authedPage }) => {
-    await authedPage.goto(`/users-and-teams/users/${encodeURIComponent(userId)}/access`)
+  test("'Add agents' opens the agent picker modal", async ({ authedPage }) => {
+    await authedPage.goto(`/users-and-teams/users/${encodeURIComponent(userId)}/agents`)
     await expect(
       authedPage.getByText('Agents this member may use — and the connectors each one carries.')
     ).toBeVisible({ timeout: 15_000 })
 
-    await authedPage.getByRole('button', { name: 'Add access', exact: true }).click()
+    await authedPage.getByRole('button', { name: 'Add agents', exact: true }).click()
 
-    const dialog = authedPage.getByRole('dialog', { name: 'Add access' })
+    const dialog = authedPage.getByRole('dialog', { name: 'Add agents' })
     await expect(dialog).toBeVisible()
-    await expect(dialog.getByLabel('Access')).toBeVisible()
-    await expect(dialog.locator('#member-access-picker')).toBeVisible()
-    await expect(dialog.getByRole('button', { name: 'Add access', exact: true })).toBeVisible()
+    await expect(dialog.getByLabel('Agents')).toBeVisible()
+    await expect(dialog.locator('#member-agent-picker')).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Add agents', exact: true })).toBeVisible()
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
     await expect(dialog).toHaveCount(0)
   })
 
-  test('removing access confirms, toasts, and clears the mapping via the API', async ({
+  test('removing an agent confirms, toasts, and clears the mapping via the API', async ({
     authedPage,
   }) => {
-    await authedPage.goto(`/users-and-teams/users/${encodeURIComponent(userId)}/access`)
+    await authedPage.goto(`/users-and-teams/users/${encodeURIComponent(userId)}/agents`)
     const row = authedPage
       .getByRole('row')
       .filter({ has: authedPage.getByRole('cell', { name: HOST_DISPLAY_NAME, exact: true }) })
     await expect(row).toBeVisible({ timeout: 15_000 })
 
-    await row.getByLabel('Remove access').click()
+    await row.getByLabel('Remove agent').click()
 
-    const confirmDialog = authedPage.getByRole('alertdialog', { name: 'Remove Access' })
+    const confirmDialog = authedPage.getByRole('alertdialog', { name: 'Remove Agent' })
     await expect(confirmDialog).toBeVisible()
     await expect(confirmDialog).toContainText(
       'This revokes the agent and every connector it carries.'
     )
-    await confirmDialog.getByRole('button', { name: 'Remove access', exact: true }).click()
+    await confirmDialog.getByRole('button', { name: 'Remove', exact: true }).click()
 
-    await expect(authedPage.getByRole('status').filter({ hasText: 'Access updated.' })).toBeVisible(
+    await expect(authedPage.getByRole('status').filter({ hasText: 'Agents updated.' })).toBeVisible(
       { timeout: 15_000 }
     )
     await expect(row).toHaveCount(0)
     if (originalContextIds.length === 0 && originalAgentNames.length === 0) {
-      await expect(authedPage.getByText('No access assigned yet.')).toBeVisible()
+      await expect(authedPage.getByText('No agents assigned yet.')).toBeVisible()
     }
 
     const { contextIds } = await controlApi.getUserContexts(userId)

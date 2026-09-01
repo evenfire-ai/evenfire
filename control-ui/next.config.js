@@ -139,26 +139,26 @@ const nextConfig = {
         destination: '/connectors/:name/edit/access',
         permanent: true,
       },
-      // Users & Teams "Contexts" tabs renamed to "Access".
+      // Users & Teams access tabs consolidated onto "Agents" (D10): the old
+      // "Contexts" and "Access" tab URLs all land on the Agents tab.
       {
         source: '/users-and-teams/users/:id/contexts',
-        destination: '/users-and-teams/users/:id/access',
+        destination: '/users-and-teams/users/:id/agents',
         permanent: true,
       },
       {
         source: '/users-and-teams/teams/:id/contexts',
-        destination: '/users-and-teams/teams/:id/access',
-        permanent: true,
-      },
-      // The member/team "Agents" tabs folded into "Access" (D8).
-      {
-        source: '/users-and-teams/users/:id/agents',
-        destination: '/users-and-teams/users/:id/access',
+        destination: '/users-and-teams/teams/:id/agents',
         permanent: true,
       },
       {
-        source: '/users-and-teams/teams/:id/agents',
-        destination: '/users-and-teams/teams/:id/access',
+        source: '/users-and-teams/users/:id/access',
+        destination: '/users-and-teams/users/:id/agents',
+        permanent: true,
+      },
+      {
+        source: '/users-and-teams/teams/:id/access',
+        destination: '/users-and-teams/teams/:id/agents',
         permanent: true,
       },
       { source: '/marketplace', destination: '/marketplace/connectors', permanent: true },

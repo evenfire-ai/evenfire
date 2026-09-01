@@ -1,12 +1,13 @@
 // control-ui/e2e/qa-recorder-member-access-multi.spec.ts
 //
 // Optional QA recorder journey (MUTATING). Requires QA_RECORDER_CONFIRM_MUTATIONS=1.
-// Records the member detail Access tab multi-select add flow (D8): two
-// host-backed scopes are seeded out-of-band (one context + one host each),
-// then the "Add access" picker — options are AGENT display names — selects
-// BOTH at once and submits — toast "Access updated." — and both rows render
-// in the Access/Connectors table with the agent display names (never the raw
-// contextIds). Each row is then removed through its confirm dialog. The tab's
+// Records the member detail Agents tab multi-select add flow (D8 semantics,
+// D10 name): two host-backed scopes are seeded out-of-band (one context +
+// one host each), then the "Add agents" picker — options are AGENT display
+// names — selects BOTH at once and submits — toast "Agents updated." — and
+// both rows render in the Agent/Connectors table with the agent display
+// names (never the raw contextIds). Each row is then removed through its
+// confirm dialog. The tab's
 // writes are D8 composite writes (agents AND contexts mappings), so the
 // member's original contextIds AND agentNames are restored and the seeded
 // hosts + contexts are deleted in the finally (hosts before contexts).
@@ -26,8 +27,8 @@ import {
   uniqueE2EName,
 } from './qa-recorder-helpers'
 
-test.describe('optional QA recorder: Control UI member Access multi-select', () => {
-  test('records adding and removing two member access scopes in one picker submit', async ({
+test.describe('optional QA recorder: Control UI member Agents multi-select', () => {
+  test('records adding and removing two member agents in one picker submit', async ({
     page,
   }, testInfo) => {
     requireRecorderConfirm(
@@ -77,10 +78,10 @@ test.describe('optional QA recorder: Control UI member Access multi-select', () 
 
       const memberTabs = page.getByRole('tablist', { name: 'Member sections' })
       await expect(memberTabs).toBeVisible({ timeout: 20_000 })
-      const accessTab = memberTabs.getByRole('tab', { name: 'Access', exact: true })
-      await expect(accessTab).toBeVisible()
-      await accessTab.click()
-      await expect(page).toHaveURL(/\/users-and-teams\/users\/[^/]+\/access$/, {
+      const agentsTab = memberTabs.getByRole('tab', { name: 'Agents', exact: true })
+      await expect(agentsTab).toBeVisible()
+      await agentsTab.click()
+      await expect(page).toHaveURL(/\/users-and-teams\/users\/[^/]+\/agents$/, {
         timeout: 20_000,
       })
       await expect(
@@ -151,11 +152,11 @@ test.describe('optional QA recorder: Control UI member Access multi-select', () 
         })
       ).toBeVisible({ timeout: 20_000 })
 
-      await page.getByRole('button', { name: 'Add access', exact: true }).click()
-      const dialog = page.getByRole('dialog', { name: 'Add access' })
+      await page.getByRole('button', { name: 'Add agents', exact: true }).click()
+      const dialog = page.getByRole('dialog', { name: 'Add agents' })
       await expect(dialog).toBeVisible()
-      await expect(dialog.getByLabel('Access')).toBeVisible()
-      await expect(dialog.locator('#member-access-picker')).toBeVisible()
+      await expect(dialog.getByLabel('Agents')).toBeVisible()
+      await expect(dialog.locator('#member-agent-picker')).toBeVisible()
       const optionA = dialog.getByRole('option', { name: hostDisplayA, exact: true })
       const optionB = dialog.getByRole('option', { name: hostDisplayB, exact: true })
       await expect(optionA).toBeVisible({ timeout: 20_000 })
@@ -165,17 +166,17 @@ test.describe('optional QA recorder: Control UI member Access multi-select', () 
       await expect(optionA).toHaveAttribute('aria-selected', 'true')
       await expect(optionB).toHaveAttribute('aria-selected', 'true')
       await screenshotAndLog(page, testInfo, `${journey}-add-modal`)
-      await dialog.getByRole('button', { name: 'Add access', exact: true }).click()
+      await dialog.getByRole('button', { name: 'Add agents', exact: true }).click()
 
       // One toast, both rows — D8 renders one table row per granted agent,
       // each labelled with its agent display name, never the raw wire
       // contextId.
       await expect(
-        page.getByRole('status').filter({ hasText: 'Access updated.' }).first()
+        page.getByRole('status').filter({ hasText: 'Agents updated.' }).first()
       ).toBeVisible({
         timeout: 20_000,
       })
-      await expect(page.getByRole('columnheader', { name: 'Access', exact: true })).toBeVisible()
+      await expect(page.getByRole('columnheader', { name: 'Agent', exact: true })).toBeVisible()
       await expect(
         page.getByRole('columnheader', { name: 'Connectors', exact: true })
       ).toBeVisible()
@@ -193,16 +194,16 @@ test.describe('optional QA recorder: Control UI member Access multi-select', () 
 
       // Remove both rows: confirm dialog → toast → row gone, one at a time.
       for (const row of [rowA, rowB]) {
-        await row.getByLabel('Remove access').click()
-        const confirmDialog = page.getByRole('alertdialog', { name: 'Remove Access' })
+        await row.getByLabel('Remove agent').click()
+        const confirmDialog = page.getByRole('alertdialog', { name: 'Remove Agent' })
         await expect(confirmDialog).toBeVisible()
-        await confirmDialog.getByRole('button', { name: 'Remove access', exact: true }).click()
+        await confirmDialog.getByRole('button', { name: 'Remove', exact: true }).click()
         await expect(
-          page.getByRole('status').filter({ hasText: 'Access updated.' }).first()
+          page.getByRole('status').filter({ hasText: 'Agents updated.' }).first()
         ).toBeVisible({
           timeout: 20_000,
         })
-        await expect(row.getByLabel('Remove access')).toHaveCount(0)
+        await expect(row.getByLabel('Remove agent')).toHaveCount(0)
       }
       await screenshotAndLog(page, testInfo, `${journey}-removed`)
     } finally {
