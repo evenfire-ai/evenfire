@@ -292,10 +292,13 @@ export function App() {
   // callbacks) can tell whether a reveal should target the in-app drawer or the
   // full-screen chat route without re-binding on every render.
   const chatDrawerVisibleRef = React.useRef(false)
-  // Mirrors `chatDrawerAvailable` (app live on the apps route): whenever the app
-  // is in the foreground, "new chat" must open a blank tab in the drawer instead
-  // of tearing the live embed down — even when the drawer is currently closed.
-  const chatDrawerAvailableRef = React.useRef(false)
+  // Mirrors `chatDrawerDivertable`: the drawer is a VALID surface to divert a
+  // gesture into only when the app is live AND the panel is wide enough to render
+  // it. Below the minimum width the drawer is suppressed, so "new chat" /
+  // notification gestures must fall back to the full-screen chat route instead of
+  // landing in a hidden drawer (an unreachable chat). Read from stable callbacks,
+  // hence a ref.
+  const chatDrawerDivertableRef = React.useRef(false)
   // Set when `chat.switcher` fires with the drawer still closed: the switcher is
   // not mounted yet, so we open the drawer and defer the focus bump until its
   // column commits.
@@ -399,12 +402,16 @@ export function App() {
   const handleNewChatViewTab = React.useCallback(() => {
     const next = addBlankChatViewTab(chatViewTabsRef.current, nextChatTabId(), vm.selectedAgent)
     setChatViewTabs(next)
-    if (chatDrawerAvailableRef.current) {
-      // App in foreground: open the blank chat in the drawer, never tear the
-      // live embed down (spec §5.3). Opens the drawer if it was closed.
+    if (chatDrawerDivertableRef.current) {
+      // Drawer is a valid surface (app live, panel wide enough): open the blank
+      // chat in the drawer without tearing the live embed down. Opens the drawer
+      // if it was closed.
       setChatDrawerOpen(true)
       revealChatViewTab(activeChatViewTab(next), true)
     } else {
+      // No divertable drawer (no app live, or the panel is too narrow to render
+      // one): fall back to the full-screen chat route so the new chat is reachable
+      // instead of landing in a suppressed drawer.
       revealChatViewTab(activeChatViewTab(next))
     }
     setComposerFocusRequestId(value => value + 1)
@@ -462,7 +469,7 @@ export function App() {
     (...args: Parameters<typeof vm.handleOpenNotification>) => {
       const [notification, options] = args
       const surfacesInDrawer =
-        chatDrawerAvailableRef.current &&
+        chatDrawerDivertableRef.current &&
         notification.kind !== 'workflow_completed' &&
         notification.kind !== 'sdk_notification' &&
         // Mirror the controller's `if (!targetAgent) return`: an agent-less
@@ -549,8 +556,14 @@ export function App() {
   // not persisted by design; it resets to the default each launch.
   const chatDrawerResize = useChatDrawerResize(contentPanelRef, chatDrawerDesired)
   const chatDrawerVisible = chatDrawerDesired && !chatDrawerResize.panelTooNarrow
+  // Can a gesture be diverted INTO the drawer right now? Only if it is a valid
+  // surface: app live AND wide enough to render. Kept SEPARATE from the hook's
+  // `active` input on purpose — folding `!panelTooNarrow` into `chatDrawerAvailable`
+  // or `chatDrawerDesired` would stop the ResizeObserver from observing the
+  // re-widen, turning "suppressed" into "never returns".
+  const chatDrawerDivertable = chatDrawerAvailable && !chatDrawerResize.panelTooNarrow
   chatDrawerVisibleRef.current = chatDrawerVisible
-  chatDrawerAvailableRef.current = chatDrawerAvailable
+  chatDrawerDivertableRef.current = chatDrawerDivertable
   // The notification tray's drawer form occupies the same fixed right-rail rect
   // as the chat drawer, so it only takes drawer form when the chat drawer is NOT
   // visible; while the chat drawer is up it reverts to its popover/overlay form

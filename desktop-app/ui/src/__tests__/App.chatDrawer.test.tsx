@@ -768,6 +768,59 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
     expect(screen.queryByRole('button', { name: 'Open chats' })).toBeNull()
   })
 
+  // Repro of round-4 #1: below the minimum panel width the drawer is suppressed
+  // (correctly — there is no room to dock it beside the embed). A `Mod+T` new-chat
+  // gesture must therefore fall back to the full-screen chat route, NOT be diverted
+  // into the hidden drawer — which would create a chat no surface can reach. The
+  // divert decision keys off `chatDrawerDivertable` (available && !panelTooNarrow),
+  // not `chatDrawerAvailable`, so at a narrow width the gesture ejects to chat.
+  it('routes a new-chat gesture to full-screen chat when the panel is too narrow to dock the drawer', () => {
+    let commandCb: ((commandId: string, source: string) => void) | null = null
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        shortcuts: {
+          onCommand: vi.fn((cb: (commandId: string, source: string) => void) => {
+            commandCb = cb
+            return vi.fn()
+          }),
+        },
+        app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
+        sandboxUi: {
+          listApps: vi.fn().mockResolvedValue({ apps: [] }),
+          listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
+          clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
+          onDeepLink: vi.fn(() => vi.fn()),
+          setVisible: vi.fn().mockResolvedValue(undefined),
+          setBounds: vi.fn().mockResolvedValue(undefined),
+          focusActive: vi.fn().mockResolvedValue(true),
+          close: vi.fn().mockResolvedValue(undefined),
+        },
+      } as unknown as Window['clerum'],
+    })
+
+    render(<App />)
+
+    // Launch the app (drawer available), then narrow the panel below 846 so the
+    // drawer is suppressed: app is live, but the drawer is not a divertable surface.
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    resizeTo(800)
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+
+    // Mod+T: the new chat must land on the full-screen chat route (reachable),
+    // not in the suppressed drawer (orphaned).
+    act(() => commandCb?.('chat.newTab', 'shortcut-host'))
+
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.chat)
+  })
+
   it('publishes --chat-drawer-top from the measured embed slot, falling back until measured', () => {
     render(<App />)
 
