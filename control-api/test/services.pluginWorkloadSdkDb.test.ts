@@ -410,7 +410,6 @@ describe('invocation retry lifecycle timestamps', () => {
         ],
         rowCount: 1,
       } as never)
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
       .mockResolvedValueOnce({
         rows: [
           {
@@ -435,21 +434,25 @@ describe('invocation retry lifecycle timestamps', () => {
     expect(sql).toContain('lease_expires_at IS NULL')
     expect(sql).toContain('updated_at < now()')
     expect(sql).toContain('FOR UPDATE')
-    expect(pool.query).toHaveBeenCalledTimes(7)
-    expect(vi.mocked(pool.query).mock.calls[1]?.[0] as string).toContain('pg_advisory_xact_lock')
-    expect(vi.mocked(pool.query).mock.calls[2]?.[0] as string).toContain(
+    expect(
+      vi
+        .mocked(pool.query)
+        .mock.calls.some(([statement]: [string]) => statement.includes('pg_advisory_xact_lock'))
+    ).toBe(false)
+    expect(pool.query).toHaveBeenCalledTimes(6)
+    expect(vi.mocked(pool.query).mock.calls[1]?.[0] as string).toContain(
       'FROM plugin_workload_sdk_provider_attempts'
     )
-    expect(vi.mocked(pool.query).mock.calls[3]?.[0] as string).toContain(
+    expect(vi.mocked(pool.query).mock.calls[2]?.[0] as string).toContain(
       "SET status = 'provider_unavailable'"
     )
-    expect(vi.mocked(pool.query).mock.calls[4]?.[0] as string).toContain(
+    expect(vi.mocked(pool.query).mock.calls[3]?.[0] as string).toContain(
       'INSERT INTO plugin_workload_sdk_spend_outcomes'
     )
-    expect(vi.mocked(pool.query).mock.calls[5]?.[0] as string).toContain(
+    expect(vi.mocked(pool.query).mock.calls[4]?.[0] as string).toContain(
       "SET status = 'provider_unavailable'"
     )
-    expect(vi.mocked(pool.query).mock.calls[6]?.[0] as string).toContain(
+    expect(vi.mocked(pool.query).mock.calls[5]?.[0] as string).toContain(
       "SET status = 'provider_unavailable'"
     )
   })
@@ -467,7 +470,6 @@ describe('invocation retry lifecycle timestamps', () => {
         ],
         rowCount: 1,
       } as never)
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
       .mockResolvedValueOnce({
         rows: [
           {

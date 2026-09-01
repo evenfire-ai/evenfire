@@ -2149,9 +2149,9 @@ export async function failStaleInvocationsInTransaction(
     recipe_namespace: string
     recipe_name: string
   }>) {
-    await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
-      `plugin_workload_sdk:${row.recipe_namespace}/${row.recipe_name}`,
-    ])
+    // Invocation FOR UPDATE is the fence. Do not take the recipe advisory lock
+    // here: finalize takes advisory first, then the invocation row. Row-then-
+    // advisory deadlocks the sweeper/finalizer interleaving.
     const physicalAttempts = await db.query(
       `SELECT id, recipe_namespace, recipe_name, attempt_generation,
                 attempt_index, target_ref, provider, model, credential_slot
