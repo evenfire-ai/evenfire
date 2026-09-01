@@ -999,8 +999,6 @@ spec:
                       # 80/443 is the platform's default web pair, NOT a
                       # protocol claim — a NetworkPolicy filters port numbers
                       # and never inspects traffic.
-                      # Transport workloads are deliberately not capped; the
-                      # message names that escape hatch on purpose.
                       # This rule lives at WORKLOAD level, not binding level:
                       # binding-item CEL cannot see its workload's `transport`.
                       # The literal mirrors PROVIDER_NON_TRANSPORT_ALLOWED_PORTS

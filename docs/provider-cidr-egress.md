@@ -167,10 +167,24 @@ while provider-mode bindings still exist (old code has no `provider` branch → 
 
 ## Duplicate-binding guard: McpServer only (by design)
 
-The duplicate-`(dns, port)` guard (H4) lives on the **McpServer/HCC** surface only —
-`mcpserver.yaml` CEL (`egressBindings must not declare the same (dns, port) twice`) plus the
-HCC reconciler dup check. It exists because HCC derives a **NetworkPolicy name per (dns, port)**,
-so two identical pairs would collide on the same NP name.
+The duplicate-`(dns, port)` guard (H4) lives on the **McpServer/HCC** surface only. It exists
+because HCC derives a **NetworkPolicy name per (dns, port)**, so two identical pairs would
+collide on the same NP name.
+
+It is enforced in **two** places, and deliberately **not** in a third:
+
+| layer | file | behaviour |
+| --- | --- | --- |
+| control-api admission | `control-api/src/http/validateMcpServerSpec.ts` | rejects the write |
+| HCC reconciler (H4) | `host-context-controller/src/networkPolicyReconciler.ts` | fails loud, retains the live NP |
+| CRD CEL | `charts/clerum-crds/crds/mcpserver.yaml` | **absent by design — ships separately** |
+
+The CEL rule is the only rule on that CRD that would reject an object a cluster accepts today,
+so it is reviewed on that risk alone rather than bundled with egress (see the comment beside the
+`egressBindings` validations). The consequence is explicit: a **direct `kubectl apply`** of a
+colliding pair — bypassing control-api — **is admitted by the apiserver**, and then fails loud at
+reconcile with the live NetworkPolicy retained. Writes that go through control-api are rejected
+up front.
 
 It is intentionally **absent** on the **WorkflowRecipe/WRC** surface. WRC renders **one
 NetworkPolicy per workload**, with each binding contributing *rules* inside that single policy —

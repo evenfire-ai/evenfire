@@ -4361,6 +4361,39 @@ export class WorkflowRecipeReconciler {
 
     const externals = recipe.spec.ui?.egress?.external ?? []
     const label = `WorkflowRecipe "${recipe.metadata.name}" ui external egress`
+
+    // issue #510 — the RUNTIME half of the provider port ceiling on the UI
+    // surface. The other two layers already reject this (CEL R19 in
+    // workflowrecipe.yaml, and rejectRecipeProviderPorts in control-api), so on
+    // a current CRD this throw is unreachable. It exists for the case those two
+    // cannot cover: a WRC image running against an OLDER CRD that predates the
+    // rule, or an object admitted before it shipped.
+    //
+    // Detection differs from the workload lane by necessity: a
+    // SandboxUiExternalEgress entry has NO `egressClass` field at all, so the
+    // presence of `provider` IS the opt-in — the same signal CEL R19 keys on
+    // (`!has(e.provider) || e.port in [80, 443]`). Keying on egressClass here
+    // would leave the surface ungated, which is precisely the hole #510
+    // reported.
+    //
+    // Placed BEFORE resolveExternalEgress and before the catalog read, so the
+    // ceiling holds with no DNS or ConfigMap I/O — same invariant the workload
+    // lane states. Throwing here cannot lose egress: safeDelete runs only when
+    // the live policy is absent.
+    for (let i = 0; i < externals.length; i += 1) {
+      const entry = externals[i]
+      if (!entry.provider) continue
+      // A malformed port is the port validator's business; reporting it here
+      // too would name the same defect twice under the wrong field.
+      if (!Number.isInteger(entry.port)) continue
+      if (isProviderNonTransportPortAllowed(entry.port)) continue
+      throw new Error(
+        `${label}: spec.ui.egress.external[${i}] provider entries are limited to port ` +
+          `${PROVIDER_NON_TRANSPORT_ALLOWED_PORTS.join(' or ')} (got ${entry.port}); ` +
+          `provider egress on a non-transport surface may not reach other ports`
+      )
+    }
+
     const { resolved, failures } = await resolveExternalEgress(externals, this.fqdnLookup)
     this.recordExternalEgressTtl(resolved)
 

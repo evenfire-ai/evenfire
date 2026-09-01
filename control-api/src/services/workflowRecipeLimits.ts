@@ -88,10 +88,12 @@ function rejectNonTransportPublicWebBindings(
 // issue #510 — the admission-side half of the provider port ceiling. Applies to
 // EVERY recipe-authored binding, transport or not.
 //
-// Why transport is NOT exempt here, while it is for platform McpServers
-// (network-policy-core: "Transport workloads are deliberately NOT capped"):
-// that exemption reasons that transport workloads "pay for their width with the
-// MCP runtime's supervision". A recipe workload gains no supervision by
+// Why transport is NOT exempt here, while platform McpServers stay uncapped
+// (network-policy-core, the "WHO IS CAPPED" note beside
+// PROVIDER_NON_TRANSPORT_ALLOWED_PORTS): that exemption reasons that a
+// platform-authored server pays for its width with the MCP runtime's
+// supervision, and that reaching it needs `create` on `mcpservers.clerum.io`.
+// A recipe workload gains no supervision by
 // declaring `transport` — the author is the same third party either way, and
 // `mcpDelegation.sanitizeEgressBindings` propagates its bindings verbatim into
 // a generated McpServer, which the McpServer lane then treats as transport and

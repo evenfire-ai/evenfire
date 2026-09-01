@@ -2415,6 +2415,91 @@ describe('WorkflowRecipeReconciler', () => {
     expect(result.message ?? '').not.toContain('is limited to port 80 or 443')
   })
 
+  // #510 third layer — the ui.egress.external surface. CEL R19 and control-api
+  // reject this before the reconciler ever sees it, so the e2e CANNOT reach
+  // this code: only a unit test that feeds the reconciler directly can. That is
+  // the point of the layer — it covers a WRC image running against an OLDER CRD
+  // that predates the rule, where neither of the other two layers exists.
+  it('applies the provider port ceiling to spec.ui.egress.external too', async () => {
+    const recipe = makeRecipe({
+      spec: {
+        contextRef: 'default',
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+        ui: {
+          workloadRef: 'app',
+          port: 8080,
+          egress: {
+            external: [
+              // NOTE: no `egressClass` field — SandboxUiExternalEgress has none.
+              // Presence of `provider` is the opt-in, which is exactly why
+              // keying the gate on egressClass left this surface open (#510).
+              {
+                fqdn: 'api.github.com',
+                port: 22,
+                provider: { name: 'github', categories: ['api'] },
+              },
+            ],
+          },
+        },
+      },
+    })
+
+    const result = await reconciler.reconcile(recipe)
+
+    expect(result.phase).toBe('failed')
+    expect(result.message).toContain('spec.ui.egress.external[0]')
+    expect(result.message).toContain('limited to port 80 or 443')
+  })
+
+  it('accepts a ui.egress.external provider entry on port 80', async () => {
+    const recipe = makeRecipe({
+      spec: {
+        contextRef: 'default',
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+        ui: {
+          workloadRef: 'app',
+          port: 8080,
+          egress: {
+            external: [
+              {
+                fqdn: 'api.github.com',
+                port: 80,
+                provider: { name: 'github', categories: ['api'] },
+              },
+            ],
+          },
+        },
+      },
+    })
+
+    const result = await reconciler.reconcile(recipe)
+
+    // 80 is the lower bound of the ceiling and was never exercised anywhere —
+    // the whole suite used 443. A regression that narrowed the pair to [443]
+    // alone would pass every other test in this file.
+    expect(result.message ?? '').not.toContain('limited to port 80 or 443')
+  })
+
+  it('leaves a ui.egress.external entry WITHOUT a provider object uncapped', async () => {
+    const recipe = makeRecipe({
+      spec: {
+        contextRef: 'default',
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+        ui: {
+          workloadRef: 'app',
+          port: 8080,
+          // No `provider` — a plain exact-host UI entry. The ceiling is about
+          // provider CIDR width, so this must stay reachable on any port.
+          egress: { external: [{ fqdn: 'example.com', port: 8443 }] },
+        },
+      },
+    })
+
+    const result = await reconciler.reconcile(recipe)
+
+    expect(result.message ?? '').not.toContain('limited to port 80 or 443')
+  })
+
   it('creates workload egress policy for non-transport exact-host egressBindings', async () => {
     const recipe = makeRecipe({
       spec: {
@@ -11115,9 +11200,15 @@ describe('WorkflowRecipeReconciler', () => {
         port: 443,
         provider: { name: 'github', categories: ['api'] },
       }
+      // #510: the second port must be INSIDE the ceiling. This fixture used
+      // 8443, a state admission no longer permits (CEL R19 rejects a
+      // ui.egress.external provider entry outside [80, 443]), so the reconciler
+      // now throws before rendering. The test's subject is order-independence
+      // of two same-FQDN declarations on DIFFERENT ports — 80 preserves that
+      // exactly, and exercises the ceiling's lower bound, which nothing else did.
       const webDecl = {
         fqdn: 'github.com',
-        port: 8443,
+        port: 80,
         provider: { name: 'github', categories: ['web'] },
       }
 
@@ -11147,8 +11238,8 @@ describe('WorkflowRecipeReconciler', () => {
         // of declaration order.
         expect(pairs).toContainEqual({ cidr: GITHUB_API_CIDR, port: 443 })
         expect(pairs).not.toContainEqual({ cidr: GITHUB_WEB_CIDR, port: 443 })
-        expect(pairs).toContainEqual({ cidr: GITHUB_WEB_CIDR, port: 8443 })
-        expect(pairs).not.toContainEqual({ cidr: GITHUB_API_CIDR, port: 8443 })
+        expect(pairs).toContainEqual({ cidr: GITHUB_WEB_CIDR, port: 80 })
+        expect(pairs).not.toContainEqual({ cidr: GITHUB_API_CIDR, port: 80 })
       }
     })
 

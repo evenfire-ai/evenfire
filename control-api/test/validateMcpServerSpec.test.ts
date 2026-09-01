@@ -39,6 +39,30 @@ describe('validateMcpServerSpec', () => {
           })
         ).toEqual([])
       })
+      // #510 — PINS AN INTENTIONAL ASYMMETRY, do not "fix" this by capping.
+      //
+      // The provider port ceiling ([80, 443]) applies to the WorkflowRecipe
+      // surfaces only. McpServer stays uncapped on purpose: a platform-authored
+      // server pays for its width with the MCP runtime's supervision, and
+      // creating one requires `create` on mcpservers.clerum.io — a permission a
+      // recipe author does not have. Recipe-generated McpServers arrive already
+      // capped by the recipe lane, so this is not a bypass.
+      //
+      // Until this test existed the asymmetry was defended ONLY by comments
+      // (network-policy-core "WHO IS CAPPED", workflowRecipeLimits, and the
+      // ABSENCE of a port rule in mcpserver.yaml). Every provider case here
+      // used 443, so a "unification" that capped McpServer too would have gone
+      // green — and silently broken any platform server needing another port.
+      it('leaves McpServer provider bindings UNCAPPED on a non-web port (asymmetry is by design)', () => {
+        expect(
+          check({
+            egressClass: 'provider',
+            dns: 'api.github.com',
+            port: 5432,
+            provider: { name: 'github', categories: ['api'] },
+          })
+        ).toEqual([])
+      })
       it('accepts a provider binding with explicit categories', () => {
         expect(
           check({

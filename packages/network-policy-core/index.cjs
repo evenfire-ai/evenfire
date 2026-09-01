@@ -766,21 +766,32 @@ function resolveProviderRanges(input) {
 // or 443. That is governed by catalog curation — which providers are seeded and
 // with which bounds — not by this list.
 //
-// Transport workloads are deliberately NOT capped: they are the class the
-// capability tier was built for, and they pay for their width with the MCP
-// runtime's supervision. Note this makes the ceiling a FORCING FUNCTION FOR
-// INTENT rather than a hard boundary: an author who needs another port can
-// declare `transport` and change lanes, which the error message says out loud.
-// That is the intended escape hatch, not a bypass.
+// WHO IS CAPPED: every `provider` binding authored in a WorkflowRecipe — both
+// `spec.workloads[].egressBindings` and `spec.ui.egress.external` — INCLUDING
+// transport workloads. A recipe author does not buy MCP-runtime supervision by
+// writing `transport`, so transport is not an escape hatch on this surface.
+// The remedy the error messages name is `exact-host` with an explicit dns.
+//
+// Platform-authored McpServers are a DIFFERENT surface and stay uncapped on
+// purpose: reaching them requires `create` on `mcpservers.clerum.io`, and their
+// width is paid for by the MCP runtime's supervision. Recipe authors cannot
+// reach that surface.
 //
 // Provider-blind by construction: a port list, no provider names — the
 // generality gate (scripts/ci/check-provider-generality.sh) stays satisfied.
 const PROVIDER_NON_TRANSPORT_ALLOWED_PORTS = Object.freeze([80, 443])
 
 /**
- * True when `port` is reachable by a `provider` binding on a non-transport
- * workload. Callers that already know the workload is a transport must not
- * consult this — the cap does not apply there.
+ * True when `port` is reachable by a `provider` binding authored in a
+ * WorkflowRecipe.
+ *
+ * Consult this for EVERY recipe-authored `provider` binding, transport
+ * workloads included — see the WHO IS CAPPED note above. Both callers
+ * (`workflowRecipeReconciler`, `workflowRecipeLimits`) do exactly that.
+ *
+ * NAME IS A LEGACY MISNOMER: `NonTransport` predates the transport exemption
+ * being closed and no longer describes the applicability. Renaming it is an
+ * exported-API change and is deliberately left out of this PR's scope.
  */
 function isProviderNonTransportPortAllowed(port) {
   return PROVIDER_NON_TRANSPORT_ALLOWED_PORTS.includes(port)
