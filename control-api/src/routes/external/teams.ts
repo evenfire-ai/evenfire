@@ -53,8 +53,8 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
   router.use(
     '/external/teams',
     ...externalTeamsRateLimits,
-    attachAccessExecutionBudget,
-    requireValidExternalSessionToken
+    requireValidExternalSessionToken,
+    attachAccessExecutionBudget
   )
 
   router.get(

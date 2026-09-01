@@ -225,8 +225,8 @@ export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Rout
   router.use(
     '/external/contexts/:contextId/shared-filesystems',
     ...externalSharedFilesystemsRateLimits,
-    attachAccessExecutionBudget,
-    requireValidExternalSessionToken
+    requireValidExternalSessionToken,
+    attachAccessExecutionBudget
   )
 
   // Reject anything but GET/HEAD up-front so the proxy below can never be
