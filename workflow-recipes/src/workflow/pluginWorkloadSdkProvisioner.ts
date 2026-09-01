@@ -45,6 +45,25 @@ export type EagerSdkMcpHostStatus =
   | 'failed'
   | 'provider_unavailable'
 
+/** Why the mcp-host runtime JWT Secret was reminted. */
+export type McpHostRuntimeTokenRefreshReason = 'scope' | 'binding' | 'ttl'
+
+export type McpHostRuntimeTokenRefreshResult = {
+  reminted: boolean
+  reason?: McpHostRuntimeTokenRefreshReason
+}
+
+export const NO_MCP_HOST_RUNTIME_TOKEN_REFRESH: McpHostRuntimeTokenRefreshResult = {
+  reminted: false,
+}
+
+/** Env-injected access/refresh JWTs only update on a new process. */
+export function eagerMcpHostRequiresTokenRoll(
+  result: McpHostRuntimeTokenRefreshResult | void
+): boolean {
+  return result?.reminted === true && (result.reason === 'scope' || result.reason === 'binding')
+}
+
 export interface EagerSdkBootstrapProof {
   ready: true
   contractVersion: 2 | 3
@@ -93,7 +112,7 @@ export type PluginWorkloadSdkProvisionerDeps = {
     runtimeScopeRecipeName: string,
     spec: WorkflowRecipeSpec,
     recipeUid?: string
-  ) => Promise<void>
+  ) => Promise<McpHostRuntimeTokenRefreshResult | void>
   applyWorkflowNetworkPolicies: (
     recipeName: string,
     recipeUid: string,
@@ -203,7 +222,7 @@ export class PluginWorkloadSdkProvisioner {
       return 'failed'
     }
 
-    await this.deps.ensureMcpHostSecrets(
+    const tokenRefresh = await this.deps.ensureMcpHostSecrets(
       namespace,
       recipeName,
       runtimeScopeRecipeName,
@@ -257,6 +276,29 @@ export class PluginWorkloadSdkProvisioner {
         await this.rollEagerSdkMcpHostPod(recipeName)
         mcpHostPhase = undefined
       }
+    }
+
+    // Runtime JWT scope/binding remint. Access/refresh tokens are env-injected
+    // on a bare Pod, so a Secret patch does not update process.env. HCC rolls
+    // on contract_changed; WRC must do the same or authorize keeps the first-boot
+    // JWT (insufficient_scope after reservation-only Codex).
+    if (
+      eagerMcpHostRequiresTokenRoll(tokenRefresh) &&
+      (mcpHostPhase === 'Running' || mcpHostPhase === 'Pending')
+    ) {
+      const runningPod = await readMcpHostPodDriftStateIfExists(
+        this.deps.coreApi,
+        `${recipeName}-mcp-host`,
+        this.deps.config.sandboxNamespace
+      )
+      if (runningPod?.deleting) {
+        return 'deploying'
+      }
+      log.info('Plugin Workload SDK eager mcp-host runtime token drift; rolling Pod', {
+        reason: tokenRefresh?.reason,
+      })
+      await this.rollEagerSdkMcpHostPod(recipeName)
+      return 'deploying'
     }
 
     // Image-drift roll. The eager SDK mcp-host is a bare Pod (no Deployment),

@@ -75,6 +75,9 @@ import { NetworkPolicyConfig, buildWorkflowNetworkPolicies } from './networkPoli
 import { ObjectStorageClient, StorageCredentials, StorageRef } from './objectStorageClient'
 import {
   type EagerSdkBootstrapProof,
+  type McpHostRuntimeTokenRefreshReason,
+  type McpHostRuntimeTokenRefreshResult,
+  NO_MCP_HOST_RUNTIME_TOKEN_REFRESH,
   PluginWorkloadSdkProvisioner,
 } from './pluginWorkloadSdkProvisioner'
 import type {
@@ -3708,8 +3711,8 @@ export class WorkflowReconciler {
     runtimeScopeRecipeName: string,
     spec: WorkflowRecipeSpec,
     recipeUid?: string
-  ): Promise<void> {
-    await this.ensureMcpHostRuntimeTokenSecret(
+  ): Promise<McpHostRuntimeTokenRefreshResult> {
+    const tokenRefresh = await this.ensureMcpHostRuntimeTokenSecret(
       namespace,
       recipeName,
       runtimeScopeRecipeName,
@@ -3719,6 +3722,7 @@ export class WorkflowReconciler {
     if (this.deps.config.pluginWorkloadSdkEnabled && spec.pluginWorkloadSdk) {
       await this.pluginWorkloadSdkProvisioner.ensurePluginWorkloadSdkTokenSecret(recipeName, spec)
     }
+    return tokenRefresh
   }
 
   /**
@@ -4649,7 +4653,7 @@ export class WorkflowReconciler {
     runtimeScopeRecipeName = recipeName,
     workflowControlScopes: EffectiveWorkflowControlScope[] = [],
     gfsScopes: WorkflowRecipeGfsScope[] = ['gfs.read']
-  ): Promise<void> {
+  ): Promise<McpHostRuntimeTokenRefreshResult> {
     const secretName = `wf-${recipeName}-mcp-host-runtime-tokens`
     const sandboxNamespace = this.deps.config.sandboxNamespace
 
@@ -4658,7 +4662,7 @@ export class WorkflowReconciler {
         name: secretName,
         namespace: sandboxNamespace,
       })
-      await this.refreshMcpHostRuntimeTokensIfExpiring(
+      return await this.refreshMcpHostRuntimeTokensIfExpiring(
         recipeNamespace,
         recipeName,
         runtimeScopeRecipeName,
@@ -4666,7 +4670,6 @@ export class WorkflowReconciler {
         gfsScopes,
         existing
       )
-      return
     } catch (err) {
       if (getErrorCode(err) !== 404) throw err
     }
@@ -4695,13 +4698,14 @@ export class WorkflowReconciler {
         body: mcpHostRuntimeSecret,
       })
       this.log.info(`Created Secret "${secretName}"`)
+      return NO_MCP_HOST_RUNTIME_TOKEN_REFRESH
     } catch (err) {
       if (getErrorCode(err) !== 409) throw err
       const existing = await this.deps.coreApi.readNamespacedSecret({
         name: secretName,
         namespace: sandboxNamespace,
       })
-      await this.refreshMcpHostRuntimeTokensIfExpiring(
+      const tokenRefresh = await this.refreshMcpHostRuntimeTokensIfExpiring(
         recipeNamespace,
         recipeName,
         runtimeScopeRecipeName,
@@ -4710,6 +4714,7 @@ export class WorkflowReconciler {
         existing
       )
       this.log.info(`Secret "${secretName}" already exists (skip)`)
+      return tokenRefresh
     }
   }
 
@@ -4725,7 +4730,7 @@ export class WorkflowReconciler {
     workflowControlScopes: EffectiveWorkflowControlScope[],
     expectedGfsScopes: WorkflowRecipeGfsScope[],
     existing: k8s.V1Secret
-  ): Promise<void> {
+  ): Promise<McpHostRuntimeTokenRefreshResult> {
     const rawAccess = existing.data?.['mcp-host-runtime-access-token']
     const rawRefresh = existing.data?.['mcp-host-runtime-refresh-token']
     const accessJwt = rawAccess ? Buffer.from(rawAccess, 'base64').toString('utf-8') : ''
@@ -4806,8 +4811,16 @@ export class WorkflowReconciler {
       gfsScopesMismatch ||
       gfsAccessExp - nowSecs < refreshBeforeSeconds
 
-    if (!needsMcpHostRuntimeRefresh && !needsWorkflowControlRefresh && !needsGfsAccessRefresh)
-      return
+    if (!needsMcpHostRuntimeRefresh && !needsWorkflowControlRefresh && !needsGfsAccessRefresh) {
+      return NO_MCP_HOST_RUNTIME_TOKEN_REFRESH
+    }
+
+    const refreshReason: McpHostRuntimeTokenRefreshReason =
+      runtimeScopesMismatch || controlScopesMismatch
+        ? 'scope'
+        : runtimeBindingMismatch || controlBindingMismatch
+          ? 'binding'
+          : 'ttl'
 
     if (
       runtimeBindingMismatch ||
@@ -4883,8 +4896,18 @@ export class WorkflowReconciler {
         { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
       )
       this.log.info(
-        `Refreshed workflow auth Secret for ${recipeName} (mcpHostRuntime=${needsMcpHostRuntimeRefresh}, mcpHostControl=${needsWorkflowControlRefresh})`
+        `Refreshed workflow auth Secret for ${recipeName} (mcpHostRuntime=${needsMcpHostRuntimeRefresh}, mcpHostControl=${needsWorkflowControlRefresh}, reason=${refreshReason})`
       )
+      if (refreshReason === 'scope' || refreshReason === 'binding') {
+        // Access/refresh JWTs are env-injected. A Secret patch does not update
+        // the running process; refresh/reissue copy the stale scopes.
+        await deletePodIfExists(
+          this.deps.coreApi,
+          `${recipeName}-mcp-host`,
+          this.deps.config.sandboxNamespace
+        )
+      }
+      return { reminted: true, reason: refreshReason }
     } catch (err) {
       this.log.error(`Failed to refresh mcpHost runtime tokens for ${recipeName}`, {
         error: err instanceof Error ? err.message : String(err),

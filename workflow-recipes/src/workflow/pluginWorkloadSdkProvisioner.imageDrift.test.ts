@@ -38,7 +38,11 @@ function podWithPhase(
 function makeProvisioner(
   podImage: string,
   phase: 'Running' | 'Pending' = 'Running',
-  opts: { deleting?: boolean; runtimeContractHash?: string } = {}
+  opts: {
+    deleting?: boolean
+    runtimeContractHash?: string
+    tokenRefresh?: { reminted: boolean; reason?: 'scope' | 'binding' | 'ttl' }
+  } = {}
 ) {
   const readNamespacedPod = vi.fn().mockResolvedValue(podWithPhase(podImage, phase, opts))
   const deleteNamespacedPod = vi.fn().mockResolvedValue({})
@@ -54,7 +58,7 @@ function makeProvisioner(
     config: TEST_CONFIG,
     tokenFactory: {},
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
-    ensureMcpHostSecrets: vi.fn().mockResolvedValue(undefined),
+    ensureMcpHostSecrets: vi.fn().mockResolvedValue(opts.tokenRefresh),
     applyWorkflowNetworkPolicies: vi.fn().mockResolvedValue(undefined),
     ensureMcpHostHeadlessService: vi.fn().mockResolvedValue(undefined),
     modelConfigHandler: {
@@ -496,5 +500,54 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
     // mocked UID, because the roll reset the budget.
     podImage = DESIRED_IMAGE
     expect(await reconcile()).toBe('deploying')
+  })
+})
+
+describe('ensureEagerSdkMcpHost runtime token roll', () => {
+  it('rolls a healthy eager mcp-host when runtime JWT scopes were reminted', async () => {
+    const { provisioner, deleteNamespacedPod, createNamespacedPod } = makeProvisioner(
+      DESIRED_IMAGE,
+      'Running',
+      {
+        runtimeContractHash: desiredRuntimeContractHash(),
+        tokenRefresh: { reminted: true, reason: 'scope' },
+      }
+    )
+
+    const status = await provisioner.ensureEagerSdkMcpHost(
+      RECIPE,
+      'recipe-uid',
+      SANDBOX_NS,
+      RECIPE,
+      SPEC,
+      RUNTIME,
+      { mcpHostPhase: 'Running' }
+    )
+
+    expect(status).toBe('deploying')
+    expect(deleteNamespacedPod).toHaveBeenCalledWith({
+      name: `${RECIPE}-mcp-host`,
+      namespace: SANDBOX_NS,
+    })
+    expect(createNamespacedPod).not.toHaveBeenCalled()
+  })
+
+  it('does not roll the eager mcp-host on a TTL-only runtime token remint', async () => {
+    const { provisioner, deleteNamespacedPod } = makeProvisioner(DESIRED_IMAGE, 'Running', {
+      runtimeContractHash: desiredRuntimeContractHash(),
+      tokenRefresh: { reminted: true, reason: 'ttl' },
+    })
+
+    await provisioner.ensureEagerSdkMcpHost(
+      RECIPE,
+      'recipe-uid',
+      SANDBOX_NS,
+      RECIPE,
+      SPEC,
+      RUNTIME,
+      { mcpHostPhase: 'Running' }
+    )
+
+    expect(deleteNamespacedPod).not.toHaveBeenCalled()
   })
 })
