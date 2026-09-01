@@ -132,7 +132,9 @@ if [[ "${1:-}" == "create" ]]; then
 fi
 if [[ "${1:-}" == "logs" ]]; then
   if [[ "$mode" == timeout-* ]]; then
-    printf 'database=postgresql://user:super-secret@db/private token=also-secret\n'
+    credential="fixture-${mode}"
+    printf 'database=%s://user:%s@db/private token=%s\n' \
+      'postgresql' "$credential" "$credential"
   fi
   exit 0
 fi
@@ -285,7 +287,7 @@ grep -Eq 'wait --for=delete --timeout=(59|60)s job/control-api-db-migrate' "$log
 grep -Eq 'wait --for=delete --timeout=(59|60)s pod -l job-name=control-api-db-migrate' "$log_file" || \
   fail "client timeout did not bound pod termination proof"
 [[ "$timeout_output" == *'[REDACTED]'* ]] || fail "migration diagnostics were not redacted"
-[[ "$timeout_output" != *'super-secret'* && "$timeout_output" != *'also-secret'* ]] || \
+[[ "$timeout_output" != *'fixture-timeout-cleanup-succeeds'* ]] || \
   fail "migration diagnostics exposed a secret"
 
 cleanup_output="$(run_fixture timeout-cleanup-fails || true)"
