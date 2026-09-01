@@ -7622,14 +7622,9 @@ h3 {
   grid-template-columns: minmax(280px, 0.9fr) minmax(360px, 1.1fr);
 }
 
-/* `.contexts-fleet-page` / `.mcp-servers-page` were legacy layout hooks.
-   They were removed from list-page JSX in favor of `.page`, so the only
-   remaining page-specific hooks are `context-detail-page` / `team-detail-page`
-   (used for scoped token overrides). */
-
 /* Card that frames the connectors `da-table` (which renders frameless + full
-   bleed), mirroring `.contexts-board-card`: the page-card supplies the single
-   frame; the table lays out inside it. */
+   bleed): the page-card supplies the single frame; the table lays out inside
+   it. */
 .mcp-servers-board-card {
   min-height: 0;
   min-width: 0;
@@ -7821,33 +7816,6 @@ h3 {
 .reference-tag--button:focus-visible {
   border-color: rgba(var(--focus-rgb), 0.56);
   box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.16);
-}
-
-.contexts-board-card,
-.contexts-details-section {
-  min-height: 0;
-  min-width: 0;
-  display: grid;
-  align-content: start;
-}
-
-/* Subtler `--list-item-*` palette so multiple board listings share the same
-   understated visual instead of the stronger default `--grid-card-*` look. */
-.contexts-board-card .da-grid,
-.context-detail-page .da-grid,
-.team-detail-page .da-grid {
-  --grid-card-bg: var(--list-item-bg);
-  --grid-card-border: rgba(var(--edge-rgb), 0.14);
-  --grid-card-bg-hover: var(--list-item-hover-bg);
-  --grid-card-border-hover: rgba(var(--accent-rgb), 0.34);
-  --grid-card-bg-selected: var(--list-item-selected-bg);
-  --grid-card-border-selected: var(--list-item-selected-border);
-}
-
-.contexts-board-card .da-grid__row,
-.context-detail-page .da-grid__row,
-.team-detail-page .da-grid__row {
-  border-radius: var(--radius-lg); /* 12px — matches legacy `.context-table-row` */
 }
 
 /* `.context-id-cell` is the first column in the contexts/agents/workflows
@@ -8064,19 +8032,6 @@ h3 {
 
 .contexts-footnote {
   font-size: var(--font-size-sm);
-}
-
-/* `.teams-page` was a legacy layout hook; removed from list-page JSX. */
-
-.team-detail-page {
-  grid-template-rows: auto minmax(0, 1fr);
-}
-
-.context-detail-page {
-  min-height: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  gap: var(--space-2-5);
 }
 
 .teams-detail-page-card {
@@ -10888,17 +10843,6 @@ pre {
   .search-result-tag {
     white-space: normal;
     text-align: right;
-  }
-
-  /* Responsive: tighten 4-col contexts/agents/teams-tab listings. Workflows
-     is excluded (3 columns). */
-  .contexts-board-card .da-grid__head,
-  .contexts-board-card .da-grid__row,
-  .context-detail-page .da-grid__head,
-  .context-detail-page .da-grid__row,
-  .team-detail-page .da-grid__head,
-  .team-detail-page .da-grid__row {
-    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.9fr) minmax(0, 0.9fr);
   }
 
   /* Responsive behavior now comes from `.page-card__header`. */
