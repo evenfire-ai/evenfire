@@ -26,6 +26,7 @@ export type SandboxUiPageProps = {
   headerShellOverlayOpen?: boolean
   sidebarShellOverlayOpen?: boolean
   toastShellOverlayOpen?: boolean
+  deepLinkShellOverlayOpen?: boolean
   shortcutApp?: ActiveSandboxUiApp | null
   shortcutOpenRequestId?: number
   localSearchRequestId?: number
