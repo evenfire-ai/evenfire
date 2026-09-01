@@ -26,8 +26,8 @@ export function createExternalDirectoryRouter(): Router {
   router.use(
     '/external/directory',
     ...externalDirectoryRateLimits,
-    attachAccessExecutionBudget,
-    requireValidExternalSessionTokenWithPublicErrors
+    requireValidExternalSessionTokenWithPublicErrors,
+    attachAccessExecutionBudget
   )
 
   router.get(
