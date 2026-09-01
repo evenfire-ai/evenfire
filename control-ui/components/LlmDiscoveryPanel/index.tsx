@@ -383,7 +383,7 @@ export function LlmDiscoveryPanel({
                         aria-label={`Select ${modelLabel(model)}`}
                       />
                     </td>
-                    <td>
+                    <td className="cu-llm-provider-cell">
                       <span className="cu-inline-icon-label">
                         <LlmProviderIcon
                           provider={model.provider}

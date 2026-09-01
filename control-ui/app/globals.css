@@ -11196,6 +11196,17 @@ textarea.cu-input {
   padding-left: 0.85rem;
 }
 
+.cu-llm-model-row > .cu-llm-provider-cell {
+  padding-left: var(--cu-space-2);
+}
+
+.cu-inline-icon-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+  line-height: 1.2;
+}
+
 .cu-llm-models-error {
   flex: 0 0 auto;
 }

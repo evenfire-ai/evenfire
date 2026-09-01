@@ -321,7 +321,7 @@ export function LlmModelTable({
             ) : (
               modelSort.sortedRows.map((model: DisplayModel) => (
                 <tr key={model.id} className="cu-table__row cu-llm-model-row">
-                  <td>
+                  <td className="cu-llm-provider-cell">
                     <span className="cu-inline-icon-label">
                       <LlmProviderIcon
                         provider={catalogGroupKey(model.provider)}
