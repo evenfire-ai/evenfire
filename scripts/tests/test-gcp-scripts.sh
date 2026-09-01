@@ -193,6 +193,7 @@ assert_db_migration_job_uses_ci_suffix() {
 #!/usr/bin/env bash
 set -euo pipefail
 LOG_FILE="${TEST_LOG_FILE:?}"
+JOB_CAPTURE="${TEST_JOB_CAPTURE:?}"
 args="$*"
 printf '%s\n' "$args" >>"$LOG_FILE"
 if [[ "${1:-}" == "--context=fake-context" ]]; then shift; fi
@@ -269,6 +270,10 @@ if [[ "${1:-}" == "get" && "${2:-}" == "secret" ]]; then
 fi
 
 if [[ "${1:-}" == "get" && "${2:-}" == "job" ]]; then
+  if [[ "$args" == *"-o json"* && -s "$JOB_CAPTURE" ]]; then
+    cat "$JOB_CAPTURE"
+    exit 0
+  fi
   if [[ "$args" == *"jsonpath={.status.active}"* ]]; then
     exit 1
   fi
@@ -281,6 +286,7 @@ fi
 
 if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
   manifest="$(cat)"
+  printf '%s' "$manifest" >"$JOB_CAPTURE"
   printf '%s\n' "$manifest" >>"$LOG_FILE"
   echo "job.batch/control-api-db-migrate created"
   exit 0
@@ -307,7 +313,8 @@ exit 0
 STUB
   chmod +x "$tmp/kubectl"
 
-  if TEST_LOG_FILE="$log_file" GITHUB_RUN_ID=123456 PATH="$tmp:$PATH" \
+  if TEST_LOG_FILE="$log_file" TEST_JOB_CAPTURE="$tmp/job.json" \
+    GITHUB_RUN_ID=123456 PATH="$tmp:$PATH" \
     CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
     bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" >/dev/null 2>&1; then
     if grep -q 'control-api-db-migrate-123456' "$log_file"; then
@@ -334,6 +341,7 @@ assert_db_migration_handles_concurrent_create_race() {
 #!/usr/bin/env bash
 set -euo pipefail
 LOG_FILE="${TEST_LOG_FILE:?}"
+JOB_CAPTURE="${TEST_JOB_CAPTURE:?}"
 args="$*"
 printf '%s\n' "$args" >>"$LOG_FILE"
 if [[ "${1:-}" == "--context=fake-context" ]]; then shift; fi
@@ -410,6 +418,10 @@ if [[ "${1:-}" == "get" && "${2:-}" == "secret" ]]; then
 fi
 
 if [[ "${1:-}" == "get" && "${2:-}" == "job" ]]; then
+  if [[ "$args" == *"-o json"* && -s "$JOB_CAPTURE" ]]; then
+    cat "$JOB_CAPTURE"
+    exit 0
+  fi
   if [[ "$args" == *"jsonpath={.status.active}"* ]]; then
     exit 1
   fi
@@ -421,7 +433,7 @@ if [[ "${1:-}" == "delete" && "${2:-}" == "job" ]]; then
 fi
 
 if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
-  cat >/dev/null
+  cat >"$JOB_CAPTURE"
   echo 'Error from server (AlreadyExists): jobs.batch "control-api-db-migrate-999" already exists' >&2
   exit 1
 fi
@@ -447,10 +459,11 @@ exit 0
 STUB
   chmod +x "$tmp/kubectl"
 
-  if TEST_LOG_FILE="$log_file" GITHUB_RUN_ID=999 PATH="$tmp:$PATH" \
+  if TEST_LOG_FILE="$log_file" TEST_JOB_CAPTURE="$tmp/job.json" \
+    GITHUB_RUN_ID=999 PATH="$tmp:$PATH" \
     CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
     bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" >/dev/null 2>&1; then
-    if grep -q 'wait --for=condition=complete --timeout=300s job/control-api-db-migrate-999 -n control-plane' "$log_file"; then
+    if grep -q 'wait --for=condition=complete --timeout=360s job/control-api-db-migrate-999 -n control-plane' "$log_file"; then
       pass "db migration script tolerates concurrent create AlreadyExists race"
     else
       fail "db migration script did not wait for concurrently-created job"
@@ -500,6 +513,7 @@ assert_db_migration_reports_missing_migrate_artifact() {
   cat > "$tmp/kubectl" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+JOB_CAPTURE="${TEST_JOB_CAPTURE:?}"
 args="$*"
 if [[ "${1:-}" == "--context=fake-context" ]]; then shift; fi
 
@@ -571,6 +585,10 @@ if [[ "${1:-}" == "get" && "${2:-}" == "secret" ]]; then
 fi
 
 if [[ "${1:-}" == "get" && "${2:-}" == "job" ]]; then
+  if [[ "$args" == *"-o json"* && -s "$JOB_CAPTURE" ]]; then
+    cat "$JOB_CAPTURE"
+    exit 0
+  fi
   if [[ "$args" == *"jsonpath={.status.active}"* ]]; then
     exit 1
   fi
@@ -578,7 +596,7 @@ if [[ "${1:-}" == "get" && "${2:-}" == "job" ]]; then
 fi
 
 if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
-  cat >/dev/null
+  cat >"$JOB_CAPTURE"
   echo "job.batch/control-api-db-migrate created"
   exit 0
 fi
@@ -588,7 +606,12 @@ if [[ "${1:-}" == "describe" ]]; then
 fi
 
 if [[ "${1:-}" == "wait" ]]; then
-  exit 1
+  [[ "$args" == *"--for=condition=complete"* ]] && exit 1
+  exit 0
+fi
+
+if [[ "${1:-}" == "delete" && "${2:-}" == "job" ]]; then
+  exit 0
 fi
 
 if [[ "${1:-}" == "logs" ]]; then
@@ -603,7 +626,8 @@ exit 0
 STUB
   chmod +x "$tmp/kubectl"
 
-  out="$(PATH="$tmp:$PATH" CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
+  out="$(TEST_JOB_CAPTURE="$tmp/job.json" PATH="$tmp:$PATH" \
+    CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
     bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" 2>&1 || true)"
   if [[ "$out" == *"is missing dist/migrate.js"* ]] && [[ "$out" == *"example/control-api:broken"* ]]; then
     pass "db migration script emits a direct error for images missing dist/migrate.js"
@@ -626,6 +650,7 @@ assert_db_migration_verifies_db_after_success() {
 #!/usr/bin/env bash
 set -euo pipefail
 LOG_FILE="${TEST_LOG_FILE:?}"
+JOB_CAPTURE="${TEST_JOB_CAPTURE:?}"
 args="$*"
 printf '%s\n' "$args" >>"$LOG_FILE"
 if [[ "${1:-}" == "--context=fake-context" ]]; then shift; fi
@@ -705,6 +730,10 @@ if [[ "${1:-}" == "get" && "${2:-}" == "secret" ]]; then
 fi
 
 if [[ "${1:-}" == "get" && "${2:-}" == "job" ]]; then
+  if [[ "$args" == *"-o json"* && -s "$JOB_CAPTURE" ]]; then
+    cat "$JOB_CAPTURE"
+    exit 0
+  fi
   if [[ "$args" == *"jsonpath={.status.active}"* ]]; then
     exit 1
   fi
@@ -713,6 +742,7 @@ fi
 
 if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
   job_manifest="$(cat)"
+  printf '%s' "$job_manifest" >"$JOB_CAPTURE"
   printf 'JOB_MANIFEST %s\n' "$job_manifest" >>"$LOG_FILE"
   echo "job.batch/control-api-db-migrate created"
   exit 0
@@ -739,7 +769,8 @@ exit 0
 STUB
   chmod +x "$tmp/kubectl"
 
-  out="$(TEST_LOG_FILE="$log_file" PATH="$tmp:$PATH" CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
+  out="$(TEST_LOG_FILE="$log_file" TEST_JOB_CAPTURE="$tmp/job.json" PATH="$tmp:$PATH" \
+    CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
     bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" 2>&1 || true)"
   if [[ "$out" == *"Using control-api image for migration: example/control-api:test"* ]] && \
      [[ "$out" == *"Verifying DB-first schema in control-postgres"* ]] && \

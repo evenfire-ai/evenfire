@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+MIGRATION_POLICY_FILE="${REPO_ROOT}/control-api/src/migrations/migrationExecutionPolicy.json"
 RUNTIME_ACCESS_PROFILES_FILE="${SCRIPT_DIR}/control-api-runtime-access-profiles.tsv"
 RUNTIME_SEQUENCE_ACCESS_PROFILES_FILE="${SCRIPT_DIR}/control-api-runtime-sequence-access-profiles.tsv"
 MAINTENANCE_ACCESS_PROFILES_FILE="${SCRIPT_DIR}/trace-maintenance-runtime-access-profiles.tsv"
@@ -30,7 +32,7 @@ Usage:
 Options:
   --overlay    Kustomize overlay directory (required)
   --job-name   Kubernetes Job name (default: control-api-db-migrate)
-  --timeout    kubectl wait timeout (default: 300s)
+  --timeout    kubectl wait timeout (default: canonical 360s; may only be increased)
 
 Environment:
   CONTEXT      Required target kubectl context
@@ -53,6 +55,61 @@ log() {
 die() {
   log "ERROR: $*"
   exit 1
+}
+
+load_migration_policy() {
+  [ -f "$MIGRATION_POLICY_FILE" ] || die "migration policy not found: $MIGRATION_POLICY_FILE"
+  read -r \
+    MIGRATION_LOCK_TIMEOUT_MS \
+    MIGRATION_ORDINARY_STATEMENT_TIMEOUT_MS \
+    MIGRATION_ONLINE_INDEX_STATEMENT_TIMEOUT_MS \
+    MIGRATION_IDLE_TRANSACTION_TIMEOUT_MS \
+    MIGRATION_JOB_ACTIVE_DEADLINE_SECONDS \
+    MIGRATION_CLIENT_WAIT_SECONDS \
+    MIGRATION_TERMINATION_PROOF_SECONDS \
+    MIGRATION_JOB_BACKOFF_LIMIT \
+    MIGRATION_JOB_TTL_SECONDS \
+    MIGRATION_POLICY_SHA256 < <(
+      ruby -rjson -rdigest -e '
+        path = ARGV.fetch(0)
+        policy = JSON.parse(File.read(path))
+        keys = %w[
+          lockTimeoutMs ordinaryStatementTimeoutMs onlineIndexStatementTimeoutMs
+          idleInTransactionTimeoutMs jobActiveDeadlineSeconds clientWaitSeconds
+          terminationProofSeconds backoffLimit ttlSecondsAfterFinished
+        ]
+        abort("migration policy keys mismatch") unless policy.keys == keys
+        values = keys.map do |key|
+          value = policy.fetch(key)
+          abort("invalid migration policy value: #{key}") unless value.is_a?(Integer) && value.positive?
+          value
+        end
+        abort("lock timeout must be below ordinary statement timeout") unless values[0] < values[1]
+        abort("client wait must cover active deadline plus termination proof") unless values[5] >= values[4] + values[6]
+        puts(values.push(Digest::SHA256.file(path).hexdigest).join(" "))
+      ' "$MIGRATION_POLICY_FILE"
+    )
+  [ -n "${MIGRATION_POLICY_SHA256:-}" ] || die "migration policy could not be loaded"
+  export MIGRATION_JOB_ACTIVE_DEADLINE_SECONDS MIGRATION_JOB_BACKOFF_LIMIT
+  export MIGRATION_JOB_TTL_SECONDS MIGRATION_POLICY_SHA256
+}
+
+duration_seconds() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]+[smh]$ ]] || return 1
+  case "$value" in
+    *s) printf '%s' "${value%s}" ;;
+    *m) printf '%s' "$(( ${value%m} * 60 ))" ;;
+    *h) printf '%s' "$(( ${value%h} * 3600 ))" ;;
+    *) return 1 ;;
+  esac
+}
+
+sanitize_diagnostics() {
+  sed -E \
+    -e 's#(postgres(ql)?://)[^/@[:space:]]+:[^/@[:space:]]+@#\1[REDACTED]@#g' \
+    -e 's/(authorization:?[[:space:]]*bearer)[[:space:]]+[^[:space:]]+/\1 [REDACTED]/Ig' \
+    -e 's/((password|token|secret|cookie)[^:=[:space:]]*[=:])[[:space:]]*[^[:space:]]+/\1[REDACTED]/Ig'
 }
 
 context_is_allowed() {
@@ -94,12 +151,6 @@ job_exists() {
   kctl get job "$JOB_NAME" -n control-plane >/dev/null 2>&1
 }
 
-job_is_active() {
-  local active_count
-  active_count="$(kctl get job "$JOB_NAME" -n control-plane -o 'jsonpath={.status.active}' 2>/dev/null || true)"
-  [ -n "$active_count" ] && [ "$active_count" != "0" ]
-}
-
 create_job() {
   local output status
   set +e
@@ -113,7 +164,10 @@ create_job() {
   fi
 
   if [[ "$output" == *"AlreadyExists"* ]]; then
-    log "Migration job $JOB_NAME was created concurrently; waiting for the existing job"
+    if ! verify_active_job_identity; then
+      die "concurrently created migration Job identity does not match the requested migration"
+    fi
+    log "Migration job $JOB_NAME was created concurrently with matching identity; waiting"
     return 0
   fi
 
@@ -121,9 +175,131 @@ create_job() {
   return "$status"
 }
 
+verify_active_job_identity() {
+  local expected_file actual_file status
+  expected_file="$(mktemp)"
+  actual_file="$(mktemp)"
+  status=0
+  JOB_NAME="$JOB_NAME" build_job_manifest >"$expected_file"
+  if ! kctl get job "$JOB_NAME" -n control-plane -o json >"$actual_file"; then
+    rm -f "$expected_file" "$actual_file"
+    return 1
+  fi
+  ruby -rjson -rdigest -e '
+    normalize_container = lambda do |value|
+      container = Marshal.load(Marshal.dump(value))
+      container.delete("terminationMessagePath") if
+        [nil, "/dev/termination-log"].include?(container["terminationMessagePath"])
+      container.delete("terminationMessagePolicy") if
+        [nil, "File"].include?(container["terminationMessagePolicy"])
+      %w[env envFrom ports volumeDevices volumeMounts].each do |key|
+        container.delete(key) if container[key] == []
+      end
+      %w[resources securityContext].each do |key|
+        container.delete(key) if container[key].nil? || container[key] == {}
+      end
+      container
+    end
+    normalize_pod = lambda do |value|
+      pod = Marshal.load(Marshal.dump(value))
+      containers = pod["containers"] || []
+      abort("migration Job must contain exactly one migrate container") unless
+        containers.length == 1 && containers.first["name"] == "migrate"
+      pod["containers"] = containers.map { |item| normalize_container.call(item) }
+      %w[initContainers ephemeralContainers imagePullSecrets tolerations topologySpreadConstraints
+         readinessGates resourceClaims schedulingGates volumes].each do |key|
+        pod.delete(key) if pod[key] == []
+      end
+      pod.delete("securityContext") if pod["securityContext"].nil? || pod["securityContext"] == {}
+      pod.delete("serviceAccount") if pod["serviceAccount"] == pod["serviceAccountName"]
+      pod.delete("dnsPolicy") if [nil, "ClusterFirst"].include?(pod["dnsPolicy"])
+      pod.delete("schedulerName") if [nil, "default-scheduler"].include?(pod["schedulerName"])
+      pod.delete("terminationGracePeriodSeconds") if
+        [nil, 30].include?(pod["terminationGracePeriodSeconds"])
+      pod.delete("enableServiceLinks") if [nil, true].include?(pod["enableServiceLinks"])
+      pod.delete("preemptionPolicy") if [nil, "PreemptLowerPriority"].include?(pod["preemptionPolicy"])
+      %w[hostNetwork hostPID hostIPC shareProcessNamespace setHostnameAsFQDN].each do |key|
+        pod.delete(key) if [nil, false].include?(pod[key])
+      end
+      pod
+    end
+    normalize_job_spec = lambda do |value|
+      spec = Marshal.load(Marshal.dump(value))
+      spec.delete("selector")
+      spec.delete("manualSelector") if [nil, false].include?(spec["manualSelector"])
+      spec.delete("parallelism") if [nil, 1].include?(spec["parallelism"])
+      spec.delete("completions") if [nil, 1].include?(spec["completions"])
+      spec.delete("completionMode") if [nil, "NonIndexed"].include?(spec["completionMode"])
+      spec.delete("suspend") if [nil, false].include?(spec["suspend"])
+      template = spec.fetch("template")
+      metadata = Marshal.load(Marshal.dump(template["metadata"] || {}))
+      labels = Marshal.load(Marshal.dump(metadata["labels"] || {}))
+      %w[batch.kubernetes.io/controller-uid batch.kubernetes.io/job-name
+         controller-uid job-name].each { |key| labels.delete(key) }
+      metadata["labels"] = labels
+      metadata.delete("annotations") if metadata["annotations"] == {}
+      template["metadata"] = metadata
+      template["spec"] = normalize_pod.call(template["spec"] || {})
+      spec["template"] = template
+      spec
+    end
+    execution_contract = lambda do |job|
+      { "jobSpec" => normalize_job_spec.call(job["spec"] || {}) }
+    end
+    expected = JSON.parse(File.read(ARGV.fetch(0)))
+    actual = JSON.parse(File.read(ARGV.fetch(1)))
+    expected_annotations = expected.dig("metadata", "annotations") || {}
+    actual_annotations = actual.dig("metadata", "annotations") || {}
+    keys = %w[clerum.io/migration-policy-sha256 clerum.io/migration-configuration-sha256]
+    abort("active migration Job identity mismatch") unless keys.all? do |key|
+      expected_annotations[key] == actual_annotations[key]
+    end
+    expected_image = expected.dig("spec", "template", "spec", "containers", 0, "image")
+    actual_image = actual.dig("spec", "template", "spec", "containers", 0, "image")
+    abort("active migration Job image mismatch") unless expected_image == actual_image
+    expected_contract = execution_contract.call(expected)
+    actual_contract = execution_contract.call(actual)
+    expected_identity = Digest::SHA256.hexdigest(JSON.generate(expected_contract))
+    actual_identity = Digest::SHA256.hexdigest(JSON.generate(actual_contract))
+    abort("expected migration Job configuration annotation mismatch") unless
+      expected_identity == expected_annotations["clerum.io/migration-configuration-sha256"]
+    abort("active migration Job configuration annotation mismatch") unless
+      actual_identity == actual_annotations["clerum.io/migration-configuration-sha256"]
+    abort("active migration Job execution configuration mismatch") unless
+      actual_contract == expected_contract
+  ' "$expected_file" "$actual_file" || status=$?
+  rm -f "$expected_file" "$actual_file"
+  return "$status"
+}
+
+terminate_migration_job() {
+  local deadline now remaining
+  deadline="$(( SECONDS + MIGRATION_TERMINATION_PROOF_SECONDS ))"
+  if ! kctl delete job "$JOB_NAME" -n control-plane \
+    --cascade=foreground --wait=false --ignore-not-found >/dev/null; then
+    return 1
+  fi
+  now="$SECONDS"
+  remaining="$(( deadline - now ))"
+  [ "$remaining" -gt 0 ] || return 1
+  if ! kctl wait --for=delete --timeout="${remaining}s" \
+    "job/$JOB_NAME" -n control-plane >/dev/null; then
+    return 1
+  fi
+  now="$SECONDS"
+  remaining="$(( deadline - now ))"
+  [ "$remaining" -gt 0 ] || return 1
+  if ! kctl wait --for=delete --timeout="${remaining}s" pod \
+    -l "job-name=$JOB_NAME" -n control-plane >/dev/null; then
+    return 1
+  fi
+}
+
 OVERLAY=""
+load_migration_policy
+
 JOB_NAME="${JOB_NAME:-control-api-db-migrate}"
-TIMEOUT="${TIMEOUT:-300s}"
+TIMEOUT="${TIMEOUT:-${MIGRATION_CLIENT_WAIT_SECONDS}s}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -148,6 +324,11 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+TIMEOUT_SECONDS="$(duration_seconds "$TIMEOUT")" || die "unsupported timeout duration: $TIMEOUT"
+[[ "$TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || die "invalid timeout duration: $TIMEOUT"
+[ "$TIMEOUT_SECONDS" -ge "$MIGRATION_CLIENT_WAIT_SECONDS" ] || \
+  die "timeout must be at least ${MIGRATION_CLIENT_WAIT_SECONDS}s"
 
 [ -n "$OVERLAY" ] || {
   usage >&2
@@ -294,7 +475,7 @@ extract_control_api_image() {
 }
 
 build_job_manifest() {
-  ruby -ryaml -rjson -e '
+  ruby -ryaml -rjson -rdigest -e '
     job_name = ENV.fetch("JOB_NAME")
     docs = []
     YAML.load_stream(File.read(ARGV[0])) do |doc|
@@ -348,6 +529,9 @@ build_job_manifest() {
           "app" => "control-api",
           "clerum.io/component" => "control-api-db-migrate",
         },
+        "annotations" => {
+          "clerum.io/migration-policy-sha256" => ENV.fetch("MIGRATION_POLICY_SHA256"),
+        },
       },
       "spec" => {
         # Retry a transient migration abort instead of failing the whole deploy.
@@ -356,11 +540,13 @@ build_job_manifest() {
         # DELETE) holds its lock past that timeout the Job exits 1. The migration
         # body is idempotent, so re-running is safe; restartPolicy Never makes each
         # retry a fresh pod, giving backoffLimit + 1 attempts before the deploy fails.
-        # Note: 3 attempts, each waiting up to the 60s lock_timeout plus pod startup,
-        # can approach the 300s kubectl-wait budget below against a persistently stuck
-        # writer; raise that wait if such contention is expected.
-        "backoffLimit" => 2,
-        "ttlSecondsAfterFinished" => 600,
+        # The accepted 300-second active deadline is authoritative over all
+        # retries. Each pod inherits the canonical 10-second lock timeout, and
+        # the client observes for at least 360 seconds so it can see the Job
+        # deadline before beginning its separate termination proof.
+        "activeDeadlineSeconds" => Integer(ENV.fetch("MIGRATION_JOB_ACTIVE_DEADLINE_SECONDS")),
+        "backoffLimit" => Integer(ENV.fetch("MIGRATION_JOB_BACKOFF_LIMIT")),
+        "ttlSecondsAfterFinished" => Integer(ENV.fetch("MIGRATION_JOB_TTL_SECONDS")),
         "template" => {
           "metadata" => {
             "labels" => {
@@ -392,6 +578,73 @@ build_job_manifest() {
       value = pod_spec[key]
       job["spec"]["template"]["spec"][key] = value if value
     end
+
+    normalize_container = lambda do |value|
+      normalized = Marshal.load(Marshal.dump(value))
+      normalized.delete("terminationMessagePath") if
+        [nil, "/dev/termination-log"].include?(normalized["terminationMessagePath"])
+      normalized.delete("terminationMessagePolicy") if
+        [nil, "File"].include?(normalized["terminationMessagePolicy"])
+      %w[env envFrom ports volumeDevices volumeMounts].each do |key|
+        normalized.delete(key) if normalized[key] == []
+      end
+      %w[resources securityContext].each do |key|
+        normalized.delete(key) if normalized[key].nil? || normalized[key] == {}
+      end
+      normalized
+    end
+    normalize_pod = lambda do |value|
+      normalized = Marshal.load(Marshal.dump(value))
+      containers = normalized["containers"] || []
+      abort("migration Job must contain exactly one migrate container") unless
+        containers.length == 1 && containers.first["name"] == "migrate"
+      normalized["containers"] = containers.map { |item| normalize_container.call(item) }
+      %w[initContainers ephemeralContainers imagePullSecrets tolerations topologySpreadConstraints
+         readinessGates resourceClaims schedulingGates volumes].each do |key|
+        normalized.delete(key) if normalized[key] == []
+      end
+      normalized.delete("securityContext") if
+        normalized["securityContext"].nil? || normalized["securityContext"] == {}
+      normalized.delete("serviceAccount") if
+        normalized["serviceAccount"] == normalized["serviceAccountName"]
+      normalized.delete("dnsPolicy") if [nil, "ClusterFirst"].include?(normalized["dnsPolicy"])
+      normalized.delete("schedulerName") if
+        [nil, "default-scheduler"].include?(normalized["schedulerName"])
+      normalized.delete("terminationGracePeriodSeconds") if
+        [nil, 30].include?(normalized["terminationGracePeriodSeconds"])
+      normalized.delete("enableServiceLinks") if
+        [nil, true].include?(normalized["enableServiceLinks"])
+      normalized.delete("preemptionPolicy") if
+        [nil, "PreemptLowerPriority"].include?(normalized["preemptionPolicy"])
+      %w[hostNetwork hostPID hostIPC shareProcessNamespace setHostnameAsFQDN].each do |key|
+        normalized.delete(key) if [nil, false].include?(normalized[key])
+      end
+      normalized
+    end
+    normalize_job_spec = lambda do |value|
+      normalized = Marshal.load(Marshal.dump(value))
+      normalized.delete("selector")
+      normalized.delete("manualSelector") if [nil, false].include?(normalized["manualSelector"])
+      normalized.delete("parallelism") if [nil, 1].include?(normalized["parallelism"])
+      normalized.delete("completions") if [nil, 1].include?(normalized["completions"])
+      normalized.delete("completionMode") if
+        [nil, "NonIndexed"].include?(normalized["completionMode"])
+      normalized.delete("suspend") if [nil, false].include?(normalized["suspend"])
+      template = normalized.fetch("template")
+      metadata = Marshal.load(Marshal.dump(template["metadata"] || {}))
+      labels = Marshal.load(Marshal.dump(metadata["labels"] || {}))
+      %w[batch.kubernetes.io/controller-uid batch.kubernetes.io/job-name
+         controller-uid job-name].each { |key| labels.delete(key) }
+      metadata["labels"] = labels
+      metadata.delete("annotations") if metadata["annotations"] == {}
+      template["metadata"] = metadata
+      template["spec"] = normalize_pod.call(template["spec"] || {})
+      normalized["template"] = template
+      normalized
+    end
+    configuration_contract = { "jobSpec" => normalize_job_spec.call(job.fetch("spec")) }
+    job["metadata"]["annotations"]["clerum.io/migration-configuration-sha256"] =
+      Digest::SHA256.hexdigest(JSON.generate(configuration_contract))
 
     puts JSON.generate(job)
   ' "$RENDERED_MANIFEST_FILE"
@@ -1095,8 +1348,20 @@ for secret_name in $(extract_secret_refs); do
 done
 
 if job_exists; then
-  if job_is_active; then
-    log "Migration job $JOB_NAME is already active; waiting for the existing run"
+  if ! job_state="$(kctl get job "$JOB_NAME" -n control-plane -o json 2>/dev/null | \
+    ruby -rjson -e '
+      job = JSON.parse(STDIN.read)
+      conditions = job.dig("status", "conditions") || []
+      terminal = conditions.any? do |condition|
+        %w[Complete Failed].include?(condition["type"]) && condition["status"] == "True"
+      end
+      puts(terminal ? "terminal" : "nonterminal")
+    ')"; then
+    die "could not determine existing migration Job status"
+  fi
+  if [ "$job_state" = "nonterminal" ]; then
+    verify_active_job_identity || die "active migration Job identity does not match the current deployment"
+    log "Migration job $JOB_NAME is queued or active; waiting for the existing run"
   else
     log "Deleting previous terminal migration job $JOB_NAME"
     kctl delete job "$JOB_NAME" -n control-plane --ignore-not-found >/dev/null 2>&1 || true
@@ -1108,16 +1373,20 @@ else
   create_job
 fi
 
+verify_active_job_identity || die "migration Job identity does not match immediately before wait"
 if ! kctl wait --for=condition=complete --timeout="$TIMEOUT" "job/$JOB_NAME" -n control-plane; then
   job_logs=""
+  failure_message="migration Job failed or timed out"
   job_logs="$(kctl logs "job/$JOB_NAME" -n control-plane --all-containers=true 2>&1 || true)"
   log "Migration job failed or timed out; dumping diagnostics"
-  kctl describe job "$JOB_NAME" -n control-plane || true
-  printf '%s\n' "$job_logs" >&2
+  { kctl describe job "$JOB_NAME" -n control-plane || true; } 2>&1 | sanitize_diagnostics >&2
+  printf '%s\n' "$job_logs" | sanitize_diagnostics >&2
   if [[ "$job_logs" == *"Cannot find module '/app/dist/migrate.js'"* ]]; then
-    die "control-api image ${CONTROL_API_IMAGE} is missing dist/migrate.js; rebuild/push the current image and ensure deploy-dev resolves the correct sha tag before rerunning the gate"
+    failure_message="control-api image ${CONTROL_API_IMAGE} is missing dist/migrate.js; rebuild/push the current image and ensure deploy-dev resolves the correct sha tag before rerunning the gate"
   fi
-  exit 1
+  terminate_migration_job || \
+    die "migration Job cleanup could not prove Job and pod termination within ${MIGRATION_TERMINATION_PROOF_SECONDS}s"
+  die "$failure_message"
 fi
 
 log "Migration job completed successfully"

@@ -5,6 +5,9 @@ import {
   createBoundedPgPoolForConnection,
 } from './boundedPgPool.js'
 import { config } from './config.js'
+import { migrationSessionBoundsSql } from './migrations/migrationExecutionPolicy.js'
+import { applyPendingPr1Migrations } from './migrations/migrationRunner.js'
+import { rootLogger } from './observability/logger.js'
 import {
   applyCatalogUtf8OrderingSchema,
   applyComposableCatalogRevisionSchema,
@@ -72,7 +75,7 @@ export type DbTransactionClient = DbClient & {
 }
 
 type DbSessionClient = DbClient & {
-  release: () => void
+  release: (destroy?: boolean | Error) => void
 }
 
 type DbConnector = {
@@ -80,6 +83,7 @@ type DbConnector = {
 }
 
 const INIT_DB_LOCK_KEY_SQL = "hashtext('control-api-init-db-v1')::bigint"
+const migrationLogger = rootLogger.child({ module: 'database-migration' })
 
 type DbMigration = {
   version: string
@@ -6243,11 +6247,12 @@ async function recordMigration(db: DbClient, version: string): Promise<void> {
   )
 }
 
-async function applyPendingMigrations(db: DbClient): Promise<void> {
+async function applyPendingLegacyMigrations(db: DbClient): Promise<Set<string>> {
   await ensureSchemaMigrationsTable(db)
   const appliedVersions = await loadAppliedMigrationVersions(db)
 
   for (const migration of CONTROL_API_MIGRATIONS) {
+    if (migration.version > '0106_oauth_grants_owner_generalization') break
     if (appliedVersions.has(migration.version)) continue
     if (migration.legacyVersions?.some(version => appliedVersions.has(version))) {
       await recordMigration(db, migration.version)
@@ -6258,30 +6263,41 @@ async function applyPendingMigrations(db: DbClient): Promise<void> {
     await recordMigration(db, migration.version)
     appliedVersions.add(migration.version)
   }
+  return appliedVersions
 }
 
 export async function initDb(db: DbConnector = pool): Promise<void> {
   const client = await db.connect()
   let locked = false
   let inTransaction = false
+  let destroySession = false
 
   try {
+    for (const sql of migrationSessionBoundsSql(false)) {
+      await client.query(sql)
+    }
     await client.query(`SELECT pg_advisory_lock(${INIT_DB_LOCK_KEY_SQL})`)
     locked = true
 
     await client.query('BEGIN')
     inTransaction = true
-
-    await applyPendingMigrations(client)
-
+    const appliedVersions = await applyPendingLegacyMigrations(client)
     await client.query('COMMIT')
     inTransaction = false
+
+    await applyPendingPr1Migrations({
+      db: client,
+      migrations: CONTROL_API_MIGRATIONS,
+      appliedVersions,
+      recordMigration,
+    })
   } catch (error) {
+    destroySession = true
     if (inTransaction) {
       try {
         await client.query('ROLLBACK')
       } catch (rollbackError) {
-        console.warn('[ControlAPI] initDb rollback failed:', rollbackError)
+        migrationLogger.warn({ err: rollbackError }, 'Database migration rollback failed')
       }
     }
     throw error
@@ -6290,10 +6306,11 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
       try {
         await client.query(`SELECT pg_advisory_unlock(${INIT_DB_LOCK_KEY_SQL})`)
       } catch (unlockError) {
-        console.warn('[ControlAPI] initDb advisory unlock failed:', unlockError)
+        destroySession = true
+        migrationLogger.warn({ err: unlockError }, 'Database migration advisory unlock failed')
       }
     }
-    client.release()
+    client.release(destroySession)
   }
 }
 
