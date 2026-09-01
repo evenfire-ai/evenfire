@@ -1,20 +1,22 @@
 import type { Pool } from 'pg'
 import { resolveMigrationConnectionString } from './migrationConnection.js'
+import { rootLogger } from './observability/logger.js'
 
 let migrationPool: Pool | undefined
+const logger = rootLogger.child({ module: 'database-migration-entrypoint' })
 
 async function main(): Promise<void> {
   process.env.CONTROL_API_PG_CONNECTION_STRING = resolveMigrationConnectionString(process.env)
   const { initDb, pool } = await import('./db.js')
   migrationPool = pool
-  console.log('[ControlAPI:Migrate] Starting DB migration')
+  logger.info('Starting database migration')
   await initDb()
-  console.log('[ControlAPI:Migrate] DB migration complete')
+  logger.info('Database migration complete')
 }
 
 main()
   .catch(error => {
-    console.error('[ControlAPI:Migrate] Fatal error:', error)
+    logger.error({ err: error }, 'Database migration failed')
     process.exitCode = 1
   })
   .finally(async () => {

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { onlineIndexAwareQuery } from './helpers/onlineIndexCatalogMock.js'
 
 const clientQuery = vi.fn()
 const clientRelease = vi.fn()
@@ -22,7 +23,7 @@ describe('db migration 0048_gfs_permission_store', () => {
     vi.resetModules()
     vi.clearAllMocks()
     mockConnect.mockResolvedValue({
-      query: clientQuery,
+      query: onlineIndexAwareQuery(clientQuery),
       release: clientRelease,
     })
     // schema_migrations empty → every migration (incl. 0048) runs.
