@@ -276,7 +276,7 @@ export function RecipeSecretsPanel({
                         ? 'No keys declared by recipe.'
                         : 'No keys defined.'}
                   </td>
-                  <td style={{ textAlign: 'right' }}>
+                  <td className="cu-table__cell-actions">
                     {row.status === 'missing' ? (
                       <button
                         type="button"

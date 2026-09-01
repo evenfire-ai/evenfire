@@ -178,7 +178,7 @@ export function ContextTable({
                   <td style={{ color: 'var(--cu-text-muted)', fontVariantNumeric: 'tabular-nums' }}>
                     {mcpServers.length}
                   </td>
-                  <td style={{ textAlign: 'right' }}>
+                  <td className="cu-table__cell-actions">
                     <div className="cu-table-actions">
                       <RowActionsMenu
                         ariaLabel={`Actions for context ${name}`}

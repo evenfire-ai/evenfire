@@ -11151,6 +11151,9 @@ textarea.cu-input {
   display: flex;
   justify-content: flex-end;
   gap: var(--cu-space-2);
+  max-width: 3.5rem;
+  min-width: 3rem;
+  width: 3.5rem;
 }
 
 .cu-llm-model-table {
@@ -11668,6 +11671,9 @@ textarea.cu-input {
   display: flex;
   justify-content: flex-end;
   gap: var(--cu-space-2);
+  max-width: 3.5rem;
+  min-width: 3rem;
+  width: 3.5rem;
 }
 
 /* Scope editor (create/edit form) */

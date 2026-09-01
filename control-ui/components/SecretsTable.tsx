@@ -585,7 +585,7 @@ export function SecretsTable({
                             <span style={{ color: 'var(--cu-text-soft)' }}>—</span>
                           )}
                         </td>
-                        <td style={{ textAlign: 'right' }}>
+                        <td className="cu-table__cell-actions">
                           <div style={{ display: 'inline-flex', gap: '0.35rem' }}>
                             <RowActionsMenu
                               ariaLabel={`Actions for LLM secret ${name}`}
@@ -667,7 +667,7 @@ export function SecretsTable({
                           ? row.registryEntries.join(', ')
                           : 'Created manually or source unknown.'}
                       </td>
-                      <td style={{ textAlign: 'right' }}>
+                      <td className="cu-table__cell-actions">
                         <button
                           type="button"
                           className="cu-btn cu-btn--primary cu-btn--sm"
@@ -794,7 +794,7 @@ export function SecretsTable({
                           ? `${row.recipes.length} recipe(s): ${row.recipes.join(', ')}`
                           : 'Not yet referenced by a recipe.'}
                       </td>
-                      <td style={{ textAlign: 'right' }}>
+                      <td className="cu-table__cell-actions">
                         {row.status === 'missing' ? (
                           <button
                             type="button"

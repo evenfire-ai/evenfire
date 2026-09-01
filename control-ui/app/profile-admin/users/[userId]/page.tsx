@@ -1020,7 +1020,7 @@ export default function UserDetailsPage() {
                           {contextId}
                         </button>
                       </td>
-                      <td>
+                      <td className="cu-table__cell-actions">
                         <RowActionsMenu
                           ariaLabel={`Actions for ${contextId}`}
                           actions={[
@@ -1166,7 +1166,7 @@ export default function UserDetailsPage() {
                             aria-label={`${team.name} can delete members`}
                           />
                         </td>
-                        <td>
+                        <td className="cu-table__cell-actions">
                           <RowActionsMenu
                             ariaLabel={`Actions for ${team.name}`}
                             actions={[
@@ -1257,7 +1257,7 @@ export default function UserDetailsPage() {
                           {agentName}
                         </button>
                       </td>
-                      <td>
+                      <td className="cu-table__cell-actions">
                         <RowActionsMenu
                           ariaLabel={`Actions for ${agentName}`}
                           actions={[

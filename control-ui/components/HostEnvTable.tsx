@@ -292,7 +292,7 @@ export function HostEnvTable({ hostRef }: { hostRef: string }) {
                 </td>
                 <td>{entry.secret ? 'Secret' : 'Non-secret'}</td>
                 <td>{entry.updatedAt ? new Date(entry.updatedAt).toLocaleString() : '—'}</td>
-                <td>
+                <td className="cu-table__cell-actions">
                   <RowActionsMenu
                     ariaLabel={`Actions for ${entry.key}`}
                     actions={[

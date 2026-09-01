@@ -315,7 +315,7 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
                             : 'Unknown'}
                       </span>
                     </td>
-                    <td style={{ textAlign: 'right' }}>
+                    <td className="cu-table__cell-actions">
                       <span
                         onFocusCapture={event => {
                           grantsOpenerRef.current = event.target as HTMLElement
