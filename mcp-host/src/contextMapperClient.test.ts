@@ -276,13 +276,11 @@ describe('ContextMapperClient Host-scoped v2 inventory', () => {
   it('preserves a valid authKind from the v2 inventory (mini-spec 10 §3.3)', async () => {
     vi.stubGlobal(
       'fetch',
-      vi
-        .fn()
-        .mockResolvedValue(
-          new Response(JSON.stringify(inventory([authorizedServer({ authKind: 'oauth-user' })])), {
-            status: 200,
-          })
-        )
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(inventory([authorizedServer({ authKind: 'oauth-user' })])), {
+          status: 200,
+        })
+      )
     )
     const client = new ContextMapperClient('http://context-mapper.test', {
       authentication: authentication(),
@@ -295,13 +293,11 @@ describe('ContextMapperClient Host-scoped v2 inventory', () => {
   it('rejects an authKind value outside the enum', async () => {
     vi.stubGlobal(
       'fetch',
-      vi
-        .fn()
-        .mockResolvedValue(
-          new Response(JSON.stringify(inventory([authorizedServer({ authKind: 'oauth-admin' })])), {
-            status: 200,
-          })
-        )
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(inventory([authorizedServer({ authKind: 'oauth-admin' })])), {
+          status: 200,
+        })
+      )
     )
     const client = new ContextMapperClient('http://context-mapper.test', {
       authentication: authentication(),

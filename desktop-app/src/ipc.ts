@@ -251,6 +251,18 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.diagnoseLoginBackend()
   })
+  ipcMain.handle('auth:probeLocalhostReachable', async event => {
+    assertTrustedSender(event)
+    return service.probeLocalhostReachable()
+  })
+  ipcMain.handle('auth:openDeploymentDocs', async event => {
+    assertTrustedSender(event)
+    return service.openDeploymentDocs()
+  })
+  ipcMain.handle('auth:openHostedSignup', async event => {
+    assertTrustedSender(event)
+    return service.openHostedSignup()
+  })
   ipcMain.handle('auth:startDesktopSetup', async (event, payload: { email: string }) => {
     assertTrustedSender(event)
     return service.startDesktopSetup(sanitizeString(payload?.email).toLowerCase())
@@ -1837,7 +1849,7 @@ export function registerIpcHandlers(service: AppService): void {
   // The consent resolve channel IS trusted-sender guarded. That is what stops
   // an embed from answering its own permission prompt, and it pairs with the
   // main-generated `promptId` nonce: a resolve for an unknown or already-
-  // answered prompt is dropped inside the gate (spec §9.4).
+  // answered prompt is dropped inside the gate.
 
   ipcMain.handle(
     PLUGIN_SDK_CONSENT_RESOLVE_CHANNEL,

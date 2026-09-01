@@ -38,7 +38,9 @@ import {
 import { isAllowedExternalEgressCidr, isPublicDnsHostname } from './networkPolicyReconciler'
 import { HostCRD, LlmHookCRD, LlmHookCondition, LlmHookImageTarget, LlmHookStatus } from './types'
 import {
+  deploymentMatchesDesired,
   getErrorCode,
+  networkPolicyMatchesDesired,
   preserveDeploymentAnnotations,
   preserveObjectAnnotations,
   preserveServiceAssignedFields,
@@ -767,6 +769,7 @@ export class LlmHookReconciler {
       logPrefix: LOG,
       body: deployment,
       mergeExisting: preserveDeploymentAnnotations,
+      isUpToDate: deploymentMatchesDesired,
       read: () =>
         this.appsApi.readNamespacedDeployment({ name, namespace: config.llmHooksNamespace }),
       replace: body =>
@@ -827,6 +830,7 @@ export class LlmHookReconciler {
       logPrefix: LOG,
       body: policy,
       mergeExisting: preserveObjectAnnotations,
+      isUpToDate: networkPolicyMatchesDesired,
       read: () => this.networkingApi.readNamespacedNetworkPolicy({ name, namespace }),
       replace: body => this.networkingApi.replaceNamespacedNetworkPolicy({ name, namespace, body }),
     })
