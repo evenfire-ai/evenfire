@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { sendPublicApiError } from '../../http/publicApiError.js'
 import type { K8sGateway } from '../../k8s.js'
+import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import {
   type ExternalAuthedRequest,
   requireCompletedExternalSessionAuthenticationWithPublicErrors,
@@ -19,7 +20,6 @@ import {
 import { AccessCatalogCursorError } from '../../services/access/accessCatalogCursor.js'
 import {
   AccessBudgetExceededError,
-  AccessExecutionBudget,
   AccessExecutionCancelledError,
 } from '../../services/access/accessExecutionBudget.js'
 import { isAccessCapability } from '../../services/access/capabilityRegistry.js'
@@ -28,52 +28,12 @@ import { resolveLiveAuthorization } from '../../services/access/liveAuthorizatio
 import { validateOperationTarget } from '../../services/access/operationTarget.js'
 import { canonicalEnvironmentId } from '../../services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../../services/access/resourceIdentity.js'
-import {
-  configuredCatalogBudgetOptions,
-  userAccessCapabilityManifest,
-} from '../../services/access/userAccessPolicy.js'
+import { userAccessCapabilityManifest } from '../../services/access/userAccessPolicy.js'
 import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAccessRuntimePolicy.js'
 
 const CATALOG_RATE_LIMIT_PER_MINUTE = 10
 const RESOLVE_RATE_LIMIT_PER_MINUTE = 10
 const ACCESS_PATH_PATTERN = /^ap1_[A-Za-z0-9_-]{43}$/
-
-export function attachAccessExecutionBudget(
-  req: ExternalAuthedRequest,
-  res: Parameters<typeof sendPublicApiError>[1],
-  next: () => void
-): void {
-  const kind = req.method === 'GET' && req.path.endsWith('/catalog') ? 'catalog' : 'action'
-  const budget = AccessExecutionBudget.create(
-    kind,
-    kind === 'catalog' ? configuredCatalogBudgetOptions : undefined
-  )
-  req.accessExecutionBudget = budget
-  let settled = false
-  const detach = () => {
-    req.removeListener('aborted', onAborted)
-    res.removeListener('finish', onFinished)
-    res.removeListener('close', onClosed)
-  }
-  const onAborted = () => budget.cancel()
-  const onFinished = () => {
-    if (settled) return
-    settled = true
-    detach()
-    budget.close()
-  }
-  const onClosed = () => {
-    if (settled) return
-    settled = true
-    if (!res.writableEnded) budget.cancel()
-    detach()
-    budget.close()
-  }
-  req.once('aborted', onAborted)
-  res.once('finish', onFinished)
-  res.once('close', onClosed)
-  next()
-}
 
 function catalogFamilies(value: unknown): CatalogFamily[] | null | undefined {
   if (value === undefined) return undefined

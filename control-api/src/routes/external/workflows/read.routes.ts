@@ -11,7 +11,8 @@ import {
   isRecipeNamespaceAllowed,
 } from '../../../services/workflows/workflowRecipeAccessService.js'
 import { getWorkflowHealth } from '../../../services/workflows/workflowRunReadService.js'
-import { requireExternalWorkflowCaller } from '../../workflows/shared/auth.js'
+import { requireBoundExternalWorkflowCaller } from '../../workflows/shared/auth.js'
+import { externalWorkflowReadAdmission } from './admission.js'
 
 const BASE = '/external/workflows'
 
@@ -20,8 +21,9 @@ export function createExternalWorkflowReadRoutes(gateway: K8sGateway): Router {
 
   router.get(
     BASE,
+    ...externalWorkflowReadAdmission,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = await requireExternalWorkflowCaller(req, res)
+      const caller = requireBoundExternalWorkflowCaller(req, res)
       if (!caller) return
 
       const recipes = await getAuthorizedRecipeResources(caller, gateway)
@@ -66,8 +68,9 @@ export function createExternalWorkflowReadRoutes(gateway: K8sGateway): Router {
 
   router.get(
     `${BASE}/:ns/:name`,
+    ...externalWorkflowReadAdmission,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = await requireExternalWorkflowCaller(req, res)
+      const caller = requireBoundExternalWorkflowCaller(req, res)
       if (!caller) return
 
       const { ns, name } = req.params
@@ -95,8 +98,9 @@ export function createExternalWorkflowReadRoutes(gateway: K8sGateway): Router {
 
   router.get(
     `${BASE}/:ns/:name/health`,
+    ...externalWorkflowReadAdmission,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = await requireExternalWorkflowCaller(req, res)
+      const caller = requireBoundExternalWorkflowCaller(req, res)
       if (!caller) return
 
       const { ns, name } = req.params
