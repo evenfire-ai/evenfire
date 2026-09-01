@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
@@ -121,7 +121,7 @@ describe('shared frontend components', () => {
     expect(screen.getByRole('tooltip')).toHaveTextContent(longDescription)
   })
 
-  it('keeps table paint contracts compatible with supported browsers', () => {
+  it('keeps table paint contracts compatible with supported browsers', async () => {
     const frontendStyles = readFileSync(
       resolve(process.cwd(), '../packages/frontend-components/styles.css'),
       'utf8'
@@ -139,6 +139,44 @@ describe('shared frontend components', () => {
     expect(descriptionCellRule).toContain('overflow: visible;')
     expect(descriptionCellRule).toContain('-webkit-line-clamp: unset;')
     expect(descriptionCellRule).toContain('line-clamp: unset;')
+
+    const seamShadow = '0 -0.375rem 0 var(--eft-surface-muted), inset 0 -1px 0 var(--eft-border)'
+    const { unmount } = render(
+      <DataTable>
+        <thead>
+          <tr>
+            <TableHeaderCell label="Unwrapped seam" />
+          </tr>
+        </thead>
+      </DataTable>
+    )
+
+    expect(screen.getByRole('columnheader', { name: 'Unwrapped seam' })).not.toHaveStyle({
+      boxShadow: seamShadow,
+    })
+    unmount()
+
+    render(
+      <div className="eft-table-viewport">
+        <DataTable>
+          <thead>
+            <tr>
+              <TableHeaderCell label="Paint seam" />
+              <th>Raw seam</th>
+            </tr>
+          </thead>
+        </DataTable>
+      </div>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByRole('columnheader', { name: 'Paint seam' })).toHaveStyle({
+        boxShadow: seamShadow,
+      })
+      expect(screen.getByRole('columnheader', { name: 'Raw seam' })).toHaveStyle({
+        boxShadow: seamShadow,
+      })
+    })
   })
 
   it('opens one accessible action menu and executes its destructive action', () => {

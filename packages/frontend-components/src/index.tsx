@@ -1,13 +1,20 @@
 'use client'
 
 import {
+  type CSSProperties,
+  Children,
   type HTMLAttributes,
   type KeyboardEvent,
+  type ReactElement,
   type ReactNode,
   type TableHTMLAttributes,
   type TdHTMLAttributes,
   type ThHTMLAttributes,
+  cloneElement,
+  createContext,
+  isValidElement,
   useCallback,
+  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -24,6 +31,48 @@ export type CellKind = 'text' | 'numeric' | 'fixed' | 'selection' | 'actions'
 
 function classNames(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(' ')
+}
+
+const tableHeaderSeamStyle: CSSProperties = {
+  boxShadow: '0 -0.375rem 0 var(--eft-surface-muted), inset 0 -1px 0 var(--eft-border)',
+}
+
+const TableHeaderSeamContext = createContext(false)
+
+type HeaderPaintElementProps = {
+  children?: ReactNode
+  style?: CSSProperties
+}
+
+function tableHeaderStyle(style: CSSProperties | undefined, enabled: boolean) {
+  return enabled ? { ...tableHeaderSeamStyle, ...style } : style
+}
+
+function withTableHeaderSeam(children: ReactNode, enabled: boolean): ReactNode {
+  if (!enabled) return children
+  return Children.map(children, child => {
+    if (!isValidElement<HeaderPaintElementProps>(child) || child.type !== 'thead') return child
+    return cloneElement(child, undefined, withHeaderCellSeam(child.props.children, enabled))
+  })
+}
+
+function withHeaderCellSeam(children: ReactNode, enabled: boolean): ReactNode {
+  return Children.map(children, child => {
+    if (!isValidElement<HeaderPaintElementProps>(child)) return child
+
+    if (child.type === 'th') {
+      return cloneElement(child, {
+        style: tableHeaderStyle(child.props.style, enabled),
+      })
+    }
+
+    if (child.props.children === undefined) return child
+    return cloneElement(
+      child as ReactElement<HeaderPaintElementProps>,
+      undefined,
+      withHeaderCellSeam(child.props.children, enabled)
+    )
+  })
 }
 
 export type DataViewHeaderProps = {
@@ -112,12 +161,28 @@ export function RecordListRow({ className, ...props }: HTMLAttributes<HTMLDivEle
 }
 
 export function DataTable({
+  children,
   className,
   variant = 'standard',
   ...props
 }: TableHTMLAttributes<HTMLTableElement> & { variant?: TableVariant }) {
+  const tableRef = useRef<HTMLTableElement | null>(null)
+  const [paintHeaderSeam, setPaintHeaderSeam] = useState(false)
+
+  useLayoutEffect(() => {
+    setPaintHeaderSeam(Boolean(tableRef.current?.closest('.eft-table-viewport')))
+  }, [])
+
   return (
-    <table {...props} className={classNames('eft-table', `eft-table--${variant}`, className)} />
+    <table
+      {...props}
+      className={classNames('eft-table', `eft-table--${variant}`, className)}
+      ref={tableRef}
+    >
+      <TableHeaderSeamContext.Provider value={paintHeaderSeam}>
+        {withTableHeaderSeam(children, paintHeaderSeam)}
+      </TableHeaderSeamContext.Provider>
+    </table>
   )
 }
 
@@ -183,6 +248,7 @@ export function TableHeaderCell({
   sortLabel,
   ...props
 }: TableHeaderCellProps) {
+  const paintHeaderSeam = useContext(TableHeaderSeamContext)
   const ariaSort = activeDirection
     ? activeDirection === 'asc'
       ? 'ascending'
@@ -204,6 +270,7 @@ export function TableHeaderCell({
       aria-sort={ariaSort}
       className={classNames(`eft-table__header--${kind}`, className)}
       scope={props.scope ?? 'col'}
+      style={tableHeaderStyle(props.style, paintHeaderSeam)}
     >
       {onSort && sortLabel ? (
         <span className="eft-table__sort-group">
