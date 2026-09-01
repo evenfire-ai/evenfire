@@ -177,7 +177,7 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
     <>
       <TablePanelHeader
         title={`API keys${isReady ? ` for @${(view as { org: string }).org}` : ''}`}
-        actions={
+        primaryAction={
           isReady ? (
             <Button type="button" variant="primary" size="sm" onClick={() => setCreating(true)}>
               + Create key

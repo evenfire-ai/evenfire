@@ -372,7 +372,7 @@ export function McpServerTable({
         }
         subtitle="Browse connector deployments and context bindings."
         actionsClassName="cu-table-panel__actions--mcp"
-        actions={
+        primaryAction={
           onInstallFromRegistry ? (
             <button
               type="button"

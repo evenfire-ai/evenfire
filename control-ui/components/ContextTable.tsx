@@ -110,7 +110,7 @@ export function ContextTable({
           </>
         }
         subtitle="Group connectors into reusable access scopes."
-        actions={
+        primaryAction={
           <button
             type="button"
             className="cu-btn cu-btn--primary cu-btn--sm"

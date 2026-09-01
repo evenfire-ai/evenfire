@@ -116,7 +116,7 @@ export function TokenBudgetTable({
           </>
         }
         subtitle="Spend caps per dimension, shown against live usage. P0c runs in observation mode (warn)."
-        actions={
+        primaryAction={
           <button
             type="button"
             className="cu-btn cu-btn--primary cu-btn--sm"

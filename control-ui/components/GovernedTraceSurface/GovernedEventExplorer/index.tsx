@@ -136,7 +136,7 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
     <section className="cu-trace-layout">
       <div className="cu-card cu-card--viewport-fill">
         <TablePanelHeader
-          actions={<TraceTimeWindowControl onChange={updateState} state={state} />}
+          secondaryActions={<TraceTimeWindowControl onChange={updateState} state={state} />}
           refreshAction={
             <button
               aria-label={loading ? 'Refreshing governed events' : 'Refresh governed events'}

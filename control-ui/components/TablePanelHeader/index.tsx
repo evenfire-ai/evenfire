@@ -6,10 +6,11 @@ import type { TablePanelHeaderProps } from './types'
 
 /** Control UI compatibility adapter for the shared list header. */
 export function TablePanelHeader({
-  actions,
   actionsClassName,
+  primaryAction,
   refreshAction,
   search,
+  secondaryActions,
   subtitle,
   title,
   titleActions,
@@ -17,11 +18,12 @@ export function TablePanelHeader({
   return (
     <DataViewHeader
       actions={
-        actions || refreshAction || search ? (
+        secondaryActions || search || refreshAction || primaryAction ? (
           <div className={cn('cu-table-panel__actions', actionsClassName)}>
-            {actions}
-            {refreshAction}
+            {secondaryActions}
             {search}
+            {refreshAction}
+            {primaryAction}
           </div>
         ) : undefined
       }

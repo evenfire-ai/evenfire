@@ -314,7 +314,7 @@ export function GovernedTraceSurface({
         <TablePanelHeader
           title={title}
           subtitle={subtitle}
-          actions={
+          secondaryActions={
             !detail ? (
               <SelectInput
                 aria-label="Trace time window"

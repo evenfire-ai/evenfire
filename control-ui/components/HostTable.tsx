@@ -200,7 +200,7 @@ export function HostTable({
           </>
         }
         subtitle="Manage available agents and their host mappings."
-        actions={
+        primaryAction={
           <button
             type="button"
             className="cu-btn cu-btn--primary cu-btn--sm"

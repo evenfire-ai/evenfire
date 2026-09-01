@@ -174,7 +174,7 @@ export function RecipeSecretsPanel({
             namespace where the workload will read the Secret.
           </>
         }
-        actions={
+        primaryAction={
           <button
             type="button"
             className="cu-btn cu-btn--primary cu-btn--sm"

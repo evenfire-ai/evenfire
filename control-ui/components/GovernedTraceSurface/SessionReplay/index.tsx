@@ -138,7 +138,7 @@ export function SessionReplay({
     <section className="cu-trace-layout">
       <div className="cu-card cu-card--viewport-fill">
         <TablePanelHeader
-          actions={<TraceTimeWindowControl onChange={updateState} state={state} />}
+          secondaryActions={<TraceTimeWindowControl onChange={updateState} state={state} />}
           refreshAction={
             <button
               aria-label={loading ? 'Refreshing sessions' : 'Refresh sessions'}

@@ -289,7 +289,7 @@ export function LlmDiscoveryPanel({
             </>
           }
           subtitle="Newly synced models land here disabled. Enable only the models you want available to agents and runtime."
-          actions={
+          primaryAction={
             <button
               type="button"
               className="cu-btn cu-btn--primary cu-btn--sm"

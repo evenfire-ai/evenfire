@@ -199,7 +199,7 @@ export default function SharedFileSystemsPage() {
             </>
           }
           subtitle="Workspace volumes that Contexts can mount read-only into agent pods."
-          actions={
+          primaryAction={
             <button
               type="button"
               className="cu-btn cu-btn--primary cu-btn--sm"

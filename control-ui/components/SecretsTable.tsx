@@ -421,7 +421,7 @@ export function SecretsTable({
             </>
           }
           subtitle="Manage LLM, connector, and recipe credentials in one place."
-          actions={
+          primaryAction={
             <button
               type="button"
               className="cu-btn cu-btn--primary cu-btn--sm"

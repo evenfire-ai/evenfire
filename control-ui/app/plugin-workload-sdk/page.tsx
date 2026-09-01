@@ -308,32 +308,16 @@ export default function PluginWorkloadSdkPage() {
             </>
           }
           subtitle="Per-recipe capability grants, quota, and invocation audit for promptBridge and clientNotifications."
-          actions={
+          secondaryActions={
             view === 'grants' ? (
-              <>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => setView('invocations')}
-                >
-                  Invocations
-                </Button>
-                <Button
-                  type="button"
-                  variant="primary"
-                  size="sm"
-                  onClick={() => setEditing('new')}
-                  disabled={
-                    grantsInitialLoad ||
-                    legacyInventoryLoading ||
-                    Boolean(legacyInventoryError) ||
-                    Boolean(grantsError)
-                  }
-                >
-                  New grant
-                </Button>
-              </>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => setView('invocations')}
+              >
+                Invocations
+              </Button>
             ) : undefined
           }
           refreshAction={
@@ -381,6 +365,24 @@ export default function PluginWorkloadSdkPage() {
                   Boolean(grantsError)
                 }
               />
+            ) : undefined
+          }
+          primaryAction={
+            view === 'grants' ? (
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                onClick={() => setEditing('new')}
+                disabled={
+                  grantsInitialLoad ||
+                  legacyInventoryLoading ||
+                  Boolean(legacyInventoryError) ||
+                  Boolean(grantsError)
+                }
+              >
+                New grant
+              </Button>
             ) : undefined
           }
         />

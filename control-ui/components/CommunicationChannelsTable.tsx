@@ -194,7 +194,7 @@ export function CommunicationChannelsTable({
             </>
           }
           subtitle="Route channel messages to the selected agent."
-          actions={
+          primaryAction={
             <button
               type="button"
               className="cu-btn cu-btn--primary cu-btn--sm"

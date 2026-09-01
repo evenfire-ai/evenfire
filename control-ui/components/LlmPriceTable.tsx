@@ -159,7 +159,7 @@ export function LlmPriceTable({
           </>
         }
         subtitle="Per-model token prices that back cost-unit budgets. Prices are per 1M tokens."
-        actions={
+        primaryAction={
           <button
             type="button"
             className="cu-btn cu-btn--primary cu-btn--sm"

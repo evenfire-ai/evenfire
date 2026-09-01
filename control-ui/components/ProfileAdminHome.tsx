@@ -433,7 +433,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
             </>
           }
           subtitle="Members and teams grant Desktop App access. Admins grant Control UI access."
-          actions={
+          primaryAction={
             activeTab === 'admins' ? (
               <button
                 type="button"

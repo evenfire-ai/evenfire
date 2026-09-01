@@ -10,10 +10,11 @@ describe('TablePanelHeader', () => {
   it('applies the common action-toolbar layout to every header', () => {
     render(
       <TablePanelHeader
-        actions={<button type="button">Create agent</button>}
         actionsClassName="custom-toolbar"
+        primaryAction={<button type="button">Create agent</button>}
         refreshAction={<button type="button">Refresh agents</button>}
         search={<input aria-label="Search agents" type="search" />}
+        secondaryActions={<button type="button">Import agents</button>}
         title="Agents"
       />
     )
@@ -24,12 +25,13 @@ describe('TablePanelHeader', () => {
     )
   })
 
-  it('renders page actions, refresh, and search in visual and focus order', () => {
+  it('renders secondary actions, search, refresh, and the primary action in focus order', () => {
     render(
       <TablePanelHeader
         search={<input aria-label="Search agents" type="search" />}
         refreshAction={<button type="button">Refresh agents</button>}
-        actions={<button type="button">Create agent</button>}
+        primaryAction={<button type="button">Create agent</button>}
+        secondaryActions={<button type="button">Import agents</button>}
         title="Agents"
       />
     )
@@ -40,7 +42,7 @@ describe('TablePanelHeader', () => {
       Array.from((toolbar as HTMLElement).querySelectorAll('button, input[type="search"]')).map(
         control => control.getAttribute('aria-label') || control.textContent
       )
-    ).toEqual(['Create agent', 'Refresh agents', 'Search agents'])
+    ).toEqual(['Import agents', 'Search agents', 'Refresh agents', 'Create agent'])
     expect(css).not.toMatch(/\.cu-table-panel__actions[^{}]*\{[^}]*\border\s*:/)
     expect(css).toMatch(/\.cu-table-panel__actions\s*\{[^}]*flex-wrap:\s*wrap/)
     expect(css).toMatch(/\.cu-table-panel__actions\s*\{[^}]*width:\s*100%/)

@@ -239,7 +239,7 @@ export default function RegistryCatalog() {
           }
           subtitle="Discover and install connectors from the Marketplace."
           actionsClassName="cu-registry-toolbar"
-          actions={
+          secondaryActions={
             <>
               <div className="cu-registry-filter-group">
                 <FilterSelect

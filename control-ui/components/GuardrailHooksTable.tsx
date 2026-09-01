@@ -166,7 +166,7 @@ export function GuardrailHooksTable({
           </>
         }
         subtitle="Installed LLM guardrail hooks across the cluster."
-        actions={
+        primaryAction={
           onInstall ? (
             <button
               type="button"

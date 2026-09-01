@@ -88,25 +88,15 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
           </>
         }
         subtitle="Select a plugin to view status, run history, and actions."
-        actions={
-          <>
-            <button
-              type="button"
-              className="cu-btn cu-btn--sm cu-nowrap"
-              onClick={() => router.push(CONTROL_ROUTES.plugins.sdk)}
-              disabled={isInitialLoad}
-            >
-              Plugins SDK
-            </button>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={onInstall}
-              disabled={isInitialLoad}
-            >
-              Install Plugin
-            </button>
-          </>
+        secondaryActions={
+          <button
+            type="button"
+            className="cu-btn cu-btn--sm cu-nowrap"
+            onClick={() => router.push(CONTROL_ROUTES.plugins.sdk)}
+            disabled={isInitialLoad}
+          >
+            Plugins SDK
+          </button>
         }
         refreshAction={
           <button
@@ -127,6 +117,16 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
             ariaLabel="Search plugins"
             disabled={isInitialLoad}
           />
+        }
+        primaryAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--primary cu-btn--sm"
+            onClick={onInstall}
+            disabled={isInitialLoad}
+          >
+            Install Plugin
+          </button>
         }
       />
       {error ? <div className="cu-banner cu-banner--error cu-table-error">{error}</div> : null}

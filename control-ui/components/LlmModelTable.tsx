@@ -227,7 +227,7 @@ export function LlmModelTable({
           </>
         }
         subtitle="The authoritative allowlist of manual and discovered models. Only enabled rows can be selected for agents and runtime."
-        actions={
+        secondaryActions={
           <>
             {providerOptions.length > 1 ? (
               <FilterSelect
@@ -263,14 +263,6 @@ export function LlmModelTable({
                 <option value="discovery">Discovered</option>
               </SelectInput>
             ) : null}
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={onCreate}
-              disabled={isInitialLoad}
-            >
-              Add model
-            </button>
           </>
         }
         refreshAction={
@@ -292,6 +284,16 @@ export function LlmModelTable({
             ariaLabel="Search models"
             disabled={isInitialLoad}
           />
+        }
+        primaryAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--primary cu-btn--sm"
+            onClick={onCreate}
+            disabled={isInitialLoad}
+          >
+            Add model
+          </button>
         }
       />
       {navigation}
