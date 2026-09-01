@@ -40,8 +40,10 @@ done >>"$tmp"
 
 python3 - "$tmp" <<'PY'
 from pathlib import Path
+import ipaddress
 import re
 import sys
+from urllib.parse import urlsplit
 
 diff = Path(sys.argv[1]).read_text(errors="replace")
 bad = []
@@ -134,6 +136,23 @@ def is_source_fixture(path: str) -> bool:
 def is_credentialed_postgres_url(text: str) -> bool:
     return bool(re.search(r"(?i)postgres(?:ql)?://[^\s\"'<>:]+:[^\s\"'<>@]+@", text))
 
+def is_synthetic_postgres_fixture_url(text: str) -> bool:
+    try:
+        parsed = urlsplit(text)
+        host = parsed.hostname
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in {"postgres", "postgresql"} or not host:
+        return False
+    if parsed.password is not None:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
 def safe_contract_control_value(path: str, reason: str, value: str) -> bool:
     if path not in {
         "scripts/tests/test-minikube-t2-contract.sh",
@@ -156,12 +175,7 @@ def safe_source_fixture_value(path: str, reason: str, value: str, match: re.Matc
         matched_url = match.group(0)
         if is_credentialed_postgres_url(matched_url):
             return False
-        return bool(
-            re.search(
-                r"(?i)(CONTROL_API_REAL_PG_ADMIN_URL|adminUrl|sentinel|fixture|example|test)",
-                value,
-            )
-        )
+        return is_synthetic_postgres_fixture_url(matched_url)
     if reason == "credential assignment":
         literal = match.group(1) if match.lastindex else ""
         return literal in safe_fixture_literals
@@ -201,7 +215,7 @@ for line in diff.splitlines():
     # inspection, and handle shell-style uppercase assignments separately.
     patterns = (
         (r"postgres(?:ql)?://[^\s\"'<>:]+:[^\s\"'<>@]+@", "credentialed PostgreSQL URL"),
-        (r"(?i)postgres(?:ql)?://(?:[^\s\"'<>@]+@)?(?:localhost|127\.0\.0\.1|10\.[0-9.]+|192\.168\.[0-9.]+|172\.(?:1[6-9]|2[0-9]|3[01])\.[0-9.]+|[A-Za-z0-9.-]*(?:private|internal|local|cluster|postgres)[A-Za-z0-9.-]*)(?::[0-9]+)?(?:/|$)", "private PostgreSQL URL"),
+        (r"(?i)postgres(?:ql)?://(?:[^\s\"'<>@]+@)?(?:localhost|127(?:\.[0-9]{1,3}){3}|\[::1\]|10\.[0-9.]+|192\.168\.[0-9.]+|172\.(?:1[6-9]|2[0-9]|3[01])\.[0-9.]+|[A-Za-z0-9.-]*(?:private|internal|local|cluster|postgres)[A-Za-z0-9.-]*)(?::[0-9]+)?(?:/|$)", "private PostgreSQL URL"),
         (r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", "private key"),
         (r"(?i)\bBearer\s+[A-Za-z0-9._~-]{24,}", "bearer token"),
         (r"(?i)\b(?:api[_-]?key|password|secret|token|private[_-]?key)\s*[:=]\s*[\"']([^\"'\r\n]{8,})[\"']", "credential assignment"),
