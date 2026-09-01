@@ -7,7 +7,7 @@ const nextConfig = {
   async rewrites() {
     const destination =
       process.env.EXTERNAL_REST_API_INTERNAL_URL ||
-      'http://external-rest-api.profiles.svc.cluster.local:8091'
+      'http://external-rest-api:8091'
     // WARNING (see evenfire #287, and RC2 in PR #280): this rewrite routes through
     // Next's internal proxy, which silently truncates request bodies at 10MiB and
     // hard-caps at a 30s proxyTimeout — the exact construct RC2 removed from
