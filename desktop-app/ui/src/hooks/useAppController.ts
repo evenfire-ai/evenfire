@@ -873,7 +873,17 @@ export function useAppController() {
   const handleSelectChatAgent = useCallback(
     (
       agentName: string,
-      options: { selectLatest?: boolean; chatId?: string; isRemote?: boolean; title?: string } = {}
+      options: {
+        selectLatest?: boolean
+        chatId?: string
+        isRemote?: boolean
+        title?: string
+        // When true, drive the chat controller (pending selection + selectedAgent)
+        // WITHOUT flipping `navItem` to the chat route. The chat-drawer coexists
+        // with the live app on the `apps` route and needs to swap the shared
+        // <ChatPage>'s conversation in place, so it must not navigate away.
+        keepNavItem?: boolean
+      } = {}
     ) => {
       if (!agentName) return
       const targetChatId = String(options.chatId || '').trim()
@@ -890,7 +900,20 @@ export function useAppController() {
       // the pending-selection path below, which is designed to survive a route
       // change: it sets the active chat synchronously AND records the selection
       // the effect replays.
-      if (targetChatId && nav.selectedAgent === agentName && nav.navItem === DESKTOP_ROUTES.chat) {
+      // `keepNavItem` always takes the pending-selection path below: it is used
+      // when the route is changing to (or staying on) a non-chat route (the app
+      // drawer). The pending selection is what survives a route change — but it is
+      // only replayed when the agent-selection effect re-runs (deps include
+      // `navItem`/`selectedAgent`). When `keepNavItem` selects a chat of the
+      // ALREADY-selected agent WITHOUT a route change (drawer reopen / switcher),
+      // neither dep changes, the effect never replays, and the pending selection
+      // is left stuck loading. That case gets an imperative `switchToChat` below.
+      if (
+        targetChatId &&
+        nav.selectedAgent === agentName &&
+        nav.navItem === DESKTOP_ROUTES.chat &&
+        !options.keepNavItem
+      ) {
         // D.4: switchToChat is now a single unified path (no isRemote) — the
         // server is the source of truth and hydrates server-only chats itself.
         void chat.switchToChat(agentName, targetChatId)
@@ -916,7 +939,17 @@ export function useAppController() {
       }
       nav.setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
       nav.setSelectedAgent(agentName)
-      nav.setNavItem(DESKTOP_ROUTES.chat)
+      if (!options.keepNavItem) nav.setNavItem(DESKTOP_ROUTES.chat)
+      // Drawer same-agent selection: `setSelectedAgent` above is a no-op (same
+      // value) and `navItem` is not flipped, so the agent-selection effect will
+      // not replay to consume the pending selection — load the chat imperatively.
+      // The pending selection is still set above so that when the caller DID
+      // change the route in the same batch (launch-from-chat: chat→apps), the
+      // effect replays into its `specific` branch instead of the reset branch;
+      // both switches target the same chat and `switchToChat` coalesces them.
+      if (options.keepNavItem && targetChatId && nav.selectedAgent === agentName) {
+        void chat.switchToChat(agentName, targetChatId)
+      }
     },
     [
       chat.clearActiveChat,
@@ -950,17 +983,37 @@ export function useAppController() {
   )
 
   const openAgentConversationTarget = useCallback(
-    async (target: AgentConversationNotificationTarget) => {
+    async (
+      target: AgentConversationNotificationTarget,
+      options: { keepNavItem?: boolean } = {}
+    ) => {
       const targetAgent = String(target.agentName || '').trim()
       if (!targetAgent) return
       const targetChatId = String(target.chatId || '').trim()
       const targetTeamId = String(target.teamId || '').trim()
       const activeTeamId = currentTeamIdRef.current
       const requiresTeamSwitch = Boolean(targetTeamId && targetTeamId !== activeTeamId)
+      // minispec 04 approach C: when the app embed is live (App requests
+      // `keepNavItem`) and no team switch is needed, surface the conversation IN
+      // the drawer instead of ejecting to the full-screen chat route. A team
+      // switch tears the embed down, so that case keeps the full-screen path.
+      const stayInDrawer = Boolean(options.keepNavItem) && !requiresTeamSwitch
 
       try {
         if (requiresTeamSwitch) {
           await ensureTeamContext({ teamId: targetTeamId })
+        }
+
+        if (stayInDrawer) {
+          // handleSelectChatAgent(keepNavItem) sets the active chat without
+          // flipping `navItem` (and imperatively switches for the same-agent
+          // case); the drawer reconciler (approach A) syncs the switcher tab.
+          handleSelectChatAgent(targetAgent, {
+            selectLatest: false,
+            keepNavItem: true,
+            ...(targetChatId ? { chatId: targetChatId } : {}),
+          })
+          return
         }
 
         // Same imperative-fast-path guard as handleSelectChatAgent: `switchToChat`
@@ -1002,6 +1055,7 @@ export function useAppController() {
       chat.switchToChat,
       ensureTeamContext,
       fullSetStatus,
+      handleSelectChatAgent,
       nav.navItem,
       nav.selectedAgent,
       nav.setNavItem,
@@ -1144,7 +1198,7 @@ export function useAppController() {
 
   // ─── Cross-domain: handleOpenNotification ───
   const handleOpenNotification = useCallback(
-    async (notification: AppNotification) => {
+    async (notification: AppNotification, options: { keepNavItem?: boolean } = {}) => {
       notif.markNotificationRead(notification.id)
       if (notification.kind === 'workflow_completed') {
         await openWorkflowCompletionTarget(notification)
@@ -1154,7 +1208,9 @@ export function useAppController() {
         await openSdkNotificationTarget(notification)
         return
       }
-      await openAgentConversationTarget(notification)
+      // `keepNavItem` (App passes it when the app embed is live) only reaches the
+      // agent-conversation surface — workflow/SDK targets navigate elsewhere.
+      await openAgentConversationTarget(notification, options)
     },
     [
       notif.markNotificationRead,
