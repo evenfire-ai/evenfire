@@ -17,9 +17,9 @@ import { useConfirmDialog } from './ConfirmDialog'
 import { LlmProviderIcon } from './LlmProviderIcon'
 import { LlmSecretUpdateModal } from './LlmSecretUpdateModal'
 import { RowActionsMenu } from './RowActionsMenu'
+import { SecretsScopeTabs } from './SecretsScopeTabs'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconKey } from './Sidebar/icons'
-import { TabBar } from './TabBar'
 import { TablePanelHeader } from './TablePanelHeader'
 import { useToast } from './Toast'
 import { IconRefresh } from './icons'
@@ -467,16 +467,7 @@ export function SecretsTable({
         />
 
         <div className="cu-card__body cu-card__body--auto cu-secrets-strip">
-          <TabBar<SecretScope>
-            ariaLabel="Secret scopes"
-            activeValue={scope}
-            className="cu-tabs--flush"
-            options={[
-              { value: 'llm', href: CONTROL_ROUTES.secrets.llm, label: 'LLM' },
-              { value: 'mcp', href: CONTROL_ROUTES.secrets.connector, label: 'Connector' },
-              { value: 'recipe', href: CONTROL_ROUTES.secrets.recipe, label: 'Recipe' },
-            ]}
-          />
+          <SecretsScopeTabs activeValue={scope} />
         </div>
 
         {scope === 'llm' && error && (
@@ -532,7 +523,7 @@ export function SecretsTable({
           </div>
         ) : scope === 'llm' && filteredRows.length === 0 ? (
           <div className="cu-empty">
-            {normalizedLlmSearch ? 'No LLM secrets match this search.' : 'No LLM secrets found.'}
+            {normalizedLlmSearch ? 'No LLM secrets match this search.' : <>No LLM secrets found.</>}
           </div>
         ) : scope === 'llm' ? (
           <div className="cu-table-wrap">

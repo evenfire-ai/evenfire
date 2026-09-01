@@ -11,6 +11,7 @@ import type {
 import { DESKTOP_ROUTES } from '../constants/navigation'
 import { pickLatestAgent } from '../lib/agents'
 import { toPrettyJson } from '../lib/format'
+import { selectUnauthenticatedView } from '../lib/unauthenticatedView'
 import { summarizeWorkflowResource } from '../lib/workflows'
 import type {
   AgentApprovalNotificationTarget,
@@ -24,13 +25,17 @@ import type {
 import {
   type ApprovalDecisionTarget,
   decideApproval as decideApprovalCore,
+  handleMcpOauthCompletion,
+  resolveConnectResumeTargets,
 } from './domain/approvalDecision'
+import { createMcpOauthResumeBuffer } from './domain/mcpOauthResumeBuffer'
 import { desktopQueryKeys } from './domain/queryKeys'
 import { useActivityController } from './domain/useActivityController'
 import { useAgentChatController } from './domain/useAgentChatController'
 import { useAgentsDataController } from './domain/useAgentsDataController'
 import { useAuthController } from './domain/useAuthController'
 import { useChannelNotificationPreferencesController } from './domain/useChannelNotificationPreferencesController'
+import { useConnectorsController } from './domain/useConnectorsController'
 import { useContextsDataController } from './domain/useContextsDataController'
 import { useDesktopController } from './domain/useDesktopController'
 import { useHostPrewarmController } from './domain/useHostPrewarmController'
@@ -39,6 +44,7 @@ import { useMcpServersDataController } from './domain/useMcpServersDataControlle
 import { useNavigationController } from './domain/useNavigationController'
 import { useNotificationSettingsController } from './domain/useNotificationSettingsController'
 import { useNotificationsController } from './domain/useNotificationsController'
+import { useOnboardingController } from './domain/useOnboardingController'
 import { useTeamsDataController } from './domain/useTeamsDataController'
 import { useToastController } from './domain/useToastController'
 import {
@@ -48,11 +54,21 @@ import {
 } from './domain/useWorkflowController.types'
 import { scheduleAfterFirstPaint } from './scheduleAfterFirstPaint'
 
+// U5 cold-start buffer: how long an OAuth completion whose sessions are not yet
+// seeded is retried against later snapshots before it is discarded. Long enough
+// to cover the async/auth-gated session load after `rendererReady`, short enough
+// that a stale grant can never drive a much-later resume. RPC token TTL is 300s;
+// this stays well under it.
+const MCP_OAUTH_RESUME_BUFFER_TTL_MS = 45_000
+
 const DENY_REASON_BY_SOURCE: Record<ApprovalDecisionTarget['source'], string> = {
   desktop_notification: 'Denied from desktop notification',
   inapp_bell: 'Denied from notifications panel',
   in_chat: 'User denied',
   placeholder: 'User denied',
+  // U5: connect_completed is only ever an approve/resume — this deny reason is
+  // unreachable, present solely to satisfy the exhaustive source map.
+  connect_completed: 'User denied',
 }
 
 export async function loadWorkflowRunsWithArtifactsForWorkflowTarget(
@@ -167,10 +183,34 @@ export function useAppController() {
     onSessionNeedsLoad,
   })
 
+  // ─── First-run onboarding ───
+  const onboarding = useOnboardingController()
+  // Onboarding owns the unauthenticated screen only while the app has no
+  // environment at all. Saving one — or selecting Localhost —
+  // flips `configured`, which retires the wizard; deleting the last one brings
+  // it back rather than leaving a sign-in form with nothing to sign in to.
+  const unauthenticatedView = selectUnauthenticatedView({
+    hasDependencyOutage: auth.hasDependencyOutage,
+    runtimeConfigMissing: auth.runtimeConfigMissing,
+    isAuthenticated: auth.isAuthenticated,
+  })
+  // The controller is app-level, so wizard state outlives the wizard itself.
+  // Once an environment exists the run is finished: rewind to Q1, so deleting
+  // that environment later reopens onboarding at the first question instead of
+  // the step of a path the user already left.
+  const resetOnboarding = onboarding.reset
+  useEffect(() => {
+    if (!auth.runtimeConfigMissing) resetOnboarding()
+  }, [auth.runtimeConfigMissing, resetOnboarding])
+
   // ─── First-screen data contexts ───
   const agentsData = useAgentsDataController()
   const contextsData = useContextsDataController()
   const mcpServersData = useMcpServersDataController()
+  // App-coordinated like the other data-controllers: the panel query is
+  // `enabled:false`, so the initial load and the identity teardown are owned
+  // here (see refreshAuthenticatedData / handleLogout / switchTeamForWorkspace).
+  const connectorsData = useConnectorsController()
   const teamsData = useTeamsDataController()
   const currentTeamId = auth.me?.teamId || teamsData.currentTeamId || ''
   const availableTeamIds = useMemo(() => teamsData.teams.map(team => team.id), [teamsData.teams])
@@ -202,6 +242,15 @@ export function useAppController() {
     (target: ApprovalDecisionTarget) => decideApprovalRef.current(target),
     []
   )
+  // U5/R3-M1: buffers OAuth completions that arrive before their sessions are
+  // seeded (cold start), retried on later FSM snapshots. Lazy-init the ref (the
+  // factory must not re-run every render — same pattern as the FSM store).
+  const mcpOauthResumeBufferRef = useRef<ReturnType<
+    typeof createMcpOauthResumeBuffer<ApprovalDecisionTarget>
+  > | null>(null)
+  if (!mcpOauthResumeBufferRef.current) {
+    mcpOauthResumeBufferRef.current = createMcpOauthResumeBuffer<ApprovalDecisionTarget>()
+  }
   const openAgentConversationFromNotification = useCallback(
     (target: AgentConversationNotificationTarget) =>
       openAgentConversationFromNotificationRef.current(target),
@@ -307,6 +356,79 @@ export function useAppController() {
   )
   decideApprovalRef.current = decideApprovalImpl
 
+  // U5 (mcp-oauth reactive consent) — deep-link correlation + resume.
+  // When the OAuth "Connect <server>" flow completes, control-api bounces to
+  // `clerum://oauth-completed?…&source=mcp&mcpServerName=<X>`; main.ts forwards
+  // `{ mcpServerName }` here. Correlation is by `mcpServerName` against the FSM
+  // snapshot — the single source of truth already used by the resume/reconcile
+  // paths — so it is robust to concurrency (resumes EVERY conversation suspended
+  // on that server, since a per-user grant is global to the user) and needs no
+  // ephemeral client_id→server map. Each match resumes through the SAME central
+  // decider (`decideApproval` approve → the approval RPC re-executes the tool).
+  //
+  // R3-M1 (cold start): a completion can arrive BEFORE the FSM snapshot is seeded
+  // (sessions load async/auth-gated after `rendererReady`), so `resolve…` returns
+  // `[]` even though the grant exists and a conversation is suspended. Dropping it
+  // there loses the auto-resume. Instead, an empty resolve buffers the completion
+  // (bounded TTL) and the store `subscribe` re-evaluates it on EVERY snapshot
+  // change until its deadline. The buffered entry is kept — not dropped on the
+  // first match — because the real seam (`seedSessionSnapshots`) dispatches one
+  // session per snapshot, so siblings on the SAME server surface across separate
+  // notifications; keeping the entry alive lets every one of them resume within
+  // the window (the per-user grant is global to the user). A resumed conversation
+  // leaves `awaiting_approval`, so it stops resolving as a target — each sibling
+  // fires once, and any redundant re-fire is a guarded no-op (decideApproval step
+  // 1 + mcp-host per-`requestId` idempotency).
+  //
+  // U3 (mcp-oauth PROACTIVE consent) adds the connectors-panel arm: EVERY
+  // completion refreshes the panel via `handleMcpOauthCompletion` (which resumes
+  // any already-seeded suspended turn AND refreshes), so both the PROACTIVE (no
+  // turn in flight) and coexistence (turn + panel) cases re-read the grant store
+  // (U1 tri-state, D4). When the completion resolves no targets on arrival —
+  // proactive OR cold-start — it is buffered: a genuinely proactive entry keeps
+  // resolving `[]` and expires at TTL, a cold-start one resumes once the FSM is
+  // seeded. Subscribed once; `chat.sessionFsmStore`, `decideApprovalRef`, the
+  // buffer ref and `connectorsData.refresh` are read live.
+  useEffect(() => {
+    const store = chat.sessionFsmStore
+    const buffer = mcpOauthResumeBufferRef.current!
+    const fire = (targets: ApprovalDecisionTarget[]) => {
+      for (const target of targets) void decideApprovalRef.current(target)
+    }
+
+    const unsub = window.clerum.rpc.onMcpOauthCompleted?.(({ mcpServerName }) => {
+      // Immediate arm: resume any already-seeded suspended turn(s) AND refresh
+      // the connectors panel (U3). The panel query is `enabled:false`, so an
+      // invalidate would only mark it stale — drive the imperative refresh.
+      const { resumedCount } = handleMcpOauthCompletion(
+        {
+          getSnapshot: () => store.getSnapshot(),
+          decide: target => void decideApprovalRef.current(target),
+          refreshConnectors: () => void connectorsData.refresh(),
+        },
+        mcpServerName
+      )
+      if (resumedCount === 0) {
+        // Nothing resolved on arrival — proactive (no turn) OR cold-start (FSM
+        // not seeded yet). Buffer for retry on a later snapshot; a proactive
+        // entry keeps resolving `[]` and expires harmlessly at its TTL.
+        buffer.add(mcpServerName, Date.now() + MCP_OAUTH_RESUME_BUFFER_TTL_MS)
+      }
+    })
+
+    const unsubStore = store.subscribe(() => {
+      if (buffer.size() === 0) return
+      fire(
+        buffer.drain(Date.now(), server => resolveConnectResumeTargets(store.getSnapshot(), server))
+      )
+    })
+
+    return () => {
+      unsub?.()
+      unsubStore()
+    }
+  }, [chat.sessionFsmStore, connectorsData.refresh])
+
   // ─── MCP Server ───
   const mcpServer = useMcpServerController({
     selectedAgent: nav.selectedAgent,
@@ -404,6 +526,7 @@ export function useAppController() {
                 refreshMcpServersData(),
                 refreshTeams(),
                 refreshWorkflowsData(),
+                connectorsData.refresh(),
                 notif.handleRefreshPendingApprovals({ silent: true }),
               ])
             }
@@ -417,10 +540,12 @@ export function useAppController() {
         refreshMcpServersData(),
         refreshTeams(),
         refreshWorkflowsData(),
+        connectorsData.refresh(),
         notif.handleRefreshPendingApprovals({ silent: true }),
       ])
     },
     [
+      connectorsData.refresh,
       notif.handleRefreshPendingApprovals,
       refreshAgentsData,
       refreshContextsData,
@@ -530,7 +655,7 @@ export function useAppController() {
         if (!sessionState.authenticated || !sessionState.me) {
           throw new Error('Team switch ended without an authenticated session')
         }
-        // GAP-N4 (spec §4.5-3): the renderer half of a team switch. `clearActiveChat`
+        // GAP-N4: the renderer half of a team switch. `clearActiveChat`
         // only deselects — the previous team's tracker entries and FSM projection
         // survive, so a late terminal from an old-team task could run side effects
         // and stale badges leak across teams. Tear down the renderer chat state
@@ -540,6 +665,11 @@ export function useAppController() {
         // team's tasks stay alive server-side and converge on return via reconcile.
         // Main-process stream teardown is Fase 4.
         chat.resetChat()
+        // The connectors panel key is identity-unscoped, and its payload carries
+        // per-connector OAuth authorization state — drop it here (before the
+        // refresh below repopulates) so the previous team's grants cannot show,
+        // even for the frame between the confirmed switch and the refetch.
+        connectorsData.reset()
         auth.setIsAuthenticated(true)
         auth.setMe(sessionState.me)
         auth.setEmail(sessionState.me.email || '')
@@ -568,6 +698,7 @@ export function useAppController() {
       auth.setIsAuthenticated,
       auth.setMe,
       chat.resetChat,
+      connectorsData.reset,
       fullSetStatus,
       refreshAuthenticatedData,
       setPostPaintDataReady,
@@ -646,6 +777,7 @@ export function useAppController() {
           agentsData.reset()
           contextsData.reset()
           mcpServersData.reset()
+          connectorsData.reset()
           teamsData.reset()
           resetWorkflowsData()
           queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
@@ -687,6 +819,7 @@ export function useAppController() {
     [
       agentsData.reset,
       auth.refreshRuntimeConfigState,
+      connectorsData.reset,
       auth.setBooting,
       auth.setDependencyHealth,
       auth.setDesktopReleaseStatus,
@@ -721,10 +854,11 @@ export function useAppController() {
       agentsData.reset()
       contextsData.reset()
       mcpServersData.reset()
+      connectorsData.reset()
       teamsData.reset()
       resetWorkflowsData()
       queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
-      // Drop ALL cached queries on logout (spec §5.2 P1): the singleton
+      // Drop ALL cached queries on logout: the singleton
       // desktopQueryClient uses staleTime:Infinity, so any env-scoped data left
       // in cache would otherwise bleed into the next login (possibly a different
       // environment, since the env is chosen pre-login).
@@ -749,6 +883,7 @@ export function useAppController() {
     auth.setBusy,
     chat.resetChat,
     chat.stopAllActivityStreams,
+    connectorsData.reset,
     contextsData.reset,
     fullSetStatus,
     loadSession,
@@ -1119,6 +1254,8 @@ export function useAppController() {
     authTransitioning: auth.authTransitioning,
     runtimeConfigState: auth.runtimeConfigState,
     runtimeConfigMissing: auth.runtimeConfigMissing,
+    onboarding,
+    unauthenticatedView,
     desktopReleaseStatus: auth.desktopReleaseStatus,
     desktopEnvironmentSetupComplete: auth.desktopEnvironmentSetupComplete,
     pendingDesktopEnvironmentSetup: auth.pendingDesktopEnvironmentSetup,
@@ -1155,6 +1292,7 @@ export function useAppController() {
     selectedAgent: nav.selectedAgent,
     selectedAgentRoute: nav.selectedAgentRoute,
     selectedContext: nav.selectedContext,
+    selectedContextTab: nav.selectedContextTab,
     selectedTeam: nav.selectedTeam,
     setSelectedAgent: nav.setSelectedAgent,
     setSelectedContext: nav.setSelectedContext,

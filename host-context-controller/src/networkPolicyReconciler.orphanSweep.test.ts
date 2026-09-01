@@ -36,6 +36,8 @@ vi.mock('./metrics', () => ({
   networkPolicySafetyPassPoliciesTotal: { inc: vi.fn() },
   netPolOrphansDeletedTotal: { inc: vi.fn() },
   netPolOrphanSweepCappedTotal: { inc: vi.fn() },
+  writesTotal: { inc: vi.fn() },
+  writeSkipsTotal: { inc: vi.fn() },
 }))
 function makeMockNetworkingApi() {
   return {

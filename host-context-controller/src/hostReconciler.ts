@@ -4,6 +4,12 @@ import { createHash, randomUUID } from 'crypto'
 import { isDeepStrictEqual } from 'node:util'
 import * as path from 'path'
 import type { AdministrativeOutcomeReporter } from './administrativeOutcomeReporter'
+import {
+  type CodexCatalogSnapshot,
+  type CodexExecutionProjection,
+  assignedHostCodexConnectionRef,
+  projectCodexExecution,
+} from './codexExecutionProjection'
 import { config } from './config'
 import { HOST_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE } from './constants'
 import { mintHostGfsToken } from './gfsHostBinding'
@@ -13,18 +19,29 @@ import type {
   HccInfrastructureTelemetryPayload,
   InfrastructureTelemetryReporter,
 } from './infrastructureTelemetryReporter'
-import { makeHostK8sApiClient } from './k8s/hostK8sApiClient'
+import {
+  HOST_K8S_REQUEST_TIMEOUT_CODE,
+  HostK8sRequestTimeoutError,
+  makeHostK8sApiClient,
+} from './k8s/hostK8sApiClient'
 import {
   SFS_LABEL,
   SFS_NAMESPACE_LABEL,
   WFC_APP_LABEL,
   sharedFileSystemHash,
 } from './k8s/sharedFileSystemFactory'
+import {
+  ALLOWED_MODELS_CONFIGMAP_NAME,
+  parseAllowedModelsSnapshot,
+  snapshotForAssignedCodexGrant,
+  snapshotFromConfigMapError,
+} from './llmAllowedModelsSnapshot'
 import { hccLogger } from './logger'
 import { issueMcpHostRuntimeTokens } from './mcpHostRuntimeTokenIssuerClient'
 import {
   hostCleanupDeferredTotal,
   hostDeleteCleanupTotal,
+  hostFleetBenignSupersessionsTotal,
   hostReconcileDurationSeconds,
   hostReconcileInFlight,
   hostReconcileQueueWaitSeconds,
@@ -47,8 +64,10 @@ import { EffectiveHostLifecycle, SuspendFromHeartbeatOutcome } from './stateless
 import { ReflectHostOutcomeFn, StatelessLifecycleExecutor } from './statelessLifecycleExecutor'
 import {
   CommunicationChannelCRD,
+  EffectiveMcpHostControlScope,
   HostCRD,
   HostChannelReaderStatus,
+  HostRuntimeControlScope,
   HostRuntimeStatus,
   HostWorkflowControlScope,
   HostWorkflowControlSpec,
@@ -56,6 +75,8 @@ import {
 import {
   applyNetworkPolicy,
   canonicalStringify,
+  canonicalizeValue,
+  deploymentMatchesDesired,
   getErrorCode,
   preserveDeploymentAnnotations,
   preserveServiceAssignedFields,
@@ -148,7 +169,7 @@ const BENIGN_SUPERSESSION_ERROR_NAMES: ReadonlySet<string> = new Set([
   'HostMutationDependencyChangedError',
 ])
 
-function isBenignSupersessionError(error: unknown): boolean {
+function isBenignSupersessionError(error: unknown): error is Error {
   return error instanceof Error && BENIGN_SUPERSESSION_ERROR_NAMES.has(error.name)
 }
 
@@ -247,6 +268,40 @@ export function resolveWorkflowControlScopes(
 }
 
 /**
+ * The scope HCC appends for a Host runtime that fronts an enabled
+ * `auth.type: oauth` mcp-server. control-api's OAuth user-token broker
+ * (`POST /api/v1/mcp-oauth/user-token`) requires the caller's mcp-host control
+ * JWT to carry this scope; it is derive-only (never user-declarable) — see
+ * {@link HostRuntimeControlScope}.
+ */
+export const OAUTH_USER_TOKEN_SCOPE = 'oauth:user-token' as const
+
+/**
+ * Resolve the EFFECTIVE runtime control scopes minted into the mcp-host control
+ * JWT: the declarable workflow-control scopes plus the derive-only
+ * `oauth:user-token` when the Host fronts an enabled oauth mcp-server.
+ *
+ * This is the SINGLE source of truth shared by BOTH the mint path
+ * (`resolveWorkflowControlScopesForHost`) and the drift hash
+ * (`runtimeTokenScopeHash`), so the scopes carried by the token and the scopes
+ * hashed for change-detection can never diverge.
+ */
+export function resolveRuntimeControlScopes(
+  workflowControl: HostWorkflowControlSpec | undefined,
+  options: { hasChannelIngress?: boolean; frontsOAuthServer?: boolean } = {}
+): HostRuntimeControlScope[] {
+  const scopes: HostRuntimeControlScope[] = [
+    ...resolveWorkflowControlScopes(workflowControl, {
+      hasChannelIngress: options.hasChannelIngress,
+    }),
+  ]
+  if (options.frontsOAuthServer === true) {
+    scopes.push(OAUTH_USER_TOKEN_SCOPE)
+  }
+  return scopes
+}
+
+/**
  * One SharedFileSystem mount injected into a Host's mcp-host Deployment.
  * The PVC is mounted RO at the requested path; mcp-host's built-in
  * clerum__context_files_* tools read CLERUM_CONTEXT_FILES_MOUNTS to learn
@@ -264,6 +319,15 @@ export interface ResolvedSfsMount {
 }
 
 export type ResolveContextMountsFn = (host: HostCRD) => Promise<ResolvedSfsMount[]>
+
+/**
+ * Resolve whether a Host's referenced Context fronts at least one ENABLED
+ * `auth.type: oauth` mcp-server. Wired in production from the McpServerWatcher
+ * (which owns the Context + McpServer caches) so HCC can decide whether to
+ * request the derive-only `oauth:user-token` scope without HostReconciler
+ * needing direct K8s access to non-Host CRDs. Default (unwired) returns false.
+ */
+export type HostFrontsOAuthServerFn = (host: HostCRD) => Promise<boolean>
 
 const CONTEXT_LABEL = 'clerum.io/context'
 const CONTEXT_MOUNT_PATH_PATTERN = /^\/[a-zA-Z0-9_.][a-zA-Z0-9_.\/-]*$/
@@ -377,6 +441,13 @@ type HostReconcilerDeps = {
    */
   resolveContextMounts?: ResolveContextMountsFn
   /**
+   * Resolve whether the Host fronts an enabled `auth.type: oauth` mcp-server,
+   * gating the derive-only `oauth:user-token` runtime scope. Wired in
+   * production by `McpServerWatcher` over `getServerInfosByContext`. Default
+   * (no override) returns false — fail closed: no oauth scope until wired.
+   */
+  hostFrontsOAuthServer?: HostFrontsOAuthServerFn
+  /**
    * Count CommunicationChannels referencing this Host. Used by
    * `buildChannelReaderDeployment` to compute `spec.replicas`
    * (0 when no CCs, 1 when 1+). Wired by `McpServerWatcher` from
@@ -451,6 +522,8 @@ export class HostReconciler {
   private readonly now: () => Date
   private readonly newTelemetryOccurrenceId: () => string
   private readonly statusMap: Map<string, HostRuntimeStatus> = new Map()
+  private codexSnapshot: CodexCatalogSnapshot = { flagEnabled: false }
+  private lastCodexConfigMap: k8s.V1ConfigMap | undefined
   private readonly readinessTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
   /**
    * host.name → image whose pull-policy refusal was already error-logged.
@@ -467,6 +540,7 @@ export class HostReconciler {
    */
   private readonly lifecycle: StatelessLifecycleExecutor
   private resolveContextMounts: ResolveContextMountsFn
+  private hostFrontsOAuthServerFn: HostFrontsOAuthServerFn
   private countCommunicationChannels: (hostName: string) => number
   private findCommunicationChannelsByHostRef: (host: string) => CommunicationChannelCRD[]
   private findCommunicationChannelsByCredentialsSecretName: (
@@ -542,6 +616,7 @@ export class HostReconciler {
     this.now = deps?.now ?? (() => new Date())
     this.newTelemetryOccurrenceId = deps?.newTelemetryOccurrenceId ?? randomUUID
     this.resolveContextMounts = deps?.resolveContextMounts ?? (async () => [])
+    this.hostFrontsOAuthServerFn = deps?.hostFrontsOAuthServer ?? (async () => false)
     this.countCommunicationChannels = deps?.countCommunicationChannels ?? (() => 0)
     this.findCommunicationChannelsByHostRef = deps?.findCommunicationChannelsByHostRef ?? (() => [])
     this.findCommunicationChannelsByCredentialsSecretName =
@@ -597,6 +672,71 @@ export class HostReconciler {
    */
   setResolveContextMounts(fn: ResolveContextMountsFn): void {
     this.resolveContextMounts = fn
+  }
+
+  /**
+   * Late-bound setter so the McpServerWatcher (which owns the Context and
+   * McpServer caches) can wire up the oauth-server resolver after this
+   * reconciler is constructed. Pattern mirrors setResolveContextMounts.
+   */
+  setHostFrontsOAuthServer(fn: HostFrontsOAuthServerFn): void {
+    this.hostFrontsOAuthServerFn = fn
+  }
+
+  /**
+   * Whether this Host fronts an enabled `auth.type: oauth` mcp-server, gating
+   * the derive-only `oauth:user-token` runtime scope. Fails CLOSED (false) when
+   * the cross-CRD read throws: an uncertain read must never grant the scope.
+   *
+   * Each call is an INDEPENDENT live point-in-time read (mirrors
+   * `hasChannelIngress`); the value is deliberately not cached across a
+   * reconcile. Callers that need one consistent value within a unit of work
+   * resolve it once and thread the same bool (see the issuance path, which
+   * threads it into the mint-scope derive and the drift hash so they never
+   * diverge); the deployment drift guard re-reads it on purpose to catch a
+   * scope change mid-reconcile.
+   */
+  private async frontsOAuthServer(host: HostCRD): Promise<boolean> {
+    // Bounded retry that absorbs a TRANSIENT apiserver blip without touching the
+    // authoritative-`false` path. Contract of the underlying resolver: a real
+    // scope change (the server genuinely stopped fronting an oauth mcp-server)
+    // RETURNS `false` without throwing; only a transient read failure (apiserver
+    // blip) THROWS. So we retry ONLY on throw — any RETURNED value (true or
+    // false) is authoritative and is returned immediately, so a healthy call
+    // resolves on the first attempt with zero added overhead and an authoritative
+    // `false` is never re-tried. Before this retry, a transient throw collapsed
+    // to `false` exactly like an authoritative `false`, dropping the
+    // oauth:user-token scope → runtime-token re-mint + Deployment rollout, then a
+    // flip back on recovery → churn, once per OAuth Host per reconcile.
+    const MAX_ATTEMPTS = 3
+    const BACKOFF_BASE_MS = 50
+    let lastErr: unknown
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        return await this.hostFrontsOAuthServerFn(host)
+      } catch (err) {
+        lastErr = err
+        if (attempt < MAX_ATTEMPTS) {
+          // Small linear backoff (50ms, 100ms) to let a transient blip clear.
+          await new Promise(resolve => setTimeout(resolve, BACKOFF_BASE_MS * attempt))
+        }
+      }
+    }
+    // All attempts threw. Residual honesty: a SUSTAINED apiserver outage (every
+    // attempt throws) still fails CLOSED here and can flip the scope off. That is
+    // correct — a sustained outage is a genuine "scope unknown" situation, not a
+    // blip — the retry only smooths over transient blips, never a real outage.
+    log.warn(
+      'failed to resolve whether Host fronts an oauth mcp-server after retries; failing closed (no oauth:user-token scope)',
+      {
+        host: host.name,
+        namespace: host.namespace,
+        contextRef: host.spec.contextRef,
+        attempts: MAX_ATTEMPTS,
+        err: lastErr instanceof Error ? lastErr.message : String(lastErr),
+      }
+    )
+    return false
   }
 
   /**
@@ -934,7 +1074,7 @@ export class HostReconciler {
             host.spec.secretRef,
             `host-${host.name}-env-secret`,
             mcpHostRuntimeTokenSecretName(host),
-          ],
+          ].filter((name): name is string => Boolean(name)),
           verbs: ['get', 'watch', 'list'],
         },
       ],
@@ -952,6 +1092,7 @@ export class HostReconciler {
     // Already exists — replace to pick up rotated secretRef / new resourceNames.
     try {
       const existing = await this.rbacApi.readNamespacedRole({ name, namespace: host.namespace })
+      if (roleMatchesDesired(body, existing)) return
       body.metadata!.resourceVersion = existing.metadata?.resourceVersion
       await this.rbacApi.replaceNamespacedRole({ name, namespace: host.namespace, body })
       console.log(`[HostReconciler] Updated Role "${name}"`)
@@ -1044,14 +1185,34 @@ export class HostReconciler {
     return HostReconciler.shortHash({ namespace: host.namespace, host: host.name })
   }
 
-  private static runtimeTokenScopeHash(host: HostCRD, hasChannelIngress = false): string {
+  private static runtimeTokenScopeHash(
+    host: HostCRD,
+    hasChannelIngress = false,
+    frontsOAuthServer = false,
+    projection?: CodexExecutionProjection
+  ): string {
     // Hash the EFFECTIVE (resolved) scopes — what actually gets minted into the
     // control token — so change-detection matches the default-fallback applied
     // at issuance (otherwise a null workflowControl hashes as [] while the token
-    // carries the first-party defaults, and the two drift).
-    return HostReconciler.shortHash(
-      [...resolveWorkflowControlScopes(host.spec.workflowControl, { hasChannelIngress })].sort()
-    )
+    // carries the first-party defaults, and the two drift). Uses the SAME
+    // `resolveRuntimeControlScopes` as the mint path (see
+    // `resolveEffectiveControlScopesForHost`) so the hashed set and the minted
+    // set — including the derive-only `oauth:user-token` and the codex
+    // projection's derived scopes — can never diverge.
+    const runtimeScopes = [
+      ...resolveRuntimeControlScopes(host.spec.workflowControl, {
+        hasChannelIngress,
+        frontsOAuthServer,
+      }),
+    ].sort()
+    const derived = projection?.derivedScopes ?? []
+    if (derived.length === 0) {
+      return HostReconciler.shortHash(runtimeScopes)
+    }
+    return HostReconciler.shortHash({
+      scopes: [...runtimeScopes, ...derived].sort(),
+      drift: projection?.driftHashInput,
+    })
   }
 
   private static gfsCapabilitySetHash(): string {
@@ -1077,7 +1238,9 @@ export class HostReconciler {
     nowMs: number,
     gfsTokenTtlSec: number,
     hasChannelIngress = false,
-    preservedHostUid?: string
+    frontsOAuthServer = false,
+    preservedHostUid?: string,
+    projection?: CodexExecutionProjection
   ): Record<string, string> {
     const refreshTtlSec = Number.isFinite(tokens.refreshExpiresInSeconds)
       ? Math.max(0, tokens.refreshExpiresInSeconds)
@@ -1094,7 +1257,9 @@ export class HostReconciler {
         HostReconciler.runtimeTokenHostBindingHash(host),
       [RUNTIME_TOKEN_SCOPE_HASH_ANNOTATION]: HostReconciler.runtimeTokenScopeHash(
         host,
-        hasChannelIngress
+        hasChannelIngress,
+        frontsOAuthServer,
+        projection
       ),
       [RUNTIME_TOKEN_ISSUER_ANNOTATION]: RUNTIME_TOKEN_ISSUER,
       [RUNTIME_TOKEN_AUDIENCE_ANNOTATION]: RUNTIME_TOKEN_AUDIENCE,
@@ -1124,7 +1289,9 @@ export class HostReconciler {
     host: HostCRD,
     secret: k8s.V1Secret,
     nowMs: number,
-    hasChannelIngress = false
+    hasChannelIngress = false,
+    frontsOAuthServer = false,
+    projection?: CodexExecutionProjection
   ): { refresh: boolean; rolloutRequired: boolean; reason: string; refreshTokenExpMs?: number } {
     const labels = secret.metadata?.labels ?? {}
     if (labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE || labels[HOST_LABEL] !== host.name) {
@@ -1139,7 +1306,12 @@ export class HostReconciler {
 
     const annotations = secret.metadata?.annotations ?? {}
     const expectedHostBindingHash = HostReconciler.runtimeTokenHostBindingHash(host)
-    const expectedScopeHash = HostReconciler.runtimeTokenScopeHash(host, hasChannelIngress)
+    const expectedScopeHash = HostReconciler.runtimeTokenScopeHash(
+      host,
+      hasChannelIngress,
+      frontsOAuthServer,
+      projection
+    )
     const hasContractMetadata =
       RUNTIME_TOKEN_HOST_BINDING_HASH_ANNOTATION in annotations ||
       RUNTIME_TOKEN_SCOPE_HASH_ANNOTATION in annotations ||
@@ -1329,16 +1501,105 @@ export class HostReconciler {
 
   private resolveWorkflowControlScopesForHost(
     host: HostCRD,
-    hasChannelIngress = this.hasChannelIngress(host)
-  ): HostWorkflowControlScope[] {
-    const scopes = resolveWorkflowControlScopes(host.spec.workflowControl, { hasChannelIngress })
-    if (hasChannelIngress && scopes.length === 0) {
+    hasChannelIngress = this.hasChannelIngress(host),
+    frontsOAuthServer = false
+  ): HostRuntimeControlScope[] {
+    // Delegate to the SAME resolver the drift hash uses so the minted scope set
+    // and the hashed scope set can never diverge (a divergence re-issues the
+    // token every reconcile).
+    const scopes = resolveRuntimeControlScopes(host.spec.workflowControl, {
+      hasChannelIngress,
+      frontsOAuthServer,
+    })
+    const hasWorkflowScope = scopes.some(scope => scope !== OAUTH_USER_TOKEN_SCOPE)
+    if (hasChannelIngress && !hasWorkflowScope) {
       log.warn('channel-bearing Host resolved with no workflow-control scopes', {
         host: host.name,
         namespace: host.namespace,
       })
     }
     return scopes
+  }
+
+  private projectCodexForHost(host: HostCRD): CodexExecutionProjection {
+    const connectionKey = assignedHostCodexConnectionRef(host.spec.model?.connectionRef)
+    const snapshot = snapshotForAssignedCodexGrant(
+      connectionKey,
+      this.lastCodexConfigMap,
+      this.codexSnapshot
+    )
+    return projectCodexExecution(host.spec, snapshot)
+  }
+
+  private resolveEffectiveControlScopesForHost(
+    host: HostCRD,
+    frontsOAuthServer: boolean,
+    hasChannelIngress = this.hasChannelIngress(host)
+  ): EffectiveMcpHostControlScope[] {
+    const workflow = this.resolveWorkflowControlScopesForHost(
+      host,
+      hasChannelIngress,
+      frontsOAuthServer
+    )
+    const derived = this.projectCodexForHost(host).derivedScopes.filter(
+      scope => !workflow.includes(scope as HostWorkflowControlScope)
+    )
+    return [...workflow, ...derived] as EffectiveMcpHostControlScope[]
+  }
+
+  private runtimeScopeHashFor(
+    host: HostCRD,
+    frontsOAuthServer: boolean,
+    hasChannelIngress = this.hasChannelIngress(host)
+  ): string {
+    return HostReconciler.runtimeTokenScopeHash(
+      host,
+      hasChannelIngress,
+      frontsOAuthServer,
+      this.projectCodexForHost(host)
+    )
+  }
+
+  private async refreshCodexSnapshot(): Promise<void> {
+    try {
+      const cm = await this.coreApi.readNamespacedConfigMap({
+        name: ALLOWED_MODELS_CONFIGMAP_NAME,
+        namespace: config.hccTargetNamespace,
+      })
+      this.lastCodexConfigMap = cm
+      this.codexSnapshot = parseAllowedModelsSnapshot(cm)
+    } catch (err) {
+      const timeout =
+        err instanceof HostK8sRequestTimeoutError ||
+        (err as { code?: string }).code === HOST_K8S_REQUEST_TIMEOUT_CODE
+      if (timeout) {
+        this.lastCodexConfigMap = undefined
+        this.codexSnapshot = snapshotFromConfigMapError('timeout')
+        log.warn('Codex allowlist ConfigMap read timed out; failing closed', {
+          configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
+          namespace: config.hccTargetNamespace,
+        })
+        return
+      }
+      const code = getErrorCode(err)
+      if (code === 401 || code === 403) {
+        this.lastCodexConfigMap = undefined
+        this.codexSnapshot = snapshotFromConfigMapError('forbidden')
+        log.warn('Codex allowlist ConfigMap read forbidden; failing closed', {
+          configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
+          namespace: config.hccTargetNamespace,
+          statusCode: code,
+        })
+        return
+      }
+      this.lastCodexConfigMap = undefined
+      this.codexSnapshot = snapshotFromConfigMapError('missing')
+      log.warn('Codex allowlist ConfigMap unavailable; failing closed', {
+        configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
+        namespace: config.hccTargetNamespace,
+        statusCode: code,
+      })
+    }
   }
 
   private async ensureMcpHostRuntimeTokenSecret(
@@ -1368,14 +1629,32 @@ export class HostReconciler {
           RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH
         const nowMs = Date.now()
         const hasChannelIngress = this.hasChannelIngress(host)
-        const scopeHash = HostReconciler.runtimeTokenScopeHash(host, hasChannelIngress)
+        // Resolve ONCE per issuance and thread the SAME frontsOAuthServer bool and
+        // codex projection into the mint-scope derive, the refresh decision, the
+        // scope hash and the stored annotation, so the minted token and the drift
+        // hash never diverge.
+        const frontsOAuthServer = await this.frontsOAuthServer(host)
+        const projection = this.projectCodexForHost(host)
+        const scopeHash = HostReconciler.runtimeTokenScopeHash(
+          host,
+          hasChannelIngress,
+          frontsOAuthServer,
+          projection
+        )
         let decision: {
           refresh: boolean
           rolloutRequired: boolean
           reason: string
           refreshTokenExpMs?: number
         } = existing
-          ? HostReconciler.runtimeTokenRefreshDecision(host, existing, nowMs, hasChannelIngress)
+          ? HostReconciler.runtimeTokenRefreshDecision(
+              host,
+              existing,
+              nowMs,
+              hasChannelIngress,
+              frontsOAuthServer,
+              projection
+            )
           : { refresh: true, rolloutRequired: false, reason: 'missing_secret' }
         if (
           existing &&
@@ -1516,7 +1795,7 @@ export class HostReconciler {
         const tokens = await issueMcpHostRuntimeTokens(
           host.name,
           host.uid ?? '',
-          this.resolveWorkflowControlScopesForHost(host, hasChannelIngress)
+          this.resolveEffectiveControlScopesForHost(host, frontsOAuthServer, hasChannelIngress)
         )
         const gfs = await mintHostGfsToken({ name: host.name, namespace: host.namespace })
         const body = buildMcpHostRuntimeTokenSecret(
@@ -1544,7 +1823,9 @@ export class HostReconciler {
               nowMs,
               gfs.expiresInSeconds,
               hasChannelIngress,
-              existing?.metadata?.annotations?.[GFS_TOKEN_HOST_UID_ANNOTATION]
+              frontsOAuthServer,
+              existing?.metadata?.annotations?.[GFS_TOKEN_HOST_UID_ANNOTATION],
+              projection
             ),
             [RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION]: RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH,
             [RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION]: rolloutRequired ? 'true' : 'false',
@@ -1954,6 +2235,9 @@ export class HostReconciler {
   }
 
   async validateHostSecret(host: HostCRD): Promise<HostSecretValidationResult> {
+    if (!host.spec.secretRef) {
+      return { ok: true }
+    }
     try {
       await this.coreApi.readNamespacedSecret({
         namespace: host.namespace,
@@ -2250,7 +2534,9 @@ export class HostReconciler {
    * - On 409 from create, compares a fresh, server-normalized Deployment and
    *   replaces only meaningful drift. Conflict retries rebuild against the
    *   latest live replica count. A Deployment owned by a different host is
-   *   never overwritten.
+   *   never overwritten: the initial read skips, and a retry-time ownership
+   *   change throws so write_skips_total does not count the refusal as a
+   *   healthy no-op.
    */
   private async reconcileChannelReaderDeployment(host: HostCRD): Promise<void> {
     const name = `channel-reader-${host.name}`
@@ -2317,12 +2603,18 @@ export class HostReconciler {
             }
             return preserveChannelReaderDeploymentAnnotations(desiredWithLiveReplicas, fresh)
           },
-          isUpToDate: (next, fresh) => {
+          validateExisting: fresh => {
             const freshOwnerHost = fresh.metadata?.labels?.[HOST_LABEL]
             // Never replace an object whose ownership changed during a retry.
-            if (freshOwnerHost && freshOwnerHost !== host.name) return true
-            return deploymentMatchesDesired(next, fresh)
+            // Veto here — not via isUpToDate — so write_skips_total stays a
+            // genuine no-op count.
+            if (freshOwnerHost && freshOwnerHost !== host.name) {
+              throw new Error(
+                `channel-reader Deployment ownership changed to host "${freshOwnerHost}"; refusing replace`
+              )
+            }
           },
+          isUpToDate: deploymentMatchesDesired,
         })
       } catch (replaceErr) {
         console.error(`[HostReconciler] Failed to update channel-reader "${name}":`, replaceErr)
@@ -2546,7 +2838,7 @@ export class HostReconciler {
       },
       { name: 'CLERUM_WORKSPACE_PATH', value: workspacePath },
       // Changing spec.secretRef changes the pod template and rolls the host.
-      { name: 'CLERUM_LLM_SECRET_REF', value: host.spec.secretRef },
+      { name: 'CLERUM_LLM_SECRET_REF', value: host.spec.secretRef ?? '' },
       // mcpHost runtime token env vars. Names match WRC's podFactory.ts so mcp-host
       // sees the same shape regardless of which controller provisioned it.
       {
@@ -3768,6 +4060,89 @@ export class HostReconciler {
   }
 
   /**
+   * Per-Host mcp-host egress to the static Codex LLM proxy runtime listener.
+   * Derived from the same Codex projection that mints `llm:codex:execute`.
+   */
+  private async ensureMcpHostCodexProxyEgressNetworkPolicy(host: HostCRD): Promise<void> {
+    const policyName = `mcp-host-${host.name}-egress-codex-proxy`
+    const policy: k8s.V1NetworkPolicy = {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: {
+        name: policyName,
+        namespace: host.namespace,
+        labels: {
+          [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+          [HOST_LABEL]: host.name,
+          'clerum.io/policy-type': 'codex-proxy-egress',
+        },
+      },
+      spec: {
+        podSelector: {
+          matchLabels: {
+            [HOST_LABEL]: host.name,
+            [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+          },
+        },
+        policyTypes: ['Egress'],
+        egress: [
+          {
+            to: [
+              {
+                namespaceSelector: {
+                  matchLabels: { 'kubernetes.io/metadata.name': config.controlPlaneNamespace },
+                },
+                podSelector: {
+                  matchLabels: { app: 'codex-llm-proxy' },
+                },
+              },
+            ],
+            ports: [{ port: 8080, protocol: 'TCP' }],
+          },
+        ],
+      },
+    }
+
+    await applyNetworkPolicy(
+      this.networkingApi,
+      policyName,
+      host.namespace,
+      policy,
+      '[HostReconciler]'
+    )
+  }
+
+  private async deleteMcpHostCodexProxyEgressNetworkPolicy(host: HostCRD): Promise<void> {
+    const policyName = `mcp-host-${host.name}-egress-codex-proxy`
+    await this.deleteIfHccOwned(
+      'NetworkPolicy',
+      policyName,
+      host.namespace,
+      host.name,
+      () =>
+        this.networkingApi.readNamespacedNetworkPolicy({
+          name: policyName,
+          namespace: host.namespace,
+        }),
+      () =>
+        this.networkingApi.deleteNamespacedNetworkPolicy({
+          name: policyName,
+          namespace: host.namespace,
+        })
+    )
+  }
+
+  private async reconcileMcpHostCodexProxyEgressNetworkPolicy(host: HostCRD): Promise<void> {
+    const projection = this.projectCodexForHost(host)
+    if (projection.eligibility === 'uncertain') return
+    if (projection.requiresCodexProxyEgress) {
+      await this.ensureMcpHostCodexProxyEgressNetworkPolicy(host)
+      return
+    }
+    await this.deleteMcpHostCodexProxyEgressNetworkPolicy(host)
+  }
+
+  /**
    * Delete per-Host NetworkPolicies created by this reconciler.
    * 404-tolerant — safe to call even if NPs were never created or already gone.
    */
@@ -3778,6 +4153,7 @@ export class HostReconciler {
       { name: `mcp-host-${name}-ingress-workflow-approval-reader`, namespace },
       { name: `mcp-host-${name}-ingress-rpc-proxy`, namespace },
       { name: `mcp-host-${name}-egress-gfs`, namespace },
+      { name: `mcp-host-${name}-egress-codex-proxy`, namespace },
       { name: `mcp-host-${name}-egress-llm-hooks`, namespace },
       { name: `channel-reader-${name}-egress`, namespace: config.channelsNamespace },
       {
@@ -3914,6 +4290,8 @@ export class HostReconciler {
     // is recovered here.
     const forceFreshForWake = (await this.lifecycle.handleWakeFastPath(host)) === true
     revalidateHostMutationBoundary()
+    await this.refreshCodexSnapshot()
+    revalidateHostMutationBoundary()
 
     // Track whether this host has desktop enabled
     const isDesktop = !!(host.spec.desktop?.browser || host.spec.desktop?.x11)
@@ -4029,6 +4407,8 @@ export class HostReconciler {
       await this.ensureMcpHostIngressNetworkPolicy(host)
       revalidateHostMutationBoundary()
       await this.ensureMcpHostGfsEgressNetworkPolicy(host)
+      revalidateHostMutationBoundary()
+      await this.reconcileMcpHostCodexProxyEgressNetworkPolicy(host)
       // The mcp-host→llm-hooks egress policy is now owned by LlmHookReconciler
       // (per-host, scoped to referenced hook pods — N1/N7); host-delete cleanup
       // of `mcp-host-<host>-egress-llm-hooks` stays in deleteHostNetworkPolicies.
@@ -4101,10 +4481,7 @@ export class HostReconciler {
     const ensureCurrentRuntimeTokenScope = async (): Promise<void> => {
       for (let attempt = 1; attempt <= 3; attempt++) {
         revalidateHostMutationBoundary()
-        const currentScopeHash = HostReconciler.runtimeTokenScopeHash(
-          host,
-          this.hasChannelIngress(host)
-        )
+        const currentScopeHash = this.runtimeScopeHashFor(host, await this.frontsOAuthServer(host))
         if (runtimeTokenProvision.scopeHash === currentScopeHash) return
 
         runtimeTokenProvision = await this.provisionRuntimeTokenRevision(host, {
@@ -4113,9 +4490,9 @@ export class HostReconciler {
             lifecycle.effective.stateless && lifecycle.effective.state === 'suspended',
         })
         revalidateHostMutationBoundary()
-        const postProvisionScopeHash = HostReconciler.runtimeTokenScopeHash(
+        const postProvisionScopeHash = this.runtimeScopeHashFor(
           host,
-          this.hasChannelIngress(host)
+          await this.frontsOAuthServer(host)
         )
         if (runtimeTokenProvision.scopeHash === postProvisionScopeHash) return
 
@@ -4136,10 +4513,7 @@ export class HostReconciler {
         await resolveDeploymentLifecycle()
         await ensureCurrentRuntimeTokenScope()
         const effective = await resolveDeploymentLifecycle()
-        const currentScopeHash = HostReconciler.runtimeTokenScopeHash(
-          host,
-          this.hasChannelIngress(host)
-        )
+        const currentScopeHash = this.runtimeScopeHashFor(host, await this.frontsOAuthServer(host))
         if (runtimeTokenProvision.scopeHash === currentScopeHash) {
           revalidateHostMutationBoundary()
           return {
@@ -4312,6 +4686,15 @@ export class HostReconciler {
       try {
         await this.reconcile(host, source)
       } catch (error) {
+        if (isBenignSupersessionError(error)) {
+          // Watch-race withdrawal is not a host failure.
+          hostFleetBenignSupersessionsTotal.inc({ error: error.name })
+          log.warn('Fleet Host reconcile withdrawn as benign supersession', {
+            err: error,
+            errorName: error.name,
+          })
+          return
+        }
         console.error(`[HostReconciler] Fleet reconcile failed for Host "${name}":`, error)
         throw error
       }
@@ -4652,19 +5035,45 @@ export class HostReconciler {
 }
 
 /**
- * Kubernetes persists server metadata and defaulted Deployment/PodSpec fields
- * that HCC does not author. Remove only those known fields before comparing
- * the objects; every HCC-authored field stays exact so an intentional removal
- * or change still causes a rollout. Keep this allowlist conservative: an
- * unknown admission mutation must compare as drift rather than be silently
- * ignored. Pod-template annotations are merged by preserveDeploymentAnnotations
- * before this comparison.
+ * True when the desired Role matches the live object on the fields HCC authors:
+ * `rbacLabels` and `rules`. Server metadata and annotations are ignored — the
+ * builder does not write annotations, and comparing them would force a PUT.
+ *
+ * Label comparison is a subset of the keys HCC authors. Extra live labels
+ * (Kyverno/Gatekeeper add-labels, ArgoCD instance, cost tags) must not force a
+ * PUT that strips them and re-enters the write loop. A missing or changed
+ * authored key still fail-opens to write, so a later third `rbacLabels` key
+ * still lands. A key HCC stops authoring is treated as extra-live and will
+ * not PUT until some other authored field drifts; the previous exact-map
+ * compare used to retract it. `isHccOwnedHostResource` keys on the same two
+ * labels today.
+ *
+ * Object keys inside each rule are canonicalized: client-node rebuilds
+ * V1PolicyRule in attributeTypeMap order (resourceNames before resources), so a
+ * raw JSON.stringify never matches a live GET (#307). Rule arrays, verbs, and
+ * resourceNames stay in author order. Missing rules or labels, or any compare
+ * failure, returns false (fail-open-to-write).
  */
-function deploymentMatchesDesired(desired: k8s.V1Deployment, existing: k8s.V1Deployment): boolean {
-  return (
-    JSON.stringify(normalizeDeploymentForComparison(desired)) ===
-    JSON.stringify(normalizeDeploymentForComparison(existing))
-  )
+function roleMatchesDesired(desired: k8s.V1Role, existing: k8s.V1Role): boolean {
+  try {
+    if (!desired.rules || !existing.rules) return false
+    const desiredLabels = desired.metadata?.labels
+    const existingLabels = existing.metadata?.labels
+    if (!desiredLabels || !existingLabels) return false
+    const authored: Record<string, string> = {}
+    const liveAuthored: Record<string, string> = {}
+    for (const key of Object.keys(desiredLabels)) {
+      if (existingLabels[key] === undefined) return false
+      authored[key] = desiredLabels[key]
+      liveAuthored[key] = existingLabels[key]
+    }
+    return (
+      JSON.stringify(canonicalizeValue({ labels: authored, rules: desired.rules })) ===
+      JSON.stringify(canonicalizeValue({ labels: liveAuthored, rules: existing.rules }))
+    )
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -4735,102 +5144,4 @@ function preserveChannelReaderDeploymentAnnotations(
   existing: k8s.V1Deployment
 ): k8s.V1Deployment {
   return preserveDeploymentAnnotationsExcept(desired, existing, ['clerum.io/credentials-revision'])
-}
-
-function normalizeDeploymentForComparison(deployment: k8s.V1Deployment): unknown {
-  const normalized = structuredClone(deployment)
-  delete normalized.status
-  delete normalized.metadata?.resourceVersion
-  delete normalized.metadata?.uid
-  delete normalized.metadata?.generation
-  delete normalized.metadata?.creationTimestamp
-  delete normalized.metadata?.managedFields
-  delete normalized.metadata?.selfLink
-
-  const spec = normalized.spec
-  if (spec) {
-    if (spec.progressDeadlineSeconds === 600) delete spec.progressDeadlineSeconds
-    if (spec.revisionHistoryLimit === 10) delete spec.revisionHistoryLimit
-    if (spec.minReadySeconds === 0) delete spec.minReadySeconds
-    if (spec.paused === false) delete spec.paused
-    if (
-      spec.strategy?.type === 'RollingUpdate' &&
-      spec.strategy.rollingUpdate?.maxSurge === '25%' &&
-      spec.strategy.rollingUpdate.maxUnavailable === '25%'
-    ) {
-      delete spec.strategy
-    }
-    const template = spec.template
-    if (template) {
-      delete template.metadata?.creationTimestamp
-
-      const podSpec = template.spec
-      if (podSpec) {
-        if (podSpec.restartPolicy === 'Always') delete podSpec.restartPolicy
-        if (podSpec.dnsPolicy === 'ClusterFirst') delete podSpec.dnsPolicy
-        if (podSpec.schedulerName === 'default-scheduler') delete podSpec.schedulerName
-        if (podSpec.terminationGracePeriodSeconds === 30)
-          delete podSpec.terminationGracePeriodSeconds
-        if (podSpec.enableServiceLinks === true) delete podSpec.enableServiceLinks
-        if (podSpec.preemptionPolicy === 'PreemptLowerPriority') delete podSpec.preemptionPolicy
-        if (podSpec.serviceAccount === podSpec.serviceAccountName) delete podSpec.serviceAccount
-        if (Object.keys(podSpec.securityContext ?? {}).length === 0) delete podSpec.securityContext
-        for (const container of [
-          ...(podSpec.initContainers ?? []),
-          ...(podSpec.containers ?? []),
-        ]) {
-          normalizeContainerDefaults(container)
-        }
-        for (const volume of podSpec.volumes ?? []) normalizeVolumeDefaults(volume)
-      }
-    }
-  }
-
-  return normalizeDeploymentValue(normalized)
-}
-
-function normalizeContainerDefaults(container: k8s.V1Container): void {
-  if (container.terminationMessagePath === '/dev/termination-log') {
-    delete container.terminationMessagePath
-  }
-  if (container.terminationMessagePolicy === 'File') delete container.terminationMessagePolicy
-  for (const probe of [container.startupProbe, container.livenessProbe, container.readinessProbe]) {
-    if (!probe) continue
-    if (probe.initialDelaySeconds === 0) delete probe.initialDelaySeconds
-    if (probe.successThreshold === 1) delete probe.successThreshold
-    if (probe.httpGet?.scheme === 'HTTP') delete probe.httpGet.scheme
-  }
-  for (const env of container.env ?? []) {
-    if (env.valueFrom?.fieldRef?.apiVersion === 'v1') {
-      delete env.valueFrom.fieldRef.apiVersion
-    }
-  }
-}
-
-function normalizeVolumeDefaults(volume: k8s.V1Volume): void {
-  if (volume.secret?.defaultMode === 420) delete volume.secret.defaultMode
-  if (volume.secret?.optional === false) delete volume.secret.optional
-  if (volume.configMap?.defaultMode === 420) delete volume.configMap.defaultMode
-  if (volume.configMap?.optional === false) delete volume.configMap.optional
-  if (volume.downwardAPI?.defaultMode === 420) delete volume.downwardAPI.defaultMode
-  if (volume.projected?.defaultMode === 420) delete volume.projected.defaultMode
-  if (volume.persistentVolumeClaim?.readOnly === false) {
-    delete volume.persistentVolumeClaim.readOnly
-  }
-}
-
-function normalizeDeploymentValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalizeDeploymentValue)
-  if (!isDeploymentObject(value)) return value
-
-  const normalized: Record<string, unknown> = {}
-  for (const key of Object.keys(value).sort()) {
-    const entry = value[key]
-    if (entry !== undefined) normalized[key] = normalizeDeploymentValue(entry)
-  }
-  return normalized
-}
-
-function isDeploymentObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

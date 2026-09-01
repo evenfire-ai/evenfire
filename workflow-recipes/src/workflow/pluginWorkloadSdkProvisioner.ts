@@ -86,7 +86,8 @@ export type PluginWorkloadSdkProvisionerDeps = {
     namespace: string,
     recipeName: string,
     runtimeScopeRecipeName: string,
-    spec: WorkflowRecipeSpec
+    spec: WorkflowRecipeSpec,
+    recipeUid?: string
   ) => Promise<void>
   applyWorkflowNetworkPolicies: (
     recipeName: string,
@@ -189,7 +190,13 @@ export class PluginWorkloadSdkProvisioner {
       return 'failed'
     }
 
-    await this.deps.ensureMcpHostSecrets(namespace, recipeName, runtimeScopeRecipeName, spec)
+    await this.deps.ensureMcpHostSecrets(
+      namespace,
+      recipeName,
+      runtimeScopeRecipeName,
+      spec,
+      recipeUid
+    )
 
     await this.deps.applyWorkflowNetworkPolicies(
       recipeName,

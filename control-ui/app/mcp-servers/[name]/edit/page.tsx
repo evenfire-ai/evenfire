@@ -13,6 +13,10 @@ import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
 import { UpdateConnectorCredentials } from '@components/UpdateConnectorCredentials'
 import {
+  isRecipeOwned,
+  resolveCredentialSurface,
+} from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
+import {
   CONNECTOR_EDIT_DEFAULT_TAB,
   CONNECTOR_EDIT_TABS,
   CONNECTOR_EDIT_TAB_LABELS,
@@ -373,6 +377,12 @@ export default function EditMcpServerPage() {
                   serverName={name}
                   envSecret={envSecret}
                   registryCredentialSource={registryCredentialSource}
+                  surface={resolveCredentialSurface(
+                    server.status?.conditions,
+                    server.spec as { managed?: boolean } | undefined
+                  )}
+                  // Ownership is a spec fact, independent of observed status.
+                  recipeOwned={isRecipeOwned(server.spec as { managed?: boolean } | undefined)}
                 />
               </div>
             ) : activeTab === 'access' ? (

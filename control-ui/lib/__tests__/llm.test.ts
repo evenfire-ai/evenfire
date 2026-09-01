@@ -4,11 +4,22 @@ import {
   BEDROCK_CREDENTIAL_KEYS,
   LLM_CREDENTIAL_GROUPS,
   LLM_DEFAULT_MODEL_BY_PROVIDER,
+  LLM_SECRET_EDITOR_GROUPS,
   type LlmModelCatalogEntry,
+  OPERATOR_PROVIDER_OPTIONS,
+  brokerBackedRecipeAuthoringError,
+  budgetUnitAllowedForProviders,
+  catalogGroupKey,
   getAllModelOptions,
   getLlmGroupCompleteness,
   getModelOptions,
+  getProviderDisplayLabel,
+  getProviderLabel,
   inferProviderFromModels,
+  isOpenAiFamily,
+  llmChainRequiresSecret,
+  openAiCredentialSources,
+  providerRequiresLlmSecret,
   resolveDefaultModel,
   validateLlmSecretData,
 } from '../llm'
@@ -43,6 +54,57 @@ describe('getModelOptions', () => {
   it('returns an empty list for a provider with no rows', () => {
     expect(getModelOptions(CATALOG, 'vertex')).toEqual([])
   })
+
+  it('hides stale models from new picks unless includeStale is set', () => {
+    const catalog: LlmModelCatalogEntry[] = [
+      { provider: 'codex-subscription', model: 'gpt-5.1', enabled: true },
+      { provider: 'codex-subscription', model: 'old-codex', enabled: true, stale: true },
+      { provider: 'codex-subscription', model: 'disabled-codex', enabled: false },
+    ]
+    expect(getModelOptions(catalog, 'codex-subscription')).toEqual(['gpt-5.1'])
+    expect(getModelOptions(catalog, 'codex-subscription', { includeStale: true })).toEqual([
+      'gpt-5.1',
+      'old-codex',
+    ])
+  })
+})
+
+describe('OpenAI family presentation', () => {
+  it('does not offer Codex as a second provider in operator pickers', () => {
+    expect(OPERATOR_PROVIDER_OPTIONS.some(option => option.value === 'codex-subscription')).toBe(
+      false
+    )
+    expect(OPERATOR_PROVIDER_OPTIONS.some(option => option.value === 'openai')).toBe(true)
+  })
+
+  it('labels the subscription runtime id as OpenAI for operators', () => {
+    expect(getProviderLabel('codex-subscription')).toBe('OpenAI')
+    expect(getProviderDisplayLabel('codex-subscription')).toBe('OpenAI')
+    expect(getProviderLabel('openai')).toBe('OpenAI')
+  })
+
+  it('groups subscription catalog rows under OpenAI', () => {
+    expect(catalogGroupKey('codex-subscription')).toBe('openai')
+    expect(catalogGroupKey('openai')).toBe('openai')
+    expect(catalogGroupKey('claude')).toBe('claude')
+    expect(isOpenAiFamily('codex-subscription')).toBe(true)
+  })
+
+  it('marks a model as API key, subscription, or both', () => {
+    const catalog: LlmModelCatalogEntry[] = [
+      { provider: 'openai', model: 'gpt-5.1', enabled: true },
+      { provider: 'codex-subscription', model: 'gpt-5.1', enabled: true },
+      { provider: 'codex-subscription', model: 'gpt-5.3-codex', enabled: true },
+    ]
+    expect(openAiCredentialSources(catalog, 'gpt-5.1')).toEqual({
+      apiKey: true,
+      subscription: true,
+    })
+    expect(openAiCredentialSources(catalog, 'gpt-5.3-codex')).toEqual({
+      apiKey: false,
+      subscription: true,
+    })
+  })
 })
 
 describe('getAllModelOptions', () => {
@@ -60,8 +122,10 @@ describe('resolveDefaultModel', () => {
   it('prefers the static provider default when it is enabled', () => {
     const enabled = getModelOptions(CATALOG, 'claude')
     // Seed the static default into the enabled list to exercise the happy path.
-    const withDefault = [...enabled, LLM_DEFAULT_MODEL_BY_PROVIDER.claude]
-    expect(resolveDefaultModel('claude', withDefault)).toBe(LLM_DEFAULT_MODEL_BY_PROVIDER.claude)
+    const claudeDefault = LLM_DEFAULT_MODEL_BY_PROVIDER.claude
+    expect(claudeDefault).toBeDefined()
+    const withDefault = [...enabled, claudeDefault!]
+    expect(resolveDefaultModel('claude', withDefault)).toBe(claudeDefault)
   })
 
   it('falls back to the first enabled model when the default is not allowed', () => {
@@ -120,6 +184,21 @@ describe('LLM_CREDENTIAL_GROUPS (spec R4.5.1/R4.5.2)', () => {
     expect(vertex.slots[0].multiline).toBe(true)
     expect(vertex.nonSecretEnv).toEqual(expect.arrayContaining(['VERTEX_PROJECT_ID']))
   })
+
+  it('models Codex as a zero-slot broker with no static default model', () => {
+    const codex = LLM_CREDENTIAL_GROUPS.find(g => g.provider === 'codex-subscription')!
+    expect(codex.slots).toEqual([])
+    expect(codex.nonSecretEnv).toEqual([])
+    expect(LLM_DEFAULT_MODEL_BY_PROVIDER['codex-subscription']).toBeUndefined()
+    expect(resolveDefaultModel('codex-subscription', ['gpt-5.1'])).toBe('')
+  })
+
+  it('keeps oauth-broker providers off the Kubernetes Secret editor list', () => {
+    expect(LLM_SECRET_EDITOR_GROUPS.some(group => group.provider === 'codex-subscription')).toBe(
+      false
+    )
+    expect(LLM_SECRET_EDITOR_GROUPS.every(group => group.slots.length > 0)).toBe(true)
+  })
 })
 
 describe('getLlmGroupCompleteness (spec R4.5.5)', () => {
@@ -133,6 +212,15 @@ describe('getLlmGroupCompleteness (spec R4.5.5)', () => {
       usable: false,
     })
     expect(getLlmGroupCompleteness(openai, () => true).usable).toBe(true)
+  })
+
+  it('treats a zero-slot oauth-broker provider as usable without any keys', () => {
+    const codex = LLM_CREDENTIAL_GROUPS.find(g => g.provider === 'codex-subscription')!
+    expect(getLlmGroupCompleteness(codex, () => false)).toEqual({
+      present: 0,
+      total: 0,
+      usable: true,
+    })
   })
 
   it('is usable for Bedrock only when both required slots are present', () => {
@@ -192,5 +280,56 @@ describe('validateLlmSecretData (spec R4.5.3)', () => {
         }),
       })
     ).toEqual([])
+  })
+})
+
+describe('broker-backed authoring helpers', () => {
+  it('requires a Secret only when any static-credentials provider is in the chain', () => {
+    expect(providerRequiresLlmSecret('codex-subscription')).toBe(false)
+    expect(providerRequiresLlmSecret('openai')).toBe(true)
+    expect(llmChainRequiresSecret('codex-subscription')).toBe(false)
+    expect(llmChainRequiresSecret('codex-subscription', [{ provider: 'openai' }])).toBe(true)
+    expect(llmChainRequiresSecret('openai', [{ provider: 'codex-subscription' }])).toBe(true)
+  })
+
+  it('rejects cost-unit budgets when a broker provider is in scope', () => {
+    expect(budgetUnitAllowedForProviders('tokens', ['codex-subscription'])).toBe(true)
+    expect(budgetUnitAllowedForProviders('cost', ['openai'])).toBe(true)
+    expect(budgetUnitAllowedForProviders('cost', ['codex-subscription'])).toBe(false)
+    expect(budgetUnitAllowedForProviders('cost', ['openai', 'codex-subscription'])).toBe(false)
+  })
+
+  it('rejects Codex recipe authoring that omits the model, ships a secretRef, or uses cost', () => {
+    expect(
+      brokerBackedRecipeAuthoringError(
+        { agent: { provider: 'codex-subscription', model: 'gpt-5.1' } },
+        'team-plus'
+      )
+    ).toBeNull()
+    expect(
+      brokerBackedRecipeAuthoringError({
+        agent: { provider: 'codex-subscription', model: 'gpt-5.1' },
+      })
+    ).toMatch(/ChatGPT grant/)
+    expect(
+      brokerBackedRecipeAuthoringError({
+        agent: { provider: 'codex-subscription' },
+      })
+    ).toMatch(/explicit catalog model/)
+    expect(
+      brokerBackedRecipeAuthoringError({
+        agent: {
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          secretRef: { name: 'codex-oauth', key: 'refresh' },
+        },
+      })
+    ).toMatch(/must not declare an LLM secretRef/)
+    expect(
+      brokerBackedRecipeAuthoringError({
+        agent: { provider: 'codex-subscription', model: 'gpt-5.1' },
+        budget: { unit: 'cost' },
+      })
+    ).toMatch(/unit tokens/)
   })
 })

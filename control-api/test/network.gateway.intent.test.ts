@@ -335,15 +335,34 @@ describe('network/gateway intent (manifest-level)', () => {
     const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
     const gatewayConf = docContaining(yamlDocs(configmaps), 'name: control-api-rpc-gateway')
     expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-servers$')
+    // spec 11 U1: the proactive connectors read-model is gated by an rpc access
+    // token (requireRpcTokenUserMatch), not requireInternalService('rpc-proxy'),
+    // so the derived guard below does not cover it — assert its location here or
+    // rpc-proxy's GET /rpc/connectors 403s at the edge (the shipped regression).
+    expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-connectors$')
+    // Scope the method assertion to THIS block: `[^}]*?` cannot cross the block's
+    // closing brace, so deleting the connectors' own `limit_except GET {` makes
+    // this fail instead of silently matching a later location's limit_except
+    // (the vacuous-match defect the old `[\s\S]*?` had).
+    expect(gatewayConf).toMatch(
+      /location ~ \^\/api\/v1\/rpc\/access\/users\/\[\^\/\]\+\/mcp-connectors\$ \{[^}]*?limit_except GET \{/
+    )
+    // nginx resolves regex locations by first match in file order, so the
+    // default-deny `location /` MUST come after this allowlisted block.
+    const connectorsIdx = gatewayConf.indexOf('/mcp-connectors$ {')
+    const defaultDenyIdx = gatewayConf.indexOf('location / {')
+    expect(connectorsIdx).toBeGreaterThan(-1)
+    expect(defaultDenyIdx).toBeGreaterThan(-1)
+    expect(connectorsIdx).toBeLessThan(defaultDenyIdx)
     expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-hosts/[^/]+$')
     expect(gatewayConf).toMatch(
-      /location ~ \^\/api\/v1\/rpc\/access\/users\/\[\^\/\]\+\/mcp-hosts\/\[\^\/\]\+\$ \{[\s\S]*?limit_except GET POST/
+      /location ~ \^\/api\/v1\/rpc\/access\/users\/\[\^\/\]\+\/mcp-hosts\/\[\^\/\]\+\$ \{[^}]*?limit_except GET POST/
     )
     expect(gatewayConf).not.toContain('/api/v1/internal/tracing/direct-run-bindings')
     expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/hosts/[^/]+/wake$')
     expect(gatewayConf).toContain('limit_except GET')
     expect(gatewayConf).toMatch(
-      /location ~ \^\/api\/v1\/rpc\/hosts\/\[\^\/\]\+\/wake\$ \{[\s\S]*?limit_except POST/
+      /location ~ \^\/api\/v1\/rpc\/hosts\/\[\^\/\]\+\/wake\$ \{[^}]*?limit_except POST/
     )
     expect(gatewayConf).toContain('location / {')
     expect(gatewayConf).toContain('return 403;')
@@ -477,7 +496,7 @@ describe('network/gateway intent (manifest-level)', () => {
 
     expect(gatewayConf).toContain('location = /api/v1/mcp-host/hosts/heartbeat')
     expect(gatewayConf).toMatch(
-      /location = \/api\/v1\/mcp-host\/hosts\/heartbeat \{[\s\S]*?limit_except POST/
+      /location = \/api\/v1\/mcp-host\/hosts\/heartbeat \{[^}]*?limit_except POST/
     )
   })
 
@@ -552,7 +571,7 @@ describe('network/gateway intent (manifest-level)', () => {
 
     expect(gatewayConf).toContain('location = /api/v1/internal/tracing/agent-run-events')
     expect(gatewayConf).toMatch(
-      /location = \/api\/v1\/internal\/tracing\/agent-run-events \{[\s\S]*?limit_except POST/
+      /location = \/api\/v1\/internal\/tracing\/agent-run-events \{[^}]*?limit_except POST/
     )
     expect(gatewayConf).toMatch(
       /location = \/api\/v1\/internal\/tracing\/agent-run-events \{[\s\S]*?proxy_set_header Authorization \$http_authorization;/
@@ -565,7 +584,7 @@ describe('network/gateway intent (manifest-level)', () => {
 
     expect(gatewayConf).toContain('location = /api/v1/internal/tracing/approval-prompt-history')
     expect(gatewayConf).toMatch(
-      /location = \/api\/v1\/internal\/tracing\/approval-prompt-history \{[\s\S]*?limit_except POST/
+      /location = \/api\/v1\/internal\/tracing\/approval-prompt-history \{[^}]*?limit_except POST/
     )
     expect(gatewayConf).toMatch(
       /location = \/api\/v1\/internal\/tracing\/approval-prompt-history \{[\s\S]*?proxy_set_header Authorization \$http_authorization;/

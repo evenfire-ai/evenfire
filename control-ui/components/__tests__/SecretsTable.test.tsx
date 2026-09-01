@@ -514,3 +514,33 @@ describe('SecretsTable — recipe pending refs', () => {
     expect(mockPush).toHaveBeenCalledWith('/secrets/recipe/ui-creds/edit?namespace=sandbox-ui')
   })
 })
+
+describe('SecretsTable — LLM empty state', () => {
+  it('shows LLM API Keys and LLM Subscriptions as sibling top-level scopes', async () => {
+    rtlRender(
+      <ToastProvider>
+        <SecretsTable
+          activeScope="llm"
+          items={[]}
+          onChanged={async () => {}}
+          onCreateLlmSecret={() => {}}
+          onCreateMcpSecret={() => {}}
+          onCreateRecipeSecret={() => {}}
+          onCreateRecipeSecretFor={() => {}}
+        />
+      </ToastProvider>
+    )
+    expect(await screen.findByText('No LLM secrets found.')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'LLM API Keys' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    )
+    expect(screen.getByRole('tab', { name: 'LLM Subscriptions' })).toHaveAttribute(
+      'href',
+      '/secrets/llm/subscriptions'
+    )
+    expect(screen.getByRole('tab', { name: 'Connector' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Recipe' })).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'API-KEY' })).not.toBeInTheDocument()
+  })
+})
