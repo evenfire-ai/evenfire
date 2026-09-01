@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { ApiException } from '@kubernetes/client-node'
 import request from 'supertest'
 import { rootLogger } from '../src/observability/logger.js'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
@@ -359,6 +360,160 @@ describe('POST /admin/mcp-secrets', () => {
       .expect(500)
 
     expect(res.body.error).toContain('K8s API timeout')
+  })
+
+  // ── Audit: create must be logged like rotate (R3-M2) ────────────────────
+  // A rotation that actually happened must never go unlogged; the same is
+  // now true of create, because the connector screen is a primary credential-
+  // creation path. Key NAMES are safe to log; values never are.
+
+  it('emits mcp-secret-created with name, namespace, and sorted key names only', async () => {
+    const gateway = createGateway()
+    const infoSpy = vi.spyOn(rootLogger, 'info').mockImplementation(() => {})
+    const app = makeApp(gateway)
+    const credentialValue = 'never-log-this-secret-value'
+
+    try {
+      await request(app)
+        .post('/admin/mcp-secrets')
+        .send({
+          name: 'web-research-credentials',
+          data: { SEARCH_API_KEY: credentialValue, GITHUB_TOKEN: credentialValue },
+        })
+        .expect(201)
+
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          module: 'admin-secrets',
+          event: 'mcp-secret-created',
+          name: 'web-research-credentials',
+          namespace: 'mcp-server',
+          createdKeys: ['GITHUB_TOKEN', 'SEARCH_API_KEY'],
+        }),
+        'MCP Secret created'
+      )
+      const serialized = JSON.stringify(infoSpy.mock.calls)
+      expect(serialized).not.toContain(credentialValue)
+      expect(serialized).not.toContain(Buffer.from(credentialValue, 'utf8').toString('base64'))
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
+  it('emits mcp-secret-create-failed with the same names-only fields when createSecret throws', async () => {
+    const gateway = createGateway()
+    gateway.createSecret.mockRejectedValueOnce(new Error('K8s API timeout'))
+    const infoSpy = vi.spyOn(rootLogger, 'info').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    const app = makeApp(gateway)
+    const credentialValue = 'never-log-this-failed-secret'
+
+    try {
+      await request(app)
+        .post('/admin/mcp-secrets')
+        .send({ name: 'fail-secret', data: { SEARCH_API_KEY: credentialValue } })
+        .expect(500)
+
+      expect(infoSpy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'mcp-secret-created' }),
+        expect.anything()
+      )
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          module: 'admin-secrets',
+          event: 'mcp-secret-create-failed',
+          name: 'fail-secret',
+          namespace: 'mcp-server',
+          createdKeys: ['SEARCH_API_KEY'],
+          err: { name: 'Error', message: 'K8s API timeout' },
+        }),
+        'MCP Secret create failed'
+      )
+      const serialized = JSON.stringify([...infoSpy.mock.calls, ...warnSpy.mock.calls])
+      expect(serialized).not.toContain(credentialValue)
+      expect(serialized).not.toContain(Buffer.from(credentialValue, 'utf8').toString('base64'))
+    } finally {
+      infoSpy.mockRestore()
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('does not log ApiException headers when createSecret hits AlreadyExists', async () => {
+    const gateway = createGateway()
+    const body = {
+      kind: 'Status',
+      apiVersion: 'v1',
+      status: 'Failure',
+      message: 'secrets "fail-secret" already exists',
+      reason: 'AlreadyExists',
+      code: 409,
+    }
+    const headers = {
+      'audit-id': 'a1b2c3-secret-audit-uuid',
+      'x-kubernetes-pf-flowschema-uid': 'internal-flowschema-uid',
+      'content-type': 'application/json',
+    }
+    const err = new ApiException(409, 'Conflict', body, headers)
+    expect(err.message).toContain('Headers:')
+    expect(err.message).toContain('audit-id')
+    gateway.createSecret.mockRejectedValueOnce(err)
+    const warnSpy = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    const app = makeApp(gateway)
+
+    try {
+      await request(app)
+        .post('/admin/mcp-secrets')
+        .send({ name: 'fail-secret', data: { SEARCH_API_KEY: 'never-log-this-secret-value' } })
+        .expect(500)
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'mcp-secret-create-failed',
+          name: 'fail-secret',
+          createdKeys: ['SEARCH_API_KEY'],
+        }),
+        'MCP Secret create failed'
+      )
+      const serialized = JSON.stringify(warnSpy.mock.calls)
+      expect(serialized).not.toContain('Headers:')
+      expect(serialized).not.toContain('audit-id')
+      expect(serialized).not.toContain('x-kubernetes-pf')
+      expect(serialized).not.toContain('never-log-this-secret-value')
+      expect(warnSpy.mock.calls[0][0]).toEqual(
+        expect.objectContaining({
+          err: { name: 'Error', message: 'secrets "fail-secret" already exists' },
+        })
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('does not emit a create audit when validation rejects the request', async () => {
+    const gateway = createGateway()
+    const infoSpy = vi.spyOn(rootLogger, 'info').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    const app = makeApp(gateway)
+
+    try {
+      await request(app)
+        .post('/admin/mcp-secrets')
+        .send({ name: 'my-secret', data: {} })
+        .expect(400)
+
+      expect(gateway.createSecret).not.toHaveBeenCalled()
+      expect(infoSpy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'mcp-secret-created' }),
+        expect.anything()
+      )
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'mcp-secret-create-failed' }),
+        expect.anything()
+      )
+    } finally {
+      infoSpy.mockRestore()
+      warnSpy.mockRestore()
+    }
   })
 })
 
