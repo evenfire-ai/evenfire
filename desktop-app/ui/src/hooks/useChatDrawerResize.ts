@@ -28,7 +28,10 @@ import type { RefObject } from 'react'
 /** Hard floor — below this the drawer's own chrome (composer, header, switcher)
  *  starts to overflow. Also the minimum the resize drag can reach. */
 export const CHAT_DRAWER_MIN_WIDTH = 340
-/** Default session width (matches the top of the old CSS clamp). */
+/** Default session width. Matches the top of the LIVE CSS pre-mount fallback
+ *  `--chat-drawer-width: clamp(340px, 32vw, 420px)` (styles.css) that sizes the
+ *  drawer before this hook measures — keep the two in sync. That clamp is still
+ *  in use (the pre-mount / closed-state width), not dead code to delete. */
 export const CHAT_DRAWER_DEFAULT_WIDTH = 420
 /** Generous absolute ceiling for the drag. */
 export const CHAT_DRAWER_MAX_ABSOLUTE = 820
