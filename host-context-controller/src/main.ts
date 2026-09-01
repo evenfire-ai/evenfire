@@ -21,7 +21,12 @@ import {
 } from './k8sClient'
 import { McpApiAuthenticator } from './mcpApiAuthentication'
 import { McpAuthorizationService } from './mcpAuthorization'
-import { resolveHostAuthoritativeFn, resolveProviderAuthoritativeFn } from './readinessGate'
+import {
+  resolveHostAuthoritativeFn,
+  resolveProbeAuthoritativeFn,
+  resolveProviderAuthoritativeFn,
+  resolveReadinessDetailFn,
+} from './readinessGate'
 import { ContextMapperServer } from './server'
 import { StatelessLifecycleTracker } from './statelessLifecycleTracker'
 import {
@@ -145,6 +150,12 @@ async function main(): Promise<void> {
   // server's fail-closed default would pin /api/v1/desktop/* at 503 forever in
   // dev (R2-M1). See resolveHostAuthoritativeFn.
   const hostAuthoritativeFn = resolveHostAuthoritativeFn(watcher)
+  const readinessDetailFn = resolveReadinessDetailFn(watcher)
+  // /ready uses watch freshness only. Phase-2 certification stays on the
+  // per-request gate (providerAuthoritativeFn). Omitting this 10th argument
+  // would keep /ready on the 6-clause predicate and kubelet would evict
+  // during an uncertified safety window.
+  const probeAuthoritativeFn = resolveProbeAuthoritativeFn(watcher)
 
   // Stateless heartbeat consumption — mcp-host pods authenticate their
   // heartbeats toward control-api's /mcp-host facade (control-api is the
@@ -186,7 +197,9 @@ async function main(): Promise<void> {
     providerAuthoritativeFn,
     hostAuthoritativeFn,
     mcpAuthenticator,
-    mcpAuthorization
+    mcpAuthorization,
+    readinessDetailFn,
+    probeAuthoritativeFn
   )
   await server.start()
 

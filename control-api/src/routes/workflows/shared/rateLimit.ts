@@ -3,6 +3,7 @@ import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { createHash } from 'node:crypto'
 import { rateLimitMiddleware } from '../../../middleware/rateLimitMiddleware.js'
 import { verifyAdminToken } from '../../../utils/auth/adminAuthToken.js'
+import { verifyExternalSessionToken } from '../../../utils/auth/externalSessionAuthToken.js'
 import { CONTROL_UI_ADMIN_SESSION_COOKIE, readCookie } from '../../../utils/auth/sessionCookies.js'
 import { extractBearerToken } from '../../../utils/extractBearerToken.js'
 
@@ -11,6 +12,10 @@ const WORKFLOW_GRANT_WRITE_PER_MINUTE = 20
 const WORKFLOW_ADMIN_READ_PER_MINUTE = 60
 const ADMIN_OUTPUTS_READ_PER_MINUTE = 30
 const WORKFLOW_TRIGGER_PER_MINUTE = 10
+const ADMIN_CODEX_READ_PER_MINUTE = 30
+const ADMIN_CODEX_WRITE_PER_MINUTE = 20
+const CODEX_OAUTH_CALLBACK_PER_MINUTE = 20
+const LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MINUTE = 60
 
 /**
  * Credential surface matched by requireAdminWorkflowCaller: bearer for automation,
@@ -130,6 +135,94 @@ export function adminOutputsReadRateLimits() {
   return [adminOutputsReadEdgeRateLimit(), adminOutputsReadRateLimit()] as const
 }
 
+function adminCodexReadEdgeRateLimit() {
+  return createWorkflowEdgeRateLimit('admin_codex_read_edge', ADMIN_CODEX_READ_PER_MINUTE)
+}
+
+function adminCodexWriteEdgeRateLimit() {
+  return createWorkflowEdgeRateLimit('admin_codex_write_edge', ADMIN_CODEX_WRITE_PER_MINUTE)
+}
+
+function adminCodexReadRateLimit() {
+  return rateLimitMiddleware({
+    bucketType: 'admin_codex_read',
+    maxPerMinute: ADMIN_CODEX_READ_PER_MINUTE,
+    getBucketKey: hashedAdminWorkflowCredentialBucket('admin_codex_read'),
+  })
+}
+
+function adminCodexWriteRateLimit() {
+  return rateLimitMiddleware({
+    bucketType: 'admin_codex_write',
+    maxPerMinute: ADMIN_CODEX_WRITE_PER_MINUTE,
+    getBucketKey: hashedAdminWorkflowCredentialBucket('admin_codex_write'),
+  })
+}
+
+export function adminCodexReadRateLimits() {
+  return [adminCodexReadEdgeRateLimit(), adminCodexReadRateLimit()] as const
+}
+
+export function adminCodexWriteRateLimits() {
+  return [adminCodexWriteEdgeRateLimit(), adminCodexWriteRateLimit()] as const
+}
+
+function codexOAuthCallbackBucketKey(req: Request): string {
+  const state = typeof req.query.state === 'string' ? req.query.state.trim() : ''
+  if (state) {
+    const hash = createHash('sha256').update(state).digest('hex').slice(0, 32)
+    return `codex_oauth_callback:state:${hash}`
+  }
+  return `codex_oauth_callback:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
+}
+
+export function codexOAuthCallbackRateLimits() {
+  return [
+    rateLimit({
+      windowMs: 60_000,
+      limit: CODEX_OAUTH_CALLBACK_PER_MINUTE,
+      standardHeaders: 'draft-7',
+      legacyHeaders: false,
+      keyGenerator: codexOAuthCallbackBucketKey,
+      handler: workflowGrantEdgeRateLimitHandler,
+    }),
+    rateLimitMiddleware({
+      bucketType: 'codex_oauth_callback',
+      maxPerMinute: CODEX_OAUTH_CALLBACK_PER_MINUTE,
+      getBucketKey: codexOAuthCallbackBucketKey,
+    }),
+  ] as const
+}
+
+function mcpHostAttemptRateLimitKey(req: Request): string {
+  const claims = req.mcpHostJwt
+  if (claims?.sub) return `llm_provider_attempt:${claims.sub}`
+  const bearer = extractBearerToken(req)
+  if (bearer) {
+    const hash = createHash('sha256').update(bearer).digest('hex').slice(0, 32)
+    return `llm_provider_attempt:bearer:${hash}`
+  }
+  return `llm_provider_attempt:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
+}
+
+export function llmProviderAttemptAuthorizeRateLimits() {
+  return [
+    rateLimit({
+      windowMs: 60_000,
+      limit: LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MINUTE,
+      standardHeaders: 'draft-7',
+      legacyHeaders: false,
+      keyGenerator: mcpHostAttemptRateLimitKey,
+      handler: workflowGrantEdgeRateLimitHandler,
+    }),
+    rateLimitMiddleware({
+      bucketType: 'llm_provider_attempt_authorize',
+      maxPerMinute: LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MINUTE,
+      getBucketKey: mcpHostAttemptRateLimitKey,
+    }),
+  ] as const
+}
+
 function adminWorkflowTriggerRateLimitKey(req: Request): string | null {
   const value = adminWorkflowRateLimitCredential(req)
   if (!value) return null
@@ -149,34 +242,71 @@ export function adminWorkflowTriggerRateLimit() {
   })
 }
 
-function workflowTriggerRateLimitCredential(req: Request): string | null {
-  const bearer = extractBearerToken(req)
-  if (bearer) {
-    return verifiedAdminRateLimitSubject(bearer) || bearer
-  }
-  const userSessionToken = String(req.header('x-user-session-token') || '').trim()
-  if (userSessionToken) return userSessionToken
-  const cookieSubject = verifiedAdminRateLimitSubject(
-    readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)
-  )
-  if (cookieSubject) return cookieSubject
-  if (readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)) {
-    return `ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
-  }
-  return null
+function hashedWorkflowTriggerBucket(credential: string): string {
+  const hash = createHash('sha256').update(credential).digest('hex').slice(0, 32)
+  return `workflow_trigger:${hash}`
 }
 
-export function workflowTriggerRateLimit() {
+function workflowTriggerRateLimitFor(getCredential: (req: Request) => string | null) {
   return rateLimitMiddleware({
     bucketType: 'workflow_trigger',
     maxPerMinute: WORKFLOW_TRIGGER_PER_MINUTE,
     getBucketKey: (req: Request) => {
-      const credential = workflowTriggerRateLimitCredential(req)
+      const credential = getCredential(req)
       if (!credential) return null
-      const hash = createHash('sha256').update(credential).digest('hex').slice(0, 32)
-      return `workflow_trigger:${hash}`
+      return hashedWorkflowTriggerBucket(credential)
     },
   })
+}
+
+function unverifiedTriggerIpCredential(req: Request): string {
+  return `ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
+}
+
+/** Stable per-account key. Raw tokens rotate and must not mint new buckets. */
+function verifiedUserSessionRateLimitSubject(token: string): string | null {
+  const userId = verifyExternalSessionToken(token)?.userId
+  return userId ? `user:${userId}` : null
+}
+
+/**
+ * External trigger lane: prefer the verified Profile userId when
+ * external-rest-api forwards both a service bearer and x-user-session-token.
+ * An unverified session header falls back to IP so rotation cannot evade the cap.
+ */
+export function workflowTriggerRateLimitCredential(req: Request): string | null {
+  const userSessionToken = String(req.header('x-user-session-token') || '').trim()
+  if (userSessionToken) {
+    return (
+      verifiedUserSessionRateLimitSubject(userSessionToken) || unverifiedTriggerIpCredential(req)
+    )
+  }
+
+  const cookie = readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE)
+  const cookieSubject = verifiedAdminRateLimitSubject(cookie)
+  if (cookieSubject) return cookieSubject
+  if (cookie) {
+    return unverifiedTriggerIpCredential(req)
+  }
+
+  const bearer = extractBearerToken(req)
+  if (bearer) {
+    return verifiedAdminRateLimitSubject(bearer) || bearer
+  }
+  return null
+}
+
+/** mcp-host trigger lane: the authenticated principal is the bearer only. */
+export function mcpHostWorkflowTriggerRateLimitCredential(req: Request): string | null {
+  return extractBearerToken(req)
+}
+
+export function workflowTriggerRateLimit() {
+  return workflowTriggerRateLimitFor(workflowTriggerRateLimitCredential)
+}
+
+export function mcpHostWorkflowTriggerRateLimit() {
+  return workflowTriggerRateLimitFor(mcpHostWorkflowTriggerRateLimitCredential)
 }
 
 function workflowAdminReadRateLimit() {

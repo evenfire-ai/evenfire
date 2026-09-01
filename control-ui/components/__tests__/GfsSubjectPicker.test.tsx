@@ -8,6 +8,7 @@ const options = [
   { value: 'user:ada', label: 'Ada Lovelace', badge: 'User' },
   { value: 'team:research', label: 'Research', badge: 'Team' },
   { value: 'host:first-party', label: 'First-party agent runtime', badge: 'Agent' },
+  { value: 'host:workflow', label: 'Workflow runtime', badge: 'Workflow' },
 ]
 
 function ControlledSubjectPicker() {
@@ -37,5 +38,24 @@ describe('GfsSubjectPicker', () => {
     await user.keyboard('{Enter}')
     expect(combobox).toHaveFocus()
     expect(screen.getByRole('button', { name: 'Remove Research' })).toBeTruthy()
+  })
+
+  it('renders entity-specific icons in the available subject options', async () => {
+    const user = userEvent.setup({ delay: null })
+    render(<ControlledSubjectPicker />)
+
+    await user.click(
+      screen.getByRole('combobox', { name: 'Add people, teams, agents, or workflows' })
+    )
+    expect(screen.getByRole('option', { name: 'Research' }).querySelector('svg')).not.toBeNull()
+    expect(
+      screen.getByRole('option', { name: 'First-party agent runtime' }).querySelector('svg')
+    ).not.toBeNull()
+    expect(
+      screen.getByRole('option', { name: 'Workflow runtime' }).querySelector('svg')
+    ).not.toBeNull()
+    expect(screen.getByRole('option', { name: 'Ada Lovelace' }).textContent).toContain(
+      'Ada Lovelace'
+    )
   })
 })

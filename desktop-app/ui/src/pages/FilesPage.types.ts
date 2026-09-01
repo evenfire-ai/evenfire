@@ -8,7 +8,7 @@ export type GfsDriveResource = GfsBrowserChild & {
 }
 
 export type GfsPreviewResource = Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name'> &
-  ({ kind: 'image'; mimeType: string } | { kind: 'markdown' })
+  ({ kind: 'image'; mimeType: string } | { kind: 'markdown' } | { kind: 'video'; mimeType: string })
 
 export interface FilesPageProps {
   /** App-level toast dispatcher for success feedback (desktop-app/ui rule). */

@@ -4,11 +4,16 @@ import type { AdministrativeOutcomeReporter } from '../src/administrativeOutcome
 import { mintHostGfsToken } from '../src/gfsHostBinding'
 import {
   DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES,
+  HostFleetReconcileError,
   HostReconciler,
+  OAUTH_USER_TOKEN_SCOPE,
+  resolveRuntimeControlScopes,
   resolveWorkflowControlScopes,
 } from '../src/hostReconciler'
 import type { InfrastructureTelemetryReporter } from '../src/infrastructureTelemetryReporter'
+import { HostContextLogger } from '../src/logger'
 import { issueMcpHostRuntimeTokens } from '../src/mcpHostRuntimeTokenIssuerClient'
+import { registry } from '../src/metrics'
 import { HostCRD, type HostWorkflowControlScope } from '../src/types'
 import {
   asAppsApi,
@@ -51,7 +56,7 @@ vi.mock('../src/config', () => ({
     desktopPort: 3000,
     desktopResources: {
       requests: { memory: '256Mi', cpu: '250m' },
-      limits: { memory: '4Gi', cpu: '1000m' },
+      limits: { memory: '4Gi', cpu: '1' },
     },
     devMcpServers: [],
     devContexts: [],
@@ -809,7 +814,7 @@ describe('HostReconciler — desktop support', () => {
     expect(resources.requests.memory).toBe('256Mi')
     expect(resources.requests.cpu).toBe('250m')
     expect(resources.limits.memory).toBe('4Gi')
-    expect(resources.limits.cpu).toBe('1000m')
+    expect(resources.limits.cpu).toBe('1')
   })
 
   it('creates desktop NetworkPolicy when desktop enabled', async () => {
@@ -1025,7 +1030,24 @@ describe('HostReconciler — per-Host RBAC scaffolding', () => {
   it('rewrites Role resourceNames when spec.secretRef changes (replace path)', async () => {
     const { reconciler, rbacApi } = createReconciler()
     rbacApi.createNamespacedRole.mockRejectedValueOnce({ code: 409 })
-    rbacApi.readNamespacedRole.mockResolvedValue({ metadata: { resourceVersion: '7' } })
+    rbacApi.readNamespacedRole.mockImplementation(async () => {
+      const desired = rbacApi.createNamespacedRole.mock.calls[0][0].body as {
+        metadata?: { labels?: Record<string, string> }
+        rules?: Array<{ resources?: string[]; verbs?: string[]; resourceNames?: string[] }>
+      }
+      const live = structuredClone(desired)
+      const secretRule = live.rules?.find(
+        rule => rule.resources?.[0] === 'secrets' && rule.verbs?.includes('get')
+      )
+      if (!secretRule?.resourceNames) {
+        throw new Error('expected the created Role to carry a secrets get rule')
+      }
+      secretRule.resourceNames[0] = 'host-secret'
+      return {
+        ...live,
+        metadata: { ...live.metadata, resourceVersion: '7' },
+      }
+    })
 
     await reconciler.reconcile(makeHost({ spec: { secretRef: 'rotated-secret' } } as never))
 
@@ -1043,6 +1065,17 @@ describe('HostReconciler — per-Host RBAC scaffolding', () => {
       'host-alpha-host-mcp-host-runtime-tokens',
     ])
     expect(replaced.metadata.resourceVersion).toBe('7')
+  })
+
+  it('replaces a live Role that has no rules (fail-open-to-write)', async () => {
+    const { reconciler, rbacApi } = createReconciler()
+    rbacApi.createNamespacedRole.mockRejectedValueOnce({ code: 409 })
+    rbacApi.readNamespacedRole.mockResolvedValue({ metadata: { resourceVersion: '7' } })
+
+    await reconciler.reconcile(makeHost({ spec: { secretRef: 'rotated-secret' } } as never))
+
+    expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledTimes(1)
+    expect(rbacApi.replaceNamespacedRole.mock.calls[0][0].body.metadata.resourceVersion).toBe('7')
   })
 
   it('cleans up RBAC on reconcileDelete', async () => {
@@ -1455,7 +1488,9 @@ describe('reconcileChannelReaderDeployment', () => {
     appsApi.replaceNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
     coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
 
-    await (reconciler as any).reconcileChannelReaderDeployment(host)
+    await expect((reconciler as any).reconcileChannelReaderDeployment(host)).rejects.toThrow(
+      /ownership changed to host "other-host"/
+    )
 
     expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
   })
@@ -1940,5 +1975,260 @@ describe('reconcileChannelReaderDeployment — B2: preserve replicas on unsynced
     const replaceBody = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
       .body as k8s.V1Deployment
     expect(replaceBody.spec?.replicas).toBe(1)
+  })
+})
+
+async function readFleetBenignSupersessions(errorName: string): Promise<number> {
+  const metric = registry.getSingleMetric('clerum_hcc_host_fleet_benign_supersessions_total')
+  if (!metric) throw new Error('clerum_hcc_host_fleet_benign_supersessions_total is not registered')
+  const snapshot = await metric.get()
+  return snapshot.values.find(entry => entry.labels.error === errorName)?.value ?? 0
+}
+
+describe('collectHostReconcileFailures benign supersession (#490)', () => {
+  function nameEquivalent(name: string, message: string): Error {
+    const error = new Error(message)
+    error.name = name
+    return error
+  }
+
+  it.each([
+    'HostInventoryAuthorityUnavailableError',
+    'HostMutationIdentityChangedError',
+    'HostMutationSpecRevisionChangedError',
+    'HostMutationDependencyChangedError',
+  ] as const)(
+    'resolves reconcileHosts when every fleet error is name-equivalent %s',
+    async errorName => {
+      const { reconciler } = createReconciler()
+      const withdrawn = nameEquivalent(
+        errorName,
+        `Host "${errorName}" superseded before Host "alpha-host" reconcile admission`
+      )
+      vi.spyOn(reconciler, 'reconcile').mockRejectedValue(withdrawn)
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const before = await readFleetBenignSupersessions(errorName)
+
+      await expect(reconciler.reconcileHosts([makeHost()])).resolves.toBeUndefined()
+
+      expect(await readFleetBenignSupersessions(errorName)).toBe(before + 1)
+      expect(
+        errorSpy.mock.calls.some(call => String(call[0]).includes('Fleet reconcile failed'))
+      ).toBe(false)
+      errorSpy.mockRestore()
+    }
+  )
+
+  it('still rejects a lookalike error name that is not in the benign set', async () => {
+    const { reconciler } = createReconciler()
+    vi.spyOn(reconciler, 'reconcile').mockRejectedValue(
+      nameEquivalent('HostMutationSpecRevisionChanged', 'almost the withdrawn name')
+    )
+
+    await expect(reconciler.reconcileHosts([makeHost()])).rejects.toBeInstanceOf(
+      HostFleetReconcileError
+    )
+  })
+
+  it('still rejects HostFleetReconcileError for a non-benign fleet error', async () => {
+    const { reconciler } = createReconciler()
+    vi.spyOn(reconciler, 'reconcile').mockRejectedValue(new Error('boom'))
+
+    await expect(reconciler.reconcileHosts([makeHost()])).rejects.toBeInstanceOf(
+      HostFleetReconcileError
+    )
+  })
+
+  it('still rejects when a mixed pass has at least one genuine host failure', async () => {
+    const { reconciler } = createReconciler()
+    vi.spyOn(reconciler, 'reconcile').mockImplementation(async host => {
+      if (host.name === 'alpha-host') {
+        throw nameEquivalent(
+          'HostMutationSpecRevisionChangedError',
+          'Host spec generation changed before Host "alpha-host" reconcile admission'
+        )
+      }
+      throw new Error('boom')
+    })
+
+    await expect(
+      reconciler.reconcileHosts([makeHost(), makeHost({ name: 'beta-host' })])
+    ).rejects.toMatchObject({
+      name: 'HostFleetReconcileError',
+      hostFailures: [expect.objectContaining({ message: 'boom' })],
+    })
+  })
+})
+
+describe('HostReconciler oauth:user-token runtime scope provisioning', () => {
+  // Extract the runtime-token scope arg from the LAST issuer call, sorted for
+  // stable comparison. This is the REAL derive → issuance payload: the mock
+  // captures whatever `resolveWorkflowControlScopesForHost` (the production
+  // derive) actually produced — no hand-minted JWT.
+  function lastIssuedScopes(): string[] {
+    const calls = vi.mocked(issueMcpHostRuntimeTokens).mock.calls
+    const last = calls[calls.length - 1]
+    return [...(last?.[2] ?? [])].sort()
+  }
+
+  // Access the private static scope-hash used for drift detection.
+  const scopeHashOf = (
+    HostReconciler as unknown as {
+      runtimeTokenScopeHash(
+        host: HostCRD,
+        hasChannelIngress?: boolean,
+        frontsOAuthServer?: boolean
+      ): string
+    }
+  ).runtimeTokenScopeHash
+
+  it('requests oauth:user-token through the real issuance payload when the Host fronts an enabled oauth mcp-server', async () => {
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+    const { reconciler } = createReconciler()
+    // Host CRD carries NO oauth scope — the value is derive-only. HCC learns
+    // the Host fronts an oauth server exclusively from this injected probe.
+    reconciler.setHostFrontsOAuthServer(async () => true)
+
+    await reconciler.reconcile(makeHost())
+
+    // Goes through the REAL derive (resolveWorkflowControlScopesForHost →
+    // resolveRuntimeControlScopes). Without the derive change this scope is
+    // absent and the assertion fails.
+    expect(lastIssuedScopes()).toEqual(
+      [...DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES, OAUTH_USER_TOKEN_SCOPE].sort()
+    )
+    expect(lastIssuedScopes()).toContain('oauth:user-token')
+  })
+
+  it('does NOT request oauth:user-token when the Host fronts no oauth mcp-server', async () => {
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+    const { reconciler } = createReconciler()
+    reconciler.setHostFrontsOAuthServer(async () => false)
+
+    await reconciler.reconcile(makeHost())
+
+    expect(lastIssuedScopes()).toEqual([...DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES].sort())
+    expect(lastIssuedScopes()).not.toContain('oauth:user-token')
+  })
+
+  it('defaults to NO oauth:user-token when the probe is unwired', async () => {
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+    const { reconciler } = createReconciler()
+    // No setHostFrontsOAuthServer — production default is fail-closed false.
+
+    await reconciler.reconcile(makeHost())
+
+    expect(lastIssuedScopes()).not.toContain('oauth:user-token')
+  })
+
+  it('fails closed (no oauth:user-token) when the oauth-server probe throws', async () => {
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+    const { reconciler } = createReconciler()
+    reconciler.setHostFrontsOAuthServer(async () => {
+      throw new Error('context read failed')
+    })
+
+    await reconciler.reconcile(makeHost())
+
+    expect(lastIssuedScopes()).toEqual([...DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES].sort())
+    expect(lastIssuedScopes()).not.toContain('oauth:user-token')
+  })
+
+  it('toggling oauth-server presence changes the runtime-token scope hash (drift re-issues)', () => {
+    const host = makeHost()
+    const withoutOAuth = scopeHashOf(host, true, false)
+    const withOAuth = scopeHashOf(host, true, true)
+    expect(withOAuth).not.toBe(withoutOAuth)
+  })
+
+  it('mint scope set matches the scope-hash input (no mint/hash divergence)', async () => {
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+    const { reconciler } = createReconciler()
+    reconciler.setHostFrontsOAuthServer(async () => true)
+    const host = makeHost()
+
+    await reconciler.reconcile(host)
+
+    // The scopes minted into the token (issuer payload) must equal the exact
+    // set the drift hash is computed over — both flow through
+    // resolveRuntimeControlScopes, so a hash miss would re-issue forever.
+    const hashInput = [
+      ...resolveRuntimeControlScopes(host.spec.workflowControl, {
+        hasChannelIngress: true,
+        frontsOAuthServer: true,
+      }),
+    ].sort()
+    expect(lastIssuedScopes()).toEqual(hashInput)
+    expect(hashInput).toContain('oauth:user-token')
+  })
+})
+
+describe('HostReconciler.frontsOAuthServer transient-blip retry (R4-M9)', () => {
+  // The oauth-server probe is exercised through the REAL reconciler built by
+  // createReconciler() and the REAL setHostFrontsOAuthServer setter — no
+  // hand-minted value. We assert on the private method directly (rather than the
+  // full reconcile) on purpose: the deployment drift guard
+  // (ensureCurrentRuntimeTokenScope) re-mints the token when the scope hash
+  // changes mid-reconcile, so a probe that throws once and then returns `true`
+  // would be MASKED at the public issuance observable — the guard would re-mint
+  // with the recovered `true` value, hiding the collapse. The boolean returned by
+  // frontsOAuthServer IS the observable whose flip drives the churn this fixes.
+  const callFronts = (reconciler: HostReconciler, host: HostCRD): Promise<boolean> =>
+    (
+      reconciler as unknown as {
+        frontsOAuthServer(host: HostCRD): Promise<boolean>
+      }
+    ).frontsOAuthServer(host)
+
+  it('absorbs a transient throw: probe throws once then returns true → true (blip smoothed)', async () => {
+    // Regression case (T3): against the pre-fix head the throw collapses to
+    // `false` and this assertion fails. With the bounded retry the second
+    // attempt returns the authoritative `true`.
+    const { reconciler } = createReconciler()
+    let calls = 0
+    reconciler.setHostFrontsOAuthServer(async () => {
+      calls += 1
+      if (calls === 1) throw new Error('transient apiserver read blip')
+      return true
+    })
+
+    await expect(callFronts(reconciler, makeHost())).resolves.toBe(true)
+    expect(calls).toBe(2)
+  })
+
+  it('does NOT retry an authoritative false: probe returns false without throwing → false, called once', async () => {
+    // Control: a real scope change RETURNS false; the retry must not fire, or a
+    // genuine "no longer oauth" would be smeared into a stale `true`.
+    const { reconciler } = createReconciler()
+    let calls = 0
+    reconciler.setHostFrontsOAuthServer(async () => {
+      calls += 1
+      return false
+    })
+
+    await expect(callFronts(reconciler, makeHost())).resolves.toBe(false)
+    expect(calls).toBe(1)
+  })
+
+  it('fails closed after exhausting retries: probe always throws → false, N attempts, warn logged', async () => {
+    const warnSpy = vi.spyOn(HostContextLogger.prototype, 'warn')
+    try {
+      const { reconciler } = createReconciler()
+      let calls = 0
+      reconciler.setHostFrontsOAuthServer(async () => {
+        calls += 1
+        throw new Error('sustained apiserver outage')
+      })
+
+      await expect(callFronts(reconciler, makeHost())).resolves.toBe(false)
+      // Retried up to the bounded ceiling (fix uses 3 total attempts); pre-fix
+      // head would call the probe exactly once.
+      expect(calls).toBe(3)
+      const retryWarn = warnSpy.mock.calls.find(([msg]) => String(msg).includes('after retries'))
+      expect(retryWarn).toBeDefined()
+      expect(retryWarn?.[1]).toMatchObject({ attempts: 3 })
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 })

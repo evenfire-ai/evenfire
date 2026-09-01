@@ -20,6 +20,20 @@ export interface ModelSelectorProps {
 /** How long the "applies to your next message" confirmation badge stays up. */
 const APPLIED_BADGE_MS = 4000
 
+/** Broker-backed hosts have no static default; the operator must name a model. */
+const CODEX_SUBSCRIPTION_PROVIDER = 'codex-subscription'
+const SELECT_MODEL_LABEL = 'Select model'
+
+function isBrokerBackedProvider(provider: string): boolean {
+  return provider === CODEX_SUBSCRIPTION_PROVIDER
+}
+
+function isOfferedForNewPick(option: HostModelOption, sessionModel: string | null): boolean {
+  const isCurrent = Boolean(sessionModel) && option.name === sessionModel
+  if (isCurrent) return true
+  return !option.stale && !option.disabled
+}
+
 /** Human label for a model: operator `displayName` if set, else the raw name. */
 function modelLabel(name: string, options: HostModelOption[]): string {
   const match = options.find(option => option.name === name)
@@ -29,9 +43,11 @@ function modelLabel(name: string, options: HostModelOption[]): string {
 /**
  * Per-session model selector for the chat indicators row (R2), sat next to the
  * agent title and context-window chip. Shows the effective model
- * (`sessionModel ?? hostDefault`) and, on click, a popover listing the allowed
- * models. Choosing one applies it to the NEXT task ("applies to your next
- * message" — R2.5).
+ * (`sessionModel ?? hostDefault`, except broker-backed Codex which never
+ * invents a default) and, on click, a popover listing the allowed models.
+ * Stale/disabled catalog rows stay hidden from new picks unless they are the
+ * saved session selection. Choosing one applies it to the NEXT task
+ * ("applies to your next message" — R2.5).
  *
  * Visibility / degraded rules:
  *   - Hidden entirely until the model list loads, and when the host predates the
@@ -76,10 +92,18 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
     return () => window.clearTimeout(timeoutId)
   }, [applied])
 
-  const effectiveModel = data ? (data.sessionModel ?? data.hostDefault) : ''
-  const effectiveLabel = useMemo(
-    () => (data ? modelLabel(effectiveModel, data.models) : ''),
-    [data, effectiveModel]
+  const effectiveModel = data
+    ? (data.sessionModel ?? (isBrokerBackedProvider(data.provider) ? '' : data.hostDefault))
+    : ''
+  const effectiveLabel = useMemo(() => {
+    if (!data) return ''
+    if (!effectiveModel && isBrokerBackedProvider(data.provider)) return SELECT_MODEL_LABEL
+    return modelLabel(effectiveModel, data.models)
+  }, [data, effectiveModel])
+  const offeredModels = useMemo(
+    () =>
+      data ? data.models.filter(option => isOfferedForNewPick(option, data.sessionModel)) : [],
+    [data]
   )
 
   const handleSelect = useCallback(
@@ -169,9 +193,9 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
               {error}
             </p>
           )}
-          {data.models.length ? (
+          {offeredModels.length ? (
             <ul className="model-selector-list">
-              {data.models.map(option => {
+              {offeredModels.map(option => {
                 const isActive = option.name === effectiveModel
                 return (
                   <li key={option.name}>

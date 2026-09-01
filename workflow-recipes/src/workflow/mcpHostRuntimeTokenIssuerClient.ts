@@ -36,10 +36,13 @@ export type WorkflowControlScope =
   | 'workflow:approval:decide'
   | 'plugin-workload-sdk'
 
+export type DerivedPlatformScope = 'llm:codex:execute'
+export type EffectiveWorkflowControlScope = WorkflowControlScope | DerivedPlatformScope
+
 async function postMcpHostTokenIssue(
   recipeNamespace: string,
   recipeName: string,
-  workflowControlScopes: WorkflowControlScope[] = []
+  workflowControlScopes: EffectiveWorkflowControlScope[] = []
 ): Promise<CanonicalMcpHostTokenResponse> {
   const url = `${CONTROL_API_BASE_URL}/api/v1/auth/mcp-host/${encodeURIComponent(recipeNamespace)}/${encodeURIComponent(recipeName)}/tokens`
   const controller = new AbortController()
@@ -82,7 +85,7 @@ async function postMcpHostTokenIssue(
 export async function issueMcpHostWorkflowControlToken(
   recipeNamespace: string,
   recipeName: string,
-  workflowControlScopes: WorkflowControlScope[] = []
+  workflowControlScopes: EffectiveWorkflowControlScope[] = []
 ): Promise<string> {
   return (await issueMcpHostRuntimeTokens(recipeNamespace, recipeName, workflowControlScopes))
     .mcpHostControlToken
@@ -91,7 +94,7 @@ export async function issueMcpHostWorkflowControlToken(
 export async function issueMcpHostRuntimeTokens(
   recipeNamespace: string,
   recipeName: string,
-  workflowControlScopes: WorkflowControlScope[] = []
+  workflowControlScopes: EffectiveWorkflowControlScope[] = []
 ): Promise<McpHostRuntimeTokenResponse> {
   const data = await postMcpHostTokenIssue(recipeNamespace, recipeName, workflowControlScopes)
   if (

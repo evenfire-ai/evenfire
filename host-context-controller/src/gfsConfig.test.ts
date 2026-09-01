@@ -55,8 +55,8 @@ describe('gfsDefaultFactoryConfig', () => {
     Object.assign(process.env, {
       CONTEXT_MAPPER_GFSC_UPLOAD_V2_ENABLED: 'true',
       CONTEXT_MAPPER_GFSC_UPLOAD_PROTOCOL_MAX_FILE_BYTES: '1073741824',
-      CONTEXT_MAPPER_GFSC_UPLOAD_PRODUCT_MAX_FILE_BYTES: '209715200',
-      CONTEXT_MAPPER_GFSC_UPLOAD_MAX_FILE_BYTES: '209715200',
+      CONTEXT_MAPPER_GFSC_UPLOAD_PRODUCT_MAX_FILE_BYTES: '314572800',
+      CONTEXT_MAPPER_GFSC_UPLOAD_MAX_FILE_BYTES: '314572800',
       CONTEXT_MAPPER_GFSC_UPLOAD_PREFERRED_CHUNK_BYTES: '8388608',
       CONTEXT_MAPPER_GFSC_UPLOAD_MAX_CHUNK_BYTES: '16777216',
       CONTEXT_MAPPER_GFSC_UPLOAD_MIN_PART_BYTES: '1048576',
@@ -78,8 +78,8 @@ describe('gfsDefaultFactoryConfig', () => {
     expect(c).toMatchObject({
       uploadV2Enabled: 'true',
       uploadProtocolMaxFileBytes: '1073741824',
-      uploadProductMaxFileBytes: '209715200',
-      uploadMaxFileBytes: '209715200',
+      uploadProductMaxFileBytes: '314572800',
+      uploadMaxFileBytes: '314572800',
       uploadPreferredChunkBytes: '8388608',
       uploadMaxChunkBytes: '16777216',
       uploadMinPartBytes: '1048576',

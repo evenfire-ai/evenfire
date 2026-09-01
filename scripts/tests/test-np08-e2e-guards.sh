@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 E2E_SCRIPT="${ROOT}/scripts/e2e/e2e-np08-hcc-authorization.sh"
+RUNTIME_ACCESS_MODULE="${ROOT}/scripts/e2e/_lib/np08-runtime-access.mjs"
+RUNTIME_ACCESS_TEST="${ROOT}/scripts/tests/test-np08-runtime-access.mjs"
 T2_SCRIPT="${ROOT}/scripts/minikube/t2.sh"
 MAKEFILE="${ROOT}/Makefile"
 
@@ -159,6 +161,46 @@ if ! grep -Fq 'np08_cleanup_check_residual' "${E2E_SCRIPT}" ||
 fi
 pass 'the deployed E2E is wired to cleanup and provenance guards'
 
+forbidden_refresh_env='MCP_HOST_RUNTIME_'"REFRESH_TOKEN"
+forbidden_refresh_path='/api/v1/workflow-auth/'"refresh"
+forbidden_reissue_path='/api/v1/workflow-auth/'"reissue"
+for runtime_file in "${E2E_SCRIPT}" "${RUNTIME_ACCESS_MODULE}"; do
+  [[ -f "${runtime_file}" ]] || fail 'the NP-08 access-only runtime module is missing'
+  if grep -Fq "${forbidden_refresh_env}" "${runtime_file}" ||
+    grep -Fq "${forbidden_refresh_path}" "${runtime_file}" ||
+    grep -Fq "${forbidden_reissue_path}" "${runtime_file}"; then
+    fail 'the deployed NP-08 path can still consume or mutate the runtime credential lineage'
+  fi
+done
+pass 'the deployed NP-08 path is access-only and has no refresh or reissue route'
+
+if ! grep -Fq 'NP08_RUNTIME_ACTION=health' "${E2E_SCRIPT}" ||
+  ! grep -Fq 'NP08_RUNTIME_ACTION=journey' "${E2E_SCRIPT}" ||
+  ! grep -Fq "node --input-type=module - < \"\${NP08_RUNTIME_MODULE}\"" "${E2E_SCRIPT}" ||
+  ! grep -Fq 'approval-auth.json' "${RUNTIME_ACCESS_MODULE}" ||
+  ! grep -Fq 'hostRefs' "${RUNTIME_ACCESS_MODULE}" ||
+  ! grep -Fq 'recipeNamespace' "${RUNTIME_ACCESS_MODULE}" ||
+  ! grep -Fq 'recipeName' "${RUNTIME_ACCESS_MODULE}" ||
+  ! grep -Fq 'CLERUM_CONTEXT_MAPPER_URL' "${RUNTIME_ACCESS_MODULE}" ||
+  ! grep -Fq 'CLERUM_SERVER_PORT' "${RUNTIME_ACCESS_MODULE}" ||
+  ! grep -Fq 'runtime_access_rotation_timeout' "${RUNTIME_ACCESS_MODULE}"; then
+  fail 'the deployed E2E is not wired to the tested access observation and retry contract'
+fi
+pass 'the deployed journey streams the tested binding-aware access observer into mcp-host'
+
+health_line="$(grep -n -m1 'NP08_RUNTIME_ACTION=health' "${E2E_SCRIPT}" | cut -d: -f1)"
+fixture_line="$(grep -n -m1 'apply -f -' "${E2E_SCRIPT}" | cut -d: -f1)"
+if [[ -z "${health_line}" || -z "${fixture_line}" || "${health_line}" -ge "${fixture_line}" ]]; then
+  fail 'mcp-host runtime health is not required before fixture mutation'
+fi
+pass 'mcp-host runtime health is proven before fixture mutation'
+
+for expected_status in 200 404 400 401 410; do
+  grep -Fq "status !== ${expected_status}" "${RUNTIME_ACCESS_MODULE}" ||
+    fail "the access-only journey lost its HTTP ${expected_status} assertion"
+done
+pass 'the access-only journey preserves the deployed authorization status assertions'
+
 if grep -Fq 'clerum-codex-np-08-cross-context-mcp-token-plan-' "${E2E_SCRIPT}"; then
   fail 'the deployed E2E is still hard-wired to one historical branch profile'
 fi
@@ -183,3 +225,7 @@ if grep -R -Fq 'e2e-np08-hcc-authorization.sh' "${ROOT}/.github/workflows"; then
   fail 'CI directly invokes the cluster-mutating NP-08 deployed journey'
 fi
 pass 'CI validates NP-08 wiring statically without cluster writes'
+
+node --check "${RUNTIME_ACCESS_MODULE}"
+node --test "${RUNTIME_ACCESS_TEST}"
+pass 'NP-08 access selection and retry unit tests pass'

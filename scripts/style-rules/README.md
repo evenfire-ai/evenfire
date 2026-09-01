@@ -1,8 +1,9 @@
 # style-rules
 
 Lightweight, repo-local enforcement for the frontend style conventions
-documented in [`docs/agents/frontend-style-rules.md`](../../docs/agents/frontend-style-rules.md)
-and the per-app pattern docs (e.g. `desktop-app/ui/docs/STYLE_STANDARDIZATION.md`).
+documented in the [shared](../../docs/agents/frontend-style-rules.md) and
+[Desktop renderer](../../docs/agents/desktop-ui-rules.md) guidance plus
+[`desktop-app/ui/docs/STYLE_STANDARDIZATION.md`](../../desktop-app/ui/docs/STYLE_STANDARDIZATION.md).
 
 This is **not** Stylelint or ESLint. It is a small Node script — same shape
 as `scripts/prettier/run-on-staged.mjs` — chosen because:

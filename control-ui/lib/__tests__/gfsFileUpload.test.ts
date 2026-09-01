@@ -1,24 +1,124 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { GFS_FILE_UPLOAD_MAX_BYTES, GFS_FILE_UPLOAD_MAX_MEGABYTES } from '@constants/gfsFileUpload'
 import {
+  GFS_LEGACY_UPLOAD_MAX_BYTES,
   GfsUploadJob,
   type GfsUploadStatus,
+  allowsLegacyCapabilityFallback,
   assertGfsFileUploadSize,
+  formatGfsUploadLimit,
   isAmbiguousUploadStatus,
   isRetryableUploadStatus,
   normalizeInstabilityFailureThreshold,
+  normalizeUploadProductMaxBytes,
   parseRetryAfter,
+  signalWithTimeout,
+  uploadGfsFileLegacy,
 } from '@lib/gfsFileUpload'
 
 describe('assertGfsFileUploadSize', () => {
-  it('accepts files at the upload limit', () => {
-    expect(() => assertGfsFileUploadSize(GFS_FILE_UPLOAD_MAX_BYTES)).not.toThrow()
+  it('allows product-policy decisions through the 1 GiB protocol maximum', () => {
+    expect(() => assertGfsFileUploadSize(250 * 1024 * 1024)).not.toThrow()
+    expect(() => assertGfsFileUploadSize(1024 * 1024 * 1024)).not.toThrow()
   })
 
-  it('rejects files above the upload limit', () => {
-    expect(() => assertGfsFileUploadSize(GFS_FILE_UPLOAD_MAX_BYTES + 1)).toThrow(
-      `GFS uploads are limited to ${GFS_FILE_UPLOAD_MAX_MEGABYTES} MB per file.`
+  it('rejects files above the absolute protocol maximum', () => {
+    expect(() => assertGfsFileUploadSize(1024 * 1024 * 1024 + 1)).toThrow(
+      'GFS uploads cannot exceed the 1 GiB Upload v2 protocol maximum.'
     )
+  })
+})
+
+describe('formatGfsUploadLimit', () => {
+  it('uses binary units for exact MiB boundaries without changing byte-accurate values', () => {
+    expect(formatGfsUploadLimit(300 * 1024 * 1024)).toBe('300 MiB')
+    expect(formatGfsUploadLimit(16 * 1024 * 1024)).toBe('16 MiB')
+    expect(formatGfsUploadLimit(1)).toBe('1 byte')
+    expect(formatGfsUploadLimit(1024 * 1024 * 1024)).toBe('1 GiB')
+  })
+})
+
+describe('Upload v2 capability fallback classification', () => {
+  it.each([
+    ['network failure', new TypeError('fetch failed'), true],
+    ['timeout', Object.assign(new Error('timed out'), { name: 'TimeoutError' }), true],
+    ['request timeout', Object.assign(new Error('timed out'), { status: 408 }), true],
+    ['unsupported endpoint', Object.assign(new Error('missing'), { status: 404 }), true],
+    ['not implemented', Object.assign(new Error('unsupported'), { status: 501 }), true],
+    ['gateway unavailable', Object.assign(new Error('unavailable'), { status: 503 }), true],
+    ['caller abort', Object.assign(new Error('aborted'), { name: 'AbortError' }), false],
+    ['malformed JSON', new SyntaxError('bad JSON'), false],
+    ['unauthorized', Object.assign(new Error('unauthorized'), { status: 401 }), false],
+    ['forbidden', Object.assign(new Error('forbidden'), { status: 403 }), false],
+    ['invalid request', Object.assign(new Error('invalid'), { status: 422 }), false],
+    ['writer failure', Object.assign(new Error('failed'), { status: 500 }), false],
+    ['unknown failure', new Error('unexpected'), false],
+  ])('classifies %s for bounded legacy fallback', (_label, error, expected) => {
+    expect(allowsLegacyCapabilityFallback(error)).toBe(expected)
+  })
+
+  it('classifies the real request timeout reason for bounded legacy fallback', async () => {
+    vi.useFakeTimers()
+    try {
+      const timed = signalWithTimeout(undefined, 25)
+      const aborted = new Promise<void>(resolve => {
+        timed.signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+
+      await vi.advanceTimersByTimeAsync(25)
+      await aborted
+
+      expect(timed.signal.reason).toMatchObject({ name: 'TimeoutError' })
+      expect(allowsLegacyCapabilityFallback(timed.signal.reason)).toBe(true)
+      timed.cancel()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('uploadGfsFileLegacy', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('rejects above the legacy limit before reading or requesting the legacy upload', async () => {
+    const file = new File([new Uint8Array([1])], 'too-large-for-legacy.bin')
+    Object.defineProperty(file, 'size', { value: GFS_LEGACY_UPLOAD_MAX_BYTES + 1 })
+    const arrayBuffer = vi.spyOn(file, 'arrayBuffer')
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      uploadGfsFileLegacy({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-legacy-limit' },
+      })
+    ).rejects.toThrow('legacy GFS is limited to 16 MiB')
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('keeps files within the legacy limit on the existing compatibility path', async () => {
+    const file = new File([new Uint8Array([1, 2, 3])], 'legacy.bin')
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true, data: { resourceId: 'legacy-resource' } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      uploadGfsFileLegacy({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-legacy-limit' },
+      })
+    ).resolves.toEqual({ ok: true, data: { resourceId: 'legacy-resource' } })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -114,6 +214,10 @@ class FakeXhr {
 }
 
 describe('GfsUploadJob', () => {
+  it('pins the missing-field compatibility default independently of the implementation', () => {
+    expect(normalizeUploadProductMaxBytes(undefined)).toBe(209_715_200)
+  })
+
   beforeEach(() => {
     FakeXhr.requests = []
     FakeXhr.statuses = []
@@ -150,8 +254,270 @@ describe('GfsUploadJob', () => {
         name: file.name,
         target: { operation: 'create', parentRid: 'parent-ceiling' },
       }).start()
-    ).rejects.toThrow('writer limit is 1 bytes')
+    ).rejects.toThrow('writer permits files up to 1 byte')
     expect(createCalls).toBe(0)
+  })
+
+  it('reaches writer admission for a 250 MiB file under a 300 MiB capability', async () => {
+    const file = new File([new Uint8Array([1])], 'runtime-raise.bin')
+    const fileSize = 250 * 1024 * 1024
+    Object.defineProperty(file, 'size', { value: fileSize })
+    let capabilityCalls = 0
+    let createSize: number | undefined
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        if (method === 'GET' && String(_input).endsWith('/capabilities')) {
+          capabilityCalls += 1
+          return new Response(
+            JSON.stringify({
+              upload: { resumableV2: { enabled: true, maxFileBytes: 300 * 1024 * 1024 } },
+            }),
+            { status: 200 }
+          )
+        }
+        if (method === 'POST' && String(_input).endsWith('/uploads')) {
+          createSize = JSON.parse(String(init?.body)).sizeBytes
+          throw new Error('writer admission reached')
+        }
+        throw new Error(`unexpected ${method} ${String(_input)}`)
+      })
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-runtime-raise' },
+      }).start()
+    ).rejects.toThrow('writer admission reached')
+    expect(capabilityCalls).toBe(1)
+    expect(createSize).toBe(fileSize)
+  })
+
+  it('enforces a lowered 100 MiB writer product limit before session creation', async () => {
+    const file = new File([new Uint8Array([1])], 'runtime-lower.bin')
+    Object.defineProperty(file, 'size', { value: 100 * 1024 * 1024 + 1 })
+    let createCalls = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        if (method === 'GET' && String(_input).endsWith('/capabilities'))
+          return new Response(
+            JSON.stringify({
+              upload: { resumableV2: { enabled: true, maxFileBytes: 100 * 1024 * 1024 } },
+            }),
+            { status: 200 }
+          )
+        if (method === 'POST') createCalls += 1
+        return new Response(null, { status: 204 })
+      })
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-runtime-lower' },
+      }).start()
+    ).rejects.toThrow('GFS writer permits files up to 100 MiB')
+    expect(createCalls).toBe(0)
+  })
+
+  it('marks a valid disabled-v2 response as eligible for bounded fresh legacy fallback', async () => {
+    const file = new File([new Uint8Array([1])], 'disabled-v2.bin')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ upload: { resumableV2: { enabled: false } } }), {
+            status: 200,
+          })
+      )
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-disabled-v2' },
+      }).start()
+    ).rejects.toMatchObject({
+      name: 'GfsUploadCapabilityError',
+      allowLegacyFallback: true,
+    })
+  })
+
+  it('fails closed on an authenticated capability rejection instead of selecting legacy', async () => {
+    const file = new File([new Uint8Array([1])], 'capability-auth.bin')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('{"error":"unauthorized"}', { status: 401 }))
+    )
+
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-capability-auth' },
+      }).start()
+    ).rejects.toMatchObject({
+      name: 'GfsUploadCapabilityError',
+      allowLegacyFallback: false,
+    })
+  })
+
+  it('reports the default compatibility limit when an enabled writer omits maxFileBytes', async () => {
+    const file = new File([new Uint8Array([1])], 'missing-limit.bin')
+    const compatibilityMaxFileBytes = normalizeUploadProductMaxBytes(undefined)
+    let createCalls = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        if (method === 'GET' && String(_input).endsWith('/capabilities'))
+          return new Response(JSON.stringify({ upload: { resumableV2: { enabled: true } } }), {
+            status: 200,
+          })
+        if (method === 'POST') {
+          createCalls += 1
+          return new Response(JSON.stringify({ error: 'session admission reached' }), {
+            status: 422,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+        return new Response(null, { status: 204 })
+      })
+    )
+
+    const compatibilityWarning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-missing-limit' },
+      }).start()
+    ).rejects.toThrow()
+    expect(compatibilityWarning).toHaveBeenCalledWith(
+      'GFS Upload v2 writer omitted maxFileBytes; using the 200 MiB compatibility limit.'
+    )
+    expect(createCalls).toBe(1)
+    expect(file.size).toBeLessThanOrEqual(compatibilityMaxFileBytes)
+  })
+
+  it.each([0, -1, 1.5, 1024 * 1024 * 1024 + 1, Number.MAX_SAFE_INTEGER + 1, '314572800', null])(
+    'rejects malformed writer maxFileBytes %s as a capability failure',
+    async maxFileBytes => {
+      const file = new File([new Uint8Array([1])], 'invalid-limit.bin')
+      let createCalls = 0
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+          const method = init?.method ?? 'GET'
+          if (method === 'GET' && String(_input).endsWith('/capabilities'))
+            return new Response(
+              JSON.stringify({ upload: { resumableV2: { enabled: true, maxFileBytes } } }),
+              { status: 200 }
+            )
+          if (method === 'POST') createCalls += 1
+          return new Response(null, { status: 204 })
+        })
+      )
+
+      await expect(
+        new GfsUploadJob({
+          file,
+          name: file.name,
+          target: { operation: 'create', parentRid: 'parent-invalid-limit' },
+        }).start()
+      ).rejects.toMatchObject({ name: 'GfsUploadCapabilityError' })
+      expect(createCalls).toBe(0)
+    }
+  )
+
+  it.each([
+    null,
+    {},
+    { upload: null },
+    { upload: { resumableV2: null } },
+    { upload: { resumableV2: { enabled: 'true' } } },
+  ])('normalizes malformed capability shape %# to the canonical failure path', async response => {
+    const file = new File([new Uint8Array([1])], 'invalid-capability.bin')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(response), { status: 200 }))
+    )
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-invalid-capability' },
+      }).start()
+    ).rejects.toMatchObject({ name: 'GfsUploadCapabilityError' })
+  })
+
+  it('rejects above the 1 GiB protocol maximum before requesting capabilities', async () => {
+    const file = new File([new Uint8Array([1])], 'protocol-max.bin')
+    Object.defineProperty(file, 'size', { value: 1024 * 1024 * 1024 + 1 })
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(
+      new GfsUploadJob({
+        file,
+        name: file.name,
+        target: { operation: 'create', parentRid: 'parent-protocol-max' },
+      }).start()
+    ).rejects.toThrow(/1 GiB Upload v2 protocol maximum/)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('resumes an admitted session after the writer product limit is lowered', async () => {
+    const file = new File([new Uint8Array([1, 2])], 'resume-lowered-limit.bin')
+    const session = {
+      uploadId: '92929292-9292-4292-8292-929292929292',
+      drive: 'main',
+      expectedBytes: 2,
+      partBytes: 1,
+      partCount: 2,
+      state: 'paused',
+      contiguousBytes: 0,
+      committedBytes: 0,
+      committedPartCount: 0,
+      activePartCount: 0,
+    }
+    let statusCalls = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        const url = String(_input)
+        if (method === 'GET' && url.endsWith('/capabilities'))
+          return new Response(
+            JSON.stringify({ upload: { resumableV2: { enabled: true, maxFileBytes: 1 } } }),
+            { status: 200 }
+          )
+        if (method === 'HEAD')
+          return new Response(null, { status: 204, headers: { 'upload-length': '2' } })
+        if (method === 'GET' && url.includes('/status')) {
+          statusCalls += 1
+          return new Response(JSON.stringify({ ok: true, data: { session, parts: [] } }), {
+            status: 200,
+          })
+        }
+        throw new Error(`unexpected ${method} ${url}`)
+      })
+    )
+
+    const result = await new GfsUploadJob({
+      file,
+      name: file.name,
+      target: { operation: 'create', parentRid: 'parent-resume-lowered-limit' },
+      resumeUploadId: session.uploadId,
+    }).start()
+    expect(result.state).toBe('paused')
+    expect(statusCalls).toBe(1)
   })
 
   it('rejects a create receipt that changes the canonical control-ui drive', async () => {

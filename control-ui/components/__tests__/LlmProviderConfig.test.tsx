@@ -21,6 +21,7 @@ function Harness({
   withCredentials = true,
   existingKeys,
   replacePrimaryModelWithAllowedModels = false,
+  catalog = CATALOG,
 }: {
   initialProvider?: LlmProvider
   initialModel?: string
@@ -29,6 +30,7 @@ function Harness({
   withCredentials?: boolean
   existingKeys?: string[]
   replacePrimaryModelWithAllowedModels?: boolean
+  catalog?: LlmModelCatalogEntry[]
 }) {
   const [provider, setProvider] = useState<LlmProvider>(initialProvider)
   const [model, setModel] = useState(initialModel)
@@ -47,7 +49,7 @@ function Harness({
       onPolicyChange={setPolicy}
       allowedModels={allowedModels}
       onAllowedModelsChange={setAllowedModels}
-      catalog={CATALOG}
+      catalog={catalog}
       credentials={
         withCredentials
           ? {
@@ -131,6 +133,21 @@ describe('LlmProviderConfig (spec Topic 1b — domain projection + usable gate)'
     const primary = screen.getByLabelText('OpenAI credentials')
     expect(within(primary).queryByText(/Add the OpenAI credential/i)).not.toBeInTheDocument()
     expect(within(primary).getAllByLabelText('present').length).toBeGreaterThan(0)
+    expect(within(primary).getByRole('status')).toHaveTextContent(/Stored/i)
+    expect(
+      within(primary).queryByLabelText(/OpenAI API key/i, { selector: 'input' })
+    ).not.toBeInTheDocument()
+  })
+
+  it('reveals a stored credential input only when replacement is requested', () => {
+    render(<Harness existingKeys={['openai-api-key']} />)
+    const primary = screen.getByLabelText('OpenAI credentials')
+
+    fireEvent.click(within(primary).getByRole('button', { name: 'Replace OpenAI API key' }))
+
+    expect(within(primary).getByLabelText(/OpenAI API key/i)).toBeInTheDocument()
+    expect(within(primary).getByPlaceholderText(/Enter a new openai api key/i)).toBeInTheDocument()
+    expect(within(primary).getByRole('button', { name: 'Keep stored' })).toBeInTheDocument()
   })
 
   it('starts fallbacks at ZERO and adds a same-provider fallback that reuses the primary key', () => {
@@ -171,6 +188,17 @@ describe('LlmProviderConfig (spec Topic 1b — domain projection + usable gate)'
       screen.getByLabelText('Provider', { selector: '#llm-primary-provider' })
     ).toHaveTextContent('OpenAI')
     expect(screen.getByLabelText('Model', { selector: '#llm-primary-model' })).toBeInTheDocument()
+  })
+
+  it('offers one OpenAI provider and does not invent a ChatGPT radio', () => {
+    render(<Harness />)
+    fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
+    expect(screen.getByRole('option', { name: /^OpenAI$/i })).toBeInTheDocument()
+    expect(
+      screen.queryByRole('option', { name: /OpenAI Codex Subscription/i })
+    ).not.toBeInTheDocument()
+    expect(screen.queryByRole('radio', { name: /ChatGPT subscription/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('radio', { name: /API key/i })).not.toBeInTheDocument()
   })
 })
 

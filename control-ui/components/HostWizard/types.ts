@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import type { LlmPolicy, LlmProvider } from '@/lib/llm'
 
 export type McpServer = {
   metadata?: { name?: string; namespace?: string }
@@ -35,6 +36,10 @@ export type CreatedResource = {
   name: string
 }
 
+// LLM Secret mode for Host create. A broker-only chain hides this entirely
+// and omits spec.secretRef; mixed/static chains still require an exact Secret.
+export type HostLlmSecretMode = 'existing' | 'new'
+
 export type HostWizardProps = {
   existingSecrets: SecretMeta[]
   mcpServers: McpServer[]
@@ -45,6 +50,7 @@ export type HostWizardProps = {
 }
 
 export type WizardSelectOption = {
+  group?: string
   label: ReactNode
   meta?: ReactNode
   providers?: { id: string; label: string }[]
@@ -58,4 +64,18 @@ export type WizardSelectProps = {
   options: WizardSelectOption[]
   placeholder: string
   value: string
+}
+
+export type HostWizardValidationState = {
+  hostName: string
+  secretMode: 'existing' | 'new'
+  existingSecret: string
+  existingLlmSecret: string
+  newSecretName: string
+  llmKeyDraft: Record<string, string>
+  llmPolicy: LlmPolicy | undefined
+  provider: LlmProvider
+  modelName: string
+  connectionRef: string
+  codexModels: string[]
 }

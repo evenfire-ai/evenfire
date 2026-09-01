@@ -404,6 +404,68 @@ describe('RpcProxyClient.listSessions', () => {
     })
   })
 
+  it('surfaces U5 connect_required pendingApproval fields (reason/mcpServerName) and drops a dead provider', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          state: 'awaiting_approval',
+          pendingApproval: {
+            requestId: 'req-1',
+            displayName: 'clickup: create task',
+            reason: 'connect_required',
+            mcpServerName: 'mcp-clickup',
+            // Even if a legacy server still emits `provider`, the parser drops it:
+            // under HCC v2 it is always undefined and no renderer/action consumes it.
+            provider: 'clickup',
+          },
+          turns: [],
+        }),
+      })
+    )
+
+    const result = await client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')
+    expect(result).toMatchObject({
+      pendingApproval: {
+        requestId: 'req-1',
+        displayName: 'clickup: create task',
+        reason: 'connect_required',
+        mcpServerName: 'mcp-clickup',
+      },
+    })
+    expect(result.pendingApproval).not.toHaveProperty('provider')
+  })
+
+  it('keeps generic pendingApproval byte-identical when the U5 fields are absent (back-compat)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          state: 'awaiting_approval',
+          pendingApproval: {
+            requestId: 'req-1',
+            displayName: 'Search',
+          },
+          turns: [],
+        }),
+      })
+    )
+
+    const result = await client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')
+    expect(result.pendingApproval).toEqual({
+      requestId: 'req-1',
+      displayName: 'Search',
+    })
+  })
+
   it.each([
     ['oldestTurnNumber', -1],
     ['oldestTurnNumber', 0.5],

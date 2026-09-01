@@ -28,7 +28,7 @@ import type { SidebarItem, SidebarTab } from './types'
 export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
   hosts: { label: 'Agents', href: CONTROL_ROUTES.agents.root, icon: <IconRobot /> },
   'mcp-servers': {
-    label: 'Installed connectors',
+    label: 'Installed Connectors',
     href: CONTROL_ROUTES.connectors.root,
     icon: <IconCable />,
   },
@@ -94,7 +94,7 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
     icon: <IconStore />,
   },
   'workflow-recipes': {
-    label: 'Installed plugins',
+    label: 'Installed Plugins',
     href: CONTROL_ROUTES.plugins.root,
     icon: <IconWorkflow />,
   },

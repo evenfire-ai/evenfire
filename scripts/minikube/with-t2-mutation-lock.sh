@@ -12,13 +12,27 @@ shift
 
 # GNU Make executes recipe lines containing $(MAKE) during `make -n` so the
 # recursive make can print its own plan. Never let that dry-run escape hatch
-# enter a mutating wrapper. Match the actual dry-run flags rather than looking
-# for the letter `n`, because normal recursive builds carry --no-print-directory.
-for make_flag in ${MAKEFLAGS:-}; do
-  case "${make_flag}" in
-    -n|n|--just-print|--dry-run) exit 0 ;;
-  esac
-done
+# enter a mutating wrapper. GNU Make may compact short flags into tokens such
+# as `ns` or `rns`; inspect only flag-shaped tokens so `--no-print-directory`
+# and variable assignments containing the letter n are not false positives.
+t2_makeflags_is_dry_run() {
+  local make_flag short_flags
+  for make_flag in ${MAKEFLAGS:-}; do
+    case "${make_flag}" in
+      -n|n|--just-print|--dry-run|--recon) return 0 ;;
+      --*|*=*) continue ;;
+    esac
+    short_flags="${make_flag#-}"
+    if [[ "${short_flags}" =~ ^[a-zA-Z]+$ ]] && [[ "${short_flags}" == *n* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+if t2_makeflags_is_dry_run; then
+  exit 0
+fi
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 T2_PROJECT_DIR="${T2_PROJECT_DIR:-${ROOT}}"

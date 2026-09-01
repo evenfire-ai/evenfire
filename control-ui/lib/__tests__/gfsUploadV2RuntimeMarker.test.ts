@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { validateGfsRuntimeImageMarker } from '../../../tests/e2e/gfsUploadV2Runtime'
+import {
+  GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES,
+  validateGfsRuntimeImageMarker,
+  validateGfsUploadProductMaxBytes,
+} from '../../../tests/e2e/gfsUploadV2Runtime'
 
 const base = {
   clusterFingerprint: 'cluster-a',
@@ -44,5 +48,33 @@ describe('GFS Upload v2 runtime image marker contract', () => {
         { imagesGeneratedAt: '2026-08-12T19:00:00Z' }
       )
     ).toThrow(/imagesGeneratedAt/)
+  })
+})
+
+describe('GFS Upload v2 runtime product maximum contract', () => {
+  it.each([1, 100 * 1024 * 1024, 200 * 1024 * 1024, 300 * 1024 * 1024])(
+    'accepts a bounded integer product maximum of %i bytes',
+    value => {
+      expect(validateGfsUploadProductMaxBytes(value)).toBe(value)
+    }
+  )
+
+  it('accepts the exact protocol maximum', () => {
+    expect(validateGfsUploadProductMaxBytes(GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES)).toBe(
+      GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES
+    )
+  })
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES + 1,
+    Number.MAX_SAFE_INTEGER + 1,
+    '209715200',
+    null,
+    undefined,
+  ])('rejects invalid product maximum %p before mutating a runtime', value => {
+    expect(() => validateGfsUploadProductMaxBytes(value)).toThrow(/invalid GFS Upload v2/)
   })
 })
