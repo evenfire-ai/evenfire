@@ -74,9 +74,7 @@ WebM + PNG under `.local-notes/qa-recorder/runs/desktop-app/`.
 | Navigation     | `qa-recorder-navigation.spec.ts`   | Sidebar, footer Settings/Resources menus, page shells. Read-only.                                   |
 | Agents         | `qa-recorder-agents.spec.ts`       | Fleet, exact `chatllm` row, workspace routes. Read-only.                                            |
 | Connectors     | `qa-recorder-connectors.spec.ts`   | MCP/connector health inventory. Read-only.                                                          |
-| Contexts       | `qa-recorder-contexts.spec.ts`     | List + detail tabs (`development`/`moneymaking`). Read-only.                                        |
 | Shared files   | `qa-recorder-shared-files.spec.ts` | Filesystem + directory browser. Read-only.                                                          |
-| Teams          | `qa-recorder-teams.spec.ts`        | Teams directory + detail tabs. Read-only.                                                           |
 | Plugins        | `qa-recorder-plugins.spec.ts`      | Inventory, detail, runs/artifacts. Trigger gated by `QA_RECORDER_CONFIRM_MUTATIONS`.                |
 | Apps           | `qa-recorder-apps.spec.ts`         | Catalog + embedded session. Read-only.                                                              |
 | Settings       | `qa-recorder-settings.spec.ts`     | Appearance, notifications, configuration. Endpoint switch gated by `QA_RECORDER_CONFIRM_MUTATIONS`. |
