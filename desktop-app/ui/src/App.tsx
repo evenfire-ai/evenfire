@@ -797,14 +797,18 @@ export function App() {
     setChatDrawerReady(false)
   }, [activeSandboxUiApp?.appRef, chatDrawerVisible])
 
-  // Once the drawer becomes visible after a `chat.switcher` on a closed drawer,
-  // the switcher is mounted — bump its focus request so it opens the dropdown.
+  // Once the drawer becomes visible AND ready after a `chat.switcher` on a closed
+  // drawer, the switcher is mounted and no longer `inert` — bump its focus request
+  // so it opens the dropdown and moves focus onto it. Gating on `chatDrawerReady`
+  // (not just visibility) is required: the drawer subtree is `inert` from mount
+  // until the embed acks its shrunk bounds, and a `focus()` fired while inert is a
+  // silent no-op, so bumping on visibility alone would open the switcher unfocused.
   React.useEffect(() => {
-    if (chatDrawerVisible && pendingChatSwitcherFocusRef.current) {
+    if (chatDrawerVisible && chatDrawerReady && pendingChatSwitcherFocusRef.current) {
       pendingChatSwitcherFocusRef.current = false
       setChatSwitcherFocusRequestId(value => value + 1)
     }
-  }, [chatDrawerVisible])
+  }, [chatDrawerVisible, chatDrawerReady])
 
   const handleSandboxUiBoundsApplied = React.useCallback(() => {
     if (appNotificationDrawerOpen) setNotificationDrawerReady(true)

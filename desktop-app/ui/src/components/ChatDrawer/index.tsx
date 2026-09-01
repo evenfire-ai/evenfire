@@ -31,6 +31,12 @@ export function ChatDrawer({
       className={`chat-drawer${ready ? ' is-ready' : ''}${resizing ? ' is-resizing' : ''}`}
       aria-label="Chat"
       data-ready={ready ? 'true' : 'false'}
+      // Not-ready is hidden with `opacity: 0; pointer-events: none`, which stops
+      // the mouse but NOT the keyboard: a `tabIndex=0` under opacity:0 is still
+      // focusable, so between mount and the embed's bounds-ack Tab could land on
+      // the invisible resize handle / CTAs. `inert` takes the whole subtree out
+      // of the tab order (and the a11y tree) until the drawer is actually shown.
+      inert={!ready}
     >
       <div
         className="chat-drawer__resize-handle"

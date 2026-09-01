@@ -20,6 +20,7 @@ const sandboxUiPageHarness = vi.hoisted(() => ({
     chatDrawerOpen?: boolean
     onToggleChatDrawer?: () => void
     onEmbeddedAppMounted?: () => void
+    onEmbedBoundsApplied?: () => void
     onEmbedSlotTopChange?: (topPx: number) => void
   },
 }))
@@ -264,6 +265,71 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 
     // Reopen must preserve chat-2, not jump back to the chat-1 origin.
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+  })
+
+  // The drawer's not-ready subtree is `inert`, and a `focus()` fired inside an
+  // inert subtree is a silent no-op. So the `chat.switcher` shortcut (which opens
+  // the drawer, then opens+focuses the switcher) must defer the open until the
+  // embed acks its bounds and the drawer is READY — bumping on visibility alone
+  // would open the option list while still inert, leaving it unfocused. This pins
+  // that ordering at the observable level: options appear only after ready.
+  it('defers the chat.switcher open until the drawer is ready, not merely visible', () => {
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      navItem: DESKTOP_ROUTES.chat,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    let commandCb: ((commandId: string, source: string) => void) | null = null
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        shortcuts: {
+          onCommand: vi.fn((cb: (commandId: string, source: string) => void) => {
+            commandCb = cb
+            return vi.fn()
+          }),
+        },
+        app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
+        sandboxUi: {
+          listApps: vi.fn().mockResolvedValue({ apps: [] }),
+          listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
+          clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
+          onDeepLink: vi.fn(() => vi.fn()),
+          setVisible: vi.fn().mockResolvedValue(undefined),
+          setBounds: vi.fn().mockResolvedValue(undefined),
+          focusActive: vi.fn().mockResolvedValue(true),
+          close: vi.fn().mockResolvedValue(undefined),
+        },
+      } as unknown as Window['clerum'],
+    })
+
+    render(<App />)
+
+    // Launch the app and mark the embed mounted so `chat.switcher` (eligibility
+    // `app-mounted`) is dispatchable, then manually close the drawer so the
+    // shortcut takes the "open the drawer first, defer focus" branch.
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    act(() => sandboxUiPageHarness.props?.onEmbeddedAppMounted?.())
+    act(() => sandboxUiPageHarness.props?.onToggleChatDrawer?.())
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+
+    // Fire the shortcut: the drawer reopens but has NOT acked its bounds, so its
+    // subtree is inert. The switcher must stay CLOSED — no options rendered yet.
+    act(() => commandCb?.('chat.switcher', 'shortcut-host'))
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(screen.queryByRole('option')).toBeNull()
+
+    // Embed acks its bounds → drawer becomes ready (inert lifted) → the deferred
+    // request fires and the switcher opens, now focusable.
+    act(() => sandboxUiPageHarness.props?.onEmbedBoundsApplied?.())
+    expect(screen.queryAllByRole('option').length).toBeGreaterThan(0)
   })
 
   it('reverts the notification tray to overlay form while the chat drawer is visible', () => {

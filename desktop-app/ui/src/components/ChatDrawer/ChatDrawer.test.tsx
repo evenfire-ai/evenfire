@@ -82,6 +82,9 @@ describe('ChatDrawer', () => {
     expect(drawer.classList.contains('is-ready')).toBe(false)
     expect(getComputedStyle(drawer).opacity).toBe('0')
     expect(getComputedStyle(drawer).pointerEvents).toBe('none')
+    // pointer-events:none only stops the mouse; `inert` is what also removes the
+    // focusable handle/CTAs from the tab order while the drawer is not shown.
+    expect(drawer.hasAttribute('inert')).toBe(true)
   })
 
   it('confines the composer reference submenu to the drawer interior, off the embed rect', () => {
@@ -124,5 +127,6 @@ describe('ChatDrawer', () => {
     expect(drawer.classList.contains('is-ready')).toBe(true)
     expect(getComputedStyle(drawer).opacity).toBe('1')
     expect(getComputedStyle(drawer).pointerEvents).toBe('auto')
+    expect(drawer.hasAttribute('inert')).toBe(false)
   })
 })
