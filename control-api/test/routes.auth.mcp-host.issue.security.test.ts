@@ -73,7 +73,11 @@ const mockPoolQueryDispatch = vi.fn(async (sql: unknown, params?: unknown[]) => 
 vi.mock('../src/db.js', () => ({
   pool: {
     query: (...args: unknown[]) => mockPoolQueryDispatch(args[0], args[1] as unknown[] | undefined),
-    connect: vi.fn(),
+    connect: vi.fn(async () => ({
+      query: (...args: unknown[]) =>
+        mockPoolQueryDispatch(args[0], args[1] as unknown[] | undefined),
+      release: vi.fn(),
+    })),
   },
   withTransaction: vi.fn(),
 }))
