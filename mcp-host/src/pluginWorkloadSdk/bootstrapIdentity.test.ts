@@ -338,7 +338,7 @@ describe('Plugin Workload SDK bootstrap identity', () => {
         provider: 'codex-subscription',
         model: 'gpt-5.6-luna',
         contractVersion: 3,
-        codexBinding: { ...binding, leaked: 'drop-me' },
+        codexBinding: { ...binding, leaked: 'drop-me' } as typeof binding,
       },
       { capabilityFamily: 'promptBridge', verify }
     )

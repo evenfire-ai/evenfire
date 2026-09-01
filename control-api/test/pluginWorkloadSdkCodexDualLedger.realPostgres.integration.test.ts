@@ -24,7 +24,7 @@ import {
   loadLlmProviderAttemptBySdkAttemptId,
 } from '../src/services/llmProviderAttemptStore.js'
 import { issueRegisteredCodexExecutionTicket } from '../src/services/llmProviderAttemptTicket.js'
-import { prunePluginWorkloadSdkExpiredIdempotency } from '../src/services/pluginWorkloadSdkDb.js'
+import { prunePluginWorkloadSdkExpiredIdempotencyInTransaction } from '../src/services/pluginWorkloadSdkDb.js'
 import { finalizePromptBridgeInTransaction } from '../src/services/pluginWorkloadSdkFinalization.js'
 import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
 import './realPostgres.requirement.ts'
@@ -770,7 +770,7 @@ describeRealPostgres('Plugin Workload SDK Codex dual ledger on real PostgreSQL',
           AND kcu.column_name = 'plugin_workload_sdk_provider_attempt_id'`
     )
     expect(deleteRule.rows[0]?.delete_rule).toBe('SET NULL')
-    const pruned = await prunePluginWorkloadSdkExpiredIdempotency()
+    const pruned = await prunePluginWorkloadSdkExpiredIdempotencyInTransaction(pool)
     expect(pruned).toBeGreaterThan(0)
     const leftoverSdk = await pool.query(
       `SELECT id FROM plugin_workload_sdk_provider_attempts WHERE id = $1`,

@@ -2234,32 +2234,33 @@ export async function listInvocations(
  * rows are pruned — an in_progress row past TTL is first failed by
  * failStaleInvocations.
  */
-export async function prunePluginWorkloadSdkExpiredIdempotency(): Promise<number> {
-  return withTransaction(async db => {
-    // Child receipts and one-shot JTIs have no useful life once the parent
-    // idempotency reservation expires. Delete them in one transaction so
-    // usage and ticket lookups cannot observe orphaned authority.
-    await db.query(
-      `DELETE FROM plugin_workload_sdk_credential_ticket_jtis jt
+export async function prunePluginWorkloadSdkExpiredIdempotencyInTransaction(
+  db: DbClient
+): Promise<number> {
+  // Child receipts and one-shot JTIs have no useful life once the parent
+  // idempotency reservation expires. Delete them in one transaction so
+  // usage and ticket lookups cannot observe orphaned authority.
+  await db.query(
+    `DELETE FROM plugin_workload_sdk_credential_ticket_jtis jt
         USING plugin_workload_sdk_invocations inv
        WHERE jt.invocation_id = inv.id
          AND inv.created_at < now() - interval '1 hour' * $1
          AND inv.status <> 'in_progress'`,
-      [IDEMPOTENCY_TTL_HOURS]
-    )
-    await db.query(
-      `DELETE FROM plugin_workload_sdk_invocation_attempts attempts
+    [IDEMPOTENCY_TTL_HOURS]
+  )
+  await db.query(
+    `DELETE FROM plugin_workload_sdk_invocation_attempts attempts
         USING plugin_workload_sdk_invocations inv
        WHERE attempts.invocation_id = inv.id
          AND inv.created_at < now() - interval '1 hour' * $1
          AND inv.status <> 'in_progress'`,
-      [IDEMPOTENCY_TTL_HOURS]
-    )
-    // Unlink the durable Codex ledger before deleting SDK attempt rows.
-    // 0108 also SET NULLs the FK on delete; this UPDATE keeps prune from
-    // depending on that constraint name and never CASCADE-deletes spend.
-    await db.query(
-      `UPDATE llm_provider_attempts a
+    [IDEMPOTENCY_TTL_HOURS]
+  )
+  // Unlink the durable Codex ledger before deleting SDK attempt rows.
+  // 0108 also SET NULLs the FK on delete; this UPDATE keeps prune from
+  // depending on that constraint name and never CASCADE-deletes spend.
+  await db.query(
+    `UPDATE llm_provider_attempts a
           SET plugin_workload_sdk_provider_attempt_id = NULL
          FROM plugin_workload_sdk_provider_attempts attempts
          JOIN plugin_workload_sdk_invocations inv
@@ -2267,24 +2268,27 @@ export async function prunePluginWorkloadSdkExpiredIdempotency(): Promise<number
         WHERE a.plugin_workload_sdk_provider_attempt_id = attempts.id
           AND inv.created_at < now() - interval '1 hour' * $1
           AND inv.status <> 'in_progress'`,
-      [IDEMPOTENCY_TTL_HOURS]
-    )
-    await db.query(
-      `DELETE FROM plugin_workload_sdk_provider_attempts attempts
+    [IDEMPOTENCY_TTL_HOURS]
+  )
+  await db.query(
+    `DELETE FROM plugin_workload_sdk_provider_attempts attempts
         USING plugin_workload_sdk_invocations inv
        WHERE attempts.invocation_id = inv.id
          AND inv.created_at < now() - interval '1 hour' * $1
          AND inv.status <> 'in_progress'`,
-      [IDEMPOTENCY_TTL_HOURS]
-    )
-    const result = await db.query(
-      `DELETE FROM plugin_workload_sdk_invocations
+    [IDEMPOTENCY_TTL_HOURS]
+  )
+  const result = await db.query(
+    `DELETE FROM plugin_workload_sdk_invocations
        WHERE created_at < now() - interval '1 hour' * $1
          AND status <> 'in_progress'`,
-      [IDEMPOTENCY_TTL_HOURS]
-    )
-    return result.rowCount ?? 0
-  })
+    [IDEMPOTENCY_TTL_HOURS]
+  )
+  return result.rowCount ?? 0
+}
+
+export async function prunePluginWorkloadSdkExpiredIdempotency(): Promise<number> {
+  return withTransaction(prunePluginWorkloadSdkExpiredIdempotencyInTransaction)
 }
 
 // ─── Quota counters (historical-only, issue #348) ────────────────────────
