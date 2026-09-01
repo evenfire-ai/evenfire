@@ -218,7 +218,11 @@ export function useChatDrawerResize(
   // Keyboard resize for the focusable separator handle (WAI-ARIA window-splitter
   // pattern): with `aria-orientation="vertical"`, Left/Right move the splitter.
   // The drawer is right-docked, so ArrowLeft widens it (mirroring a leftward
-  // drag) and ArrowRight narrows it; Home/End jump to the drawer's max/min.
+  // drag) and ArrowRight narrows it. Home/End jump to the handle's ANNOUNCED
+  // bounds: the handle reports `aria-valuenow` = drawer width with
+  // `aria-valuemin` = MIN and `aria-valuemax` = MAX, and the slider/separator
+  // convention binds Home → valuemin and End → valuemax. So Home shrinks to MIN
+  // and End grows to MAX — matching what a screen reader announces on each key.
   const onResizeHandleKeyDown = React.useCallback((event: React.KeyboardEvent<HTMLElement>) => {
     let requested: number
     switch (event.key) {
@@ -229,10 +233,10 @@ export function useChatDrawerResize(
         requested = widthRef.current - CHAT_DRAWER_KEY_STEP
         break
       case 'Home':
-        requested = CHAT_DRAWER_MAX_ABSOLUTE
+        requested = CHAT_DRAWER_MIN_WIDTH
         break
       case 'End':
-        requested = CHAT_DRAWER_MIN_WIDTH
+        requested = CHAT_DRAWER_MAX_ABSOLUTE
         break
       default:
         return

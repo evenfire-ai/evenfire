@@ -39,12 +39,14 @@ describe('useChatDrawerResize keyboard resize', () => {
     expect(result.current.width).toBe(CHAT_DRAWER_DEFAULT_WIDTH - 24) // 396
   })
 
-  it('jumps to the max on Home and the min on End', () => {
+  it('jumps to the min on Home and the max on End (matching aria-valuemin/valuemax)', () => {
+    // The handle announces aria-valuenow = width, valuemin = 340, valuemax = 820,
+    // so the separator/slider convention requires Home → valuemin, End → valuemax.
     const { result } = setup()
     press(result, 'Home')
-    expect(result.current.width).toBe(CHAT_DRAWER_MAX_ABSOLUTE) // 820
-    press(result, 'End')
     expect(result.current.width).toBe(CHAT_DRAWER_MIN_WIDTH) // 340
+    press(result, 'End')
+    expect(result.current.width).toBe(CHAT_DRAWER_MAX_ABSOLUTE) // 820
   })
 
   it('ignores unrelated keys and does not preventDefault them', () => {
