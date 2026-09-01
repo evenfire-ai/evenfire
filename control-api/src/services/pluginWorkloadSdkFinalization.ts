@@ -1,6 +1,7 @@
 import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import type { DbClient } from '../db.js'
 import {
+  type LlmProviderAttemptRow,
   isLinkedCodexInFlightWithoutUsage,
   isLinkedCodexUsageReady,
   loadLlmProviderAttemptBySdkAttemptId,
@@ -161,12 +162,10 @@ function validateInput(input: PromptBridgeFinalizationInput): void {
 function resolvePromptBridgeOutcome(
   status: PromptBridgeFinalizationStatus,
   oauthBroker: boolean,
-  linked: {
-    status: string
-    outcome: string | null
-    usageInputTokens?: number | null
-    usageOutputTokens?: number | null
-  } | null
+  linked: Pick<
+    LlmProviderAttemptRow,
+    'status' | 'outcome' | 'usageInputTokens' | 'usageOutputTokens'
+  > | null
 ): 'exact' | 'unknown' | 'not_executed' {
   if (!oauthBroker) {
     return status === 'complete' ? 'exact' : status === 'failed' ? 'not_executed' : 'unknown'

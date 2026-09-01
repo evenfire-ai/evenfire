@@ -2164,10 +2164,8 @@ export async function failStaleInvocationsInTransaction(
     )
     let linkedCodexInFlight = false
     for (const attempt of physicalAttempts.rows as Array<Record<string, unknown>>) {
-      if (
-        !isLlmProviderId(String(attempt.provider)) ||
-        PROVIDER_AUTH_MODE[String(attempt.provider)] !== 'oauth-broker'
-      ) {
+      const provider = String(attempt.provider)
+      if (!isLlmProviderId(provider) || PROVIDER_AUTH_MODE[provider] !== 'oauth-broker') {
         continue
       }
       const linked = await loadLlmProviderAttemptBySdkAttemptId(db, String(attempt.id))
