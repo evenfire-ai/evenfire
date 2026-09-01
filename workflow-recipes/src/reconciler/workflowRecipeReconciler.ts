@@ -4749,6 +4749,34 @@ export class WorkflowRecipeReconciler {
    * alarm cap and least-recently-observed entries were dropped (H3).
    */
   private warnEgressAccumulator(policyName: string, acc: AccumulateOutput): void {
+    // issue #299 — the resolved set, so the WRC lane leaves a history.
+    //
+    // WHY THIS EXISTS. HCC has emitted `[NetPol] Resolved <fqdn> → [ips]` since
+    // its initial commit (networkPolicyReconciler.ts), so its lane has a
+    // reconstructable 28-day record in Cloud Logging: which addresses a host
+    // used, whether the set is closed, whether it drifts. WRC gained its own
+    // resolution path later and never got the equivalent line, so `wl-egress-*`
+    // and `ui-egress-*` were observable only in the present, through the live
+    // annotation. That is the lane where the currently-exposed hosts live, so
+    // the half of the fleet that needs history is the half that had none.
+    //
+    // WHY ONLY ON CHANGE. HCC logs every resolution: 176 of 1510 log lines in a
+    // 3-minute sample. Copying that verbatim would add the same volume here for
+    // no extra information — the useful event is the set CHANGING, not the poll
+    // that confirmed it did not. `acc.changed` is exactly that predicate
+    // ((fqdn,ip,port,protocol), timestamp-only refreshes excluded), which is
+    // also what the H4 no-op gate keys on, so a logged line and a written policy
+    // stay in step.
+    //
+    // Called from BOTH lanes (ui and workload) on purpose: one emitter, not a
+    // copy per path.
+    if (acc.changed && acc.entries.length > 0) {
+      const ips = acc.entries
+        .map(e => e.ip)
+        .filter((ip, i, all) => all.indexOf(ip) === i)
+        .sort()
+      console.log(`[WR-Reconciler] Resolved egress set for ${policyName} → [${ips.join(', ')}]`)
+    }
     if (acc.frozenFqdns.length > 0) {
       console.warn(
         `[WR-Reconciler] ${policyName}: egress set FROZEN (fail-static) for ${acc.frozenFqdns.join(

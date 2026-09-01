@@ -3856,6 +3856,90 @@ describe('WorkflowRecipeReconciler', () => {
     expect(npCall.body.spec.egress).toHaveLength(2) // internal + external
   })
 
+  // issue #299 — the WRC lane must leave a resolution history in the log.
+  //
+  // HCC has emitted `[NetPol] Resolved <fqdn> → [ips]` since its initial commit,
+  // so its lane can be reconstructed from Cloud Logging: which addresses a host
+  // used over weeks, whether its universe is closed, whether it drifts. WRC had
+  // no equivalent, so `wl-egress-*` and `ui-egress-*` were observable only in
+  // the present through the live annotation — and that is exactly the lane where
+  // the currently-exposed hosts sit. These tests pin both the emission and its
+  // change-gating, since the value of the line is the history it accumulates.
+  it('logs the resolved egress set for the ui lane on first render', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const kc = new k8s.KubeConfig()
+    const rec = new WorkflowRecipeReconciler(kc, undefined, {
+      fqdnLookup: async () => ({
+        kind: 'ok',
+        ipv4: ['93.184.216.10', '93.184.216.11'],
+        ipv6: [],
+        ttlSeconds: 300,
+      }),
+    })
+    const recipe = makeRecipe({
+      spec: {
+        workloads: [{ id: 'frontend', type: 'deployment', image: 'fe:1', port: 8080 }],
+        ui: {
+          workloadRef: 'frontend',
+          port: 8080,
+          egress: { external: [{ fqdn: 'api.stripe.com', port: 443 }] },
+        },
+      },
+    })
+
+    await rec.reconcile(recipe)
+
+    // Both IPs, sorted, on one line — the shape Cloud Logging can be parsed back
+    // into a per-host time series.
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Resolved egress set for ui-egress-test-recipe')
+    )
+    const line = logSpy.mock.calls
+      .map(c => String(c[0]))
+      .find(s => s.includes('Resolved egress set for'))
+    expect(line).toContain('93.184.216.10')
+    expect(line).toContain('93.184.216.11')
+  })
+
+  it('does NOT re-log when the resolved set is unchanged', async () => {
+    // The line is gated on acc.changed — the same predicate the H4 no-op gate
+    // uses — so a logged line and a written policy stay in step. Without the
+    // gate this would emit on every poll: HCC's ungated equivalent accounts for
+    // 176 of 1510 log lines in a 3-minute sample, which is volume without
+    // information.
+    const kc = new k8s.KubeConfig()
+    const rec = new WorkflowRecipeReconciler(kc, undefined, {
+      fqdnLookup: async () => ({ kind: 'ok', ipv4: ['93.184.216.10'], ipv6: [], ttlSeconds: 300 }),
+    })
+    const recipe = makeRecipe({
+      spec: {
+        workloads: [{ id: 'frontend', type: 'deployment', image: 'fe:1', port: 8080 }],
+        ui: {
+          workloadRef: 'frontend',
+          port: 8080,
+          egress: { external: [{ fqdn: 'api.stripe.com', port: 443 }] },
+        },
+      },
+    })
+
+    await rec.reconcile(recipe)
+    // Feed the first render back as the live policy, exactly as the H-E test
+    // below does — no hand-built fixture.
+    const created = mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls
+      .map(c => (c[0] as { body: k8s.V1NetworkPolicy }).body)
+      .find(b => b.metadata?.name === 'ui-egress-test-recipe')
+    expect(created).toBeDefined()
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(created!)
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await rec.reconcile(recipe)
+
+    const relogged = logSpy.mock.calls
+      .map(c => String(c[0]))
+      .filter(s => s.includes('Resolved egress set for ui-egress-test-recipe'))
+    expect(relogged).toHaveLength(0)
+  })
+
   // H-E (audit): a rename of the external FQDN onto the SAME resolved IP/port
   // renders identical spec.egress, so the egress-signature gate alone would no-op
   // and discard the re-attributed state annotation. acc.changed must force the
