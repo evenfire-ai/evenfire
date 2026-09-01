@@ -3,7 +3,7 @@
 import { CONTROL_ROUTES } from '@constants/routes'
 import { TabBar } from '../TabBar'
 
-export type SecretsTabScope = 'llm' | 'mcp' | 'recipe'
+export type SecretsTabScope = 'llm' | 'llm-subscriptions' | 'mcp' | 'recipe'
 
 export function SecretsScopeTabs({ activeValue }: { activeValue: SecretsTabScope }) {
   return (
@@ -12,7 +12,12 @@ export function SecretsScopeTabs({ activeValue }: { activeValue: SecretsTabScope
       activeValue={activeValue}
       className="cu-tabs--flush"
       options={[
-        { value: 'llm', href: CONTROL_ROUTES.secrets.llm, label: 'LLM' },
+        { value: 'llm', href: CONTROL_ROUTES.secrets.llm, label: 'LLM API Keys' },
+        {
+          value: 'llm-subscriptions',
+          href: CONTROL_ROUTES.secrets.llmSubscriptions,
+          label: 'LLM Subscriptions',
+        },
         { value: 'mcp', href: CONTROL_ROUTES.secrets.connector, label: 'Connector' },
         { value: 'recipe', href: CONTROL_ROUTES.secrets.recipe, label: 'Recipe' },
       ]}
