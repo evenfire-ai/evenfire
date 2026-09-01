@@ -137,6 +137,31 @@ describe('D34 migration execution policy', () => {
     expect(canonicalOnlineIndexDefinition(changed)).not.toBe(
       canonicalOnlineIndexDefinition(expected)
     )
+
+    const notificationExpected = `CREATE INDEX notification_user_catalog_idx
+      ON notification_deliveries ((audience->>'userId'), id)
+      INCLUDE (expires_at, status, event_type) WHERE audience ? 'userId'`
+    const notificationDeparsed = `CREATE INDEX notification_user_catalog_idx
+      ON public.notification_deliveries USING btree (((audience ->> 'userId'::text)), id)
+      INCLUDE (expires_at, status, event_type) WHERE (audience ? 'userId'::text)`
+    const nonEquivalentNotifications = [
+      notificationDeparsed.replace('audience ->>', 'audience ->'),
+      notificationDeparsed.replaceAll("'userId'", "'teamId'"),
+      notificationDeparsed.replace(', id)', ', event_type)'),
+      notificationDeparsed.replace('expires_at, status', 'expires_at, delivered_at'),
+      notificationDeparsed.replace('WHERE (audience ?', 'WHERE (audience ='),
+      notificationDeparsed.replace('CREATE INDEX', 'CREATE UNIQUE INDEX'),
+      notificationDeparsed.replace('notification_deliveries', 'notification_archive'),
+    ]
+
+    expect(canonicalOnlineIndexDefinition(notificationDeparsed)).toBe(
+      canonicalOnlineIndexDefinition(notificationExpected)
+    )
+    for (const changed of nonEquivalentNotifications) {
+      expect(canonicalOnlineIndexDefinition(changed)).not.toBe(
+        canonicalOnlineIndexDefinition(notificationExpected)
+      )
+    }
   })
 })
 
