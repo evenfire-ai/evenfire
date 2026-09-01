@@ -182,15 +182,15 @@ describe('AgentWorkspace title selector — visible agent name (R1-M3)', () => {
     vi.clearAllMocks()
   })
 
-  it('renders the centered new-chat landing copy around the agent selector', () => {
+  it('renders the dev-style new-chat title row with the agent selector', () => {
     navMock.selectedAgent = 'alpha'
     agentsMock.agentNames = ['alpha']
 
     render(<AgentWorkspace mode="chat" scrollContainerRef={{ current: null }} />)
 
     expect(document.querySelector('.agent-workspace-new-chat')).toBeTruthy()
-    expect(screen.getByRole('heading', { name: 'Start a conversation' })).toBeTruthy()
-    expect(screen.getByText('Choose an agent to begin')).toBeTruthy()
+    expect(document.querySelector('.agent-workspace-greeting-row')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Start a new conversation with:' })).toBeTruthy()
   })
 
   it('shows the display in the collapsed trigger and in the dropdown option row', () => {

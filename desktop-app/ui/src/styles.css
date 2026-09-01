@@ -4184,73 +4184,75 @@ h3 {
   align-items: center;
   width: 100%;
   min-width: 0;
-  padding: calc(var(--space-4) * 4) 0 0;
+  padding: 0;
 }
 
-.agent-workspace-new-chat__intro {
-  display: grid;
-  justify-items: center;
-  gap: var(--space-1);
+.agent-workspace-greeting-row {
+  width: min(100%, 1120px);
+  max-width: min(100%, 1120px);
+  margin: 0 auto;
+  padding: 50px 0 var(--space-1);
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: baseline;
+  justify-content: center;
+  gap: var(--space-1-5);
   min-width: 0;
-  text-align: center;
 }
 
-.agent-workspace-new-chat__title {
+.agent-workspace-greeting-row .agent-workspace-greeting {
   margin: 0;
   color: var(--text);
   font-size: var(--font-size-2xl);
-  font-weight: var(--font-weight-bold);
-  line-height: var(--line-height-tight);
+  font-weight: 700;
+  line-height: 1.1;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.agent-workspace-new-chat__subtitle {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: var(--font-size-lg);
-  line-height: var(--line-height-normal);
+.agent-workspace-greeting-row .agent-title-selector {
+  flex: 0 0 auto;
+  align-self: center;
 }
 
-.agent-workspace-new-chat__selector {
-  margin-top: var(--space-1-5);
+/* Keep the new-chat title and selector identical to the origin/dev greeting
+ * row while retaining the current composer and sessions layout below it. */
+.agent-workspace-greeting-row .agent-title-selector-trigger.ui-button,
+.agent-workspace-greeting-row .agent-title-selector-trigger.ui-button--sm {
+  font-size: var(--font-size-2xl);
+  font-weight: 700;
+  line-height: 1.1;
+  min-height: 0;
 }
 
-.agent-workspace-new-chat .agent-title-selector-trigger.ui-button--text.ui-button--transparent {
-  width: min(196px, calc(100vw - (var(--space-4) * 2)));
-  min-height: 36px;
-  justify-content: space-between;
-  padding: 0 var(--space-2-5);
-  border: 1px solid var(--control-border);
-  border-radius: var(--radius-sm);
-  background: var(--control-bg);
-  color: var(--text);
-  font-size: var(--font-size-lg);
-  font-weight: var(--font-weight-medium);
-  line-height: var(--line-height-tight);
+.agent-workspace-greeting-row .agent-title-selector-trigger.ui-button--text.ui-button--transparent {
+  color: var(--brand-deep-blue);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  transition: color 120ms ease;
 }
 
-.agent-workspace-new-chat
-  .agent-title-selector-trigger.ui-button--text.ui-button--transparent:hover:enabled,
-.agent-workspace-new-chat
+.agent-workspace-greeting-row
+  .agent-title-selector-trigger.ui-button--text.ui-button--transparent:hover,
+.agent-workspace-greeting-row
+  .agent-title-selector-trigger.ui-button--text.ui-button--transparent:focus-visible,
+.agent-workspace-greeting-row
   .agent-title-selector-trigger.ui-button--text.ui-button--transparent[aria-expanded='true'] {
-  border-color: var(--control-border-hover);
-  background: var(--surface-hover);
-  color: var(--text);
-}
-
-.agent-workspace-new-chat .agent-title-selector-trigger:focus-visible {
+  color: var(--accent);
   outline: none;
-  box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.26);
+  text-decoration: none;
 }
 
-.agent-workspace-new-chat .agent-title-selector-trigger svg {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 14px;
-}
-
-.agent-workspace-new-chat .agent-title-selector-trigger-label {
-  max-width: 32ch;
-  color: inherit;
+.agent-workspace-greeting-row .agent-title-selector-trigger svg {
+  width: 18px;
+  height: 18px;
 }
 
 /* ── Agent title selector dropdown ──
