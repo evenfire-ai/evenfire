@@ -13,8 +13,9 @@ import {
   listWorkflowRunArtifacts,
 } from '../../../services/workflows/workflowRunArtifactService.js'
 import { listCanonicalRuns } from '../../../services/workflows/workflowRunReadService.js'
-import { requireExternalWorkflowCaller } from '../../workflows/shared/auth.js'
+import { requireBoundExternalWorkflowCaller } from '../../workflows/shared/auth.js'
 import { parseLimit } from '../../workflows/shared/validation.js'
+import { externalWorkflowReadAdmission } from './admission.js'
 
 const BASE = '/external/workflows'
 
@@ -48,8 +49,9 @@ export function createExternalWorkflowRunsRoutes(gateway: K8sGateway): Router {
 
   router.get(
     `${BASE}/:ns/:name/runs`,
+    ...externalWorkflowReadAdmission,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = await requireExternalWorkflowCaller(req, res)
+      const caller = requireBoundExternalWorkflowCaller(req, res)
       if (!caller) return
 
       const { ns, name } = req.params
@@ -83,8 +85,9 @@ export function createExternalWorkflowRunsRoutes(gateway: K8sGateway): Router {
 
   router.get(
     `${BASE}/:ns/:name/runs/:runId/artifacts`,
+    ...externalWorkflowReadAdmission,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = await requireExternalWorkflowCaller(req, res)
+      const caller = requireBoundExternalWorkflowCaller(req, res)
       if (!caller) return
 
       try {
@@ -104,8 +107,9 @@ export function createExternalWorkflowRunsRoutes(gateway: K8sGateway): Router {
 
   router.get(
     `${BASE}/:ns/:name/runs/:runId/artifacts/:artifactName/download`,
+    ...externalWorkflowReadAdmission,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = await requireExternalWorkflowCaller(req, res)
+      const caller = requireBoundExternalWorkflowCaller(req, res)
       if (!caller) return
 
       try {

@@ -2,10 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { EventEmitter } from 'node:events'
 import request from 'supertest'
-import {
-  attachAccessExecutionBudget,
-  createExternalAccessRouter,
-} from '../src/routes/external/access.js'
+import { attachAccessExecutionBudget } from '../src/middleware/accessExecutionBudget.js'
+import { createExternalAccessRouter } from '../src/routes/external/access.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 
 const mocks = vi.hoisted(() => ({

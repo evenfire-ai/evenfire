@@ -10,11 +10,8 @@ import {
   WorkflowTriggerHttpError,
   triggerWorkflow,
 } from '../../../services/workflows/workflowTriggerService.js'
-import {
-  bindExternalWorkflowAuth,
-  requireBoundExternalWorkflowCaller,
-} from '../../workflows/shared/auth.js'
-import { workflowTriggerRateLimit } from '../../workflows/shared/rateLimit.js'
+import { requireBoundExternalWorkflowCaller } from '../../workflows/shared/auth.js'
+import { externalWorkflowTriggerAdmission } from './admission.js'
 
 const BASE = '/external/workflows'
 const logger = rootLogger.child({ module: 'external-workflows' })
@@ -24,8 +21,7 @@ export function createExternalWorkflowTriggerRoutes(gateway: K8sGateway): Router
 
   router.post(
     `${BASE}/:ns/:name/trigger`,
-    bindExternalWorkflowAuth,
-    workflowTriggerRateLimit(),
+    ...externalWorkflowTriggerAdmission,
     asyncHandler(async (req: Request, res: Response) => {
       const caller = requireBoundExternalWorkflowCaller(req, res)
       if (!caller) return
