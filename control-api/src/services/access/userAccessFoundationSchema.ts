@@ -600,6 +600,7 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
         SELECT share_row.subject_type, share_row.subject_id
           FROM gfs_shares share_row
          WHERE share_row.resource_id = target_resource_id
+        ORDER BY subject_type, subject_id
       LOOP
         PERFORM authorization_bump_subject_revision(subject.subject_type, subject.subject_id);
       END LOOP;

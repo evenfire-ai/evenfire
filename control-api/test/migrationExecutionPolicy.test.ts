@@ -65,7 +65,7 @@ describe('D34 migration execution policy', () => {
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
-        'f1ff3491ca7fbb7b88300b9df570e2ee5672abc219a25086dcfdbb50a4c15c66',
+        'ed9cb12a3141871ddb4da12a19a865dcf11797436e830357193a4c3f3afc8ab6',
       ],
       [
         'src/services/directory/invitationDeliverySchema.ts',
