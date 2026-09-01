@@ -62,23 +62,6 @@ function ContextMcpHoverCard({
   const hasServers = servers.length > 0
   const cardId = `ctx-mcp-${contextRef}`
 
-  const trigger = (
-    <button
-      type="button"
-      className="cu-link cu-host-context-count"
-      onClick={e => {
-        e.stopPropagation()
-        onOpenContext(contextRef)
-      }}
-      onKeyDown={e => e.stopPropagation()}
-      aria-describedby={hasServers && open ? cardId : undefined}
-    >
-      {servers.length}
-    </button>
-  )
-
-  if (!hasServers) return trigger
-
   return (
     <span
       className="cu-host-context-hover"
@@ -87,20 +70,35 @@ function ContextMcpHoverCard({
       onFocus={() => setOpen(true)}
       onBlur={() => setOpen(false)}
     >
-      {trigger}
+      <button
+        type="button"
+        className="cu-link cu-host-context-count"
+        onClick={e => {
+          e.stopPropagation()
+          onOpenContext(contextRef)
+        }}
+        onKeyDown={e => e.stopPropagation()}
+        aria-describedby={open ? cardId : undefined}
+      >
+        {servers.length}
+      </button>
       {open ? (
         <div role="tooltip" id={cardId} className="cu-agent-context-mcp-summary">
           <div className="cu-agent-context-mcp-summary__head">
             <span>{contextRef}</span>
             <span>{servers.length}</span>
           </div>
-          <ul className="cu-agent-context-mcp-summary__list">
-            {servers.map(server => (
-              <li key={server} title={server}>
-                {server}
-              </li>
-            ))}
-          </ul>
+          {hasServers ? (
+            <ul className="cu-agent-context-mcp-summary__list">
+              {servers.map(server => (
+                <li key={server} title={server}>
+                  {server}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="cu-agent-context-mcp-summary__empty">No connectors</p>
+          )}
         </div>
       ) : null}
     </span>
@@ -258,8 +256,6 @@ export function HostTable({
                 const rawContext = String(item.spec?.contextRef || '').trim()
                 const contextRef = rawContext || '-'
                 const contextServers = contextsByRef?.[rawContext]
-                const contextClickable =
-                  Boolean(rawContext) && Array.isArray(contextServers) && contextServers.length > 0
                 const providers = collectProviderIds(item.spec || {})
                 const openAgent = () => onOpen({ namespace, name })
                 return (
@@ -274,14 +270,12 @@ export function HostTable({
                     </td>
                     <td className="cu-table__cell-subtle">{name}</td>
                     <td>
-                      {contextClickable ? (
+                      {rawContext ? (
                         <ContextMcpHoverCard
                           contextRef={contextRef}
-                          mcpServers={contextServers}
+                          mcpServers={contextServers ?? []}
                           onOpenContext={onOpenContext}
                         />
-                      ) : rawContext ? (
-                        <span className="cu-table__cell-muted">0</span>
                       ) : (
                         <span className="cu-table__cell-muted">—</span>
                       )}

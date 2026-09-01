@@ -277,22 +277,24 @@ describe('HostTable context MCP hover card', () => {
     expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
   })
 
-  it('renders the bare count without a tooltip when the context has no MCP servers', () => {
+  it('shows an empty connector tooltip when the context has no MCP servers', () => {
     renderHostTable([hostWithContext('chatllm', 'context1')], {
       context1: [],
     })
 
     const row = screen.getByLabelText('Open agent chatllm')
-    expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
-    expect(within(row).getByText('0')).toBeInTheDocument()
+    const count = within(row).getByRole('button', { name: '0' })
+    fireEvent.mouseEnter(count)
+    expect(screen.getByRole('tooltip')).toHaveTextContent('No connectors')
   })
 
-  it('renders a plain 0 when the context map is missing', () => {
+  it('keeps the zero count aligned when the context map is missing', () => {
     renderHostTable([hostWithContext('chatllm', 'context1')])
 
     const row = screen.getByLabelText('Open agent chatllm')
-    expect(within(row).getByText('0')).toBeInTheDocument()
-    expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
+    const count = within(row).getByRole('button', { name: '0' })
+    fireEvent.focus(count)
+    expect(screen.getByRole('tooltip')).toHaveTextContent('No connectors')
   })
 })
 
