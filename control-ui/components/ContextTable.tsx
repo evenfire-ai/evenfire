@@ -14,7 +14,7 @@ import { IconRefresh } from './icons'
 type ContextRef = { name: string }
 
 const CONTEXT_COLUMNS: TableHeaderColumn[] = [
-  { key: 'name', label: 'Context Name' },
+  { key: 'name', label: 'Name' },
   { key: 'identifier', label: 'Identifier' },
   { key: 'description', label: 'Description' },
   { key: 'servers', label: 'Connectors', width: '7rem' },

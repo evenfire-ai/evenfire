@@ -72,7 +72,7 @@ export function ResourceTable({
             <DataTable className="eft-table cu-table cu-table--profile">
               <thead>
                 <tr>
-                  <th>Connector name</th>
+                  <th>Name</th>
                   <th>Description</th>
                 </tr>
               </thead>
@@ -88,7 +88,7 @@ export function ResourceTable({
             <DataTable className="eft-table cu-table cu-table--profile">
               <thead>
                 <tr>
-                  <th>Connector name</th>
+                  <th>Name</th>
                   <th>Description</th>
                 </tr>
               </thead>

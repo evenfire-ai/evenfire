@@ -211,7 +211,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
   const teamsTabLabel = activeTab === 'teams' ? `Teams (${teams.length})` : 'Teams'
   const teamColumns: TableHeaderColumn[] = (
     [
-      { key: 'name', label: 'Team name' },
+      { key: 'name', label: 'Name' },
       { key: 'members', label: 'Members', width: '5rem', align: 'right' },
       { key: 'agents', label: 'Agents', width: '5rem', align: 'right' },
       { key: 'contexts', label: 'Contexts', width: '5rem', align: 'right' },
