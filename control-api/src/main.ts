@@ -2,6 +2,7 @@ import { config } from './config.js'
 import { assertDbReady, pool } from './db.js'
 import { K8sGateway } from './k8s.js'
 import { reconcileAllowedModelsConfigMapOnBoot } from './llmAllowedModelsBootReconcile.js'
+import { rootLogger } from './observability/logger.js'
 import { logRegistryConnectionState } from './registryBootGuard.js'
 import { ControlApiServer } from './server.js'
 import { OperationalAccessIndexer } from './services/access/operationalAccessIndexer.js'
@@ -120,7 +121,10 @@ async function main(): Promise<void> {
     const runningIndexer = operationalIndexer.start()
     stopOperationalAccessIndexer = runningIndexer.stop
     void runningIndexer.completion.catch(error => {
-      console.error('[ControlAPI] Operational access index stopped unexpectedly:', error)
+      rootLogger.error(
+        { err: error, event: 'operational_access_indexer_stopped' },
+        'operational access index stopped unexpectedly'
+      )
     })
     console.log('[ControlAPI] Operational access indexer enabled')
   } else {
