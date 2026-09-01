@@ -59,6 +59,7 @@ describe('user session state machine', () => {
     const inserted = row()
     const query = vi.fn(async (sql: string, values?: unknown[]) => {
       if (sql.includes('FROM users')) return { rows: [{ id: inserted.user_id }], rowCount: 1 }
+      if (sql.includes('clock_timestamp()')) return { rows: [{ db_now: now }], rowCount: 1 }
       if (sql.includes('INSERT INTO external_user_sessions')) {
         return {
           rows: [{ ...inserted, sid: values?.[0], user_id: values?.[1], current_jti: values?.[2] }],
@@ -74,7 +75,7 @@ describe('user session state machine', () => {
         email: 'User@Example.com',
         authenticationMethods: ['pwd'],
       },
-      { db: { query }, now }
+      { db: { query } }
     )
 
     const insertCall = query.mock.calls.find(call =>
@@ -94,9 +95,10 @@ describe('user session state machine', () => {
       sv: 1,
     })
     expect(String(query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
-    expect(String(query.mock.calls[1]?.[0])).toContain('DELETE FROM external_user_sessions')
-    expect(String(query.mock.calls[2]?.[0])).toContain('OFFSET $3')
-    expect(query.mock.calls[2]?.[1]?.[2]).toBe(USER_SESSION_MAX_ACTIVE_PER_USER - 1)
+    expect(String(query.mock.calls[1]?.[0])).toContain('clock_timestamp()')
+    expect(String(query.mock.calls[2]?.[0])).toContain('DELETE FROM external_user_sessions')
+    expect(String(query.mock.calls[3]?.[0])).toContain('OFFSET $3')
+    expect(query.mock.calls[3]?.[1]?.[2]).toBe(USER_SESSION_MAX_ACTIVE_PER_USER - 1)
   })
 
   it('rotates once and returns the same successor to an overlapping renewal', async () => {
@@ -104,6 +106,7 @@ describe('user session state machine', () => {
     let current = original
     const query = vi.fn(async (sql: string, values?: unknown[]) => {
       if (sql.includes('SELECT s.sid')) return { rows: [current], rowCount: 1 }
+      if (sql.includes('clock_timestamp()')) return { rows: [{ db_now: now }], rowCount: 1 }
       if (sql.includes('SET prior_jti = current_jti')) {
         current = row({
           ...original,
@@ -119,13 +122,12 @@ describe('user session state machine', () => {
       return { rows: [], rowCount: 0 }
     })
 
-    const first = await renewUserSession(claimsFor(original), { db: { query }, now })
+    const first = await renewUserSession(claimsFor(original), { db: { query } })
     expect('token' in first).toBe(true)
     const successor = 'token' in first ? first.token : ''
 
     const concurrent = await renewUserSession(claimsFor(current, String(original.current_jti)), {
       db: { query },
-      now: new Date(now.getTime() + (USER_SESSION_RENEWAL_OVERLAP_SECONDS - 1) * 1000),
     })
     expect('token' in concurrent && concurrent.token).toBe(successor)
     expect(
@@ -140,22 +142,23 @@ describe('user session state machine', () => {
     })
     const reuseQuery = vi.fn(async (sql: string) => {
       if (sql.includes('SELECT s.sid')) return { rows: [reused], rowCount: 1 }
+      if (sql.includes('clock_timestamp()')) return { rows: [{ db_now: now }], rowCount: 1 }
       return { rows: [], rowCount: 1 }
     })
     await expect(
       validateUserSessionClaims(claimsFor(reused, String(reused.prior_jti)), {
         db: { query: reuseQuery },
-        now,
       })
     ).resolves.toEqual({ status: 'revoked', reason: 'representation_reuse' })
 
     const expired = row({ idle_expires_at: new Date(now.getTime() - 1000) })
     const expiryQuery = vi.fn(async (sql: string) => {
       if (sql.includes('SELECT s.sid')) return { rows: [expired], rowCount: 1 }
+      if (sql.includes('clock_timestamp()')) return { rows: [{ db_now: now }], rowCount: 1 }
       return { rows: [], rowCount: 1 }
     })
     await expect(
-      validateUserSessionClaims(claimsFor(expired), { db: { query: expiryQuery }, now })
+      validateUserSessionClaims(claimsFor(expired), { db: { query: expiryQuery } })
     ).resolves.toEqual({ status: 'expired', reason: 'idle_expired' })
     expect(
       expiryQuery.mock.calls.some(([sql]) => String(sql).includes('idle_expires_at = LEAST'))
@@ -168,13 +171,15 @@ describe('user session state machine', () => {
       query: vi
         .fn()
         .mockResolvedValueOnce({ rows: [{ id: userId }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [{ db_now: now }], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [], rowCount: 2 }),
     }
-    await expect(revokeAllUserSessions(userId, 'password_changed', db, now)).resolves.toBe(2)
+    await expect(revokeAllUserSessions(userId, 'password_changed', db)).resolves.toBe(2)
     expect(String(db.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
-    expect(String(db.query.mock.calls[1]?.[0])).toContain('security_epochs')
-    expect(String(db.query.mock.calls[2]?.[0])).toContain('external_user_sessions')
+    expect(String(db.query.mock.calls[1]?.[0])).toContain('clock_timestamp()')
+    expect(String(db.query.mock.calls[2]?.[0])).toContain('security_epochs')
+    expect(String(db.query.mock.calls[3]?.[0])).toContain('external_user_sessions')
 
     const claims = {
       userId,
@@ -186,18 +191,22 @@ describe('user session state machine', () => {
       iat: Math.floor(now.getTime() / 1000),
     }
     const epochDb = {
-      query: vi.fn().mockResolvedValue({
-        rows: [
-          {
-            id: userId,
-            lifecycle_state: 'active',
-            lifecycle_version: 1,
-            valid_after: now,
-            token_revoked: false,
-          },
-        ],
-        rowCount: 1,
-      }),
+      query: vi.fn(async (sql: string) =>
+        sql.includes('clock_timestamp()')
+          ? { rows: [{ db_now: now }], rowCount: 1 }
+          : {
+              rows: [
+                {
+                  id: userId,
+                  lifecycle_state: 'active',
+                  lifecycle_version: 1,
+                  valid_after: now,
+                  token_revoked: false,
+                },
+              ],
+              rowCount: 1,
+            }
+      ),
     }
     await expect(validateLegacyUserSession('v1-token', claims, { db: epochDb })).resolves.toEqual({
       status: 'revoked',
@@ -223,18 +232,22 @@ describe('user session state machine', () => {
         iat: Math.floor(now.getTime() / 1000) - 1,
       }
       const db = {
-        query: vi.fn().mockResolvedValue({
-          rows: [
-            {
-              id: claims.userId,
-              lifecycle_state: lifecycleState,
-              lifecycle_version: lifecycleVersion,
-              valid_after: validAfter,
-              token_revoked: tokenRevoked,
-            },
-          ],
-          rowCount: 1,
-        }),
+        query: vi.fn(async (sql: string) =>
+          sql.includes('clock_timestamp()')
+            ? { rows: [{ db_now: now }], rowCount: 1 }
+            : {
+                rows: [
+                  {
+                    id: claims.userId,
+                    lifecycle_state: lifecycleState,
+                    lifecycle_version: lifecycleVersion,
+                    valid_after: validAfter,
+                    token_revoked: tokenRevoked,
+                  },
+                ],
+                rowCount: 1,
+              }
+        ),
       }
 
       const result = await validateLegacyUserSession('legacy-v1-token', claims, { db })

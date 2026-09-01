@@ -17,6 +17,10 @@ describe('revoke-all transaction boundary', () => {
     mocks.query.mockReset()
     mocks.query
       .mockResolvedValueOnce({ rows: [{ id: 'user-1' }], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{ db_now: new Date('2026-08-27T00:00:01.000Z') }],
+        rowCount: 1,
+      })
       .mockImplementationOnce(async () => {
         mocks.committedEpoch = true
         return { rows: [], rowCount: 1 }
@@ -38,7 +42,7 @@ describe('revoke-all transaction boundary', () => {
     )
 
     expect(mocks.withTransaction).toHaveBeenCalledTimes(1)
-    expect(mocks.query).toHaveBeenCalledTimes(3)
+    expect(mocks.query).toHaveBeenCalledTimes(4)
     expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
     expect(mocks.committedEpoch).toBe(false)
   })
@@ -46,10 +50,10 @@ describe('revoke-all transaction boundary', () => {
   it('captures the revoke-all cutoff after acquiring the user lock', async () => {
     const cutoffs: Date[] = []
     const afterLock = new Date('2026-08-27T00:00:01.250Z')
-    const now = vi.fn(() => afterLock)
     mocks.query.mockReset()
     mocks.query
       .mockResolvedValueOnce({ rows: [{ id: 'user-1' }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ db_now: afterLock }], rowCount: 1 })
       .mockImplementationOnce(async (_sql, values) => {
         cutoffs.push(values[1] as Date)
         return { rows: [], rowCount: 1 }
@@ -58,10 +62,10 @@ describe('revoke-all transaction boundary', () => {
     mocks.withTransaction.mockImplementationOnce(async work => work({ query: mocks.query }))
 
     const { revokeAllUserSessions } = await import('../src/services/auth/userSessionService.js')
-    await expect(revokeAllUserSessions('user-1', 'security_event', undefined, now)).resolves.toBe(0)
+    await expect(revokeAllUserSessions('user-1', 'security_event')).resolves.toBe(0)
 
-    expect(now).toHaveBeenCalledTimes(1)
     expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
-    expect(cutoffs).toEqual([new Date('2026-08-27T00:00:01.000Z')])
+    expect(String(mocks.query.mock.calls[1]?.[0])).toContain('clock_timestamp()')
+    expect(cutoffs).toEqual([afterLock])
   })
 })
