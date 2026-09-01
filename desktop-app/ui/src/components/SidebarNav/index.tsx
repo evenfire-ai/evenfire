@@ -579,7 +579,7 @@ export function SidebarNav({
                 className="nav-link-main"
                 onClick={() => handleSelect(DESKTOP_ROUTES.files)}
                 aria-label="Files"
-                leadingIcon={<IconContexts />}
+                leadingIcon={<IconAttachFile />}
                 trailingIcon={
                   <span className="nav-tooltip" role="tooltip">
                     Files

@@ -186,7 +186,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     []
   )
 
-  // Agent selector dropdown for the greeting title row. Each row has two
+  // Agent selector dropdown for the new-chat landing. Each row has two
   // targets: the agent NAME (click → start/switch a chat with that agent) and
   // the 3-dots (click → open a sections sub-menu: Details / Connectors /
   // Contexts / Agent Files / Activity, navigating into that agent's workspace
@@ -545,13 +545,14 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
           )}
 
           {isChatMode && !activeChatId && (
-            <>
-              <div className="agent-workspace-greeting-row">
-                <h2 className="agent-workspace-greeting">New chat with</h2>
-                {agentSwitcherLabel}
+            <div className="agent-workspace-new-chat">
+              <div className="agent-workspace-new-chat__intro">
+                <h2 className="agent-workspace-new-chat__title">Start a conversation</h2>
+                <p className="agent-workspace-new-chat__subtitle">Choose an agent to begin</p>
+                <div className="agent-workspace-new-chat__selector">{agentSwitcherLabel}</div>
               </div>
               <ComposerPanel inline />
-            </>
+            </div>
           )}
           {isChatMode && (
             <div className="chat-thread-container">
