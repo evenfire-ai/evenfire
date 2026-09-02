@@ -153,13 +153,21 @@ def is_synthetic_postgres_fixture_url(text: str) -> bool:
     except ValueError:
         return False
 
-def safe_contract_control_value(path: str, reason: str, value: str) -> bool:
+def safe_contract_control_value(
+    path: str, reason: str, value: str, match: re.Match[str]
+) -> bool:
     if path not in {
         "scripts/tests/test-minikube-t2-contract.sh",
         "scripts/tests/test-minikube-t2-public-boundary.sh",
     }:
         return False
-    return any(control in value for control in contract_control_values.get(reason, ()))
+    for control in contract_control_values.get(reason, ()):
+        offset = value.find(control)
+        while offset >= 0:
+            if offset <= match.start() and match.end() <= offset + len(control):
+                return True
+            offset = value.find(control, offset + 1)
+    return False
 
 def safe_source_fixture_value(path: str, reason: str, value: str, match: re.Match[str]) -> bool:
     if not is_source_fixture(path):
@@ -240,7 +248,7 @@ for line in diff.splitlines():
                 continue
             if safe_source_fixture_value(current, reason, value, match):
                 continue
-            if safe_contract_control_value(current, reason, value):
+            if safe_contract_control_value(current, reason, value, match):
                 continue
             bad.append((current or "<unknown>", reason))
             line_rejected = True

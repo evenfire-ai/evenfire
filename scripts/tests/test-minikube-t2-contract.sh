@@ -682,6 +682,26 @@ assert_public_boundary_rejects_postgres_fixture \
   "const fixture = 'postgresql://app:""secret@127.0.0.1/catalog'" \
   'credentialed PostgreSQL URL'
 
+contract_control_repo="$tmp/public-contract-control-repo"
+mkdir -p "$contract_control_repo/scripts/tests"
+git init -q -b dev "$contract_control_repo"
+git -C "$contract_control_repo" config user.email test@example.invalid
+git -C "$contract_control_repo" config user.name boundary-test
+printf 'base\n' >"$contract_control_repo/README.md"
+git -C "$contract_control_repo" add README.md
+git -C "$contract_control_repo" commit -q -m base
+contract_control_base="$(git -C "$contract_control_repo" rev-parse HEAD)"
+printf '%s\n' \
+  "const urls = ['postgresql://postgres@127.0.0.1/postgres', 'postgresql://database.""internal/catalog']" \
+  >"$contract_control_repo/scripts/tests/test-minikube-t2-public-boundary.sh"
+if T2_PUBLIC_ROOT="$contract_control_repo" T2_PUBLIC_BASE_REF="$contract_control_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
+  >"$tmp/contract-control.out" 2>"$tmp/contract-control.err"; then
+  echo 'FAIL: public boundary let one contract control mask a later unsafe URL' >&2
+  exit 1
+fi
+grep -Fq 'private PostgreSQL URL' "$tmp/contract-control.err"
+
 public_repo="$tmp/public-repo"
 mkdir -p "$public_repo"
 git init -q -b dev "$public_repo"
