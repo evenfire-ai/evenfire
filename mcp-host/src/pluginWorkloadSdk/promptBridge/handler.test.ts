@@ -3,9 +3,11 @@ import { PluginWorkloadError } from '../domain/errors'
 import type { PromptBridgeTarget } from '../domain/types'
 import type { PluginWorkloadSdkControlApiClient } from './controlApiClient'
 import {
+  FINALIZE_LEDGER_RETRY_DELAYS_MS,
   PromptBridgeHandler,
   type PromptBridgeHandlerDeps,
-  finalizeLedgerRetryDelayMs,
+  finalizeWithLedgerRetry,
+  isLedgerPendingError,
 } from './handler'
 import type { LlmBridge } from './llmBridge'
 
@@ -327,7 +329,8 @@ describe('PromptBridgeHandler', () => {
         status: 'failed',
         reason: 'credential_unavailable',
         target: primary,
-      })
+      }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
     )
     expect(report).not.toHaveBeenCalled()
   })
@@ -401,7 +404,8 @@ describe('PromptBridgeHandler', () => {
         status: 'complete',
         target: fallback,
         usage: expect.objectContaining({ inputTokens: 10, outputTokens: 5 }),
-      })
+      }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
     )
     expect(report).not.toHaveBeenCalled()
     expect(onUsage).not.toHaveBeenCalled()
@@ -444,16 +448,222 @@ describe('PromptBridgeHandler', () => {
         status: 'provider_unavailable',
         reason: 'outcome_unknown',
         target: primary,
-      })
+      }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
     )
     expect(report).not.toHaveBeenCalled()
   })
 
-  it('uses seconds-scale backoff for ledger_pending retries', () => {
-    expect(finalizeLedgerRetryDelayMs(0)).toBe(500)
-    expect(finalizeLedgerRetryDelayMs(1)).toBe(1000)
-    expect(finalizeLedgerRetryDelayMs(2)).toBe(2000)
-    expect(finalizeLedgerRetryDelayMs(3)).toBe(4000)
+  it('bounds ledger_pending patience to a fixed four-attempt table', () => {
+    expect(FINALIZE_LEDGER_RETRY_DELAYS_MS).toEqual([500, 1000, 2000])
+    // Four attempts, three waits: the table length IS the retry budget.
+    expect(FINALIZE_LEDGER_RETRY_DELAYS_MS.reduce((sum, ms) => sum + ms, 0)).toBe(3_500)
+  })
+
+  it('recognises only the ledger_pending triple as a retryable finalize error', () => {
+    expect(
+      isLedgerPendingError(
+        new PluginWorkloadError(
+          'provider_unavailable',
+          'linked Codex attempt has not finalized usage yet',
+          true,
+          'provider_unavailable'
+        )
+      )
+    ).toBe(true)
+    // Retryable but reasonless: control-api 5xx, open breaker, exhausted
+    // transport retries. Those already burnt their own backoff inside postOnce.
+    expect(
+      isLedgerPendingError(
+        new PluginWorkloadError('provider_unavailable', 'control-api responded 503', true)
+      )
+    ).toBe(false)
+    expect(
+      isLedgerPendingError(
+        new PluginWorkloadError(
+          'provider_unavailable',
+          'not retryable',
+          false,
+          'provider_unavailable'
+        )
+      )
+    ).toBe(false)
+    expect(
+      isLedgerPendingError(
+        new PluginWorkloadError('provider_unavailable', 'other reason', true, 'timeout')
+      )
+    ).toBe(false)
+    expect(isLedgerPendingError(new Error('plain'))).toBe(false)
+  })
+
+  it('does not retry a retryable finalize error that is not ledger_pending', async () => {
+    const finalize = vi
+      .fn<FinalizePromptBridge>()
+      .mockRejectedValue(
+        new PluginWorkloadError('provider_unavailable', 'control-api responded 503', true)
+      )
+    const complete = vi.fn().mockResolvedValue({
+      model: fallback.model,
+      servedTarget: fallback,
+      fallbackUsed: true,
+      attemptCount: 2,
+      llmSecretName: 'provider-secret',
+      providerAttemptId: 'attempt-1',
+      providerAttemptIndex: 2,
+      content: 'summary text',
+      usage: { inputTokens: 10, outputTokens: 5 },
+      finishReason: 'complete',
+    })
+    const { handler } = makeDeps({ complete, finalize })
+
+    await expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      reason: 'outcome_unknown',
+    })
+    // One attempt on the complete path, then one on the error path (N-11).
+    // Neither retries: the error is retryable but carries no `reason`.
+    expect(finalize).toHaveBeenCalledTimes(2)
+    expect(finalize).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ status: 'complete' }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(finalize).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ status: 'provider_unavailable' }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+  })
+
+  it('exhausts exactly the table budget on a persistent ledger_pending', async () => {
+    const finalize = vi
+      .fn<FinalizePromptBridge>()
+      .mockRejectedValue(
+        new PluginWorkloadError(
+          'provider_unavailable',
+          'linked Codex attempt has not finalized usage yet',
+          true,
+          'provider_unavailable'
+        )
+      )
+    const complete = vi.fn().mockResolvedValue({
+      model: fallback.model,
+      servedTarget: fallback,
+      fallbackUsed: true,
+      attemptCount: 2,
+      llmSecretName: 'provider-secret',
+      providerAttemptId: 'attempt-1',
+      providerAttemptIndex: 2,
+      content: 'summary text',
+      usage: { inputTokens: 10, outputTokens: 5 },
+      finishReason: 'complete',
+    })
+    const { handler } = makeDeps({ complete, finalize })
+
+    vi.useFakeTimers()
+    try {
+      // Attach the rejection handler before advancing the clock, or the
+      // in-flight rejection surfaces as an unhandled rejection.
+      const settled = expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
+        code: 'provider_unavailable',
+        reason: 'outcome_unknown',
+      })
+      await vi.runAllTimersAsync()
+      await settled
+    } finally {
+      vi.useRealTimers()
+    }
+    // Four attempts per finalize path, never five. The complete path exhausts
+    // its budget, then the error path (N-11) settles the same receipt with a
+    // budget of its own — the documented worst case of two bounded deadlines.
+    expect(finalize).toHaveBeenCalledTimes((FINALIZE_LEDGER_RETRY_DELAYS_MS.length + 1) * 2)
+  })
+
+  it('surfaces ledger_pending without another wait once its deadline is aborted', async () => {
+    const pendingError = new PluginWorkloadError(
+      'provider_unavailable',
+      'linked Codex attempt has not finalized usage yet',
+      true,
+      'provider_unavailable'
+    )
+    const finalize = vi.fn<FinalizePromptBridge>().mockRejectedValue(pendingError)
+
+    await expect(
+      finalizeWithLedgerRetry(
+        finalize,
+        {
+          invocationId: 'inv-1',
+          attemptGeneration: 1,
+          providerAttemptId: 'attempt-1',
+          providerAttemptIndex: 1,
+          status: 'complete',
+          reason: 'provider_completed',
+          target: primary,
+        },
+        AbortSignal.abort()
+      )
+    ).rejects.toBe(pendingError)
+    // An expired deadline buys neither another attempt nor another sleep, and
+    // the real pending error reaches the caller instead of a synthetic one.
+    expect(finalize).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries ledger_pending on the error path with the same bounded budget', async () => {
+    const finalize = vi
+      .fn<FinalizePromptBridge>()
+      .mockRejectedValueOnce(
+        new PluginWorkloadError(
+          'provider_unavailable',
+          'linked Codex attempt has not finalized usage yet',
+          true,
+          'provider_unavailable'
+        )
+      )
+      .mockResolvedValueOnce({
+        invocationId: 'inv-1',
+        providerAttemptId: 'attempt-1',
+        status: 'provider_unavailable',
+        outcome: 'unknown',
+        idempotent: false,
+        usageAccepted: false,
+      })
+    const complete = vi.fn().mockRejectedValue(
+      new PluginWorkloadError(
+        'provider_unavailable',
+        'provider outcome unknown',
+        false,
+        'outcome_unknown',
+        true,
+        {
+          providerAttemptId: 'attempt-1',
+          providerAttemptIndex: 1,
+          target: primary,
+          attemptCount: 1,
+          fallbackUsed: false,
+        }
+      )
+    )
+    const { handler, report } = makeDeps({ complete, finalize })
+
+    vi.useFakeTimers()
+    try {
+      const settled = expect(handler.handle(validBody, 'api')).rejects.toMatchObject({
+        code: 'provider_unavailable',
+        reason: 'outcome_unknown',
+      })
+      await vi.runAllTimersAsync()
+      await settled
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(finalize).toHaveBeenCalledTimes(2)
+    expect(finalize).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ status: 'provider_unavailable' }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    // The retry succeeded, so the legacy invocation-status report stays silent.
+    expect(report).not.toHaveBeenCalled()
   })
 
   it('retries a retryable complete finalization before treating the outcome as unknown', async () => {
@@ -501,8 +711,16 @@ describe('PromptBridgeHandler', () => {
       vi.useRealTimers()
     }
     expect(finalize).toHaveBeenCalledTimes(2)
-    expect(finalize).toHaveBeenNthCalledWith(1, expect.objectContaining({ status: 'complete' }))
-    expect(finalize).toHaveBeenNthCalledWith(2, expect.objectContaining({ status: 'complete' }))
+    expect(finalize).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ status: 'complete' }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(finalize).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ status: 'complete' }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
     expect(report).not.toHaveBeenCalled()
   })
 
@@ -537,10 +755,15 @@ describe('PromptBridgeHandler', () => {
       reason: 'outcome_unknown',
     })
     expect(finalize).toHaveBeenCalledTimes(2)
-    expect(finalize).toHaveBeenNthCalledWith(1, expect.objectContaining({ status: 'complete' }))
+    expect(finalize).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ status: 'complete' }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
     expect(finalize).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ status: 'provider_unavailable', reason: 'outcome_unknown' })
+      expect.objectContaining({ status: 'provider_unavailable', reason: 'outcome_unknown' }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
     )
     expect(report).not.toHaveBeenCalled()
   })

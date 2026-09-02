@@ -48,18 +48,28 @@ export class ProviderAttemptAuthorizer {
     }
   }
 
-  async authorize(body: AuthorizeAttemptBody): Promise<{
+  /**
+   * The caller's `signal` is the only clock on this hop. Authorize deliberately
+   * has no timeout of its own: the bridge already bounds the whole attempt, and
+   * a second independent deadline would make two different answers possible for
+   * "did this attempt still have time?".
+   */
+  async authorize(
+    body: AuthorizeAttemptBody,
+    options?: { signal?: AbortSignal }
+  ): Promise<{
     providerAttemptId: string
     requestHash: string
     executionTicket: string
     expiresAt: string
   }> {
-    return this.authorizeOnce(body, Boolean(this.options.refreshOnUnauthorized))
+    return this.authorizeOnce(body, Boolean(this.options.refreshOnUnauthorized), options?.signal)
   }
 
   private async authorizeOnce(
     body: AuthorizeAttemptBody,
-    retryOnUnauthorized: boolean
+    retryOnUnauthorized: boolean,
+    signal?: AbortSignal
   ): Promise<{
     providerAttemptId: string
     requestHash: string
@@ -78,12 +88,13 @@ export class ProviderAttemptAuthorizer {
         'content-type': 'application/json',
       },
       body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
     })
     const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
     if (!response.ok) {
       if (response.status === 401 && retryOnUnauthorized && this.options.refreshOnUnauthorized) {
         await this.options.refreshOnUnauthorized()
-        return this.authorizeOnce(body, false)
+        return this.authorizeOnce(body, false, signal)
       }
       const code = typeof payload.error === 'string' ? payload.error : 'provider_unavailable'
       throw new CodexAuthorizeError(code, `authorize failed with ${response.status}`)

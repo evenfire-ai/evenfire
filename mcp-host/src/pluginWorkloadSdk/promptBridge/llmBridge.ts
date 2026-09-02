@@ -666,6 +666,26 @@ export class LlmBridge {
         breaker,
         captured
       )
+      // Receipt ownership is decided by the caller's mode, exactly as on the
+      // api-key lane. Only atomic finalization defers the terminal ACK; a
+      // workflow-mode Codex attempt must still be acknowledged here, and a
+      // lost acknowledgement must surface as `failed` rather than be hidden
+      // behind the finalizer's name.
+      let providerAttemptAcknowledgement: 'confirmed' | 'owned_by_finalizer' | 'failed' =
+        'confirmed'
+      if (request.acknowledgementMode === 'atomic_terminal_finalization') {
+        providerAttemptAcknowledgement = 'owned_by_finalizer'
+      } else if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
+        const acknowledged = await reportProviderAttemptBestEffort(
+          request.providerAttemptReporter,
+          {
+            providerAttemptId: ticket.providerAttemptId,
+            providerAttemptIndex: ticket.providerAttemptIndex,
+            status: 'complete',
+          }
+        )
+        providerAttemptAcknowledgement = acknowledged ? 'confirmed' : 'failed'
+      }
       return {
         kind: 'result',
         result: {
@@ -676,35 +696,19 @@ export class LlmBridge {
           llmSecretName: '',
           providerAttemptId: ticket.providerAttemptId,
           providerAttemptIndex: ticket.providerAttemptIndex,
-          providerAttemptAcknowledgement: 'owned_by_finalizer',
+          providerAttemptAcknowledgement,
         },
       }
     } catch (error) {
-      if (
-        error instanceof ClassifiedProviderError &&
-        (error.classified.providerCode === 'budget_denied' ||
-          error.classified.providerCode === 'no_grant' ||
-          error.classified.providerCode === 'host_binding_mismatch' ||
-          error.classified.providerCode === 'insufficient_scope' ||
-          error.classified.code === LlmErrorCode.AuthenticationFailed)
-      ) {
-        if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
-          await reportProviderAttemptBestEffort(request.providerAttemptReporter, {
-            providerAttemptId: ticket.providerAttemptId,
-            providerAttemptIndex: ticket.providerAttemptIndex,
-            status: 'failed',
-          })
-        }
-        return {
-          kind: 'error',
-          error,
-          terminal: true,
-        }
-      }
+      // One physical status for one attempt. The grant/scope/budget failures
+      // used to be acknowledged as `failed` from a branch of their own, which
+      // could contradict `providerMayHaveExecuted` and leave a possibly billed
+      // Codex call revivable. `providerMayHaveExecuted` is now the single
+      // source of that decision for every oauth failure.
+      const providerMayHaveExecuted =
+        (error instanceof PluginWorkloadError && error.providerMayHaveExecuted) ||
+        (error instanceof ClassifiedProviderError && error.providerMayHaveExecuted)
       if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
-        const providerMayHaveExecuted =
-          (error instanceof PluginWorkloadError && error.providerMayHaveExecuted) ||
-          (error instanceof ClassifiedProviderError && error.providerMayHaveExecuted)
         const acknowledged = await reportProviderAttemptBestEffort(
           request.providerAttemptReporter,
           {
@@ -731,12 +735,30 @@ export class LlmBridge {
           ? withProviderAttemptContext(error, providerAttemptContext)
           : error
       }
+      // Grant, scope, binding and budget denials never advance to another
+      // target: they are operator/configuration signals about this invocation,
+      // not transient provider weather.
+      const forcedTerminal =
+        error.classified.providerCode === 'budget_denied' ||
+        error.classified.providerCode === 'no_grant' ||
+        error.classified.providerCode === 'host_binding_mismatch' ||
+        error.classified.providerCode === 'insufficient_scope' ||
+        error.classified.code === LlmErrorCode.AuthenticationFailed
       const failureClass = classifyFailoverClass(error.classified.code, error.classified.retryable)
       const eligible = failureClass !== null && triggerOn.has(failureClass)
       return {
         kind: 'error',
-        error,
-        terminal: !eligible || index === request.targets.length - 1,
+        // The ticket already reserved this physical attempt, so the receipt
+        // must travel with the error. Without it the atomic finalizer closes
+        // the logical invocation while the spend row for the attempt is never
+        // written — the same contract the api-key lane applies.
+        error: providerAttemptContext
+          ? new ClassifiedProviderError(
+              error.classified,
+              withProviderAttemptContext(error, providerAttemptContext)
+            )
+          : error,
+        terminal: forcedTerminal || !eligible || index === request.targets.length - 1,
       }
     }
   }
@@ -861,17 +883,23 @@ export class LlmBridge {
           code: classified.code,
           retryable: classified.retryable,
           ...(classified.providerCode ? { providerCode: classified.providerCode } : {}),
+          ...(classified.providerDispatched !== undefined
+            ? { providerDispatched: classified.providerDispatched }
+            : {}),
         },
         new PluginWorkloadError(
           'provider_unavailable',
           `LLM provider error: ${classified.code}`,
           classified.retryable,
           reason,
-          // This branch runs only after the provider call was entered. Even a
-          // provider-declared auth/rate-limit response is not proof that no
-          // billable work occurred, so it must remain fenced as an ambiguous
-          // physical outcome rather than reviving the idempotency key.
-          true
+          // This branch runs only after the provider call was entered, so an
+          // unknown dispatch state must read as executed: a provider-declared
+          // auth/rate-limit response is not proof that no billable work
+          // occurred. Only a classifier that PROVED no call left the process
+          // may revive the idempotency key — mislabelling a dispatched attempt
+          // as not-executed would permit a second charge, while the opposite
+          // mistake only costs revivability.
+          classified.providerDispatched ?? true
         )
       )
     } finally {

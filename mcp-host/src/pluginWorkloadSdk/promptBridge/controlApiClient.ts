@@ -319,9 +319,9 @@ export class PluginWorkloadSdkControlApiClient {
    * no refresh hook) propagates the error so a genuinely bad credential still
    * surfaces instead of looping.
    */
-  private async post(path: string, body: unknown): Promise<unknown> {
+  private async post(path: string, body: unknown, signal?: AbortSignal): Promise<unknown> {
     try {
-      return await this.postOnce(path, body)
+      return await this.postOnce(path, body, signal)
     } catch (err) {
       if (
         err instanceof PluginWorkloadError &&
@@ -329,7 +329,7 @@ export class PluginWorkloadSdkControlApiClient {
         this.opts.refreshOnUnauthorized
       ) {
         await this.triggerRefresh()
-        return this.postOnce(path, body)
+        return this.postOnce(path, body, signal)
       }
       throw err
     }
@@ -363,7 +363,7 @@ export class PluginWorkloadSdkControlApiClient {
     }
   }
 
-  private async postOnce(path: string, body: unknown): Promise<unknown> {
+  private async postOnce(path: string, body: unknown, signal?: AbortSignal): Promise<unknown> {
     if (!this.breaker.allow()) {
       throw new PluginWorkloadError(
         'provider_unavailable',
@@ -379,6 +379,10 @@ export class PluginWorkloadSdkControlApiClient {
 
     let lastError: unknown = null
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      // An aborted caller deadline is not a transient network failure: without
+      // this the `catch` below would swallow every AbortError as retryable and
+      // burn the remaining attempts after the operation was already over.
+      if (signal?.aborted) break
       if (attempt > 0) await sleep(baseDelay * 2 ** (attempt - 1))
       let response: Response
       try {
@@ -389,7 +393,12 @@ export class PluginWorkloadSdkControlApiClient {
             Authorization: `Bearer ${this.opts.getAccessToken()}`,
           },
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(15_000),
+          // The per-request timeout still bounds one hop; a caller-supplied
+          // signal additionally bounds the whole operation across retries, so
+          // a finalize deadline cannot be outlived by this loop.
+          signal: signal
+            ? AbortSignal.any([AbortSignal.timeout(15_000), signal])
+            : AbortSignal.timeout(15_000),
         })
       } catch (err) {
         // Network failure — retryable.
@@ -818,25 +827,28 @@ export class PluginWorkloadSdkControlApiClient {
    * unknown spend. This replaces separate status + usage calls for the
    * stepless runtime; the route is idempotent on providerAttemptId.
    */
-  async finalizePromptBridge(body: {
-    recipeNamespace: string
-    recipeName: string
-    invocationId: string
-    attemptGeneration: number
-    providerAttemptId: string
-    providerAttemptIndex: number
-    status: 'complete' | 'failed' | 'provider_unavailable'
-    reason: string
-    target: PromptBridgeTarget
-    usage?: {
-      llmSecretName: string
-      callerRef: string
-      fallbackUsed: boolean
-      attemptCount: number
-      inputTokens: number
-      outputTokens: number
-    }
-  }): Promise<FinalizePromptBridgeResponse> {
+  async finalizePromptBridge(
+    body: {
+      recipeNamespace: string
+      recipeName: string
+      invocationId: string
+      attemptGeneration: number
+      providerAttemptId: string
+      providerAttemptIndex: number
+      status: 'complete' | 'failed' | 'provider_unavailable'
+      reason: string
+      target: PromptBridgeTarget
+      usage?: {
+        llmSecretName: string
+        callerRef: string
+        fallbackUsed: boolean
+        attemptCount: number
+        inputTokens: number
+        outputTokens: number
+      }
+    },
+    options?: { signal?: AbortSignal }
+  ): Promise<FinalizePromptBridgeResponse> {
     const result = await this.post(
       `/api/v1/mcp-host/plugin-workload-sdk/invocations/${encodeURIComponent(body.invocationId)}/finalize`,
       {
@@ -850,7 +862,8 @@ export class PluginWorkloadSdkControlApiClient {
         reason: body.reason,
         target: body.target,
         ...(body.usage ? { usage: body.usage } : {}),
-      }
+      },
+      options?.signal
     )
     if (!isFinalizePromptBridgeResponse(result)) {
       throw new PluginWorkloadError(

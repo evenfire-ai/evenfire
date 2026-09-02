@@ -36,35 +36,78 @@ import type { LlmBridge } from './llmBridge'
 const IDEMPOTENCY_KEY_RE = new RegExp(DEFAULT_IDEMPOTENCY_KEY_PATTERN)
 const PURPOSE_SET = new Set<string>(PLUGIN_WORKLOAD_SDK_PURPOSES)
 const MAX_METADATA_BYTES = 16 * 1024
-const FINALIZE_LEDGER_RETRIES = 4
 
-/** Seconds-scale backoff so a Codex usage frame can land before ledger_pending expires. */
-export function finalizeLedgerRetryDelayMs(attempt: number): number {
-  return Math.min(4_000, 500 * 2 ** attempt)
+/**
+ * Four attempts, three waits (3.5 s total). `ledger_pending` at this point is a
+ * commit race of milliseconds between the proxy's own finalize — which runs in
+ * its `finally`, before the `done` frame — and this read. The 900 s the sweeper
+ * waits is the sweeper's patience, not a client budget: a proxy that already
+ * exhausted its attempts will not land no matter how long the host waits here.
+ *
+ * No jitter: finalizations serialize per recipe on the advisory lock rather
+ * than competing in a thundering herd, and a deterministic table is the part a
+ * test can actually assert.
+ */
+export const FINALIZE_LEDGER_RETRY_DELAYS_MS = [500, 1_000, 2_000] as const
+
+/**
+ * Whole-finalize deadline, retries included. Worst case after the provider has
+ * already answered is two of these (complete path, then error path) instead of
+ * the 65-250 s an unfiltered retry of every retryable error could reach.
+ */
+const FINALIZE_DEADLINE_MS = 30_000
+
+/**
+ * `ledger_pending` is the only 409 the finalize route marks retryable AND
+ * names with a `reason`. Every other retryable finalize failure (5xx, open
+ * breaker, exhausted transport retries, unexpected response shape) arrives
+ * WITHOUT a reason and has already burnt four fetches with backoff inside
+ * `postOnce`; repeating those four more times outside is amplification with no
+ * new information. The triple is asserted as a contract in the client tests.
+ */
+export function isLedgerPendingError(err: unknown): boolean {
+  return (
+    err instanceof PluginWorkloadError &&
+    err.code === 'provider_unavailable' &&
+    err.retryable === true &&
+    err.reason === 'provider_unavailable'
+  )
 }
 
-async function finalizeCompleteWithLedgerRetry(
+/** Resolves on the timer or on abort, whichever comes first. */
+function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    let timer: NodeJS.Timeout
+    const finish = () => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', finish)
+      resolve()
+    }
+    timer = setTimeout(finish, ms)
+    signal.addEventListener('abort', finish, { once: true })
+  })
+}
+
+export async function finalizeWithLedgerRetry(
   finalize: NonNullable<PromptBridgeHandlerDeps['finalizePromptBridge']>,
-  input: Parameters<NonNullable<PromptBridgeHandlerDeps['finalizePromptBridge']>>[0]
+  input: Parameters<NonNullable<PromptBridgeHandlerDeps['finalizePromptBridge']>>[0],
+  signal: AbortSignal
 ): Promise<void> {
-  let lastError: unknown
-  for (let attempt = 0; attempt < FINALIZE_LEDGER_RETRIES; attempt++) {
+  for (let attempt = 0; ; attempt++) {
     try {
-      await finalize(input)
+      await finalize(input, { signal })
       return
     } catch (error) {
-      lastError = error
-      if (
-        !(error instanceof PluginWorkloadError) ||
-        error.retryable !== true ||
-        attempt === FINALIZE_LEDGER_RETRIES - 1
-      ) {
+      if (attempt >= FINALIZE_LEDGER_RETRY_DELAYS_MS.length || !isLedgerPendingError(error)) {
         throw error
       }
-      await new Promise(resolve => setTimeout(resolve, finalizeLedgerRetryDelayMs(attempt)))
+      // The deadline surfaces the real pending error rather than a synthetic
+      // one, so the caller's fence sees why the ledger never settled.
+      if (signal.aborted) throw error
+      await sleepUnlessAborted(FINALIZE_LEDGER_RETRY_DELAYS_MS[attempt], signal)
+      if (signal.aborted) throw error
     }
   }
-  throw lastError
 }
 
 /**
@@ -110,23 +153,26 @@ export interface PromptBridgeHandlerDeps {
   /** Public provider/model identity from the live spec.agent binding. */
   getBootstrapTarget?: () => { provider: string; model: string } | null
   /** SDK-only atomic accounting boundary; workflow mode keeps the legacy reporter. */
-  finalizePromptBridge?: (input: {
-    invocationId: string
-    attemptGeneration: number
-    providerAttemptId: string
-    providerAttemptIndex: number
-    status: 'complete' | 'failed' | 'provider_unavailable'
-    reason: string
-    target: PromptBridgeTarget
-    usage?: {
-      llmSecretName: string
-      callerRef: string
-      fallbackUsed: boolean
-      attemptCount: number
-      inputTokens: number
-      outputTokens: number
-    }
-  }) => Promise<unknown>
+  finalizePromptBridge?: (
+    input: {
+      invocationId: string
+      attemptGeneration: number
+      providerAttemptId: string
+      providerAttemptIndex: number
+      status: 'complete' | 'failed' | 'provider_unavailable'
+      reason: string
+      target: PromptBridgeTarget
+      usage?: {
+        llmSecretName: string
+        callerRef: string
+        fallbackUsed: boolean
+        attemptCount: number
+        inputTokens: number
+        outputTokens: number
+      }
+    },
+    options?: { signal?: AbortSignal }
+  ) => Promise<unknown>
   onUsage?: (usage: {
     invocationId: string
     attemptGeneration: number
@@ -418,26 +464,30 @@ export class PromptBridgeHandler {
         providerAttemptIndex >= 1
       ) {
         try {
-          await finalizeCompleteWithLedgerRetry(this.deps.finalizePromptBridge, {
-            invocationId: authorized.invocationId,
-            attemptGeneration: authorized.attemptGeneration,
-            providerAttemptId,
-            providerAttemptIndex,
-            status: 'complete',
-            reason:
-              providerAttemptAcknowledgement === 'failed'
-                ? 'provider_completion_acknowledgement_failed'
-                : 'provider_completed',
-            target: completion.servedTarget,
-            usage: {
-              llmSecretName: completion.llmSecretName,
-              callerRef,
-              fallbackUsed: completion.fallbackUsed,
-              attemptCount: completion.attemptCount,
-              inputTokens: completion.usage.inputTokens,
-              outputTokens: completion.usage.outputTokens,
+          await finalizeWithLedgerRetry(
+            this.deps.finalizePromptBridge,
+            {
+              invocationId: authorized.invocationId,
+              attemptGeneration: authorized.attemptGeneration,
+              providerAttemptId,
+              providerAttemptIndex,
+              status: 'complete',
+              reason:
+                providerAttemptAcknowledgement === 'failed'
+                  ? 'provider_completion_acknowledgement_failed'
+                  : 'provider_completed',
+              target: completion.servedTarget,
+              usage: {
+                llmSecretName: completion.llmSecretName,
+                callerRef,
+                fallbackUsed: completion.fallbackUsed,
+                attemptCount: completion.attemptCount,
+                inputTokens: completion.usage.inputTokens,
+                outputTokens: completion.usage.outputTokens,
+              },
             },
-          })
+            AbortSignal.timeout(FINALIZE_DEADLINE_MS)
+          )
         } catch {
           // Returning provider content before durable finalization would hide
           // a possible spend. Surface an explicit unknown outcome instead.
@@ -535,16 +585,24 @@ export class PromptBridgeHandler {
             err instanceof PluginWorkloadError && err.providerMayHaveExecuted
               ? 'provider_unavailable'
               : 'failed'
-          await this.deps.finalizePromptBridge({
-            invocationId: authorized.invocationId,
-            attemptGeneration: authorized.attemptGeneration,
-            providerAttemptId: unknownProviderAttempt.providerAttemptId,
-            providerAttemptIndex: unknownProviderAttempt.providerAttemptIndex,
-            status: finalizationStatus,
-            reason:
-              err instanceof PluginWorkloadError && err.reason ? err.reason : 'outcome_unknown',
-            target: unknownProviderAttempt.target,
-          })
+          // N-11: the error path settles the same ledger row as the complete
+          // path, so it needs the same `ledger_pending` patience and the same
+          // bounded deadline. Losing this attempt to a millisecond commit race
+          // would silently drop the spend for an attempt that already ran.
+          await finalizeWithLedgerRetry(
+            this.deps.finalizePromptBridge,
+            {
+              invocationId: authorized.invocationId,
+              attemptGeneration: authorized.attemptGeneration,
+              providerAttemptId: unknownProviderAttempt.providerAttemptId,
+              providerAttemptIndex: unknownProviderAttempt.providerAttemptIndex,
+              status: finalizationStatus,
+              reason:
+                err instanceof PluginWorkloadError && err.reason ? err.reason : 'outcome_unknown',
+              target: unknownProviderAttempt.target,
+            },
+            AbortSignal.timeout(FINALIZE_DEADLINE_MS)
+          )
           providerAttemptFinalized = true
         } catch {
           console.warn('[PluginWorkloadSdk] provider spend finalization failed')

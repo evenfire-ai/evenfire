@@ -544,6 +544,97 @@ describe('PluginWorkloadSdkControlApiClient', () => {
     })
   })
 
+  it('surfaces ledger_pending as the retryable-with-reason finalize triple', async () => {
+    // The handler retries a finalize ONLY on this exact triple. If control-api
+    // ever stops sending `reason`, or the client stops mapping it, the retry
+    // silently disappears — so the triple is asserted end to end here.
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(409, {
+        error: 'provider_unavailable',
+        message: 'linked Codex attempt has not finalized usage yet',
+        retryable: true,
+        reason: 'provider_unavailable',
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    const failure = await client
+      .finalizePromptBridge({
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'r1',
+        invocationId: 'inv-1',
+        attemptGeneration: 1,
+        providerAttemptId: 'attempt-1',
+        providerAttemptIndex: 1,
+        status: 'complete',
+        reason: 'provider_completed',
+        target,
+      })
+      .catch((err: unknown) => err)
+    expect(failure).toBeInstanceOf(PluginWorkloadError)
+    expect(failure).toMatchObject({
+      code: 'provider_unavailable',
+      retryable: true,
+      reason: 'provider_unavailable',
+    })
+    // A 409 is not retried by the transport itself; the ledger retry lives in
+    // the handler, where the deadline can bound it.
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it('threads a caller deadline into the finalize request and stops retrying once aborted', async () => {
+    const controller = new AbortController()
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(201, {
+        invocationId: 'inv-1',
+        providerAttemptId: 'attempt-1',
+        status: 'complete',
+        outcome: 'exact',
+        idempotent: false,
+        usageAccepted: true,
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    await client.finalizePromptBridge(
+      {
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'r1',
+        invocationId: 'inv-1',
+        attemptGeneration: 1,
+        providerAttemptId: 'attempt-1',
+        providerAttemptIndex: 1,
+        status: 'complete',
+        reason: 'provider_completed',
+        target,
+      },
+      { signal: controller.signal }
+    )
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
+    expect(init.signal).toBeInstanceOf(AbortSignal)
+    expect(init.signal?.aborted).toBe(false)
+
+    // An already-expired deadline must not buy a single transport attempt: the
+    // AbortError would otherwise be swallowed by the network-retry branch.
+    const abortedFetch = vi.fn()
+    const abortedClient = makeClient(abortedFetch as unknown as typeof fetch)
+    await expect(
+      abortedClient.finalizePromptBridge(
+        {
+          recipeNamespace: 'sandbox-recipes',
+          recipeName: 'r1',
+          invocationId: 'inv-1',
+          attemptGeneration: 1,
+          providerAttemptId: 'attempt-1',
+          providerAttemptIndex: 1,
+          status: 'complete',
+          reason: 'provider_completed',
+          target,
+        },
+        { signal: AbortSignal.abort() }
+      )
+    ).rejects.toMatchObject({ code: 'provider_unavailable', retryable: true })
+    expect(abortedFetch).not.toHaveBeenCalled()
+  })
+
   it('submitClientNotification maps event_type_not_allowed', async () => {
     const fetchImpl = vi
       .fn()
