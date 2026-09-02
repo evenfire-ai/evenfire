@@ -38,8 +38,9 @@ export type McpServerSpec = {
     port?: number
   }
   auth?: {
-    type?: 'none' | 'bearer' | 'basic' | 'apiKey'
+    type?: 'none' | 'bearer' | 'basic' | 'apiKey' | 'oauth'
   }
+  oauth?: { grantScope?: 'user' | 'context' }
 }
 
 export type McpServerItem = {

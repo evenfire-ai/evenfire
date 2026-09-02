@@ -375,6 +375,36 @@ describe('CreateMcpServerForm — submit', () => {
     await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1), { timeout: 1500 })
   })
 
+  it('does not grant a returned context-scoped OAuth connector across Agent scopes', async () => {
+    vi.mocked(api.getHosts).mockResolvedValueOnce({
+      items: [
+        { metadata: { name: 'agent-alpha' }, spec: { contextRef: 'ctx-alpha' } },
+        { metadata: { name: 'agent-beta' }, spec: { contextRef: 'ctx-beta' } },
+      ],
+    })
+    vi.mocked(api.createMcpServer).mockResolvedValueOnce({
+      metadata: { name: 'shared-drive' },
+      spec: {
+        contextRef: 'ctx-alpha',
+        oauth: { grantScope: 'context' },
+      },
+    })
+    render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
+    await fillIdentity('shared-drive')
+    goToAccessStep()
+    await selectAgents('agent-alpha', 'agent-beta')
+    continueToSecretsStep()
+    chooseNoCredentials()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create connector' }))
+
+    expect(
+      await screen.findByText(/shared OAuth identity.*original access scope/i)
+    ).toBeInTheDocument()
+    expect(api.getContext).not.toHaveBeenCalled()
+    expect(api.updateContext).not.toHaveBeenCalled()
+  })
+
   it('creates a private access scope when no agents are selected', async () => {
     const onCreated = vi.fn()
     render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={onCreated} />)

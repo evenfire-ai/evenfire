@@ -23,6 +23,7 @@ function makeItem(overrides: {
   description?: string
   transportType?: 'sse' | 'streamableHttp' | 'stdio'
   enabled?: boolean
+  oauthGrantScope?: 'user' | 'context'
   conditions?: McpServerCondition[] | undefined
   hasStatus?: boolean
 }) {
@@ -34,6 +35,7 @@ function makeItem(overrides: {
       description?: string
       enabled?: boolean
       transport: { type: 'sse' | 'streamableHttp' | 'stdio'; url: string }
+      oauth?: { grantScope: 'user' | 'context' }
     }
     status?: { conditions?: McpServerCondition[] }
   } = {
@@ -50,6 +52,7 @@ function makeItem(overrides: {
         type: overrides.transportType ?? 'streamableHttp',
         url: 'http://brave-search.mcp-server.svc.cluster.local:3000/mcp',
       },
+      ...(overrides.oauthGrantScope ? { oauth: { grantScope: overrides.oauthGrantScope } } : {}),
     },
   }
   if (overrides.hasStatus !== false) {
@@ -535,6 +538,31 @@ describe('McpServerTable — agent membership', () => {
         ]
       )
     )
+  })
+
+  it('offers a context-scoped OAuth connector only to Agents in its authoritative scope', () => {
+    render(
+      <McpServerTable
+        items={[
+          makeItem({
+            name: 'shared-drive',
+            contextRef: 'ctx-authoritative',
+            oauthGrantScope: 'context',
+          }),
+        ]}
+        agentTargets={[
+          { name: 'agent-alpha', label: 'Alpha', contextRef: 'ctx-authoritative' },
+          { name: 'agent-beta', label: 'Beta', contextRef: 'ctx-foreign' },
+        ]}
+        onAddToAgents={vi.fn().mockResolvedValue(undefined)}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand connector shared-drive' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add agents' }))
+
+    expect(screen.getByRole('option', { name: 'Alpha' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'Beta' })).not.toBeInTheDocument()
   })
 })
 

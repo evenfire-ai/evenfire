@@ -20,6 +20,7 @@ import {
   updateContext,
 } from '@/lib/api'
 import type { EgressBinding, EnvSecretKeyMapping, EnvVar, HostResource, OrgImage } from '@/lib/api'
+import { connectorContextAssignmentError } from '@/lib/connectorOAuthAccess'
 import { buildContextUpdatePayload } from '@/lib/contextMutation'
 import type { EgressEditorStatus } from '@/lib/egressModel'
 import { createPrivateContext } from '@/lib/privateContext'
@@ -588,10 +589,19 @@ export function CreateMcpServerForm({
         secretCreated = true
       }
 
-      await createMcpServer({
+      const createdServer = await createMcpServer({
         metadata: { name },
         spec,
       })
+
+      const oauthScopeError = connectorContextAssignmentError(
+        createdServer.spec,
+        selectedContextRefs
+      )
+      if (oauthScopeError) {
+        setError(oauthScopeError)
+        return
+      }
 
       // Give the selected agents access. Each agent's private scope gets an
       // additive write with its own loaded resourceVersion; failures are

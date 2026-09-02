@@ -2,6 +2,7 @@
 
 import React, { Fragment, useMemo, useState } from 'react'
 import { copyTextToClipboard } from '../lib/clipboard'
+import { canAssignConnectorToContext } from '../lib/connectorOAuthAccess'
 import type {
   ConnectorAccessSummary,
   ConnectorAgentBinding,
@@ -640,7 +641,11 @@ export function McpServerTable({
               )
             )
             const agentOptions = agentTargets
-              .filter(target => !boundAgentNames.has(target.name))
+              .filter(
+                target =>
+                  !boundAgentNames.has(target.name) &&
+                  canAssignConnectorToContext(row.item.spec, target.contextRef)
+              )
               .map(target => ({
                 value: target.name,
                 label: target.label,

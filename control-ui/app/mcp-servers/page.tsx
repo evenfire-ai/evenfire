@@ -26,6 +26,7 @@ import {
 } from '../../lib/api'
 import type { ContextResource, ContextSpec, HostResource, McpServerResource } from '../../lib/api'
 import { mergeAccessSummaries, sortAccessPrincipals } from '../../lib/connectorAccess'
+import { connectorContextAssignmentError } from '../../lib/connectorOAuthAccess'
 import { buildContextUpdatePayload, contextMutationError } from '../../lib/contextMutation'
 
 function resourceName(resource: { metadata?: { name?: string } }): string {
@@ -302,6 +303,12 @@ export default function McpServersPage() {
   ) {
     const key = `${server.namespace}/${server.name}`
     const contextRefs = [...new Set(agents.map(agent => agent.contextRef))]
+    const connector = mcpServers.find(item => connectorKey(item) === key)
+    const oauthScopeError = connectorContextAssignmentError(connector?.spec, contextRefs)
+    if (oauthScopeError) {
+      setError(oauthScopeError)
+      return
+    }
     const targets = contexts.filter(context => contextRefs.includes(contextName(context)))
     if (targets.length !== contextRefs.length) {
       setError('One or more selected agents could not be resolved. Please refresh and try again.')
