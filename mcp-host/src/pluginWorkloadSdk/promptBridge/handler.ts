@@ -245,8 +245,13 @@ export function validatePromptBridgeRequest(raw: unknown): PromptBridgeRequest {
   if (body.modelPolicyRef !== undefined && typeof body.modelPolicyRef !== 'string') {
     throw new PluginWorkloadError('invalid_request', 'modelPolicyRef must be a string')
   }
-  if (body.maxTokens !== undefined && typeof body.maxTokens !== 'number') {
-    throw new PluginWorkloadError('invalid_request', 'maxTokens must be a number')
+  if (
+    body.maxTokens !== undefined &&
+    (typeof body.maxTokens !== 'number' || !Number.isInteger(body.maxTokens) || body.maxTokens < 1)
+  ) {
+    // R4-H2: `typeof number` alone let 0, -1 and 1.5 through to the provider
+    // and made the grant clamp's Math.min ill-defined.
+    throw new PluginWorkloadError('invalid_request', 'maxTokens must be a positive integer')
   }
   if (body.temperature !== undefined && typeof body.temperature !== 'number') {
     throw new PluginWorkloadError('invalid_request', 'temperature must be a number')
@@ -429,12 +434,13 @@ export class PromptBridgeHandler {
         acknowledgementMode: this.deps.finalizePromptBridge
           ? 'atomic_terminal_finalization'
           : 'per_attempt',
-        // J8: the workload's own maxTokens is the only value on this seam. The
-        // grant no longer advertises an output cap, because nothing enforced it:
-        // Codex ChatGPT `/codex/responses` rejects max_output_tokens and the
-        // proxy omits it, so the clamp bounded only the hashed request shape
-        // while the real call ran uncapped.
-        maxTokens: request.maxTokens,
+        // R4-H2: the per-grant ceiling is enforced here, before the request
+        // reaches any provider. On API-key providers it lands as `max_tokens`
+        // on the wire; on codex-subscription it bounds the hashed request
+        // identity while the proxy omits it from the ChatGPT wire, which also
+        // keeps a capped grant eligible for failover instead of failing the
+        // contract's 16384 range check outright.
+        maxTokens: clampMaxTokens(request.maxTokens, authorized.maxOutputTokens),
         temperature: request.temperature ?? authorized.modelPolicy?.temperature,
         timeoutMs: this.deps.promptTimeoutMs,
         recipeNamespace: this.deps.recipeNamespace,
@@ -653,4 +659,28 @@ function unexpectedAuthorizationResponse(): PluginWorkloadError {
     'control-api returned an inconsistent authorized target set',
     false
   )
+}
+
+/**
+ * Bound a workload's requested output against the grant's ceiling.
+ *
+ * Scope, stated honestly (R4-H2): on API-key providers this is the real cap —
+ * `max_tokens` reaches the provider. On codex-subscription the ChatGPT wire
+ * rejects `max_output_tokens` and the proxy omits it, so there the clamp bounds
+ * the hashed request identity rather than the response, and the enforced bound
+ * is the contract's structural `LIMITS.maxOutputTokens`. It still matters
+ * there: an unclamped request above that limit fails the contract range check
+ * as a non-retryable error, which is terminal with no failover.
+ *
+ * A grant with no ceiling passes the request through; a workload that names no
+ * maxTokens inherits the ceiling. Both inputs are validated upstream, so the
+ * `Math.min` is over two positive integers.
+ */
+function clampMaxTokens(
+  requested: number | undefined,
+  grantCap: number | null
+): number | undefined {
+  if (grantCap === null) return requested
+  if (requested === undefined) return grantCap
+  return Math.min(requested, grantCap)
 }

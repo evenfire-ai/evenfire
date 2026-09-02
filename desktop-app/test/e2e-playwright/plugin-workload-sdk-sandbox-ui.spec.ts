@@ -15,6 +15,7 @@ import {
   findSandboxUiContents,
   latestSdkInvocationStatus,
   notificationDeliverySignal,
+  profilesNow,
   promptBridgeLedgerForRun,
   readPluginWorkloadSdkStatus,
   requireExpectedSdkProvider,
@@ -165,7 +166,7 @@ test('Desktop Apps executes promptBridge and clientNotifications inside the real
     }
 
     const marker = `desktop-sdk-${Date.now()}`
-    const runStartedAt = new Date().toISOString()
+    const runStartedAt = profilesNow()
 
     await test.step('reject an empty prompt without creating an invocation', async () => {
       const before = sdkInvocationCount(fixture, 'promptBridge')

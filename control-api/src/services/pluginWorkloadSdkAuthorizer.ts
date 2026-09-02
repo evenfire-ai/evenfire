@@ -112,6 +112,12 @@ export interface AuthorizePromptBridgeParams {
 }
 
 export interface AuthorizedPromptBridge {
+  /**
+   * Per-grant output ceiling. Enforced as `max_tokens` on API-key providers;
+   * codex-subscription cannot bind it on the ChatGPT wire and is bounded by
+   * the contract's structural LIMITS.maxOutputTokens instead (R4-H2).
+   */
+  maxOutputTokens: number | null
   invocationId: string
   /** True when this idempotency key already produced an invocation. */
   replay: boolean
@@ -397,6 +403,7 @@ async function authorizePromptBridgeInner(
         attemptGeneration: recorded.invocation.attemptGeneration,
         policyRevision: grant.policyRevision,
         policyHash: resolvedPolicyHash,
+        maxOutputTokens: grant.quotaLimits.maxOutputTokens ?? null,
       },
     }
   }
@@ -494,6 +501,7 @@ async function authorizePromptBridgeInner(
       attemptGeneration: recorded.invocation.attemptGeneration,
       policyRevision: grant.policyRevision,
       policyHash: resolvedPolicyHash,
+      maxOutputTokens: grant.quotaLimits.maxOutputTokens ?? null,
     },
   }
 }

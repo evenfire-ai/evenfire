@@ -8,6 +8,7 @@ import {
   embeddedText,
   findSandboxUiContents,
   latestSdkInvocationStatus,
+  profilesNow,
   promptBridgeAttemptsForRun,
   promptBridgeGrantTargets,
   readPluginWorkloadSdkStatus,
@@ -182,7 +183,7 @@ test('Desktop Apps falls back to the authorized non-Codex target when Codex is u
       await expectProxyStopped()
     })
 
-    const runStartedAt = new Date().toISOString()
+    const runStartedAt = profilesNow()
     const before = sdkInvocationCount(fixture, 'promptBridge')
     await typeEmbedded(
       app,

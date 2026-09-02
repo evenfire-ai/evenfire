@@ -8,6 +8,7 @@ import {
   embeddedText,
   findSandboxUiContents,
   latestSdkInvocationStatus,
+  profilesNow,
   promptBridgeLedgerForRun,
   readPluginWorkloadSdkStatus,
   sandboxUiViewUrlPrefix,
@@ -149,7 +150,7 @@ test('Desktop Apps refuses a Codex prompt when the execution binding is missing'
       })
       .toContain(sandboxUiViewUrlPrefix(fixture))
     const webContentsId = embedded!.id
-    const runStartedAt = new Date().toISOString()
+    const runStartedAt = profilesNow()
     const before = sdkInvocationCount(fixture, 'promptBridge')
     await typeEmbedded(app, webContentsId, '#prompt', 'This prompt must not dispatch Codex.')
     await activateEmbedded(app, webContentsId, '#run')

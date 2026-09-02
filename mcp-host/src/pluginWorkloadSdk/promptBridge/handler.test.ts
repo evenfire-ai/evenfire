@@ -45,6 +45,7 @@ function authorization(overrides: Record<string, unknown> = {}) {
     attemptGeneration: 1,
     policyRevision: 7,
     policyHash: 'a'.repeat(64),
+    maxOutputTokens: null,
     ...overrides,
   }
 }
@@ -206,16 +207,42 @@ describe('PromptBridgeHandler', () => {
     )
   })
 
-  it('forwards the workload maxTokens verbatim and applies no grant cap (J8)', async () => {
+  // R4-H2. J8 dropped the clamp on the premise that nothing enforced the
+  // ceiling. That held only for codex-subscription, whose ChatGPT wire rejects
+  // `max_output_tokens`; every API-key provider does send it, so for them the
+  // per-grant cap was a working billing control that the removal silenced.
+  it('clamps the workload maxTokens down to the grant ceiling', async () => {
+    const authorize = vi.fn().mockResolvedValue(authorization({ maxOutputTokens: 4096 }))
+    const { handler, complete } = makeDeps({ authorize })
+    await handler.handle({ ...validBody, maxTokens: 9000 }, 'api')
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining({ maxTokens: 4096 }))
+  })
+
+  it('applies the grant ceiling when the workload names no maxTokens', async () => {
+    const authorize = vi.fn().mockResolvedValue(authorization({ maxOutputTokens: 4096 }))
+    const { handler, complete } = makeDeps({ authorize })
+    await handler.handle(validBody, 'api')
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining({ maxTokens: 4096 }))
+  })
+
+  it('passes the workload maxTokens through when the grant sets no ceiling', async () => {
     const { handler, complete } = makeDeps()
     await handler.handle({ ...validBody, maxTokens: 9000 }, 'api')
     expect(complete).toHaveBeenCalledWith(expect.objectContaining({ maxTokens: 9000 }))
   })
 
-  it('sends no maxTokens when the workload asks for none (J8)', async () => {
+  it('sends no maxTokens when neither the workload nor the grant names one', async () => {
     const { handler, complete } = makeDeps()
     await handler.handle(validBody, 'api')
     expect(complete.mock.calls[0]?.[0]).toMatchObject({ maxTokens: undefined })
+  })
+
+  it.each([0, -1, 1.5])('rejects a non-positive-integer maxTokens (%s)', async maxTokens => {
+    const { handler, complete } = makeDeps()
+    await expect(handler.handle({ ...validBody, maxTokens }, 'api')).rejects.toMatchObject({
+      code: 'invalid_request',
+    })
+    expect(complete).not.toHaveBeenCalled()
   })
 
   it('preserves metering when the logical terminal acknowledgement is unavailable', async () => {

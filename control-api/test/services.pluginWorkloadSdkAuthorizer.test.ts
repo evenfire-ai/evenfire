@@ -602,9 +602,11 @@ describe('authorizePromptBridge', () => {
       value: { invocationId: 'inv-1', replay: false },
     })
     if (!result.ok) throw new Error('expected the authorization to succeed')
-    // J8: a legacy grant may still carry maxOutputTokens, but the authorization
-    // must not re-advertise it as a policy ceiling — nothing enforced it.
-    expect(result.value).not.toHaveProperty('maxOutputTokens')
+    // R4-H2: the grant's output ceiling travels on the authorization again.
+    // J8 removed it on the premise that nothing enforced it, which held only
+    // for codex-subscription; every API-key provider sends it as `max_tokens`,
+    // so for them it was a working per-grant billing control.
+    expect(result.value.maxOutputTokens).toBe(2048)
     expect(sdkDb.insertInvocation).toHaveBeenCalledOnce()
     // Issue #348: the per-run leg is inert — no period quota is consumed even
     // though the grant still carries a legacy maxRequestsPerRun value.

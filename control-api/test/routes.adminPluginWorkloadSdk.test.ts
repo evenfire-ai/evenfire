@@ -536,9 +536,10 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     // (malformed still 400s, pinned above) but are dropped on write, while the
     // active per-minute keys persist untouched.
     //
-    // J8: maxOutputTokens joins the stripped set. It was persisted and
-    // advertised as a policy ceiling, but the Codex ChatGPT wire discards
-    // max_output_tokens, so nothing ever capped the response by token count.
+    // R4-H2: maxOutputTokens is NOT stripped. It briefly was, on the premise
+    // that nothing enforced it — true only for codex-subscription. Every
+    // API-key provider sends max_tokens, so for them it is a live per-grant
+    // billing ceiling and it must reach the grant.
     vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g1' } as never)
     const res = await request(buildApp())
       .post('/admin/plugin-workload-sdk/grants')
@@ -554,16 +555,16 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     expect(res.status).toBe(200)
     expect(sdkDb.upsertGrant).toHaveBeenCalledWith(
       expect.objectContaining({
-        quotaLimits: { maxInvocationsPerMinute: 30 },
+        quotaLimits: { maxInvocationsPerMinute: 30, maxOutputTokens: 4096 },
       }),
       '11111111-1111-4111-8111-111111111111',
       expect.anything() // carrier transaction client (R1-H3 fase 2)
     )
   })
 
-  it('still shape-validates the deprecated maxOutputTokens on the wire (J8)', async () => {
-    // Deprecating the key must not loosen the boundary: a malformed value is
-    // still a 400, exactly as it was while the key was persisted.
+  it('rejects a malformed maxOutputTokens on the wire', async () => {
+    // A ceiling of 0 would clamp every response to nothing; it is a 400, not a
+    // silently ignored value.
     const res = await request(buildApp())
       .post('/admin/plugin-workload-sdk/grants')
       .send({ ...validGrantBody, quotaLimits: { maxOutputTokens: 0 } })
