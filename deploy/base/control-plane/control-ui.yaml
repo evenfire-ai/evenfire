@@ -66,9 +66,13 @@ spec:
         resources:
           limits:
             cpu: 300m
-            # Legacy JSON mutations are buffered by the generic proxy; v2 part
-            # requests bypass that path and stream. Keep headroom for the legacy
-            # cap and the Next.js baseline. The minikube overlay must not reduce this.
+            # The proxy route buffers EVERY body-bearing request, v2 upload parts
+            # included — they are counted and flattened before being forwarded, not
+            # streamed through. What keeps that safe is the in-flight byte budget in
+            # app/control-api/[...path]/route.ts: 192MiB charged at most, leaving the
+            # Next.js baseline (~150MiB) and headroom inside this limit. Raising
+            # CONTROL_UI_PROXY_MAX_INFLIGHT_BODY_BYTES without raising this is how the
+            # pod gets OOMKilled. The minikube overlay must not reduce this.
             memory: 512Mi
           requests:
             cpu: 50m

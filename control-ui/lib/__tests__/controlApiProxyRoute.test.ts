@@ -1,6 +1,11 @@
 import { NextRequest } from 'next/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { GET, POST } from '../../app/control-api/[...path]/route'
+import {
+  GET,
+  POST,
+  __inFlightBodyBytesForTest,
+  __resetInFlightBodyBytesForTest,
+} from '../../app/control-api/[...path]/route'
 
 describe('control-ui control-api proxy route', () => {
   afterEach(() => {
@@ -297,32 +302,44 @@ describe('control-ui control-api proxy route', () => {
     })
   })
 
-  describe('concurrent body reads are bounded (pre-auth DoS guard)', () => {
-    const ENV_KEY = 'CONTROL_UI_PROXY_MAX_CONCURRENT_BODY_READS'
+  describe('in-flight body bytes are bounded (pre-auth DoS guard)', () => {
+    const BUDGET_KEY = 'CONTROL_UI_PROXY_MAX_INFLIGHT_BODY_BYTES'
+    const IDLE_KEY = 'CONTROL_UI_PROXY_BODY_READ_IDLE_TIMEOUT_MS'
+    const CAP_KEY = 'CONTROL_UI_PROXY_MAX_BODY_BYTES'
     const path = ['api', 'v1', 'admin', 'x']
-    let savedEnv: string | undefined
+    const saved: Record<string, string | undefined> = {}
 
     beforeEach(() => {
-      savedEnv = process.env[ENV_KEY]
+      for (const key of [BUDGET_KEY, IDLE_KEY, CAP_KEY]) saved[key] = process.env[key]
+      // Module state is shared across tests in this file; a test that throws
+      // mid-read would otherwise leak its charge into every later test.
+      __resetInFlightBodyBytesForTest()
     })
 
     afterEach(() => {
-      if (savedEnv === undefined) delete process.env[ENV_KEY]
-      else process.env[ENV_KEY] = savedEnv
+      for (const key of [BUDGET_KEY, IDLE_KEY, CAP_KEY]) {
+        if (saved[key] === undefined) delete process.env[key]
+        else process.env[key] = saved[key] as string
+      }
+      __resetInFlightBodyBytesForTest()
     })
 
     // A request whose body stream stays open until the test releases it, so one
     // reader can be parked mid-read while another request is issued against it.
-    function parkedBodyRequest() {
+    // `bytes` is charged at 2x while it is parked (chunk list + pending copy).
+    function parkedBodyRequest(bytes = 8, declaredLength?: number) {
       let close!: () => void
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
-          controller.enqueue(new Uint8Array(8))
+          controller.enqueue(new Uint8Array(bytes))
           close = () => controller.close()
         },
       })
+      const headers = new Headers()
+      if (declaredLength !== undefined) headers.set('content-length', String(declaredLength))
       const req = new NextRequest('http://localhost:3000/control-api/api/v1/admin/x', {
         method: 'POST',
+        headers,
         body: stream,
         duplex: 'half',
       } as RequestInit & { duplex: 'half' })
@@ -338,8 +355,10 @@ describe('control-ui control-api proxy route', () => {
         body: JSON.stringify({ ok: true }),
       })
 
-    it('sheds with 503 while every slot is held, without reaching upstream', async () => {
-      process.env[ENV_KEY] = '1'
+    it('sheds with 429 once the budget is spent, without reaching upstream', async () => {
+      // 16 bytes = exactly the 2x charge of the 8-byte parked chunk, so the
+      // parked reader alone consumes the whole budget.
+      process.env[BUDGET_KEY] = '16'
       const fetchMock = vi
         .spyOn(globalThis, 'fetch')
         .mockResolvedValue(new Response('{}', { status: 200 }))
@@ -350,7 +369,7 @@ describe('control-ui control-api proxy route', () => {
 
       const shed = await POST(jsonRequest(), { params: { path } })
 
-      expect(shed.status).toBe(503)
+      expect(shed.status).toBe(429)
       expect(shed.headers.get('retry-after')).toBe('1')
       await expect(shed.json()).resolves.toEqual({ error: 'proxy_busy' })
       expect(fetchMock).not.toHaveBeenCalled()
@@ -359,8 +378,47 @@ describe('control-ui control-api proxy route', () => {
       await parkedResponse
     })
 
-    it('releases the slot once the body is read, so the next request is admitted', async () => {
-      process.env[ENV_KEY] = '1'
+    // B1 regression. The charge must span the upstream round trip: `body` stays
+    // referenced by fetchInit for its whole duration, which is the SLOW phase.
+    // Releasing when the read finishes bounds the rate buffers are created at,
+    // not how many are alive.
+    it('holds the charge across the upstream fetch, not just the body read', async () => {
+      // 16 = the 8-byte chunk's resident charge (8) plus headroom below the
+      // 22 bytes the JSON mutation needs, so the shed below can only come from
+      // the in-flight request still holding its buffer.
+      process.env[BUDGET_KEY] = '16'
+      let releaseUpstream!: () => void
+      const upstreamGate = new Promise<void>(resolve => {
+        releaseUpstream = resolve
+      })
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        await upstreamGate
+        return new Response('{}', { status: 200 })
+      })
+
+      // Read the body to completion, then park the request inside fetch().
+      const parked = parkedBodyRequest()
+      const inFlight = POST(parked.req, { params: { path } })
+      await settle()
+      parked.release()
+      await settle()
+
+      // The read is finished — a reader-count budget would have freed its slot
+      // here — but the buffer is still referenced by fetchInit.
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(__inFlightBodyBytesForTest()).toBe(8)
+
+      const shed = await POST(jsonRequest(), { params: { path } })
+      expect(shed.status).toBe(429)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+
+      releaseUpstream()
+      await inFlight
+      expect(__inFlightBodyBytesForTest()).toBe(0)
+    })
+
+    it('releases the charge once the upstream fetch resolves', async () => {
+      process.env[BUDGET_KEY] = '32'
       const fetchMock = vi
         .spyOn(globalThis, 'fetch')
         .mockResolvedValue(new Response('{}', { status: 200 }))
@@ -371,14 +429,71 @@ describe('control-ui control-api proxy route', () => {
       parked.release()
       await parkedResponse
 
+      expect(__inFlightBodyBytesForTest()).toBe(0)
       const admitted = await POST(jsonRequest(), { params: { path } })
 
       expect(admitted.status).toBe(200)
       expect(fetchMock).toHaveBeenCalledTimes(2)
     })
 
+    // B3/B4 regression. A slot budget priced a 4 KiB mutation like a 16 MiB upload
+    // part, so four upload workers shed every unrelated mutation in the product.
+    it('lets a small mutation through while a large upload is buffering', async () => {
+      process.env[BUDGET_KEY] = String(1024 * 1024)
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }))
+
+      // 64 KiB parked upload -> 128 KiB charged, far below the 1 MiB budget.
+      const parked = parkedBodyRequest(64 * 1024)
+      const parkedResponse = POST(parked.req, { params: { path } })
+      await settle()
+
+      const mutation = await POST(jsonRequest(), { params: { path } })
+
+      expect(mutation.status).toBe(200)
+      parked.release()
+      await parkedResponse
+    })
+
+    // B2 regression. readBodyCapped took no deadline and the AbortSignal.timeout
+    // was constructed AFTER the read, so the buffering phase had none at all: a
+    // socket that sent one byte and went quiet held its charge until Node's
+    // 300s server.requestTimeout.
+    it('aborts a body that stalls mid-read instead of holding the charge', async () => {
+      process.env[IDLE_KEY] = '20'
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }))
+
+      // Dribbles one byte, then never closes and never sends again.
+      const stalled = parkedBodyRequest(1)
+      const res = await POST(stalled.req, { params: { path } })
+
+      expect(res.status).toBe(408)
+      await expect(res.json()).resolves.toEqual({ error: 'request_body_timeout' })
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(__inFlightBodyBytesForTest()).toBe(0)
+    })
+
+    it('does not let a dribbling client reserve the length it declared', async () => {
+      // Declares 512 KiB but sends 1 byte. Charging the declared length would let
+      // a handful of near-silent sockets deny the whole budget.
+      process.env[BUDGET_KEY] = String(1024 * 1024)
+      process.env[IDLE_KEY] = '20'
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }))
+
+      const dribbler = parkedBodyRequest(1, 512 * 1024)
+      const pending = POST(dribbler.req, { params: { path } })
+      await settle()
+
+      // Only the byte actually sent is charged: 1 x 2, not 512 KiB x 2.
+      expect(__inFlightBodyBytesForTest()).toBe(2)
+      await pending
+    })
+
     it('never gates GET, so SSE notification streams cannot be shed', async () => {
-      process.env[ENV_KEY] = '1'
+      process.env[BUDGET_KEY] = '16'
       const fetchMock = vi
         .spyOn(globalThis, 'fetch')
         .mockResolvedValue(new Response('{}', { status: 200 }))
@@ -399,18 +514,60 @@ describe('control-ui control-api proxy route', () => {
       await parkedResponse
     })
 
-    it('falls back to the default when the env value is absent, NaN, non-positive, or out-of-range', async () => {
+    // H3 regression. The default IS the production config — the knob appears in no
+    // manifest — so the suite has to pin its value, not just that some limit exists.
+    // Asserting only that a lone request is admitted lets 4 -> MAX_SAFE_INTEGER live.
+    // The forecast is checked against the budget only AFTER the per-request cap,
+    // so these raise the cap to its ceiling to make the budget the binding limit.
+    // Nothing is actually buffered: the forecast is read from content-length and
+    // the shed happens before the first chunk.
+    const declaredLengthRequest = (declaredBytes: number) =>
+      new NextRequest('http://localhost:3000/control-api/api/v1/admin/x', {
+        method: 'POST',
+        headers: { 'content-length': String(declaredBytes) },
+        body: new Uint8Array(8),
+        duplex: 'half',
+      } as RequestInit & { duplex: 'half' })
+
+    it('defaults the budget to 192MiB exactly', async () => {
+      delete process.env[BUDGET_KEY]
+      process.env[CAP_KEY] = String(512 * 1024 * 1024)
       const fetchMock = vi
         .spyOn(globalThis, 'fetch')
         .mockResolvedValue(new Response('{}', { status: 200 }))
 
-      for (const value of [undefined, 'abc', '0', '-1', '1.5', '99999']) {
-        if (value === undefined) delete process.env[ENV_KEY]
-        else process.env[ENV_KEY] = value
-        const res = await POST(jsonRequest(), { params: { path } })
-        expect(res.status).toBe(200)
+      // The forecast is 2x content-length, so 96MiB is the largest declared length
+      // that fits a 192MiB budget and 96MiB + 1 is the smallest that does not.
+      // Asserting BOTH sides pins the constant: a budget of 1024, or one widened to
+      // MAX_SAFE_INTEGER by a broken parse, fails one side or the other.
+      expect(
+        (await POST(declaredLengthRequest(96 * 1024 * 1024 + 1), { params: { path } })).status
+      ).toBe(429)
+      expect(fetchMock).not.toHaveBeenCalled()
+
+      expect(
+        (await POST(declaredLengthRequest(96 * 1024 * 1024), { params: { path } })).status
+      ).toBe(200)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('falls back to the default when the env value is absent, NaN, non-positive, or out-of-range', async () => {
+      process.env[CAP_KEY] = String(512 * 1024 * 1024)
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }))
+
+      // Every one of these must resolve to the 192MiB default, so a forecast just
+      // above it is shed. Asserting a bare 200 instead would prove nothing — a
+      // budget parsed as NaN admits everything, which is the mutant this kills.
+      // 1GiB is above MAX_INFLIGHT_BODY_BYTES_CEILING and must not be honoured.
+      for (const value of [undefined, 'abc', '0', '-1', '1.5', String(1024 ** 3)]) {
+        if (value === undefined) delete process.env[BUDGET_KEY]
+        else process.env[BUDGET_KEY] = value
+        const res = await POST(declaredLengthRequest(96 * 1024 * 1024 + 1), { params: { path } })
+        expect(res.status).toBe(429)
       }
-      expect(fetchMock).toHaveBeenCalledTimes(6)
+      expect(fetchMock).not.toHaveBeenCalled()
     })
   })
 
