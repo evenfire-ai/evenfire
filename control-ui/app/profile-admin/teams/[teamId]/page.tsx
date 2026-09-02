@@ -10,6 +10,7 @@ import { TeamRolePermissionEditor } from '@components/TeamRolePermissionEditor'
 import { useToast } from '@components/Toast'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { partitionVisibleAccess } from '@lib/accessVisibility'
+import { planAgentAccessUpdate } from '@lib/agentAccessCompatibility'
 import { getAgentDisplayName } from '@lib/agentName'
 import { ConnectorCountCell } from '../../../../components/ConnectorCountCell'
 import { InviteMemberDialog } from '../../../../components/InviteMemberDialog'
@@ -531,33 +532,13 @@ export default function TeamDetailsPage() {
     setBusy(true)
     setError('')
     try {
-      const normalizedAgents = Array.from(
-        new Set(nextGrantedAgents.map(v => v.trim()).filter(Boolean))
-      ).sort((a, b) => a.localeCompare(b))
-
-      const nextRefs = new Set<string>()
-      for (const agentName of normalizedAgents) {
-        const ref = agentContextRef(agentName)
-        if (ref) nextRefs.add(ref)
-      }
-      const nextContextIds = availableContextIds.filter(contextId => {
-        const owned = [...hostsByName.values()].some(
-          host =>
-            String((host.spec as { contextRef?: string } | undefined)?.contextRef || '').trim() ===
-            contextId
-        )
-        return owned ? nextRefs.has(contextId) : true
-      })
-      for (const ref of nextRefs) {
-        if (!nextContextIds.includes(ref)) nextContextIds.push(ref)
-      }
+      const updatePlan = planAgentAccessUpdate(assignedContextIds, nextGrantedAgents, [
+        ...hostsByName.values(),
+      ])
 
       const [updatedAgents, updatedContexts] = await Promise.all([
-        updateAdminTeamAgents(teamId, normalizedAgents, observedAgentNames),
-        updateAdminTeamContexts(
-          teamId,
-          nextContextIds.sort((a, b) => a.localeCompare(b))
-        ),
+        updateAdminTeamAgents(teamId, updatePlan.agentNames, observedAgentNames),
+        updateAdminTeamContexts(teamId, updatePlan.contextIds),
       ])
 
       const hostNames = [...hostsByName.keys()]

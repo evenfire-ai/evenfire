@@ -12,6 +12,7 @@ import { CheckboxField } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { accessScopeLabeler } from '@lib/accessScopeLabels'
 import { partitionVisibleAccess } from '@lib/accessVisibility'
+import { planAgentAccessUpdate } from '@lib/agentAccessCompatibility'
 import { getAgentDisplayName } from '@lib/agentName'
 import type { DeleteCandidateTeam } from '@lib/profileAdminDelete'
 import { formatTeamNames, getSoloMemberTeamsForUser } from '@lib/profileAdminDelete'
@@ -455,38 +456,13 @@ export default function UserDetailsPage() {
     setBusy(true)
     setError('')
     try {
-      const normalizedAgents = Array.from(
-        new Set(nextGrantedAgents.map(v => v.trim()).filter(Boolean))
-      ).sort((a, b) => a.localeCompare(b))
-
-      // Scopes: keep legacy ids that map to no known agent; add the scopes of
-      // newly granted agents; drop the scopes of revoked agents unless
-      // another still-granted agent shares them.
-      const nextRefs = new Set<string>()
-      for (const agentName of normalizedAgents) {
-        const ref = agentContextRef(agentName)
-        if (ref) nextRefs.add(ref)
-      }
-      const nextContextIds = availableContextIds.filter(contextId => {
-        const owner = [...hostsByName.values()].some(
-          host =>
-            String((host.spec as { contextRef?: string } | undefined)?.contextRef || '').trim() ===
-            contextId
-        )
-        // Keep legacy scope-only mappings untouched; managed ones follow the
-        // agent grant state.
-        return owner ? nextRefs.has(contextId) : true
-      })
-      for (const ref of nextRefs) {
-        if (!nextContextIds.includes(ref)) nextContextIds.push(ref)
-      }
+      const updatePlan = planAgentAccessUpdate(assignedContextIds, nextGrantedAgents, [
+        ...hostsByName.values(),
+      ])
 
       const [updatedAgents, updatedContexts] = await Promise.all([
-        updateAdminUserAgents(userId, normalizedAgents, observedAgentNames),
-        updateAdminUserContexts(
-          userId,
-          nextContextIds.sort((a, b) => a.localeCompare(b))
-        ),
+        updateAdminUserAgents(userId, updatePlan.agentNames, observedAgentNames),
+        updateAdminUserContexts(userId, updatePlan.contextIds),
       ])
 
       const hostNames = [...hostsByName.keys()]
