@@ -15375,6 +15375,25 @@ pre {
   z-index: 1;
 }
 
+/* Bottom shelf of the tab strip. It lives on the non-scrolling container (not
+   the scroller/list) so it stays under the whole visible strip when the tabs
+   overflow and scroll — a shelf on the scrolling list only spans the initial
+   viewport and slides away on scroll. z-index:-1 keeps it below the opaque
+   tabs (so it only shows through the gaps between them); each inactive tab
+   draws its own matching bottom border, and the active tab omits it to notch
+   through and merge with the surface below. */
+.chat-view-tabs::after {
+  background: var(--chat-view-selected-border);
+  bottom: 0;
+  content: '';
+  height: 1px;
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
+  z-index: -1;
+}
+
 .chat-view-tabs__scroller {
   min-width: 0;
   overflow-x: auto;
@@ -15389,18 +15408,7 @@ pre {
   min-width: 100%;
   position: relative;
   transform: rotateX(180deg);
-  width: max-content;
-}
-
-.chat-view-tabs__list::after {
-  background: var(--chat-view-selected-border);
-  bottom: 0;
-  content: '';
-  height: 1px;
-  left: 0;
-  pointer-events: none;
-  position: absolute;
-  right: 0;
+  width: 100%;
 }
 
 .chat-view-tab {
@@ -15409,21 +15417,24 @@ pre {
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   display: flex;
-  flex: 0 0 220px;
-  min-width: 0;
+  flex: 1 1 var(--chat-tab-max);
+  min-width: var(--chat-tab-min);
+  max-width: var(--chat-tab-max);
   transition: background var(--motion-fast);
-  width: 220px;
 }
 
 .chat-view-tab:not(.is-active) {
-  border-bottom: 0;
-  border-color: color-mix(in srgb, var(--border-soft) 25%, transparent);
+  border-bottom: 1px solid var(--chat-view-selected-border);
+  border-left-color: color-mix(in srgb, var(--border-soft) 25%, transparent);
+  border-right-color: color-mix(in srgb, var(--border-soft) 25%, transparent);
+  border-top-color: color-mix(in srgb, var(--border-soft) 25%, transparent);
 }
 
 .chat-view-tab.is-active {
   background: linear-gradient(var(--surface-strong), var(--surface-strong)), var(--panel);
   border-color: var(--chat-view-selected-border);
   border-bottom: 0;
+  flex-shrink: 0.4;
   position: relative;
   z-index: 1;
 }

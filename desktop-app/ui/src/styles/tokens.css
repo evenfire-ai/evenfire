@@ -151,6 +151,10 @@
   /* Layout */
   --search-bar-min-width: 320px;
   --avatar-size: 40px;
+
+  /* chat-view session tabs (Chrome-style: shrink to a floor, cap at a ceiling) */
+  --chat-tab-max: 220px;
+  --chat-tab-min: 96px;
   --control-bg: var(--surface-soft);
   --control-bg-strong: rgba(var(--panel-rgb), 0.78);
   --control-border: rgba(var(--edge-rgb), 0.56);
