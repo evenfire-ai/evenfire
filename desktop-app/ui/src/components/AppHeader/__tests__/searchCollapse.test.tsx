@@ -85,13 +85,15 @@ describe('AppHeader global search idle collapse', () => {
     const user = userEvent.setup()
     const { container } = render(<AppHeader />)
     const search = container.querySelector('.global-search')
+    const input = screen.getByRole('textbox', { name: 'Search' })
     expect(search).not.toBeNull()
+    expect(input.getAttribute('placeholder')).toBe('Search')
 
-    await user.click(screen.getByRole('textbox', { name: 'Search' }))
+    await user.click(input)
     expect(search?.classList.contains('is-open')).toBe(false)
 
     await user.tab()
-    expect(document.activeElement).not.toBe(screen.getByRole('textbox', { name: 'Search' }))
+    expect(document.activeElement).not.toBe(input)
     expect(search?.classList.contains('is-open')).toBe(false)
   })
 
@@ -106,5 +108,21 @@ describe('AppHeader global search idle collapse', () => {
 
     await user.clear(input)
     expect(search?.classList.contains('is-open')).toBe(false)
+  })
+
+  it('renders explicit titlebar search chrome for contrast', () => {
+    const { container } = render(<AppHeader placement="titlebar" />)
+
+    expect(container.querySelector('.global-search--titlebar')).toBeTruthy()
+    expect(container.querySelector('.search-input--titlebar')).toBeTruthy()
+    const icon = container.querySelector<HTMLElement>('.global-search__titlebar-icon')
+    const placeholder = container.querySelector<HTMLElement>('.search-input__titlebar-placeholder')
+    const bell = container.querySelector<HTMLElement>('.notification-bell--titlebar')
+
+    expect(icon?.textContent).toBe('⌕')
+    expect(icon?.style.color).toBe('var(--titlebar-action-ink)')
+    expect(placeholder?.textContent).toBe('Search')
+    expect(placeholder?.style.color).toBe('var(--titlebar-action-ink)')
+    expect(bell?.style.color).toBe('var(--titlebar-action-ink)')
   })
 })

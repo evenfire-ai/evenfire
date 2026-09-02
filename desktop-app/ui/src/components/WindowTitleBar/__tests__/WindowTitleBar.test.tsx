@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
+import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { WindowTitleBar, resolveWindowControlsPlatform } from '..'
+import { TitlebarActionsPortal, WindowTitleBar, resolveWindowControlsPlatform } from '..'
 import type { WindowControlsState } from '../types'
 
 afterEach(() => {
@@ -95,5 +96,51 @@ describe('WindowTitleBar', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Maximize window' })).toBeTruthy()
     })
+  })
+
+  it('renders reusable titlebar actions beside the native window controls', () => {
+    setNavigatorPlatform('MacIntel')
+    installWindowControls()
+
+    render(
+      <WindowTitleBar
+        actions={
+          <button type="button" aria-label="Search">
+            Search
+          </button>
+        }
+      />
+    )
+
+    expect(screen.getByRole('button', { name: 'Search' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Close window' })).toBeTruthy()
+  })
+
+  it('portals provider-backed actions above the titlebar background', async () => {
+    setNavigatorPlatform('MacIntel')
+    installWindowControls()
+
+    function Harness() {
+      const [actionsRoot, setActionsRoot] = React.useState<HTMLDivElement | null>(null)
+
+      return (
+        <>
+          <WindowTitleBar actionsRef={setActionsRoot} />
+          <div className="app-root">
+            <TitlebarActionsPortal container={actionsRoot}>
+              <button type="button" aria-label="Search">
+                Search
+              </button>
+            </TitlebarActionsPortal>
+          </div>
+        </>
+      )
+    }
+
+    render(<Harness />)
+
+    const search = await screen.findByRole('button', { name: 'Search' })
+    expect(search.closest('.window-titlebar')).toBeTruthy()
+    expect(search.closest('.app-root')).toBeNull()
   })
 })

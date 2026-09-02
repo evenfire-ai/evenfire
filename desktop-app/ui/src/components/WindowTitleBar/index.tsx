@@ -1,6 +1,13 @@
 import React from 'react'
+import { createPortal } from 'react-dom'
 import { joinClasses } from '@lib/classNames'
-import type { WindowControlAction, WindowControlsPlatform, WindowControlsState } from './types'
+import type {
+  TitlebarActionsPortalProps,
+  WindowControlAction,
+  WindowControlsPlatform,
+  WindowControlsState,
+  WindowTitleBarProps,
+} from './types'
 
 const DEFAULT_WINDOW_CONTROLS_STATE: WindowControlsState = {
   fullscreen: false,
@@ -31,7 +38,11 @@ function getWindowControlsApi() {
   return window.evenfire?.window
 }
 
-export function WindowTitleBar() {
+export function TitlebarActionsPortal({ children, container }: TitlebarActionsPortalProps) {
+  return container ? createPortal(children, container) : null
+}
+
+export function WindowTitleBar({ actions, actionsRef }: WindowTitleBarProps) {
   const [controlsState, setControlsState] = React.useState<WindowControlsState>(
     DEFAULT_WINDOW_CONTROLS_STATE
   )
@@ -101,8 +112,17 @@ export function WindowTitleBar() {
           </button>
         ))}
       </div>
+      <div className="window-titlebar__actions" ref={actionsRef}>
+        {actions}
+      </div>
     </header>
   )
 }
 
-export type { WindowControlAction, WindowControlsPlatform, WindowControlsState } from './types'
+export type {
+  TitlebarActionsPortalProps,
+  WindowControlAction,
+  WindowControlsPlatform,
+  WindowControlsState,
+  WindowTitleBarProps,
+} from './types'

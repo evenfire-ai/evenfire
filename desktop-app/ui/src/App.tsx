@@ -22,7 +22,7 @@ import { GfsImagePreview } from '@components/GfsImagePreview'
 import { PluginConsentModal } from '@components/PluginConsentModal'
 import type { PluginConsentRequest } from '@components/PluginConsentModal/types'
 import { SidebarNav } from '@components/SidebarNav'
-import { WindowTitleBar } from '@components/WindowTitleBar'
+import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
@@ -311,6 +311,7 @@ export function App() {
   const [composerFocusRequestId, setComposerFocusRequestId] = React.useState(0)
   const [globalSearchFocusRequestId, setGlobalSearchFocusRequestId] = React.useState(0)
   const [notificationOpenRequestId, setNotificationOpenRequestId] = React.useState(0)
+  const [titlebarActionsRoot, setTitlebarActionsRoot] = React.useState<HTMLDivElement | null>(null)
   const [sidebarToggleRequestId, setSidebarToggleRequestId] = React.useState(0)
   const [chatLocalSearchOpen, setChatLocalSearchOpen] = React.useState(false)
   const [chatLocalSearchState, setChatLocalSearchState] = React.useState<{
@@ -2033,7 +2034,7 @@ export function App() {
   return (
     <AuthContext.Provider value={authValue}>
       <div className="app-frame">
-        <WindowTitleBar />
+        <WindowTitleBar actionsRef={setTitlebarActionsRoot} />
         <div className="app-root" inert={bootSplashLoading || undefined}>
           {vm.isAuthenticated ? (
             <NavigationContext.Provider value={navValue}>
@@ -2073,6 +2074,10 @@ export function App() {
                                 className={`content-panel glass-card${
                                   isAgentChatView ? ' content-panel--agent-chat' : ''
                                 }${vm.navItem === DESKTOP_ROUTES.settings ? ' content-panel--settings' : ''}${
+                                  vm.navItem === DESKTOP_ROUTES.chat
+                                    ? ' content-panel--titlebar-actions'
+                                    : ''
+                                }${
                                   appNotificationDrawerOpen
                                     ? ' content-panel--app-notification-drawer-open'
                                     : ''
@@ -2092,16 +2097,32 @@ export function App() {
                                     : undefined
                                 }
                               >
-                                <AppHeader
-                                  searchFocusRequestId={globalSearchFocusRequestId}
-                                  notificationOpenRequestId={notificationOpenRequestId}
-                                  notificationTrayMode={
-                                    notificationTrayUsesDrawer ? 'drawer' : 'overlay'
-                                  }
-                                  notificationTrayReady={notificationDrawerReady}
-                                  onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
-                                  onShellOverlayOpenChange={setHeaderShellOverlayOpen}
-                                />
+                                {vm.navItem === DESKTOP_ROUTES.chat ? (
+                                  <TitlebarActionsPortal container={titlebarActionsRoot}>
+                                    <AppHeader
+                                      placement="titlebar"
+                                      searchFocusRequestId={globalSearchFocusRequestId}
+                                      notificationOpenRequestId={notificationOpenRequestId}
+                                      notificationTrayMode={
+                                        notificationTrayUsesDrawer ? 'drawer' : 'overlay'
+                                      }
+                                      notificationTrayReady={notificationDrawerReady}
+                                      onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
+                                      onShellOverlayOpenChange={setHeaderShellOverlayOpen}
+                                    />
+                                  </TitlebarActionsPortal>
+                                ) : (
+                                  <AppHeader
+                                    searchFocusRequestId={globalSearchFocusRequestId}
+                                    notificationOpenRequestId={notificationOpenRequestId}
+                                    notificationTrayMode={
+                                      notificationTrayUsesDrawer ? 'drawer' : 'overlay'
+                                    }
+                                    notificationTrayReady={notificationDrawerReady}
+                                    onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
+                                    onShellOverlayOpenChange={setHeaderShellOverlayOpen}
+                                  />
+                                )}
                                 <ToastStack items={vm.toasts} />
                                 {vm.navItem === DESKTOP_ROUTES.chat && (
                                   <ChatViewWorkspace

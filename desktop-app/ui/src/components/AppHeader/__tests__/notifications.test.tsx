@@ -236,30 +236,24 @@ describe('AppHeader notification tray presentation', () => {
     ).toBe(false)
   })
 
-  it('uses a compact search label at constrained widths while retaining the full hover text', () => {
+  it('uses the shared search label at constrained widths', () => {
     vi.stubGlobal('innerWidth', 1200)
 
     render(<AppHeader />)
 
     const search = screen.getByRole('textbox', { name: 'Search' })
-    expect(search.getAttribute('placeholder')).toBe('Search workspace...')
-    expect(search.getAttribute('title')).toBe(
-      'Search teams, contexts, members, agents or connectors...'
-    )
+    expect(search.getAttribute('placeholder')).toBe('Search')
+    expect(search.getAttribute('title')).toBe('Search')
   })
 
-  it('uses the full search label above the constrained-width breakpoint', () => {
+  it('uses the shared search label above the constrained-width breakpoint', () => {
     vi.stubGlobal('innerWidth', 1400)
 
     render(<AppHeader />)
 
     const search = screen.getByRole('textbox', { name: 'Search' })
-    expect(search.getAttribute('placeholder')).toBe(
-      'Search teams, contexts, members, agents or connectors...'
-    )
-    expect(search.getAttribute('title')).toBe(
-      'Search teams, contexts, members, agents or connectors...'
-    )
+    expect(search.getAttribute('placeholder')).toBe('Search')
+    expect(search.getAttribute('title')).toBe('Search')
   })
 
   it('opens and focuses the existing global search for a command request', () => {
