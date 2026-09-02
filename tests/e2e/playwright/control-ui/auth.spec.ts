@@ -71,7 +71,7 @@ test.describe('Control UI — Auth', () => {
 
     // All main tabs visible
     await expect(page.locator(CUI_DASHBOARD.TAB_AGENTS)).toBeVisible()
-    await expect(page.locator(CUI_DASHBOARD.TAB_CONTEXTS)).toBeVisible()
+    await expect(page.locator(CUI_DASHBOARD.TAB_MARKETPLACE)).toBeVisible()
     await expect(page.locator(CUI_DASHBOARD.TAB_MCP_SERVERS)).toBeVisible()
     await expect(page.locator(CUI_DASHBOARD.TAB_CHANNELS)).toBeVisible()
     await expect(page.locator(CUI_DASHBOARD.TAB_MEMBERS_TEAMS)).toBeVisible()

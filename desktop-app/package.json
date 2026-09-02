@@ -23,7 +23,6 @@
     "qa:recorder:navigation": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-navigation.spec.ts",
     "qa:recorder:agents": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-agents.spec.ts",
     "qa:recorder:connectors": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-connectors.spec.ts",
-    "qa:recorder:contexts": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-contexts.spec.ts",
     "qa:recorder:shared-files": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-shared-files.spec.ts",
     "qa:recorder:teams": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-teams.spec.ts",
     "qa:recorder:plugins": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-plugins.spec.ts",

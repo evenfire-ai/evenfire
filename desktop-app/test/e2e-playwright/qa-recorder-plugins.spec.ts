@@ -17,7 +17,7 @@ import {
 // Read-only inventory + detail-panel assertions always run. The trigger step is
 // gated behind QA_RECORDER_CONFIRM_MUTATIONS=1 (it creates a real workflow run
 // and may incur provider cost) and only fires when a triggerable recipe with an
-// input contract is selected. Contract: docs/testing/optional-playwright-qa-recorder.md.
+// input contract is selected. Contract: docs/testing/desktop-headful-journeys.md.
 //
 // Note on selectors: WorkflowsPage renders no `workflows-page`, `workflow-row`,
 // `selected-workflow`, `run-count`, or `runs-loading` data-testids. The real

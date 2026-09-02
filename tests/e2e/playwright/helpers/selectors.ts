@@ -37,7 +37,7 @@ export const CUI_DASHBOARD = {
 
   TAB_AGENTS: '.cu-sidebar__item:has-text("Agents")',
   TAB_HOSTS: '.cu-sidebar__item:has-text("Agents")',
-  TAB_CONTEXTS: '.cu-sidebar__item:has-text("Contexts")',
+  TAB_MARKETPLACE: '.cu-sidebar__item:has-text("Marketplace")',
   TAB_MCP_SERVERS: '.cu-sidebar__item:has-text("Connectors")',
   TAB_CHANNELS: '.cu-sidebar__item:has-text("External Channels")',
   TAB_MEMBERS_TEAMS: '.cu-sidebar__item:has-text("Users & Teams")',
@@ -45,7 +45,6 @@ export const CUI_DASHBOARD = {
   TAB_WORKFLOW_RECIPES: '.cu-sidebar__item:has-text("Plugins")',
 
   CREATE_HOST_BUTTON: 'button:has-text("Create agent")',
-  CREATE_CONTEXT_BUTTON: 'button:has-text("Create context")',
   LOADING_INDICATOR: 'div:has-text("Loading...")',
 } as const
 
@@ -57,13 +56,6 @@ export const CUI_HOSTS = {
   TABLE_HEADER_NAMESPACE: 'th:text-is("Namespace")',
   // Host Wizard — no semantic h2, detect wizard by presence of Close button
   WIZARD_CLOSE_BUTTON: 'button[aria-label="Close"]',
-} as const
-
-// ── Control UI — Contexts table ───────────────────────────────────────────────
-export const CUI_CONTEXTS = {
-  TABLE: 'table',
-  TABLE_HEADER_NAME: 'th:has-text("Context Name")',
-  TABLE_HEADER_MCP_SERVERS: 'th:has-text("MCP servers")',
 } as const
 
 // ── Control UI — Users & Teams ────────────────────────────────────────────────
