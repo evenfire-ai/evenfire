@@ -72,6 +72,21 @@ describe('ReleaseLabel', () => {
     expect(screen.getByText('Release v0.6.0')).toBeInTheDocument()
   })
 
+  it('keeps a mounted label when a later refresh fails', async () => {
+    api.getDesktopRelease.mockResolvedValue({ releaseId: 'v0.7.0' })
+
+    render(<ReleaseLabel />)
+    expect(await screen.findByText('Release v0.7.0')).toBeInTheDocument()
+
+    api.getDesktopRelease.mockRejectedValue(new Error('502 Bad Gateway'))
+    await act(async () => {
+      await refreshReleaseIdentity()
+    })
+
+    expect(screen.getByText('Release v0.7.0')).toBeInTheDocument()
+    expect(screen.queryByText('Release unavailable')).not.toBeInTheDocument()
+  })
+
   it('publishes one read to every mounted label', async () => {
     api.getDesktopRelease.mockResolvedValue({ releaseId: 'v0.6.0' })
 

@@ -5,6 +5,7 @@ import {
   formatReleaseTitle,
   loadReleaseIdentity,
   normalizeReleaseIdentity,
+  readCachedReleaseIdentity,
   refreshReleaseIdentity,
   resetReleaseIdentityCache,
   subscribeReleaseIdentity,
@@ -163,4 +164,68 @@ test('refreshReleaseIdentity re-reads past a cached value and republishes', asyn
 
   assert.equal(calls, 2)
   assert.deepEqual(seen, [{ releaseId: 'v0.6.0' }, { releaseId: 'v0.7.0' }])
+})
+
+// Refresh used to null the cache *before* the new read resolved. A transient
+// 502 then published null to every mounted label, turning a correct
+// "Release v0.7.0" into "Release unavailable" until the next successful
+// refresh or a full reload.
+test('refreshReleaseIdentity keeps the last good identity when the re-read fails', async () => {
+  resetReleaseIdentityCache()
+  const seen: Array<{ releaseId: string } | null> = []
+  const unsubscribe = subscribeReleaseIdentity(identity => seen.push(identity))
+
+  await loadReleaseIdentity(async () => ({ releaseId: 'v0.7.0' }))
+  const refreshed = await refreshReleaseIdentity(async () => {
+    throw new Error('502 Bad Gateway')
+  })
+  unsubscribe()
+
+  assert.deepEqual(refreshed, { releaseId: 'v0.7.0' })
+  assert.deepEqual(readCachedReleaseIdentity(), { releaseId: 'v0.7.0' })
+  assert.deepEqual(seen, [{ releaseId: 'v0.7.0' }])
+})
+
+// refreshReleaseIdentity used to leave inFlight alone, so a Refresh during
+// the mount read returned that same promise and never issued a second
+// request — the button existed to repair a stuck read and did nothing.
+test('refreshReleaseIdentity starts a new read while one is already in flight', async () => {
+  resetReleaseIdentityCache()
+  let calls = 0
+  let finishFirst: ((value: { releaseId: string }) => void) | undefined
+  const firstPayload = new Promise<{ releaseId: string }>(resolve => {
+    finishFirst = resolve
+  })
+  const fetcher = async () => {
+    calls += 1
+    if (calls === 1) return firstPayload
+    return { releaseId: 'v0.8.0-NEW' }
+  }
+
+  const firstLoad = loadReleaseIdentity(fetcher)
+  const refreshed = refreshReleaseIdentity(fetcher)
+  assert.equal(calls, 2)
+
+  const refreshedIdentity = await refreshed
+  finishFirst!({ releaseId: 'v0.7.0-OLD' })
+  await firstLoad
+
+  assert.deepEqual(refreshedIdentity, { releaseId: 'v0.8.0-NEW' })
+  assert.deepEqual(readCachedReleaseIdentity(), { releaseId: 'v0.8.0-NEW' })
+})
+
+// publishReleaseIdentity used to run inside the fetch try. A throwing
+// subscriber was caught as if the read itself had failed, which published
+// null over the good value and returned null from the load.
+test('a throwing subscriber does not wipe a resolved release identity', async () => {
+  resetReleaseIdentityCache()
+  const unsubscribe = subscribeReleaseIdentity(() => {
+    throw new Error('subscriber failed')
+  })
+
+  const identity = await loadReleaseIdentity(async () => ({ releaseId: 'v0.7.0' }))
+  unsubscribe()
+
+  assert.deepEqual(identity, { releaseId: 'v0.7.0' })
+  assert.deepEqual(readCachedReleaseIdentity(), { releaseId: 'v0.7.0' })
 })

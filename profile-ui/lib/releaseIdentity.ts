@@ -14,14 +14,15 @@ export type ReleaseIdentityListener = (identity: ReleaseIdentity | null) => void
 // formatReleaseLabel, the sidebar brand through formatReleaseTitle.
 const RELEASE_PREFIX = 'Release'
 
-// The running external-rest-api image bakes its release identity in, so the
-// value cannot change while the tab is open. One resolved read is cached for
-// the page session and shared by the always-mounted sidebar and the settings
-// page. A failed read is deliberately NOT cached: the label is decoration, and
-// pinning it to "unavailable" until the next full page load would be the wrong
-// trade for one transient error.
+// One resolved read is cached for the page session and shared by the
+// always-mounted sidebar and the settings page. A failed first read is not
+// cached, so the next mount retries. Refresh drops any in-flight read and
+// re-asks; a failed re-read keeps the last good value rather than publishing
+// "unavailable" over a label that was already correct. loadGeneration lets an
+// abandoned in-flight promise finish without clobbering a newer read.
 let cachedIdentity: ReleaseIdentity | null = null
 let inFlight: Promise<ReleaseIdentity | null> | null = null
+let loadGeneration = 0
 
 // Every mounted label subscribes, so a read resolved by one of them lands on
 // all of them. Without this, an instance that caught a transient failure would
@@ -38,7 +39,14 @@ export function subscribeReleaseIdentity(listener: ReleaseIdentityListener): () 
 
 function publishReleaseIdentity(identity: ReleaseIdentity | null): void {
   // Iterate a copy: a listener may unsubscribe (unmount) while being notified.
-  for (const listener of [...listeners]) listener(identity)
+  // Isolate each subscriber so a throw cannot rewind the cache or reject the read.
+  for (const listener of [...listeners]) {
+    try {
+      listener(identity)
+    } catch {
+      // The label is decoration; a broken subscriber is not a failed read.
+    }
+  }
 }
 
 export function normalizeReleaseIdentity(payload: unknown): ReleaseIdentity | null {
@@ -68,39 +76,59 @@ export function readCachedReleaseIdentity(): ReleaseIdentity | null {
 export function resetReleaseIdentityCache(): void {
   cachedIdentity = null
   inFlight = null
+  loadGeneration += 1
 }
 
 export async function loadReleaseIdentity(
   fetcher: ReleaseIdentityFetcher = getDesktopRelease
 ): Promise<ReleaseIdentity | null> {
-  if (cachedIdentity) return cachedIdentity
-  if (inFlight) return inFlight
-
-  inFlight = (async () => {
-    try {
-      const identity = normalizeReleaseIdentity(await fetcher())
-      if (identity) cachedIdentity = identity
-      publishReleaseIdentity(identity)
-      return identity
-    } catch {
-      // Never surfaced to the page and never allowed to drive navigation: the
-      // settings page's own getMe() call is what detects a dead session.
-      publishReleaseIdentity(null)
-      return null
-    } finally {
-      inFlight = null
-    }
-  })()
-
-  return inFlight
+  return readReleaseIdentity(fetcher, false)
 }
 
-// Drops a resolved read so the next load re-asks. The settings Refresh button
-// routes through here, which is what lets a label that caught a transient
-// failure heal in place rather than waiting to be remounted.
+// Drops any in-flight read so the next load re-asks. The settings Refresh
+// button routes through here, which is what lets a label that caught a
+// transient failure heal in place rather than waiting to be remounted. A
+// failed re-read keeps the last good value; clearing the cache first would
+// publish "unavailable" onto every mounted label for one 502.
 export async function refreshReleaseIdentity(
   fetcher: ReleaseIdentityFetcher = getDesktopRelease
 ): Promise<ReleaseIdentity | null> {
-  cachedIdentity = null
-  return loadReleaseIdentity(fetcher)
+  loadGeneration += 1
+  inFlight = null
+  return readReleaseIdentity(fetcher, true)
+}
+
+async function readReleaseIdentity(
+  fetcher: ReleaseIdentityFetcher,
+  force: boolean
+): Promise<ReleaseIdentity | null> {
+  if (!force && cachedIdentity) return cachedIdentity
+  if (inFlight) return inFlight
+
+  const generation = loadGeneration
+  const request = (async (): Promise<ReleaseIdentity | null> => {
+    let identity: ReleaseIdentity | null = null
+    try {
+      identity = normalizeReleaseIdentity(await fetcher())
+    } catch {
+      // Never surfaced to the page and never allowed to drive navigation: the
+      // settings page's own getMe() call is what detects a dead session.
+      identity = null
+    } finally {
+      if (generation === loadGeneration) inFlight = null
+    }
+
+    if (generation !== loadGeneration) return cachedIdentity
+    if (identity) {
+      cachedIdentity = identity
+      publishReleaseIdentity(identity)
+      return identity
+    }
+    if (cachedIdentity) return cachedIdentity
+    publishReleaseIdentity(null)
+    return null
+  })()
+
+  inFlight = request
+  return request
 }
