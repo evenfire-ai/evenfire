@@ -623,7 +623,7 @@ export const AppHeader = React.memo(function AppHeader({
   return (
     <header className="top-bar">
       <div className="header-left">
-        <div className="global-search" ref={searchRef}>
+        <div className={`global-search${searchOpen ? ' is-open' : ''}`} ref={searchRef}>
           <TextInput
             ref={searchInputRef}
             type="text"
