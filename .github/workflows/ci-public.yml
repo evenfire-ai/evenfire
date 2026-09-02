@@ -234,6 +234,7 @@ jobs:
             catalogProducers.realPostgres.integration \
             catalogRevisionComponents.realPostgres.integration \
             db.codexSubscriptionConnection.realPostgres.integration \
+            externalSessionSingleTouch.realPostgres.integration \
             finalAuthorityLifecycle.realPostgres.integration \
             gfsRevisionLockOrder.realPostgres.integration \
             invitationAcceptedOnboarding.realPostgres.integration \
@@ -249,7 +250,8 @@ jobs:
             services.llmProviderAttemptStore.realPostgres.integration \
             services.llmProviderAttemptRedemption.realPostgres.integration \
             services.llmProviderAttemptFinalization.realPostgres.integration \
-            userAccessRuntimeContract.realPostgres.integration
+            userAccessRuntimeContract.realPostgres.integration \
+            userSessionDatabaseClock.realPostgres.integration
           do
             grep -Fq "$suite" "$normalized_log" || {
               echo "real-Postgres control-api lane omitted critical suite ${suite}" >&2
