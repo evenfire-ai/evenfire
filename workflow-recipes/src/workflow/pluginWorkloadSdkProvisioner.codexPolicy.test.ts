@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import type { WorkflowRecipeSpec } from '../types'
+import type { CodexRecipeVerdict } from './codexRecipeVerdict'
 import {
   PluginWorkloadSdkProvisioner,
   type PluginWorkloadSdkProvisionerDeps,
@@ -47,6 +48,34 @@ function codexBinding(
 }
 
 const MINTED = codexBinding()
+
+/** Build the one verdict the provisioner reads, from a case's intent. */
+function verdictFor(opts: {
+  codexBinding?: PluginWorkloadSdkCodexBindingProof | null
+  codexBindingUndecidable?: boolean
+}): CodexRecipeVerdict {
+  const undecidable = opts.codexBindingUndecidable === true
+  const binding = opts.codexBinding ?? null
+  return {
+    provenance: undecidable ? 'uncertain' : 'authoritative',
+    provenanceReason: undecidable ? 'parent_spec_unavailable' : 'standalone',
+    connectionKey: 'team-plus',
+    projection: {
+      targets: [],
+      eligibleTargets: [],
+      derivedScopes: [],
+      requiresCodexProxyEgress: false,
+      catalogContentHash: null,
+      catalogRevision: null,
+      connectionRevision: null,
+      eligibility: undecidable ? 'uncertain' : binding ? 'eligible' : 'ineligible',
+      reason: undecidable ? 'provenance_uncertain' : binding ? 'eligible' : 'unassigned',
+      driftHashInput: '{}',
+    },
+    hostBinding: binding,
+    hostBindingReason: binding ? 'eligible' : 'unassigned',
+  }
+}
 
 /** A v3 bootstrap body that survives parseEagerSdkBootstrapProof as policy-ready. */
 function readyBootstrapBody(binding: PluginWorkloadSdkCodexBindingProof | null) {
@@ -125,6 +154,10 @@ function makeHarness(configureResult: unknown) {
   } as unknown as PluginWorkloadSdkProvisionerDeps
   const provisioner = new PluginWorkloadSdkProvisioner(deps)
 
+  // R5-B1: the provisioner now takes ONE verdict instead of a binding plus a
+  // derived boolean. These helpers keep each existing case's semantics: a
+  // minted binding means eligible+authoritative, and "undecidable" means the
+  // projection itself could not decide.
   const reconcile = (opts: {
     codexBinding?: PluginWorkloadSdkCodexBindingProof | null
     codexBindingUndecidable?: boolean
@@ -138,7 +171,7 @@ function makeHarness(configureResult: unknown) {
       RUNTIME,
       {
         mcpHostPhase: 'Running',
-        ...opts,
+        codexVerdict: verdictFor(opts),
       }
     )
 

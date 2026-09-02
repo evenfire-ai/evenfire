@@ -454,4 +454,98 @@ describe('Codex allowlist view across interleaved recipes', () => {
       bindingHash: EXPECTED_BINDING_HASH,
     })
   })
+
+  // ── R5-M1 / R5-B1 ───────────────────────────────────────────────────────
+  // The previous round fixed the wiring but tested only its two ends: the
+  // helper (malformed -> uncertain) and the provisioner (given the flag as an
+  // input). Nothing drove the reconciler, so forcing the flag to `false` at
+  // the wiring reintroduced the wipe with every test still green.
+  //
+  // These assert the OBSERVABLE outcome — no binding-less configure is ever
+  // sent — and each one first proves the reconcile actually reached the pod,
+  // because "configure was not called" is also true of a reconcile that died
+  // on line one.
+  describe('a binding-less configure is never sent under an undecidable verdict', () => {
+    it('withholds configure when the allowlist ConfigMap is readable but malformed', async () => {
+      const { reconciler, coreApi, configure } = createHarness()
+      bindGrant(reconciler)
+      const malformed = codexConfigMap()
+      malformed.metadata!.annotations!['clerum.io/catalog-revision'] = 'not-a-number'
+      coreApi.readNamespacedConfigMap.mockResolvedValue(malformed)
+
+      await reconcileRecipe(reconciler, codexSdkSpec())
+
+      expect(builtMcpHostPodFrom(coreApi)).toBeDefined()
+      expect(configure).not.toHaveBeenCalled()
+    })
+
+    it('withholds configure when the runtime-scope parent spec is unavailable', async () => {
+      // R5-B1 proper. The scope path already called this uncertain and kept the
+      // live JWT scope; the configure path called it `ineligible` and shipped a
+      // null binding, wiping the live execution binding over a transient read.
+      const { reconciler, coreApi, configure } = createHarness()
+      reconciler.setCodexReconcileContext({
+        recipeUid: `uid-${RECIPE}`,
+        recipeName: RECIPE,
+        runtimeScopeRecipeName: 'parent-recipe',
+        claimedParent: true,
+        parentSpec: null,
+        connectionKey: 'unassigned',
+      })
+
+      await reconcileRecipe(reconciler, codexSdkSpec())
+
+      expect(builtMcpHostPodFrom(coreApi)).toBeDefined()
+      expect(configure).not.toHaveBeenCalled()
+    })
+
+    it('withholds configure AND the scope when the parent claim is rejected', async () => {
+      // The inverse divergence: an eligible own grant used to mint a binding
+      // here while the scope path withheld `llm:codex:execute`, leaving an
+      // execution binding on a host whose fresh JWT lacks the scope.
+      const { reconciler, coreApi, configure } = createHarness()
+      reconciler.setCodexReconcileContext({
+        recipeUid: `uid-${RECIPE}`,
+        recipeName: RECIPE,
+        runtimeScopeRecipeName: RECIPE,
+        claimedParent: true,
+        parentSpec: null,
+        connectionKey: GRANT,
+      })
+
+      await reconcileRecipe(reconciler, codexSdkSpec())
+
+      expect(builtMcpHostPodFrom(coreApi)).toBeDefined()
+      expect(configure).not.toHaveBeenCalled()
+      expect(issuedScopes()).not.toContain(CODEX_SCOPE)
+    })
+
+    it('does configure with a null binding when an authoritative grant is unassigned', async () => {
+      // Control case: with authority established, "no grant" is a DECISION and
+      // clearing the binding is correct. Without this, the three tests above
+      // would also pass if the guard simply blocked every configure.
+      const { reconciler, coreApi, configure } = createHarness()
+      bindGrant(reconciler, RECIPE, 'unassigned')
+
+      await reconcileRecipe(reconciler, codexSdkSpec())
+
+      expect(builtMcpHostPodFrom(coreApi)).toBeDefined()
+      expect(configure).toHaveBeenCalledTimes(1)
+      expect(configure.mock.calls[0]?.[5] ?? null).toBeNull()
+    })
+
+    it('agrees on binding and scope in the eligible case', async () => {
+      // R5-B1's real invariant, asserted as a biconditional rather than as two
+      // independent facts: a configure that carries a binding must come with
+      // the scope, and vice versa.
+      const { reconciler, coreApi, configure } = createHarness()
+      bindGrant(reconciler)
+
+      await reconcileRecipe(reconciler, codexSdkSpec())
+
+      expect(builtMcpHostPodFrom(coreApi)).toBeDefined()
+      const carriedBinding = (configure.mock.calls[0]?.[5] ?? null) !== null
+      expect(carriedBinding).toBe(issuedScopes().includes(CODEX_SCOPE))
+    })
+  })
 })

@@ -86,70 +86,17 @@ export function readVerifiedSdkOnlyCodexBinding(
 }
 
 /**
- * Derive the sanitized v3 Codex execution proof from one WRC snapshot.
+ * Mint the sanitized five-field v3 proof from an already-eligible binding.
  *
- * Eligibility is decided by `toEligiblePolicyBinding`, the same cascade that
- * derives `llm:codex:execute`, so a recipe can never be handed an execution
- * binding for a grant whose scope the reconciler withholds (and vice versa).
- * Returns null when the grant is unassigned, the Codex flag is off, the
- * connection is not `connected`, the catalog is stale, or the selected model
- * is not in the assigned connection's catalog.
+ * Deliberately NOT exported alongside a "derive from a ConfigMap" helper any
+ * more. Those helpers (`deriveSdkOnlyCodexBinding` / `resolveSdkOnlyCodexBinding`)
+ * were blind to provenance, so a caller could obtain a binding for a recipe
+ * whose Codex authority could not be established — the R5-B1 wipe. The only
+ * caller is `projectCodexRecipeVerdict`, which gates on provenance and
+ * eligibility first. Removed rather than deprecated, for the same reason
+ * `readOk` was removed: a reachable blind path invites the sibling back.
  */
-export type SdkOnlyCodexBindingResolution = {
-  binding: PluginWorkloadSdkCodexBindingProof | null
-  eligibility: 'eligible' | 'ineligible' | 'uncertain'
-  reason: string
-}
-
-/**
- * R4-B1: the same call must answer both "which binding?" and "was the catalog
- * decidable at all?". The reconciler previously derived the second from
- * `readOk`, a pure IO signal that is `true` for a ConfigMap that reads fine
- * but parses badly — so a malformed `catalog-revision` produced `uncertain`
- * on the scope path while the configure path saw a decidable catalog and sent
- * a binding-less v3 configure, wiping the live execution binding.
- * `uncertain` strictly subsumes `!readOk`: an unreadable ConfigMap is
- * `missing`, which is also `uncertain`.
- */
-export function resolveSdkOnlyCodexBinding(input: {
-  provider: string
-  model: string
-  connectionKey: string | undefined
-  configMap: CodexConfigMapView | undefined
-  log?: { debug(msg: string, fields?: Record<string, unknown>): void }
-}): SdkOnlyCodexBindingResolution {
-  if (input.provider !== CODEX_PROVIDER) {
-    return { binding: null, eligibility: 'ineligible', reason: 'provider_not_codex' }
-  }
-  const { binding, eligibility, reason } = toEligiblePolicyBinding(
-    input.configMap,
-    input.connectionKey,
-    input.model
-  )
-  if (!binding || binding.catalogRevision < 1 || binding.credentialRevision < 1) {
-    const withheldReason = binding ? 'revision_out_of_range' : reason
-    input.log?.debug('Codex execution binding withheld', {
-      model: input.model,
-      connectionKey: input.connectionKey ?? CODEX_UNASSIGNED_CONNECTION_KEY,
-      eligibility,
-      reason: withheldReason,
-    })
-    return { binding: null, eligibility, reason: withheldReason }
-  }
-  return { binding: toProof(binding), eligibility, reason }
-}
-
-export function deriveSdkOnlyCodexBinding(input: {
-  provider: string
-  model: string
-  connectionKey: string | undefined
-  configMap: CodexConfigMapView | undefined
-  log?: { debug(msg: string, fields?: Record<string, unknown>): void }
-}): PluginWorkloadSdkCodexBindingProof | null {
-  return resolveSdkOnlyCodexBinding(input).binding
-}
-
-function toProof(binding: {
+export function mintSdkOnlyCodexBindingProof(binding: {
   connectionKey: string
   catalogRevision: number
   credentialRevision: number

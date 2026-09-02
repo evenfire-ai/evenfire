@@ -5,6 +5,7 @@ import { getErrorCode } from '../reconciler/k8sErrors'
 import { effectiveWorkflowContextRefForSpec } from '../reconciler/workflowContext'
 import type { WorkflowRecipeSpec } from '../types'
 import { resolveEagerSdkMcpHostAgent } from './agentResolution'
+import type { CodexRecipeVerdict } from './codexRecipeVerdict'
 import {
   deletePodIfExists,
   getContainerWaitingReason,
@@ -123,7 +124,8 @@ export type PluginWorkloadSdkProvisionerDeps = {
     recipeName: string,
     runtimeScopeRecipeName: string,
     spec: WorkflowRecipeSpec,
-    recipeUid?: string
+    recipeUid: string | undefined,
+    codexVerdict: CodexRecipeVerdict
   ) => Promise<McpHostRuntimeTokenRefreshResult | void>
   applyWorkflowNetworkPolicies: (
     recipeName: string,
@@ -211,13 +213,14 @@ export class PluginWorkloadSdkProvisioner {
     runtime: WorkflowRuntimePlan,
     opts: {
       mcpHostPhase: string | undefined
-      codexBinding?: PluginWorkloadSdkCodexBindingProof | null
       /**
-       * ConfigMap read failed this reconcile. Grant decisions stay fail-closed.
-       * Do not send a binding-less v3 configure that would clear a live host
-       * binding.
+       * The caller's ONE Codex verdict for this pass (R5-B1). Required, and
+       * deliberately not a pair of optional derived fields: an optional
+       * `codexBindingUndecidable` defaulting to false is a flag a future
+       * caller can silently omit, which is precisely how a binding-less v3
+       * configure reached a live host.
        */
-      codexBindingUndecidable?: boolean
+      codexVerdict: CodexRecipeVerdict
     }
   ): Promise<EagerSdkMcpHostStatus> {
     const log = createLogger('wrc', recipeName)
@@ -238,7 +241,8 @@ export class PluginWorkloadSdkProvisioner {
       recipeName,
       runtimeScopeRecipeName,
       spec,
-      recipeUid
+      recipeUid,
+      opts.codexVerdict
     )
 
     await this.deps.applyWorkflowNetworkPolicies(
@@ -387,7 +391,7 @@ export class PluginWorkloadSdkProvisioner {
 
     if (promptBridge && !mcpHostAgent) return 'failed'
     if (
-      opts.codexBindingUndecidable === true &&
+      opts.codexVerdict.projection.eligibility === 'uncertain' &&
       promptBridge &&
       mcpHostAgent?.provider === 'codex-subscription'
     ) {
@@ -414,10 +418,10 @@ export class PluginWorkloadSdkProvisioner {
       }
       return 'ready'
     }
-    // The caller derives the binding from the same allowlist view it used for
-    // `codexBindingUndecidable`; the provisioner never re-reads that state
-    // after its own awaits (see the reconciler's `codexView`).
-    const resolvedCodexBinding = opts.codexBinding ?? null
+    // Both the skip decision above and this binding are fields of the SAME
+    // verdict the caller computed once for this pass. The provisioner never
+    // re-derives either after its own awaits (R5-B1).
+    const resolvedCodexBinding = opts.codexVerdict.hostBinding
     const capabilityFamily = promptBridge ? 'promptBridge' : 'clientNotifications'
     const configureKey = `${readiness.uid}:${capabilityFamily}:${mcpHostAgent?.provider ?? 'none'}:${mcpHostAgent?.model ?? 'none'}:${resolvedCodexBinding?.bindingHash ?? 'none'}`
     try {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { WorkflowRecipeSpec } from '../types'
+import type { CodexRecipeVerdict } from './codexRecipeVerdict'
 import { PluginWorkloadSdkProvisioner } from './pluginWorkloadSdkProvisioner'
 import type { PluginWorkloadSdkProvisionerDeps } from './pluginWorkloadSdkProvisioner'
 import { buildMcpHostPod, pluginWorkloadSdkRuntimeContractHash } from './podFactory'
@@ -135,6 +136,31 @@ function desiredRuntimeContractHash(): string {
   return pluginWorkloadSdkRuntimeContractHash(desiredPod)
 }
 
+/**
+ * The one verdict the provisioner reads. These image-drift cases are about pod
+ * rolls, not Codex policy, so they use an authoritative-but-ineligible verdict:
+ * a real decision, never uncertainty (which would take the configure skip).
+ */
+const decidedVerdict: CodexRecipeVerdict = {
+  provenance: 'authoritative',
+  provenanceReason: 'standalone',
+  connectionKey: 'unassigned',
+  projection: {
+    targets: [],
+    eligibleTargets: [],
+    derivedScopes: [],
+    requiresCodexProxyEgress: false,
+    catalogContentHash: null,
+    catalogRevision: null,
+    connectionRevision: null,
+    eligibility: 'ineligible',
+    reason: 'unassigned',
+    driftHashInput: '{}',
+  },
+  hostBinding: null,
+  hostBindingReason: 'unassigned',
+}
+
 describe('ensureEagerSdkMcpHost image-drift roll', () => {
   it('rolls a healthy eager mcp-host pod when its image drifts from the platform image', async () => {
     const { provisioner, deleteNamespacedPod, createNamespacedPod } = makeProvisioner(STALE_IMAGE)
@@ -146,7 +172,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: 'Running' }
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
     )
 
     // Pod deleted so the next reconcile recreates it from the platform image;
@@ -175,7 +201,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: 'Running' }
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
     )
 
     expect(deleteNamespacedPod).not.toHaveBeenCalled()
@@ -192,7 +218,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: 'Running' }
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
     )
 
     expect(status).toBe('deploying')
@@ -215,7 +241,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: 'Pending' }
+      { mcpHostPhase: 'Pending', codexVerdict: decidedVerdict }
     )
 
     expect(status).toBe('deploying')
@@ -240,7 +266,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: 'Running' }
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
     )
 
     expect(status).toBe('deploying')
@@ -286,7 +312,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: undefined }
+      { mcpHostPhase: undefined, codexVerdict: decidedVerdict }
     )
 
     expect(status).toBe('deploying')
@@ -351,7 +377,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: 'Pending' }
+      { mcpHostPhase: 'Pending', codexVerdict: decidedVerdict }
     )
 
     expect(status).toBe('deploying')
@@ -416,7 +442,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       RECIPE,
       promptBridgeSpec,
       RUNTIME,
-      { mcpHostPhase: 'Running' }
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
     )
 
     expect(status).toBe('deploying')
@@ -498,6 +524,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
         RUNTIME,
         {
           mcpHostPhase: 'Running',
+          codexVerdict: decidedVerdict,
         }
       )
 
@@ -534,7 +561,7 @@ describe('ensureEagerSdkMcpHost runtime token roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: 'Running' }
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
     )
 
     expect(status).toBe('deploying')
@@ -558,7 +585,7 @@ describe('ensureEagerSdkMcpHost runtime token roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: 'Running' }
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
     )
 
     expect(deleteNamespacedPod).not.toHaveBeenCalled()
@@ -582,7 +609,7 @@ describe('ensureEagerSdkMcpHost runtime token roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: 'Running' }
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
     )
 
     expect(status).toBe('deploying')
@@ -607,7 +634,7 @@ describe('ensureEagerSdkMcpHost runtime token roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: 'Running' }
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
     )
 
     expect(deleteNamespacedPod).not.toHaveBeenCalled()
@@ -682,7 +709,29 @@ describe('ensureEagerSdkMcpHost ConfigMap snapshot skip', () => {
         RECIPE,
         CODEX_SPEC,
         RUNTIME,
-        { mcpHostPhase: 'Running', codexBindingUndecidable: true }
+        {
+          mcpHostPhase: 'Running',
+          // R5-B1: undecidable is now a field of the one verdict.
+          codexVerdict: {
+            provenance: 'uncertain',
+            provenanceReason: 'parent_spec_unavailable',
+            connectionKey: 'team-plus',
+            projection: {
+              targets: [],
+              eligibleTargets: [],
+              derivedScopes: [],
+              requiresCodexProxyEgress: false,
+              catalogContentHash: null,
+              catalogRevision: null,
+              connectionRevision: null,
+              eligibility: 'uncertain',
+              reason: 'provenance_uncertain',
+              driftHashInput: '{}',
+            },
+            hostBinding: null,
+            hostBindingReason: 'provenance_uncertain',
+          } satisfies CodexRecipeVerdict,
+        }
       )
     ).resolves.toBe('awaiting_policy')
     expect(configure).not.toHaveBeenCalled()

@@ -738,14 +738,6 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
       // #533 acceptance criterion 2 ties the Codex binding to the catalog and
       // credential revisions, but those live on the connection row and never
       // reached the host, so `codexBindingReady` could not compare them. They
-      // R4-M4: `codexBindingRevisions` is a STATIC capability of this binary —
-      // "I know how to publish the revisions" — not a statement about any one
-      // connection. Emitting it only alongside the numbers made a revoked or
-      // missing connection look like an older control-api, so the host skipped
-      // the freshness check exactly when the binding could not possibly be
-      // backed. With the flag static, absent numbers take the host's
-      // partial-deploy branch and fail closed, which is correct: a revoked
-      // connection can never back a live binding.
       // are advertised additively, gated by `codexBindingRevisions`, because
       // the two rollout directions need opposite defaults: a host that
       // predates the fields ignores them, and a host that postdates them must
@@ -754,6 +746,15 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
       // which is the #540 failure shape. Omitting the comparison is a
       // readiness gap, never an unfenced spend: llmProviderAttemptAuthorizer
       // and llmProviderAttemptRedemption already reject a stale revision.
+      //
+      // R4-M4: `codexBindingRevisions` is a STATIC capability of this binary —
+      // "I know how to publish the revisions" — not a statement about any one
+      // connection. Emitting it only alongside the numbers made a revoked or
+      // missing connection look like an older control-api, so the host skipped
+      // the freshness check exactly when the binding could not possibly be
+      // backed. With the flag static, absent numbers take the host's
+      // partial-deploy branch and fail closed, which is correct: a revoked
+      // connection can never back a live binding.
       const codexConnection =
         reservationOnlyOauthBroker && typeof alignedPrimary?.connectionRef === 'string'
           ? await getSafeCodexSubscriptionConnection(pool, alignedPrimary.connectionRef)
