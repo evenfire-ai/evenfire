@@ -1165,6 +1165,29 @@ test-e2e-plugin-workload-sdk-desktop-no-grant: ## Run the no-grant Codex guard (
 		E2E_PLUGIN_SDK_NO_GRANT_APP_TITLE="$$E2E_PLUGIN_SDK_NO_GRANT_APP_TITLE" \
 		./node_modules/.bin/playwright test --config test/e2e-playwright/playwright.config.ts plugin-workload-sdk-no-grant-guard.spec.ts
 
+.PHONY: test-e2e-plugin-workload-sdk-desktop-codex-fallback
+test-e2e-plugin-workload-sdk-desktop-codex-fallback: ## Run the Codex -> authorized fallback journey (#533 acceptance criterion 8); stops codex-llm-proxy and restores it
+	@set -eu; \
+	ctx="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}"; \
+	test -n "$$ctx" || { echo "Refusing Desktop Plugin Workload SDK fallback journey: explicit Kubernetes context is required" >&2; exit 1; }; \
+	test "$${E2E_PLUGIN_SDK_WRITE_CONFIRM:-}" = 1 || { echo "Refusing Desktop Plugin Workload SDK fallback journey: set E2E_PLUGIN_SDK_WRITE_CONFIRM=1" >&2; exit 1; }; \
+	test -n "$${CONTROL_UI_BASE_URL:-}" || { echo "CONTROL_UI_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${CONTROL_API_BASE_URL:-}" || { echo "CONTROL_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${EXTERNAL_REST_API_BASE_URL:-}" || { echo "EXTERNAL_REST_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${RPC_PROXY_BASE_URL:-}" || { echo "RPC_PROXY_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test "$${E2E_PLUGIN_SDK_EXPECT_PROVIDER:-}" = codex-subscription || { echo "Refusing Desktop Plugin Workload SDK fallback journey: set E2E_PLUGIN_SDK_EXPECT_PROVIDER=codex-subscription; this journey exists only for the Codex primary" >&2; exit 1; }; \
+	. scripts/e2e/e2e-lib.sh; \
+	require_branch_profile_urls "$$ctx" "$${CLERUM_PROFILE_PORTS_ENV:-$${E2E_PROFILE_PORTS_ENV:-}}"; \
+	echo "[E2E-GUARD] Desktop Plugin Workload SDK fallback journey: context=$$ctx; recipe=$${E2E_PLUGIN_SDK_RECIPE_NAMESPACE:-sandbox-recipes}/$${E2E_PLUGIN_SDK_RECIPE_NAME:-evenfire-prompt-notify-app}; codex-llm-proxy will be stopped and restored"; \
+	trap 'kubectl --context "$$ctx" -n control-plane scale deployment/codex-llm-proxy --replicas=1 >/dev/null || echo "[E2E-GUARD] FAILED to restore control-plane/codex-llm-proxy to replicas=1 — restore it before running any other lane on this profile" >&2' EXIT; \
+	cd desktop-app && KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 E2E_PLUGIN_SDK_CODEX_FALLBACK=1 npm run build && \
+	KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 E2E_PLUGIN_SDK_CODEX_FALLBACK=1 \
+		E2E_PLUGIN_SDK_EXPECT_PROVIDER="$$E2E_PLUGIN_SDK_EXPECT_PROVIDER" \
+		E2E_PLUGIN_SDK_RECIPE_NAME="$${E2E_PLUGIN_SDK_RECIPE_NAME:-evenfire-prompt-notify-app}" \
+		E2E_PLUGIN_SDK_RECIPE_NAMESPACE="$${E2E_PLUGIN_SDK_RECIPE_NAMESPACE:-sandbox-recipes}" \
+		E2E_PLUGIN_SDK_APP_TITLE="$${E2E_PLUGIN_SDK_APP_TITLE:-Prompt & Notify}" \
+		./node_modules/.bin/playwright test --config test/e2e-playwright/playwright.config.ts plugin-workload-sdk-codex-fallback.spec.ts
+
 .PHONY: test-e2e-cron-tab-validation
 test-e2e-cron-tab-validation: ## Run recipe cron tab E2E (set E2E_CRON_TAB_FIX_REQUIRED=1 when the fix must be present)
 	@echo "Running cron tab validation E2E gate..."

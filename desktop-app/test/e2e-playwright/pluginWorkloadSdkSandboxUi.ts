@@ -572,6 +572,107 @@ export function promptBridgeLedgerForRun(
   }
 }
 
+export type PromptBridgeAttemptRow = {
+  attemptIndex: number
+  targetRef: string
+  provider: string
+  model: string
+  status: string
+  spendOutcome: string
+  codexAttemptId: string
+}
+
+/**
+ * Every physical attempt of the run's first promptBridge invocation, ordered by
+ * `attempt_index`.
+ *
+ * `promptBridgeLedgerForRun` answers "what did the served attempt record", so
+ * it stops at `LIMIT 1`. A failover journey needs the opposite: the displaced
+ * attempt is the evidence. Attempt 0 never reaches `finalize` when a later
+ * target wins, so its spend floor is written by
+ * `settlePriorProviderAttemptFloors` — the server-side discovery that replaced
+ * a client-declared `priorAttempts` field. Reading every row is what proves
+ * that path ran at all.
+ */
+export function promptBridgeAttemptsForRun(
+  fixture: SandboxUiFixture,
+  startedAt: string
+): PromptBridgeAttemptRow[] {
+  const raw = profilesSql(`
+    SELECT sdk.attempt_index::text || '|' || sdk.target_ref || '|' || sdk.provider || '|' ||
+           sdk.model || '|' || sdk.status || '|' || coalesce(spend.outcome, '') || '|' ||
+           coalesce(codex.id::text, '')
+      FROM plugin_workload_sdk_invocations inv
+      JOIN plugin_workload_sdk_provider_attempts sdk
+        ON sdk.invocation_id = inv.id
+      LEFT JOIN llm_provider_attempts codex
+        ON codex.plugin_workload_sdk_provider_attempt_id = sdk.id
+      LEFT JOIN plugin_workload_sdk_spend_outcomes spend
+        ON spend.provider_attempt_id = sdk.id
+     WHERE inv.recipe_namespace = ${sqlLiteral(fixture.recipeNamespace)}
+       AND inv.recipe_name = ${sqlLiteral(fixture.recipeName)}
+       AND inv.method = 'promptBridge'
+       AND inv.created_at >= ${sqlLiteral(startedAt)}::timestamptz
+       AND inv.id = (
+         SELECT id FROM plugin_workload_sdk_invocations
+          WHERE recipe_namespace = ${sqlLiteral(fixture.recipeNamespace)}
+            AND recipe_name = ${sqlLiteral(fixture.recipeName)}
+            AND method = 'promptBridge'
+            AND created_at >= ${sqlLiteral(startedAt)}::timestamptz
+          ORDER BY created_at ASC
+          LIMIT 1
+       )
+     ORDER BY sdk.attempt_index ASC;
+  `)
+  if (!raw.trim()) return []
+  return raw
+    .trim()
+    .split('\n')
+    .map(line => {
+      const [attemptIndex, targetRef, provider, model, status, spendOutcome, codexAttemptId] = line
+        .trim()
+        .split('|')
+      return {
+        attemptIndex: Number.parseInt(attemptIndex ?? '', 10),
+        targetRef: targetRef ?? '',
+        provider: provider ?? '',
+        model: model ?? '',
+        status: status ?? '',
+        spendOutcome: spendOutcome ?? '',
+        codexAttemptId: codexAttemptId ?? '',
+      }
+    })
+}
+
+/**
+ * The ordered promptBridge targets on the live grant.
+ *
+ * A failover journey that runs against a single-target grant would pass while
+ * proving nothing — there would be nowhere to fall to. This is asserted before
+ * the fault is injected so an unprovisioned fixture fails as a precondition,
+ * not as a mysteriously green run.
+ */
+export function promptBridgeGrantTargets(
+  fixture: SandboxUiFixture
+): Array<{ targetRef: string; provider: string }> {
+  const raw = profilesSql(`
+    SELECT string_agg(t->>'targetRef' || '|' || (t->>'provider'), E'\\n' ORDER BY ord)
+      FROM plugin_workload_sdk_grants g
+      CROSS JOIN LATERAL jsonb_array_elements(g.prompt_targets) WITH ORDINALITY AS a(t, ord)
+     WHERE g.recipe_namespace = ${sqlLiteral(fixture.recipeNamespace)}
+       AND g.recipe_name = ${sqlLiteral(fixture.recipeName)}
+       AND g.capability_family = 'promptBridge';
+  `)
+  if (!raw.trim()) return []
+  return raw
+    .trim()
+    .split('\n')
+    .map(line => {
+      const [targetRef, provider] = line.trim().split('|')
+      return { targetRef: targetRef ?? '', provider: provider ?? '' }
+    })
+}
+
 export function latestSdkInvocationStatus(
   fixture: SandboxUiFixture,
   method: 'promptBridge' | 'clientNotifications'
