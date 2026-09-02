@@ -477,6 +477,14 @@ spec:
                                       maxOutputTokens:
                                         type: integer
                                         minimum: 1
+                                        description: >-
+                                          DEPRECATED — accepted for
+                                          compatibility but no longer enforced.
+                                          The Codex ChatGPT wire discards
+                                          max_output_tokens, so no layer capped
+                                          the response by token count.
+                                          Scheduled for removal in a future
+                                          version.
                                   clientNotifications:
                                     type: object
                                     required: [allowedEventTypes]
@@ -1711,6 +1719,12 @@ spec:
                         maxOutputTokens:
                           type: integer
                           minimum: 1
+                          description: >-
+                            DEPRECATED — accepted for compatibility but no
+                            longer enforced. The Codex ChatGPT wire discards
+                            max_output_tokens, so no layer capped the response
+                            by token count. Scheduled for removal in a future
+                            version.
                         maxRequestsPerRun:
                           type: integer
                           minimum: 1

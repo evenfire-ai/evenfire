@@ -1172,8 +1172,41 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
         ) as never
       )
     ).rejects.toMatchObject({
-      code: 'binding_mismatch',
-      httpStatus: 403,
+      // N-19: the persisted `openai` attempt still governs, so the missing
+      // credentialSlot is a malformed body (400), not a binding mismatch (403).
+      // `replayExistingOutcome` already classified this exact body as 400; the
+      // fresh path used to answer 403 only because the binding comparison ran
+      // before the persisted-auth-mode assert.
+      code: 'invalid_request',
+      httpStatus: 400,
+    })
+  })
+
+  it('classifies the same malformed body identically on the replay path (N-19)', async () => {
+    await expect(
+      finalizePromptBridgeInTransaction(
+        {
+          ...inputBase,
+          target: {
+            ...inputBase.target,
+            provider: 'codex-subscription',
+            credentialSlot: '',
+          },
+          status: 'complete',
+          usage: {
+            llmSecretName: '',
+            callerRef: 'scanner',
+            fallbackUsed: false,
+            attemptCount: 1,
+            inputTokens: 1,
+            outputTokens: 1,
+          },
+        },
+        dbWithRows([], spendRow({ outcome: 'exact', input_tokens: 1, output_tokens: 1 })) as never
+      )
+    ).rejects.toMatchObject({
+      code: 'invalid_request',
+      httpStatus: 400,
     })
   })
 

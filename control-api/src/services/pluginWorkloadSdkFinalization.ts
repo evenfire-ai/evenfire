@@ -421,6 +421,12 @@ export async function finalizePromptBridgeInTransaction(
   if (!providerAttempt) {
     throw new PromptBridgeFinalizationError('not_found', 'provider attempt not found', 404)
   }
+  // N-19: shape before binding, matching `replayExistingOutcome`. A non-oauth
+  // finalization that omits `target.credentialSlot` is a malformed request, and
+  // both paths must classify it as 400 `invalid_request`. Running the binding
+  // comparison first would report the same body as 403 `binding_mismatch` here
+  // and 400 on replay, so the same defect got two different verdicts.
+  assertPersistedAuthModeCredentialRules(String(providerAttempt.provider), input)
   if (
     String(providerAttempt.invocation_id) !== input.invocationId ||
     String(providerAttempt.recipe_namespace) !== input.recipeNamespace ||
@@ -438,7 +444,6 @@ export async function finalizePromptBridgeInTransaction(
       403
     )
   }
-  assertPersistedAuthModeCredentialRules(String(providerAttempt.provider), input)
 
   const currentInvocationStatus = String(invocation.status)
   const currentReceiptStatus = String(receipt.status)
@@ -608,8 +613,12 @@ export async function finalizePromptBridgeInTransaction(
   // RP-539-003: a successful failover finalizes only its winner, so the
   // attempts it displaced would never reach this endpoint. They are terminal
   // and immutable by the reservation fence, so they can be discovered and
-  // settled here without trusting the host to declare them. Index 1 has no
-  // predecessors, so the query is skipped rather than run over an empty range.
+  // settled here without trusting the host to declare them.
+  //
+  // The index-1 skip is NOT a defensive optimization: `attempt_index < 1`
+  // matches nothing by construction, because attempt_index starts at 1 and
+  // UNIQUE (invocation_id, attempt_generation, attempt_index) forbids gaps.
+  // The query is skipped because it is provably empty, not because it might be.
   if (input.providerAttemptIndex > 1) {
     await settlePriorProviderAttemptFloors(db, {
       invocationId: input.invocationId,

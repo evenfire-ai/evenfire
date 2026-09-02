@@ -45,7 +45,6 @@ function authorization(overrides: Record<string, unknown> = {}) {
     attemptGeneration: 1,
     policyRevision: 7,
     policyHash: 'a'.repeat(64),
-    maxOutputTokens: 2048,
     ...overrides,
   }
 }
@@ -183,7 +182,6 @@ describe('PromptBridgeHandler', () => {
     expect(complete).toHaveBeenCalledWith(
       expect.objectContaining({
         invocationId: 'inv-1',
-        maxTokens: 2048,
         targets: [{ target: primary }, { target: fallback }],
       })
     )
@@ -206,6 +204,18 @@ describe('PromptBridgeHandler', () => {
         attemptCount: 2,
       })
     )
+  })
+
+  it('forwards the workload maxTokens verbatim and applies no grant cap (J8)', async () => {
+    const { handler, complete } = makeDeps()
+    await handler.handle({ ...validBody, maxTokens: 9000 }, 'api')
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining({ maxTokens: 9000 }))
+  })
+
+  it('sends no maxTokens when the workload asks for none (J8)', async () => {
+    const { handler, complete } = makeDeps()
+    await handler.handle(validBody, 'api')
+    expect(complete.mock.calls[0]?.[0]).toMatchObject({ maxTokens: undefined })
   })
 
   it('preserves metering when the logical terminal acknowledgement is unavailable', async () => {

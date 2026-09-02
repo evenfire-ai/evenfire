@@ -128,7 +128,6 @@ export interface AuthorizedPromptBridge {
   attemptGeneration: number
   policyRevision: number
   policyHash: string
-  maxOutputTokens: number | null
 }
 
 type PromptTargetResolution =
@@ -398,7 +397,6 @@ async function authorizePromptBridgeInner(
         attemptGeneration: recorded.invocation.attemptGeneration,
         policyRevision: grant.policyRevision,
         policyHash: resolvedPolicyHash,
-        maxOutputTokens: grant.quotaLimits.maxOutputTokens ?? null,
       },
     }
   }
@@ -496,7 +494,6 @@ async function authorizePromptBridgeInner(
       attemptGeneration: recorded.invocation.attemptGeneration,
       policyRevision: grant.policyRevision,
       policyHash: resolvedPolicyHash,
-      maxOutputTokens: grant.quotaLimits.maxOutputTokens ?? null,
     },
   }
 }
@@ -599,6 +596,20 @@ export async function reissuePromptBridgeCredentialTicket(
     return deny('target_not_allowed', 'target is not in the current promptBridge policy')
   }
 
+  const reservationOnly =
+    isLlmProviderId(target.provider) && PROVIDER_AUTH_MODE[target.provider] === 'oauth-broker'
+  // RP-539-009: an oauth-broker target is redeemable only through the broker
+  // binding the WRC installs for the grant's default target. Any other broker
+  // target would be reserved here and then die in execution with no credential
+  // to redeem, after the reservation already charged the attempt budget. Deny
+  // before reserving, and fail closed when the grant has no default target.
+  if (reservationOnly && target.targetRef !== grant.defaultTargetRef) {
+    return deny(
+      'target_not_allowed',
+      'oauth-broker fallback is authorized only for the default target of this grant'
+    )
+  }
+
   const providerAttempt = await reservePluginWorkloadSdkProviderAttempt({
     invocationId: invocation.id,
     recipeNamespace: params.claims.recipeNamespace,
@@ -613,8 +624,6 @@ export async function reissuePromptBridgeCredentialTicket(
     )
   }
 
-  const reservationOnly =
-    isLlmProviderId(target.provider) && PROVIDER_AUTH_MODE[target.provider] === 'oauth-broker'
   if (reservationOnly) {
     return {
       ok: true,

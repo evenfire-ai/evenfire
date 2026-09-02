@@ -34,7 +34,6 @@ function authorizedBody(invocationId: string) {
     attemptGeneration: 1,
     policyRevision: 2,
     policyHash: 'a'.repeat(64),
-    maxOutputTokens: null,
   }
 }
 

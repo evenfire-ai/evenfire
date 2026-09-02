@@ -507,6 +507,7 @@ export interface OAuthClientDef {
 export interface PluginWorkloadSdkSpec {
   promptBridge?: {
     allowedModels?: string[]
+    /** @deprecated Accepted for compatibility; no longer enforced (J8). The Codex ChatGPT wire discards max_output_tokens, so no layer capped the response by token count. */
     maxOutputTokens?: number
     /** @deprecated Accepted for compatibility; no longer enforced (issue #348). Platform per-minute rate limits apply. */
     maxRequestsPerRun?: number
@@ -548,6 +549,7 @@ export interface PluginWorkloadSdkSpec {
 export interface PluginWorkloadSdkSnippetConfig {
   promptBridge?: {
     allowedModels?: string[]
+    /** @deprecated Accepted for compatibility; no longer enforced (J8). The Codex ChatGPT wire discards max_output_tokens, so no layer capped the response by token count. */
     maxOutputTokens?: number
   }
   clientNotifications?: {

@@ -429,7 +429,12 @@ export class PromptBridgeHandler {
         acknowledgementMode: this.deps.finalizePromptBridge
           ? 'atomic_terminal_finalization'
           : 'per_attempt',
-        maxTokens: clampMaxTokens(request.maxTokens, authorized.maxOutputTokens),
+        // J8: the workload's own maxTokens is the only value on this seam. The
+        // grant no longer advertises an output cap, because nothing enforced it:
+        // Codex ChatGPT `/codex/responses` rejects max_output_tokens and the
+        // proxy omits it, so the clamp bounded only the hashed request shape
+        // while the real call ran uncapped.
+        maxTokens: request.maxTokens,
         temperature: request.temperature ?? authorized.modelPolicy?.temperature,
         timeoutMs: this.deps.promptTimeoutMs,
         recipeNamespace: this.deps.recipeNamespace,
@@ -648,19 +653,4 @@ function unexpectedAuthorizationResponse(): PluginWorkloadError {
     'control-api returned an inconsistent authorized target set',
     false
   )
-}
-
-/**
- * Grant-advertised output cap for providers that honor max_tokens on the wire.
- * Codex ChatGPT `/codex/responses` rejects max_output_tokens; the proxy omits
- * it. This clamp still bounds the host request used for authorize hashing. It
- * is not ChatGPT enforcement.
- */
-function clampMaxTokens(
-  requested: number | undefined,
-  grantCap: number | null
-): number | undefined {
-  if (grantCap === null) return requested
-  if (requested === undefined) return grantCap
-  return Math.min(requested, grantCap)
 }

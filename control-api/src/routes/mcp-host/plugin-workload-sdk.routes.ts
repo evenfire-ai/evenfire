@@ -611,7 +611,6 @@ async function handlePromptBridgeAuthorization(
     attemptGeneration: result.value.attemptGeneration,
     policyRevision: result.value.policyRevision,
     policyHash: result.value.policyHash,
-    maxOutputTokens: result.value.maxOutputTokens,
   })
 }
 

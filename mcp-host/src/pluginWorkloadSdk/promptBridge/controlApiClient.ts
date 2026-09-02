@@ -51,7 +51,6 @@ export interface AuthorizePromptBridgeResponse {
   attemptGeneration: number
   policyRevision: number
   policyHash: string
-  maxOutputTokens: number | null
 }
 
 export interface PluginWorkloadSdkCapabilities {
@@ -186,8 +185,7 @@ function isAuthorizePromptBridgeResponse(v: unknown): v is AuthorizePromptBridge
     Number.isInteger(r.policyRevision) &&
     (r.policyRevision as number) >= 1 &&
     typeof r.policyHash === 'string' &&
-    /^[a-f0-9]{64}$/.test(r.policyHash) &&
-    (r.maxOutputTokens === null || typeof r.maxOutputTokens === 'number')
+    /^[a-f0-9]{64}$/.test(r.policyHash)
   )
 }
 

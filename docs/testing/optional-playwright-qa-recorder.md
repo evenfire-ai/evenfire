@@ -99,6 +99,7 @@ prompt/notification journey:
 
 ```bash
 E2E_PLUGIN_SDK_WRITE_CONFIRM=1 \
+E2E_PLUGIN_SDK_EXPECT_PROVIDER=codex-subscription \
 CONTROL_UI_BASE_URL=http://127.0.0.1:<random-control-ui-port> \
 CONTROL_API_BASE_URL=http://127.0.0.1:<random-control-api-port> \
 EXTERNAL_REST_API_BASE_URL=http://127.0.0.1:<random-external-rest-port> \
@@ -107,12 +108,47 @@ KUBECONTEXT=<branch-profile-context> \
 make test-e2e-plugin-workload-sdk-desktop
 ```
 
+`E2E_PLUGIN_SDK_EXPECT_PROVIDER` is **mandatory and has no default**. It
+declares which provider the run is meant to exercise, and the precondition
+asserts the live recipe declares exactly that one. Without it the spec used to
+accept `openai`, `claude` or `codex-subscription` and skip its Codex assertions
+when the recipe was not Codex — so a run against the OpenAI recipe that
+`seed-e2e-data.sh` provisions by default went green while proving nothing about
+Codex. Declare the provider you intend to evidence; a mismatch now fails the
+precondition instead of quietly narrowing the run.
+
 The target sets the opt-in flag only for this spec, requires non-default
 branch-owned URLs, and compares them with the exact `ports.env` generated for
 the selected branch profile. It runs the actual Electron/WebContentsView
 journey and fails before building if the profile map is missing or belongs to a
 different context. It does not start Minikube or create grants; those
 prerequisites must already be provided by the T2/T3 profile lane.
+
+### No-grant guard lane
+
+`plugin-workload-sdk-no-grant-guard.spec.ts` is the regression test for the
+symptom of issue #533: a Codex recipe whose execution binding is missing must
+report `awaiting_policy`, never `validated`. It lives in its own spec and its
+own Make target because it is mutually exclusive with the happy path — that one
+requires the recipe to reach `validated`, this one requires it not to.
+
+```bash
+E2E_PLUGIN_SDK_WRITE_CONFIRM=1 \
+E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAME=<codex-recipe-without-binding> \
+E2E_PLUGIN_SDK_NO_GRANT_APP_TITLE=<its-app-title> \
+CONTROL_UI_BASE_URL=http://127.0.0.1:<random-control-ui-port> \
+CONTROL_API_BASE_URL=http://127.0.0.1:<random-control-api-port> \
+EXTERNAL_REST_API_BASE_URL=http://127.0.0.1:<random-external-rest-port> \
+RPC_PROXY_BASE_URL=http://127.0.0.1:<random-rpc-port> \
+KUBECONTEXT=<branch-profile-context> \
+make test-e2e-plugin-workload-sdk-desktop-no-grant
+```
+
+Both `E2E_PLUGIN_SDK_NO_GRANT_*` variables are **mandatory**: the spec has no
+default recipe and fails loudly when either is missing, and it refuses to run
+against the happy path's recipe even if pointed at it. **Provisioning a Codex
+recipe with no execution binding is operator work** — the lane will not create
+one, and a lane that cannot find its fixture fails rather than skipping.
 
 ## Repository isolation
 

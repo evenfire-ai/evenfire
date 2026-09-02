@@ -167,10 +167,13 @@ export function getPromptBridgeAttemptLeaseSeconds(): number {
 const IDEMPOTENCY_TTL_HOURS = 24
 
 export interface PluginWorkloadSdkQuotaLimits {
+  /** Deprecated (issue #348) — accepted and validated on the wire, never persisted. */
   maxRequestsPerRun?: number
+  /** Deprecated (issue #348) — accepted and validated on the wire, never persisted. */
   maxNotificationsPerRun?: number
   maxInvocationsPerMinute?: number
   maxNotificationsPerMinute?: number
+  /** Deprecated (J8) — accepted and validated on the wire, never persisted. */
   maxOutputTokens?: number
 }
 

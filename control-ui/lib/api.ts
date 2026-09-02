@@ -3658,6 +3658,11 @@ export type PluginWorkloadSdkQuotaLimits = {
   maxNotificationsPerRun?: number
   maxInvocationsPerMinute?: number
   maxNotificationsPerMinute?: number
+  /**
+   * @deprecated No longer enforced (J8); the Codex ChatGPT wire discards
+   * max_output_tokens, so no layer capped the response by token count. Still
+   * returned on legacy grants; never sent by this UI.
+   */
   maxOutputTokens?: number
 }
 
@@ -3717,10 +3722,13 @@ export type PluginWorkloadSdkGrantInput = {
   allowedTargetRefs?: string[]
   allowedUserRefs?: string[]
   allowedCallers?: string[]
-  // Input type omits the deprecated per-run keys (issue #348): this UI never
-  // sends them and the server strips them on write. The response
-  // PluginWorkloadSdkQuotaLimits still carries them for legacy grants.
-  quotaLimits?: Omit<PluginWorkloadSdkQuotaLimits, 'maxRequestsPerRun' | 'maxNotificationsPerRun'>
+  // Input type omits the deprecated keys (per-run: issue #348; maxOutputTokens:
+  // J8): this UI never sends them and the server strips them on write. The
+  // response PluginWorkloadSdkQuotaLimits still carries them for legacy grants.
+  quotaLimits?: Omit<
+    PluginWorkloadSdkQuotaLimits,
+    'maxRequestsPerRun' | 'maxNotificationsPerRun' | 'maxOutputTokens'
+  >
   modelPolicies?: Record<string, PluginWorkloadSdkModelPolicy>
   promptTargets?: PluginWorkloadSdkPromptTarget[]
   defaultTargetRef?: string

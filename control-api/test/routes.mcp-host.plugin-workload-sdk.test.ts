@@ -162,7 +162,6 @@ beforeEach(() => {
       attemptGeneration: 1,
       policyRevision: 1,
       policyHash: 'policy-hash',
-      maxOutputTokens: null,
     },
   })
   vi.mocked(authorizer.reissuePromptBridgeCredentialTicket).mockResolvedValue({
@@ -534,7 +533,6 @@ describe('POST /mcp-host/plugin-workload-sdk/prompt-bridge/v2', () => {
         ],
         policyRevision: 1,
         policyHash: 'policy-hash',
-        maxOutputTokens: null,
       },
     })
     const res = await request(buildApp())

@@ -147,15 +147,22 @@ function parseModelArray(value: unknown, field: string, res: Response): string[]
 // Issue #348: per-run quota keys are deprecated. They remain accepted on the
 // wire for compatibility and are validated with the same shape rules, but they
 // are stripped before persistence — only per-minute/platform limits are stored.
+//
+// J8: `maxOutputTokens` joins them. It was advertised as a policy ceiling but
+// bound nothing: the Codex ChatGPT wire rejects `max_output_tokens`, so no
+// layer ever capped the response by token count. The only real bound is the
+// 300s wall clock, and the budget reservation is admission control that denies
+// the NEXT call, after the overspend already happened. Persisting the key kept
+// a promise the platform could not keep.
 const DEPRECATED_QUOTA_LIMIT_KEYS: ReadonlyArray<keyof PluginWorkloadSdkQuotaLimits> = [
   'maxRequestsPerRun',
   'maxNotificationsPerRun',
+  'maxOutputTokens',
 ]
 
 const ACTIVE_QUOTA_LIMIT_KEYS: ReadonlyArray<keyof PluginWorkloadSdkQuotaLimits> = [
   'maxInvocationsPerMinute',
   'maxNotificationsPerMinute',
-  'maxOutputTokens',
 ]
 
 function parseQuotaLimits(value: unknown, res: Response): PluginWorkloadSdkQuotaLimits | null {
