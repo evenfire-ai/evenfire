@@ -236,6 +236,15 @@ describe('WorkflowsPage', () => {
     expect(within(table).getAllByText('Succeeded')).toHaveLength(1)
   })
 
+  // M3: a failed runs fetch (recent.error) must not read as "No runs yet".
+  it('shows a load failure in the Recent Runs cell instead of "No runs yet"', () => {
+    renderWorkflowsPage({}, { error: 'runs boom', latestRun: null, loading: false })
+
+    const table = screen.getByRole('table')
+    expect(within(table).getByText('Failed to load runs')).toBeTruthy()
+    expect(within(table).queryByText('No runs yet')).toBeNull()
+  })
+
   it('downloads the latest run artifact through the run-scoped workflows API', async () => {
     const downloadRunArtifact = vi.fn().mockResolvedValue({
       saved: true,

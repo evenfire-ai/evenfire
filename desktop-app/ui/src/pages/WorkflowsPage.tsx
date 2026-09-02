@@ -43,6 +43,11 @@ function RecentRunsCell({
   }
   const run = recent.latestRun
   if (!run) {
+    // A failed runs fetch (recent.error) is not the same as "no runs exist":
+    // surface the failure instead of the reassuring empty state.
+    if (recent.error) {
+      return <span className="muted">Failed to load runs</span>
+    }
     return <span className="muted">No runs yet</span>
   }
   const when = run.startedAt ?? run.triggeredAt
