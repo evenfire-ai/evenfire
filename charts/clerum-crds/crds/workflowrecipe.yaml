@@ -2169,8 +2169,10 @@ spec:
                     bootstrapContractVersion:
                       type: integer
                       # v2 = static-credential SDK bootstrap; v3 = Codex
-                      # reservation-only binding. WRC persists 3 for
-                      # spec.agent.provider=codex-subscription.
+                      # reservation-only binding. WRC persists 3 when the
+                      # eager-resolved agent provider is codex-subscription:
+                      # spec.agent, or — when spec.agent is absent — the
+                      # first step that declares a complete agent.
                       enum: [2, 3]
                     bootstrapPodUid:
                       type: string
