@@ -145,3 +145,14 @@ export declare const NETWORK_READY_GENERATION_ANNOTATION: string
 export declare function classifyDnsError(
   errOrCode: unknown
 ): 'transient' | 'permanent'
+
+/**
+ * Codes that are a positive permanent verdict about the NAME (issue #513): the
+ * two genuine no-records answers plus EBADNAME, a name c-ares refuses to query.
+ * `classifyDnsError` returns 'permanent' for these AND for anything it does not
+ * recognize; callers that must not launder an unclassified fault into a prune
+ * gate on this set instead.
+ */
+export declare const PERMANENT_DNS_CODES: ReadonlySet<string>
+
+export declare function isPermanentDnsCode(code: unknown): boolean

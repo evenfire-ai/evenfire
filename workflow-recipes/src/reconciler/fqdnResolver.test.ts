@@ -226,6 +226,71 @@ describe('defaultFqdnLookup classification', () => {
     const result = await defaultFqdnLookup('partial.example.com')
     expect(result).toMatchObject({ kind: 'error', retryable: true })
   })
+
+  // ─── issue #513: only a positive DNS verdict may become a lookup result ──────
+  // `FqdnLookupResult` is a DNS verdict type. Before the fix its final branch was
+  // an unconditional `return { error: 'no A or AAAA records' }`, so anything the
+  // transient set did not recognize — a c-ares complaint about the query WE
+  // built, or a rejection with no code at all — was reported as an empty answer
+  // the resolver never gave, and travelled on as a permanent misconfiguration.
+
+  it.each(['EBADFAMILY', 'EBADQUERY'])(
+    'T4a throws on %s: a complaint about our own query is not a DNS answer',
+    async code => {
+      resolve4Mock.mockRejectedValue(dnsError(code))
+      resolve6Mock.mockRejectedValue(dnsError(code))
+
+      await expect(defaultFqdnLookup('h.example.com')).rejects.toThrow(code)
+      await expect(defaultFqdnLookup('h.example.com')).rejects.toThrow('"h.example.com"')
+      await expect(defaultFqdnLookup('h.example.com')).rejects.toMatchObject({
+        cause: expect.objectContaining({ code }),
+      })
+    }
+  )
+
+  it('T4b throws when a rejection carries no code at all', async () => {
+    resolve4Mock.mockRejectedValue(new Error('boom'))
+    resolve6Mock.mockRejectedValue(dnsError('ENODATA'))
+
+    await expect(defaultFqdnLookup('nocode.example.com')).rejects.toThrow(/no code/)
+    await expect(defaultFqdnLookup('nocode.example.com')).rejects.toThrow(/boom/)
+  })
+
+  it('T4c reports EBADNAME as a malformed name, not as an empty answer', async () => {
+    // Permanent like NXDOMAIN, but the resolver never queried the name. Saying
+    // "no A or AAAA records" sends the operator hunting for missing records
+    // instead of at the typo in their own manifest.
+    resolve4Mock.mockRejectedValue(dnsError('EBADNAME'))
+    resolve6Mock.mockRejectedValue(dnsError('EBADNAME'))
+
+    const result = await defaultFqdnLookup('foo..example.com')
+    expect(result).toMatchObject({ kind: 'error' })
+    expect((result as { error: string }).error).toContain('EBADNAME')
+    expect((result as { error: string }).error).toContain('foo..example.com')
+    expect((result as { error: string }).error).not.toContain('no A or AAAA')
+    expect((result as { retryable?: boolean }).retryable).toBeFalsy()
+  })
+
+  it('T4d still reports a genuinely empty answer as no-records', async () => {
+    // A family that RESOLVED to an empty list contributes no rejection at all.
+    // The gate keys on rejections, so this must not be mistaken for an
+    // unclassified fault.
+    resolve4Mock.mockResolvedValue([])
+    resolve6Mock.mockRejectedValue(dnsError('ENODATA'))
+
+    const result = await defaultFqdnLookup('empty.example.com')
+    expect(result).toEqual({ kind: 'error', error: 'no A or AAAA records' })
+  })
+
+  it('T4e lets a transient code win over an unclassified one', async () => {
+    // Retrying is harmless, and if the resolver recovers the fault surfaces on
+    // the next pass with a real answer to contrast it against.
+    resolve4Mock.mockRejectedValue(dnsError('EBADFAMILY'))
+    resolve6Mock.mockRejectedValue(dnsError('ESERVFAIL'))
+
+    const result = await defaultFqdnLookup('mixed.example.com')
+    expect(result).toMatchObject({ kind: 'error', retryable: true })
+  })
 })
 
 // ─── issue #299: TTL propagation (feeds the sliding-window accumulator) ─────

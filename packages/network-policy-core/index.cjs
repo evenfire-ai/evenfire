@@ -68,6 +68,29 @@ const TRANSIENT_DNS_CODES = new Set([
 ])
 
 /**
+ * DNS codes that are a POSITIVE permanent verdict about the NAME (issue #513):
+ * the two genuine no-records answers, plus EBADNAME — c-ares refused to send
+ * the query because the name is malformed. EBADNAME is reachable from user
+ * input: the CRD pattern for `egressBindings[].dns` admits consecutive dots and
+ * labels over 63 octets, so a typo in a manifest lands here. A malformed name is
+ * the operator's misconfiguration — not a resolver outage, not a controller
+ * fault — so it prunes and is reported as rejected exactly like NXDOMAIN.
+ *
+ * Every other non-transient code stays OUT on purpose: EBADFAMILY, EBADFLAGS,
+ * EBADHINTS, ENONAME, EBADQUERY and EBADSTR describe arguments neither
+ * controller derives from user data, so if one of them fires the call is ours.
+ * `classifyDnsError` still defaults those to 'permanent' — its contract is
+ * pinned by this package's tests — which is exactly why the controllers gate on
+ * THIS set to decide what may reach the sliding-window classifier, and rethrow
+ * the rest instead of laundering a fault into a prune.
+ */
+const PERMANENT_DNS_CODES = new Set(['ENODATA', 'ENOTFOUND', 'EBADNAME'])
+
+function isPermanentDnsCode(code) {
+  return typeof code === 'string' && PERMANENT_DNS_CODES.has(code)
+}
+
+/**
  * Classify a DNS failure as 'transient' or 'permanent'. Accepts a raw code
  * string or an Error carrying `.code`. Unknown/missing codes default to
  * 'permanent' (matches the WRC resolver): only a recognized transient code
@@ -417,4 +440,6 @@ module.exports = {
   serializeState,
   parseState,
   classifyDnsError,
+  PERMANENT_DNS_CODES,
+  isPermanentDnsCode,
 }

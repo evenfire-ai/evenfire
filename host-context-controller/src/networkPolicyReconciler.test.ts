@@ -2660,7 +2660,15 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('deletes stale policies and fails when DNS resolution for that binding fails', async () => {
-      vi.mocked(dns.resolve4).mockRejectedValueOnce(new Error('dns timeout'))
+      // Issue #513: this used to inject a codeless `new Error('dns timeout')` and
+      // expect the prune-and-delete path. That expectation encoded the defect —
+      // classifyDnsError defaults an unknown code to 'permanent', so a codeless
+      // error (a programming fault as easily as a resolver one) pruned the window
+      // and deleted the policy. A codeless error is now rethrown, so this test
+      // injects a real no-records answer: the permanent branch it means to cover.
+      vi.mocked(dns.resolve4).mockRejectedValueOnce(
+        Object.assign(new Error('queryA ENOTFOUND api.openai.com'), { code: 'ENOTFOUND' })
+      )
       mockApi.listNamespacedNetworkPolicy.mockResolvedValue({
         items: [
           { metadata: { name: 'ext-egress-openai-mcp-api.openai.com-443' } },
@@ -2681,7 +2689,7 @@ describe('NetworkPolicyReconciler', () => {
 
       await expect(
         reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
-      ).rejects.toThrow(/dns timeout/)
+      ).rejects.toThrow(/ENOTFOUND/)
 
       expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
       expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(

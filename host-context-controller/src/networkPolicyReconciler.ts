@@ -16,7 +16,7 @@
 import * as k8s from '@kubernetes/client-node'
 import * as dns from 'node:dns/promises'
 import { isIP } from 'node:net'
-import { STATE_ANNOTATION, classifyDnsError } from '@clerum/network-policy-core'
+import { STATE_ANNOTATION, classifyDnsError, isPermanentDnsCode } from '@clerum/network-policy-core'
 import { config } from './config'
 import {
   EXTERNAL_EGRESS_POLICY_TYPE,
@@ -2231,7 +2231,36 @@ export class NetworkPolicyReconciler {
           // Fail-static (H1): freeze the accumulated set on a transient resolver
           // failure; fail loud when there is nothing to serve (bootstrap, or a
           // permanent no-records answer).
+          //
+          // Issue #513: only a POSITIVELY identified DNS condition may reach the
+          // sliding-window classifier. classifyDnsError defaults every unknown or
+          // missing code to 'permanent' (network-policy-core index.cjs), and
+          // 'permanent' PRUNES the accumulated set rather than freezing it. This
+          // try covers the whole resolve-and-render block, so without this gate a
+          // programming fault raised after resolution — a TypeError from a
+          // contract violation, an ERR_* argument error — is laundered into the
+          // prune branch and reported to the operator as a DNS failure, pointing
+          // at the resolver while the fault is here. Transient codes are positive
+          // by construction (TRANSIENT_DNS_CODES); 'permanent' is positive only for
+          // PERMANENT_DNS_CODES — the two no-records answers plus EBADNAME, a name
+          // c-ares refuses to query. EBADNAME passes the CRD pattern (`..`,
+          // 64-octet labels) and is the operator's misconfiguration, so it must
+          // keep pruning and reporting ExternalEgressRejected rather than blame
+          // the controller.
           const kind = classifyDnsError(err)
+          const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined
+          if (kind !== 'transient' && !isPermanentDnsCode(code)) {
+            if (!isCurrent()) return
+            await this.writeExternalEgressStatus(
+              server,
+              resolvedEgressIPs,
+              'False',
+              'ExternalEgressReconcileFailed',
+              `External egress reconciliation failed on binding "${binding.dns}" with a non-DNS error (not a resolver condition, accumulated egress left untouched): ${this.errorMessage(err)}`,
+              isCurrent
+            )
+            throw err
+          }
           const accumulated = accumulateHostExactHostEgress({
             fqdn: binding.dns,
             port: binding.port,

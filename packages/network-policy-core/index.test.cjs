@@ -334,6 +334,50 @@ test('classifyDnsError defaults unknown/undefined codes to permanent (matches WR
   assert.equal(core.classifyDnsError(new Error('no code')), 'permanent')
 })
 
+// ─── #513: the positive permanent set, which is NOT classifyDnsError's default ──
+// classifyDnsError answers "is this transient?" and says 'permanent' for
+// everything else, unknown codes included. That default is load-bearing for the
+// window (an unrecognized transient must not freeze forever), but it makes the
+// return value useless for deciding whether a failure was a DNS answer at all.
+// PERMANENT_DNS_CODES is that second, narrower question, and the gap between the
+// two sets is exactly the bug in issue #513.
+test('#513: PERMANENT_DNS_CODES is the positive verdict set, not the default', () => {
+  assert.deepEqual([...core.PERMANENT_DNS_CODES].sort(), ['EBADNAME', 'ENODATA', 'ENOTFOUND'])
+  for (const code of core.PERMANENT_DNS_CODES) {
+    assert.equal(core.classifyDnsError(code), 'permanent', `${code} must classify as permanent`)
+  }
+})
+
+test('#513: isPermanentDnsCode rejects what classifyDnsError merely defaults', () => {
+  // Every one of these yields 'permanent' from classifyDnsError. None is a DNS
+  // answer: they are c-ares complaints about the query WE built, or no code at
+  // all. Telling them apart is the whole point of the controllers' gates.
+  for (const code of [
+    undefined,
+    null,
+    'ESOMETHINGWEIRD',
+    'EBADFAMILY',
+    'EBADFLAGS',
+    'EBADHINTS',
+    'EBADQUERY',
+    'EBADSTR',
+    'ENONAME',
+  ]) {
+    assert.equal(core.classifyDnsError(code), 'permanent')
+    assert.equal(core.isPermanentDnsCode(code), false, `${String(code)} must not be a DNS verdict`)
+  }
+})
+
+test('#513: the transient and permanent sets never overlap', () => {
+  for (const code of core.PERMANENT_DNS_CODES) {
+    assert.equal(
+      core.classifyDnsError(code),
+      'permanent',
+      `${code} appears in both sets — a code cannot be both a retry and a verdict`
+    )
+  }
+})
+
 // ─── H-A: revocation/freeze keyed by (fqdn,port,protocol), not fqdn alone ──────
 // The state map is keyed by (fqdn,ip,port,protocol) but classification used to be
 // keyed by fqdn only, so an entry whose declared PORT was removed survived under

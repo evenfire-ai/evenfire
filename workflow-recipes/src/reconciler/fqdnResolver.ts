@@ -1,6 +1,6 @@
 import type { RecordWithTtl } from 'node:dns'
 import { resolve4, resolve6 } from 'node:dns/promises'
-import { classifyDnsError } from '@clerum/network-policy-core'
+import { classifyDnsError, isPermanentDnsCode } from '@clerum/network-policy-core'
 import type { SandboxUiExternalEgress } from '../types'
 
 const BLOCKED_EGRESS_CIDRS = [
@@ -90,7 +90,9 @@ export type FqdnLookupResult =
   | { kind: 'ok'; ipv4: string[]; ipv6: string[]; ttlSeconds: number }
   // `retryable` distinguishes a transient resolver failure (SERVFAIL, timeout,
   // unreachable upstream) — worth retrying on a later reconcile — from a
-  // permanent one (the name genuinely has no A/AAAA records). Absent ⇒ permanent.
+  // permanent one (the name genuinely has no A/AAAA records, or is malformed).
+  // Absent ⇒ permanent. A failure that is not a DNS verdict at all never becomes
+  // a result: the lookup throws (issue #513).
   | { kind: 'error'; error: string; retryable?: boolean }
 
 export type FqdnLookup = (host: string) => Promise<FqdnLookupResult>
@@ -148,17 +150,50 @@ export const defaultFqdnLookup: FqdnLookup = async host => {
     return { kind: 'ok', ipv4, ipv6, ttlSeconds }
   }
 
-  const codes = ['err' in v4 ? v4.err.code : undefined, 'err' in v6 ? v6.err.code : undefined]
-  const transientCode = codes.find(
-    code => code !== undefined && classifyDnsError(code) === 'transient'
-  )
-  if (transientCode) {
+  const rejections: NodeJS.ErrnoException[] = []
+  if ('err' in v4) rejections.push(v4.err)
+  if ('err' in v6) rejections.push(v6.err)
+
+  const transient = rejections.find(e => classifyDnsError(e) === 'transient')
+  if (transient) {
     return {
       kind: 'error',
-      error: `DNS resolution for "${host}" failed (${transientCode}) — resolver or upstream unavailable`,
+      error: `DNS resolution for "${host}" failed (${transient.code}) — resolver or upstream unavailable`,
       retryable: true,
     }
   }
+
+  // Issue #513: only a POSITIVE DNS verdict may become a lookup result. A family
+  // that resolved to an empty list contributes no rejection at all; one that
+  // rejected must carry a code in PERMANENT_DNS_CODES. Anything else — a
+  // codeless rejection, or a c-ares complaint about the query WE built rather
+  // than about the name — is not a DNS answer, and the old default branch turned
+  // it into "no A or AAAA records": a reply that was never received, blamed on
+  // the resolver, and routed on through egressResolutionError() as the
+  // operator's permanent misconfiguration. Throw instead. The reconciler's catch
+  // already routes a plain Error to the terminal `failed` phase with the real
+  // message (walking `.cause` for socket codes), and this throw happens before
+  // any policy write or delete, so the live NetworkPolicy is left untouched. The
+  // message deliberately avoids the 'egress resolution failed' marker that catch
+  // matches on: a raw fault is not a DNS classification worth protecting.
+  const unclassified = rejections.find(e => !isPermanentDnsCode(e.code))
+  if (unclassified) {
+    throw new Error(
+      `DNS lookup for "${host}" failed with a non-DNS error (${unclassified.code ?? 'no code'}): ${unclassified.message}`,
+      { cause: unclassified }
+    )
+  }
+
+  // EBADNAME is permanent like NXDOMAIN, but it is not an empty answer: c-ares
+  // refused to send the query. Say so, or the operator hunts for missing records
+  // on a name the resolver never asked about.
+  if (rejections.some(e => e.code === 'EBADNAME')) {
+    return {
+      kind: 'error',
+      error: `malformed hostname "${host}" (EBADNAME) — the resolver refused to query it`,
+    }
+  }
+
   return { kind: 'error', error: 'no A or AAAA records' }
 }
 
@@ -186,7 +221,10 @@ export interface ResolveResult {
  * apply a stale or partial NetworkPolicy off the back of one. Each failure
  * carries a `retryable` flag: transient resolver failures (SERVFAIL/timeout)
  * are retryable, while a genuine no-records answer or a blocked-address
- * rejection fails closed permanently. If any A record for a hostname resolves
+ * rejection fails closed permanently. A lookup that cannot produce a DNS verdict
+ * at all throws instead of returning a failure, so the reconciler's existing
+ * error routing reports the real fault (issue #513).
+ * If any A record for a hostname resolves
  * to a blocked range, the entire hostname fails closed and no public siblings
  * are emitted.
  */

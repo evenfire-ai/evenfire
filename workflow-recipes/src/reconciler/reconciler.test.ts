@@ -2431,6 +2431,55 @@ describe('WorkflowRecipeReconciler', () => {
     )
   })
 
+  it('#513: a lookup that throws fails the recipe without touching the egress policy', async () => {
+    // Pins the routing the fqdnResolver gate relies on. `defaultFqdnLookup` now
+    // throws rather than dressing an unclassifiable fault as "no A or AAAA
+    // records"; that only helps if the throw lands somewhere honest. It must
+    // reach the terminal `failed` phase carrying the real code, and it must do
+    // so before any write or delete, leaving whatever egress policy is live
+    // exactly as it was.
+    const recipe = makeRecipe({
+      spec: {
+        contextRef: 'default',
+        workloads: [
+          {
+            id: 'worker',
+            type: 'deployment',
+            image: 'worker:latest',
+            port: 8080,
+            egressBindings: [{ dns: 'api.example.com', port: 443 }],
+          },
+        ],
+      },
+    })
+    const reconcilerWithLookup = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+      fqdnLookup: async () => {
+        throw new Error(
+          'DNS lookup for "api.example.com" failed with a non-DNS error (EBADFAMILY): queryA EBADFAMILY',
+          { cause: Object.assign(new Error('queryA EBADFAMILY'), { code: 'EBADFAMILY' }) }
+        )
+      },
+    })
+
+    const result = await reconcilerWithLookup.reconcile(recipe)
+
+    expect(result.phase).toBe('failed')
+    expect(result.message).toContain('EBADFAMILY')
+    // Not laundered into the operator-facing no-records wording.
+    expect(result.message).not.toContain('no A or AAAA records')
+
+    const egressPolicy = expect.objectContaining({
+      body: expect.objectContaining({
+        metadata: expect.objectContaining({ name: 'wl-egress-test-recipe-worker' }),
+      }),
+    })
+    expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalledWith(egressPolicy)
+    expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalledWith(egressPolicy)
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'wl-egress-test-recipe-worker' })
+    )
+  })
+
   it('returns failed phase when a workload egress binding uses wildcard DNS', async () => {
     const recipe = makeRecipe({
       spec: {
