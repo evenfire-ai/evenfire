@@ -167,7 +167,11 @@ export const AppHeader = React.memo(function AppHeader({
   useEffect(() => {
     if (searchFocusRequestId <= 0) return
     setNotificationsOpen(false)
-    setSearchOpen(true)
+    // Open based on query presence rather than delegating to the input's
+    // onFocus: when the field is already focused (e.g. Escape then re-triggering
+    // the shortcut) focus() is a no-op and onFocus would not re-fire. Read the
+    // live input value so this stays keyed only on the request id.
+    setSearchOpen((searchInputRef.current?.value ?? '').trim().length > 0)
     searchInputRef.current?.focus()
   }, [searchFocusRequestId])
 
@@ -634,9 +638,9 @@ export const AppHeader = React.memo(function AppHeader({
             value={searchQuery}
             onChange={event => {
               setSearchQuery(event.target.value)
-              setSearchOpen(true)
+              setSearchOpen(event.target.value.trim().length > 0)
             }}
-            onFocus={() => setSearchOpen(true)}
+            onFocus={() => setSearchOpen(searchQuery.trim().length > 0)}
             onKeyDown={event => {
               if (event.key === 'Escape') {
                 setSearchOpen(false)
