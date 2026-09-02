@@ -1454,6 +1454,13 @@ export async function createMcpServer(payload: {
   return apiSend('POST', '/api/v1/admin/mcp-servers', payload) as Promise<McpServerResource>
 }
 
+export async function deleteMcpServer(name: string) {
+  return apiSend('DELETE', `/api/v1/admin/mcp-servers/${encodeURIComponent(name)}`) as Promise<{
+    name: string
+    namespace?: string
+  }>
+}
+
 export async function getMcpServer(name: string) {
   return apiGet(
     `/api/v1/admin/mcp-servers/${encodeURIComponent(name)}`

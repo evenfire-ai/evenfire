@@ -2,6 +2,7 @@
 
 import React, { useMemo, useState } from 'react'
 import { getProviderLabel } from '../lib/llm'
+import { ConnectorCountHoverCard } from './ConnectorCountCell'
 import type { HostItem, HostRef } from './HostTable.types'
 import { LlmProviderIcon } from './LlmProviderIcon'
 import { RowActionsMenu } from './RowActionsMenu'
@@ -16,7 +17,7 @@ import { IconRefresh } from './icons'
 
 const HOST_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
-  { key: 'context', label: 'Connectors', width: '14%' },
+  { key: 'connectors', label: 'Connectors', width: '14%' },
   { key: 'providers', label: 'Providers', minWidth: '8rem' },
   { key: 'actions', width: '3.5rem', align: 'right', ariaLabel: 'Actions' },
 ]
@@ -42,74 +43,10 @@ export function collectProviderIds(spec: Record<string, unknown>): string[] {
   return out
 }
 
-// Hover card over the context cell. Mirrors the `cu-agent-context-mcp-summary`
-// block the create wizard shows for the selected context — the operator gets
-// the same list of attached MCP servers without navigating away. The card is
-// keyboard-accessible (focus + blur mirror hover) and `role="tooltip"` keeps
-// screen readers in sync with what's visible.
-function ContextMcpHoverCard({
-  contextRef,
-  mcpServers,
-  onOpenContext,
-}: {
-  contextRef: string
-  mcpServers: string[] | undefined
-  onOpenContext: (contextRef: string) => void
-}) {
-  const [open, setOpen] = useState(false)
-  const servers = Array.isArray(mcpServers) ? mcpServers : []
-  const hasServers = servers.length > 0
-  const cardId = `ctx-mcp-${contextRef}`
-
-  const trigger = (
-    <button
-      type="button"
-      className="cu-link cu-host-context-count"
-      onClick={e => {
-        e.stopPropagation()
-        onOpenContext(contextRef)
-      }}
-      onKeyDown={e => e.stopPropagation()}
-      aria-describedby={hasServers && open ? cardId : undefined}
-    >
-      {servers.length}
-    </button>
-  )
-
-  if (!hasServers) return trigger
-
-  return (
-    <span
-      className="cu-host-context-hover"
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-      onFocus={() => setOpen(true)}
-      onBlur={() => setOpen(false)}
-    >
-      {trigger}
-      {open ? (
-        <div role="tooltip" id={cardId} className="cu-agent-context-mcp-summary">
-          <div className="cu-agent-context-mcp-summary__head">
-            <span>{contextRef}</span>
-            <span>{servers.length}</span>
-          </div>
-          <ul className="cu-agent-context-mcp-summary__list">
-            {servers.map(server => (
-              <li key={server} title={server}>
-                {server}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-    </span>
-  )
-}
-
 export function HostTable({
   items,
   onOpen,
-  onOpenContext,
+  onOpenConnectors,
   onDelete,
   deletingKey,
   onRefresh,
@@ -120,16 +57,16 @@ export function HostTable({
 }: {
   items: HostItem[]
   onOpen: (host: HostRef) => void
-  onOpenContext: (contextName: string) => void
+  onOpenConnectors: (host: HostRef) => void
   onDelete: (host: HostRef) => Promise<void>
   deletingKey: string | null
   onRefresh: () => void
   onCreateHost: () => void
   refreshing: boolean
   loading?: boolean
-  // contextRef (host.spec.contextRef) → list of attached MCP server names. The
-  // page passes this from the same `/api/v1/admin/contexts` payload the
-  // creation wizard consumes, so the operator sees the same attribution here.
+  // Private contextRef (host.spec.contextRef) → list of attached MCP server
+  // names. Internal enrichment from the same `/api/v1/admin/contexts` payload
+  // the creation wizard consumes; the context itself is never rendered.
   contextsByRef?: Record<string, string[]>
 }) {
   const [searchQuery, setSearchQuery] = useState('')
@@ -153,10 +90,9 @@ export function HostTable({
     if (!normalizedSearch) return rows
     return rows.filter(({ name, displayName, namespace, item }) => {
       const spec = item.spec || {}
-      const contextRef = String(spec.contextRef || '').trim()
       const providers = collectProviderIds(spec)
       const providerLabels = providers.map(id => getProviderLabel(id)).join(' ')
-      return [name, displayName, namespace, contextRef, providerLabels]
+      return [name, displayName, namespace, providerLabels]
         .join(' ')
         .toLowerCase()
         .includes(normalizedSearch)
@@ -243,9 +179,8 @@ export function HostTable({
             <tbody>
               {filteredRows.map(({ key, namespace, name, displayName, item }) => {
                 const rawContext = String(item.spec?.contextRef || '').trim()
-                const contextRef = rawContext || '-'
-                const contextServers = contextsByRef?.[rawContext]
-                const contextClickable =
+                const contextServers = rawContext ? contextsByRef?.[rawContext] : undefined
+                const showHoverCard =
                   Boolean(rawContext) && Array.isArray(contextServers) && contextServers.length > 0
                 const providers = collectProviderIds(item.spec || {})
                 const openAgent = () => onOpen({ namespace, name })
@@ -270,11 +205,11 @@ export function HostTable({
                       ) : null}
                     </td>
                     <td>
-                      {contextClickable ? (
-                        <ContextMcpHoverCard
-                          contextRef={contextRef}
-                          mcpServers={contextServers}
-                          onOpenContext={onOpenContext}
+                      {showHoverCard ? (
+                        <ConnectorCountHoverCard
+                          hostKey={key}
+                          servers={contextServers as string[]}
+                          onOpenConnectors={() => onOpenConnectors({ namespace, name })}
                         />
                       ) : rawContext ? (
                         <span className="cu-table__cell-muted">0</span>
