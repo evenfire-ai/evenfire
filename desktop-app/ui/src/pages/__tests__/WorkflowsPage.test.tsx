@@ -166,6 +166,34 @@ describe('WorkflowsPage', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
+  // H2: while the Trigger modal is open, every row's Trigger button is disabled.
+  // ConfirmDialog has no focus trap, so a keyboard user could otherwise tab to
+  // another row and activate it, resetting the modal's global selection state.
+  it('disables every row Trigger button while the Trigger modal is open', async () => {
+    const WF_A = { ...WORKFLOW, name: 'recipe-a' }
+    const WF_B = { ...WORKFLOW, name: 'recipe-b' }
+    renderWorkflowsPage({
+      workflows: [WF_A, WF_B],
+      handleSelectWorkflow: vi.fn().mockResolvedValue(CONTRACT),
+      selectedWorkflowInputContract: CONTRACT,
+    })
+
+    const table = screen.getByRole('table')
+    const rowTriggers = within(table).getAllByRole('button', { name: 'Trigger' })
+    expect(rowTriggers).toHaveLength(2)
+    // Both enabled before the modal opens.
+    expect((rowTriggers[0] as HTMLButtonElement).disabled).toBe(false)
+    expect((rowTriggers[1] as HTMLButtonElement).disabled).toBe(false)
+
+    fireEvent.click(rowTriggers[0]!)
+    await screen.findByRole('dialog')
+
+    // With the modal open, every row Trigger is disabled (not just the opener).
+    for (const btn of within(table).getAllByRole('button', { name: 'Trigger' })) {
+      expect((btn as HTMLButtonElement).disabled).toBe(true)
+    }
+  })
+
   it('does not fire trigger when the recipe declares no user on-demand trigger', () => {
     const handleTriggerWorkflow = vi.fn()
     renderWorkflowsPage({

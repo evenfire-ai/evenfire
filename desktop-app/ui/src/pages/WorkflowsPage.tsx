@@ -82,10 +82,12 @@ function RecentRunsCell({
 function WorkflowRow({
   wf,
   pendingTriggerKey,
+  triggerModalOpen,
   onTrigger,
 }: {
   wf: WorkflowSummary
   pendingTriggerKey: string | null
+  triggerModalOpen: boolean
   onTrigger: (wf: WorkflowSummary) => void
 }) {
   const { setStatus } = useAuthContext()
@@ -149,7 +151,11 @@ function WorkflowRow({
         <span className="action-row">
           <Button
             color="primary"
-            disabled={!wf.triggerableByUser || anotherPending}
+            // While the Trigger modal is open, every row's Trigger is disabled:
+            // ConfirmDialog has no focus trap yet, so a keyboard user could
+            // otherwise Shift+Tab out and activate another row, resetting the
+            // modal's global selection state. (Central focus-trap is follow-up.)
+            disabled={!wf.triggerableByUser || anotherPending || triggerModalOpen}
             loading={isTriggering}
             onClick={() => onTrigger(wf)}
             size="sm"
@@ -289,6 +295,7 @@ export function WorkflowsPage() {
                     key={workflowKey(wf)}
                     wf={wf}
                     pendingTriggerKey={pendingTriggerKey}
+                    triggerModalOpen={triggerModalWorkflow !== null}
                     onTrigger={w => void handleTrigger(w)}
                   />
                 ))}
