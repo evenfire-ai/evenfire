@@ -1,10 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
-import {
-  isPluginWorkloadSdkCodexBindingProof,
-  readVerifiedSdkOnlyCodexBinding,
-  verifySdkOnlyCodexBindingHash,
-} from './sdkOnlyCodexBinding'
+import { readVerifiedSdkOnlyCodexBinding } from './sdkOnlyCodexBinding'
 
 const MODEL = 'gpt-5.6-luna'
 
@@ -14,67 +10,6 @@ const HASH = computeCodexPolicyHash({
   credentialRevision: 1,
   connectionKey: 'team-plus',
 })
-
-/**
- * An executable allowlist ConfigMap in the legacy (map-less) shape: the Codex
- * flag is on, the connection is `connected`, and the catalog actually lists the
- * model. Every one of those is load-bearing — the binding gate is the same
- * cascade that derives `llm:codex:execute`, so dropping any of them must drop
- * the binding too.
- */
-function eligibleLegacyConfigMap(overrides?: {
-  annotations?: Record<string, string>
-  stale?: boolean
-  models?: string[]
-}) {
-  const models = overrides?.models ?? [MODEL]
-  return {
-    metadata: {
-      annotations: {
-        'clerum.io/catalog-revision': '3',
-        'clerum.io/connection-revision': '1',
-        'clerum.io/codex-connection-status': 'connected',
-        'clerum.io/codex-enabled': 'true',
-        ...overrides?.annotations,
-      },
-    },
-    data: {
-      'codex-subscription': JSON.stringify(
-        models.map(model => ({ model, stale: overrides?.stale === true }))
-      ),
-    },
-  }
-}
-
-/** The same grant expressed through the per-connection map. */
-function eligibleMappedConfigMap(overrides?: {
-  status?: string
-  models?: string[]
-  catalogModels?: string[]
-}) {
-  return {
-    metadata: {
-      annotations: {
-        'clerum.io/catalog-revision': '9',
-        'clerum.io/connection-revision': '9',
-        'clerum.io/codex-enabled': 'true',
-        'clerum.io/codex-connections': JSON.stringify({
-          'team-plus': {
-            status: overrides?.status ?? 'connected',
-            catalogRevision: 3,
-            connectionRevision: 1,
-            models: overrides?.models ?? [MODEL],
-          },
-        }),
-      },
-    },
-    data: {
-      'codex-subscription': JSON.stringify(
-        (overrides?.catalogModels ?? [MODEL]).map(model => ({ model, stale: false }))
-      ),
-    },
-  }
-}
 
 describe('readVerifiedSdkOnlyCodexBinding', () => {
   // The derive/resolve suite moved to codexRecipeVerdict.test.ts along with

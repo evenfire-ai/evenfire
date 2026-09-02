@@ -1,9 +1,4 @@
-import {
-  CODEX_PROVIDER,
-  CODEX_UNASSIGNED_CONNECTION_KEY,
-  type CodexConfigMapView,
-  toEligiblePolicyBinding,
-} from '@clerum/codex-catalog-projection'
+import { CODEX_UNASSIGNED_CONNECTION_KEY } from '@clerum/codex-catalog-projection'
 import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 
 const POLICY_HASH_RE = /^[a-f0-9]{64}$/
