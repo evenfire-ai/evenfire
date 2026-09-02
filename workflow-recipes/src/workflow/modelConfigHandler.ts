@@ -21,10 +21,7 @@ import {
   isRunnableLlmModelId,
 } from '@clerum/llm-providers'
 import { createLogger } from '../observability/logger'
-import {
-  isPluginWorkloadSdkCodexBindingProof,
-  sanitizePluginWorkloadSdkCodexBindingProof,
-} from './sdkOnlyCodexBinding'
+import { readVerifiedSdkOnlyCodexBinding } from './sdkOnlyCodexBinding'
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -293,6 +290,15 @@ export class ModelConfigHandler {
           (result.body.provider !== provider || result.body.model !== model)) ||
         !familyProofValid
       ) {
+        // A host that configured itself successfully but answered v2 to a
+        // Codex bootstrap is running a pre-v3 image — a stale workload, not a
+        // broker outage. Tag it so WRC can report `codex_bootstrap_contract_stale`
+        // instead of burning the configure budget into "provider unavailable".
+        const codexContractStale =
+          expectedContractVersion === 3 &&
+          result.body.configured === true &&
+          result.body.ready === true &&
+          result.body.contractVersion === 2
         return {
           status: 502,
           body: {
@@ -300,10 +306,15 @@ export class ModelConfigHandler {
               expectedContractVersion === 3
                 ? 'mcp_host bootstrap identity is not Plugin Workload SDK v3'
                 : 'mcp_host bootstrap identity is not Plugin Workload SDK v2',
+            ...(codexContractStale ? { policyReason: 'codex_bootstrap_contract_stale' } : {}),
           },
         }
       }
       const policyProof = capabilityFamily === 'promptBridge' && isBootstrapPolicyProof(result.body)
+      // Shape alone is not proof: re-derive the policy hash and pin the model
+      // so a host cannot echo a well-formed binding for another model or with
+      // a hash that does not match its own five fields.
+      const verifiedCodexBinding = readVerifiedSdkOnlyCodexBinding(result.body.codexBinding, model)
       return {
         status: 202,
         body: {
@@ -313,9 +324,7 @@ export class ModelConfigHandler {
           model,
           contractVersion: expectedContractVersion,
           capabilityFamily,
-          ...(isPluginWorkloadSdkCodexBindingProof(result.body.codexBinding)
-            ? { codexBinding: sanitizePluginWorkloadSdkCodexBindingProof(result.body.codexBinding) }
-            : {}),
+          ...(verifiedCodexBinding ? { codexBinding: verifiedCodexBinding } : {}),
           ...(typeof result.body.policyReady === 'boolean'
             ? { policyReady: result.body.policyReady }
             : {}),

@@ -40,6 +40,7 @@ import type {
 } from '../types'
 import { resolveEagerSdkMcpHostAgent, resolveMcpHostAgent } from './agentResolution'
 import {
+  CODEX_EXECUTE_SCOPE,
   type CodexCatalogSnapshot,
   projectRecipeCodexExecution,
   resolveCodexAuthoritativeSpec,
@@ -897,16 +898,27 @@ export interface WorkflowReconcilerDeps {
 export class WorkflowReconciler {
   private readonly log = createLogger('wrc', 'reconciler')
   private readonly pluginWorkloadSdkProvisioner: PluginWorkloadSdkProvisioner
-  private codexSnapshot: CodexCatalogSnapshot = { flagEnabled: false }
   /**
-   * Raw allowlist ConfigMap from the last refresh, kept so each recipe's
-   * projection can re-parse it with that recipe's assigned grant key (HCC
-   * keeps the same shape for Hosts). Cleared on a failed read so grant
-   * decisions stay fail-closed. Do not send a binding-less v3 configure in
-   * that window — skip configure so mcp-host keeps a live binding.
+   * The last allowlist refresh as ONE value. `configMap` is kept raw so each
+   * recipe's projection can re-parse it with that recipe's assigned grant key
+   * (HCC keeps the same shape for Hosts); `readOk` says whether the triple
+   * comes from a successful read. They are a single field because they must be
+   * read together: a `configMap` from one refresh combined with a `readOk`
+   * from another is how a concurrently-reconciled recipe turns a failed read
+   * into a binding-less v3 configure that wipes a live mcp-host binding.
+   * Readers capture `this.codexView` once and use only that snapshot.
+   *
+   * Cleared on a failed read so grant decisions stay fail-closed. Do not send
+   * a binding-less v3 configure in that window — skip configure so mcp-host
+   * keeps a live binding. Symmetrically (see `resolveEffectiveControlScopes`),
+   * an unreadable ConfigMap must not revoke the Codex scope either: with no
+   * data there is no policy decision to apply in either direction.
    */
-  private lastCodexConfigMap: k8s.V1ConfigMap | undefined
-  private lastCodexSnapshotReadOk = true
+  private codexView: {
+    configMap?: k8s.V1ConfigMap
+    snapshot: CodexCatalogSnapshot
+    readOk: boolean
+  } = { snapshot: { flagEnabled: false }, readOk: true }
   private readonly codexContexts = new Map<string, CodexReconcileContext>()
 
   constructor(private readonly deps: WorkflowReconcilerDeps) {
@@ -937,15 +949,6 @@ export class WorkflowReconciler {
       ensureMcpHostHeadlessService: recipeName => this.ensureMcpHostHeadlessService(recipeName),
       createIfNotExists: (createFn, label) => this.createIfNotExists(createFn, label),
       safeDelete: deleteFn => this.safeDelete(deleteFn),
-      resolveCodexBinding: ({ provider, model, recipeName, recipeUid, runtimeScopeRecipeName }) => {
-        const context = this.resolveCodexContext(recipeUid, recipeName, runtimeScopeRecipeName)
-        return deriveSdkOnlyCodexBinding({
-          provider,
-          model,
-          connectionKey: context.connectionKey,
-          configMap: this.lastCodexConfigMap,
-        })
-      },
     })
   }
 
@@ -1003,65 +1006,79 @@ export class WorkflowReconciler {
    * Read failures keep the fail-closed error snapshot.
    */
   private codexSnapshotFor(connectionKey: string): CodexCatalogSnapshot {
-    return snapshotForAssignedCodexGrant(connectionKey, this.lastCodexConfigMap, this.codexSnapshot)
+    const view = this.codexView
+    return snapshotForAssignedCodexGrant(connectionKey, view.configMap, view.snapshot)
   }
 
+  /**
+   * Effective control scopes plus whether the Codex decision rests on data.
+   *
+   * `codexScopeUncertain` is true when the projection could not decide —
+   * an unreadable allowlist ConfigMap, or a spec whose Codex provenance could
+   * not be established. In that state `derivedScopes` is empty, which is
+   * indistinguishable from a real revocation; the token refresh uses the flag
+   * to preserve whatever the live JWT already carries instead of reminting
+   * (and rolling the pod) over a transient read failure. A readable ConfigMap
+   * that says `reauth-required` is a decision, not uncertainty: it still
+   * withdraws the scope.
+   */
   private resolveEffectiveControlScopes(
     spec: WorkflowRecipeSpec,
     recipeUid: string,
     recipeName: string,
     runtimeScopeRecipeName: string
-  ): EffectiveWorkflowControlScope[] {
+  ): { scopes: EffectiveWorkflowControlScope[]; codexScopeUncertain: boolean } {
     const workflow = deriveWorkflowControlScopes(spec, {
       pluginWorkloadSdkEnabled: this.deps.config.pluginWorkloadSdkEnabled,
     })
-    const derived = this.projectCodex(
-      spec,
-      recipeUid,
-      recipeName,
-      runtimeScopeRecipeName
-    ).derivedScopes.filter(scope => !workflow.includes(scope as WorkflowControlScope))
-    return [...workflow, ...derived] as EffectiveWorkflowControlScope[]
+    const projection = this.projectCodex(spec, recipeUid, recipeName, runtimeScopeRecipeName)
+    const derived = projection.derivedScopes.filter(
+      scope => !workflow.includes(scope as WorkflowControlScope)
+    )
+    return {
+      scopes: [...workflow, ...derived] as EffectiveWorkflowControlScope[],
+      codexScopeUncertain: projection.eligibility === 'uncertain',
+    }
   }
 
-  private async refreshCodexSnapshot(): Promise<boolean> {
+  private async refreshCodexSnapshot(): Promise<{
+    configMap?: k8s.V1ConfigMap
+    snapshot: CodexCatalogSnapshot
+    readOk: boolean
+  }> {
     try {
       const cm = await this.deps.coreApi.readNamespacedConfigMap({
         name: ALLOWED_MODELS_CONFIGMAP_NAME,
         namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
       })
-      this.lastCodexConfigMap = cm
-      this.codexSnapshot = parseAllowedModelsSnapshot(cm)
-      this.lastCodexSnapshotReadOk = true
-      return true
+      this.codexView = { configMap: cm, snapshot: parseAllowedModelsSnapshot(cm), readOk: true }
+      return this.codexView
     } catch (err) {
-      this.lastCodexConfigMap = undefined
-      this.lastCodexSnapshotReadOk = false
       if (isCodexSnapshotTimeout(err)) {
-        this.codexSnapshot = snapshotFromConfigMapError('timeout')
+        this.codexView = { snapshot: snapshotFromConfigMapError('timeout'), readOk: false }
         this.log.warn('Codex allowlist ConfigMap read timed out; failing closed', {
           configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
           namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
         })
-        return false
+        return this.codexView
       }
       const code = getErrorCode(err)
       if (code === 401 || code === 403) {
-        this.codexSnapshot = snapshotFromConfigMapError('forbidden')
+        this.codexView = { snapshot: snapshotFromConfigMapError('forbidden'), readOk: false }
         this.log.warn('Codex allowlist ConfigMap read forbidden; failing closed', {
           configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
           namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
           statusCode: code,
         })
-        return false
+        return this.codexView
       }
-      this.codexSnapshot = snapshotFromConfigMapError('missing')
+      this.codexView = { snapshot: snapshotFromConfigMapError('missing'), readOk: false }
       this.log.warn('Codex allowlist ConfigMap unavailable; failing closed', {
         configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
         namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
         statusCode: code,
       })
-      return false
+      return this.codexView
     }
   }
 
@@ -1129,7 +1146,7 @@ export class WorkflowReconciler {
       throw new Error('SDK-only runtime requires spec.steps to be absent or empty')
     }
 
-    const codexSnapshotAvailable = await this.refreshCodexSnapshot()
+    const codexView = await this.refreshCodexSnapshot()
     const agent = resolveEagerSdkMcpHostAgent(spec)
     const context = this.resolveCodexContext(recipeUid, recipeName, runtimeScopeRecipeName)
     const codexBinding =
@@ -1138,7 +1155,8 @@ export class WorkflowReconciler {
             provider: agent.provider,
             model: agent.model,
             connectionKey: context.connectionKey,
-            configMap: this.lastCodexConfigMap,
+            configMap: codexView.configMap,
+            log: this.log,
           })
         : null
 
@@ -1159,7 +1177,7 @@ export class WorkflowReconciler {
       runtimeScopeRecipeName,
       spec,
       runtime,
-      { mcpHostPhase, codexBinding, codexSnapshotUnavailable: !codexSnapshotAvailable }
+      { mcpHostPhase, codexBinding, codexSnapshotUnavailable: !codexView.readOk }
     )
     const bootstrapProof = this.pluginWorkloadSdkProvisioner.getBootstrapProof(recipeName)
     switch (status) {
@@ -1606,6 +1624,29 @@ export class WorkflowReconciler {
           // (that PVC is provisioned by the triggered-run path). Mounting it
           // here would wedge the pod in Pending — the PVC does not exist until a
           // run starts. The triggered run later recreates the pod with the mount.
+          // Capture the allowlist view ONCE and derive the binding from it, so
+          // the ConfigMap and the read-ok flag handed to the provisioner come
+          // from the same refresh. Resolving the binding inside the provisioner
+          // (after its own awaits) let a concurrently-reconciled recipe's failed
+          // refresh produce a null binding with `codexSnapshotUnavailable:false`
+          // — a binding-less v3 configure that wipes the live host binding.
+          const eagerCodexView = this.codexView
+          const eagerAgent = resolveEagerSdkMcpHostAgent(spec)
+          const eagerCodexContext = this.resolveCodexContext(
+            recipeUid,
+            recipeName,
+            runtimeScopeRecipeName
+          )
+          const eagerCodexBinding =
+            eagerAgent?.provider && eagerAgent.model
+              ? deriveSdkOnlyCodexBinding({
+                  provider: eagerAgent.provider,
+                  model: eagerAgent.model,
+                  connectionKey: eagerCodexContext.connectionKey,
+                  configMap: eagerCodexView.configMap,
+                  log: this.log,
+                })
+              : null
           const eagerStatus = await this.pluginWorkloadSdkProvisioner.ensureEagerSdkMcpHost(
             recipeName,
             recipeUid,
@@ -1615,7 +1656,8 @@ export class WorkflowReconciler {
             runtime,
             {
               mcpHostPhase,
-              codexSnapshotUnavailable: !this.lastCodexSnapshotReadOk,
+              codexBinding: eagerCodexBinding,
+              codexSnapshotUnavailable: !eagerCodexView.readOk,
             }
           )
           const eagerBootstrapProof =
@@ -3727,12 +3769,19 @@ export class WorkflowReconciler {
     spec: WorkflowRecipeSpec,
     recipeUid?: string
   ): Promise<McpHostRuntimeTokenRefreshResult> {
+    const effectiveScopes = this.resolveEffectiveControlScopes(
+      spec,
+      recipeUid ?? '',
+      recipeName,
+      runtimeScopeRecipeName
+    )
     const tokenRefresh = await this.ensureMcpHostRuntimeTokenSecret(
       namespace,
       recipeName,
       runtimeScopeRecipeName,
-      this.resolveEffectiveControlScopes(spec, recipeUid ?? '', recipeName, runtimeScopeRecipeName),
-      deriveRecipeHostGfsScopes(spec)
+      effectiveScopes.scopes,
+      deriveRecipeHostGfsScopes(spec),
+      effectiveScopes.codexScopeUncertain
     )
     if (this.deps.config.pluginWorkloadSdkEnabled && spec.pluginWorkloadSdk) {
       await this.pluginWorkloadSdkProvisioner.ensurePluginWorkloadSdkTokenSecret(recipeName, spec)
@@ -4667,7 +4716,8 @@ export class WorkflowReconciler {
     recipeName: string,
     runtimeScopeRecipeName = recipeName,
     workflowControlScopes: EffectiveWorkflowControlScope[] = [],
-    gfsScopes: WorkflowRecipeGfsScope[] = ['gfs.read']
+    gfsScopes: WorkflowRecipeGfsScope[] = ['gfs.read'],
+    codexScopeUncertain = false
   ): Promise<McpHostRuntimeTokenRefreshResult> {
     const secretName = `wf-${recipeName}-mcp-host-runtime-tokens`
     const sandboxNamespace = this.deps.config.sandboxNamespace
@@ -4683,12 +4733,16 @@ export class WorkflowReconciler {
         runtimeScopeRecipeName,
         workflowControlScopes,
         gfsScopes,
-        existing
+        existing,
+        codexScopeUncertain
       )
     } catch (err) {
       if (getErrorCode(err) !== 404) throw err
     }
 
+    // First mint: there is no live JWT whose Codex decision could be preserved,
+    // so an uncertain snapshot mints without the scope (fail-closed). The real
+    // remint happens once the ConfigMap is readable again.
     const mcpHostRuntimeTokens = await issueMcpHostRuntimeTokens(
       recipeNamespace,
       runtimeScopeRecipeName,
@@ -4726,7 +4780,8 @@ export class WorkflowReconciler {
         runtimeScopeRecipeName,
         workflowControlScopes,
         gfsScopes,
-        existing
+        existing,
+        codexScopeUncertain
       )
       this.log.info(`Secret "${secretName}" already exists (skip)`)
       return tokenRefresh
@@ -4737,14 +4792,24 @@ export class WorkflowReconciler {
    * Refreshes the mcp-host-runtime-token Secret if either stored JWT is missing or will expire
    * within the configured runtime refresh window. Refresh failures are fatal to reconcile so the
    * mounted Secret never silently drifts stale after a pod restart.
+   *
+   * `codexScopeUncertain` marks a projection that had no data to decide on (see
+   * `resolveEffectiveControlScopes`). In that state the expected scope set
+   * inherits `llm:codex:execute` from the live JWT instead of dropping it: a
+   * transient ConfigMap read failure otherwise looks exactly like a revocation
+   * and remints with reason `scope`, which rolls the eager pod, discards its
+   * bootstrap proof, and rolls it a second time when the ConfigMap returns.
+   * Every other scope is still compared, and a readable ConfigMap that denies
+   * the grant still withdraws the scope and rolls the pod.
    */
   private async refreshMcpHostRuntimeTokensIfExpiring(
     recipeNamespace: string,
     recipeName: string,
     runtimeScopeRecipeName: string,
-    workflowControlScopes: EffectiveWorkflowControlScope[],
+    requestedWorkflowControlScopes: EffectiveWorkflowControlScope[],
     expectedGfsScopes: WorkflowRecipeGfsScope[],
-    existing: k8s.V1Secret
+    existing: k8s.V1Secret,
+    codexScopeUncertain = false
   ): Promise<McpHostRuntimeTokenRefreshResult> {
     const rawAccess = existing.data?.['mcp-host-runtime-access-token']
     const rawRefresh = existing.data?.['mcp-host-runtime-refresh-token']
@@ -4762,6 +4827,25 @@ export class WorkflowReconciler {
       refreshJwt,
       'workflowControlScopes'
     )
+    // Uncertain neither grants nor revokes: with no readable catalog the Codex
+    // decision already in the live access JWT is carried forward, so a failed
+    // ConfigMap read cannot masquerade as a revocation. Applies to the issued
+    // tokens as well — expecting a scope the mint would drop would remint on
+    // every pass.
+    const preservedCodexScope =
+      codexScopeUncertain &&
+      accessScopes.includes(CODEX_EXECUTE_SCOPE) &&
+      !requestedWorkflowControlScopes.includes(CODEX_EXECUTE_SCOPE)
+    if (preservedCodexScope) {
+      this.log.warn('Codex catalog is undecidable; preserving the live Codex scope', {
+        recipeName,
+        runtimeScopeRecipeName,
+        scope: CODEX_EXECUTE_SCOPE,
+      })
+    }
+    const workflowControlScopes: EffectiveWorkflowControlScope[] = preservedCodexScope
+      ? [...requestedWorkflowControlScopes, CODEX_EXECUTE_SCOPE]
+      : requestedWorkflowControlScopes
     const rawMcpHostControl = existing.data?.['mcp-host-workflow-control-token']
     const mcpHostControlJwt = rawMcpHostControl
       ? Buffer.from(rawMcpHostControl, 'base64').toString('utf-8')

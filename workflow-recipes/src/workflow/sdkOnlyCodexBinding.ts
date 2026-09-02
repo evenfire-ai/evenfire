@@ -2,7 +2,7 @@ import {
   CODEX_PROVIDER,
   CODEX_UNASSIGNED_CONNECTION_KEY,
   type CodexConfigMapView,
-  toPolicyBinding,
+  toEligiblePolicyBinding,
 } from '@clerum/codex-catalog-projection'
 import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 
@@ -78,41 +78,46 @@ export function readVerifiedSdkOnlyCodexBinding(
 
 /**
  * Derive the sanitized v3 Codex execution proof from one WRC snapshot.
- * Returns null when the grant is unassigned, the catalog is not executable,
- * or the selected model is not in the assigned connection's model list.
+ *
+ * Eligibility is decided by `toEligiblePolicyBinding`, the same cascade that
+ * derives `llm:codex:execute`, so a recipe can never be handed an execution
+ * binding for a grant whose scope the reconciler withholds (and vice versa).
+ * Returns null when the grant is unassigned, the Codex flag is off, the
+ * connection is not `connected`, the catalog is stale, or the selected model
+ * is not in the assigned connection's catalog.
  */
 export function deriveSdkOnlyCodexBinding(input: {
   provider: string
   model: string
   connectionKey: string | undefined
   configMap: CodexConfigMapView | undefined
+  log?: { debug(msg: string, fields?: Record<string, unknown>): void }
 }): PluginWorkloadSdkCodexBindingProof | null {
   if (input.provider !== CODEX_PROVIDER) return null
-  const policy = toPolicyBinding(input.configMap, input.connectionKey)
-  if (
-    !policy ||
-    !policy.connectionKey ||
-    policy.connectionKey === CODEX_UNASSIGNED_CONNECTION_KEY ||
-    !Number.isInteger(policy.catalogRevision) ||
-    policy.catalogRevision < 1 ||
-    !Number.isInteger(policy.credentialRevision) ||
-    policy.credentialRevision < 0
-  ) {
-    return null
-  }
-  if (Array.isArray(policy.models) && !policy.models.includes(input.model)) {
+  const { binding, eligibility, reason } = toEligiblePolicyBinding(
+    input.configMap,
+    input.connectionKey,
+    input.model
+  )
+  if (!binding || binding.catalogRevision < 1 || binding.credentialRevision < 0) {
+    input.log?.debug('Codex execution binding withheld', {
+      model: input.model,
+      connectionKey: input.connectionKey ?? CODEX_UNASSIGNED_CONNECTION_KEY,
+      eligibility,
+      reason: binding ? 'revision_out_of_range' : reason,
+    })
     return null
   }
   return {
-    connectionKey: policy.connectionKey,
-    catalogRevision: policy.catalogRevision,
-    credentialRevision: policy.credentialRevision,
-    model: input.model,
+    connectionKey: binding.connectionKey,
+    catalogRevision: binding.catalogRevision,
+    credentialRevision: binding.credentialRevision,
+    model: binding.model,
     bindingHash: computeCodexPolicyHash({
-      model: input.model,
-      catalogRevision: policy.catalogRevision,
-      credentialRevision: policy.credentialRevision,
-      connectionKey: policy.connectionKey,
+      model: binding.model,
+      catalogRevision: binding.catalogRevision,
+      credentialRevision: binding.credentialRevision,
+      connectionKey: binding.connectionKey,
     }),
   }
 }
