@@ -8,6 +8,7 @@ import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
 import { createPluginWorkloadSdkRequestRateLimit } from '../../middleware/pluginWorkloadSdkRateLimits.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { pluginWorkloadSdkNotificationAuthDurationSeconds } from '../../observability/metrics.js'
+import { getSafeCodexSubscriptionConnection } from '../../services/codexSubscriptionConnection.js'
 import { enqueuePluginWorkloadSdkNotification } from '../../services/notificationEmitter.js'
 import {
   type PluginWorkloadSdkAuthzError,
@@ -732,6 +733,22 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
       // Old mcp-host/WRC require capabilities.contractVersion === 2. Advertise
       // 3 only for oauth-broker defaults so those binaries fail at reconcile
       // instead of Validated-then-empty-ticket. Authorize/grant wire stays 2.
+      //
+      // #533 acceptance criterion 2 ties the Codex binding to the catalog and
+      // credential revisions, but those live on the connection row and never
+      // reached the host, so `codexBindingReady` could not compare them. They
+      // are advertised additively, gated by `codexBindingRevisions`, because
+      // the two rollout directions need opposite defaults: a host that
+      // predates the fields ignores them, and a host that postdates them must
+      // learn whether THIS API can send them at all — otherwise it would fail
+      // closed against an older control-api on a field that peer cannot emit,
+      // which is the #540 failure shape. Omitting the comparison is a
+      // readiness gap, never an unfenced spend: llmProviderAttemptAuthorizer
+      // and llmProviderAttemptRedemption already reject a stale revision.
+      const codexConnection =
+        reservationOnlyOauthBroker && typeof alignedPrimary?.connectionRef === 'string'
+          ? await getSafeCodexSubscriptionConnection(pool, alignedPrimary.connectionRef)
+          : null
       res.status(200).json({
         contractVersion: reservationOnlyOauthBroker
           ? 3
@@ -749,6 +766,13 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         defaultConnectionRef: alignedPrimary?.connectionRef ?? null,
         v2Ready,
         ...(reservationOnlyOauthBroker ? { reservationOnlyOauthBroker: true } : {}),
+        ...(codexConnection
+          ? {
+              codexBindingRevisions: true,
+              defaultCatalogRevision: codexConnection.catalogRevision,
+              defaultCredentialRevision: codexConnection.credentialRevision,
+            }
+          : {}),
         clientNotificationsPolicyState: clientNotificationsGrant?.policyState ?? 'missing',
         clientNotificationsReady,
       })

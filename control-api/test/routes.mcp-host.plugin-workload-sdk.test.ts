@@ -3,6 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { pool } from '../src/db.js'
 import { createMcpHostPluginWorkloadSdkRoutes } from '../src/routes/mcp-host/plugin-workload-sdk.routes.js'
+import * as codexConnection from '../src/services/codexSubscriptionConnection.js'
 import * as notificationEmitter from '../src/services/notificationEmitter.js'
 import * as authorizer from '../src/services/pluginWorkloadSdkAuthorizer.js'
 import { issuePluginWorkloadSdkCredentialTicket } from '../src/services/pluginWorkloadSdkCredentialTicket.js'
@@ -25,6 +26,13 @@ vi.mock('../src/services/notificationEmitter.js', () => ({
   enqueueApprovalUpdatedNotification: vi.fn(),
   enqueuePluginWorkloadSdkNotification: vi.fn().mockResolvedValue(undefined),
 }))
+
+vi.mock('../src/services/codexSubscriptionConnection.js', async () => {
+  const actual = await vi.importActual<
+    typeof import('../src/services/codexSubscriptionConnection.js')
+  >('../src/services/codexSubscriptionConnection.js')
+  return { ...actual, getSafeCodexSubscriptionConnection: vi.fn() }
+})
 
 vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
   const actual = await vi.importActual<typeof import('../src/services/pluginWorkloadSdkDb.js')>(
@@ -126,6 +134,7 @@ beforeEach(() => {
   vi.mocked(sdkDb.getPluginWorkloadSdkProviderAttempt).mockReset()
   vi.mocked(sdkDb.hasUsableClientNotificationRecipients).mockReset()
   vi.mocked(sdkDb.findGrant).mockReset()
+  vi.mocked(codexConnection.getSafeCodexSubscriptionConnection).mockReset().mockResolvedValue(null)
   vi.mocked(sdkDb.redeemPluginWorkloadSdkCredentialTicketJti).mockReset()
   vi.mocked(sdkDb.markPluginWorkloadSdkProviderAttemptStatus).mockReset()
   vi.mocked(notificationEmitter.enqueuePluginWorkloadSdkNotification)
@@ -324,6 +333,94 @@ describe('GET /mcp-host/plugin-workload-sdk/capabilities', () => {
       defaultConnectionRef: 'team-plus',
       v2Ready: true,
     })
+  })
+
+  // #533 acceptance criterion 2 — the host cannot tie the binding to the
+  // catalog/credential revisions unless this endpoint publishes them, because
+  // they are authoritative only on the connection row.
+  const codexGrant = () => ({
+    id: 'grant-codex-revisions',
+    recipeNamespace: NS,
+    recipeName: RECIPE,
+    capabilityFamily: 'promptBridge' as const,
+    provider: 'codex-subscription',
+    allowedModels: ['gpt-5.1'],
+    allowedEventTypes: [],
+    allowedTargetRefs: [],
+    allowedUserRefs: [],
+    allowedCallers: ['api'],
+    quotaLimits: {},
+    modelPolicies: {},
+    promptTargets: [
+      {
+        targetRef: 'primary-codex',
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+        credentialSlot: '',
+        connectionRef: 'team-plus',
+      },
+    ],
+    defaultTargetRef: 'primary-codex',
+    policyState: 'active' as const,
+    policyRevision: 2,
+    createdAt: '2026-08-03T00:00:00.000Z',
+    updatedAt: '2026-08-03T00:00:00.000Z',
+  })
+
+  it('publishes the authoritative Codex revisions for an oauth-broker default', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(codexGrant())
+    vi.mocked(codexConnection.getSafeCodexSubscriptionConnection).mockResolvedValue({
+      id: 'conn-1',
+      connectionKey: 'team-plus',
+      displayName: 'Team Plus',
+      defaultModel: 'gpt-5.1',
+      createdBy: null,
+      status: 'connected',
+      credentialRevision: 3,
+      catalogRevision: 7,
+      accountFingerprint: null,
+      catalogStatus: 'ready',
+      catalogSyncedAt: null,
+      lastRefreshAt: null,
+      lastAuthAt: null,
+      refreshLockHeld: false,
+      revokedAt: null,
+      createdAt: new Date('2026-08-03T00:00:00.000Z'),
+      updatedAt: new Date('2026-08-03T00:00:00.000Z'),
+    })
+
+    const res = await request(buildApp())
+      .get('/mcp-host/plugin-workload-sdk/capabilities')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      codexBindingRevisions: true,
+      defaultCatalogRevision: 7,
+      defaultCredentialRevision: 3,
+    })
+    expect(vi.mocked(codexConnection.getSafeCodexSubscriptionConnection)).toHaveBeenCalledWith(
+      expect.anything(),
+      'team-plus'
+    )
+  })
+
+  it('omits the revision flag entirely when the Codex connection does not resolve', async () => {
+    // The flag is a promise to send both values. A revoked or missing
+    // connection must drop all three together, never advertise the flag over
+    // absent numbers — a host that trusted it would fail closed forever.
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(codexGrant())
+    vi.mocked(codexConnection.getSafeCodexSubscriptionConnection).mockResolvedValue(null)
+
+    const res = await request(buildApp())
+      .get('/mcp-host/plugin-workload-sdk/capabilities')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.reservationOnlyOauthBroker).toBe(true)
+    expect(res.body.codexBindingRevisions).toBeUndefined()
+    expect(res.body.defaultCatalogRevision).toBeUndefined()
+    expect(res.body.defaultCredentialRevision).toBeUndefined()
   })
 
   it('does not advertise oauth-broker v3 when promptTargets[0] is not the default', async () => {

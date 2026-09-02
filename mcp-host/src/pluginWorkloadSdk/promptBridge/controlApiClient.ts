@@ -69,6 +69,14 @@ export interface PluginWorkloadSdkCapabilities {
   v2Ready: boolean
   /** Present only when the grant default is oauth-broker (reservation-only Codex). */
   reservationOnlyOauthBroker?: true
+  /**
+   * Present only when this control-api can publish the authoritative Codex
+   * catalog/credential revisions. Absent means the peer predates them, not
+   * that the binding is stale — see `codexBindingReady`.
+   */
+  codexBindingRevisions?: true
+  defaultCatalogRevision?: number
+  defaultCredentialRevision?: number
   clientNotificationsPolicyState: string
   clientNotificationsReady: boolean
 }
@@ -211,6 +219,13 @@ function isPluginWorkloadSdkCapabilities(v: unknown): v is PluginWorkloadSdkCapa
       typeof value.defaultConnectionRef === 'string') &&
     typeof value.v2Ready === 'boolean' &&
     (value.reservationOnlyOauthBroker === undefined || value.reservationOnlyOauthBroker === true) &&
+    (value.codexBindingRevisions === undefined || value.codexBindingRevisions === true) &&
+    (value.defaultCatalogRevision === undefined ||
+      (Number.isInteger(value.defaultCatalogRevision) &&
+        Number(value.defaultCatalogRevision) >= 1)) &&
+    (value.defaultCredentialRevision === undefined ||
+      (Number.isInteger(value.defaultCredentialRevision) &&
+        Number(value.defaultCredentialRevision) >= 0)) &&
     typeof value.clientNotificationsPolicyState === 'string' &&
     typeof value.clientNotificationsReady === 'boolean'
   )
@@ -603,6 +618,23 @@ export class PluginWorkloadSdkControlApiClient {
     const reservationOnlyReady = capabilities.reservationOnlyOauthBroker === true
     const contractReady =
       capabilities.contractVersion === 3 && capabilities.supportedContractVersions.includes(3)
+    // #533 acceptance criterion 2: the binding must be tied to the catalog and
+    // credential revisions too, not only to the connection and model. Those
+    // revisions are authoritative on control-api's connection row, so this can
+    // only be compared when the peer publishes them. `codexBindingRevisions`
+    // is that discriminator, and it must be read as "can this API send them",
+    // never as "is this binding fresh": an older control-api omits the flag,
+    // and demanding a field it cannot emit would fail closed across a
+    // mixed-binary window (the #540 shape). When the flag IS present, both
+    // values are required and must match — a missing or divergent revision is
+    // a stale binding, and it fails closed here at reconcile rather than at
+    // the first prompt.
+    const revisionsPublished = capabilities.codexBindingRevisions === true
+    const codexRevisionsReady =
+      !revisionsPublished ||
+      (binding !== null &&
+        capabilities.defaultCatalogRevision === binding.catalogRevision &&
+        capabilities.defaultCredentialRevision === binding.credentialRevision)
     const codexBindingReady =
       expectedProvider !== 'codex-subscription' ||
       (reservationOnlyReady &&
@@ -612,7 +644,8 @@ export class PluginWorkloadSdkControlApiClient {
         capabilities.defaultModel === expectedModel &&
         binding.model === expectedModel &&
         typeof capabilities.defaultConnectionRef === 'string' &&
-        capabilities.defaultConnectionRef === binding.connectionKey)
+        capabilities.defaultConnectionRef === binding.connectionKey &&
+        codexRevisionsReady)
     const policyReady =
       capabilities.v2Ready &&
       capabilities.policyRevision >= 1 &&

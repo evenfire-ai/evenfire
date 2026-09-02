@@ -209,6 +209,135 @@ describe('PluginWorkloadSdkControlApiClient', () => {
     })
   })
 
+  // #533 acceptance criterion 2 — the binding must also be tied to the catalog
+  // and credential revisions. They are authoritative on control-api, so the
+  // comparison exists only when the peer publishes them; these five cases pin
+  // every combination, including the deliberate mixed-binary compromise.
+  const codexCapabilities = (extra: Record<string, unknown>) => ({
+    contractVersion: 3,
+    supportedContractVersions: [2, 3],
+    reservationOnlyOauthBroker: true,
+    targetAwarePromptBridge: true,
+    attemptLedger: true,
+    credentialTickets: true,
+    policyState: 'active',
+    policyRevision: 2,
+    policyHash: 'a'.repeat(64),
+    defaultTargetRef: 'codex-primary',
+    defaultProvider: 'codex-subscription',
+    defaultModel: 'gpt-5.1',
+    defaultConnectionRef: 'team-plus',
+    v2Ready: true,
+    clientNotificationsPolicyState: 'missing',
+    clientNotificationsReady: false,
+    ...extra,
+  })
+
+  it('marks the Codex binding ready when the published revisions match it', async () => {
+    installCodexBinding()
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(
+        200,
+        codexCapabilities({
+          codexBindingRevisions: true,
+          defaultCatalogRevision: 4,
+          defaultCredentialRevision: 1,
+        })
+      )
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({ policyReady: true, codexBindingReady: true })
+  })
+
+  it('refuses a binding whose catalog revision is behind the published one', async () => {
+    installCodexBinding()
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(
+        200,
+        codexCapabilities({
+          codexBindingRevisions: true,
+          defaultCatalogRevision: 5,
+          defaultCredentialRevision: 1,
+        })
+      )
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({
+      policyReady: false,
+      policyReason: 'codex_execution_binding_missing',
+      codexBindingReady: false,
+    })
+  })
+
+  it('refuses a binding whose credential revision is behind the published one', async () => {
+    installCodexBinding()
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(
+        200,
+        codexCapabilities({
+          codexBindingRevisions: true,
+          defaultCatalogRevision: 4,
+          defaultCredentialRevision: 2,
+        })
+      )
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({
+      policyReady: false,
+      policyReason: 'codex_execution_binding_missing',
+      codexBindingReady: false,
+    })
+  })
+
+  it('refuses the binding when the peer claims revisions but omits one', async () => {
+    // A partial deploy must not read as agreement: the flag is the peer's
+    // promise to send both values, so a missing one is a broken promise.
+    installCodexBinding()
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse(
+          200,
+          codexCapabilities({ codexBindingRevisions: true, defaultCredentialRevision: 1 })
+        )
+      )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({
+      policyReady: false,
+      policyReason: 'codex_execution_binding_missing',
+      codexBindingReady: false,
+    })
+  })
+
+  it('keeps the binding ready against an API that predates the revision fields', async () => {
+    // Deliberate: demanding a field an older control-api cannot emit would
+    // fail closed across a mixed-binary window (the #540 shape). This is not
+    // unfenced — authorize and redeem still reject a stale revision — so the
+    // cost is that a stale binding surfaces at the first prompt instead of at
+    // reconcile. Do not "fix" this into a fail-closed branch.
+    installCodexBinding()
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, codexCapabilities({ defaultCatalogRevision: 999 })))
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({ policyReady: true, codexBindingReady: true })
+  })
+
   it('keeps request-time policy readiness separate from identity bootstrap', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       jsonResponse(200, {
