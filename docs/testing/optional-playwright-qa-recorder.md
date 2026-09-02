@@ -144,11 +144,16 @@ KUBECONTEXT=<branch-profile-context> \
 make test-e2e-plugin-workload-sdk-desktop-no-grant
 ```
 
-Both `E2E_PLUGIN_SDK_NO_GRANT_*` variables are **mandatory**: the spec has no
-default recipe and fails loudly when either is missing, and it refuses to run
-against the happy path's recipe even if pointed at it. **Provisioning a Codex
-recipe with no execution binding is operator work** — the lane will not create
-one, and a lane that cannot find its fixture fails rather than skipping.
+Both variables above are **mandatory**: the spec has no default recipe and fails
+loudly when either is missing, and it refuses to run against the happy path's
+recipe even if pointed at it. `E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAMESPACE` is the
+one optional knob and defaults to `sandbox-recipes` — set it explicitly when the
+ungranted fixture lives elsewhere, or the lane will look for the right recipe
+name in the wrong namespace. This target takes no
+`E2E_PLUGIN_SDK_EXPECT_PROVIDER`: no provider is supposed to be reached, so
+there is none to declare. **Provisioning a Codex recipe with no execution
+binding is operator work** — the lane will not create one, and a lane that
+cannot find its fixture fails rather than skipping.
 
 ## Repository isolation
 
