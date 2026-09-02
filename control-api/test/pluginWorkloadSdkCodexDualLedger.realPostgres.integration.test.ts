@@ -548,6 +548,50 @@ describeRealPostgres('Plugin Workload SDK Codex dual ledger on real PostgreSQL',
       output_tokens: 7,
       credential_slot: '',
     })
+
+    // Addendum A.4.3: the host is not the source of truth for oauth-broker
+    // spend, so a later `failed` report cannot contradict an exact floor that
+    // Codex itself proved. It used to 409, which made the host's retry of a
+    // lost response look like an accounting conflict.
+    await expect(
+      finalizePromptBridgeInTransaction(
+        {
+          invocationId,
+          recipeNamespace: NS,
+          recipeName: RECIPE,
+          hostRef: `${NS}/${RECIPE}`,
+          attemptGeneration: 1,
+          providerAttemptId: sdkAttemptId,
+          providerAttemptIndex: 1,
+          status: 'failed',
+          target: {
+            targetRef: 'codex-primary',
+            provider: 'codex-subscription',
+            model: MODEL,
+            credentialSlot: '',
+          },
+          reason: 'provider_stream_failed',
+        },
+        pool
+      )
+    ).resolves.toMatchObject({
+      status: 'failed',
+      outcome: 'exact',
+      idempotent: true,
+      usageAccepted: false,
+    })
+    const unchanged = await pool.query(
+      `SELECT outcome, input_tokens, output_tokens, reason
+         FROM plugin_workload_sdk_spend_outcomes
+        WHERE provider_attempt_id = $1`,
+      [sdkAttemptId]
+    )
+    expect(unchanged.rows[0]).toEqual({
+      outcome: 'exact',
+      input_tokens: 12,
+      output_tokens: 7,
+      reason: 'provider_completed',
+    })
   })
 
   it('finalizes a pre-dispatch Codex miss as not_executed', async () => {

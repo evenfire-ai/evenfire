@@ -19,8 +19,20 @@ function databaseUrl(baseUrl: string, database: string): string {
   return url.toString()
 }
 
+/**
+ * Every transaction in this suite runs as the PRODUCTION runtime role, not as
+ * the superuser that creates the database. `plugin_workload_sdk_spend_outcomes`
+ * is granted SELECT/INSERT only (access profile `append`), so a write outside
+ * that envelope raises 42501 and fails the test. Running these paths as a
+ * superuser is exactly how an UPDATE against the spend ledger shipped green.
+ *
+ * `SET LOCAL` is transaction-scoped, so a pooled connection can never leak the
+ * role into a later checkout, and `CREATE DATABASE` / `initDb` / `DROP
+ * DATABASE` stay superuser.
+ */
 async function begin(client: PoolClient): Promise<void> {
   await client.query('BEGIN')
+  await client.query('SET LOCAL ROLE control_api_runtime')
 }
 
 async function commit(client: PoolClient): Promise<void> {
@@ -69,11 +81,25 @@ describeRealPostgres('Plugin Workload SDK finalization on real PostgreSQL', () =
     }
   })
 
+  const CODEX_TARGET = {
+    targetRef: 'primary-codex',
+    provider: 'codex-subscription',
+    model: 'gpt-5.1',
+    credentialSlot: '',
+  }
+  const OPENAI_TARGET = {
+    targetRef: 'primary-openai',
+    provider: 'openai',
+    model: 'gpt-4o-mini',
+    credentialSlot: 'openai-api-key',
+  }
+
   async function seedAttempt(
     client: PoolClient,
     options: {
       status?: PromptBridgeFinalizationInput['status']
       leaseExpired?: boolean
+      codex?: boolean
     } = {}
   ): Promise<PromptBridgeFinalizationInput> {
     const invocationId = randomUUID()
@@ -84,12 +110,7 @@ describeRealPostgres('Plugin Workload SDK finalization on real PostgreSQL', () =
     const leaseExpression = options.leaseExpired
       ? "now() - interval '5 minutes'"
       : "now() + interval '5 minutes'"
-    const target = {
-      targetRef: 'primary-openai',
-      provider: 'openai',
-      model: 'gpt-4o-mini',
-      credentialSlot: 'openai-api-key',
-    }
+    const target = options.codex ? { ...CODEX_TARGET } : { ...OPENAI_TARGET }
     await client.query(
       `INSERT INTO plugin_workload_sdk_invocations
          (id, recipe_namespace, recipe_name, caller_ref, method, detail,
@@ -149,6 +170,92 @@ describeRealPostgres('Plugin Workload SDK finalization on real PostgreSQL', () =
           }
         : {}),
     }
+  }
+
+  /** Link a Codex ledger row to an SDK attempt, optionally already usage-ready. */
+  async function linkCodex(
+    client: PoolClient,
+    input: PromptBridgeFinalizationInput,
+    options: { ready?: boolean; providerAttemptId?: string; attemptIndex?: number } = {}
+  ): Promise<string> {
+    const attempt = await insertLlmProviderAttempt(client, {
+      callerKind: 'recipe',
+      hostRef: input.hostRef,
+      recipeNamespace: input.recipeNamespace,
+      recipeName: input.recipeName,
+      invocationId: input.invocationId,
+      attemptGeneration: input.attemptGeneration,
+      providerAttemptIndex: options.attemptIndex ?? input.providerAttemptIndex,
+      model: CODEX_TARGET.model,
+      requestHash: 'a'.repeat(64),
+      policyRevision: 1,
+      policyHash: 'b'.repeat(64),
+      budgetReservationId: randomUUID(),
+      connectionRevision: 1,
+      pluginWorkloadSdkProviderAttemptId: options.providerAttemptId ?? input.providerAttemptId,
+    })
+    if (options.ready) await markCodexUsageReady(client, attempt.id)
+    return attempt.id
+  }
+
+  /**
+   * The state the Codex proxy finalize leaves behind on success. Written
+   * directly because driving the whole ticket lifecycle is the dual-ledger
+   * suite's job, not this one's.
+   */
+  async function markCodexUsageReady(
+    client: PoolClient,
+    codexAttemptId: string,
+    tokens: [number, number] = [12, 7]
+  ): Promise<void> {
+    await client.query(
+      `UPDATE llm_provider_attempts
+          SET status = 'finalized', outcome = 'success',
+              usage_input_tokens = $2, usage_output_tokens = $3, finalized_at = now()
+        WHERE id = $1`,
+      [codexAttemptId, tokens[0], tokens[1]]
+    )
+  }
+
+  /** Insert an extra physical attempt, as a failover would have left behind. */
+  async function seedPriorAttempt(
+    client: PoolClient,
+    input: PromptBridgeFinalizationInput,
+    options: { attemptIndex: number; status: string; codex?: boolean }
+  ): Promise<string> {
+    const id = randomUUID()
+    const target = options.codex ? CODEX_TARGET : OPENAI_TARGET
+    await client.query(
+      `INSERT INTO plugin_workload_sdk_provider_attempts
+         (id, invocation_id, recipe_namespace, recipe_name, attempt_generation,
+          attempt_index, target_ref, provider, model, credential_slot, status,
+          completed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())`,
+      [
+        id,
+        input.invocationId,
+        input.recipeNamespace,
+        input.recipeName,
+        input.attemptGeneration,
+        options.attemptIndex,
+        target.targetRef,
+        target.provider,
+        target.model,
+        target.credentialSlot,
+        options.status,
+      ]
+    )
+    return id
+  }
+
+  async function spendRows(providerAttemptId: string) {
+    const result = await dbPool.query(
+      `SELECT outcome, reason, input_tokens, output_tokens, usage_request_id, host_ref
+         FROM plugin_workload_sdk_spend_outcomes
+        WHERE provider_attempt_id = $1`,
+      [providerAttemptId]
+    )
+    return result.rows as Array<Record<string, unknown>>
   }
 
   it('writes one immutable unknown outcome and makes an identical replay idempotent', async () => {
@@ -476,6 +583,332 @@ describeRealPostgres('Plugin Workload SDK finalization on real PostgreSQL', () =
         [input.invocationId]
       )
       expect(invocation.rows[0]?.status).toBe('in_progress')
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined)
+      client.release()
+    }
+  })
+
+  it('never rewrites the sweeper floor; late Codex usage is derived at read time', async () => {
+    const client = await dbPool.connect()
+    try {
+      await begin(client)
+      const input = await seedAttempt(client, { codex: true, leaseExpired: true })
+      // Out of the in-flight grace, so the sweeper is free to close it.
+      const codexAttemptId = await linkCodex(client, input)
+      await client.query(
+        `UPDATE llm_provider_attempts SET created_at = now() - interval '30 minutes' WHERE id = $1`,
+        [codexAttemptId]
+      )
+      expect(await failStaleInvocationsInTransaction(1, client)).toBe(1)
+      await commit(client)
+
+      expect(await spendRows(input.providerAttemptId)).toEqual([
+        {
+          outcome: 'unknown',
+          reason: 'stale_lease',
+          input_tokens: null,
+          output_tokens: null,
+          usage_request_id: null,
+          host_ref: null,
+        },
+      ])
+
+      // Codex reports its usage after the sweep.
+      const usageClient = await dbPool.connect()
+      try {
+        await begin(usageClient)
+        await markCodexUsageReady(usageClient, codexAttemptId)
+        await commit(usageClient)
+      } finally {
+        usageClient.release()
+      }
+
+      const replayClient = await dbPool.connect()
+      try {
+        await begin(replayClient)
+        const replay = await finalizePromptBridgeInTransaction(
+          {
+            ...input,
+            status: 'complete',
+            usage: {
+              llmSecretName: '',
+              callerRef: 'integration-test',
+              fallbackUsed: false,
+              attemptCount: 1,
+              inputTokens: 99,
+              outputTokens: 99,
+            },
+          },
+          replayClient
+        )
+        await commit(replayClient)
+        // J3: the outcome reports the derived truth...
+        expect(replay).toMatchObject({ outcome: 'exact', idempotent: true, usageAccepted: false })
+      } finally {
+        replayClient.release()
+      }
+
+      // ...while the floor itself is byte-for-byte what the sweeper wrote.
+      // An UPDATE here would have been a 42501 under the runtime role.
+      expect(await spendRows(input.providerAttemptId)).toEqual([
+        {
+          outcome: 'unknown',
+          reason: 'stale_lease',
+          input_tokens: null,
+          output_tokens: null,
+          usage_request_id: null,
+          host_ref: null,
+        },
+      ])
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined)
+      client.release()
+    }
+  })
+
+  it('lets the sweeper freeze exact when the linked Codex usage already landed', async () => {
+    const client = await dbPool.connect()
+    try {
+      await begin(client)
+      const input = await seedAttempt(client, { codex: true, leaseExpired: true })
+      await linkCodex(client, input, { ready: true })
+      expect(await failStaleInvocationsInTransaction(1, client)).toBe(1)
+      await commit(client)
+
+      // Addendum A.4: a ready Codex row is the best floor provable without a
+      // JWT, so the sweeper no longer under-reports it as unknown.
+      expect(await spendRows(input.providerAttemptId)).toEqual([
+        {
+          outcome: 'exact',
+          reason: 'stale_lease',
+          input_tokens: 12,
+          output_tokens: 7,
+          usage_request_id: null,
+          host_ref: null,
+        },
+      ])
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined)
+      client.release()
+    }
+  })
+
+  it('closes a failed oauth attempt whose Codex row is ready as exact and non-revivable', async () => {
+    const client = await dbPool.connect()
+    try {
+      await begin(client)
+      const input = await seedAttempt(client, { codex: true, status: 'failed' })
+      input.reason = 'provider_stream_failed'
+      await linkCodex(client, input, { ready: true })
+      // N-BLK-2(a): this used to persist `unknown` WITH tokens and die on
+      // token_pair_check (23514 -> 500).
+      const result = await finalizePromptBridgeInTransaction(input, client)
+      await commit(client)
+
+      expect(result).toMatchObject({ status: 'failed', outcome: 'exact', idempotent: false })
+      expect(await spendRows(input.providerAttemptId)).toEqual([
+        {
+          outcome: 'exact',
+          reason: 'provider_stream_failed',
+          input_tokens: 12,
+          output_tokens: 7,
+          usage_request_id: null,
+          host_ref: input.hostRef,
+        },
+      ])
+
+      // Guard 1.a: reviveFailedInvocation only matches `status = 'failed'`, so
+      // persisting provider_unavailable is what stops the same idempotency key
+      // from launching a second billable Codex call.
+      const state = await dbPool.query(
+        `SELECT inv.status AS invocation_status,
+                receipt.status AS receipt_status,
+                attempt.status AS provider_status
+           FROM plugin_workload_sdk_invocations inv
+           JOIN plugin_workload_sdk_invocation_attempts receipt
+             ON receipt.invocation_id = inv.id
+           JOIN plugin_workload_sdk_provider_attempts attempt ON attempt.id = $1
+          WHERE inv.id = $2`,
+        [input.providerAttemptId, input.invocationId]
+      )
+      expect(state.rows[0]).toEqual({
+        invocation_status: 'provider_unavailable',
+        receipt_status: 'provider_unavailable',
+        provider_status: 'provider_unavailable',
+      })
+      const revivable = await dbPool.query(
+        `SELECT count(*)::int AS count
+           FROM plugin_workload_sdk_invocations
+          WHERE id = $1 AND status = 'failed'`,
+        [input.invocationId]
+      )
+      expect(revivable.rows[0]?.count).toBe(0)
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined)
+      client.release()
+    }
+  })
+
+  it('resolves three identical failed calls while Codex usage lands between them (N-05)', async () => {
+    const client = await dbPool.connect()
+    try {
+      await begin(client)
+      const input = await seedAttempt(client, { codex: true, status: 'failed' })
+      const codexAttemptId = await linkCodex(client, input)
+      await client.query(
+        `UPDATE llm_provider_attempts SET status = 'finalized', outcome = 'unknown' WHERE id = $1`,
+        [codexAttemptId]
+      )
+      const first = await finalizePromptBridgeInTransaction(input, client)
+      await commit(client)
+      expect(first).toMatchObject({ outcome: 'unknown', idempotent: false })
+
+      const usageClient = await dbPool.connect()
+      try {
+        await begin(usageClient)
+        await markCodexUsageReady(usageClient, codexAttemptId)
+        await commit(usageClient)
+      } finally {
+        usageClient.release()
+      }
+
+      // Before the fix the second call rewrote the row to `exact` and the third
+      // then 409'd against its own predecessor. The floor is immutable now, so
+      // both replays agree.
+      for (const _attempt of [2, 3]) {
+        const replayClient = await dbPool.connect()
+        try {
+          await begin(replayClient)
+          const replay = await finalizePromptBridgeInTransaction(input, replayClient)
+          await commit(replayClient)
+          expect(replay).toMatchObject({
+            status: 'failed',
+            outcome: 'exact',
+            idempotent: true,
+            usageAccepted: false,
+          })
+        } finally {
+          replayClient.release()
+        }
+      }
+      expect(await spendRows(input.providerAttemptId)).toEqual([
+        {
+          outcome: 'unknown',
+          reason: 'integration_provider_unavailable',
+          input_tokens: null,
+          output_tokens: null,
+          usage_request_id: null,
+          host_ref: input.hostRef,
+        },
+      ])
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined)
+      client.release()
+    }
+  })
+
+  it('settles the attempts a successful failover displaced (RP-539-003)', async () => {
+    const client = await dbPool.connect()
+    try {
+      await begin(client)
+      const input = await seedAttempt(client, { codex: true, status: 'complete' })
+      // The winner is attempt 3; 1 and 2 are the terminal attempts a
+      // successful failover leaves behind and never finalizes.
+      await client.query(
+        `UPDATE plugin_workload_sdk_provider_attempts SET attempt_index = 3 WHERE id = $1`,
+        [input.providerAttemptId]
+      )
+      input.providerAttemptIndex = 3
+      const failedId = await seedPriorAttempt(client, input, { attemptIndex: 1, status: 'failed' })
+      const unavailableId = await seedPriorAttempt(client, input, {
+        attemptIndex: 2,
+        status: 'provider_unavailable',
+        codex: true,
+      })
+      await linkCodex(client, input, {
+        ready: true,
+        providerAttemptId: unavailableId,
+        attemptIndex: 2,
+      })
+      await linkCodex(client, input, { ready: true, attemptIndex: 3 })
+
+      const result = await finalizePromptBridgeInTransaction(input, client)
+      await commit(client)
+      expect(result).toMatchObject({ outcome: 'exact', idempotent: false })
+
+      expect(await spendRows(failedId)).toEqual([
+        {
+          outcome: 'not_executed',
+          reason: 'prior_attempt_failed',
+          input_tokens: null,
+          output_tokens: null,
+          usage_request_id: null,
+          host_ref: input.hostRef,
+        },
+      ])
+      // A displaced oauth attempt whose Codex row is ready still owes exact
+      // spend, even though the host never reported it.
+      expect(await spendRows(unavailableId)).toEqual([
+        {
+          outcome: 'exact',
+          reason: 'prior_attempt_provider_unavailable',
+          input_tokens: 12,
+          output_tokens: 7,
+          usage_request_id: null,
+          host_ref: input.hostRef,
+        },
+      ])
+
+      // A replay is pure reads: no second row, no rewrite.
+      const replayClient = await dbPool.connect()
+      try {
+        await begin(replayClient)
+        await expect(finalizePromptBridgeInTransaction(input, replayClient)).resolves.toMatchObject(
+          { idempotent: true, outcome: 'exact' }
+        )
+        await commit(replayClient)
+      } finally {
+        replayClient.release()
+      }
+      const total = await dbPool.query(
+        `SELECT count(*)::int AS count
+           FROM plugin_workload_sdk_spend_outcomes
+          WHERE invocation_id = $1`,
+        [input.invocationId]
+      )
+      expect(total.rows[0]?.count).toBe(3)
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined)
+      client.release()
+    }
+  })
+
+  it('fails loudly when a displaced attempt is not terminal', async () => {
+    const client = await dbPool.connect()
+    try {
+      await begin(client)
+      const input = await seedAttempt(client, { status: 'complete' })
+      await client.query(
+        `UPDATE plugin_workload_sdk_provider_attempts SET attempt_index = 2 WHERE id = $1`,
+        [input.providerAttemptId]
+      )
+      input.providerAttemptIndex = 2
+      await seedPriorAttempt(client, input, { attemptIndex: 1, status: 'in_progress' })
+
+      await expect(finalizePromptBridgeInTransaction(input, client)).rejects.toThrow(
+        /is not terminal \(status=in_progress\); the reservation fence is broken/
+      )
+      await client.query('ROLLBACK')
+
+      // The whole transaction rolled back, so no half-settled ledger survives.
+      const total = await dbPool.query(
+        `SELECT count(*)::int AS count
+           FROM plugin_workload_sdk_spend_outcomes
+          WHERE invocation_id = $1`,
+        [input.invocationId]
+      )
+      expect(total.rows[0]?.count).toBe(0)
     } finally {
       await client.query('ROLLBACK').catch(() => undefined)
       client.release()

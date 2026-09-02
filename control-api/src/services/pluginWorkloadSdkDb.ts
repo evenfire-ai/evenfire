@@ -1,12 +1,18 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import { type DbClient, type DbTransactionClient, pool, withTransaction } from '../db.js'
 import type { AdministrativeEventSubmitterPrincipalV1 } from '../middleware/tracingSubmitterAuth.js'
 import { stableStringify } from '../utils/stableStringify.js'
 import {
+  type LlmProviderAttemptRow,
   isLinkedCodexInFlightWithoutUsage,
+  linkedCodexExactUsage,
   loadLlmProviderAttemptBySdkAttemptId,
 } from './llmProviderAttemptStore.js'
+import {
+  insertSpendOutcomeFloor,
+  isOauthBrokerProvider,
+  spendFloor,
+} from './pluginWorkloadSdkSpendLedger.js'
 import {
   type ControlApiPermissionChange,
   appendControlApiPermissionEventsInTransaction,
@@ -2163,13 +2169,14 @@ export async function failStaleInvocationsInTransaction(
       [row.id, row.attempt_generation]
     )
     let linkedCodexInFlight = false
+    const linkedByAttempt = new Map<string, LlmProviderAttemptRow>()
     for (const attempt of physicalAttempts.rows as Array<Record<string, unknown>>) {
       const provider = String(attempt.provider)
-      if (!isLlmProviderId(provider) || PROVIDER_AUTH_MODE[provider] !== 'oauth-broker') {
-        continue
-      }
+      if (!isOauthBrokerProvider(provider)) continue
       const linked = await loadLlmProviderAttemptBySdkAttemptId(db, String(attempt.id))
-      if (linked && isLinkedCodexInFlightWithoutUsage(linked)) {
+      if (!linked) continue
+      linkedByAttempt.set(String(attempt.id), linked)
+      if (isLinkedCodexInFlightWithoutUsage(linked)) {
         linkedCodexInFlight = true
         break
       }
@@ -2192,28 +2199,32 @@ export async function failStaleInvocationsInTransaction(
 
     for (const attempt of physicalAttempts.rows as Array<Record<string, unknown>>) {
       // The host has disappeared, so no current JWT can prove a host_ref.
-      // Persist an unattributed unknown outcome instead of inventing one
-      // from recipe names; the physical-attempt PK makes this idempotent.
-      await db.query(
-        `INSERT INTO plugin_workload_sdk_spend_outcomes
-             (provider_attempt_id, invocation_id, recipe_namespace, recipe_name,
-              attempt_generation, attempt_index, target_ref, host_ref, provider, model,
-              credential_slot, outcome, reason, input_tokens, output_tokens, usage_request_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10, 'unknown',
-                   'stale_lease', NULL, NULL, NULL)
-           ON CONFLICT (provider_attempt_id) DO NOTHING`,
-        [
-          String(attempt.id),
-          row.id,
-          String(attempt.recipe_namespace),
-          String(attempt.recipe_name),
-          Number(attempt.attempt_generation),
-          Number(attempt.attempt_index),
-          String(attempt.target_ref),
-          String(attempt.provider),
-          String(attempt.model),
-          String(attempt.credential_slot),
-        ]
+      // Persist an unattributed row instead of inventing a host identity from
+      // recipe names; the physical-attempt PK makes this idempotent.
+      //
+      // Persist the best floor provable without a JWT: exact when the linked
+      // Codex row already carries usage, unknown otherwise. Finalize derives
+      // exact at read time for the in-flight residue that lands later.
+      const exact = linkedCodexExactUsage(linkedByAttempt.get(String(attempt.id)) ?? null)
+      await insertSpendOutcomeFloor(
+        db,
+        {
+          providerAttemptId: String(attempt.id),
+          invocationId: row.id,
+          recipeNamespace: String(attempt.recipe_namespace),
+          recipeName: String(attempt.recipe_name),
+          attemptGeneration: Number(attempt.attempt_generation),
+          attemptIndex: Number(attempt.attempt_index),
+          targetRef: String(attempt.target_ref),
+          hostRef: null,
+          provider: String(attempt.provider),
+          model: String(attempt.model),
+          credentialSlot: String(attempt.credential_slot),
+          reason: 'stale_lease',
+          // The sweeper never ingests a usage_events row.
+          usageRequestId: null,
+        },
+        exact ? { outcome: 'exact', ...exact } : spendFloor('unknown')
       )
     }
     await db.query(

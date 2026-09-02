@@ -1,11 +1,19 @@
-import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import type { DbClient } from '../db.js'
 import {
   type LlmProviderAttemptRow,
   isLinkedCodexInFlightWithoutUsage,
-  isLinkedCodexUsageReady,
+  linkedCodexExactUsage,
   loadLlmProviderAttemptBySdkAttemptId,
 } from './llmProviderAttemptStore.js'
+import {
+  type PersistableSpend,
+  type SpendOutcomeRow,
+  insertSpendOutcomeFloor,
+  isOauthBrokerProvider,
+  loadSpendOutcomeRow,
+  settlePriorProviderAttemptFloors,
+  spendFloor,
+} from './pluginWorkloadSdkSpendLedger.js'
 import { withTraceIngestTransaction } from './tracing/pools.js'
 import { projectAcceptedUsageEvents } from './tracing/usageProjection.js'
 import { ingestUsageEventsInTransaction } from './usageEvents.js'
@@ -83,10 +91,6 @@ function requireNonEmpty(value: string, field: string): void {
   }
 }
 
-function isOauthBrokerProvider(provider: string): boolean {
-  return isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker'
-}
-
 function validateUsageFields(usage: PromptBridgeFinalizationUsage): void {
   requireNonEmpty(usage.callerRef, 'usage.callerRef')
   if (!Number.isInteger(usage.attemptCount) || usage.attemptCount < 1 || usage.attemptCount > 4) {
@@ -159,22 +163,40 @@ function validateInput(input: PromptBridgeFinalizationInput): void {
   }
 }
 
-function resolvePromptBridgeOutcome(
+/**
+ * The floor this finalization may freeze. A usage-ready Codex row always wins
+ * for an oauth-broker attempt regardless of the status the host declared
+ * (Addendum A.4 "best-floor writers"): the subscription was already billed and
+ * the exact token pair is the strongest fact available at write time.
+ */
+function resolvePersistableSpend(
   status: PromptBridgeFinalizationStatus,
   oauthBroker: boolean,
   linked: Pick<
     LlmProviderAttemptRow,
     'status' | 'outcome' | 'usageInputTokens' | 'usageOutputTokens'
-  > | null
-): 'exact' | 'unknown' | 'not_executed' {
+  > | null,
+  usage: PromptBridgeFinalizationUsage | undefined
+): PersistableSpend {
   if (!oauthBroker) {
-    return status === 'complete' ? 'exact' : status === 'failed' ? 'not_executed' : 'unknown'
+    if (status === 'complete') {
+      // validateInput already guarantees this; the throw is a fail-loud guard,
+      // never a fallback that would fabricate a token pair.
+      if (!usage) {
+        throw new PromptBridgeFinalizationError(
+          'invalid_request',
+          'complete finalization requires exact usage',
+          400
+        )
+      }
+      return { outcome: 'exact', inputTokens: usage.inputTokens, outputTokens: usage.outputTokens }
+    }
+    return spendFloor(status === 'failed' ? 'not_executed' : 'unknown')
   }
-  if (status === 'complete' && linked && isLinkedCodexUsageReady(linked)) {
-    return 'exact'
-  }
-  if (status === 'failed' && !linked) return 'not_executed'
-  return 'unknown'
+  const exact = linkedCodexExactUsage(linked)
+  if (exact) return { outcome: 'exact', ...exact }
+  if (status === 'failed' && !linked) return spendFloor('not_executed')
+  return spendFloor('unknown')
 }
 
 function replayOutcomeCompatible(
@@ -192,28 +214,12 @@ function replayOutcomeCompatible(
         Number(row.output_tokens) === input.usage?.outputTokens)
     )
   }
-  if (input.status === 'complete') return row.outcome === 'exact' || row.outcome === 'unknown'
-  if (input.status === 'failed') {
-    return row.outcome === 'not_executed' || row.outcome === 'unknown'
-  }
-  return row.outcome === 'unknown'
-}
-
-type SpendOutcomeRow = {
-  provider_attempt_id: string
-  invocation_id: string
-  recipe_namespace: string
-  recipe_name: string
-  attempt_generation: number | string
-  attempt_index: number | string
-  target_ref: string
-  host_ref: string | null
-  provider: string
-  model: string
-  credential_slot: string
-  outcome: 'exact' | 'unknown' | 'not_executed'
-  input_tokens: number | string | null
-  output_tokens: number | string | null
+  // The host is not the source of truth for oauth-broker spend (Codex is), so
+  // its declared status cannot contradict an `exact` floor. Only a
+  // `not_executed` floor — which proves no Codex row ever existed — can
+  // contradict a host that claims the provider ran.
+  if (input.status === 'failed') return true
+  return row.outcome === 'exact' || row.outcome === 'unknown'
 }
 
 function spendBindingMatches(row: SpendOutcomeRow, input: PromptBridgeFinalizationInput): boolean {
@@ -231,66 +237,91 @@ function spendBindingMatches(row: SpendOutcomeRow, input: PromptBridgeFinalizati
   )
 }
 
-async function upgradeUnknownOauthSpendToExact(
-  db: DbClient,
-  existing: SpendOutcomeRow,
-  input: PromptBridgeFinalizationInput,
-  linked: Pick<LlmProviderAttemptRow, 'usageInputTokens' | 'usageOutputTokens'>
-): Promise<PromptBridgeFinalizationResult> {
-  assertPersistedAuthModeCredentialRules(existing.provider, input)
-  if (!spendBindingMatches(existing, input)) {
-    throw new PromptBridgeFinalizationError(
-      'conflict',
-      'provider attempt was finalized with a different immutable outcome',
-      409
-    )
-  }
-  const updated = await db.query(
-    `UPDATE plugin_workload_sdk_spend_outcomes
-        SET outcome = 'exact',
-            input_tokens = $2,
-            output_tokens = $3,
-            usage_request_id = COALESCE(usage_request_id, $1)
-      WHERE provider_attempt_id = $1
-        AND outcome = 'unknown'
-      RETURNING provider_attempt_id`,
-    [input.providerAttemptId, linked.usageInputTokens, linked.usageOutputTokens]
-  )
-  if ((updated.rowCount ?? updated.rows.length) !== 1) {
-    const raced = await db.query(
-      `SELECT provider_attempt_id, invocation_id, recipe_namespace, recipe_name,
-              attempt_generation, attempt_index, target_ref, host_ref, provider,
-              model, credential_slot, outcome, input_tokens, output_tokens
-         FROM plugin_workload_sdk_spend_outcomes
-        WHERE provider_attempt_id = $1`,
-      [input.providerAttemptId]
-    )
-    const existingOutcome = raced.rows[0] as SpendOutcomeRow | undefined
-    if (!existingOutcome) {
-      throw new PromptBridgeFinalizationError(
-        'conflict',
-        'provider attempt outcome was concurrently finalized but is not readable',
-        409
-      )
-    }
-    return mapExistingOutcome(existingOutcome, input)
-  }
-  return {
-    invocationId: input.invocationId,
-    providerAttemptId: input.providerAttemptId,
-    status: input.status,
-    outcome: 'exact',
-    idempotent: false,
-    usageAccepted: false,
-  }
+export type SpendOutcomeView = {
+  /** The immutable floor exactly as it sits in the table. */
+  persisted: SpendOutcomeRow
+  /** Linked Codex row, or null for a non-oauth provider / no link. */
+  linked: LlmProviderAttemptRow | null
+  /** Truth derived from the floor plus the linked Codex usage. */
+  effective: PersistableSpend
 }
 
-function mapExistingOutcome(
-  row: SpendOutcomeRow,
+/**
+ * Derive the effective spend from the immutable floor plus the linked Codex
+ * row. Only `unknown` is derivable: `exact` and `not_executed` are terminal
+ * facts. The derivation is monotone — a floor can only ever be improved by a
+ * Codex row that has already landed — so a verdict taken over the floor stays
+ * stable across replays while the reported outcome catches up.
+ */
+export function deriveEffectiveSpend(
+  persisted: Pick<SpendOutcomeRow, 'provider' | 'outcome' | 'input_tokens' | 'output_tokens'>,
+  linked: Pick<LlmProviderAttemptRow, 'outcome' | 'usageInputTokens' | 'usageOutputTokens'> | null
+): PersistableSpend {
+  if (persisted.outcome === 'exact') {
+    if (persisted.input_tokens == null || persisted.output_tokens == null) {
+      // token_pair_check makes this impossible; if it happens the table is
+      // corrupt and silently reporting `exact` with no tokens would undercount.
+      throw new Error('exact spend outcome persisted without a token pair')
+    }
+    return {
+      outcome: 'exact',
+      inputTokens: Number(persisted.input_tokens),
+      outputTokens: Number(persisted.output_tokens),
+    }
+  }
+  if (persisted.outcome === 'unknown' && isOauthBrokerProvider(persisted.provider)) {
+    const exact = linkedCodexExactUsage(linked)
+    if (exact) return { outcome: 'exact', ...exact }
+  }
+  return spendFloor(persisted.outcome)
+}
+
+/** The single reader of the spend ledger. */
+export async function loadSpendOutcome(
+  db: DbClient,
+  providerAttemptId: string
+): Promise<SpendOutcomeView | null> {
+  const persisted = await loadSpendOutcomeRow(db, providerAttemptId)
+  if (!persisted) return null
+  const linked = isOauthBrokerProvider(persisted.provider)
+    ? await loadLlmProviderAttemptBySdkAttemptId(db, providerAttemptId)
+    : null
+  return { persisted, linked, effective: deriveEffectiveSpend(persisted, linked) }
+}
+
+/**
+ * The only idempotent return point. Purely read-only: the floor is never
+ * rewritten, so a replay can neither double-bill nor invalidate a verdict it
+ * already received.
+ */
+function replayExistingOutcome(
+  view: SpendOutcomeView,
   input: PromptBridgeFinalizationInput
 ): PromptBridgeFinalizationResult {
-  assertPersistedAuthModeCredentialRules(row.provider, input)
-  if (!spendBindingMatches(row, input) || !replayOutcomeCompatible(input, row)) {
+  const { persisted, linked } = view
+  assertPersistedAuthModeCredentialRules(persisted.provider, input)
+  // N-07: re-anchoring to the JWT's recipe binding runs BEFORE any state
+  // oracle, so a foreign caller cannot learn ledger_pending/exact/unknown.
+  if (!spendBindingMatches(persisted, input)) {
+    throw new PromptBridgeFinalizationError(
+      'conflict',
+      'provider attempt was finalized with a different immutable outcome',
+      409
+    )
+  }
+  // Decided from the floor plus the linked Codex row, never from the
+  // caller-chosen finalize status.
+  if (persisted.outcome === 'unknown' && linked && isLinkedCodexInFlightWithoutUsage(linked)) {
+    throw new PromptBridgeFinalizationError(
+      'ledger_pending',
+      'linked Codex attempt has not finalized usage yet',
+      409,
+      true
+    )
+  }
+  // N-05: judged against the immutable floor, so the verdict cannot change
+  // between two replays of the same request.
+  if (!replayOutcomeCompatible(input, persisted)) {
     throw new PromptBridgeFinalizationError(
       'conflict',
       'provider attempt was finalized with a different immutable outcome',
@@ -301,18 +332,24 @@ function mapExistingOutcome(
     invocationId: input.invocationId,
     providerAttemptId: input.providerAttemptId,
     status: input.status,
-    outcome: row.outcome,
+    outcome: view.effective.outcome,
     idempotent: true,
-    usageAccepted: row.outcome === 'exact' && !isOauthBrokerProvider(row.provider),
+    usageAccepted: persisted.outcome === 'exact' && !isOauthBrokerProvider(persisted.provider),
   }
 }
 
 /**
  * Finalize one physical promptBridge attempt and its logical invocation in a
  * single trace-ingest transaction. Exact usage is inserted through the same
- * receipt binder as the normal usage endpoint; unknown provider spend and
- * proven no-execution failures get immutable ledger rows instead of
- * disappearing behind a public provider_unavailable response.
+ * receipt binder as the normal usage endpoint.
+ *
+ * The spend row written here is an immutable FLOOR — the least spend provable
+ * at write time — and is never updated. For an oauth-broker attempt the
+ * effective outcome is derived at read time from the linked
+ * `llm_provider_attempts` usage, so an `unknown` floor whose Codex usage lands
+ * later reports `exact` without any write. A `failed`/`provider_unavailable`
+ * finalization can therefore legitimately report `exact`: the host's own
+ * account of the attempt is preserved in the row's `reason`.
  */
 export async function finalizePromptBridge(
   input: PromptBridgeFinalizationInput
@@ -330,51 +367,8 @@ export async function finalizePromptBridgeInTransaction(
   const recipeLock = `plugin_workload_sdk:${input.recipeNamespace}/${input.recipeName}`
   await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [recipeLock])
 
-  const existingResult = await db.query(
-    `SELECT provider_attempt_id, invocation_id, recipe_namespace, recipe_name,
-            attempt_generation, attempt_index, target_ref, provider, model,
-            credential_slot, host_ref, outcome, input_tokens, output_tokens
-       FROM plugin_workload_sdk_spend_outcomes
-      WHERE provider_attempt_id = $1`,
-    [input.providerAttemptId]
-  )
-  const existing = existingResult.rows[0] as SpendOutcomeRow | undefined
-  if (existing) {
-    if (isOauthBrokerProvider(existing.provider)) {
-      const linkedCodex = await loadLlmProviderAttemptBySdkAttemptId(db, input.providerAttemptId)
-      // Upgrade and ledger_pending are decided from persisted spend + the
-      // linked Codex row, not from the caller-chosen finalize status.
-      if (
-        existing.outcome === 'unknown' &&
-        linkedCodex &&
-        isLinkedCodexInFlightWithoutUsage(linkedCodex)
-      ) {
-        throw new PromptBridgeFinalizationError(
-          'ledger_pending',
-          'linked Codex attempt has not finalized usage yet',
-          409,
-          true
-        )
-      }
-      if (existing.outcome === 'unknown' && linkedCodex && isLinkedCodexUsageReady(linkedCodex)) {
-        return upgradeUnknownOauthSpendToExact(db, existing, input, linkedCodex)
-      }
-      if (
-        existing.outcome === 'exact' &&
-        linkedCodex &&
-        isLinkedCodexUsageReady(linkedCodex) &&
-        (Number(existing.input_tokens) !== Number(linkedCodex.usageInputTokens) ||
-          Number(existing.output_tokens) !== Number(linkedCodex.usageOutputTokens))
-      ) {
-        throw new PromptBridgeFinalizationError(
-          'conflict',
-          'provider attempt was finalized with a different immutable outcome',
-          409
-        )
-      }
-    }
-    return mapExistingOutcome(existing, input)
-  }
+  const existing = await loadSpendOutcome(db, input.providerAttemptId)
+  if (existing) return replayExistingOutcome(existing, input)
 
   const invocationResult = await db.query(
     `SELECT id, recipe_namespace, recipe_name, method, status, attempt_generation
@@ -446,11 +440,10 @@ export async function finalizePromptBridgeInTransaction(
   }
   assertPersistedAuthModeCredentialRules(String(providerAttempt.provider), input)
 
-  const expectedStatus = input.status
   const currentInvocationStatus = String(invocation.status)
   const currentReceiptStatus = String(receipt.status)
   const currentProviderStatus = String(providerAttempt.status)
-  const compatibleStatuses = new Set(['in_progress', expectedStatus])
+  const compatibleStatuses = new Set(['in_progress', input.status])
   // SDK-only success is finalized atomically by this service, so the normal
   // path leaves the physical attempt in_progress until usage/outcome commit.
   // Accept terminal provider states on the unknown path as a recovery fence:
@@ -490,7 +483,20 @@ export async function finalizePromptBridgeInTransaction(
       )
     }
   }
-  const outcome = resolvePromptBridgeOutcome(input.status, oauthBroker, linkedCodex)
+  const spend = resolvePersistableSpend(input.status, oauthBroker, linkedCodex, input.usage)
+  // N-17: only point a usage_request_id at a usage_events row that is really
+  // written. Codex spend is ingested by the proxy finalize, not here.
+  const willIngestUsage = input.status === 'complete' && !oauthBroker
+  // Codex already billed this attempt, so closing the invocation `failed`
+  // would leave it revivable (reviveFailedInvocation gates only on
+  // status = 'failed') and the same idempotency key could launch a second
+  // billable Codex call. provider_unavailable is the non-revivable terminal
+  // state for exactly this situation. The RESULT still echoes input.status:
+  // mcp-host's controlApiClient requires result.status === body.status.
+  const expectedStatus: PromptBridgeFinalizationStatus =
+    oauthBroker && spend.outcome === 'exact' && input.status === 'failed'
+      ? 'provider_unavailable'
+      : input.status
   let usageAccepted = false
 
   // Promote the immutable physical and attempt receipts before exact usage is
@@ -503,7 +509,7 @@ export async function finalizePromptBridgeInTransaction(
             lease_expires_at = NULL,
             usage_request_id = CASE WHEN $3 THEN $1 ELSE usage_request_id END
       WHERE id = $1`,
-    [input.providerAttemptId, expectedStatus, input.status === 'complete']
+    [input.providerAttemptId, expectedStatus, willIngestUsage]
   )
   await db.query(
     `UPDATE plugin_workload_sdk_invocation_attempts
@@ -512,7 +518,7 @@ export async function finalizePromptBridgeInTransaction(
     [input.invocationId, expectedStatus, input.attemptGeneration]
   )
 
-  if (input.status === 'complete' && !oauthBroker) {
+  if (willIngestUsage) {
     const usage = input.usage!
     const event = {
       request_id: input.providerAttemptId,
@@ -579,65 +585,61 @@ export async function finalizePromptBridgeInTransaction(
       WHERE id = $1 AND attempt_generation = $3`,
     [input.invocationId, expectedStatus, input.attemptGeneration]
   )
-  const spendOutcomeInsert = await db.query(
-    `INSERT INTO plugin_workload_sdk_spend_outcomes
-       (provider_attempt_id, invocation_id, recipe_namespace, recipe_name,
-        attempt_generation, attempt_index, target_ref, host_ref, provider, model,
-        credential_slot, outcome, reason, input_tokens, output_tokens, usage_request_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-     ON CONFLICT (provider_attempt_id) DO NOTHING
-     RETURNING provider_attempt_id, invocation_id, recipe_namespace, recipe_name,
-               attempt_generation, attempt_index, target_ref, host_ref, provider,
-               model, credential_slot, outcome, input_tokens, output_tokens`,
-    [
-      input.providerAttemptId,
-      input.invocationId,
-      input.recipeNamespace,
-      input.recipeName,
-      input.attemptGeneration,
-      input.providerAttemptIndex,
-      input.target.targetRef,
-      input.hostRef,
-      input.target.provider,
-      input.target.model,
-      input.target.credentialSlot,
-      outcome,
-      input.reason,
-      oauthBroker ? (linkedCodex?.usageInputTokens ?? null) : (input.usage?.inputTokens ?? null),
-      oauthBroker ? (linkedCodex?.usageOutputTokens ?? null) : (input.usage?.outputTokens ?? null),
-      input.status === 'complete' ? input.providerAttemptId : null,
-    ]
+  const insertedFloor = await insertSpendOutcomeFloor(
+    db,
+    {
+      providerAttemptId: input.providerAttemptId,
+      invocationId: input.invocationId,
+      recipeNamespace: input.recipeNamespace,
+      recipeName: input.recipeName,
+      attemptGeneration: input.attemptGeneration,
+      attemptIndex: input.providerAttemptIndex,
+      targetRef: input.target.targetRef,
+      hostRef: input.hostRef,
+      provider: input.target.provider,
+      model: input.target.model,
+      credentialSlot: input.target.credentialSlot,
+      reason: input.reason,
+      usageRequestId: willIngestUsage ? input.providerAttemptId : null,
+    },
+    spend
   )
+
+  // RP-539-003: a successful failover finalizes only its winner, so the
+  // attempts it displaced would never reach this endpoint. They are terminal
+  // and immutable by the reservation fence, so they can be discovered and
+  // settled here without trusting the host to declare them. Index 1 has no
+  // predecessors, so the query is skipped rather than run over an empty range.
+  if (input.providerAttemptIndex > 1) {
+    await settlePriorProviderAttemptFloors(db, {
+      invocationId: input.invocationId,
+      attemptGeneration: input.attemptGeneration,
+      attemptIndex: input.providerAttemptIndex,
+      hostRef: input.hostRef,
+    })
+  }
 
   // The stale-lease sweeper can win the physical-attempt race between our
   // initial ledger lookup and this insert. Treat an identical existing outcome
   // as an idempotent replay and surface a stable conflict for incompatible
   // accounting, never a raw unique_violation/500.
-  if ((spendOutcomeInsert.rowCount ?? spendOutcomeInsert.rows.length) === 0) {
-    const raced = await db.query(
-      `SELECT provider_attempt_id, invocation_id, recipe_namespace, recipe_name,
-              attempt_generation, attempt_index, target_ref, host_ref, provider,
-              model, credential_slot, outcome, input_tokens, output_tokens
-         FROM plugin_workload_sdk_spend_outcomes
-        WHERE provider_attempt_id = $1`,
-      [input.providerAttemptId]
-    )
-    const existingOutcome = raced.rows[0] as SpendOutcomeRow | undefined
-    if (!existingOutcome) {
+  if (!insertedFloor) {
+    const raced = await loadSpendOutcome(db, input.providerAttemptId)
+    if (!raced) {
       throw new PromptBridgeFinalizationError(
         'conflict',
         'provider attempt outcome was concurrently finalized but is not readable',
         409
       )
     }
-    return mapExistingOutcome(existingOutcome, input)
+    return replayExistingOutcome(raced, input)
   }
 
   return {
     invocationId: input.invocationId,
     providerAttemptId: input.providerAttemptId,
     status: input.status,
-    outcome,
+    outcome: deriveEffectiveSpend(insertedFloor, linkedCodex).outcome,
     idempotent: false,
     usageAccepted,
   }

@@ -42,6 +42,21 @@ export function isLinkedCodexUsageReady(
 }
 
 /**
+ * Exact token pair of a usage-ready Codex row, or null. Shared by both SDK
+ * spend-floor writers (finalize and the stale-lease sweeper) so a ready Codex
+ * row always freezes the same `exact` floor. Never fabricates 0/0: the null
+ * re-check narrows the type without a cast and keeps a partially reported
+ * usage frame out of the ledger.
+ */
+export function linkedCodexExactUsage(
+  row: Pick<LlmProviderAttemptRow, 'outcome' | 'usageInputTokens' | 'usageOutputTokens'> | null
+): { inputTokens: number; outputTokens: number } | null {
+  if (!row || !isLinkedCodexUsageReady(row)) return null
+  if (row.usageInputTokens == null || row.usageOutputTokens == null) return null
+  return { inputTokens: row.usageInputTokens, outputTokens: row.usageOutputTokens }
+}
+
+/**
  * How long an authorized/redeemed Codex row may block SDK spend freeze.
  * After this, usage is treated as never arriving so the sweeper can close
  * the invocation. `finalized` is always terminal: ingest will not add tokens.
@@ -69,7 +84,16 @@ export function isLinkedCodexInFlightWithoutUsage(
       : row.createdAt
         ? Date.parse(String(row.createdAt))
         : Number.NaN
-  if (Number.isFinite(created) && nowMs - created > CODEX_IN_FLIGHT_USAGE_GRACE_MS) {
+  if (!Number.isFinite(created)) {
+    // N-15: an unreadable created_at used to default to "still in flight",
+    // which wedges the invocation behind ledger_pending forever and silently
+    // hides a corrupt/absent timestamp. The grace window is undecidable here,
+    // so fail loudly instead of guessing.
+    throw new Error(
+      'llm_provider_attempts.created_at is missing or unparseable; the Codex in-flight grace cannot be evaluated'
+    )
+  }
+  if (nowMs - created > CODEX_IN_FLIGHT_USAGE_GRACE_MS) {
     return false
   }
   return true
