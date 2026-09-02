@@ -127,16 +127,27 @@ function sameMcpServerSet(left: readonly string[], right: readonly string[]): bo
   return true
 }
 
-function contextReplaceIsNoOp(
+function authoredContextLabels(
   explicitContext: boolean,
+  recipeName: string
+): Record<string, string> {
+  return {
+    [CONTEXT_MANAGED_BY_LABEL]: CONTEXT_MANAGED_BY_WRC,
+    ...(!explicitContext ? { [CONTEXT_RECIPE_LABEL]: recipeName } : {}),
+  }
+}
+
+function contextReplaceIsNoOp(
   existingLabels: Record<string, string> | undefined,
   existingServers: readonly string[],
   mergedServers: readonly string[],
-  recipeName: string
+  authoredLabels: Record<string, string>
 ): boolean {
   if (!sameMcpServerSet(existingServers, mergedServers)) return false
-  if ((existingLabels ?? {})[CONTEXT_MANAGED_BY_LABEL] !== CONTEXT_MANAGED_BY_WRC) return false
-  if (!explicitContext && (existingLabels ?? {})[CONTEXT_RECIPE_LABEL] !== recipeName) return false
+  const labels = existingLabels ?? {}
+  for (const [key, value] of Object.entries(authoredLabels)) {
+    if (labels[key] !== value) return false
+  }
   return true
 }
 
@@ -710,8 +721,8 @@ export async function ensureRecipeContext(
       namespace,
       ...(!explicitContext && sameNsAsRecipe && { ownerReferences: [ownerReference] }),
       labels: {
-        'clerum.io/recipe': recipeName,
-        'clerum.io/managed-by': 'wrc',
+        [CONTEXT_RECIPE_LABEL]: recipeName,
+        [CONTEXT_MANAGED_BY_LABEL]: CONTEXT_MANAGED_BY_WRC,
       },
     },
     spec: {
@@ -747,21 +758,9 @@ export async function ensureRecipeContext(
       // Semantic post-merge equality. Do not stamp clerum.io/spec-hash on a
       // shared Context: N recipe writers would flap the annotation the same
       // way clerum.io/recipe already flaps resourceVersion (#460 Phase 1).
-      if (
-        contextReplaceIsNoOp(
-          explicitContext,
-          existingLabels,
-          existingServers,
-          mergedServers,
-          recipeName
-        )
-      ) {
+      const authoredLabels = authoredContextLabels(explicitContext, recipeName)
+      if (contextReplaceIsNoOp(existingLabels, existingServers, mergedServers, authoredLabels)) {
         return { wrote: false }
-      }
-
-      const authoredLabels: Record<string, string> = {
-        [CONTEXT_MANAGED_BY_LABEL]: CONTEXT_MANAGED_BY_WRC,
-        ...(!explicitContext ? { [CONTEXT_RECIPE_LABEL]: recipeName } : {}),
       }
 
       try {

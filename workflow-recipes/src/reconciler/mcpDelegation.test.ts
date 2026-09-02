@@ -1339,6 +1339,41 @@ describe('ensureRecipeContext', () => {
     expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
+  it('writes a private Context when the recipe label does not match', async () => {
+    const mockCustomApi = {
+      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: {
+          resourceVersion: '3',
+          labels: { 'clerum.io/recipe': 'other-recipe', 'clerum.io/managed-by': 'wrc' },
+        },
+        spec: { contextId: 'wf-test-recipe', mcpServers: ['server-a', 'server-b'] },
+      }),
+      replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+    }
+    const deps: DelegationDeps = {
+      customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
+      coreApi: {} as DelegationDeps['coreApi'],
+    }
+
+    await ensureRecipeContext(deps, 'test-recipe', ['server-a', 'server-b'], 'mcp-server', ownerRef)
+
+    const replaceCall = mockCustomApi.replaceNamespacedCustomObject.mock.calls[0]?.[0]
+    expect(replaceCall).toEqual(
+      expect.objectContaining({
+        name: 'wf-test-recipe',
+        body: expect.objectContaining({
+          metadata: expect.objectContaining({
+            labels: expect.objectContaining({
+              'clerum.io/recipe': 'test-recipe',
+              'clerum.io/managed-by': 'wrc',
+            }),
+          }),
+        }),
+      })
+    )
+  })
+
   it('H04c — re-throws non-409 errors', async () => {
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockRejectedValue(new Error('API error')),
