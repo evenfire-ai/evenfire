@@ -12,6 +12,7 @@ import {
   createMcpSecret,
   createMcpServer,
   deleteMcpSecret,
+  deleteMcpServer,
   getAgentTeams,
   getAgentUsers,
   getContext,
@@ -587,7 +588,27 @@ export function CreateMcpServerForm({
         selectedContextRefs
       )
       if (oauthScopeError) {
-        setError(oauthScopeError)
+        const rollbackFailures: string[] = []
+        try {
+          await deleteMcpServer(name)
+        } catch {
+          rollbackFailures.push('connector')
+        }
+        if (secretCreated) {
+          try {
+            await deleteMcpSecret(envSecretName.trim())
+            secretCreated = false
+          } catch {
+            rollbackFailures.push('Secret')
+          }
+        }
+        setError(
+          rollbackFailures.length === 0
+            ? oauthScopeError
+            : `${oauthScopeError} Automatic cleanup failed for the ${rollbackFailures.join(
+                ' and '
+              )}; remove it before retrying.`
+        )
         return
       }
 

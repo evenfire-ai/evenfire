@@ -16,6 +16,7 @@ vi.mock('../../lib/api', async () => {
     createMcpServer: vi.fn().mockResolvedValue({ metadata: { name: 'test-server' } }),
     createMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
     deleteMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
+    deleteMcpServer: vi.fn().mockResolvedValue({ name: 'test-server' }),
     getAgentTeams: vi.fn().mockResolvedValue({ items: [] }),
     getAgentUsers: vi.fn().mockResolvedValue({ items: [] }),
     // The form no longer reads the context list; kept as a spy to lock that contract.
@@ -379,7 +380,7 @@ describe('CreateMcpServerForm — submit', () => {
     await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1), { timeout: 1500 })
   })
 
-  it('does not grant a returned context-scoped OAuth connector across Agent scopes', async () => {
+  it('rolls back a returned context-scoped OAuth connector and Secret across Agent scopes', async () => {
     vi.mocked(api.getHosts).mockResolvedValueOnce({
       items: [
         { metadata: { name: 'agent-alpha' }, spec: { contextRef: 'ctx-alpha' } },
@@ -398,13 +399,28 @@ describe('CreateMcpServerForm — submit', () => {
     goToAccessStep()
     await selectAgents('agent-alpha', 'agent-beta')
     continueToSecretsStep()
-    chooseNoCredentials()
+    chooseNewSecret()
+    fireEvent.change(screen.getByPlaceholderText('brave-search-credentials'), {
+      target: { value: 'shared-drive-oauth' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Add Key Mapping' }))
+    fireEvent.change(screen.getByPlaceholderText('api-key'), {
+      target: { value: 'api-key' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('BRAVE_API_KEY'), {
+      target: { value: 'DRIVE_API_KEY' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('sk-...'), {
+      target: { value: 'test-secret' },
+    })
 
     fireEvent.click(screen.getByRole('button', { name: 'Create connector' }))
 
     expect(
       await screen.findByText(/shared OAuth identity.*original access scope/i)
     ).toBeInTheDocument()
+    expect(api.deleteMcpServer).toHaveBeenCalledWith('shared-drive')
+    expect(api.deleteMcpSecret).toHaveBeenCalledWith('shared-drive-oauth')
     expect(api.getContext).not.toHaveBeenCalled()
     expect(api.updateContext).not.toHaveBeenCalled()
   })
