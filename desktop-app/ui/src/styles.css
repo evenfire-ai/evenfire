@@ -100,25 +100,63 @@ h3 {
 
 .global-search {
   position: relative;
-  width: var(--app-notification-drawer-width);
-  min-width: 220px;
+  /* Collapsed to just the magnifier until focused, then expands to the full
+     search width. The expanded size is carried in custom props so each
+     breakpoint retunes it without re-declaring the collapsed state. Collapsed
+     width matches the 40px input height so the icon sits in a square. */
+  --global-search-expanded: var(--app-notification-drawer-width);
+  --global-search-expanded-min: 220px;
+  width: 40px;
+  min-width: 40px;
   max-width: 100%;
+  /* Collapsed, the 40px pill sits one gap from the notification bell, whose
+     hover fill would otherwise crowd it — add a gap's worth of separation,
+     dropped back to 0 once expanded (the wide field already reads clear of it). */
+  margin-right: var(--space-2);
+  transition:
+    width var(--motion-medium),
+    min-width var(--motion-medium),
+    margin-right var(--motion-medium);
 }
 
+/* Stay expanded whenever the field is focused OR the results are open, so the
+   collapse is tied to "closed", not merely "unfocused": tabbing out while the
+   dropdown is still open must not hide the typed query behind the 40px box. */
+.global-search:focus-within,
+.global-search.is-open {
+  width: var(--global-search-expanded);
+  min-width: var(--global-search-expanded-min);
+  margin-right: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .global-search {
+    transition: none;
+  }
+}
+
+/* Collapsed: the glyph fills the square and is centered both axes, so it reads
+   as a balanced icon button instead of a small mark with dead space beside it. */
 .global-search::before {
   content: '⌕';
   position: absolute;
-  left: 12px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 16px;
-  height: 16px;
+  inset: 0;
+  display: grid;
+  place-items: center;
   background-image: none;
   color: var(--text-dim);
-  font-size: var(--font-size-lg);
+  font-size: var(--font-size-xl);
   font-weight: 600;
   line-height: 1;
   pointer-events: none;
+}
+
+/* Expanded: pin the glyph to the left edge (ahead of the input's 40px left pad)
+   and drop back to the in-field size so it aligns with the typed text. */
+.global-search:focus-within::before,
+.global-search.is-open::before {
+  inset: 0 auto 0 12px;
+  font-size: var(--font-size-lg);
 }
 
 .search-input {
@@ -1034,7 +1072,7 @@ h3 {
   width: 328px;
   min-width: 328px;
   max-width: 328px;
-  padding: var(--space-2);
+  padding: 0 var(--space-2) var(--space-2);
   display: flex;
   flex-direction: column;
   background: var(--sidebar-gradient);
@@ -1130,7 +1168,7 @@ h3 {
   align-items: center;
   gap: var(--space-2-5);
   padding: var(--sidebar-logo-pad-top) var(--space-1) var(--space-2);
-  margin-bottom: var(--space-2);
+  margin-bottom: var(--space-1);
   min-height: 56px;
 }
 
@@ -2207,8 +2245,18 @@ h3 {
   overflow: hidden;
   min-height: 0;
   height: 100vh;
-  padding: var(--space-4) var(--space-4) 0 calc(var(--space-4) / 2);
+  /* Top pad clears the absolute top-bar: its space-2 top offset + the header's
+     own height + a bit of gap below it. space-2 * 5 is the smallest step of the
+     spacing scale that covers that stack; the other three sides are just space-2. */
+  padding: calc(var(--space-2) * 5) var(--space-2) var(--space-2) var(--space-2);
   gap: 0;
+}
+
+/* The absolute top-bar aligns to the panel's own space-2 edges here (the panel
+   owns the extra top breathing room via its padding, not the header). */
+.content-panel.content-panel--agent-chat > .top-bar {
+  top: var(--space-2);
+  right: var(--space-2);
 }
 
 .content-panel.content-panel--agent-chat > .agent-page {
@@ -10784,6 +10832,12 @@ pre {
     grid-template-rows: auto minmax(0, 1fr);
   }
 
+  /* Sidebar is gone and the aside spans the full top, so the extra top
+     breathing room (space-2 * 5) is no longer needed — drop it to space-2. */
+  .content-panel.content-panel--agent-chat {
+    padding-top: var(--space-2);
+  }
+
   .left-nav {
     position: sticky;
     top: 0;
@@ -10793,6 +10847,7 @@ pre {
     height: auto;
     min-height: 0;
     max-height: none;
+    padding-top: var(--space-2);
     border-right: 0;
     border-bottom: 1px solid rgba(var(--edge-rgb), 0.38);
     overflow: visible;
@@ -10981,9 +11036,21 @@ pre {
   }
 
   .global-search {
+    /* Header is a full-width row here — the search fills it and never
+       collapses; expanded props match so :focus-within keeps it at 100%. */
     width: 100%;
     min-width: 0;
     max-width: none;
+    margin-right: 0;
+    --global-search-expanded: 100%;
+    --global-search-expanded-min: 0;
+  }
+
+  /* Never collapses here, so the icon stays left-pinned even when unfocused —
+     without this the centered collapsed-state glyph floats mid-bar. */
+  .global-search::before {
+    inset: 0 auto 0 12px;
+    font-size: var(--font-size-lg);
   }
 
   .page-header,
@@ -12642,7 +12709,7 @@ pre {
 }
 
 .content-panel:has(.sandbox-ui-mounted-header) {
-  padding: var(--space-4) 0 0;
+  padding: var(--space-2) 0 0;
   align-content: stretch;
 }
 
@@ -12669,7 +12736,7 @@ pre {
    drawer-open states are mutually exclusive (see App.tsx notificationTrayUsesDrawer),
    so this higher-specificity override is unambiguous. */
 .content-panel.content-panel--chat-drawer-open {
-  --app-header-utilities-width: calc(var(--chat-drawer-width) + var(--space-2) + 36px);
+  --app-header-utilities-width: calc(var(--chat-drawer-width) + var(--space-2) + 16px);
 }
 
 .content-panel.content-panel--chat-drawer-open > .page:has(.sandbox-ui-mounted-header) {
@@ -12961,8 +13028,8 @@ pre {
   }
 
   .global-search {
-    width: clamp(160px, 32vw, var(--app-notification-drawer-width));
-    min-width: 160px;
+    --global-search-expanded: clamp(160px, 32vw, var(--app-notification-drawer-width));
+    --global-search-expanded-min: 160px;
   }
 
   .apps-page-header {
@@ -15633,7 +15700,6 @@ pre {
   border-color: var(--chat-view-selected-border);
   border-style: solid;
   border-width: 0 1px 1px;
-  border-radius: 0 var(--radius-sm) 0 0;
   display: flex;
   flex: 1 1 0;
   flex-direction: column;
