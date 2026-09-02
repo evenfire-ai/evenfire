@@ -118,11 +118,19 @@ export function projectCodexRecipeVerdict(input: {
   } as const
 
   if (projection.eligibility !== 'eligible') {
-    if (projection.eligibility === 'uncertain') {
-      // A recipe stuck in awaiting_policy because of a stray parent label or an
-      // unreadable ConfigMap must be visible to an operator; this used to be a
-      // debug line, which is why the state was only ever found by reading code.
-      input.log?.warn('Codex verdict is undecidable; withholding scope and binding', {
+    // R5-B1 audit (R4): warn ONLY for a recipe that actually targets Codex, and
+    // only when the doubt is about provenance. An unreadable ConfigMap already
+    // produces three warns in `refreshCodexSnapshot`, and it makes EVERY recipe
+    // uncertain — including those with no Codex target — because the shared
+    // projection checks `snapshotError` before it checks whether the spec has
+    // any Codex target at all. Warning there buried the case this line exists
+    // to surface: a recipe wedged in awaiting_policy by a stray parent label.
+    if (
+      projection.eligibility === 'uncertain' &&
+      resolved.provenance !== 'authoritative' &&
+      input.hostAgent?.provider === CODEX_PROVIDER
+    ) {
+      input.log?.warn('Codex provenance is undecidable; withholding scope and binding', {
         recipeName: context.recipeName,
         connectionKey: context.connectionKey,
         provenanceReason: resolved.reason,

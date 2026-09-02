@@ -42,8 +42,7 @@ import { resolveEagerSdkMcpHostAgent, resolveMcpHostAgent } from './agentResolut
 import {
   CODEX_EXECUTE_SCOPE,
   type CodexCatalogSnapshot,
-  projectRecipeCodexExecution,
-  resolveCodexAuthoritativeSpec,
+  type CodexExecutionProjection,
 } from './codexExecutionProjection'
 import {
   type CodexAllowlistView,
@@ -68,7 +67,6 @@ import {
   ALLOWLIST_CONFIGMAP_NAMESPACE,
   CODEX_UNASSIGNED_CONNECTION_KEY,
   parseAllowedModelsSnapshot,
-  snapshotForAssignedCodexGrant,
   snapshotFromConfigMapError,
 } from './llmAllowedModelsSnapshot'
 import {
@@ -947,6 +945,7 @@ export class WorkflowReconciler {
         spec,
         runtime,
         awaitsTriggeredRun,
+        codexProjection,
         eagerSdkMcpHost
       ) =>
         this.applyWorkflowNetworkPolicies(
@@ -955,6 +954,7 @@ export class WorkflowReconciler {
           spec,
           runtime,
           awaitsTriggeredRun,
+          codexProjection,
           eagerSdkMcpHost
         ),
       ensureMcpHostHeadlessService: recipeName => this.ensureMcpHostHeadlessService(recipeName),
@@ -1008,10 +1008,7 @@ export class WorkflowReconciler {
     const context = this.resolveCodexContext(recipeUid, recipeName, runtimeScopeRecipeName)
     return projectCodexRecipeVerdict({
       ownSpec: spec,
-      context: {
-        ...context,
-        connectionKey: context.connectionKey ?? CODEX_UNASSIGNED_CONNECTION_KEY,
-      },
+      context,
       hostAgent: resolveEagerSdkMcpHostAgent(spec),
       view,
       log: this.log,
@@ -1456,7 +1453,19 @@ export class WorkflowReconciler {
   ): Promise<WorkflowReconcileResult> {
     const preflightError = this.validateWorkflowSpec(spec)
     if (preflightError) return { phase: 'failed', message: preflightError, workflowPhase: 'failed' }
-    await this.refreshCodexSnapshot()
+    // R5-B1 audit (R3): capture the allowlist refresh ONCE for this pass and
+    // compute the verdict from it. Every consumer below — eager configure, the
+    // run path's secrets, and the NetworkPolicy decision — reads this object
+    // instead of `this.codexView`, which a concurrent recipe can replace
+    // between two of them.
+    const codexView = await this.refreshCodexSnapshot()
+    const codexVerdict = this.codexVerdictFor(
+      spec,
+      recipeUid,
+      recipeName,
+      runtimeScopeRecipeName,
+      codexView
+    )
     const secretPreflightError = await this.validateSnippetSecretRefs(
       recipeName,
       spec,
@@ -1635,7 +1644,7 @@ export class WorkflowReconciler {
             recipeUid,
             recipeName,
             runtimeScopeRecipeName,
-            this.codexView
+            codexView
           )
           const eagerStatus = await this.pluginWorkloadSdkProvisioner.ensureEagerSdkMcpHost(
             recipeName,
@@ -1884,7 +1893,7 @@ export class WorkflowReconciler {
           runtimeScopeRecipeName,
           spec,
           recipeUid,
-          this.codexVerdictFor(spec, recipeUid, recipeName, runtimeScopeRecipeName, this.codexView)
+          codexVerdict
         )
       }
 
@@ -2125,7 +2134,8 @@ export class WorkflowReconciler {
         recipeUid,
         spec,
         runtime,
-        awaitsTriggeredRun
+        awaitsTriggeredRun,
+        codexVerdict.projection
       )
 
       // 6. Create Pods — mcp-host FIRST, then coordinator. If the coordinator
@@ -2897,6 +2907,12 @@ export class WorkflowReconciler {
     spec: WorkflowRecipeSpec,
     runtime: WorkflowRuntimePlan,
     awaitsTriggeredRun: boolean,
+    /**
+     * The pass's Codex projection. R5-B1 audit: recomputing it here read the
+     * live allowlist view after this method's own awaits, so a NetworkPolicy
+     * decision could rest on a different snapshot than the binding did.
+     */
+    codexProjection: CodexExecutionProjection,
     eagerSdkMcpHost = false
   ): Promise<k8s.V1NetworkPolicy[]> {
     const runtimeHttpEgressPolicyNames = this.runtimeHttpEgressPolicyNames(recipeName, spec)
@@ -2917,13 +2933,7 @@ export class WorkflowReconciler {
     // triggered. The artifact-reader/snippet-runner stay run-only.
     const mcpHostLaneLive = !awaitsTriggeredRun || eagerSdkMcpHost
     const includeMcpHost = runtime.network.includeMcpHost && mcpHostLaneLive
-    const codexProjection = this.codexVerdictFor(
-      spec,
-      recipeUid,
-      recipeName,
-      this.resolveCodexContext(recipeUid, recipeName, recipeName).runtimeScopeRecipeName,
-      this.codexView
-    ).projection
+
     const npConfig: NetworkPolicyConfig = {
       recipeName,
       sandboxNamespace: this.deps.config.sandboxNamespace,
@@ -3026,6 +3036,7 @@ export class WorkflowReconciler {
     spec: WorkflowRecipeSpec,
     runtime: WorkflowRuntimePlan,
     awaitsTriggeredRun: boolean,
+    codexProjection: CodexExecutionProjection,
     eagerSdkMcpHost = false
   ): Promise<void> {
     const policies = await this.buildWorkflowNetworkPoliciesForSpec(
@@ -3034,6 +3045,7 @@ export class WorkflowReconciler {
       spec,
       runtime,
       awaitsTriggeredRun,
+      codexProjection,
       eagerSdkMcpHost
     )
     for (const policy of policies) {
@@ -3041,13 +3053,7 @@ export class WorkflowReconciler {
     }
     const policyNames = new Set(policies.map(policy => policy.metadata?.name))
     const codexProxyPolicyName = `${recipeName}-mcp-host-to-codex-proxy`
-    const codexProjection = this.codexVerdictFor(
-      spec,
-      recipeUid,
-      recipeName,
-      this.resolveCodexContext(recipeUid, recipeName, recipeName).runtimeScopeRecipeName,
-      this.codexView
-    ).projection
+
     if (!policyNames.has(codexProxyPolicyName) && codexProjection.eligibility !== 'uncertain') {
       await this.safeDelete(() =>
         this.deps.networkingApi.deleteNamespacedNetworkPolicy({

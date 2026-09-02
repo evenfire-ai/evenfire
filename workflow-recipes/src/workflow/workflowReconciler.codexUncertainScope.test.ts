@@ -534,6 +534,44 @@ describe('Codex allowlist view across interleaved recipes', () => {
       expect(configure.mock.calls[0]?.[5] ?? null).toBeNull()
     })
 
+    it('keeps binding and scope on the captured view when another recipe wipes it mid-pass', async () => {
+      // The audit's missing case (T2b). The existing interleaving test fires
+      // during createNamespacedService, which happens AFTER
+      // ensureMcpHostSecrets — so a recomputation there would still have seen
+      // the same view and the test would pass anyway. The real window is
+      // between the capture and the provisioner's first await: getPodPhase.
+      const { reconciler, coreApi, configure } = createHarness()
+      bindGrant(reconciler, RECIPE)
+      bindGrant(reconciler, 'other-recipe', 'personal-pro')
+
+      let interleaved = false
+      crashRecoveryMocks.getPodPhase.mockImplementation(async () => {
+        if (!interleaved) {
+          interleaved = true
+          coreApi.readNamespacedConfigMap.mockRejectedValue(
+            Object.assign(new Error('Kubernetes request timed out'), { code: 'ETIMEDOUT' })
+          )
+          await reconciler.reconcilePluginWorkloadSdkOnly(
+            'other-recipe',
+            'uid-other-recipe',
+            sandboxNamespace,
+            codexSdkSpec({ steps: undefined }),
+            'other-recipe'
+          )
+        }
+        return undefined
+      })
+
+      await reconcileRecipe(reconciler, codexSdkSpec())
+
+      expect(builtMcpHostPodFrom(coreApi)).toBeDefined()
+      // Both sides must still come from the view this pass captured, and the
+      // TRUE side is pinned so the agreement is not vacuous.
+      const carriedBinding = (configure.mock.calls[0]?.[5] ?? null) !== null
+      expect(carriedBinding).toBe(true)
+      expect(issuedScopes()).toContain(CODEX_SCOPE)
+    })
+
     it('agrees on binding and scope in the eligible case', async () => {
       // R5-B1's real invariant, asserted as a biconditional rather than as two
       // independent facts: a configure that carries a binding must come with
@@ -545,6 +583,9 @@ describe('Codex allowlist view across interleaved recipes', () => {
 
       expect(builtMcpHostPodFrom(coreApi)).toBeDefined()
       const carriedBinding = (configure.mock.calls[0]?.[5] ?? null) !== null
+      // Pin the TRUE side first: a biconditional over two falses is vacuous,
+      // and this case exists to prove agreement in the eligible direction.
+      expect(carriedBinding).toBe(true)
       expect(carriedBinding).toBe(issuedScopes().includes(CODEX_SCOPE))
     })
   })

@@ -133,6 +133,7 @@ export type PluginWorkloadSdkProvisionerDeps = {
     spec: WorkflowRecipeSpec,
     runtime: WorkflowRuntimePlan,
     awaitsTriggeredRun: boolean,
+    codexProjection: CodexRecipeVerdict['projection'],
     eagerSdkMcpHost: boolean
   ) => Promise<void>
   ensureMcpHostHeadlessService: (recipeName: string) => Promise<void>
@@ -251,6 +252,7 @@ export class PluginWorkloadSdkProvisioner {
       spec,
       runtime,
       /* awaitsTriggeredRun */ true,
+      opts.codexVerdict.projection,
       /* eagerSdkMcpHost */ true
     )
 
