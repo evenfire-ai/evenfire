@@ -207,9 +207,10 @@ export function WorkflowsPage() {
         // the modal's InputContractForm binds to the controller's input state.
         contract = await handleSelectWorkflow(wf)
       } catch (error) {
-        // handleSelectWorkflow swallows its own read failures today, so this is
-        // defensive. Report rather than fail silently if it ever does throw —
-        // matching handleTriggerWorkflow's "Trigger failed" feedback.
+        // handleSelectWorkflow throws when the recipe read fails, so we can no
+        // longer tell whether it declares an input contract. Report the failure
+        // and stop — never fall through to a contract-less trigger that would
+        // skip the input modal. Matches handleTriggerWorkflow's feedback.
         setPendingTriggerKey(null)
         setStatus(
           `Trigger failed: ${error instanceof Error ? error.message : String(error)}`,

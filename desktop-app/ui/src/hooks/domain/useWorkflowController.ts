@@ -275,6 +275,12 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
         return null
       }
 
+      // A rejected read must stay distinguishable from the legitimate "recipe
+      // declares no input contract" case. Collapsing both into `null` (the old
+      // `.catch(() => null)`) let a transient read failure masquerade as "no
+      // inputs", firing a contract-less trigger that skipped the input modal.
+      // We capture the outcome, run the race guards below unchanged, and only
+      // then re-throw a failure for the still-current selection.
       const detailPromise = queryClient
         .fetchQuery({
           queryKey: desktopQueryKeys.workflowDetail(wf.namespace, wf.name),
@@ -282,10 +288,11 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
             window.clerum.workflows.read(wf.namespace, wf.name) as Promise<WorkflowRecipeResource>,
           staleTime: 0,
         })
-        .catch(() => null)
+        .then(detail => ({ ok: true as const, detail }))
+        .catch((error: unknown) => ({ ok: false as const, error }))
       const runsPromise = loadWorkflowRunsFor(wf)
 
-      const detail = await detailPromise
+      const detailResult = await detailPromise
       if (seq !== selectWorkflowSeqRef.current) return null
       const currentSelection = queryClient.getQueryData<WorkflowSelectionState>(
         desktopQueryKeys.workflowSelection
@@ -297,6 +304,17 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
         return null
       }
       if (!sameWorkflow(currentSelection?.selectedWorkflow ?? null, wf)) return null
+      // The read failed for a selection that is still current: surface it so the
+      // caller can show an error instead of triggering with empty inputs. A
+      // superseded selection already returned `null` above, so a stale failure
+      // never reaches here.
+      if (!detailResult.ok) {
+        await runsPromise
+        throw detailResult.error instanceof Error
+          ? detailResult.error
+          : new Error(toErrorMessage(detailResult.error))
+      }
+      const detail = detailResult.detail
       const schema = detail?.spec?.inputContract ?? null
       const nextWorkflow = detail
         ? {
@@ -349,7 +367,17 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
           queryKey: desktopQueryKeys.workflowRuns(ns, name, RECENT_RUNS_LIMIT),
         })
         const wf = workflows.find(workflow => workflow.namespace === ns && workflow.name === name)
-        if (wf) await handleSelectWorkflow(wf)
+        if (wf) {
+          try {
+            // Post-trigger refresh only re-syncs the selection; a read failure
+            // here must not turn an already-successful trigger into a visible
+            // "Trigger failed". handleSelectWorkflow now throws on read failure,
+            // so swallow it — the row's next interaction retries the read.
+            await handleSelectWorkflow(wf)
+          } catch {
+            // Selection refresh failed; the trigger itself already succeeded.
+          }
+        }
       } catch (error) {
         setStatus(
           `Trigger failed: ${error instanceof Error ? error.message : String(error)}`,
