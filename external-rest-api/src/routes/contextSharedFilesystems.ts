@@ -1,6 +1,6 @@
 import type { NextFunction, Response } from 'express'
 import { Router } from 'express'
-import { ControlApiError, controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
+import { controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
 import { publicCorrelationId, sanitizeControlApiPublicError } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 

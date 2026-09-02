@@ -58,15 +58,6 @@ const STREAM_HEADERS = [
   'x-ratelimit-remaining',
   'x-gfs-ratelimit-scope',
 ]
-const CONTROL_API_ERROR_HEADERS = [
-  'retry-after',
-  'ratelimit',
-  'ratelimit-policy',
-  'x-ratelimit-limit',
-  'x-ratelimit-remaining',
-  'x-ratelimit-reset',
-  'x-request-id',
-] as const
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const EXTERNAL_GFS_EDGE_WINDOW_MS = 60_000
 
