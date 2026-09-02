@@ -1282,6 +1282,12 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     })
 
     // Counts and duration only — never the resolved FQDNs/IPs or any Secret.
+    // This line summarises a FLEET-WIDE sweep: naming every host of every recipe
+    // here would dump the whole fleet's egress onto one line, every pass, with no
+    // way to attribute an address back to a policy. The per-host record lives
+    // where the set is decided and written instead — `logResolvedEgressSet` in
+    // workflowRecipeReconciler.ts, one entry per FQDN, only when the set changed
+    // and only once the policy has landed (#299). Secrets stay out of both.
     console.log(
       `[WR-K8s] External egress refresh: re-enqueued ${enqueued}/${selected.length} recipe(s) in ${Date.now() - started}ms`
     )

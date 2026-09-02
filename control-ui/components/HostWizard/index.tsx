@@ -335,7 +335,7 @@ export function HostWizard({
         value: credentialSelectValue('', row.connectionKey),
         label: row.displayName || row.connectionKey,
         meta: 'ChatGPT subscription',
-        providers: [{ id: 'codex-subscription', label: 'ChatGPT' }],
+        providers: [{ id: 'codex-subscription', label: 'ChatGPT Subscription' }],
       })),
     ],
     [codexConnections, existingSecrets]
