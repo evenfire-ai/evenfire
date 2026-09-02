@@ -2126,13 +2126,103 @@ textarea.cu-input {
   font-weight: 600;
 }
 
-.cu-detail-summary {
+.cu-detail-summary,
+.cu-expandable-detail {
   display: flex;
   gap: var(--cu-space-5);
   padding: var(--cu-space-4) var(--cu-space-5);
 }
 
-.cu-detail-summary__fields {
+.cu-connector-detail .cu-expandable-detail__fields {
+  flex: 1 1 auto;
+  width: 100%;
+  max-width: none;
+}
+
+.cu-connector-detail .cu-expandable-detail__description {
+  flex: 0 0 100%;
+  width: 100%;
+  max-width: none;
+  margin-bottom: 0;
+}
+
+.cu-connector-detail .cu-expandable-field,
+.cu-connector-detail .cu-expandable-field > .cu-link {
+  text-align: left;
+}
+
+.cu-connector-detail .cu-expandable-field > .cu-link {
+  max-width: 100%;
+}
+
+.cu-connector-detail__metadata {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  flex: 0 0 100%;
+  gap: var(--cu-space-4);
+  min-width: 0;
+}
+
+.cu-connector-copyable-value {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-1);
+  width: 100%;
+  min-width: 0;
+}
+
+.cu-connector-copyable-value > .cu-expandable-field__code {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cu-connector-copyable-value__button {
+  width: 1.75rem;
+  height: 1.75rem;
+  flex: 0 0 auto;
+}
+
+.cu-connector-access-field {
+  gap: var(--cu-space-2);
+}
+
+.cu-connector-access-grid {
+  width: 100%;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+}
+
+.cu-connector-agent-access__list li {
+  align-items: center;
+}
+
+.cu-connector-agent-access__name {
+  flex: 1 1 auto;
+}
+
+.cu-connector-agent-access__name > .cu-link {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cu-connector-agent-access__remove {
+  width: var(--cu-space-5);
+  height: var(--cu-space-5);
+  flex: 0 0 auto;
+}
+
+.cu-connector-agent-access__add {
+  width: 100%;
+  margin-top: auto;
+}
+
+.cu-detail-summary__fields,
+.cu-expandable-detail__fields {
   display: flex;
   flex: 1 1 50%;
   flex-wrap: wrap;
@@ -2692,7 +2782,7 @@ td.cu-registry-description {
   padding-left: var(--cu-space-5);
 }
 
-.cu-registry-context-access {
+.cu-entity-access {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
   gap: var(--cu-space-2);
@@ -2702,13 +2792,13 @@ td.cu-registry-description {
   background: rgba(var(--cu-panel-rgb), 0.35);
 }
 
-.cu-registry-context-access__intro {
+.cu-entity-access__intro {
   display: grid;
   gap: calc(var(--cu-space-1) / 2);
   margin-top: var(--cu-space-1);
 }
 
-.cu-registry-context-access__intro > span {
+.cu-entity-access__intro > span {
   color: var(--cu-text-muted);
   font-size: 0.7rem;
   font-weight: 600;
@@ -2716,14 +2806,14 @@ td.cu-registry-description {
   text-transform: uppercase;
 }
 
-.cu-registry-context-access__intro > p {
+.cu-entity-access__intro > p {
   margin: 0;
   color: var(--cu-text-soft);
   font-size: 0.8125rem;
   line-height: 1.45;
 }
 
-.cu-registry-context-access__group {
+.cu-entity-access__group {
   position: relative;
   display: grid;
   align-content: start;
@@ -2738,7 +2828,7 @@ td.cu-registry-description {
   overflow: hidden;
 }
 
-.cu-registry-context-access__group::before {
+.cu-entity-access__group::before {
   position: absolute;
   top: 0;
   right: 0;
@@ -2748,32 +2838,32 @@ td.cu-registry-description {
   content: '';
 }
 
-.cu-registry-context-access__group[data-kind='teams'] {
+.cu-entity-access__group[data-kind='teams'] {
   background:
     linear-gradient(145deg, rgba(var(--cu-success-rgb), 0.1), transparent 52%), var(--cu-surface);
 }
 
-.cu-registry-context-access__group[data-kind='teams']::before {
+.cu-entity-access__group[data-kind='teams']::before {
   background: var(--cu-success);
 }
 
-.cu-registry-context-access__group[data-kind='agents'] {
+.cu-entity-access__group[data-kind='agents'] {
   background:
     linear-gradient(145deg, rgba(var(--cu-warning-rgb), 0.1), transparent 52%), var(--cu-surface);
 }
 
-.cu-registry-context-access__group[data-kind='agents']::before {
+.cu-entity-access__group[data-kind='agents']::before {
   background: var(--cu-warning);
 }
 
-.cu-registry-context-access__heading {
+.cu-entity-access__heading {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: var(--cu-space-2);
 }
 
-.cu-registry-context-access__heading h4 {
+.cu-entity-access__heading h4 {
   margin: 0;
   color: var(--cu-text);
   font-size: 0.75rem;
@@ -2782,7 +2872,7 @@ td.cu-registry-description {
   text-transform: uppercase;
 }
 
-.cu-registry-context-access__heading span {
+.cu-entity-access__heading span {
   display: inline-grid;
   place-items: center;
   min-width: calc(var(--cu-space-3) * 2);
@@ -2796,17 +2886,17 @@ td.cu-registry-description {
   font-variant-numeric: tabular-nums;
 }
 
-.cu-registry-context-access__group[data-kind='teams'] .cu-registry-context-access__heading span {
+.cu-entity-access__group[data-kind='teams'] .cu-entity-access__heading span {
   border-color: rgba(var(--cu-success-rgb), 0.35);
   background: rgba(var(--cu-success-rgb), 0.12);
 }
 
-.cu-registry-context-access__group[data-kind='agents'] .cu-registry-context-access__heading span {
+.cu-entity-access__group[data-kind='agents'] .cu-entity-access__heading span {
   border-color: rgba(var(--cu-warning-rgb), 0.35);
   background: rgba(var(--cu-warning-rgb), 0.12);
 }
 
-.cu-registry-context-access__list {
+.cu-entity-access__list {
   display: grid;
   gap: var(--cu-space-1);
   max-height: 10rem;
@@ -2818,14 +2908,14 @@ td.cu-registry-description {
   list-style: none;
 }
 
-.cu-registry-context-access__list li {
+.cu-entity-access__list li {
   display: flex;
   align-items: center;
   gap: var(--cu-space-2);
   min-width: 0;
 }
 
-.cu-registry-context-access__list li::before {
+.cu-entity-access__list li::before {
   width: var(--cu-space-1);
   height: var(--cu-space-1);
   flex: 0 0 auto;
@@ -2834,23 +2924,21 @@ td.cu-registry-description {
   content: '';
 }
 
-.cu-registry-context-access__group[data-kind='teams'] .cu-registry-context-access__list li::before {
+.cu-entity-access__group[data-kind='teams'] .cu-entity-access__list li::before {
   background: rgba(var(--cu-success-rgb), 0.8);
 }
 
-.cu-registry-context-access__group[data-kind='agents']
-  .cu-registry-context-access__list
-  li::before {
+.cu-entity-access__group[data-kind='agents'] .cu-entity-access__list li::before {
   background: rgba(var(--cu-warning-rgb), 0.8);
 }
 
-.cu-registry-context-access__list li > span {
+.cu-entity-access__list li > span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.cu-registry-context-access__group .cu-muted {
+.cu-entity-access__group .cu-muted {
   margin: 0;
   font-size: 0.8125rem;
 }
@@ -5589,15 +5677,6 @@ td.cu-registry-description {
   margin-inline: var(--cu-space-3);
 }
 
-.cu-connector-edit-context-name {
-  margin: 0 0 var(--cu-space-3);
-  color: var(--cu-text-muted);
-}
-
-.cu-connector-edit-context-name strong {
-  color: var(--cu-text);
-}
-
 .cu-connector-edit-form {
   flex: 1;
   min-height: 0;
@@ -6126,7 +6205,7 @@ td.cu-registry-description {
   font-weight: 600;
 }
 
-.cu-agent-context-mcp-summary {
+.cu-agent-connectors-summary {
   display: grid;
   gap: var(--cu-space-2);
   padding: var(--cu-space-3);
@@ -6135,7 +6214,7 @@ td.cu-registry-description {
   background: var(--cu-bg-elevated);
 }
 
-.cu-agent-context-mcp-summary__head {
+.cu-agent-connectors-summary__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -6147,7 +6226,7 @@ td.cu-registry-description {
   text-transform: uppercase;
 }
 
-.cu-agent-context-mcp-summary__head > span:last-child {
+.cu-agent-connectors-summary__head > span:last-child {
   display: inline-grid;
   place-items: center;
   min-width: 1.5rem;
@@ -6159,7 +6238,7 @@ td.cu-registry-description {
   font-variant-numeric: tabular-nums;
 }
 
-.cu-agent-context-mcp-summary__list {
+.cu-agent-connectors-summary__list {
   display: flex;
   flex-wrap: wrap;
   gap: var(--cu-space-1);
@@ -6168,7 +6247,7 @@ td.cu-registry-description {
   list-style: none;
 }
 
-.cu-agent-context-mcp-summary__list li {
+.cu-agent-connectors-summary__list li {
   max-width: 100%;
   padding: 0.2rem var(--cu-space-2);
   overflow: hidden;
@@ -6182,7 +6261,7 @@ td.cu-registry-description {
   white-space: nowrap;
 }
 
-.cu-agent-context-mcp-summary > .cu-muted {
+.cu-agent-connectors-summary > .cu-muted {
   margin: 0;
   font-size: 0.8125rem;
 }
@@ -7352,21 +7431,16 @@ td.cu-registry-description {
   gap: var(--cu-space-4);
 }
 
-.cu-host-context-select {
-  width: min(36rem, 100%);
-}
-
-/* Hover card on the Context column — shows the same MCP-server list as the
-   agent-wizard's `cu-agent-context-mcp-summary` block. The wrapper is the
-   positioning context so the absolutely-positioned card sits just below the
-   link instead of clipping against the table cell. */
-.cu-host-context-hover {
+/* Hover card on the Connectors column — shows the agent's MCP-server list.
+   The wrapper is the positioning context so the absolutely-positioned card
+   sits just below the link instead of clipping against the table cell. */
+.cu-host-connectors-hover {
   position: relative;
   display: inline-flex;
   max-width: 100%;
 }
 
-.cu-host-context-count {
+.cu-host-connectors-count {
   display: inline-grid;
   place-items: center;
   min-width: 1.75rem;
@@ -7380,7 +7454,7 @@ td.cu-registry-description {
   line-height: 1.2;
 }
 
-.cu-host-context-hover > .cu-agent-context-mcp-summary {
+.cu-host-connectors-hover > .cu-agent-connectors-summary {
   position: absolute;
   top: calc(100% + var(--cu-space-1));
   left: 0;
@@ -8968,11 +9042,6 @@ td.cu-registry-description {
   display: flex;
   gap: 0.15rem;
   justify-content: flex-end;
-}
-
-.cu-deleted-access-heading {
-  margin-top: var(--cu-space-4);
-  font-size: 0.875rem;
 }
 
 .cu-grant-row {

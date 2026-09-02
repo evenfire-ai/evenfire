@@ -98,6 +98,22 @@ const definitions = [
     visibleInSettings: true,
   },
   {
+    id: 'chat.switcher',
+    label: 'Open chats switcher',
+    description: 'Open and focus the open-chats selector in the app chat drawer.',
+    group: 'Chat',
+    order: 15,
+    // Mod+E is free of #350's chords (Mod+T/W/1..9, Ctrl+Tab, Mod+K, Mod+F,
+    // Mod+Shift+F, Mod+Shift+L, Mod+,).
+    defaultBinding: { key: 'e', modifier: 'mod' },
+    sources: ['host', 'sandbox'],
+    eligibility: 'app-mounted',
+    modalPolicy: 'block',
+    actionOwner: 'renderer',
+    visibleInPalette: true,
+    visibleInSettings: true,
+  },
+  {
     id: 'chat.closeTab',
     label: 'Close current tab',
     description: 'Close the active chat view without deleting its conversation.',

@@ -39,22 +39,6 @@ test.describe('optional QA recorder: Control UI create-form smoke', () => {
     await continueButton.click()
   }
 
-  test('Create context form mounts and steps to the connectors step', async ({
-    page,
-  }, testInfo) => {
-    await openCreatePage(page, '/contexts/new')
-    await expectShell(page, 'Create context', 'Define a new context and attach connectors.')
-    await expect(page.locator('#ctx-name')).toBeVisible({ timeout: 20_000 })
-
-    await page.locator('#ctx-name').fill('qa-smoke-context')
-    await clickContinue(page)
-    await expect(
-      page.getByText('Choose the connectors this context can expose to agents.', { exact: true })
-    ).toBeVisible({ timeout: 20_000 })
-
-    await screenshotAndLog(page, testInfo, 'control-ui-create-context')
-  })
-
   test('Create connector form mounts on the identity step', async ({ page }, testInfo) => {
     await openCreatePage(page, '/connectors/new')
     await expectShell(
@@ -223,7 +207,7 @@ test.describe('optional QA recorder: Control UI create-form smoke', () => {
     await expectShell(
       page,
       'Create SharedFileSystem',
-      'Provision workspace storage that Contexts can mount read-only into agent pods.'
+      'Provision workspace storage that agents can mount read-only into their pods.'
     )
     await expect(page.locator('#shared-filesystem-name')).toBeVisible({ timeout: 20_000 })
 
@@ -258,7 +242,7 @@ test.describe('optional QA recorder: Control UI create-form smoke', () => {
     await expectShell(
       page,
       'Install from Marketplace',
-      'Install a Marketplace entry into your cluster and bind it to a context.'
+      'Install a Marketplace entry into your cluster.'
     )
     // Without entry/version query params the page renders a graceful error
     // state beneath the header instead of a form.

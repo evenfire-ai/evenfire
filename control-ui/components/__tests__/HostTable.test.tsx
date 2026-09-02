@@ -8,7 +8,7 @@ function renderHostTable(items: HostItem[], contextsByRef?: Record<string, strin
     <HostTable
       items={items}
       onOpen={vi.fn()}
-      onOpenContext={vi.fn()}
+      onOpenConnectors={vi.fn()}
       onDelete={vi.fn().mockResolvedValue(undefined)}
       deletingKey={null}
       onRefresh={vi.fn()}
@@ -227,16 +227,17 @@ describe('HostTable display name column (UT-9)', () => {
   })
 })
 
-// Hover card on the Context column — when the page supplies a `contextsByRef`
-// map, hovering (or keyboard-focusing) the context pill reveals the same
-// MCP-server list the create wizard shows for the selected context. The cell
-// shows the count; the tooltip shows the context name + count + names.
-describe('HostTable context MCP hover card', () => {
+// Hover card on the Connectors column — when the page supplies a
+// `contextsByRef` map, hovering (or keyboard-focusing) the count pill reveals
+// the agent's MCP-server list. The cell shows the count; the tooltip shows a
+// neutral "Connectors" heading + count + server names. The private context
+// slug must never render (Category E1 invariant).
+describe('HostTable connectors hover card', () => {
   function contextPill(row: HTMLElement, count: string): HTMLElement {
     return within(row).getByRole('button', { name: count })
   }
 
-  it('reveals the MCP server list on hover and lists every server', () => {
+  it('reveals the MCP server list on hover without exposing the context slug', () => {
     renderHostTable([hostWithContext('chatllm', 'context1')], {
       context1: ['github', 'linear', 'slack'],
     })
@@ -250,14 +251,38 @@ describe('HostTable context MCP hover card', () => {
 
     fireEvent.mouseEnter(pill)
     const card = within(row).getByRole('tooltip')
-    expect(card).toHaveTextContent('context1')
+    expect(card).toHaveTextContent('Connectors')
     expect(card).toHaveTextContent('3')
     expect(within(card).getByText('github')).toBeInTheDocument()
     expect(within(card).getByText('linear')).toBeInTheDocument()
     expect(within(card).getByText('slack')).toBeInTheDocument()
+    // E1: the raw private-context slug never surfaces.
+    expect(card).not.toHaveTextContent('context1')
 
     fireEvent.mouseLeave(pill)
     expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
+  })
+
+  it('opens the agent’s own connectors tab when the count is clicked', () => {
+    const onOpenConnectors = vi.fn()
+    render(
+      <HostTable
+        items={[hostWithContext('chatllm', 'context1')]}
+        onOpen={vi.fn()}
+        onOpenConnectors={onOpenConnectors}
+        onDelete={vi.fn().mockResolvedValue(undefined)}
+        deletingKey={null}
+        onRefresh={vi.fn()}
+        onCreateHost={vi.fn()}
+        refreshing={false}
+        contextsByRef={{ context1: ['github'] }}
+      />
+    )
+
+    fireEvent.click(
+      within(screen.getByLabelText('Open agent chatllm')).getByRole('button', { name: '1' })
+    )
+    expect(onOpenConnectors).toHaveBeenCalledWith({ namespace: 'mcp-host', name: 'chatllm' })
   })
 
   it('reveals the card on keyboard focus (accessible path)', () => {
@@ -309,7 +334,7 @@ describe('HostTable — row actions kebab', () => {
       <HostTable
         items={[hostWithContext('chatllm', 'context1')]}
         onOpen={onOpen}
-        onOpenContext={vi.fn()}
+        onOpenConnectors={vi.fn()}
         onDelete={onDelete}
         deletingKey={null}
         onRefresh={vi.fn()}
@@ -336,7 +361,7 @@ describe('HostTable — row actions kebab', () => {
       <HostTable
         items={[hostWithContext('chatllm', 'context1')]}
         onOpen={onOpen}
-        onOpenContext={vi.fn()}
+        onOpenConnectors={vi.fn()}
         onDelete={vi.fn().mockResolvedValue(undefined)}
         deletingKey={null}
         onRefresh={vi.fn()}
@@ -356,7 +381,7 @@ describe('HostTable — row actions kebab', () => {
       <HostTable
         items={[hostWithContext('chatllm', 'context1')]}
         onOpen={vi.fn()}
-        onOpenContext={vi.fn()}
+        onOpenConnectors={vi.fn()}
         onDelete={onDelete}
         deletingKey="mcp-host/chatllm"
         onRefresh={vi.fn()}

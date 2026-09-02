@@ -340,7 +340,7 @@ export function AdministrativeEventDetail({ eventId }: AdministrativeEventDetail
                 payload_sha256: detail.provenance.payloadSha256,
               }}
               headingId="admin-stored-context-provenance"
-              title="Stored context and provenance"
+              title="Stored details and provenance"
             />
 
             <section className="cu-trace-detail-section" aria-labelledby="admin-target-human">

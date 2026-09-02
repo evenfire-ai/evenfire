@@ -100,25 +100,63 @@ h3 {
 
 .global-search {
   position: relative;
-  width: var(--app-notification-drawer-width);
-  min-width: 220px;
+  /* Collapsed to just the magnifier until focused, then expands to the full
+     search width. The expanded size is carried in custom props so each
+     breakpoint retunes it without re-declaring the collapsed state. Collapsed
+     width matches the 40px input height so the icon sits in a square. */
+  --global-search-expanded: var(--app-notification-drawer-width);
+  --global-search-expanded-min: 220px;
+  width: 40px;
+  min-width: 40px;
   max-width: 100%;
+  /* Collapsed, the 40px pill sits one gap from the notification bell, whose
+     hover fill would otherwise crowd it — add a gap's worth of separation,
+     dropped back to 0 once expanded (the wide field already reads clear of it). */
+  margin-right: var(--space-2);
+  transition:
+    width var(--motion-medium),
+    min-width var(--motion-medium),
+    margin-right var(--motion-medium);
 }
 
+/* Stay expanded whenever the field is focused OR the results are open, so the
+   collapse is tied to "closed", not merely "unfocused": tabbing out while the
+   dropdown is still open must not hide the typed query behind the 40px box. */
+.global-search:focus-within,
+.global-search.is-open {
+  width: var(--global-search-expanded);
+  min-width: var(--global-search-expanded-min);
+  margin-right: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .global-search {
+    transition: none;
+  }
+}
+
+/* Collapsed: the glyph fills the square and is centered both axes, so it reads
+   as a balanced icon button instead of a small mark with dead space beside it. */
 .global-search::before {
   content: '⌕';
   position: absolute;
-  left: 12px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 16px;
-  height: 16px;
+  inset: 0;
+  display: grid;
+  place-items: center;
   background-image: none;
   color: var(--text-dim);
-  font-size: var(--font-size-lg);
+  font-size: var(--font-size-xl);
   font-weight: 600;
   line-height: 1;
   pointer-events: none;
+}
+
+/* Expanded: pin the glyph to the left edge (ahead of the input's 40px left pad)
+   and drop back to the in-field size so it aligns with the typed text. */
+.global-search:focus-within::before,
+.global-search.is-open::before {
+  inset: 0 auto 0 12px;
+  font-size: var(--font-size-lg);
 }
 
 .search-input {
@@ -1034,7 +1072,7 @@ h3 {
   width: 328px;
   min-width: 328px;
   max-width: 328px;
-  padding: var(--space-2);
+  padding: 0 var(--space-2) var(--space-2);
   display: flex;
   flex-direction: column;
   background: var(--sidebar-gradient);
@@ -1130,7 +1168,7 @@ h3 {
   align-items: center;
   gap: var(--space-2-5);
   padding: var(--sidebar-logo-pad-top) var(--space-1) var(--space-2);
-  margin-bottom: var(--space-2);
+  margin-bottom: var(--space-1);
   min-height: 56px;
 }
 
@@ -2159,6 +2197,11 @@ h3 {
 .content-panel {
   --app-notification-drawer-width: clamp(280px, 42vw, 420px);
   --app-header-utilities-width: calc(var(--app-notification-drawer-width) + var(--space-2) + 36px);
+  /* Chat drawer owns its own width, decoupled from the notification drawer.
+     React sets `--chat-drawer-width` inline (session-only, drag-resizable); this
+     clamp is only the pre-mount / closed-state fallback. Floor 340px == the
+     drawer's min-width (see useChatDrawerResize). */
+  --chat-drawer-width: clamp(340px, 32vw, 420px);
 
   height: 100vh;
   min-height: 0;
@@ -2202,8 +2245,18 @@ h3 {
   overflow: hidden;
   min-height: 0;
   height: 100vh;
-  padding: var(--space-4) var(--space-4) 0 calc(var(--space-4) / 2);
+  /* Top pad clears the absolute top-bar: its space-2 top offset + the header's
+     own height + a bit of gap below it. space-2 * 5 is the smallest step of the
+     spacing scale that covers that stack; the other three sides are just space-2. */
+  padding: calc(var(--space-2) * 5) var(--space-2) var(--space-2) var(--space-2);
   gap: 0;
+}
+
+/* The absolute top-bar aligns to the panel's own space-2 edges here (the panel
+   owns the extra top breathing room via its padding, not the header). */
+.content-panel.content-panel--agent-chat > .top-bar {
+  top: var(--space-2);
+  right: var(--space-2);
 }
 
 .content-panel.content-panel--agent-chat > .agent-page {
@@ -10779,6 +10832,12 @@ pre {
     grid-template-rows: auto minmax(0, 1fr);
   }
 
+  /* Sidebar is gone and the aside spans the full top, so the extra top
+     breathing room (space-2 * 5) is no longer needed — drop it to space-2. */
+  .content-panel.content-panel--agent-chat {
+    padding-top: var(--space-2);
+  }
+
   .left-nav {
     position: sticky;
     top: 0;
@@ -10788,6 +10847,7 @@ pre {
     height: auto;
     min-height: 0;
     max-height: none;
+    padding-top: var(--space-2);
     border-right: 0;
     border-bottom: 1px solid rgba(var(--edge-rgb), 0.38);
     overflow: visible;
@@ -10840,7 +10900,11 @@ pre {
     transform: rotate(180deg);
   }
 
-  .sidebar-collapse-toggle {
+  /* Match the base rule's `.sidebar-collapse-toggle.ui-icon-button` specificity:
+     media queries don't add specificity, so a bare `.sidebar-collapse-toggle`
+     loses to it and the toggle would stay visible. In this viewport the sidebar
+     is an overlay menu with no persistent rail, so collapsing it is meaningless. */
+  .sidebar-collapse-toggle.ui-icon-button {
     display: none;
   }
 
@@ -10881,7 +10945,19 @@ pre {
     display: none;
   }
 
-  .left-nav.collapsed .sidebar-logo-lockup {
+  /* Reveal the wordmark in the collapsed mobile bar, but keep the light/dark
+     toggle. Targeting the shared `.sidebar-logo-lockup` (0,3,0) would outrank
+     `.sidebar-logo-lockup--dark { display: none }` (0,1,0) and paint both
+     variants at once (double logo), so drive the variants directly. */
+  .left-nav.collapsed .sidebar-logo-lockup--light {
+    display: block;
+  }
+
+  :root[data-theme='dark'] .left-nav.collapsed .sidebar-logo-lockup--light {
+    display: none;
+  }
+
+  :root[data-theme='dark'] .left-nav.collapsed .sidebar-logo-lockup--dark {
     display: block;
   }
 
@@ -10960,9 +11036,21 @@ pre {
   }
 
   .global-search {
+    /* Header is a full-width row here — the search fills it and never
+       collapses; expanded props match so :focus-within keeps it at 100%. */
     width: 100%;
     min-width: 0;
     max-width: none;
+    margin-right: 0;
+    --global-search-expanded: 100%;
+    --global-search-expanded-min: 0;
+  }
+
+  /* Never collapses here, so the icon stays left-pinned even when unfocused —
+     without this the centered collapsed-state glyph floats mid-bar. */
+  .global-search::before {
+    inset: 0 auto 0 12px;
+    font-size: var(--font-size-lg);
   }
 
   .page-header,
@@ -12621,7 +12709,7 @@ pre {
 }
 
 .content-panel:has(.sandbox-ui-mounted-header) {
-  padding: var(--space-4) 0 0;
+  padding: var(--space-2) 0 0;
   align-content: stretch;
 }
 
@@ -12641,6 +12729,291 @@ pre {
   padding-left: var(--space-4);
 }
 
+/* Chat drawer — Cursor-style chat column beside the live app embed. It shrinks
+   the embed with the same `--app-header-utilities-width` gutter the notification
+   drawer uses, but derives that gutter from its OWN width (`--chat-drawer-width`)
+   so resizing the chat drawer never disturbs the notification drawer. The two
+   drawer-open states are mutually exclusive (see App.tsx notificationTrayUsesDrawer),
+   so this higher-specificity override is unambiguous. */
+.content-panel.content-panel--chat-drawer-open {
+  --app-header-utilities-width: calc(var(--chat-drawer-width) + var(--space-2) + 16px);
+}
+
+.content-panel.content-panel--chat-drawer-open > .page:has(.sandbox-ui-mounted-header) {
+  padding-right: var(--app-header-utilities-width);
+}
+
+.content-panel.content-panel--chat-drawer-open .sandbox-ui-mounted-header {
+  padding-right: 0;
+}
+
+/* The chat drawer occupies the right rail at --layer-chat-overlay, above the
+   header (`.top-bar` at --layer-header) within the shared content-panel stacking
+   context — so the header's transient dropdowns (the notification Inbox popover,
+   global search) would paint BEHIND the drawer and never surface. While the chat
+   drawer is open, lift the header to the dropdown layer so those overlays surface
+   over it, exactly as they do over chat content in full-screen. Toasts
+   (z-index: 4000) still sit above the header; the drawer's own z is unchanged. */
+.content-panel.content-panel--chat-drawer-open .top-bar {
+  z-index: var(--layer-dropdown);
+}
+
+.chat-drawer {
+  position: fixed;
+  /* Follow the measured top of the embed slot (`--chat-drawer-top`, published by
+     App from useEmbedBounds) so the drawer stays aligned when the sandbox-ui
+     header wraps in a narrow window. The fallback keeps the pre-measure/test
+     behavior: a single-row header at space-4 + 36px + space-2 = 64px. */
+  top: var(--chat-drawer-top, calc(var(--space-4) + 36px + var(--space-2)));
+  right: var(--space-4);
+  bottom: var(--space-4);
+  width: var(--chat-drawer-width);
+  z-index: var(--layer-chat-overlay);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid rgba(var(--edge-rgb), 0.32);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: var(--shadow-hard);
+  overflow: hidden;
+  /* Anti-flash: reveal only after the embed acknowledges its shrunk bounds,
+     mirroring the notification drawer's bounds-ack gate. */
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chat-drawer.is-ready {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Drag handle on the drawer's LEFT edge. A comfortable ~8px grab strip with a
+   slim accent rule that surfaces on hover / during a drag. Sits inside the
+   drawer (which clips overflow), above the header/surface content. */
+.chat-drawer__resize-handle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 8px;
+  height: 100%;
+  z-index: 2;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+
+.chat-drawer__resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 2px;
+  height: 100%;
+  background: transparent;
+  transition: background var(--motion-fast);
+}
+
+.chat-drawer__resize-handle:hover::after,
+.chat-drawer.is-resizing .chat-drawer__resize-handle::after {
+  background: rgba(var(--accent-rgb), 0.55);
+}
+
+/* Compact chrome — narrow-column only. Scoped entirely under `.chat-drawer`, so
+   the full-screen chat route (which renders the same <ChatPage> OUTSIDE this
+   ancestor) is untouched. Trims the padding/margins that read as "loose" in the
+   slim column and neutralizes the full-height grid the workspace uses in
+   full-screen (which would overflow this fixed rail and leave odd gaps). */
+.chat-drawer .agent-page {
+  height: 100%;
+}
+
+.chat-drawer .agent-workspace-shell .chat-thread {
+  padding: var(--space-2);
+}
+
+.chat-drawer .agent-workspace-shell .chat-empty-state {
+  padding: var(--space-4) 0 var(--space-2);
+}
+
+.chat-drawer .agent-workspace-shell .agent-workspace-top {
+  padding: var(--space-1) var(--space-2);
+}
+
+/* The workspace head (session breadcrumb + token/context indicators) lives in
+   the nav-stack, which — unlike the thread, top and tabs below — had no
+   drawer-scoped inset, so its title and token pills sat flush against the slim
+   column's top-left edge. Give it the same horizontal rhythm the other sections
+   use so the breadcrumb aligns with the thread text; full-screen gets this inset
+   from `.content-panel--agent-chat` instead, which the drawer's <ChatPage>
+   renders outside of. Keep the nav-stack's sticky `padding-bottom` intact. */
+.chat-drawer .agent-workspace-shell .agent-chat-nav-stack {
+  padding: var(--space-2) var(--space-2) var(--space-1);
+}
+
+.chat-drawer .agent-workspace-shell .agent-workspace-tabs {
+  padding: 0 var(--space-2);
+}
+
+/* New-chat greeting ("New chat with [agent ▾]"). Like the nav-stack head above,
+   this row has zero horizontal padding by design — full-screen chat insets it
+   via `.content-panel--agent-chat` (which the drawer's <ChatPage> renders
+   outside of) and its 1120px max-width + `margin: 0 auto` centers it there. In
+   the slim column neither applies, so the title sat flush against the left
+   edge. Give it the same `var(--space-2)` horizontal rhythm the thread and head
+   use; keep the base rule's hero top offset and bottom padding intact. */
+.chat-drawer .agent-workspace-shell .agent-workspace-greeting-row {
+  padding-inline: var(--space-2);
+}
+
+.chat-drawer .composer {
+  margin-top: var(--space-1);
+  padding: var(--space-2);
+}
+
+/* Tighter table cells so the data table breathes in the slim column; the
+   `.da-table__scroll` horizontal overflow still handles anything too wide. */
+.chat-drawer .da-table {
+  --table-cell-padding-x: var(--space-1-5);
+  --table-cell-padding-y: var(--space-1);
+}
+
+.chat-drawer__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  border-bottom: 1px solid rgba(var(--edge-rgb), 0.24);
+  flex: 0 0 auto;
+}
+
+.chat-drawer__header-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.chat-drawer__header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+}
+
+/* The base .ui-icon-button sizes the button but never the glyph — each call
+   site sets its own svg size. Match the app's standard 16px icon inside a 30px
+   (sm) icon button so the new-chat / close controls line up with the rest of
+   the app instead of rendering the raw 24-viewbox artwork oversized. */
+.chat-drawer__header-actions .ui-icon-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.chat-drawer__title {
+  display: block;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-drawer__surface {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Open-chats selector in the drawer header — a thin dropdown over chatViewTabs.
+   The narrow drawer column can't host a horizontal tab strip, so the switcher
+   lists chats vertically with their status badge. */
+.chat-switcher {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.chat-switcher__trigger {
+  min-width: 0;
+}
+
+.chat-switcher__trigger-main {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.chat-switcher__chevron {
+  flex: 0 0 auto;
+  margin-left: var(--space-1);
+  color: var(--text-dim);
+}
+
+.chat-switcher__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-switcher__menu {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  left: 0;
+  right: 0;
+  z-index: calc(var(--layer-dropdown) + 10);
+  border: 1px solid rgba(var(--edge-rgb), 0.32);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: var(--shadow-hard);
+  padding: var(--space-1);
+  display: grid;
+  gap: var(--space-1);
+}
+
+.chat-switcher__options {
+  display: grid;
+  gap: var(--space-0-5);
+  max-height: min(360px, 50vh);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.chat-switcher__option {
+  min-width: 0;
+  gap: var(--space-1-5);
+}
+
+.chat-switcher__option.is-active {
+  background: rgba(var(--accent-rgb), 0.14);
+}
+
+.chat-switcher__footer {
+  border-top: 1px solid rgba(var(--edge-rgb), 0.24);
+  padding-top: var(--space-1);
+}
+
+/* Overlay confinement (spec §6). The native app view paints above ALL DOM, so
+   any chat overlay that crosses the embed's rect is hidden behind it. The drawer
+   is RIGHT-docked, so the embed sits to its LEFT. The composer reference menu is
+   anchored at the composer's left edge and its submenu flies RIGHT
+   (`left: calc(100% + …)`) — i.e. INTO the drawer, away from the embed — so it is
+   already off the app rect. Pin that rightward direction inside the drawer so a
+   future global LEFT flip can't leak the submenu over the embed and be occluded.
+   (The spec's suggested LEFT flip is inverted for a right-docked drawer: leftward
+   pushes the submenu over the embed, not off it. See report.) */
+.chat-drawer .composer-reference-submenu {
+  left: calc(100% + var(--space-1));
+  right: auto;
+}
+
+.chat-drawer .composer-reference-menu-panel {
+  left: 0;
+  right: auto;
+}
+
 @media (min-width: 901px) and (max-width: 1220px) {
   .content-panel {
     --app-header-utilities-width: calc(
@@ -12655,8 +13028,8 @@ pre {
   }
 
   .global-search {
-    width: clamp(160px, 32vw, var(--app-notification-drawer-width));
-    min-width: 160px;
+    --global-search-expanded: clamp(160px, 32vw, var(--app-notification-drawer-width));
+    --global-search-expanded-min: 160px;
   }
 
   .apps-page-header {
@@ -15214,6 +15587,25 @@ pre {
   z-index: 1;
 }
 
+/* Bottom shelf of the tab strip. It lives on the non-scrolling container (not
+   the scroller/list) so it stays under the whole visible strip when the tabs
+   overflow and scroll — a shelf on the scrolling list only spans the initial
+   viewport and slides away on scroll. z-index:-1 keeps it below the opaque
+   tabs (so it only shows through the gaps between them); each inactive tab
+   draws its own matching bottom border, and the active tab omits it to notch
+   through and merge with the surface below. */
+.chat-view-tabs::after {
+  background: var(--chat-view-selected-border);
+  bottom: 0;
+  content: '';
+  height: 1px;
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
+  z-index: -1;
+}
+
 .chat-view-tabs__scroller {
   min-width: 0;
   overflow-x: auto;
@@ -15228,18 +15620,7 @@ pre {
   min-width: 100%;
   position: relative;
   transform: rotateX(180deg);
-  width: max-content;
-}
-
-.chat-view-tabs__list::after {
-  background: var(--chat-view-selected-border);
-  bottom: 0;
-  content: '';
-  height: 1px;
-  left: 0;
-  pointer-events: none;
-  position: absolute;
-  right: 0;
+  width: 100%;
 }
 
 .chat-view-tab {
@@ -15248,21 +15629,24 @@ pre {
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   display: flex;
-  flex: 0 0 220px;
-  min-width: 0;
+  flex: 1 1 var(--chat-tab-max);
+  min-width: var(--chat-tab-min);
+  max-width: var(--chat-tab-max);
   transition: background var(--motion-fast);
-  width: 220px;
 }
 
 .chat-view-tab:not(.is-active) {
-  border-bottom: 0;
-  border-color: color-mix(in srgb, var(--border-soft) 25%, transparent);
+  border-bottom: 1px solid var(--chat-view-selected-border);
+  border-left-color: color-mix(in srgb, var(--border-soft) 25%, transparent);
+  border-right-color: color-mix(in srgb, var(--border-soft) 25%, transparent);
+  border-top-color: color-mix(in srgb, var(--border-soft) 25%, transparent);
 }
 
 .chat-view-tab.is-active {
   background: linear-gradient(var(--surface-strong), var(--surface-strong)), var(--panel);
   border-color: var(--chat-view-selected-border);
   border-bottom: 0;
+  flex-shrink: 0.4;
   position: relative;
   z-index: 1;
 }
@@ -15316,7 +15700,6 @@ pre {
   border-color: var(--chat-view-selected-border);
   border-style: solid;
   border-width: 0 1px 1px;
-  border-radius: 0 var(--radius-sm) 0 0;
   display: flex;
   flex: 1 1 0;
   flex-direction: column;
