@@ -12,9 +12,9 @@ import {
   createMcpSecret,
   createMcpServer,
   deleteMcpSecret,
+  getAgentTeams,
+  getAgentUsers,
   getContext,
-  getContextTeams,
-  getContextUsers,
   getHosts,
   listOrgImages,
   updateContext,
@@ -317,7 +317,7 @@ export function CreateMcpServerForm({
   )
 
   useEffect(() => {
-    if (selectedContextRefs.length === 0) {
+    if (selectedAgentNames.length === 0) {
       setAccessPreview(EMPTY_ACCESS_PREVIEW)
       setAccessPreviewError('')
       setLoadingAccessPreview(false)
@@ -330,10 +330,10 @@ export function CreateMcpServerForm({
 
     void (async () => {
       const results = await Promise.all(
-        selectedContextRefs.map(async contextRef => {
+        selectedAgentNames.map(async agentName => {
           const [usersResult, teamsResult] = await Promise.allSettled([
-            getContextUsers(contextRef),
-            getContextTeams(contextRef),
+            getAgentUsers(agentName),
+            getAgentTeams(agentName),
           ])
           return { usersResult, teamsResult }
         })
@@ -379,7 +379,7 @@ export function CreateMcpServerForm({
     return () => {
       cancelled = true
     }
-  }, [selectedContextRefs])
+  }, [selectedAgentNames])
 
   useEffect(() => {
     let cancelled = false

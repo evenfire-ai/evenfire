@@ -16,6 +16,8 @@ vi.mock('../../lib/api', async () => {
     createMcpServer: vi.fn().mockResolvedValue({ metadata: { name: 'test-server' } }),
     createMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
     deleteMcpSecret: vi.fn().mockResolvedValue({ name: 'test-credentials' }),
+    getAgentTeams: vi.fn().mockResolvedValue({ items: [] }),
+    getAgentUsers: vi.fn().mockResolvedValue({ items: [] }),
     // The form no longer reads the context list; kept as a spy to lock that contract.
     getContexts: vi.fn(),
     getContext: vi.fn().mockResolvedValue(context1),
@@ -169,10 +171,10 @@ describe('CreateMcpServerForm — render', () => {
   })
 
   it('previews who can use the connector for selected agents', async () => {
-    vi.mocked(api.getContextUsers).mockResolvedValueOnce({
+    vi.mocked(api.getAgentUsers).mockResolvedValueOnce({
       items: [{ id: 'user-1', displayName: 'Josue', email: 'josue@example.com', name: 'josue' }],
     })
-    vi.mocked(api.getContextTeams).mockResolvedValueOnce({
+    vi.mocked(api.getAgentTeams).mockResolvedValueOnce({
       items: [{ id: 'team-1', name: 'Development Team' }],
     })
     vi.mocked(api.getHosts).mockResolvedValueOnce({
@@ -189,9 +191,11 @@ describe('CreateMcpServerForm — render', () => {
     expect(preview).toHaveTextContent('product')
     expect(preview).toHaveTextContent('Josue')
     expect(preview).toHaveTextContent('Development Team')
-    // Users/teams are resolved through the selected agent's scope.
-    expect(api.getContextUsers).toHaveBeenCalledWith('context1')
-    expect(api.getContextTeams).toHaveBeenCalledWith('context1')
+    // The preview follows direct Agent grants, not legacy Context mappings.
+    expect(api.getAgentUsers).toHaveBeenCalledWith('agents/product')
+    expect(api.getAgentTeams).toHaveBeenCalledWith('agents/product')
+    expect(api.getContextUsers).not.toHaveBeenCalled()
+    expect(api.getContextTeams).not.toHaveBeenCalled()
   })
 
   it('hides the advanced options by default and reveals them on toggle', async () => {
