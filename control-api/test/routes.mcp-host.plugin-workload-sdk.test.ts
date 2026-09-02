@@ -405,10 +405,13 @@ describe('GET /mcp-host/plugin-workload-sdk/capabilities', () => {
     )
   })
 
-  it('omits the revision flag entirely when the Codex connection does not resolve', async () => {
-    // The flag is a promise to send both values. A revoked or missing
-    // connection must drop all three together, never advertise the flag over
-    // absent numbers — a host that trusted it would fail closed forever.
+  it('advertises the revision flag without numbers when the Codex connection does not resolve', async () => {
+    // R4-M4. The flag states what this binary can publish, not what this
+    // connection has. Dropping it alongside the numbers made a revoked
+    // connection indistinguishable from an older control-api, so the host
+    // skipped the freshness check precisely when no live connection could back
+    // the binding. Flag present + numbers absent is the host's fail-closed
+    // branch, and failing closed is correct here.
     vi.mocked(sdkDb.findGrant).mockResolvedValue(codexGrant())
     vi.mocked(codexConnection.getSafeCodexSubscriptionConnection).mockResolvedValue(null)
 
@@ -418,9 +421,43 @@ describe('GET /mcp-host/plugin-workload-sdk/capabilities', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.reservationOnlyOauthBroker).toBe(true)
-    expect(res.body.codexBindingRevisions).toBeUndefined()
+    expect(res.body.codexBindingRevisions).toBe(true)
     expect(res.body.defaultCatalogRevision).toBeUndefined()
     expect(res.body.defaultCredentialRevision).toBeUndefined()
+  })
+
+  it('publishes catalog revision 0 for a connected but never-synced connection', async () => {
+    // R4-H3 contract pin. 0 is the schema DEFAULT for catalog_revision, so it
+    // must survive the wire untouched; the host decides readiness from it.
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(codexGrant())
+    vi.mocked(codexConnection.getSafeCodexSubscriptionConnection).mockResolvedValue({
+      id: 'conn-never-synced',
+      connectionKey: 'team-plus',
+      displayName: 'Team Plus',
+      defaultModel: 'gpt-5.1',
+      createdBy: null,
+      status: 'connected',
+      credentialRevision: 1,
+      catalogRevision: 0,
+      accountFingerprint: null,
+      catalogStatus: 'never_synced',
+      catalogSyncedAt: null,
+      lastRefreshAt: null,
+      lastAuthAt: null,
+      refreshLockHeld: false,
+      revokedAt: null,
+      createdAt: new Date('2026-08-03T00:00:00.000Z'),
+      updatedAt: new Date('2026-08-03T00:00:00.000Z'),
+    })
+
+    const res = await request(buildApp())
+      .get('/mcp-host/plugin-workload-sdk/capabilities')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.codexBindingRevisions).toBe(true)
+    expect(res.body.defaultCatalogRevision).toBe(0)
+    expect(res.body.defaultCredentialRevision).toBe(1)
   })
 
   it('does not advertise oauth-broker v3 when promptTargets[0] is not the default', async () => {

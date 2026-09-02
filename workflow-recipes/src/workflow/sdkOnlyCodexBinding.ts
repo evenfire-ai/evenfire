@@ -28,7 +28,11 @@ export function isPluginWorkloadSdkCodexBindingProof(
     Number.isInteger(candidate.catalogRevision) &&
     Number(candidate.catalogRevision) >= 1 &&
     Number.isInteger(candidate.credentialRevision) &&
-    Number(candidate.credentialRevision) >= 0 &&
+    // `credential_revision` is CHECK (>= 1) in codex_subscription_connections.
+    // `catalogRevision >= 1` above is a binding invariant rather than a row
+    // one: a proof is only minted for an eligible catalog, and the sole writer
+    // of catalog_status='ready' bumps catalog_revision in the same UPDATE.
+    Number(candidate.credentialRevision) >= 1 &&
     typeof candidate.model === 'string' &&
     candidate.model.trim().length > 0 &&
     typeof candidate.bindingHash === 'string' &&
@@ -66,12 +70,17 @@ export function sanitizePluginWorkloadSdkCodexBindingProof(
   }
 }
 
+/**
+ * R4-L1: `model` is REQUIRED. It used to be optional and the model pin was
+ * skipped when omitted, so a caller that forgot it would accept a binding for
+ * another model. mcp-host's twin has always required it; the two now agree.
+ */
 export function readVerifiedSdkOnlyCodexBinding(
   value: unknown,
-  model?: string
+  model: string
 ): PluginWorkloadSdkCodexBindingProof | null {
   if (!isPluginWorkloadSdkCodexBindingProof(value)) return null
-  if (model !== undefined && value.model !== model) return null
+  if (value.model !== model) return null
   if (!verifySdkOnlyCodexBindingHash(value)) return null
   return sanitizePluginWorkloadSdkCodexBindingProof(value)
 }
@@ -86,6 +95,50 @@ export function readVerifiedSdkOnlyCodexBinding(
  * connection is not `connected`, the catalog is stale, or the selected model
  * is not in the assigned connection's catalog.
  */
+export type SdkOnlyCodexBindingResolution = {
+  binding: PluginWorkloadSdkCodexBindingProof | null
+  eligibility: 'eligible' | 'ineligible' | 'uncertain'
+  reason: string
+}
+
+/**
+ * R4-B1: the same call must answer both "which binding?" and "was the catalog
+ * decidable at all?". The reconciler previously derived the second from
+ * `readOk`, a pure IO signal that is `true` for a ConfigMap that reads fine
+ * but parses badly — so a malformed `catalog-revision` produced `uncertain`
+ * on the scope path while the configure path saw a decidable catalog and sent
+ * a binding-less v3 configure, wiping the live execution binding.
+ * `uncertain` strictly subsumes `!readOk`: an unreadable ConfigMap is
+ * `missing`, which is also `uncertain`.
+ */
+export function resolveSdkOnlyCodexBinding(input: {
+  provider: string
+  model: string
+  connectionKey: string | undefined
+  configMap: CodexConfigMapView | undefined
+  log?: { debug(msg: string, fields?: Record<string, unknown>): void }
+}): SdkOnlyCodexBindingResolution {
+  if (input.provider !== CODEX_PROVIDER) {
+    return { binding: null, eligibility: 'ineligible', reason: 'provider_not_codex' }
+  }
+  const { binding, eligibility, reason } = toEligiblePolicyBinding(
+    input.configMap,
+    input.connectionKey,
+    input.model
+  )
+  if (!binding || binding.catalogRevision < 1 || binding.credentialRevision < 1) {
+    const withheldReason = binding ? 'revision_out_of_range' : reason
+    input.log?.debug('Codex execution binding withheld', {
+      model: input.model,
+      connectionKey: input.connectionKey ?? CODEX_UNASSIGNED_CONNECTION_KEY,
+      eligibility,
+      reason: withheldReason,
+    })
+    return { binding: null, eligibility, reason: withheldReason }
+  }
+  return { binding: toProof(binding), eligibility, reason }
+}
+
 export function deriveSdkOnlyCodexBinding(input: {
   provider: string
   model: string
@@ -93,21 +146,15 @@ export function deriveSdkOnlyCodexBinding(input: {
   configMap: CodexConfigMapView | undefined
   log?: { debug(msg: string, fields?: Record<string, unknown>): void }
 }): PluginWorkloadSdkCodexBindingProof | null {
-  if (input.provider !== CODEX_PROVIDER) return null
-  const { binding, eligibility, reason } = toEligiblePolicyBinding(
-    input.configMap,
-    input.connectionKey,
-    input.model
-  )
-  if (!binding || binding.catalogRevision < 1 || binding.credentialRevision < 0) {
-    input.log?.debug('Codex execution binding withheld', {
-      model: input.model,
-      connectionKey: input.connectionKey ?? CODEX_UNASSIGNED_CONNECTION_KEY,
-      eligibility,
-      reason: binding ? 'revision_out_of_range' : reason,
-    })
-    return null
-  }
+  return resolveSdkOnlyCodexBinding(input).binding
+}
+
+function toProof(binding: {
+  connectionKey: string
+  catalogRevision: number
+  credentialRevision: number
+  model: string
+}): PluginWorkloadSdkCodexBindingProof {
   return {
     connectionKey: binding.connectionKey,
     catalogRevision: binding.catalogRevision,

@@ -150,8 +150,15 @@ async function resolvePriorAttemptSpend(
     )
   }
   if (isOauthBrokerProvider(provider)) {
-    const exact = linkedCodexExactUsage(await loadLlmProviderAttemptBySdkAttemptId(db, attemptId))
+    const linked = await loadLlmProviderAttemptBySdkAttemptId(db, attemptId)
+    const exact = linkedCodexExactUsage(linked)
     if (exact) return { outcome: 'exact', ...exact }
+    // R4-M1: a linked row exists only if authorize-link ran, which means the
+    // host already asked the broker for a ticket — that call may still bill.
+    // `not_executed` is terminal (deriveEffectiveSpend only lifts unknown to
+    // exact), so freezing it here would lose that spend permanently. Same rule
+    // the winner already applies in resolvePersistableSpend.
+    if (linked) return spendFloor('unknown')
   }
   return spendFloor(status === 'provider_unavailable' ? 'unknown' : 'not_executed')
 }

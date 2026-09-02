@@ -597,12 +597,12 @@ describe('LlmBridge authorized multi-provider fallback', () => {
     replaceSdkOnlyCodexBinding({
       connectionKey: 'team-plus',
       catalogRevision: 1,
-      credentialRevision: 0,
+      credentialRevision: 1,
       model: 'gpt-5.1',
       bindingHash: computeCodexPolicyHash({
         model: 'gpt-5.1',
         catalogRevision: 1,
-        credentialRevision: 0,
+        credentialRevision: 1,
         connectionKey: 'team-plus',
       }),
     })
@@ -692,12 +692,12 @@ describe('LlmBridge authorized multi-provider fallback', () => {
     replaceSdkOnlyCodexBinding({
       connectionKey: 'team-plus',
       catalogRevision: 1,
-      credentialRevision: 0,
+      credentialRevision: 1,
       model: 'gpt-5.1',
       bindingHash: computeCodexPolicyHash({
         model: 'gpt-5.1',
         catalogRevision: 1,
-        credentialRevision: 0,
+        credentialRevision: 1,
         connectionKey: 'team-plus',
       }),
     })
@@ -800,12 +800,12 @@ function installCodexBinding(): void {
   replaceSdkOnlyCodexBinding({
     connectionKey: 'team-plus',
     catalogRevision: 1,
-    credentialRevision: 0,
+    credentialRevision: 1,
     model: codexTarget.model,
     bindingHash: computeCodexPolicyHash({
       model: codexTarget.model,
       catalogRevision: 1,
-      credentialRevision: 0,
+      credentialRevision: 1,
       connectionKey: 'team-plus',
     }),
   })

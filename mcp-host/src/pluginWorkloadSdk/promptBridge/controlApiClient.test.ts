@@ -34,6 +34,9 @@ function authorizedBody(invocationId: string) {
     attemptGeneration: 1,
     policyRevision: 2,
     policyHash: 'a'.repeat(64),
+    // R4-H2: the field is required on the wire again. `null` is "this grant
+    // sets no ceiling", which is the default these fixtures describe.
+    maxOutputTokens: null,
   }
 }
 
@@ -336,6 +339,73 @@ describe('PluginWorkloadSdkControlApiClient', () => {
     await expect(
       client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
     ).resolves.toMatchObject({ policyReady: true, codexBindingReady: true })
+  })
+
+  // R4-H3 / R4-M5: the hand-built fixtures only ever used catalog revisions
+  // {4,5,7,999} and never 0 — which is the schema DEFAULT for a never-synced
+  // catalog and exactly the value the inverted bounds rejected. These pin the
+  // real CHECK constraints of codex_subscription_connections:
+  //   catalog_revision    BIGINT NOT NULL DEFAULT 0 CHECK (>= 0)
+  //   credential_revision BIGINT NOT NULL DEFAULT 1 CHECK (>= 1)
+  it('accepts a never-synced peer publishing catalog revision 0 and reports the binding not ready', async () => {
+    installCodexBinding()
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(
+        200,
+        codexCapabilities({
+          codexBindingRevisions: true,
+          defaultCatalogRevision: 0,
+          defaultCredentialRevision: 1,
+        })
+      )
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({
+      policyReady: false,
+      policyReason: 'codex_execution_binding_missing',
+      codexBindingReady: false,
+    })
+  })
+
+  it('rejects a credential revision below the schema floor as a protocol mismatch', async () => {
+    installCodexBinding()
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(
+        200,
+        codexCapabilities({
+          codexBindingRevisions: true,
+          defaultCatalogRevision: 4,
+          defaultCredentialRevision: 0,
+        })
+      )
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).rejects.toMatchObject({ code: 'protocol_mismatch' })
+  })
+
+  it('refuses the binding when the peer claims revisions but omits both', async () => {
+    // R4-M4: a revoked or absent connection now keeps the flag and drops only
+    // the numbers, so this is the branch a live control-api takes for a
+    // connection that cannot back any binding.
+    installCodexBinding()
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, codexCapabilities({ codexBindingRevisions: true })))
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({
+      policyReady: false,
+      policyReason: 'codex_execution_binding_missing',
+      codexBindingReady: false,
+    })
   })
 
   it('keeps request-time policy readiness separate from identity bootstrap', async () => {

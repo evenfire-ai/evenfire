@@ -1361,6 +1361,66 @@ describe('spend floor writers (Addendum A.4 "best-floor")', () => {
     expect(updateParams(db, 'plugin_workload_sdk_invocations')?.[1]).toBe('failed')
   })
 
+  // R4-H1. The ledger_pending gate was keyed on `input.status === 'complete'`,
+  // so a host closing `failed` walked past a Codex call still inside its usage
+  // grace. `failed` is what reviveFailedInvocation reopens, so the same
+  // idempotency key could launch a second billable Codex call while the first
+  // was still able to bill.
+  const codexInFlight = {
+    status: 'authorized',
+    outcome: null,
+    usage_input_tokens: null,
+    usage_output_tokens: null,
+  } as const
+
+  it('refuses a Codex failed close while the linked attempt is still in flight', async () => {
+    ingest.mockReset()
+    project.mockReset()
+    const db = dbWithRows(
+      [],
+      [],
+      ...codexFence('in_progress'),
+      linkedCodexRow({ ...codexInFlight, created_at: new Date() })
+    )
+
+    await expect(
+      finalizePromptBridgeInTransaction(
+        { ...codexInput, status: 'failed', reason: 'provider_error' },
+        db as never
+      )
+    ).rejects.toMatchObject({ code: 'ledger_pending', httpStatus: 409, retryable: true })
+    expect(updateParams(db, 'plugin_workload_sdk_invocations')).toBeUndefined()
+  })
+
+  it('closes a Codex failed attempt whose linked row aged out without usage as provider_unavailable', async () => {
+    // Past the grace window there is no ledger_pending left to raise, but the
+    // call may still have billed. Only a spend proved `not_executed` — no
+    // linked Codex row at all — is safe to leave revivable.
+    ingest.mockReset()
+    project.mockReset()
+    const db = dbWithRows(
+      [],
+      [],
+      ...codexFence('in_progress'),
+      linkedCodexRow({ ...codexInFlight, created_at: new Date(Date.now() - 20 * 60_000) }),
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 },
+      codexSpendRow({ outcome: 'unknown' })
+    )
+
+    const result = await finalizePromptBridgeInTransaction(
+      { ...codexInput, status: 'failed', reason: 'provider_error' },
+      db as never
+    )
+
+    // The RESULT still echoes the caller's status — mcp-host asserts
+    // result.status === body.status — while the persisted invocation state is
+    // the non-revivable one.
+    expect(result).toMatchObject({ status: 'failed', outcome: 'unknown' })
+    expect(updateParams(db, 'plugin_workload_sdk_invocations')?.[1]).toBe('provider_unavailable')
+  })
+
   it('refuses to promote a Codex row that errored with usage or reported a partial token pair', async () => {
     for (const linked of [
       linkedCodexRow({ outcome: 'error' }),
@@ -1724,6 +1784,60 @@ describe('prior provider attempt settlement (RP-539-003)', () => {
       'prior_attempt_provider_unavailable',
       5,
       3,
+      null,
+    ])
+  })
+
+  it('freezes unknown for a displaced Codex attempt whose linked row carries no usage yet', async () => {
+    // R4-M1. `not_executed` is terminal — deriveEffectiveSpend only lifts
+    // `unknown` to `exact` — so freezing it over a linked row that can still
+    // bill loses that spend permanently. A linked row exists only if
+    // authorize-link ran, which is already "asked the broker for a ticket".
+    const db = dbWithRows(
+      [],
+      [],
+      ...fenceRows({
+        attempt_index: 2,
+        target_ref: CODEX_TARGET.targetRef,
+        provider: CODEX_TARGET.provider,
+        model: CODEX_TARGET.model,
+        credential_slot: CODEX_TARGET.credentialSlot,
+      }),
+      linkedCodexRow(),
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 },
+      codexSpendRow({ attempt_index: 2, outcome: 'exact', input_tokens: 12, output_tokens: 7 }),
+      [
+        {
+          ...priorAttemptRow('failed'),
+          target_ref: CODEX_TARGET.targetRef,
+          provider: CODEX_TARGET.provider,
+          model: CODEX_TARGET.model,
+          credential_slot: CODEX_TARGET.credentialSlot,
+        },
+      ],
+      linkedCodexRow({
+        id: '55555555-5555-4555-8555-555555555555',
+        plugin_workload_sdk_provider_attempt_id: PRIOR_ATTEMPT_ID,
+        status: 'authorized',
+        outcome: null,
+        usage_input_tokens: null,
+        usage_output_tokens: null,
+      }),
+      spendRow({ provider_attempt_id: PRIOR_ATTEMPT_ID, outcome: 'unknown' })
+    )
+
+    await finalizePromptBridgeInTransaction(winner, db as never)
+
+    const inserts = db.query.mock.calls.filter(([statement]: [string]) =>
+      statement.includes('INSERT INTO plugin_workload_sdk_spend_outcomes')
+    )
+    expect((inserts[1]?.[1] as unknown[])?.slice(11, 16)).toEqual([
+      'unknown',
+      'prior_attempt_failed',
+      null,
+      null,
       null,
     ])
   })

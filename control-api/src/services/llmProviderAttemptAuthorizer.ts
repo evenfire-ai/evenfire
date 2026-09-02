@@ -325,6 +325,7 @@ export async function authorizeLlmProviderAttempt(
       typeof body.pluginWorkloadSdkProviderAttemptId === 'string'
         ? body.pluginWorkloadSdkProviderAttemptId.trim()
         : ''
+    let sdkLinkRecipe: { namespace: string; name: string } | null = null
     if (pluginWorkloadSdkProviderAttemptId) {
       if (!UUID_RE.test(pluginWorkloadSdkProviderAttemptId)) {
         throw new LlmProviderAttemptAuthorizeError(
@@ -344,13 +345,19 @@ export async function authorizeLlmProviderAttempt(
           'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
         )
       }
+      sdkLinkRecipe = { namespace: caller.recipeNamespace, name: caller.recipeName }
     }
 
     // Recipe authorize and promptBridge finalize share this advisory. Take it
     // before budget reservation work so concurrent Codex + fallback cannot
     // deadlock (budget rows then advisory vs advisory then spend/invocation).
-    if (caller.callerKind === 'recipe' && caller.recipeNamespace && caller.recipeName) {
-      await lockPluginWorkloadSdkRecipe(db, caller.recipeNamespace, caller.recipeName)
+    //
+    // R4-M3: only an SDK-linked authorize goes on to take plugin_workload_sdk_*
+    // rows FOR UPDATE, which is the order finalize follows after this advisory.
+    // The workflow lane touches neither, so taking it for every recipe caller
+    // serialized that lane per recipe for no ordering benefit.
+    if (sdkLinkRecipe) {
+      await lockPluginWorkloadSdkRecipe(db, sdkLinkRecipe.namespace, sdkLinkRecipe.name)
     }
 
     const presentedReservationId =

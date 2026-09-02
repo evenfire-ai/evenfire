@@ -478,28 +478,34 @@ export async function finalizePromptBridgeInTransaction(
   const linkedCodex = oauthBroker
     ? await loadLlmProviderAttemptBySdkAttemptId(db, input.providerAttemptId)
     : null
-  if (oauthBroker && input.status === 'complete' && linkedCodex) {
-    if (isLinkedCodexInFlightWithoutUsage(linkedCodex)) {
-      throw new PromptBridgeFinalizationError(
-        'ledger_pending',
-        'linked Codex attempt has not finalized usage yet',
-        409,
-        true
-      )
-    }
+  // R4-H1: decided from the linked Codex row, never from the caller-chosen
+  // status. Gating this on `complete` let a `failed` close through while the
+  // Codex call was still inside its usage grace and could bill afterwards.
+  // The replay path (`:314`) and the sweeper already read the linked row
+  // this way; only the fresh path was narrower.
+  if (oauthBroker && linkedCodex && isLinkedCodexInFlightWithoutUsage(linkedCodex)) {
+    throw new PromptBridgeFinalizationError(
+      'ledger_pending',
+      'linked Codex attempt has not finalized usage yet',
+      409,
+      true
+    )
   }
   const spend = resolvePersistableSpend(input.status, oauthBroker, linkedCodex, input.usage)
   // N-17: only point a usage_request_id at a usage_events row that is really
   // written. Codex spend is ingested by the proxy finalize, not here.
   const willIngestUsage = input.status === 'complete' && !oauthBroker
-  // Codex already billed this attempt, so closing the invocation `failed`
-  // would leave it revivable (reviveFailedInvocation gates only on
-  // status = 'failed') and the same idempotency key could launch a second
-  // billable Codex call. provider_unavailable is the non-revivable terminal
-  // state for exactly this situation. The RESULT still echoes input.status:
-  // mcp-host's controlApiClient requires result.status === body.status.
+  // Closing the invocation `failed` leaves it revivable (reviveFailedInvocation
+  // gates only on status = 'failed'), so the same idempotency key could launch
+  // a second billable Codex call. Only a spend proved `not_executed` — no
+  // linked Codex row at all — is safe to leave revivable. `exact` obviously
+  // billed; `unknown` means we cannot prove it did not, which is the same
+  // hazard (R4-H1, and the invariant pluginWorkloadSdkDb.ts:2118-2122 states).
+  // provider_unavailable is the non-revivable terminal state for both. The
+  // RESULT still echoes input.status: mcp-host's controlApiClient requires
+  // result.status === body.status.
   const expectedStatus: PromptBridgeFinalizationStatus =
-    oauthBroker && spend.outcome === 'exact' && input.status === 'failed'
+    oauthBroker && input.status === 'failed' && spend.outcome !== 'not_executed'
       ? 'provider_unavailable'
       : input.status
   let usageAccepted = false

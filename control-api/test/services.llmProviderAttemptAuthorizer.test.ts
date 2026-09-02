@@ -223,6 +223,23 @@ describe('authorizeLlmProviderAttempt', () => {
     expect(current.insertAttempt).not.toHaveBeenCalled()
   })
 
+  it('does not take the recipe advisory lock for a recipe caller without an SDK attempt link', async () => {
+    // R4-M3. Only an SDK-linked authorize goes on to take plugin_workload_sdk_*
+    // rows FOR UPDATE, which is the order finalize follows after this advisory.
+    // Taking it for every recipe caller serialized the workflow lane per recipe
+    // for no ordering benefit.
+    await authorizeLlmProviderAttempt(
+      claims({
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'prompt-notify',
+        hostRefs: ['sandbox-recipes/prompt-notify'],
+      }),
+      body(),
+      current
+    )
+    expect(lockPluginWorkloadSdkRecipe).not.toHaveBeenCalled()
+  })
+
   it('binds a reserved Plugin Workload SDK attempt onto the Codex ledger row', async () => {
     const sdkAttemptId = '44444444-4444-4444-8444-444444444444'
     getPluginWorkloadSdkProviderAttemptForUpdate.mockResolvedValue(

@@ -53,7 +53,11 @@ export function isPluginWorkloadSdkCodexBindingProof(
     Number.isInteger(candidate.catalogRevision) &&
     Number(candidate.catalogRevision) >= 1 &&
     Number.isInteger(candidate.credentialRevision) &&
-    Number(candidate.credentialRevision) >= 0 &&
+    // `credential_revision` is CHECK (>= 1) in codex_subscription_connections.
+    // `catalogRevision >= 1` above is a binding invariant rather than a row
+    // one: a proof is only minted for an eligible catalog, and the sole writer
+    // of catalog_status='ready' bumps catalog_revision in the same UPDATE.
+    Number(candidate.credentialRevision) >= 1 &&
     typeof candidate.model === 'string' &&
     candidate.model.trim().length > 0 &&
     typeof candidate.bindingHash === 'string' &&

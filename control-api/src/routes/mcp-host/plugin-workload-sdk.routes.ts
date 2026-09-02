@@ -612,6 +612,7 @@ async function handlePromptBridgeAuthorization(
     attemptGeneration: result.value.attemptGeneration,
     policyRevision: result.value.policyRevision,
     policyHash: result.value.policyHash,
+    maxOutputTokens: result.value.maxOutputTokens,
   })
 }
 
@@ -737,6 +738,14 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
       // #533 acceptance criterion 2 ties the Codex binding to the catalog and
       // credential revisions, but those live on the connection row and never
       // reached the host, so `codexBindingReady` could not compare them. They
+      // R4-M4: `codexBindingRevisions` is a STATIC capability of this binary —
+      // "I know how to publish the revisions" — not a statement about any one
+      // connection. Emitting it only alongside the numbers made a revoked or
+      // missing connection look like an older control-api, so the host skipped
+      // the freshness check exactly when the binding could not possibly be
+      // backed. With the flag static, absent numbers take the host's
+      // partial-deploy branch and fail closed, which is correct: a revoked
+      // connection can never back a live binding.
       // are advertised additively, gated by `codexBindingRevisions`, because
       // the two rollout directions need opposite defaults: a host that
       // predates the fields ignores them, and a host that postdates them must
@@ -765,10 +774,11 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         defaultModel: alignedPrimary?.model ?? null,
         defaultConnectionRef: alignedPrimary?.connectionRef ?? null,
         v2Ready,
-        ...(reservationOnlyOauthBroker ? { reservationOnlyOauthBroker: true } : {}),
+        ...(reservationOnlyOauthBroker
+          ? { reservationOnlyOauthBroker: true, codexBindingRevisions: true }
+          : {}),
         ...(codexConnection
           ? {
-              codexBindingRevisions: true,
               defaultCatalogRevision: codexConnection.catalogRevision,
               defaultCredentialRevision: codexConnection.credentialRevision,
             }
