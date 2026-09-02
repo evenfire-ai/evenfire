@@ -11,8 +11,7 @@
 // qa-recorder-marketplace-browse.spec.ts; the journey skips when no
 // installable MCP entry exists.
 //
-// Contract: docs/testing/optional-playwright-qa-recorder.md ("Extending the
-// recorder").
+// Contract: docs/testing/control-ui-headful-journeys.md.
 import { expect, test } from '@playwright/test'
 import {
   CONTROL_API_URL,

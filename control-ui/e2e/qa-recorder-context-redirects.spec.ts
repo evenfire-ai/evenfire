@@ -7,7 +7,7 @@
 // the owning agent's Connectors tab. The throwaway context and host are
 // deleted via the Control API in a finally (host before context).
 //
-// Contract: docs/testing/optional-playwright-qa-recorder.md ("Extending the recorder").
+// Contract: docs/testing/control-ui-headful-journeys.md.
 import { expect, test } from '@playwright/test'
 import {
   CONTROL_API_URL,

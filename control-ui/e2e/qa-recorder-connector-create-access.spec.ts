@@ -9,8 +9,7 @@
 // and deleted in the finally along with both connectors, the seeded agent
 // host, and its context (hosts before contexts).
 //
-// Contract: docs/testing/optional-playwright-qa-recorder.md ("Extending the
-// recorder").
+// Contract: docs/testing/control-ui-headful-journeys.md.
 import { type Page, type TestInfo, expect, test } from '@playwright/test'
 import {
   CONTROL_API_URL,

@@ -20,7 +20,7 @@ import {
 // lands on the chatllm agent's chat composer, and exercises the agent workspace
 // route switcher (Details / Connectors / Contexts / Activity). No chat messages
 // are sent and no confirm flag is required; every test still guards the loopback
-// targets up front. See docs/testing/optional-playwright-qa-recorder.md.
+// targets up front. See docs/testing/desktop-headful-journeys.md.
 
 test('optional QA recorder: Desktop agents journey — fleet', async ({}, testInfo) => {
   await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)

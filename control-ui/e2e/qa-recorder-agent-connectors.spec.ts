@@ -8,7 +8,7 @@
 // The seeded context, MCP servers, and host are deleted via the Control API
 // in a finally (host first, then servers and context).
 //
-// Contract: docs/testing/optional-playwright-qa-recorder.md ("Extending the recorder").
+// Contract: docs/testing/control-ui-headful-journeys.md.
 import { expect, test } from '@playwright/test'
 import {
   CONTROL_API_URL,

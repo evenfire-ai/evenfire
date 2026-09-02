@@ -12,8 +12,7 @@
 // member's original contextIds AND agentNames are restored and the seeded
 // hosts + contexts are deleted in the finally (hosts before contexts).
 //
-// Contract: docs/testing/optional-playwright-qa-recorder.md ("Extending the
-// recorder").
+// Contract: docs/testing/control-ui-headful-journeys.md.
 import { expect, test } from '@playwright/test'
 import {
   CONTROL_API_URL,

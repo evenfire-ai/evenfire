@@ -4,8 +4,7 @@
 // backing context out-of-band, and proves the Agents tab renders no
 // deleted-scope bookkeeping (no tombstone row is ever rendered).
 //
-// Contract: docs/testing/optional-playwright-qa-recorder.md ("Extending the
-// recorder").
+// Contract: docs/testing/control-ui-headful-journeys.md.
 import { expect, test } from '@playwright/test'
 import {
   CONTROL_API_URL,
