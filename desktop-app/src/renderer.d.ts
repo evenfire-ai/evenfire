@@ -604,8 +604,15 @@ declare global {
       }
       window: {
         getVisibility: () => Promise<{ visible: boolean; focused: boolean }>
+        getControlsState: () => Promise<{ fullscreen: boolean; maximized: boolean }>
+        minimize: () => Promise<void>
+        toggleMaximize: () => Promise<void>
+        close: () => Promise<void>
         onVisibilityChange: (
           callback: (state: { visible: boolean; focused: boolean }) => void
+        ) => () => void
+        onControlsStateChange: (
+          callback: (state: { fullscreen: boolean; maximized: boolean }) => void
         ) => () => void
       }
       system: {

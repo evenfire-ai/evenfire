@@ -151,6 +151,13 @@
   /* Layout */
   --search-bar-min-width: 320px;
   --avatar-size: 40px;
+  --window-titlebar-height: 38px;
+  --window-titlebar-control-size: 28px;
+  --window-titlebar-mac-control-size: 12px;
+  --window-control-mac-close: rgb(255, 95, 87);
+  --window-control-mac-minimize: rgb(255, 189, 46);
+  --window-control-mac-expand: rgb(40, 201, 64);
+  --window-control-mac-border: rgba(var(--overlay-rgb), 0.28);
 
   /* chat-view session tabs (Chrome-style: shrink to a floor, cap at a ceiling) */
   --chat-tab-max: 220px;
