@@ -1136,11 +1136,34 @@ test-e2e-plugin-workload-sdk-desktop: ## Run the explicit opt-in Electron/WebCon
 	test -n "$${CONTROL_API_BASE_URL:-}" || { echo "CONTROL_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
 	test -n "$${EXTERNAL_REST_API_BASE_URL:-}" || { echo "EXTERNAL_REST_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
 	test -n "$${RPC_PROXY_BASE_URL:-}" || { echo "RPC_PROXY_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${E2E_PLUGIN_SDK_EXPECT_PROVIDER:-}" || { echo "Refusing Desktop Plugin Workload SDK E2E: set E2E_PLUGIN_SDK_EXPECT_PROVIDER to the provider this run must exercise (openai | claude | codex-subscription)" >&2; exit 1; }; \
 	. scripts/e2e/e2e-lib.sh; \
 	require_branch_profile_urls "$$ctx" "$${CLERUM_PROFILE_PORTS_ENV:-$${E2E_PROFILE_PORTS_ENV:-}}"; \
-	echo "[E2E-GUARD] Desktop Plugin Workload SDK gate: context=$$ctx; URLs supplied by the branch profile"; \
+	echo "[E2E-GUARD] Desktop Plugin Workload SDK gate: context=$$ctx; expected provider=$${E2E_PLUGIN_SDK_EXPECT_PROVIDER}; URLs supplied by the branch profile"; \
 	cd desktop-app && KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 npm run build && \
-	KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 ./node_modules/.bin/playwright test --config test/e2e-playwright/playwright.config.ts plugin-workload-sdk-sandbox-ui.spec.ts
+	KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 E2E_PLUGIN_SDK_EXPECT_PROVIDER="$$E2E_PLUGIN_SDK_EXPECT_PROVIDER" ./node_modules/.bin/playwright test --config test/e2e-playwright/playwright.config.ts plugin-workload-sdk-sandbox-ui.spec.ts
+
+.PHONY: test-e2e-plugin-workload-sdk-desktop-no-grant
+test-e2e-plugin-workload-sdk-desktop-no-grant: ## Run the no-grant Codex guard (#533 regression) against its own ungranted SDK-only recipe
+	@set -eu; \
+	ctx="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}"; \
+	test -n "$$ctx" || { echo "Refusing Desktop Plugin Workload SDK no-grant guard: explicit Kubernetes context is required" >&2; exit 1; }; \
+	test "$${E2E_PLUGIN_SDK_WRITE_CONFIRM:-}" = 1 || { echo "Refusing Desktop Plugin Workload SDK no-grant guard: set E2E_PLUGIN_SDK_WRITE_CONFIRM=1" >&2; exit 1; }; \
+	test -n "$${CONTROL_UI_BASE_URL:-}" || { echo "CONTROL_UI_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${CONTROL_API_BASE_URL:-}" || { echo "CONTROL_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${EXTERNAL_REST_API_BASE_URL:-}" || { echo "EXTERNAL_REST_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${RPC_PROXY_BASE_URL:-}" || { echo "RPC_PROXY_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAME:-}" || { echo "Refusing Desktop Plugin Workload SDK no-grant guard: set E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAME to a Codex SDK-only recipe whose execution binding is missing (never the granted happy-path recipe)" >&2; exit 1; }; \
+	test -n "$${E2E_PLUGIN_SDK_NO_GRANT_APP_TITLE:-}" || { echo "Refusing Desktop Plugin Workload SDK no-grant guard: set E2E_PLUGIN_SDK_NO_GRANT_APP_TITLE to the ungranted app's Desktop catalog title" >&2; exit 1; }; \
+	. scripts/e2e/e2e-lib.sh; \
+	require_branch_profile_urls "$$ctx" "$${CLERUM_PROFILE_PORTS_ENV:-$${E2E_PROFILE_PORTS_ENV:-}}"; \
+	echo "[E2E-GUARD] Desktop Plugin Workload SDK no-grant guard: context=$$ctx; recipe=$${E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAMESPACE:-sandbox-recipes}/$${E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAME}; URLs supplied by the branch profile"; \
+	cd desktop-app && KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 E2E_PLUGIN_SDK_NO_GRANT=1 npm run build && \
+	KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 E2E_PLUGIN_SDK_NO_GRANT=1 \
+		E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAME="$$E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAME" \
+		E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAMESPACE="$${E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAMESPACE:-sandbox-recipes}" \
+		E2E_PLUGIN_SDK_NO_GRANT_APP_TITLE="$$E2E_PLUGIN_SDK_NO_GRANT_APP_TITLE" \
+		./node_modules/.bin/playwright test --config test/e2e-playwright/playwright.config.ts plugin-workload-sdk-no-grant-guard.spec.ts
 
 .PHONY: test-e2e-cron-tab-validation
 test-e2e-cron-tab-validation: ## Run recipe cron tab E2E (set E2E_CRON_TAB_FIX_REQUIRED=1 when the fix must be present)
