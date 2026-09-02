@@ -83,13 +83,19 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   } = useNavigationContext()
   const { agentNames } = useAgentsDataController()
   const { me } = useAuthContext()
-  const { accessCatalog } = useContextsDataController()
+  const {
+    accessCatalog,
+    loading: contextsLoading,
+    error: contextsError,
+  } = useContextsDataController()
   const {
     teams,
     currentTeamId,
     teamMembers,
     teamDirectory,
     ensureHydrated: ensureTeamsHydrated,
+    loading: teamsLoading,
+    error: teamsError,
   } = useTeamsDataController()
   const { agentContextByName, agentDisplayByName, selectedAgentMcpServers } =
     useMcpServersDataController({
@@ -525,7 +531,13 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
             <section className="agent-workspace-panel" aria-label="Agent members">
               <AgentHero agentName={selectedAgentDisplay} subtitle={routeSubtitle} />
 
-              {scopedMembers.length ? (
+              {(contextsError || teamsError) && !scopedMembers.length ? (
+                // Error before loading/content: a failed access-catalog or team
+                // directory read otherwise rendered a permanent "No members".
+                <StatusBanner tone="error">{contextsError ?? teamsError}</StatusBanner>
+              ) : (contextsLoading || teamsLoading) && !scopedMembers.length ? (
+                <EmptyState title="Loading" body="Fetching members…" />
+              ) : scopedMembers.length ? (
                 <DataTable className="agent-members-data-table">
                   <thead>
                     <tr>
