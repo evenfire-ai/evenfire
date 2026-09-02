@@ -3,7 +3,9 @@
 import { useEffect } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { getHosts } from '@lib/api'
+import { getContexts, getHosts } from '@lib/api'
+import type { ContextResource } from '@lib/api'
+import { contextAliases, contextForAlias } from '@lib/contextIdentity'
 
 // Legacy deep-link resolver for the removed Contexts section.
 //
@@ -36,13 +38,15 @@ export default function LegacyContextRedirectPage() {
           return
         }
 
-        const hostsResponse = await getHosts()
+        const [hostsResponse, contextsResponse] = await Promise.all([getHosts(), getContexts()])
+        const context = contextForAlias((contextsResponse.items ?? []) as ContextResource[], slug)
+        const aliases = new Set(context ? contextAliases(context) : [slug])
         const owner = (
           (hostsResponse.items ?? []) as Array<{
             metadata?: { name?: string }
             spec?: { contextRef?: string }
           }>
-        ).find(host => String(host.spec?.contextRef ?? '').trim() === slug)
+        ).find(host => aliases.has(String(host.spec?.contextRef ?? '').trim()))
 
         if (!owner?.metadata?.name) {
           fallback()

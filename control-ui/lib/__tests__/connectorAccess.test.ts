@@ -272,4 +272,17 @@ describe('hostOwnedContextNamesForConnector', () => {
 
     expect(hostOwnedContextNamesForConnector(contexts, hosts, 'search')).toEqual(['agent-scope'])
   })
+
+  it('resolves a Host contextRef through a legacy Context alias', () => {
+    const contexts: ContextResource[] = [
+      {
+        metadata: { name: 'ctx-resource' },
+        spec: { contextId: 'ctx-wire', mcpServers: ['search'] },
+      },
+    ]
+    const hosts = [{ metadata: { name: 'agent-alpha' }, spec: { contextRef: 'ctx-wire' } }]
+
+    expect(contextNamesForConnector(contexts, 'search')).toEqual(['ctx-wire'])
+    expect(hostOwnedContextNamesForConnector(contexts, hosts, 'search')).toEqual(['ctx-wire'])
+  })
 })

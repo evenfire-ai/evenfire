@@ -1,14 +1,11 @@
 import type { ContextResource, HostResource } from './api'
+import { contextAliases, contextForAlias } from './contextIdentity'
 
 export type AccessScopeLabel = {
   label: string
   // False only for the raw-id fallback: nothing could resolve the scope to a
   // user-facing name (no owning agent, no stored display name).
   resolved: boolean
-}
-
-function contextIdOf(context: ContextResource): string {
-  return String(context.spec?.contextId || context.metadata?.name || '').trim()
 }
 
 function hostContextRef(host: HostResource): string {
@@ -32,21 +29,17 @@ export function accessScopeLabeler(
   contexts: readonly ContextResource[],
   hosts: readonly HostResource[]
 ): (scopeId: string) => AccessScopeLabel {
-  const contextById = new Map<string, ContextResource>()
-  for (const context of contexts) {
-    const id = contextIdOf(context)
-    if (id) contextById.set(id, context)
-  }
-
   return function labelFor(scopeId: string): AccessScopeLabel {
+    const context = contextForAlias(contexts, scopeId)
+    const aliases = new Set(context ? contextAliases(context) : [scopeId])
     const owners = hosts
-      .filter(host => hostContextRef(host) === scopeId)
+      .filter(host => aliases.has(hostContextRef(host)))
       .map(hostDisplayName)
       .filter(Boolean)
       .sort((left, right) => left.localeCompare(right))
     if (owners.length > 0) return { label: owners.join(', '), resolved: true }
 
-    const display = contextById.get(scopeId)?.spec?.displayName?.trim()
+    const display = context?.spec?.displayName?.trim()
     if (display) return { label: display, resolved: true }
     return { label: scopeId, resolved: false }
   }
