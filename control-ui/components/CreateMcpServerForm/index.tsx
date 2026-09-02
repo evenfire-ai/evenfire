@@ -304,18 +304,6 @@ export function CreateMcpServerForm({
 
   // Preview: the users/teams that already have access to the selected agents.
   // Adding this connector makes it usable by exactly those people.
-  const selectedContextRefs = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          selectedAgentNames
-            .map(agentName => agentTargets.find(target => target.name === agentName)?.contextRef)
-            .filter((ref): ref is string => Boolean(ref))
-        )
-      ),
-    [selectedAgentNames, agentTargets]
-  )
-
   useEffect(() => {
     if (selectedAgentNames.length === 0) {
       setAccessPreview(EMPTY_ACCESS_PREVIEW)
