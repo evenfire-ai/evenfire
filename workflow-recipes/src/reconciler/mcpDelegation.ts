@@ -113,6 +113,33 @@ function hasExplicitWorkflowContextRef(recipe: WorkflowRecipeCRD): boolean {
   return Boolean(recipe.spec.contextRef?.trim())
 }
 
+const CONTEXT_RECIPE_LABEL = 'clerum.io/recipe'
+const CONTEXT_MANAGED_BY_LABEL = 'clerum.io/managed-by'
+const CONTEXT_MANAGED_BY_WRC = 'wrc'
+
+function sameMcpServerSet(left: readonly string[], right: readonly string[]): boolean {
+  const leftSet = new Set(left)
+  const rightSet = new Set(right)
+  if (leftSet.size !== rightSet.size) return false
+  for (const name of leftSet) {
+    if (!rightSet.has(name)) return false
+  }
+  return true
+}
+
+function contextReplaceIsNoOp(
+  explicitContext: boolean,
+  existingLabels: Record<string, string> | undefined,
+  existingServers: readonly string[],
+  mergedServers: readonly string[],
+  recipeName: string
+): boolean {
+  if (!sameMcpServerSet(existingServers, mergedServers)) return false
+  if ((existingLabels ?? {})[CONTEXT_MANAGED_BY_LABEL] !== CONTEXT_MANAGED_BY_WRC) return false
+  if (!explicitContext && (existingLabels ?? {})[CONTEXT_RECIPE_LABEL] !== recipeName) return false
+  return true
+}
+
 /**
  * Compute McpServer CRD name.
  *
@@ -693,7 +720,7 @@ export async function ensureRecipeContext(
     },
   }
 
-  const replaceExistingContext = async (): Promise<void> => {
+  const replaceExistingContext = async (): Promise<{ wrote: boolean }> => {
     for (let attempt = 1; attempt <= CONTEXT_REPLACE_CONFLICT_RETRIES; attempt += 1) {
       const existing = (await deps.customApi.getNamespacedCustomObject({
         group: CRD_GROUP,
@@ -702,7 +729,11 @@ export async function ensureRecipeContext(
         plural: CONTEXT_PLURAL,
         name: contextName,
       })) as {
-        metadata?: { resourceVersion?: string; labels?: Record<string, string> }
+        metadata?: {
+          resourceVersion?: string
+          labels?: Record<string, string>
+          annotations?: Record<string, string>
+        }
         spec?: { contextId?: string; mcpServers?: string[]; [key: string]: unknown }
       }
       const existingServers = Array.isArray(existing.spec?.mcpServers)
@@ -711,6 +742,27 @@ export async function ensureRecipeContext(
       const mergedServers = explicitContext
         ? Array.from(new Set([...existingServers, ...serverNames]))
         : serverNames
+      const existingLabels = existing.metadata?.labels ?? {}
+
+      // Semantic post-merge equality. Do not stamp clerum.io/spec-hash on a
+      // shared Context: N recipe writers would flap the annotation the same
+      // way clerum.io/recipe already flaps resourceVersion (#460 Phase 1).
+      if (
+        contextReplaceIsNoOp(
+          explicitContext,
+          existingLabels,
+          existingServers,
+          mergedServers,
+          recipeName
+        )
+      ) {
+        return { wrote: false }
+      }
+
+      const authoredLabels: Record<string, string> = {
+        [CONTEXT_MANAGED_BY_LABEL]: CONTEXT_MANAGED_BY_WRC,
+        ...(!explicitContext ? { [CONTEXT_RECIPE_LABEL]: recipeName } : {}),
+      }
 
       try {
         await deps.customApi.replaceNamespacedCustomObject({
@@ -724,9 +776,12 @@ export async function ensureRecipeContext(
             metadata: {
               ...contextBody.metadata,
               labels: {
-                ...(existing.metadata?.labels ?? {}),
-                ...contextBody.metadata.labels,
+                ...existingLabels,
+                ...authoredLabels,
               },
+              ...(existing.metadata?.annotations
+                ? { annotations: { ...existing.metadata.annotations } }
+                : {}),
               resourceVersion: existing.metadata?.resourceVersion,
             },
             spec: {
@@ -736,7 +791,7 @@ export async function ensureRecipeContext(
             },
           },
         })
-        return
+        return { wrote: true }
       } catch (replaceError) {
         if (getErrorCode(replaceError) === 409) {
           if (attempt < CONTEXT_REPLACE_CONFLICT_RETRIES) {
@@ -747,6 +802,7 @@ export async function ensureRecipeContext(
         throw replaceError
       }
     }
+    throw new Error(`failed to update Context "${contextName}" after conflict retries`)
   }
 
   try {
@@ -762,10 +818,14 @@ export async function ensureRecipeContext(
     )
   } catch (error) {
     if (getErrorCode(error) === 409) {
-      await replaceExistingContext()
-      console.log(
-        `[MCP-Delegation] Updated per-recipe Context "${contextName}" with ${serverNames.length} server(s)`
-      )
+      const { wrote } = await replaceExistingContext()
+      if (wrote) {
+        console.log(
+          `[MCP-Delegation] Updated per-recipe Context "${contextName}" with ${serverNames.length} server(s)`
+        )
+      } else {
+        console.log(`[MCP-Delegation] Context "${contextName}" unchanged; skipping update`)
+      }
     } else {
       throw error
     }

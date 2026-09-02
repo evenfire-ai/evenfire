@@ -989,7 +989,7 @@ describe('ensureRecipeContext', () => {
     )
   })
 
-  it('H04b — updates existing Context on 409 conflict (re-reconcile path)', async () => {
+  it('H04b — writes on 409 when live Context has no mcpServers (empty→filled is not a skip)', async () => {
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({ metadata: { resourceVersion: '5' } }),
@@ -1025,7 +1025,11 @@ describe('ensureRecipeContext', () => {
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({
-        metadata: { resourceVersion: '5', labels: { 'clerum.io/context-owner': 'admin' } },
+        metadata: {
+          resourceVersion: '5',
+          labels: { 'clerum.io/context-owner': 'admin', 'clerum.io/recipe': 'other-recipe' },
+          annotations: { 'operator.io/note': 'keep' },
+        },
         spec: {
           contextId: 'context1',
           description: 'shared operator context',
@@ -1056,7 +1060,12 @@ describe('ensureRecipeContext', () => {
         name: 'context1',
         body: expect.objectContaining({
           metadata: expect.objectContaining({
-            labels: expect.objectContaining({ 'clerum.io/context-owner': 'admin' }),
+            labels: expect.objectContaining({
+              'clerum.io/context-owner': 'admin',
+              'clerum.io/managed-by': 'wrc',
+              'clerum.io/recipe': 'other-recipe',
+            }),
+            annotations: { 'operator.io/note': 'keep' },
           }),
           spec: {
             contextId: 'context1',
@@ -1067,6 +1076,11 @@ describe('ensureRecipeContext', () => {
         }),
       })
     )
+    expect(
+      (replaceCall.body as { metadata?: { labels?: Record<string, string> } }).metadata?.labels?.[
+        'clerum.io/recipe'
+      ]
+    ).not.toBe('test-recipe')
     expect(
       (replaceCall.body as { metadata?: Record<string, unknown> }).metadata
     ).not.toHaveProperty('ownerReferences')
@@ -1167,6 +1181,162 @@ describe('ensureRecipeContext', () => {
 
     expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledTimes(3)
     expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalledTimes(3)
+  })
+
+  it('skips shared Context replace when the union and WRC-authored labels already match', async () => {
+    const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
+    const mockCustomApi = {
+      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: {
+          resourceVersion: '9',
+          labels: {
+            'clerum.io/recipe': 'other-recipe',
+            'clerum.io/managed-by': 'wrc',
+            'clerum.io/context-owner': 'admin',
+          },
+        },
+        spec: {
+          contextId: 'context1',
+          mcpServers: ['existing-server', 'test-recipe-redis-mcp'],
+        },
+      }),
+      replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+    }
+    const deps: DelegationDeps = {
+      customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
+      coreApi: {} as DelegationDeps['coreApi'],
+    }
+
+    const contextName = await ensureRecipeContext(
+      deps,
+      recipe,
+      ['test-recipe-redis-mcp'],
+      'mcp-server',
+      ownerRef,
+      'sandbox-recipes'
+    )
+
+    expect(contextName).toBe('context1')
+    expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+  })
+
+  it('writes a shared Context when managed-by is missing even if the server union already matches', async () => {
+    const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
+    const mockCustomApi = {
+      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: {
+          resourceVersion: '9',
+          labels: { 'clerum.io/recipe': 'other-recipe' },
+        },
+        spec: {
+          contextId: 'context1',
+          mcpServers: ['existing-server', 'test-recipe-redis-mcp'],
+        },
+      }),
+      replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+    }
+    const deps: DelegationDeps = {
+      customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
+      coreApi: {} as DelegationDeps['coreApi'],
+    }
+
+    await ensureRecipeContext(
+      deps,
+      recipe,
+      ['test-recipe-redis-mcp'],
+      'mcp-server',
+      ownerRef,
+      'sandbox-recipes'
+    )
+
+    expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    const replaceCall = mockCustomApi.replaceNamespacedCustomObject.mock.calls[0]?.[0]
+    expect(replaceCall).toEqual(
+      expect.objectContaining({
+        name: 'context1',
+        body: expect.objectContaining({
+          metadata: expect.objectContaining({
+            labels: expect.objectContaining({
+              'clerum.io/managed-by': 'wrc',
+              'clerum.io/recipe': 'other-recipe',
+            }),
+          }),
+        }),
+      })
+    )
+    expect(
+      (replaceCall.body as { metadata?: { labels?: Record<string, string> } }).metadata?.labels?.[
+        'clerum.io/recipe'
+      ]
+    ).not.toBe('test-recipe')
+  })
+
+  it('skips shared Context replace even when a leftover spec-hash annotation is present', async () => {
+    const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
+    const mockCustomApi = {
+      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: {
+          resourceVersion: '9',
+          labels: { 'clerum.io/managed-by': 'wrc', 'clerum.io/recipe': 'other-recipe' },
+          annotations: { 'clerum.io/spec-hash': 'deadbeefdeadbeefdeadbeefdeadbeef' },
+        },
+        spec: {
+          contextId: 'context1',
+          mcpServers: ['existing-server', 'test-recipe-redis-mcp'],
+        },
+      }),
+      replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+    }
+    const deps: DelegationDeps = {
+      customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
+      coreApi: {} as DelegationDeps['coreApi'],
+    }
+
+    await ensureRecipeContext(
+      deps,
+      recipe,
+      ['test-recipe-redis-mcp'],
+      'mcp-server',
+      ownerRef,
+      'sandbox-recipes'
+    )
+
+    expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+  })
+
+  it('skips private Context replace when mcpServers and WRC labels already match', async () => {
+    const mockCustomApi = {
+      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: {
+          resourceVersion: '3',
+          labels: { 'clerum.io/recipe': 'test-recipe', 'clerum.io/managed-by': 'wrc' },
+        },
+        spec: { contextId: 'wf-test-recipe', mcpServers: ['server-a', 'server-b'] },
+      }),
+      replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+    }
+    const deps: DelegationDeps = {
+      customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
+      coreApi: {} as DelegationDeps['coreApi'],
+    }
+
+    const contextName = await ensureRecipeContext(
+      deps,
+      'test-recipe',
+      ['server-a', 'server-b'],
+      'mcp-server',
+      ownerRef
+    )
+
+    expect(contextName).toBe('wf-test-recipe')
+    expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('H04c — re-throws non-409 errors', async () => {
@@ -1298,6 +1468,82 @@ describe('delegateTransportWorkloads', () => {
       (call: unknown[]) => (call[0] as { plural?: string } | undefined)?.plural === MCPSERVER_PLURAL
     )
     expect(mcpServerReplaceCalls).toHaveLength(0)
+  })
+
+  it('does NOT replace an explicit Context on the second reconcile when the union is already live', async () => {
+    const CONTEXT_PLURAL = 'contexts'
+    const MCPSERVER_PLURAL = 'mcpservers'
+    const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
+    let storedMcpServer: { metadata?: unknown; spec?: Record<string, unknown> } | undefined
+    let storedContext:
+      | {
+          metadata?: { labels?: Record<string, string>; annotations?: Record<string, string> }
+          spec?: { mcpServers?: string[] }
+        }
+      | undefined
+
+    const mockCustomApi = {
+      getNamespacedCustomObject: vi.fn().mockImplementation((args: { plural: string }) => {
+        if (args.plural === MCPSERVER_PLURAL && storedMcpServer) {
+          return Promise.resolve(storedMcpServer)
+        }
+        if (args.plural === CONTEXT_PLURAL && storedContext) {
+          return Promise.resolve(storedContext)
+        }
+        return Promise.reject({ code: 404 })
+      }),
+      createNamespacedCustomObject: vi.fn().mockImplementation(
+        (args: {
+          plural: string
+          body: {
+            metadata?: { labels?: Record<string, string> }
+            spec?: { mcpServers?: string[] }
+          }
+        }) => {
+          if (args.plural === MCPSERVER_PLURAL) {
+            storedMcpServer = args.body as typeof storedMcpServer
+            return Promise.resolve({})
+          }
+          if (args.plural === CONTEXT_PLURAL) {
+            if (storedContext) {
+              return Promise.reject({ code: 409 })
+            }
+            storedContext = {
+              ...args.body,
+              metadata: {
+                ...args.body.metadata,
+                labels: {
+                  ...(args.body.metadata?.labels ?? {}),
+                  'clerum.io/managed-by': 'wrc',
+                },
+              },
+            }
+            return Promise.resolve({})
+          }
+          return Promise.resolve({})
+        }
+      ),
+      replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+    }
+    const mockCoreApi = { createNamespacedService: vi.fn().mockResolvedValue({}) }
+    const deps: DelegationDeps = {
+      customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
+      coreApi: mockCoreApi as unknown as DelegationDeps['coreApi'],
+    }
+
+    await delegateTransportWorkloads(deps, recipe, 'mcp-server', new Map())
+    expect(storedContext).toBeDefined()
+
+    mockCustomApi.replaceNamespacedCustomObject.mockClear()
+    await delegateTransportWorkloads(deps, recipe, 'mcp-server', new Map())
+
+    const contextReplaceCalls = mockCustomApi.replaceNamespacedCustomObject.mock.calls.filter(
+      (call: unknown[]) => (call[0] as { plural?: string } | undefined)?.plural === CONTEXT_PLURAL
+    )
+    expect(contextReplaceCalls).toHaveLength(0)
+    expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({ plural: CONTEXT_PLURAL, name: 'context1' })
+    )
   })
 
   it('DOES replace an McpServer when the desired spec-hash differs (changed recipe / pre-upgrade object)', async () => {

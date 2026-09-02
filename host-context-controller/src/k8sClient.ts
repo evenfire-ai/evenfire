@@ -4361,6 +4361,15 @@ export class McpServerWatcher implements McpServerProvider {
         void this.runInitialNetworkPolicyConvergence()
       }
 
+      // Metadata-only Context MODIFIED (label ping-pong, annotation churn)
+      // does not change desired revision. Skip SFS propagate and Host fan-out
+      // — that accidental resync is the #460 Loop A storm. Mirrors the
+      // McpServer status-only early return above.
+      if (type === 'MODIFIED' && !desiredStateChanged) {
+        this.changeCallback?.()
+        return
+      }
+
       // Re-reconcile every SFS this Context referenced before or after the
       // change so SharedFileSystem.status.mountedByContexts stays in sync
       // without waiting for an SFS-level event.
