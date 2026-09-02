@@ -340,9 +340,15 @@ export async function finalizePromptBridgeInTransaction(
   )
   const existing = existingResult.rows[0] as SpendOutcomeRow | undefined
   if (existing) {
-    if (isOauthBrokerProvider(existing.provider) && input.status === 'complete') {
+    if (isOauthBrokerProvider(existing.provider)) {
       const linkedCodex = await loadLlmProviderAttemptBySdkAttemptId(db, input.providerAttemptId)
-      if (linkedCodex && isLinkedCodexInFlightWithoutUsage(linkedCodex)) {
+      // Upgrade and ledger_pending are decided from persisted spend + the
+      // linked Codex row, not from the caller-chosen finalize status.
+      if (
+        existing.outcome === 'unknown' &&
+        linkedCodex &&
+        isLinkedCodexInFlightWithoutUsage(linkedCodex)
+      ) {
         throw new PromptBridgeFinalizationError(
           'ledger_pending',
           'linked Codex attempt has not finalized usage yet',
