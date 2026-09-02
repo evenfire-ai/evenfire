@@ -901,10 +901,12 @@ export class WorkflowReconciler {
   /**
    * Raw allowlist ConfigMap from the last refresh, kept so each recipe's
    * projection can re-parse it with that recipe's assigned grant key (HCC
-   * keeps the same shape for Hosts). Undefined while the read is failing —
-   * `codexSnapshot` then carries the fail-closed snapshot error.
+   * keeps the same shape for Hosts). Cleared on a failed read so grant
+   * decisions stay fail-closed. Do not send a binding-less v3 configure in
+   * that window — skip configure so mcp-host keeps a live binding.
    */
   private lastCodexConfigMap: k8s.V1ConfigMap | undefined
+  private lastCodexSnapshotReadOk = true
   private readonly codexContexts = new Map<string, CodexReconcileContext>()
 
   constructor(private readonly deps: WorkflowReconcilerDeps) {
@@ -1022,7 +1024,7 @@ export class WorkflowReconciler {
     return [...workflow, ...derived] as EffectiveWorkflowControlScope[]
   }
 
-  private async refreshCodexSnapshot(): Promise<void> {
+  private async refreshCodexSnapshot(): Promise<boolean> {
     try {
       const cm = await this.deps.coreApi.readNamespacedConfigMap({
         name: ALLOWED_MODELS_CONFIGMAP_NAME,
@@ -1030,15 +1032,18 @@ export class WorkflowReconciler {
       })
       this.lastCodexConfigMap = cm
       this.codexSnapshot = parseAllowedModelsSnapshot(cm)
+      this.lastCodexSnapshotReadOk = true
+      return true
     } catch (err) {
       this.lastCodexConfigMap = undefined
+      this.lastCodexSnapshotReadOk = false
       if (isCodexSnapshotTimeout(err)) {
         this.codexSnapshot = snapshotFromConfigMapError('timeout')
         this.log.warn('Codex allowlist ConfigMap read timed out; failing closed', {
           configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
           namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
         })
-        return
+        return false
       }
       const code = getErrorCode(err)
       if (code === 401 || code === 403) {
@@ -1048,7 +1053,7 @@ export class WorkflowReconciler {
           namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
           statusCode: code,
         })
-        return
+        return false
       }
       this.codexSnapshot = snapshotFromConfigMapError('missing')
       this.log.warn('Codex allowlist ConfigMap unavailable; failing closed', {
@@ -1056,6 +1061,7 @@ export class WorkflowReconciler {
         namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
         statusCode: code,
       })
+      return false
     }
   }
 
@@ -1123,7 +1129,7 @@ export class WorkflowReconciler {
       throw new Error('SDK-only runtime requires spec.steps to be absent or empty')
     }
 
-    await this.refreshCodexSnapshot()
+    const codexSnapshotAvailable = await this.refreshCodexSnapshot()
     const agent = resolveEagerSdkMcpHostAgent(spec)
     const context = this.resolveCodexContext(recipeUid, recipeName, runtimeScopeRecipeName)
     const codexBinding =
@@ -1153,7 +1159,7 @@ export class WorkflowReconciler {
       runtimeScopeRecipeName,
       spec,
       runtime,
-      { mcpHostPhase, codexBinding }
+      { mcpHostPhase, codexBinding, codexSnapshotUnavailable: !codexSnapshotAvailable }
     )
     const bootstrapProof = this.pluginWorkloadSdkProvisioner.getBootstrapProof(recipeName)
     switch (status) {
@@ -1607,7 +1613,10 @@ export class WorkflowReconciler {
             runtimeScopeRecipeName,
             spec,
             runtime,
-            { mcpHostPhase }
+            {
+              mcpHostPhase,
+              codexSnapshotUnavailable: !this.lastCodexSnapshotReadOk,
+            }
           )
           const eagerBootstrapProof =
             this.pluginWorkloadSdkProvisioner.getBootstrapProof(recipeName)

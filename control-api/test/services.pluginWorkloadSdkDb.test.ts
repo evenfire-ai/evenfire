@@ -509,7 +509,7 @@ describe('invocation retry lifecycle timestamps', () => {
             outcome: null,
             usage_input_tokens: null,
             usage_output_tokens: null,
-            created_at: new Date('2026-09-01T00:00:00.000Z'),
+            created_at: new Date(),
           },
         ],
         rowCount: 1,
@@ -527,6 +527,74 @@ describe('invocation retry lifecycle timestamps', () => {
         .mocked(pool.query)
         .mock.calls.some(([sql]: [string]) => sql.includes("SET status = 'provider_unavailable'"))
     ).toBe(false)
+  })
+
+  it('freezes oauth spend after the linked Codex in-flight grace expires', async () => {
+    vi.mocked(pool.query)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'inv-codex-stale',
+            attempt_generation: 1,
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'attempt-codex-stale',
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+            attempt_generation: 1,
+            attempt_index: 1,
+            target_ref: 'primary-codex',
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+            credential_slot: '',
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'codex-stale',
+            caller_kind: 'recipe',
+            host_ref: 'sandbox-recipes/sdk-recipe',
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+            invocation_id: 'inv-codex-stale',
+            attempt_generation: 1,
+            provider_attempt_index: 1,
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+            request_hash: 'hash',
+            policy_revision: 1,
+            policy_hash: 'a'.repeat(64),
+            budget_reservation_id: 'budget-1',
+            connection_revision: 1,
+            plugin_workload_sdk_provider_attempt_id: 'attempt-codex-stale',
+            status: 'authorized',
+            outcome: null,
+            usage_input_tokens: null,
+            usage_output_tokens: null,
+            created_at: new Date(Date.now() - 16 * 60 * 1000),
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValue({ rows: [{ id: 'inv-codex-stale' }], rowCount: 1 } as never)
+    await expect(failStaleInvocations(150)).resolves.toBe(1)
+    expect(
+      vi
+        .mocked(pool.query)
+        .mock.calls.some(([sql]: [string]) =>
+          sql.includes('INSERT INTO plugin_workload_sdk_spend_outcomes')
+        )
+    ).toBe(true)
   })
 })
 

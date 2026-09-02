@@ -631,6 +631,40 @@ describe('buildPluginWorkloadSdkStatus', () => {
     )
   })
 
+  it('does not hide a stale Codex contract behind a default policyState', () => {
+    const projection = buildPluginWorkloadSdkStatus({
+      spec: baseSpec(
+        { promptBridge: {} },
+        { agent: { provider: 'codex-subscription', model: 'gpt-5.6-luna' } }
+      ),
+      existingConditions: undefined,
+      phase: 'active',
+      featureFlagEnabled: true,
+      bootstrapProof: {
+        ready: true,
+        contractVersion: 2,
+        podUid: 'pod-uid-1',
+        provider: 'codex-subscription',
+        model: 'gpt-5.6-luna',
+        policyReady: true,
+        policyState: 'active',
+        verifiedAt: NOW,
+      },
+      now: NOW,
+    })
+    expect(projection.conditions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
+          status: 'True',
+          reason: 'codex_bootstrap_contract_stale',
+          message:
+            'Plugin Workload SDK promptBridge policy is not ready (codex_bootstrap_contract_stale)',
+        }),
+      ])
+    )
+  })
+
   it('does not validate a clientNotifications-only recipe before its grant is proven', () => {
     const projection = buildPluginWorkloadSdkStatus({
       spec: baseSpec(

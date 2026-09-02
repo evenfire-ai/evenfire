@@ -216,24 +216,81 @@ type SpendOutcomeRow = {
   output_tokens: number | string | null
 }
 
+function spendBindingMatches(row: SpendOutcomeRow, input: PromptBridgeFinalizationInput): boolean {
+  return (
+    row.invocation_id === input.invocationId &&
+    row.recipe_namespace === input.recipeNamespace &&
+    row.recipe_name === input.recipeName &&
+    Number(row.attempt_generation) === input.attemptGeneration &&
+    Number(row.attempt_index) === input.providerAttemptIndex &&
+    row.target_ref === input.target.targetRef &&
+    (row.host_ref === null || row.host_ref === input.hostRef) &&
+    row.provider === input.target.provider &&
+    row.model === input.target.model &&
+    row.credential_slot === input.target.credentialSlot
+  )
+}
+
+async function upgradeUnknownOauthSpendToExact(
+  db: DbClient,
+  existing: SpendOutcomeRow,
+  input: PromptBridgeFinalizationInput,
+  linked: Pick<LlmProviderAttemptRow, 'usageInputTokens' | 'usageOutputTokens'>
+): Promise<PromptBridgeFinalizationResult> {
+  assertPersistedAuthModeCredentialRules(existing.provider, input)
+  if (!spendBindingMatches(existing, input)) {
+    throw new PromptBridgeFinalizationError(
+      'conflict',
+      'provider attempt was finalized with a different immutable outcome',
+      409
+    )
+  }
+  const updated = await db.query(
+    `UPDATE plugin_workload_sdk_spend_outcomes
+        SET outcome = 'exact',
+            input_tokens = $2,
+            output_tokens = $3,
+            usage_request_id = COALESCE(usage_request_id, $1)
+      WHERE provider_attempt_id = $1
+        AND outcome = 'unknown'
+      RETURNING provider_attempt_id`,
+    [input.providerAttemptId, linked.usageInputTokens, linked.usageOutputTokens]
+  )
+  if ((updated.rowCount ?? updated.rows.length) !== 1) {
+    const raced = await db.query(
+      `SELECT provider_attempt_id, invocation_id, recipe_namespace, recipe_name,
+              attempt_generation, attempt_index, target_ref, host_ref, provider,
+              model, credential_slot, outcome, input_tokens, output_tokens
+         FROM plugin_workload_sdk_spend_outcomes
+        WHERE provider_attempt_id = $1`,
+      [input.providerAttemptId]
+    )
+    const existingOutcome = raced.rows[0] as SpendOutcomeRow | undefined
+    if (!existingOutcome) {
+      throw new PromptBridgeFinalizationError(
+        'conflict',
+        'provider attempt outcome was concurrently finalized but is not readable',
+        409
+      )
+    }
+    return mapExistingOutcome(existingOutcome, input)
+  }
+  return {
+    invocationId: input.invocationId,
+    providerAttemptId: input.providerAttemptId,
+    status: input.status,
+    outcome: 'exact',
+    idempotent: false,
+    usageAccepted: false,
+  }
+}
+
 function mapExistingOutcome(
   row: SpendOutcomeRow,
   input: PromptBridgeFinalizationInput
 ): PromptBridgeFinalizationResult {
   assertPersistedAuthModeCredentialRules(row.provider, input)
-  if (
-    row.invocation_id !== input.invocationId ||
-    row.recipe_namespace !== input.recipeNamespace ||
-    row.recipe_name !== input.recipeName ||
-    Number(row.attempt_generation) !== input.attemptGeneration ||
-    Number(row.attempt_index) !== input.providerAttemptIndex ||
-    row.target_ref !== input.target.targetRef ||
-    (row.host_ref !== null && row.host_ref !== input.hostRef) ||
-    row.provider !== input.target.provider ||
-    row.model !== input.target.model ||
-    row.credential_slot !== input.target.credentialSlot ||
-    !replayOutcomeCompatible(input, row)
-  ) {
+  if (!spendBindingMatches(row, input) || !replayOutcomeCompatible(input, row)) {
     throw new PromptBridgeFinalizationError(
       'conflict',
       'provider attempt was finalized with a different immutable outcome',
@@ -283,11 +340,7 @@ export async function finalizePromptBridgeInTransaction(
   )
   const existing = existingResult.rows[0] as SpendOutcomeRow | undefined
   if (existing) {
-    if (
-      isOauthBrokerProvider(existing.provider) &&
-      input.status === 'complete' &&
-      existing.outcome === 'unknown'
-    ) {
+    if (isOauthBrokerProvider(existing.provider) && input.status === 'complete') {
       const linkedCodex = await loadLlmProviderAttemptBySdkAttemptId(db, input.providerAttemptId)
       if (linkedCodex && isLinkedCodexInFlightWithoutUsage(linkedCodex)) {
         throw new PromptBridgeFinalizationError(
@@ -295,6 +348,22 @@ export async function finalizePromptBridgeInTransaction(
           'linked Codex attempt has not finalized usage yet',
           409,
           true
+        )
+      }
+      if (existing.outcome === 'unknown' && linkedCodex && isLinkedCodexUsageReady(linkedCodex)) {
+        return upgradeUnknownOauthSpendToExact(db, existing, input, linkedCodex)
+      }
+      if (
+        existing.outcome === 'exact' &&
+        linkedCodex &&
+        isLinkedCodexUsageReady(linkedCodex) &&
+        (Number(existing.input_tokens) !== Number(linkedCodex.usageInputTokens) ||
+          Number(existing.output_tokens) !== Number(linkedCodex.usageOutputTokens))
+      ) {
+        throw new PromptBridgeFinalizationError(
+          'conflict',
+          'provider attempt was finalized with a different immutable outcome',
+          409
         )
       }
     }

@@ -554,7 +554,7 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
         outcome: null,
         usage_input_tokens: null,
         usage_output_tokens: null,
-        created_at: new Date('2026-08-03T00:00:00.000Z'),
+        created_at: new Date(),
       }
     )
 
@@ -686,6 +686,104 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
     ])
   })
 
+  it('records Codex complete as unknown when linked success finalized without usage', async () => {
+    ingest.mockReset()
+    project.mockReset()
+    const db = dbWithRows(
+      [],
+      [],
+      {
+        id: IDS.invocation,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        method: 'promptBridge',
+        status: 'in_progress',
+        attempt_generation: 1,
+      },
+      {
+        invocation_id: IDS.invocation,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        attempt_generation: 1,
+        method: 'promptBridge',
+        status: 'in_progress',
+      },
+      {
+        id: IDS.providerAttempt,
+        invocation_id: IDS.invocation,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        attempt_generation: 1,
+        attempt_index: 1,
+        target_ref: 'codex-primary',
+        host_ref: inputBase.hostRef,
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+        credential_slot: '',
+        status: 'in_progress',
+      },
+      {
+        id: '33333333-3333-4333-8333-333333333333',
+        caller_kind: 'recipe',
+        host_ref: inputBase.hostRef,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        invocation_id: IDS.invocation,
+        attempt_generation: 1,
+        provider_attempt_index: 1,
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+        request_hash: 'hash',
+        policy_revision: 1,
+        policy_hash: 'a'.repeat(64),
+        budget_reservation_id: 'budget-1',
+        connection_revision: 1,
+        status: 'finalized',
+        outcome: 'success',
+        usage_input_tokens: null,
+        usage_output_tokens: null,
+        created_at: new Date(),
+      },
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 },
+      { rows: [], rowCount: 1 }
+    )
+
+    const result = await finalizePromptBridgeInTransaction(
+      {
+        ...inputBase,
+        target: {
+          targetRef: 'codex-primary',
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          credentialSlot: '',
+        },
+        status: 'complete',
+        usage: {
+          llmSecretName: '',
+          callerRef: 'scanner',
+          fallbackUsed: false,
+          attemptCount: 1,
+          inputTokens: 4,
+          outputTokens: 2,
+        },
+      },
+      db as never
+    )
+
+    expect(result).toMatchObject({
+      status: 'complete',
+      outcome: 'unknown',
+      usageAccepted: false,
+    })
+    expect(
+      db.query.mock.calls.some(([statement]: [string]) =>
+        statement.includes('INSERT INTO plugin_workload_sdk_spend_outcomes')
+      )
+    ).toBe(true)
+  })
+
   it('replays a Codex unknown complete finalization idempotently', async () => {
     const row = {
       provider_attempt_id: IDS.providerAttempt,
@@ -730,6 +828,83 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
       outcome: 'unknown',
       usageAccepted: false,
     })
+  })
+
+  it('upgrades a Codex unknown spend row to exact when linked usage becomes ready', async () => {
+    const row = {
+      provider_attempt_id: IDS.providerAttempt,
+      invocation_id: IDS.invocation,
+      recipe_namespace: inputBase.recipeNamespace,
+      recipe_name: inputBase.recipeName,
+      attempt_generation: 1,
+      attempt_index: 1,
+      target_ref: 'codex-primary',
+      host_ref: inputBase.hostRef,
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+      credential_slot: '',
+      outcome: 'unknown',
+      input_tokens: null,
+      output_tokens: null,
+    }
+    const db = dbWithRows(
+      [],
+      row,
+      {
+        id: '33333333-3333-4333-8333-333333333333',
+        caller_kind: 'recipe',
+        host_ref: inputBase.hostRef,
+        recipe_namespace: inputBase.recipeNamespace,
+        recipe_name: inputBase.recipeName,
+        invocation_id: IDS.invocation,
+        attempt_generation: 1,
+        provider_attempt_index: 1,
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+        request_hash: 'hash',
+        policy_revision: 1,
+        policy_hash: 'a'.repeat(64),
+        budget_reservation_id: 'budget-1',
+        connection_revision: 1,
+        status: 'finalized',
+        outcome: 'success',
+        usage_input_tokens: 12,
+        usage_output_tokens: 7,
+        created_at: new Date(),
+      },
+      { rows: [{ provider_attempt_id: IDS.providerAttempt }], rowCount: 1 }
+    )
+    await expect(
+      finalizePromptBridgeInTransaction(
+        {
+          ...inputBase,
+          target: {
+            targetRef: 'codex-primary',
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+            credentialSlot: '',
+          },
+          status: 'complete',
+          usage: {
+            llmSecretName: '',
+            callerRef: 'scanner',
+            fallbackUsed: false,
+            attemptCount: 1,
+            inputTokens: 4,
+            outputTokens: 2,
+          },
+        },
+        db as never
+      )
+    ).resolves.toMatchObject({
+      idempotent: false,
+      outcome: 'exact',
+      usageAccepted: false,
+    })
+    const upgrade = db.query.mock.calls.find(([statement]: [string]) =>
+      statement.includes("SET outcome = 'exact'")
+    )
+    expect(upgrade?.[1]).toEqual([IDS.providerAttempt, 12, 7])
   })
 
   it('refuses to replay a sweeper unknown while the linked Codex attempt is still in flight', async () => {
@@ -789,7 +964,7 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
           outcome: null,
           usage_input_tokens: null,
           usage_output_tokens: null,
-          created_at: new Date('2026-08-03T00:00:00.000Z'),
+          created_at: new Date(),
         }) as never
       )
     ).rejects.toMatchObject({

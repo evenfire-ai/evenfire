@@ -50,6 +50,10 @@ export function verifySdkOnlyCodexBindingHash(
   )
 }
 
+/**
+ * Return a public-field copy of an already-typed Codex binding.
+ * Hash and model checks live on `readVerifiedSdkOnlyCodexBinding`.
+ */
 export function sanitizePluginWorkloadSdkCodexBindingProof(
   binding: PluginWorkloadSdkCodexBindingProof
 ): PluginWorkloadSdkCodexBindingProof {

@@ -37,7 +37,11 @@ const IDEMPOTENCY_KEY_RE = new RegExp(DEFAULT_IDEMPOTENCY_KEY_PATTERN)
 const PURPOSE_SET = new Set<string>(PLUGIN_WORKLOAD_SDK_PURPOSES)
 const MAX_METADATA_BYTES = 16 * 1024
 const FINALIZE_LEDGER_RETRIES = 4
-const FINALIZE_LEDGER_DELAY_MS = 50
+
+/** Seconds-scale backoff so a Codex usage frame can land before ledger_pending expires. */
+export function finalizeLedgerRetryDelayMs(attempt: number): number {
+  return Math.min(4_000, 500 * 2 ** attempt)
+}
 
 async function finalizeCompleteWithLedgerRetry(
   finalize: NonNullable<PromptBridgeHandlerDeps['finalizePromptBridge']>,
@@ -57,7 +61,7 @@ async function finalizeCompleteWithLedgerRetry(
       ) {
         throw error
       }
-      await new Promise(resolve => setTimeout(resolve, FINALIZE_LEDGER_DELAY_MS))
+      await new Promise(resolve => setTimeout(resolve, finalizeLedgerRetryDelayMs(attempt)))
     }
   }
   throw lastError
@@ -588,6 +592,12 @@ function unexpectedAuthorizationResponse(): PluginWorkloadError {
   )
 }
 
+/**
+ * Grant-advertised output cap for providers that honor max_tokens on the wire.
+ * Codex ChatGPT `/codex/responses` rejects max_output_tokens; the proxy omits
+ * it. This clamp still bounds the host request used for authorize hashing. It
+ * is not ChatGPT enforcement.
+ */
 function clampMaxTokens(
   requested: number | undefined,
   grantCap: number | null

@@ -290,7 +290,9 @@ function toUpstreamPayload(request: CodexCompletionRequestV1): Record<string, un
   // ChatGPT `/codex/responses` rejects sampling fields that Chat Completions
   // treats as portable. Keep them on CodexCompletionRequestV1 (authorize hash)
   // and omit them on the upstream wire. The CLI Codex client also omits
-  // max_output_tokens / temperature.
+  // max_output_tokens / temperature. The authorize hash still carries
+  // generation.maxOutputTokens as request identity; this wire cannot enforce
+  // that cap. Do not restore the fields here.
   if (request.generation?.toolChoice) {
     payload.tool_choice = request.generation.toolChoice
   }

@@ -2174,8 +2174,9 @@ export async function failStaleInvocationsInTransaction(
         break
       }
     }
-    // Codex still owns exact usage. Leave the invocation leased so finalize
-    // can 409 ledger_pending instead of freezing an unknown spend row.
+    // Codex still owns exact usage within the in-flight grace. Leave the
+    // invocation leased so finalize can 409 ledger_pending. After the grace,
+    // or once Codex finalizes without tokens, unknown spend is the honest close.
     if (linkedCodexInFlight) continue
 
     const marked = await db.query(

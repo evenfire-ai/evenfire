@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from 'vitest'
 import { PluginWorkloadError } from '../domain/errors'
 import type { PromptBridgeTarget } from '../domain/types'
 import type { PluginWorkloadSdkControlApiClient } from './controlApiClient'
-import { PromptBridgeHandler, type PromptBridgeHandlerDeps } from './handler'
+import {
+  PromptBridgeHandler,
+  type PromptBridgeHandlerDeps,
+  finalizeLedgerRetryDelayMs,
+} from './handler'
 import type { LlmBridge } from './llmBridge'
 
 const validBody = {
@@ -445,6 +449,13 @@ describe('PromptBridgeHandler', () => {
     expect(report).not.toHaveBeenCalled()
   })
 
+  it('uses seconds-scale backoff for ledger_pending retries', () => {
+    expect(finalizeLedgerRetryDelayMs(0)).toBe(500)
+    expect(finalizeLedgerRetryDelayMs(1)).toBe(1000)
+    expect(finalizeLedgerRetryDelayMs(2)).toBe(2000)
+    expect(finalizeLedgerRetryDelayMs(3)).toBe(4000)
+  })
+
   it('retries a retryable complete finalization before treating the outcome as unknown', async () => {
     const finalize = vi
       .fn<FinalizePromptBridge>()
@@ -478,10 +489,17 @@ describe('PromptBridgeHandler', () => {
     })
     const { handler, report } = makeDeps({ complete, finalize })
 
-    await expect(handler.handle(validBody, 'api')).resolves.toMatchObject({
-      invocationId: 'inv-1',
-      content: 'summary text',
-    })
+    vi.useFakeTimers()
+    try {
+      const pending = handler.handle(validBody, 'api')
+      await vi.runAllTimersAsync()
+      await expect(pending).resolves.toMatchObject({
+        invocationId: 'inv-1',
+        content: 'summary text',
+      })
+    } finally {
+      vi.useRealTimers()
+    }
     expect(finalize).toHaveBeenCalledTimes(2)
     expect(finalize).toHaveBeenNthCalledWith(1, expect.objectContaining({ status: 'complete' }))
     expect(finalize).toHaveBeenNthCalledWith(2, expect.objectContaining({ status: 'complete' }))

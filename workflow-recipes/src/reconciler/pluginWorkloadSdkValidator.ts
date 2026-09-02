@@ -210,6 +210,21 @@ export interface PluginWorkloadSdkBootstrapProofInput {
 }
 
 /**
+ * parseEagerSdkBootstrapProof always sets policyState (default `unknown`).
+ * A stale v2 Codex image or a missing binding must not render as `(active)`.
+ */
+function promptBridgePolicyPendingReason(
+  bootstrapProof: PluginWorkloadSdkBootstrapProofInput | undefined,
+  codexBindingPending: boolean
+): string {
+  if (codexBindingPending) {
+    if (bootstrapProof?.contractVersion !== 3) return 'codex_bootstrap_contract_stale'
+    return bootstrapProof.policyReason ?? 'codex_execution_binding_missing'
+  }
+  return bootstrapProof?.policyReason ?? bootstrapProof?.policyState ?? 'unknown'
+}
+
+/**
  * JSON merge-patch preserves omitted object members. Keep the status
  * projection's derived metadata explicit so a validated record cannot leave
  * stale bootstrap/policy identity behind after a degraded transition.
@@ -361,13 +376,7 @@ export function buildPluginWorkloadSdkStatus(args: {
         ? (bootstrapProof?.clientNotificationsPolicyReason ??
           bootstrapProof?.clientNotificationsPolicyState ??
           'unknown')
-        : (bootstrapProof?.policyReason ??
-          bootstrapProof?.policyState ??
-          (codexBindingPending
-            ? bootstrapProof?.contractVersion !== 3
-              ? 'codex_bootstrap_contract_stale'
-              : 'codex_execution_binding_missing'
-            : 'unknown'))
+        : promptBridgePolicyPendingReason(bootstrapProof, codexBindingPending)
     const message =
       policyReason === 'grant_missing'
         ? `Plugin Workload SDK ${family} is awaiting an operator grant`

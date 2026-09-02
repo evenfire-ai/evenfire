@@ -321,6 +321,38 @@ export async function authorizeLlmProviderAttempt(
       )
     }
 
+    const pluginWorkloadSdkProviderAttemptId =
+      typeof body.pluginWorkloadSdkProviderAttemptId === 'string'
+        ? body.pluginWorkloadSdkProviderAttemptId.trim()
+        : ''
+    if (pluginWorkloadSdkProviderAttemptId) {
+      if (!UUID_RE.test(pluginWorkloadSdkProviderAttemptId)) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'invalid_request',
+          'pluginWorkloadSdkProviderAttemptId must be a UUID'
+        )
+      }
+      if (caller.callerKind === 'host') {
+        throw new LlmProviderAttemptAuthorizeError(
+          'no_grant',
+          'host Codex chat cannot bind a Plugin Workload SDK provider attempt'
+        )
+      }
+      if (!caller.recipeNamespace || !caller.recipeName) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'no_grant',
+          'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
+        )
+      }
+    }
+
+    // Recipe authorize and promptBridge finalize share this advisory. Take it
+    // before budget reservation work so concurrent Codex + fallback cannot
+    // deadlock (budget rows then advisory vs advisory then spend/invocation).
+    if (caller.callerKind === 'recipe' && caller.recipeNamespace && caller.recipeName) {
+      await lockPluginWorkloadSdkRecipe(db, caller.recipeNamespace, caller.recipeName)
+    }
+
     const presentedReservationId =
       typeof body.budgetReservationId === 'string' ? body.budgetReservationId.trim() : ''
     let budgetReservationId = presentedReservationId || 'unbudgeted'
@@ -365,10 +397,6 @@ export async function authorizeLlmProviderAttempt(
       budgetReservationId = budget.reservationIds?.[0] ?? 'unbudgeted'
     }
 
-    const pluginWorkloadSdkProviderAttemptId =
-      typeof body.pluginWorkloadSdkProviderAttemptId === 'string'
-        ? body.pluginWorkloadSdkProviderAttemptId.trim()
-        : ''
     const presentedTargetRef = typeof body.targetRef === 'string' ? body.targetRef.trim() : ''
     let reservedSdkAttemptToPromote: {
       id: string
@@ -381,25 +409,6 @@ export async function authorizeLlmProviderAttempt(
       targetRef: string
     } | null = null
     if (pluginWorkloadSdkProviderAttemptId) {
-      if (!UUID_RE.test(pluginWorkloadSdkProviderAttemptId)) {
-        throw new LlmProviderAttemptAuthorizeError(
-          'invalid_request',
-          'pluginWorkloadSdkProviderAttemptId must be a UUID'
-        )
-      }
-      if (caller.callerKind === 'host') {
-        throw new LlmProviderAttemptAuthorizeError(
-          'no_grant',
-          'host Codex chat cannot bind a Plugin Workload SDK provider attempt'
-        )
-      }
-      if (!caller.recipeNamespace || !caller.recipeName) {
-        throw new LlmProviderAttemptAuthorizeError(
-          'no_grant',
-          'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
-        )
-      }
-      await lockPluginWorkloadSdkRecipe(db, caller.recipeNamespace, caller.recipeName)
       const sdkAttempt = await getPluginWorkloadSdkProviderAttemptForUpdate(
         pluginWorkloadSdkProviderAttemptId,
         db

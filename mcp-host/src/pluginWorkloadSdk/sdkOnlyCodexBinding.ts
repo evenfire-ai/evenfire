@@ -76,9 +76,8 @@ export function verifySdkOnlyCodexBindingHash(
 }
 
 /**
- * Integrity-check a caller-supplied Codex binding against the expected model.
- * This must run for every bootstrap request that carries a binding object;
- * the request provider/version must not decide whether the hash is verified.
+ * Return a public-field copy of an already-typed Codex binding.
+ * Hash and model checks live on `readVerifiedSdkOnlyCodexBinding`.
  */
 export function sanitizePluginWorkloadSdkCodexBindingProof(
   binding: PluginWorkloadSdkCodexBindingProof
@@ -92,6 +91,11 @@ export function sanitizePluginWorkloadSdkCodexBindingProof(
   }
 }
 
+/**
+ * Integrity-check a caller-supplied Codex binding against the expected model.
+ * This must run for every bootstrap request that carries a binding object;
+ * the request provider/version must not decide whether the hash is verified.
+ */
 export function readVerifiedSdkOnlyCodexBinding(
   value: unknown,
   model: string

@@ -41,16 +41,38 @@ export function isLinkedCodexUsageReady(
   return row.outcome === 'success' && row.usageInputTokens != null && row.usageOutputTokens != null
 }
 
+/**
+ * How long an authorized/redeemed Codex row may block SDK spend freeze.
+ * After this, usage is treated as never arriving so the sweeper can close
+ * the invocation. `finalized` is always terminal: ingest will not add tokens.
+ */
+export const CODEX_IN_FLIGHT_USAGE_GRACE_MS = 15 * 60 * 1000
+
 /** Linked Codex still owns exact usage; sweepers must not freeze SDK spend. */
 export function isLinkedCodexInFlightWithoutUsage(
-  row: Pick<LlmProviderAttemptRow, 'status' | 'outcome' | 'usageInputTokens' | 'usageOutputTokens'>
+  row: Pick<
+    LlmProviderAttemptRow,
+    'status' | 'outcome' | 'usageInputTokens' | 'usageOutputTokens'
+  > & {
+    createdAt?: Date | string | null
+  },
+  nowMs = Date.now()
 ): boolean {
   if (isLinkedCodexUsageReady(row)) return false
-  return (
-    row.status === 'authorized' ||
-    row.status === 'redeemed' ||
-    (row.status === 'finalized' && row.outcome === 'success')
-  )
+  // Finalized rows never receive a later usage frame. Treating usage-less
+  // success as in-flight wedges complete behind ledger_pending forever.
+  if (row.status === 'finalized') return false
+  if (row.status !== 'authorized' && row.status !== 'redeemed') return false
+  const created =
+    row.createdAt instanceof Date
+      ? row.createdAt.getTime()
+      : row.createdAt
+        ? Date.parse(String(row.createdAt))
+        : Number.NaN
+  if (Number.isFinite(created) && nowMs - created > CODEX_IN_FLIGHT_USAGE_GRACE_MS) {
+    return false
+  }
+  return true
 }
 
 export async function applyLlmProviderAttemptSchema(db: DbClient): Promise<void> {

@@ -219,6 +219,12 @@ export class PluginWorkloadSdkProvisioner {
     opts: {
       mcpHostPhase: string | undefined
       codexBinding?: PluginWorkloadSdkCodexBindingProof | null
+      /**
+       * ConfigMap read failed this reconcile. Grant decisions stay fail-closed.
+       * Do not send a binding-less v3 configure that would clear a live host
+       * binding.
+       */
+      codexSnapshotUnavailable?: boolean
     }
   ): Promise<EagerSdkMcpHostStatus> {
     const log = createLogger('wrc', recipeName)
@@ -387,6 +393,23 @@ export class PluginWorkloadSdkProvisioner {
     }
 
     if (promptBridge && !mcpHostAgent) return 'failed'
+    if (
+      opts.codexSnapshotUnavailable === true &&
+      promptBridge &&
+      mcpHostAgent?.provider === 'codex-subscription'
+    ) {
+      const existing = this.eagerSdkBootstrapProofByRecipe.get(recipeName)
+      if (
+        !existing ||
+        existing.policyReady === false ||
+        existing.contractVersion !== 3 ||
+        !existing.codexBinding ||
+        existing.policyReason === 'codex_execution_binding_missing'
+      ) {
+        return 'awaiting_policy'
+      }
+      return 'ready'
+    }
     const resolvedCodexBinding =
       opts.codexBinding ??
       (mcpHostAgent

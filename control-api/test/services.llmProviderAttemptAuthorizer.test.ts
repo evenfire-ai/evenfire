@@ -265,6 +265,9 @@ describe('authorizeLlmProviderAttempt', () => {
     expect(promoteReservedOauthBrokerProviderAttempt.mock.invocationCallOrder[0]).toBeGreaterThan(
       current.insertAttempt.mock.invocationCallOrder[0]!
     )
+    expect(lockPluginWorkloadSdkRecipe.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(current.evaluateBudget).mock.invocationCallOrder[0]!
+    )
   })
 
   it('rejects a Plugin Workload SDK attempt that does not match the reserved receipt', async () => {

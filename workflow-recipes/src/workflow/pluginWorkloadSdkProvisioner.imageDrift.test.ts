@@ -613,3 +613,79 @@ describe('ensureEagerSdkMcpHost runtime token roll', () => {
     expect(deleteNamespacedPod).not.toHaveBeenCalled()
   })
 })
+
+describe('ensureEagerSdkMcpHost ConfigMap snapshot skip', () => {
+  const CODEX_SPEC = {
+    agent: { provider: 'codex-subscription', model: 'gpt-5.6-luna' },
+    pluginWorkloadSdk: { promptBridge: {} },
+  } as unknown as WorkflowRecipeSpec
+
+  function desiredCodexRuntimeContractHash(): string {
+    const desiredPod = buildMcpHostPod(
+      RECIPE,
+      CODEX_SPEC.agent,
+      TEST_CONFIG,
+      RECIPE,
+      SANDBOX_NS,
+      undefined,
+      undefined,
+      undefined,
+      {
+        mountWorkflowOutput: false,
+        pluginWorkloadSdkCapabilities: ['promptBridge'],
+        pluginWorkloadSdkRuntimeMode: 'sdk-only',
+      }
+    )
+    return pluginWorkloadSdkRuntimeContractHash(desiredPod)
+  }
+
+  it('does not send a binding-less Codex configure when the allowlist snapshot is unavailable', async () => {
+    const configure = vi.fn()
+    const signWrcConfigureToken = vi.fn()
+    const readNamespacedPod = vi.fn().mockResolvedValue({
+      metadata: {
+        uid: 'pod-uid-1',
+        annotations: {
+          'clerum.io/plugin-workload-sdk-runtime-contract-hash': desiredCodexRuntimeContractHash(),
+        },
+      },
+      spec: { containers: [{ name: 'mcp-host', image: DESIRED_IMAGE }] },
+      status: {
+        phase: 'Running',
+        conditions: [{ type: 'Ready', status: 'True' }],
+        containerStatuses: [],
+      },
+    })
+    const deps = {
+      coreApi: {
+        readNamespacedPod,
+        deleteNamespacedPod: vi.fn(),
+        createNamespacedPod: vi.fn(),
+      },
+      config: TEST_CONFIG,
+      tokenFactory: { signWrcConfigureToken },
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+      ensureMcpHostSecrets: vi.fn().mockResolvedValue(undefined),
+      applyWorkflowNetworkPolicies: vi.fn().mockResolvedValue(undefined),
+      ensureMcpHostHeadlessService: vi.fn().mockResolvedValue(undefined),
+      modelConfigHandler: { configurePluginWorkloadSdkBootstrap: configure },
+      createIfNotExists: vi.fn().mockResolvedValue(true),
+      safeDelete: vi.fn().mockResolvedValue(undefined),
+    } as unknown as PluginWorkloadSdkProvisionerDeps
+    const provisioner = new PluginWorkloadSdkProvisioner(deps)
+
+    await expect(
+      provisioner.ensureEagerSdkMcpHost(
+        RECIPE,
+        'recipe-uid',
+        SANDBOX_NS,
+        RECIPE,
+        CODEX_SPEC,
+        RUNTIME,
+        { mcpHostPhase: 'Running', codexSnapshotUnavailable: true }
+      )
+    ).resolves.toBe('awaiting_policy')
+    expect(configure).not.toHaveBeenCalled()
+    expect(deps.tokenFactory.signWrcConfigureToken).not.toHaveBeenCalled()
+  })
+})
