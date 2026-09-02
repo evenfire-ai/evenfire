@@ -15,7 +15,8 @@ export const WORKFLOW_ACCESS_SECTIONS: AccessSectionDefinition[] = [
   {
     key: 'trigger-teams',
     title: 'Teams',
-    description: 'Teams whose active members can trigger this workflow in the matching context.',
+    description:
+      'Teams whose active members can trigger this workflow in the matching connector scope.',
     pickLabel: 'Pick a team to grant trigger access',
     emptyCreate: 'No teams selected for trigger access.',
     emptyEdit: 'No teams have trigger access yet.',

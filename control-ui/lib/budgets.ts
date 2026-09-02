@@ -27,7 +27,7 @@ export const BUDGET_DIMENSION_LABELS: Record<string, string> = {
   user_id: 'User',
   host_ref: 'Agent',
   llm_secret_name: 'Secret',
-  context_ref: 'Context',
+  context_ref: 'Connector scope',
   source_kind: 'Source',
   recipe_name: 'Recipe',
   cron_job_id: 'Cron job',

@@ -4,6 +4,7 @@ import type { ConnectorAccessSummary } from '../../components/McpServerTable.typ
 import type { ContextResource } from '../api'
 import {
   contextNamesForConnector,
+  hostOwnedContextNamesForConnector,
   mergeAccessSummaries,
   sortAccessPrincipals,
 } from '../connectorAccess'
@@ -245,5 +246,43 @@ describe('contextNamesForConnector invariants', () => {
         }
       )
     )
+  })
+})
+
+describe('hostOwnedContextNamesForConnector', () => {
+  it('excludes connector scopes that have no owning host', () => {
+    const contexts: ContextResource[] = [
+      {
+        metadata: { name: 'agent-scope' },
+        spec: { contextId: 'agent-scope', mcpServers: ['search'] },
+      },
+      {
+        metadata: { name: 'install-private' },
+        spec: { contextId: 'install-private', mcpServers: ['search'] },
+      },
+      {
+        metadata: { name: 'recipe-private' },
+        spec: { contextId: 'recipe-private', mcpServers: ['search'] },
+      },
+    ]
+    const hosts = [
+      { metadata: { name: 'agent-alpha' }, spec: { contextRef: 'agent-scope' } },
+      { metadata: { name: 'agent-with-other-connector' }, spec: { contextRef: 'other-scope' } },
+    ]
+
+    expect(hostOwnedContextNamesForConnector(contexts, hosts, 'search')).toEqual(['agent-scope'])
+  })
+
+  it('resolves a Host contextRef through a legacy Context alias', () => {
+    const contexts: ContextResource[] = [
+      {
+        metadata: { name: 'ctx-resource' },
+        spec: { contextId: 'ctx-wire', mcpServers: ['search'] },
+      },
+    ]
+    const hosts = [{ metadata: { name: 'agent-alpha' }, spec: { contextRef: 'ctx-wire' } }]
+
+    expect(contextNamesForConnector(contexts, 'search')).toEqual(['ctx-wire'])
+    expect(hostOwnedContextNamesForConnector(contexts, hosts, 'search')).toEqual(['ctx-wire'])
   })
 })

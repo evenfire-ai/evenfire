@@ -100,7 +100,7 @@ describe('governed event details', () => {
     expect(screen.getByText('admin:write, users:write')).toBeInTheDocument()
     expect(screen.getByText('exchange-reference-1')).toBeInTheDocument()
     expect(screen.getByText('approval-1')).toBeInTheDocument()
-    expect(screen.getByText('Stored context and provenance')).toBeInTheDocument()
+    expect(screen.getByText('Stored details and provenance')).toBeInTheDocument()
     expect(screen.getByText('audit-1')).toBeInTheDocument()
     expect(screen.getByText('authorization-1')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Bob Target' })).toHaveAttribute(
