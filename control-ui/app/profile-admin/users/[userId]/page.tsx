@@ -13,10 +13,11 @@ import { CONTROL_ROUTES } from '@constants/routes'
 import { accessScopeLabeler } from '@lib/accessScopeLabels'
 import { partitionVisibleAccess } from '@lib/accessVisibility'
 import {
+  agentNamesForContextAccess,
   applyAgentAccessCompatibilityUpdate,
-  planAgentAccessUpdate,
 } from '@lib/agentAccessCompatibility'
 import { getAgentDisplayName } from '@lib/agentName'
+import { contextResourceName, contextResourceNameForAlias } from '@lib/contextIdentity'
 import type { DeleteCandidateTeam } from '@lib/profileAdminDelete'
 import { formatTeamNames, getSoloMemberTeamsForUser } from '@lib/profileAdminDelete'
 import { ConnectorCountCell } from '../../../../components/ConnectorCountCell'
@@ -166,19 +167,16 @@ export default function UserDetailsPage() {
   // unioned with agents resolved from legacy scope-only mappings so nothing
   // granted before this change disappears.
   const grantedAgentNames = useMemo(() => {
-    const granted = new Set(assignedAgentNames)
-    for (const contextId of assignedContextIds) {
-      for (const [name, host] of hostsByName) {
-        if (
-          String((host.spec as { contextRef?: string } | undefined)?.contextRef || '').trim() ===
-          contextId
-        ) {
-          granted.add(name)
-        }
-      }
-    }
+    const granted = new Set([
+      ...assignedAgentNames,
+      ...agentNamesForContextAccess(
+        assignedContextIds,
+        [...hostsByName.values()],
+        contextResources
+      ),
+    ])
     return [...granted].sort((a, b) => a.localeCompare(b))
-  }, [assignedAgentNames, assignedContextIds, hostsByName])
+  }, [assignedAgentNames, assignedContextIds, contextResources, hostsByName])
 
   const agentDisplay = (agentName: string): string => {
     const host = hostsByName.get(agentName)
@@ -265,13 +263,6 @@ export default function UserDetailsPage() {
     return output
   }
 
-  function contextIdFromResource(item: {
-    metadata?: { name?: string }
-    spec?: { contextId?: string }
-  }) {
-    return String(item.spec?.contextId || item.metadata?.name || '').trim()
-  }
-
   async function loadData() {
     setBusy(true)
     setError('')
@@ -303,8 +294,9 @@ export default function UserDetailsPage() {
       setContactEmailsDraft(uniqueTrimmed(context.channels.emails || [], true))
       setSlackHandlesDraft(uniqueTrimmed(context.channels.slackUserNames || []))
       setTelegramIdsDraft(uniqueTrimmed(context.channels.telegramIds || []))
-      const ids = (contexts.items || [])
-        .map(item => contextIdFromResource(item as never))
+      const resources = (contexts.items || []) as ContextResource[]
+      const ids = resources
+        .map(contextResourceName)
         .filter(Boolean)
         .sort((a, b) => a.localeCompare(b))
       const hostNames = Array.from(
@@ -315,7 +307,11 @@ export default function UserDetailsPage() {
         )
       ).sort((a, b) => a.localeCompare(b))
       const contextPartition = partitionVisibleAccess(
-        Array.isArray(contextAccess.contextIds) ? contextAccess.contextIds : [],
+        Array.isArray(contextAccess.contextIds)
+          ? contextAccess.contextIds.map(contextId =>
+              contextResourceNameForAlias(resources, contextId)
+            )
+          : [],
         ids,
         Array.isArray(contextAccess.deletedContextIds) ? contextAccess.deletedContextIds : []
       )
@@ -337,7 +333,7 @@ export default function UserDetailsPage() {
       ])
       setCommunicationChannels(communicationChannelsData.items || [])
       setAvailableContextIds(ids)
-      setContextResources((contexts.items || []) as ContextResource[])
+      setContextResources(resources)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load member details')
     } finally {
@@ -459,14 +455,17 @@ export default function UserDetailsPage() {
     setBusy(true)
     setError('')
     try {
-      const updatePlan = planAgentAccessUpdate(assignedContextIds, nextGrantedAgents, [
-        ...hostsByName.values(),
-      ])
-
-      const [updatedAgents, updatedContexts] = await applyAgentAccessCompatibilityUpdate(
-        () => updateAdminUserAgents(userId, updatePlan.agentNames, observedAgentNames),
-        () => updateAdminUserContexts(userId, updatePlan.contextIds)
-      )
+      const [updatedAgents, updatedContexts] = await applyAgentAccessCompatibilityUpdate({
+        contexts: contextResources,
+        hosts: [...hostsByName.values()],
+        loadCurrentContextIds: async () => {
+          const current = await getAdminUserContexts(userId)
+          return [...(current.contextIds || []), ...(current.deletedContextIds || [])]
+        },
+        nextGrantedAgentNames: nextGrantedAgents,
+        updateAgents: agentNames => updateAdminUserAgents(userId, agentNames, observedAgentNames),
+        updateContexts: contextIds => updateAdminUserContexts(userId, contextIds),
+      })
 
       const hostNames = [...hostsByName.keys()]
       const agentPartition = partitionVisibleAccess(
@@ -475,7 +474,11 @@ export default function UserDetailsPage() {
         Array.isArray(updatedAgents.deletedAgentNames) ? updatedAgents.deletedAgentNames : []
       )
       const contextPartition = partitionVisibleAccess(
-        Array.isArray(updatedContexts.contextIds) ? updatedContexts.contextIds : [],
+        Array.isArray(updatedContexts.contextIds)
+          ? updatedContexts.contextIds.map(contextId =>
+              contextResourceNameForAlias(contextResources, contextId)
+            )
+          : [],
         availableContextIds,
         Array.isArray(updatedContexts.deletedContextIds) ? updatedContexts.deletedContextIds : []
       )

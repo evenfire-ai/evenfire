@@ -1,4 +1,5 @@
-import type { HostResource } from './api'
+import type { ContextResource, HostResource } from './api'
+import { contextAliases, contextForAlias, contextResourceName } from './contextIdentity'
 
 export type AgentAccessUpdatePlan = {
   agentNames: string[]
@@ -9,12 +10,32 @@ export type AgentAccessUpdatePlan = {
  * Applies the authoritative Agent CAS before its legacy Context compatibility
  * write. A stale Agent snapshot must fail before any Context grant can change.
  */
-export async function applyAgentAccessCompatibilityUpdate<AgentResult, ContextResult>(
-  updateAgents: () => Promise<AgentResult>,
-  updateContexts: () => Promise<ContextResult>
-): Promise<[AgentResult, ContextResult]> {
-  const updatedAgents = await updateAgents()
-  const updatedContexts = await updateContexts()
+export async function applyAgentAccessCompatibilityUpdate<AgentResult, ContextResult>(options: {
+  contexts: readonly ContextResource[]
+  hosts: readonly HostResource[]
+  loadCurrentContextIds: () => Promise<readonly string[]>
+  nextGrantedAgentNames: readonly string[]
+  updateAgents: (agentNames: string[]) => Promise<AgentResult>
+  updateContexts: (contextIds: string[]) => Promise<ContextResult>
+}): Promise<[AgentResult, ContextResult]> {
+  const agentPlan = planAgentAccessUpdate(
+    [],
+    options.nextGrantedAgentNames,
+    options.hosts,
+    options.contexts
+  )
+  const updatedAgents = await options.updateAgents(agentPlan.agentNames)
+  // Refresh after the Agent CAS. Hidden/unowned Context grants may have been
+  // revoked by another admin since this page loaded and must not be restored
+  // from the stale UI snapshot.
+  const currentContextIds = await options.loadCurrentContextIds()
+  const contextPlan = planAgentAccessUpdate(
+    currentContextIds,
+    agentPlan.agentNames,
+    options.hosts,
+    options.contexts
+  )
+  const updatedContexts = await options.updateContexts(contextPlan.contextIds)
   return [updatedAgents, updatedContexts]
 }
 
@@ -24,6 +45,30 @@ function hostName(host: HostResource): string {
 
 function hostContextRef(host: HostResource): string {
   return String(host.spec?.contextRef ?? '').trim()
+}
+
+export function agentNamesForContextAccess(
+  assignedContextIds: readonly string[],
+  hosts: readonly HostResource[],
+  contexts: readonly ContextResource[]
+): string[] {
+  const assignedResourceNames = new Set(
+    assignedContextIds.map(contextId => {
+      const context = contextForAlias(contexts, contextId)
+      return context ? contextResourceName(context) : contextId.trim()
+    })
+  )
+
+  return hosts
+    .filter(host => {
+      const contextRef = hostContextRef(host)
+      const context = contextForAlias(contexts, contextRef)
+      const resourceName = context ? contextResourceName(context) : contextRef
+      return assignedResourceNames.has(resourceName)
+    })
+    .map(hostName)
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right))
 }
 
 /**
@@ -37,12 +82,19 @@ function hostContextRef(host: HostResource): string {
 export function planAgentAccessUpdate(
   assignedContextIds: readonly string[],
   nextGrantedAgentNames: readonly string[],
-  hosts: readonly HostResource[]
+  hosts: readonly HostResource[],
+  contexts: readonly ContextResource[] = []
 ): AgentAccessUpdatePlan {
   const normalizedAgents = Array.from(
     new Set(nextGrantedAgentNames.map(value => value.trim()).filter(Boolean))
   ).sort((left, right) => left.localeCompare(right))
-  const ownedContextIds = new Set(hosts.map(hostContextRef).filter(Boolean))
+  const ownedContextIds = new Set(
+    hosts.flatMap(host => {
+      const ref = hostContextRef(host)
+      const context = contextForAlias(contexts, ref)
+      return context ? contextAliases(context) : [ref]
+    })
+  )
   const preservedUnownedContextIds = assignedContextIds.filter(
     contextId => contextId && !ownedContextIds.has(contextId)
   )
@@ -51,7 +103,11 @@ export function planAgentAccessUpdate(
   )
   const selectedAgentContextIds = normalizedAgents
     .map(agentName => hostByName.get(agentName))
-    .map(host => (host ? hostContextRef(host) : ''))
+    .map(host => {
+      const ref = host ? hostContextRef(host) : ''
+      const context = contextForAlias(contexts, ref)
+      return context ? contextResourceName(context) : ref
+    })
     .filter(Boolean)
 
   return {

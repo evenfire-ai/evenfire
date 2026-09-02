@@ -11,10 +11,11 @@ import { useToast } from '@components/Toast'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { partitionVisibleAccess } from '@lib/accessVisibility'
 import {
+  agentNamesForContextAccess,
   applyAgentAccessCompatibilityUpdate,
-  planAgentAccessUpdate,
 } from '@lib/agentAccessCompatibility'
 import { getAgentDisplayName } from '@lib/agentName'
+import { contextResourceName, contextResourceNameForAlias } from '@lib/contextIdentity'
 import { ConnectorCountCell } from '../../../../components/ConnectorCountCell'
 import { InviteMemberDialog } from '../../../../components/InviteMemberDialog'
 import { IconUsers } from '../../../../components/Sidebar/icons'
@@ -201,13 +202,6 @@ export default function TeamDetailsPage() {
     [hosts]
   )
 
-  function contextIdFromResource(item: {
-    metadata?: { name?: string }
-    spec?: { contextId?: string }
-  }) {
-    return String(item.spec?.contextId || item.metadata?.name || '').trim()
-  }
-
   // Rows are context IDs on the wire, but the user sees what that access
   // means: the owning agent(s) for private scopes, the stored display name
   // for anything else, and the raw id as a last-resort muted fallback.
@@ -234,19 +228,16 @@ export default function TeamDetailsPage() {
   // D8: granted set is agent-centric — direct team↔agent mapping unioned with
   // agents resolved from legacy scope-only mappings.
   const grantedAgentNames = useMemo(() => {
-    const granted = new Set(assignedAgentNames)
-    for (const contextId of assignedContextIds) {
-      for (const [name, host] of hostsByName) {
-        if (
-          String((host.spec as { contextRef?: string } | undefined)?.contextRef || '').trim() ===
-          contextId
-        ) {
-          granted.add(name)
-        }
-      }
-    }
+    const granted = new Set([
+      ...assignedAgentNames,
+      ...agentNamesForContextAccess(
+        assignedContextIds,
+        [...hostsByName.values()],
+        contextResources
+      ),
+    ])
     return [...granted].sort((a, b) => a.localeCompare(b))
-  }, [assignedAgentNames, assignedContextIds, hostsByName])
+  }, [assignedAgentNames, assignedContextIds, contextResources, hostsByName])
 
   const agentDisplay = (agentName: string): string => {
     const host = hostsByName.get(agentName)
@@ -269,7 +260,8 @@ export default function TeamDetailsPage() {
   async function loadTeamData(
     resolvedTeamId: string,
     visibleContextIds = availableContextIds,
-    visibleAgentNames = hostNameOptions
+    visibleAgentNames = hostNameOptions,
+    visibleContexts = contextResources
   ) {
     const [team, teamMembers, teamContexts, teamAgents, pendingInv] = await Promise.all([
       getAdminTeam(resolvedTeamId),
@@ -291,7 +283,11 @@ export default function TeamDetailsPage() {
       )
     )
     const contextPartition = partitionVisibleAccess(
-      Array.isArray(teamContexts.contextIds) ? teamContexts.contextIds : [],
+      Array.isArray(teamContexts.contextIds)
+        ? teamContexts.contextIds.map(contextId =>
+            contextResourceNameForAlias(visibleContexts, contextId)
+          )
+        : [],
       visibleContextIds,
       Array.isArray(teamContexts.deletedContextIds) ? teamContexts.deletedContextIds : []
     )
@@ -323,8 +319,9 @@ export default function TeamDetailsPage() {
         setUsers(Array.isArray(usersData.items) ? usersData.items : [])
         setHosts(Array.isArray(hostsData.items) ? hostsData.items : [])
         setContextResources((contextsData.items || []) as ContextResource[])
-        const ids = (contextsData.items || [])
-          .map(item => contextIdFromResource(item as never))
+        const resources = (contextsData.items || []) as ContextResource[]
+        const ids = resources
+          .map(contextResourceName)
           .filter(Boolean)
           .sort((a, b) => a.localeCompare(b))
         const hostNames = Array.from(
@@ -336,7 +333,7 @@ export default function TeamDetailsPage() {
         ).sort((a, b) => a.localeCompare(b))
         setAvailableContextIds(ids)
         if (!isNew) {
-          await loadTeamData(teamId, ids, hostNames)
+          await loadTeamData(teamId, ids, hostNames, resources)
         }
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to load team data')
@@ -535,14 +532,17 @@ export default function TeamDetailsPage() {
     setBusy(true)
     setError('')
     try {
-      const updatePlan = planAgentAccessUpdate(assignedContextIds, nextGrantedAgents, [
-        ...hostsByName.values(),
-      ])
-
-      const [updatedAgents, updatedContexts] = await applyAgentAccessCompatibilityUpdate(
-        () => updateAdminTeamAgents(teamId, updatePlan.agentNames, observedAgentNames),
-        () => updateAdminTeamContexts(teamId, updatePlan.contextIds)
-      )
+      const [updatedAgents, updatedContexts] = await applyAgentAccessCompatibilityUpdate({
+        contexts: contextResources,
+        hosts: [...hostsByName.values()],
+        loadCurrentContextIds: async () => {
+          const current = await getAdminTeamContexts(teamId)
+          return [...(current.contextIds || []), ...(current.deletedContextIds || [])]
+        },
+        nextGrantedAgentNames: nextGrantedAgents,
+        updateAgents: agentNames => updateAdminTeamAgents(teamId, agentNames, observedAgentNames),
+        updateContexts: contextIds => updateAdminTeamContexts(teamId, contextIds),
+      })
 
       const hostNames = [...hostsByName.keys()]
       const agentPartition = partitionVisibleAccess(
@@ -551,7 +551,9 @@ export default function TeamDetailsPage() {
         updatedAgents.deletedAgentNames || []
       )
       const contextPartition = partitionVisibleAccess(
-        updatedContexts.contextIds || [],
+        (updatedContexts.contextIds || []).map(contextId =>
+          contextResourceNameForAlias(contextResources, contextId)
+        ),
         availableContextIds,
         updatedContexts.deletedContextIds || []
       )

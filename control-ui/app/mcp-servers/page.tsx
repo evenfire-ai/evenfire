@@ -27,6 +27,7 @@ import {
 import type { ContextResource, ContextSpec, HostResource, McpServerResource } from '../../lib/api'
 import { mergeAccessSummaries, sortAccessPrincipals } from '../../lib/connectorAccess'
 import { connectorContextAssignmentError } from '../../lib/connectorOAuthAccess'
+import { contextAliases, contextForAlias, contextResourceName } from '../../lib/contextIdentity'
 import { buildContextUpdatePayload, contextMutationError } from '../../lib/contextMutation'
 
 function resourceName(resource: { metadata?: { name?: string } }): string {
@@ -47,7 +48,7 @@ function getContextRef(resource: { spec?: Record<string, unknown> }): string {
 }
 
 function contextName(context: ContextResource): string {
-  return String(context.metadata?.name || context.spec?.contextId || '').trim()
+  return contextResourceName(context)
 }
 
 function contextSpec(context: ContextResource): ContextSpec {
@@ -82,18 +83,14 @@ function bindingsByConnectorFromContexts(
   contexts: ContextResource[],
   agentTargets: ConnectorAgentTarget[]
 ): Record<string, ConnectorAgentBinding[]> {
-  const targetsByContextRef = new Map<string, ConnectorAccessPrincipal[]>()
-  for (const target of agentTargets) {
-    const principals = targetsByContextRef.get(target.contextRef) ?? []
-    principals.push({ id: target.name, label: target.label })
-    targetsByContextRef.set(target.contextRef, principals)
-  }
-
   const bindings: Record<string, ConnectorAgentBinding[]> = {}
   for (const context of contexts) {
     const ref = contextName(context)
-    const agents = targetsByContextRef.get(ref)
-    if (!ref || !agents || agents.length === 0) continue
+    const aliases = new Set(contextAliases(context))
+    const agents = agentTargets
+      .filter(target => aliases.has(target.contextRef))
+      .map(target => ({ id: target.name, label: target.label }))
+    if (!ref || agents.length === 0) continue
     for (const serverName of context.spec?.mcpServers ?? []) {
       const list = bindings[serverName] ?? []
       list.push({ contextRef: ref, agents: sortAccessPrincipals(agents) })
@@ -309,11 +306,16 @@ export default function McpServersPage() {
       setError(oauthScopeError)
       return
     }
-    const targets = contexts.filter(context => contextRefs.includes(contextName(context)))
-    if (targets.length !== contextRefs.length) {
+    const resolvedTargets = contextRefs.map(contextRef => contextForAlias(contexts, contextRef))
+    if (resolvedTargets.some(target => !target)) {
       setError('One or more selected agents could not be resolved. Please refresh and try again.')
       return
     }
+    const targets = Array.from(
+      new Map(
+        resolvedTargets.map(target => [contextName(target as ContextResource), target] as const)
+      ).values()
+    ) as ContextResource[]
 
     setUpdatingAgentAccessKey(key)
     setError('')
@@ -351,7 +353,7 @@ export default function McpServersPage() {
     binding: ConnectorAgentBinding
   ) {
     const key = `${server.namespace}/${server.name}`
-    const target = contexts.find(context => contextName(context) === binding.contextRef)
+    const target = contextForAlias(contexts, binding.contextRef)
     if (!target) {
       setError('This agent’s connector set could not be loaded. Please refresh and try again.')
       return
@@ -373,7 +375,7 @@ export default function McpServersPage() {
     try {
       const spec = contextSpec(target)
       await updateContext(
-        binding.contextRef,
+        contextName(target),
         buildContextUpdatePayload(target.metadata?.resourceVersion, {
           ...spec,
           mcpServers: spec.mcpServers.filter(name => name !== server.name),
