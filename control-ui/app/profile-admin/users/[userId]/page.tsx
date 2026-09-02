@@ -12,7 +12,10 @@ import { CheckboxField } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { accessScopeLabeler } from '@lib/accessScopeLabels'
 import { partitionVisibleAccess } from '@lib/accessVisibility'
-import { planAgentAccessUpdate } from '@lib/agentAccessCompatibility'
+import {
+  applyAgentAccessCompatibilityUpdate,
+  planAgentAccessUpdate,
+} from '@lib/agentAccessCompatibility'
 import { getAgentDisplayName } from '@lib/agentName'
 import type { DeleteCandidateTeam } from '@lib/profileAdminDelete'
 import { formatTeamNames, getSoloMemberTeamsForUser } from '@lib/profileAdminDelete'
@@ -460,10 +463,10 @@ export default function UserDetailsPage() {
         ...hostsByName.values(),
       ])
 
-      const [updatedAgents, updatedContexts] = await Promise.all([
-        updateAdminUserAgents(userId, updatePlan.agentNames, observedAgentNames),
-        updateAdminUserContexts(userId, updatePlan.contextIds),
-      ])
+      const [updatedAgents, updatedContexts] = await applyAgentAccessCompatibilityUpdate(
+        () => updateAdminUserAgents(userId, updatePlan.agentNames, observedAgentNames),
+        () => updateAdminUserContexts(userId, updatePlan.contextIds)
+      )
 
       const hostNames = [...hostsByName.keys()]
       const agentPartition = partitionVisibleAccess(

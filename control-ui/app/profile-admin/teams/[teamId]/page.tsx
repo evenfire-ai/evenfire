@@ -10,7 +10,10 @@ import { TeamRolePermissionEditor } from '@components/TeamRolePermissionEditor'
 import { useToast } from '@components/Toast'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { partitionVisibleAccess } from '@lib/accessVisibility'
-import { planAgentAccessUpdate } from '@lib/agentAccessCompatibility'
+import {
+  applyAgentAccessCompatibilityUpdate,
+  planAgentAccessUpdate,
+} from '@lib/agentAccessCompatibility'
 import { getAgentDisplayName } from '@lib/agentName'
 import { ConnectorCountCell } from '../../../../components/ConnectorCountCell'
 import { InviteMemberDialog } from '../../../../components/InviteMemberDialog'
@@ -536,10 +539,10 @@ export default function TeamDetailsPage() {
         ...hostsByName.values(),
       ])
 
-      const [updatedAgents, updatedContexts] = await Promise.all([
-        updateAdminTeamAgents(teamId, updatePlan.agentNames, observedAgentNames),
-        updateAdminTeamContexts(teamId, updatePlan.contextIds),
-      ])
+      const [updatedAgents, updatedContexts] = await applyAgentAccessCompatibilityUpdate(
+        () => updateAdminTeamAgents(teamId, updatePlan.agentNames, observedAgentNames),
+        () => updateAdminTeamContexts(teamId, updatePlan.contextIds)
+      )
 
       const hostNames = [...hostsByName.keys()]
       const agentPartition = partitionVisibleAccess(

@@ -5,6 +5,19 @@ export type AgentAccessUpdatePlan = {
   contextIds: string[]
 }
 
+/**
+ * Applies the authoritative Agent CAS before its legacy Context compatibility
+ * write. A stale Agent snapshot must fail before any Context grant can change.
+ */
+export async function applyAgentAccessCompatibilityUpdate<AgentResult, ContextResult>(
+  updateAgents: () => Promise<AgentResult>,
+  updateContexts: () => Promise<ContextResult>
+): Promise<[AgentResult, ContextResult]> {
+  const updatedAgents = await updateAgents()
+  const updatedContexts = await updateContexts()
+  return [updatedAgents, updatedContexts]
+}
+
 function hostName(host: HostResource): string {
   return String(host.metadata?.name ?? '').trim()
 }
