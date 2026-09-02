@@ -314,7 +314,12 @@ export class ModelConfigHandler {
       // Shape alone is not proof: re-derive the policy hash and pin the model
       // so a host cannot echo a well-formed binding for another model or with
       // a hash that does not match its own five fields.
-      const verifiedCodexBinding = readVerifiedSdkOnlyCodexBinding(result.body.codexBinding, model)
+      // R4-L1: without a model there is no pin to apply, and an unpinned
+      // binding could be for another model. Refuse it rather than accept it
+      // blind — the pin is the point of this call.
+      const verifiedCodexBinding = model
+        ? readVerifiedSdkOnlyCodexBinding(result.body.codexBinding, model)
+        : null
       return {
         status: 202,
         body: {

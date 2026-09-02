@@ -682,7 +682,7 @@ describe('ensureEagerSdkMcpHost ConfigMap snapshot skip', () => {
         RECIPE,
         CODEX_SPEC,
         RUNTIME,
-        { mcpHostPhase: 'Running', codexSnapshotUnavailable: true }
+        { mcpHostPhase: 'Running', codexBindingUndecidable: true }
       )
     ).resolves.toBe('awaiting_policy')
     expect(configure).not.toHaveBeenCalled()

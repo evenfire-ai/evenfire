@@ -412,7 +412,7 @@ describe('Codex allowlist view across interleaved recipes', () => {
     // N-08. Recipe B captured a readable catalog; while B is inside
     // ensureEagerSdkMcpHost, recipe A's refresh fails and clears the shared
     // state. Resolving the binding from that shared state after the awaits gave
-    // B a null binding while `codexSnapshotUnavailable` still said false — a
+    // B a null binding while `codexBindingUndecidable` still said false — a
     // binding-less v3 configure that wipes the live host binding. B must
     // configure from the view it captured, or not configure at all.
     const { reconciler, coreApi, configure } = createHarness()

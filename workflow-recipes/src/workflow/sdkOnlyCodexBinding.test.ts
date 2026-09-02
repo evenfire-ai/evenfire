@@ -4,6 +4,7 @@ import {
   deriveSdkOnlyCodexBinding,
   isPluginWorkloadSdkCodexBindingProof,
   readVerifiedSdkOnlyCodexBinding,
+  resolveSdkOnlyCodexBinding,
   verifySdkOnlyCodexBindingHash,
 } from './sdkOnlyCodexBinding'
 
@@ -198,6 +199,47 @@ describe('deriveSdkOnlyCodexBinding', () => {
     ).toBeNull()
   })
 
+  // R4-B1: the reconciler used to answer "was the catalog decidable?" from a
+  // pure IO flag, which is true for a ConfigMap that reads fine and parses
+  // badly. These pin the single verdict both paths now share: an unreadable
+  // ConfigMap and a malformed one are equally `uncertain`, while a deliberate
+  // "Codex is off" is `ineligible` — a decision, not a doubt.
+  it('reports an unreadable ConfigMap as uncertain', () => {
+    expect(
+      resolveSdkOnlyCodexBinding({
+        provider: 'codex-subscription',
+        model: MODEL,
+        connectionKey: 'team-plus',
+        configMap: undefined,
+      })
+    ).toMatchObject({ binding: null, eligibility: 'uncertain' })
+  })
+
+  it('reports a readable but malformed ConfigMap as uncertain, not as a decision', () => {
+    const malformed = eligibleLegacyConfigMap()
+    malformed.metadata!.annotations!['clerum.io/catalog-revision'] = 'not-a-number'
+
+    expect(
+      resolveSdkOnlyCodexBinding({
+        provider: 'codex-subscription',
+        model: MODEL,
+        connectionKey: 'team-plus',
+        configMap: malformed,
+      })
+    ).toMatchObject({ binding: null, eligibility: 'uncertain' })
+  })
+
+  it('reports a non-Codex provider as ineligible rather than uncertain', () => {
+    expect(
+      resolveSdkOnlyCodexBinding({
+        provider: 'openai',
+        model: MODEL,
+        connectionKey: 'team-plus',
+        configMap: eligibleLegacyConfigMap(),
+      })
+    ).toMatchObject({ binding: null, eligibility: 'ineligible' })
+  })
+
   it('returns null for non-Codex providers and unassigned grants', () => {
     expect(
       deriveSdkOnlyCodexBinding({
@@ -243,7 +285,9 @@ describe('deriveSdkOnlyCodexBinding', () => {
       bindingHash: HASH,
       extra: true,
     }
-    expect(readVerifiedSdkOnlyCodexBinding(proof)).toEqual({
+    // R4-L1: the model is a required argument now. This call used to omit it,
+    // which silently skipped the pin — the very gap the change closes.
+    expect(readVerifiedSdkOnlyCodexBinding(proof, MODEL)).toEqual({
       connectionKey: 'team-plus',
       catalogRevision: 3,
       credentialRevision: 1,

@@ -217,7 +217,7 @@ export class PluginWorkloadSdkProvisioner {
        * Do not send a binding-less v3 configure that would clear a live host
        * binding.
        */
-      codexSnapshotUnavailable?: boolean
+      codexBindingUndecidable?: boolean
     }
   ): Promise<EagerSdkMcpHostStatus> {
     const log = createLogger('wrc', recipeName)
@@ -387,7 +387,7 @@ export class PluginWorkloadSdkProvisioner {
 
     if (promptBridge && !mcpHostAgent) return 'failed'
     if (
-      opts.codexSnapshotUnavailable === true &&
+      opts.codexBindingUndecidable === true &&
       promptBridge &&
       mcpHostAgent?.provider === 'codex-subscription'
     ) {
@@ -415,7 +415,7 @@ export class PluginWorkloadSdkProvisioner {
       return 'ready'
     }
     // The caller derives the binding from the same allowlist view it used for
-    // `codexSnapshotUnavailable`; the provisioner never re-reads that state
+    // `codexBindingUndecidable`; the provisioner never re-reads that state
     // after its own awaits (see the reconciler's `codexView`).
     const resolvedCodexBinding = opts.codexBinding ?? null
     const capabilityFamily = promptBridge ? 'promptBridge' : 'clientNotifications'
@@ -694,7 +694,7 @@ function parseEagerSdkBootstrapProof(
   body: Record<string, unknown>,
   podUid: string,
   /** Agent model WRC bootstrapped; a binding for another model is not ours. */
-  expectedModel?: string
+  expectedModel: string | undefined
 ): EagerSdkBootstrapProof | null {
   if (body.capabilityFamily === 'clientNotifications') {
     if (
@@ -801,7 +801,10 @@ function parseEagerSdkBootstrapProof(
 
 function parseCodexBindingProof(
   value: unknown,
-  expectedModel?: string
+  expectedModel: string | undefined
 ): PluginWorkloadSdkCodexBindingProof | undefined {
+  // No expected model means no pin is possible, and an unpinned binding could
+  // be for another model. Refuse the proof instead of accepting it blind.
+  if (!expectedModel) return undefined
   return readVerifiedSdkOnlyCodexBinding(value, expectedModel) ?? undefined
 }

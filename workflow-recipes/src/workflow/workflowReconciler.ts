@@ -141,7 +141,7 @@ import {
   deleteScheduling,
   reconcileScheduling,
 } from './schedulingHandler'
-import { deriveSdkOnlyCodexBinding } from './sdkOnlyCodexBinding'
+import { resolveSdkOnlyCodexBinding } from './sdkOnlyCodexBinding'
 import {
   MCP_HOST_RUNTIME_TOKEN_GENERATION_ANNOTATION,
   buildMcpHostRuntimeTokenSecret,
@@ -901,12 +901,19 @@ export class WorkflowReconciler {
   /**
    * The last allowlist refresh as ONE value. `configMap` is kept raw so each
    * recipe's projection can re-parse it with that recipe's assigned grant key
-   * (HCC keeps the same shape for Hosts); `readOk` says whether the triple
-   * comes from a successful read. They are a single field because they must be
-   * read together: a `configMap` from one refresh combined with a `readOk`
-   * from another is how a concurrently-reconciled recipe turns a failed read
-   * into a binding-less v3 configure that wipes a live mcp-host binding.
+   * (HCC keeps the same shape for Hosts), and it is cleared on a failed read so
+   * the projection sees `missing`. They are a single field because they must be
+   * read together: a `configMap` from one refresh paired with a verdict from
+   * another is how a concurrently-reconciled recipe turns a failed read into a
+   * binding-less v3 configure that wipes a live mcp-host binding.
    * Readers capture `this.codexView` once and use only that snapshot.
+   *
+   * There is deliberately NO separate "was the read OK?" boolean here (R4-B1).
+   * A ConfigMap that reads fine but parses badly is just as undecidable as one
+   * that never arrived, and an IO-only flag said otherwise — so the scope path
+   * withheld the grant while the configure path wiped the binding. The single
+   * verdict is `resolveSdkOnlyCodexBinding(...).eligibility === 'uncertain'`,
+   * which strictly subsumes the old flag.
    *
    * Cleared on a failed read so grant decisions stay fail-closed. Do not send
    * a binding-less v3 configure in that window — skip configure so mcp-host
@@ -917,8 +924,7 @@ export class WorkflowReconciler {
   private codexView: {
     configMap?: k8s.V1ConfigMap
     snapshot: CodexCatalogSnapshot
-    readOk: boolean
-  } = { snapshot: { flagEnabled: false }, readOk: true }
+  } = { snapshot: { flagEnabled: false } }
   private readonly codexContexts = new Map<string, CodexReconcileContext>()
 
   constructor(private readonly deps: WorkflowReconcilerDeps) {
@@ -1044,18 +1050,17 @@ export class WorkflowReconciler {
   private async refreshCodexSnapshot(): Promise<{
     configMap?: k8s.V1ConfigMap
     snapshot: CodexCatalogSnapshot
-    readOk: boolean
   }> {
     try {
       const cm = await this.deps.coreApi.readNamespacedConfigMap({
         name: ALLOWED_MODELS_CONFIGMAP_NAME,
         namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
       })
-      this.codexView = { configMap: cm, snapshot: parseAllowedModelsSnapshot(cm), readOk: true }
+      this.codexView = { configMap: cm, snapshot: parseAllowedModelsSnapshot(cm) }
       return this.codexView
     } catch (err) {
       if (isCodexSnapshotTimeout(err)) {
-        this.codexView = { snapshot: snapshotFromConfigMapError('timeout'), readOk: false }
+        this.codexView = { snapshot: snapshotFromConfigMapError('timeout') }
         this.log.warn('Codex allowlist ConfigMap read timed out; failing closed', {
           configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
           namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
@@ -1064,7 +1069,7 @@ export class WorkflowReconciler {
       }
       const code = getErrorCode(err)
       if (code === 401 || code === 403) {
-        this.codexView = { snapshot: snapshotFromConfigMapError('forbidden'), readOk: false }
+        this.codexView = { snapshot: snapshotFromConfigMapError('forbidden') }
         this.log.warn('Codex allowlist ConfigMap read forbidden; failing closed', {
           configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
           namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
@@ -1072,7 +1077,7 @@ export class WorkflowReconciler {
         })
         return this.codexView
       }
-      this.codexView = { snapshot: snapshotFromConfigMapError('missing'), readOk: false }
+      this.codexView = { snapshot: snapshotFromConfigMapError('missing') }
       this.log.warn('Codex allowlist ConfigMap unavailable; failing closed', {
         configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
         namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
@@ -1149,9 +1154,13 @@ export class WorkflowReconciler {
     const codexView = await this.refreshCodexSnapshot()
     const agent = resolveEagerSdkMcpHostAgent(spec)
     const context = this.resolveCodexContext(recipeUid, recipeName, runtimeScopeRecipeName)
-    const codexBinding =
+    // R4-B1: the binding and the "was this decidable?" signal come from the
+    // same call. Deriving the second from `codexView.readOk` made a readable
+    // but malformed ConfigMap look decidable here while the scope path called
+    // it uncertain, and a binding-less v3 configure then wiped the live one.
+    const codexResolution =
       agent?.provider && agent.model
-        ? deriveSdkOnlyCodexBinding({
+        ? resolveSdkOnlyCodexBinding({
             provider: agent.provider,
             model: agent.model,
             connectionKey: context.connectionKey,
@@ -1159,6 +1168,8 @@ export class WorkflowReconciler {
             log: this.log,
           })
         : null
+    const codexBinding = codexResolution?.binding ?? null
+    const codexBindingUndecidable = codexResolution?.eligibility === 'uncertain'
 
     const runtime = deriveWorkflowRuntimePlan(spec, {
       recipeName,
@@ -1177,7 +1188,7 @@ export class WorkflowReconciler {
       runtimeScopeRecipeName,
       spec,
       runtime,
-      { mcpHostPhase, codexBinding, codexSnapshotUnavailable: !codexView.readOk }
+      { mcpHostPhase, codexBinding, codexBindingUndecidable }
     )
     const bootstrapProof = this.pluginWorkloadSdkProvisioner.getBootstrapProof(recipeName)
     switch (status) {
@@ -1637,9 +1648,11 @@ export class WorkflowReconciler {
             recipeName,
             runtimeScopeRecipeName
           )
-          const eagerCodexBinding =
+          // R4-B1: see the sibling call above — one resolution answers both
+          // "which binding?" and "was the catalog decidable?".
+          const eagerCodexResolution =
             eagerAgent?.provider && eagerAgent.model
-              ? deriveSdkOnlyCodexBinding({
+              ? resolveSdkOnlyCodexBinding({
                   provider: eagerAgent.provider,
                   model: eagerAgent.model,
                   connectionKey: eagerCodexContext.connectionKey,
@@ -1647,6 +1660,8 @@ export class WorkflowReconciler {
                   log: this.log,
                 })
               : null
+          const eagerCodexBinding = eagerCodexResolution?.binding ?? null
+          const eagerCodexBindingUndecidable = eagerCodexResolution?.eligibility === 'uncertain'
           const eagerStatus = await this.pluginWorkloadSdkProvisioner.ensureEagerSdkMcpHost(
             recipeName,
             recipeUid,
@@ -1657,7 +1672,7 @@ export class WorkflowReconciler {
             {
               mcpHostPhase,
               codexBinding: eagerCodexBinding,
-              codexSnapshotUnavailable: !eagerCodexView.readOk,
+              codexBindingUndecidable: eagerCodexBindingUndecidable,
             }
           )
           const eagerBootstrapProof =

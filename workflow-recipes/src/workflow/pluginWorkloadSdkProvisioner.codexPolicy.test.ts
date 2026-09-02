@@ -127,7 +127,7 @@ function makeHarness(configureResult: unknown) {
 
   const reconcile = (opts: {
     codexBinding?: PluginWorkloadSdkCodexBindingProof | null
-    codexSnapshotUnavailable?: boolean
+    codexBindingUndecidable?: boolean
   }) =>
     provisioner.ensureEagerSdkMcpHost(
       RECIPE,
@@ -173,7 +173,7 @@ describe('eager Codex policy gate', () => {
     // ConfigMap read fails on the next pass: the live host still holds the
     // binding this same pod was configured with, so the recipe stays ready and
     // WRC must NOT re-broker with a binding it can no longer justify.
-    expect(await harness.reconcile({ codexSnapshotUnavailable: true })).toBe('ready')
+    expect(await harness.reconcile({ codexBindingUndecidable: true })).toBe('ready')
     expect(harness.configure).toHaveBeenCalledTimes(1)
   })
 
@@ -190,7 +190,7 @@ describe('eager Codex policy gate', () => {
     harness.configure.mockClear()
     harness.signWrcConfigureToken.mockClear()
 
-    expect(await harness.reconcile({ codexSnapshotUnavailable: true })).toBe('awaiting_policy')
+    expect(await harness.reconcile({ codexBindingUndecidable: true })).toBe('awaiting_policy')
     expect(harness.provisioner.getBootstrapProof(RECIPE)).toBeUndefined()
     expect(harness.configure).not.toHaveBeenCalled()
     expect(harness.signWrcConfigureToken).not.toHaveBeenCalled()
@@ -249,7 +249,7 @@ describe('eager Codex policy gate', () => {
       },
     })
 
-    expect(await harness.reconcile({ codexBinding: null, codexSnapshotUnavailable: false })).toBe(
+    expect(await harness.reconcile({ codexBinding: null, codexBindingUndecidable: false })).toBe(
       'awaiting_policy'
     )
     expect(harness.configure).toHaveBeenCalledWith(
@@ -309,7 +309,7 @@ describe('eager Codex policy gate', () => {
     expect(harness.provisioner.getBootstrapProof(RECIPE)).toMatchObject({ contractVersion: 2 })
 
     harness.configure.mockClear()
-    expect(await harness.reconcile({ codexSnapshotUnavailable: true })).toBe('awaiting_policy')
+    expect(await harness.reconcile({ codexBindingUndecidable: true })).toBe('awaiting_policy')
     // The early-return short-circuits before configure either way, so the
     // status above is the whole assertion: 'ready' would be the regression.
     expect(harness.configure).not.toHaveBeenCalled()
