@@ -203,9 +203,7 @@ describe('AgentWorkspace — Connectors tab OAuth actions', () => {
     renderTab()
 
     const panel = screen.getByRole('region', { name: 'Agent connectors' })
-    expect(
-      within(panel).getByText('Couldn\'t disconnect "monday". write boom')
-    ).toBeTruthy()
+    expect(within(panel).getByText('Couldn\'t disconnect "monday". write boom')).toBeTruthy()
   })
 
   it('renders no OAuth action button for a no_oauth connector', () => {

@@ -144,7 +144,7 @@ export interface BlobWriter {
 }
 
 const RETURNING =
-  "resource_id, drive, parent_resource_id, name, kind, path_cache, version, bytes, blob_key, content_sha256, deleted_at";
+  "resource_id, drive, parent_resource_id, name, kind, path_cache, version, bytes, blob_key, content_sha256, deleted_at, updated_at";
 
 interface AncestorRow {
   resourceId: string;
@@ -162,6 +162,15 @@ function toIsoOrNull(value: unknown): string | null {
   return String(value);
 }
 
+function toIsoTimestamp(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "string" && value.length > 0) {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString();
+  }
+  throw new Error("gfs_resources.updated_at is required");
+}
+
 function rowToResource(row: Record<string, unknown>): GfsResource {
   return {
     resourceId: String(row.resource_id),
@@ -175,6 +184,7 @@ function rowToResource(row: Record<string, unknown>): GfsResource {
     blobKey: row.blob_key == null ? null : String(row.blob_key),
     contentSha256: row.content_sha256 == null ? null : String(row.content_sha256),
     deletedAt: toIsoOrNull(row.deleted_at),
+    updatedAt: toIsoTimestamp(row.updated_at),
   };
 }
 

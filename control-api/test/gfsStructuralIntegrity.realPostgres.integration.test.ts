@@ -381,4 +381,57 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL integrity', () => {
       for (const client of [publisher, cleanup]) client.release()
     }
   }, 20_000)
+
+  it('advances updatedAt after replace and move without changing an untouched parent', async () => {
+    const tree = await seedTree(pool, 'updated-at')
+    const seed = '2000-01-01T00:00:00.000Z'
+    await pool.query(
+      `UPDATE gfs_resources SET created_at = $2::timestamptz, updated_at = $2::timestamptz WHERE drive = $1`,
+      [tree.drive, seed]
+    )
+
+    const replaceClient = await pool.connect()
+    let replacedAt: string
+    try {
+      const published = await writer(replaceClient).replace({
+        drive: tree.drive,
+        resourceId: tree.child,
+        ifMatch: 0,
+        content: Buffer.from('replacement'),
+      })
+      expect(published.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/)
+      expect(new Date(published.updatedAt).getTime()).toBeGreaterThan(new Date(seed).getTime())
+      replacedAt = published.updatedAt
+    } finally {
+      replaceClient.release()
+    }
+
+    const afterReplace = await pool.query<{ id: string; updated_at: Date }>(
+      `SELECT resource_id::text AS id, updated_at FROM gfs_resources WHERE drive = $1`,
+      [tree.drive]
+    )
+    const byId = Object.fromEntries(
+      afterReplace.rows.map(row => [row.id, row.updated_at.toISOString()])
+    )
+    expect(new Date(byId[tree.child] ?? 0).getTime()).toBeGreaterThan(new Date(seed).getTime())
+    expect(byId[tree.source]).toBe(new Date(seed).toISOString())
+
+    const moveClient = await pool.connect()
+    try {
+      await begin(moveClient)
+      await move(moveClient, tree, tree.destinationA)
+      await moveClient.query('COMMIT')
+    } finally {
+      moveClient.release()
+    }
+
+    const afterMove = await pool.query<{ child_at: Date; parent_at: Date }>(
+      `SELECT
+         (SELECT updated_at FROM gfs_resources WHERE resource_id = $1) AS child_at,
+         (SELECT updated_at FROM gfs_resources WHERE resource_id = $2) AS parent_at`,
+      [tree.child, tree.source]
+    )
+    expect(afterMove.rows[0]?.child_at.getTime()).toBeGreaterThan(new Date(replacedAt).getTime())
+    expect(afterMove.rows[0]?.parent_at.toISOString()).toBe(new Date(seed).toISOString())
+  }, 20_000)
 })
