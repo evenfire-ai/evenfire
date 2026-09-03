@@ -3,13 +3,18 @@ import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
 import { preparePr1Migration } from './pr1OnlineIndexPlan.js'
 
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
-  '0107_user_access_foundation',
-  '0108_invitation_delivery_commands',
-  '0109_catalog_utf8_ordering',
-  '010a_composable_catalog_revisions',
-  '010b_gfs_catalog_revision_components',
-  '010c_legacy_password_security_epoch_backfill',
+  '0109_user_access_foundation',
+  '010a_invitation_delivery_commands',
+  '010b_catalog_utf8_ordering',
+  '010c_composable_catalog_revisions',
+  '010d_gfs_catalog_revision_components',
+  '010e_legacy_password_security_epoch_backfill',
 ] as const)
+
+const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set([
+  '0107_llm_provider_attempts_sdk_link',
+  '0108_llm_provider_attempts_sdk_link_on_delete_set_null',
+])
 
 export type MigrationDescriptor = {
   version: string
@@ -57,7 +62,8 @@ export async function applyPendingPr1Migrations({
   const unclassified = migrations.filter(
     migration =>
       migration.version > '0106_oauth_grants_owner_generalization' &&
-      !expected.has(migration.version)
+      !expected.has(migration.version) &&
+      !NON_PR1_POST_0106_MIGRATION_VERSIONS.has(migration.version)
   )
   if (unclassified.length > 0) {
     throw new Error(
