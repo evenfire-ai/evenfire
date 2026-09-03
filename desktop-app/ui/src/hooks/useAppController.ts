@@ -8,7 +8,7 @@ import type {
   WorkflowRecipeResource,
   WorkflowRunsResult,
 } from '../../../src/types'
-import { DESKTOP_ROUTES } from '../constants/navigation'
+import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../constants/navigation'
 import { pickLatestAgent } from '../lib/agents'
 import { toPrettyJson } from '../lib/format'
 import { selectUnauthenticatedView } from '../lib/unauthenticatedView'
@@ -568,34 +568,21 @@ export function useAppController() {
           refresh: () => agentsData.refreshWithCatalog(getCatalogRefreshPromise()),
         },
         {
-          route: DESKTOP_ROUTES.contexts,
-          refresh: () => contextsData.refreshWithCatalog(getCatalogRefreshPromise()),
-        },
-        {
           route: DESKTOP_ROUTES.connectors,
           refresh: () => mcpServersData.refreshWithCatalog(getCatalogRefreshPromise()),
         },
-        { route: DESKTOP_ROUTES.teams, refresh: teamsData.refresh },
         { route: DESKTOP_ROUTES.plugins, refresh: refreshWorkflowsData },
       ] as const
 
-      const activeRoute =
-        route === DESKTOP_ROUTES.contextDetails
-          ? DESKTOP_ROUTES.contexts
-          : route === DESKTOP_ROUTES.teamDetails
-            ? DESKTOP_ROUTES.teams
-            : route
-      const current = refreshers.find(entry => entry.route === activeRoute)
+      const current = refreshers.find(entry => entry.route === route)
 
       if (current) await current.refresh()
     },
     [
       agentsData.refreshWithCatalog,
-      contextsData.refreshWithCatalog,
       getCatalogRefreshPromise,
       mcpServersData.refreshWithCatalog,
       refreshWorkflowsData,
-      teamsData.refresh,
     ]
   )
 
@@ -612,37 +599,6 @@ export function useAppController() {
     auth.isAuthenticated,
     nav.selectedAgent,
     nav.setSelectedAgent,
-  ])
-
-  useEffect(() => {
-    if (!auth.isAuthenticated) return
-    if (contextsData.accessCatalog && nav.selectedContext) {
-      if (!contextsData.contextIds.includes(nav.selectedContext)) {
-        nav.setSelectedContext(null)
-      }
-    }
-  }, [
-    auth.isAuthenticated,
-    contextsData.accessCatalog,
-    contextsData.contextIds,
-    nav.selectedContext,
-    nav.setSelectedContext,
-  ])
-
-  useEffect(() => {
-    if (!auth.isAuthenticated) return
-    if (teamsData.teamDirectoryHydrated && nav.selectedTeam) {
-      const available = teamsData.teams.map(team => team.id)
-      if (!available.includes(nav.selectedTeam)) {
-        nav.setSelectedTeam(null)
-      }
-    }
-  }, [
-    auth.isAuthenticated,
-    nav.selectedTeam,
-    nav.setSelectedTeam,
-    teamsData.teamDirectoryHydrated,
-    teamsData.teams,
   ])
 
   const switchTeamForWorkspace = useCallback(
@@ -896,7 +852,7 @@ export function useAppController() {
 
   // ─── Cross-domain: handleOpenAgentWorkspace ───
   const handleOpenAgentWorkspace = useCallback(
-    (agentName: string, route: AgentWorkspaceRoute = 'details') => {
+    (agentName: string, route: AgentWorkspaceRoute = AGENT_WORKSPACE_ROUTES.connectors) => {
       if (!agentName) return
       chat.setPendingChatSelection(agentName, null)
       chat.clearActiveChat()
@@ -961,7 +917,7 @@ export function useAppController() {
         // D.4: switchToChat is now a single unified path (no isRemote) — the
         // server is the source of truth and hydrates server-only chats itself.
         void chat.switchToChat(agentName, targetChatId)
-        nav.setSelectedAgentRoute('details')
+        nav.setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
         nav.setNavItem(DESKTOP_ROUTES.chat)
         return
       }
@@ -981,7 +937,7 @@ export function useAppController() {
       if (!targetChatId) {
         chat.clearActiveChat()
       }
-      nav.setSelectedAgentRoute('details')
+      nav.setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
       nav.setSelectedAgent(agentName)
       if (!options.keepNavItem) nav.setNavItem(DESKTOP_ROUTES.chat)
       // Drawer same-agent selection: `setSelectedAgent` above is a no-op (same
@@ -1347,22 +1303,13 @@ export function useAppController() {
     navItem: nav.navItem,
     selectedAgent: nav.selectedAgent,
     selectedAgentRoute: nav.selectedAgentRoute,
-    selectedContext: nav.selectedContext,
-    selectedContextTab: nav.selectedContextTab,
-    selectedTeam: nav.selectedTeam,
     setSelectedAgent: nav.setSelectedAgent,
-    setSelectedContext: nav.setSelectedContext,
-    setSelectedTeam: nav.setSelectedTeam,
     handleNavSelect,
     handleOpenAgentWorkspace,
     handleSelectChatAgent,
     handleEnsureTeamContext: ensureTeamContext,
     getCurrentTeamId,
     handleBackToAgents: nav.handleBackToAgents,
-    handleOpenContextDetails: nav.handleOpenContextDetails,
-    handleBackToContexts: nav.handleBackToContexts,
-    handleOpenTeamDetails: nav.handleOpenTeamDetails,
-    handleBackToTeams: nav.handleBackToTeams,
     handleRefreshWorkspaceData: refreshWorkspaceDataForRoute,
 
     // Notifications

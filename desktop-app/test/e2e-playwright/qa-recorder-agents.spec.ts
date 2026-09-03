@@ -16,11 +16,11 @@ import {
 // Optional QA recorder journey for the Desktop App agents fleet and workspace.
 //
 // Read-only throughout: it launches the real Electron window headfully with
-// video, signs in as the exact QA identity, walks the Resources -> Agents fleet,
-// lands on the chatllm agent's chat composer, and exercises the agent workspace
-// route switcher (Details / Connectors / Contexts / Activity). No chat messages
-// are sent and no confirm flag is required; every test still guards the loopback
-// targets up front. See docs/testing/desktop-headful-journeys.md.
+// video, signs in as the exact QA identity, walks the Agents fleet, lands on the
+// chatllm agent's chat composer, and exercises the agent workspace route switcher
+// (Connectors / Members / Activity). No chat messages are sent and no confirm
+// flag is required; every test still guards the loopback targets up front. See
+// docs/testing/desktop-headful-journeys.md.
 
 test('optional QA recorder: Desktop agents journey — fleet', async ({}, testInfo) => {
   await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
@@ -104,10 +104,10 @@ test('optional QA recorder: Desktop agents journey — workspace routes', async 
     await login(page, credentials)
     await openAgentsPage(page)
 
-    // Enter the chatllm workspace in agents-mode (Details route) by clicking its
-    // fleet row. Resilient to the auto-selected-chat landing: if the fleet did
-    // not render, the route-switching portion is skipped and we still capture a
-    // proof of whatever shell is present.
+    // Enter the chatllm workspace in agents-mode (default Connectors route) by
+    // clicking its fleet row. Resilient to the auto-selected-chat landing: if the
+    // fleet did not render, the route-switching portion is skipped and we still
+    // capture a proof of whatever shell is present.
     const exactAgentRow = page.locator('.agents-table-row-clickable', { hasText: hostRef }).first()
     const composer = page.getByRole('textbox', { name: 'Agent message composer' })
     const emptyState = page.getByText('No agents available')
@@ -117,11 +117,11 @@ test('optional QA recorder: Desktop agents journey — workspace routes', async 
       await exactAgentRow.click()
 
       // Agents-mode workspace: breadcrumb shows Agents / <agent> / <route>, and
-      // the default Details section renders its hero shell.
+      // the default Connectors section renders its hero shell.
       const agentBreadcrumb = page.getByLabel('Agent breadcrumb')
       await expect(agentBreadcrumb).toBeVisible({ timeout: 20_000 })
       await expect(agentBreadcrumb).toContainText(hostRef)
-      await expect(page.locator('section[aria-label="Agent details"]')).toBeVisible({
+      await expect(page.locator('section[aria-label="Agent connectors"]')).toBeVisible({
         timeout: 20_000,
       })
 
@@ -129,8 +129,8 @@ test('optional QA recorder: Desktop agents journey — workspace routes', async 
       // aria-label "Switch agent section") across the workspace resource routes
       // exposed by the agent menu, asserting each section shell renders.
       const routes: Array<{ menuLabel: string; sectionAriaLabel: string }> = [
+        { menuLabel: 'Members', sectionAriaLabel: 'Agent members' },
         { menuLabel: 'Connectors', sectionAriaLabel: 'Agent connectors' },
-        { menuLabel: 'Contexts', sectionAriaLabel: 'Agent contexts' },
         { menuLabel: 'Activity', sectionAriaLabel: 'Agent activity' },
       ]
       for (const { menuLabel, sectionAriaLabel } of routes) {
