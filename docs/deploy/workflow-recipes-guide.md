@@ -301,16 +301,27 @@ kubectl delete workflowrecipe my-nginx -n sandbox-recipes
 
 ## Reconcile idempotency & drift behavior
 
-WRC reconciles every recipe on a periodic resync. Each managed object (Deployment,
-StatefulSet, headless Service, CronJob, Job, DaemonSet, the McpServer CRD, and every
-WRC-authored NetworkPolicy applied through `applyNetworkPolicy` — `ui-ingress-*`,
-`wl-ingress-*`, `wr-intdep-*`, `wf-*-oauth-broker-egress`, the three webhook-gateway
-policies, and `wl-egress-*` once issue #299 has decided a write is due) is
-applied through a **spec-hash idempotency gate**: WRC stamps a `clerum.io/spec-hash`
-annotation (a hash of the _desired_ manifest) and, on the already-exists path, **skips
-the write entirely when the existing object's stamped hash matches**. This keeps
-`metadata.generation` from climbing on no-op reconciles (which previously produced a
-`degraded↔active` status flap and a downstream HCC NetworkPolicy no-op write storm).
+WRC reconciles every recipe on a periodic resync. Most managed objects (the recipe
+Deployment, StatefulSet, headless Service, CronJob, Job, DaemonSet, the McpServer CRD,
+and the NetworkPolicies `ui-ingress-*`, `wl-ingress-*`, `wr-intdep-*`,
+`wf-*-oauth-broker-egress` and the three webhook-gateway policies) are applied through a
+**spec-hash idempotency gate**: WRC stamps a `clerum.io/spec-hash` annotation (a hash of
+the _desired_ manifest) and, on the already-exists path, **skips the write entirely when
+the existing object's stamped hash matches**. This keeps `metadata.generation` from
+climbing on no-op reconciles (which previously produced a `degraded↔active` status flap
+and a downstream HCC NetworkPolicy no-op write storm).
+
+**What the gate does _not_ cover.** Do not read the list above as "everything":
+
+- `wl-egress-*` routes through the same method, but its manifest carries a
+  `clerum.io/egress-fqdn-resolved-at` timestamp that is regenerated on every pass, so its
+  desired hash never matches and **the gate never closes for it**. What actually keeps it
+  quiet is the upstream issue #299 check (`egressWriteNeeded`), which compares the
+  enforced egress rules. If that check ever regresses, the spec-hash gate will not catch it.
+- `ui-egress-*` and the `coordinator-to-gfs` policy do not use the spec-hash at all; they
+  have their own ad-hoc comparisons (#299 and #579 respectively).
+- The **webhook gateway's own** ConfigMap, Deployment and Service are still ungated and
+  rewritten on every pass — only its three NetworkPolicies were migrated.
 
 **Operational consequences:**
 
@@ -319,9 +330,19 @@ the write entirely when the existing object's stamped hash matches**. This keeps
   any alert keyed on it.
 - **Drift is no longer auto-reverted.** If an operator hand-edits a WRC-managed object
   (e.g. `kubectl edit`/`scale` on a recipe Deployment), WRC will **not** revert it until
-  the recipe spec changes (which flips the hash). The change is still **visible**: the
-  recipe `status` reports the workload `degraded` when replica health drops. To force a
-  re-apply, change the recipe spec (or delete the object and let WRC recreate it).
+  the recipe spec changes (which flips the hash). To force a re-apply, change the recipe
+  spec (or delete the object and let WRC recreate it).
+- **For a Deployment the drift is still visible**: the recipe `status` reports the
+  workload `degraded` when replica health drops.
+- **For a NetworkPolicy it is not visible by any path.** There is no replica health to
+  degrade: the recipe stays `active` while the enforcement object diverges from the
+  desired one, and nothing sweeps for it — `pruneStaleInternalDependencyPolicies`
+  compares names, not content, and `deploy/scripts/verify-networkpolicies.sh` only checks
+  that the overlay's policies exist. An edit that preserves the `clerum.io/spec-hash`
+  annotation while changing the `spec` (widening `ingress`/`egress`, emptying
+  `podSelector`, dropping a `policyTypes` entry) is **permanent and silent**. Treat any
+  `kubectl edit` on a `ui-ingress-*`, `wl-ingress-*`, `wr-intdep-*` or gateway policy as
+  permanent until a bounded resync exists (issue #581).
 - **First deploy after this change** does one stamping write per pre-existing managed
   object (they have no hash yet), then steady-state is quiet.
 

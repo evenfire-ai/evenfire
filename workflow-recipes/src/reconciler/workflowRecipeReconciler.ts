@@ -3734,7 +3734,7 @@ export class WorkflowRecipeReconciler {
       console.log(`[WR-Reconciler] Created ${label}`)
     } catch (error: unknown) {
       if (getErrorCode(error) === 409) {
-        if (idempotency && (await this.applyIsNoop(idempotency))) {
+        if (idempotency && (await this.applyIsNoop(idempotency, label))) {
           console.log(`[WR-Reconciler] ${label} unchanged (spec-hash match); skipping update`)
           return
         }
@@ -3761,14 +3761,27 @@ export class WorkflowRecipeReconciler {
    * their own read in `replaceFn`: this catch is total by design (see
    * `applyNetworkPolicy`).
    */
-  private async applyIsNoop(idempotency: {
-    manifest: { metadata?: { annotations?: { [key: string]: string } } }
-    readExisting: () => Promise<{ metadata?: { annotations?: { [key: string]: string } } } | null>
-  }): Promise<boolean> {
+  private async applyIsNoop(
+    idempotency: {
+      manifest: { metadata?: { annotations?: { [key: string]: string } } }
+      readExisting: () => Promise<{ metadata?: { annotations?: { [key: string]: string } } } | null>
+    },
+    label: string
+  ): Promise<boolean> {
     try {
       const existing = await idempotency.readExisting()
       return specHashUnchanged(idempotency.manifest, existing ?? null)
-    } catch {
+    } catch (error) {
+      // Falling through to the replace is correct — never skip an update we cannot
+      // prove unnecessary — but discarding the error left no trace of WHY: revoked
+      // RBAC or a persistently failing apiserver looked exactly like a healthy
+      // cache miss, and the gate silently stopped saving anything. The write still
+      // happens, so this is a diagnostic line, not a failure path; a genuine veto
+      // reaches the caller through `replaceFn`, loud.
+      console.warn(
+        `[WR-Reconciler] ${label}: idempotency pre-read failed, falling through to update:`,
+        error
+      )
       return false
     }
   }
@@ -4892,14 +4905,17 @@ export class WorkflowRecipeReconciler {
    */
   private async applyNetworkPolicy(policy: k8s.V1NetworkPolicy, namespace: string): Promise<void> {
     const policyName = policy.metadata!.name!
-    let existing: k8s.V1NetworkPolicy | undefined
+    // Set only by a read whose ownership assertion PASSED, which is what makes it
+    // safe to reuse in the replace path. Unset therefore means "no verified object
+    // in hand" — the read failed, or its assertion vetoed.
+    let assertedExisting: k8s.V1NetworkPolicy | undefined
     const readExistingAndAssertOwnership = async (): Promise<k8s.V1NetworkPolicy> => {
       const fetched = await this.networkingApi.readNamespacedNetworkPolicy({
         name: policyName,
         namespace,
       })
       this.assertInternalDependencyPolicyOwnership(policy, fetched, namespace)
-      existing = fetched
+      assertedExisting = fetched
       return fetched
     }
     await this.createOrReplace(
@@ -4909,9 +4925,9 @@ export class WorkflowRecipeReconciler {
           body: policy,
         }),
       async () => {
-        // `existing` is unset when the gate's read failed OR its assertion vetoed
-        // (applyIsNoop swallows both); re-read so the veto surfaces from here, loud.
-        const current = existing ?? (await readExistingAndAssertOwnership())
+        // Unset means the gate's read failed OR its assertion vetoed (applyIsNoop
+        // swallows both); re-read so the veto surfaces from here, loud.
+        const current = assertedExisting ?? (await readExistingAndAssertOwnership())
         policy.metadata!.resourceVersion = current.metadata?.resourceVersion
         return this.networkingApi.replaceNamespacedNetworkPolicy({
           name: policyName,

@@ -18,7 +18,7 @@ import {
   resolveScopedWorkloadResourceName,
   resolveWorkloadRuntimeResourceName,
 } from './resourceBuilder'
-import { stampSpecHash } from './specHash'
+import { computeSpecHash, stampSpecHash } from './specHash'
 import {
   TRANSIENT_REQUEUE_BASE_MS,
   WORKFLOW_PROGRESS_REQUEUE_BASE_MS,
@@ -839,7 +839,9 @@ describe('WorkflowRecipeReconciler', () => {
           }
         ).body
       )
-      expect(sealed.metadata?.annotations?.[SPEC_HASH]).toBeTruthy()
+      // The exact hash, not merely "some annotation": a stamp that is present but
+      // wrong would still skip the write, and would skip it for the wrong reason.
+      expect(sealed.metadata?.annotations?.[SPEC_HASH]).toBe(computeSpecHash(plainPolicy()))
 
       mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
       mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
@@ -878,7 +880,7 @@ describe('WorkflowRecipeReconciler', () => {
         }
       ).body
       expect(body.metadata?.resourceVersion).toBe('9')
-      expect(body.metadata?.annotations?.[SPEC_HASH]).toBeTruthy()
+      expect(body.metadata?.annotations?.[SPEC_HASH]).toBe(computeSpecHash(plainPolicy()))
       // One read serves both the gate and the replace, so the replace cannot act
       // on a different resourceVersion than the one the gate evaluated.
       expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
@@ -897,7 +899,7 @@ describe('WorkflowRecipeReconciler', () => {
           }
         ).body
       )
-      expect(sealed.metadata?.annotations?.[SPEC_HASH]).toBeTruthy()
+      expect(sealed.metadata?.annotations?.[SPEC_HASH]).toBe(computeSpecHash(plainPolicy()))
 
       mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
       mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(sealed)
@@ -920,9 +922,19 @@ describe('WorkflowRecipeReconciler', () => {
         },
       })
 
-      await expect(apply(desired)).rejects.toThrow(
-        /Refusing to replace NetworkPolicy "wr-intdep-egress-r-w"/
+      const rejection = await apply(desired).then(
+        () => {
+          throw new Error('expected the ownership assertion to reject')
+        },
+        (e: unknown) => e as Error
       )
+      // Pin the CLASS, not just the message. `reconcileInternalDependencyPolicies`
+      // keys the CRD condition `OwnershipConflict` off `instanceof`, so a bare
+      // Error carrying the same text would set the wrong condition while passing a
+      // message-only assertion. The class is module-local — exporting it just for
+      // this test would be production code shaped by a test — so pin its `name`.
+      expect(rejection.name).toBe('NetworkPolicyOwnershipConflictError')
+      expect(rejection.message).toMatch(/Refusing to replace NetworkPolicy "wr-intdep-egress-r-w"/)
       expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
       // Two reads: the gate's read raises the veto, `applyIsNoop` treats any
       // throw as "cannot prove this is a no-op" and falls through, and the replace
@@ -933,10 +945,48 @@ describe('WorkflowRecipeReconciler', () => {
       expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
     })
 
+    it('T4b lets an internal-dependency policy WRC already owns through the gate', async () => {
+      // T4 pins the veto; nothing pinned the other side. An assertion that rejected
+      // EVERY internal-dependency policy would leave T4 green and silently stop the
+      // whole intdep family from converging — the gate would never be reached and
+      // every pass would set an OwnershipConflict condition. This is the test that
+      // makes T4 mean "vetoes foreign owners" rather than "always vetoes".
+      const desired = intdepPolicy()
+      const ownHash = stampSpecHash(clone(desired))
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
+        metadata: {
+          name: 'wr-intdep-egress-r-w',
+          resourceVersion: '9',
+          annotations: { [SPEC_HASH]: ownHash },
+          labels: desired.metadata!.labels,
+        },
+      })
+
+      await expect(apply(desired)).resolves.toBeUndefined()
+
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      // One read: the assertion passed inside the gate's own read, so the replace
+      // path is never entered and never re-reads. Contrast T4's two.
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    })
+
     it('T5 falls through to the replace when the gate read fails with an HTTP status', async () => {
       mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
       mockNetworkingApi.readNamespacedNetworkPolicy
         .mockRejectedValueOnce({ code: 500 })
+        .mockResolvedValueOnce(ownedExisting())
+
+      await apply(plainPolicy())
+
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+    })
+
+    it('T5b falls through to the replace on a retryable transport error', async () => {
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+      mockNetworkingApi.readNamespacedNetworkPolicy
+        .mockRejectedValueOnce({ code: 'ECONNRESET' })
         .mockResolvedValueOnce(ownedExisting())
 
       await apply(plainPolicy())
@@ -952,21 +1002,13 @@ describe('WorkflowRecipeReconciler', () => {
       // happens — so `applyIsNoop` swallows everything and falls open. A version
       // of this gate that classified errors instead broke that test; this pins the
       // behaviour for NetworkPolicy so the same idea cannot come back quietly.
+      //
+      // Not redundant with T5b despite the total catch: T5b's error carries a
+      // `code`, and every earlier draft that regressed this did so by keying on
+      // `code`. The codeless shape is the one that broke the Deployment test.
       mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
       mockNetworkingApi.readNamespacedNetworkPolicy
         .mockRejectedValueOnce(new Error('transient read timeout'))
-        .mockResolvedValueOnce(ownedExisting())
-
-      await apply(plainPolicy())
-
-      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
-      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
-    })
-
-    it('T5b falls through to the replace on a retryable transport error', async () => {
-      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
-      mockNetworkingApi.readNamespacedNetworkPolicy
-        .mockRejectedValueOnce({ code: 'ECONNRESET' })
         .mockResolvedValueOnce(ownedExisting())
 
       await apply(plainPolicy())
@@ -9415,7 +9457,13 @@ describe('WorkflowRecipeReconciler', () => {
         const body = (call[0] as { body: k8s.V1NetworkPolicy }).body
         sealed.set(body.metadata!.name!, JSON.parse(JSON.stringify(body)))
       }
-      expect(sealed.size).toBe(3)
+      // Which three, not just how many: cardinality alone stays green if a refactor
+      // stops emitting gateway policies and three arrive from another family.
+      expect([...sealed.keys()].sort()).toEqual([
+        'allow-gateway-egress-to-handler-wf-wh-recipe',
+        'allow-gateway-ingress-to-handler-wf-wh-recipe',
+        'allow-webhook-proxy-ingress-wf-wh-recipe',
+      ])
 
       mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
       mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
@@ -9429,13 +9477,31 @@ describe('WorkflowRecipeReconciler', () => {
         }
       )
       mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockClear()
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
 
-      await reconciler.reconcile(recipeWithWebhook())
+      try {
+        await reconciler.reconcile(recipeWithWebhook())
 
-      for (const name of sealed.keys()) {
-        expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
-          expect.objectContaining({ name })
-        )
+        const logged = logSpy.mock.calls.flat().join('\n')
+        for (const name of sealed.keys()) {
+          // Negative half: the gate closed, no write went out.
+          expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+            expect.objectContaining({ name })
+          )
+          // Positive half, and the reason this test is not vacuous: prove the second
+          // pass actually REACHED this policy. A negative assertion alone cannot tell
+          // "the gate closed" from "the code never ran" — patching the gateway loop to
+          // run only on the first pass leaves the negative half green. Both halves are
+          // required of any convergence test built on this shape (issue #581).
+          expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledWith(
+            expect.objectContaining({ name })
+          )
+          expect(logged).toContain(`NetworkPolicy "${name}" in`)
+          expect(logged).toContain('unchanged (spec-hash match); skipping update')
+        }
+      } finally {
+        logSpy.mockRestore()
       }
     })
 
