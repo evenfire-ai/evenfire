@@ -18,6 +18,7 @@ import {
   resolveScopedWorkloadResourceName,
   resolveWorkloadRuntimeResourceName,
 } from './resourceBuilder'
+import { stampSpecHash } from './specHash'
 import {
   TRANSIENT_REQUEUE_BASE_MS,
   WORKFLOW_PROGRESS_REQUEUE_BASE_MS,
@@ -767,6 +768,212 @@ describe('WorkflowRecipeReconciler', () => {
           '" readyReplicas 0/0',
       },
     ])
+  })
+
+  // ─── issue #575: the spec-hash gate applyNetworkPolicy never opted into ──────
+  //
+  // `createOrReplace` takes a fourth `idempotency` argument that stamps the
+  // desired manifest with a SHA-256 of its content and compares it against the
+  // annotation on the live object before replacing. Five callers pass it —
+  // Deployment, headless Service, CronJob, Job, DaemonSet. `applyNetworkPolicy`
+  // did not, so every WRC NetworkPolicy funnelling through it was rewritten on
+  // every reconcile pass without comparing anything: ~12 200 PUTs/hour of objects
+  // the apiserver then discarded as unchanged.
+  //
+  // The ownership assertion is why this is not a one-line change. It runs inside
+  // the replace path today; a gate that returns first would skip it, so it moves
+  // into `readExisting` — the very read the gate evaluates — and the result is
+  // cached only AFTER it passes, so the replace path can never inherit a vetoed
+  // object.
+  describe('applyNetworkPolicy spec-hash gate (issue #575)', () => {
+    const SPEC_HASH = 'clerum.io/spec-hash'
+    const NS = 'sandbox-recipes'
+    const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T
+    type Priv = { applyNetworkPolicy: (p: k8s.V1NetworkPolicy, ns: string) => Promise<void> }
+    const apply = (p: k8s.V1NetworkPolicy) =>
+      (reconciler as unknown as Priv).applyNetworkPolicy(p, NS)
+
+    const plainPolicy = (): k8s.V1NetworkPolicy => ({
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: {
+        name: 'wl-ingress-r-w',
+        namespace: NS,
+        labels: { 'clerum.io/managed-by': 'workflow-recipes', 'clerum.io/recipe': 'r' },
+      },
+      spec: {
+        podSelector: { matchLabels: { 'clerum.io/workload': 'w' } },
+        policyTypes: ['Ingress'],
+        ingress: [{ ports: [{ port: 8080, protocol: 'TCP' }] }],
+      },
+    })
+
+    const intdepPolicy = (): k8s.V1NetworkPolicy => ({
+      ...plainPolicy(),
+      metadata: {
+        name: 'wr-intdep-egress-r-w',
+        namespace: NS,
+        labels: {
+          'clerum.io/managed-by': 'workflow-recipes',
+          'clerum.io/recipe': 'r',
+          'clerum.io/policy-type': 'internal-dependency',
+        },
+      },
+    })
+
+    const ownedExisting = (extra: Record<string, unknown> = {}) => ({
+      metadata: {
+        name: 'wl-ingress-r-w',
+        resourceVersion: '9',
+        labels: plainPolicy().metadata!.labels,
+        ...extra,
+      },
+    })
+
+    it('T1 does NOT replace a NetworkPolicy whose spec-hash is unchanged, and says so', async () => {
+      await apply(plainPolicy())
+      const sealed = clone(
+        (
+          mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.at(-1)![0] as {
+            body: k8s.V1NetworkPolicy
+          }
+        ).body
+      )
+      expect(sealed.metadata?.annotations?.[SPEC_HASH]).toBeTruthy()
+
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
+        ...sealed,
+        metadata: { ...sealed.metadata, resourceVersion: '9' },
+      })
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockClear()
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+      try {
+        await apply(plainPolicy())
+        expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+        expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+        // The skip line is load-bearing, not decoration: it is what keeps the
+        // ~16s reconcile cadence visible once the writes stop. A silent gate
+        // would make the symptom of #460 invisible.
+        expect(logSpy.mock.calls.flat().join(' ')).toContain(
+          'NetworkPolicy "wl-ingress-r-w" in sandbox-recipes unchanged (spec-hash match); skipping update'
+        )
+      } finally {
+        logSpy.mockRestore()
+      }
+    })
+
+    it('T2 replaces when the spec-hash differs, reading once and using the live resourceVersion', async () => {
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(
+        ownedExisting({ annotations: { [SPEC_HASH]: 'stale' } })
+      )
+
+      await apply(plainPolicy())
+
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      const body = (
+        mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls[0][0] as {
+          body: k8s.V1NetworkPolicy
+        }
+      ).body
+      expect(body.metadata?.resourceVersion).toBe('9')
+      expect(body.metadata?.annotations?.[SPEC_HASH]).toBeTruthy()
+      // One read serves both the gate and the replace, so the replace cannot act
+      // on a different resourceVersion than the one the gate evaluated.
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    })
+
+    it('T3 writes once to seal a pre-existing policy with no spec-hash, then skips', async () => {
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(ownedExisting())
+
+      await apply(plainPolicy())
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      const sealed = clone(
+        (
+          mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls[0][0] as {
+            body: k8s.V1NetworkPolicy
+          }
+        ).body
+      )
+      expect(sealed.metadata?.annotations?.[SPEC_HASH]).toBeTruthy()
+
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(sealed)
+
+      await apply(plainPolicy())
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('T4 does not let a matching spec-hash shortcut the ownership assertion', async () => {
+      const desired = intdepPolicy()
+      const sameHash = stampSpecHash(clone(desired))
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+      // Foreign owner, carrying a hash the gate would happily match on.
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
+        metadata: {
+          name: 'wr-intdep-egress-r-w',
+          resourceVersion: '9',
+          annotations: { [SPEC_HASH]: sameHash },
+          labels: { 'clerum.io/managed-by': 'hcc' },
+        },
+      })
+
+      await expect(apply(desired)).rejects.toThrow(
+        /Refusing to replace NetworkPolicy "wr-intdep-egress-r-w"/
+      )
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      // Two reads: the gate's read raises the veto, `applyIsNoop` treats any
+      // throw as "cannot prove this is a no-op" and falls through, and the replace
+      // path re-reads and re-asserts, where the veto propagates. The write never
+      // happens either way. What this test rules out is the assertion living ONLY
+      // in the replace path: there, a matching hash would make the gate skip and
+      // this call would resolve instead of rejecting.
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+    })
+
+    it('T5 falls through to the replace when the gate read fails with an HTTP status', async () => {
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+      mockNetworkingApi.readNamespacedNetworkPolicy
+        .mockRejectedValueOnce({ code: 500 })
+        .mockResolvedValueOnce(ownedExisting())
+
+      await apply(plainPolicy())
+
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+    })
+
+    it('T5c falls through on a codeless read error, the shape `:1354` pins for Deployment', async () => {
+      // The rule cannot key on the shape of the error. A bare Error with no code
+      // is a legitimate read failure — the existing Deployment test injects
+      // exactly `new Error('transient read timeout')` and asserts the write still
+      // happens — so `applyIsNoop` swallows everything and falls open. A version
+      // of this gate that classified errors instead broke that test; this pins the
+      // behaviour for NetworkPolicy so the same idea cannot come back quietly.
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+      mockNetworkingApi.readNamespacedNetworkPolicy
+        .mockRejectedValueOnce(new Error('transient read timeout'))
+        .mockResolvedValueOnce(ownedExisting())
+
+      await apply(plainPolicy())
+
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+    })
+
+    it('T5b falls through to the replace on a retryable transport error', async () => {
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+      mockNetworkingApi.readNamespacedNetworkPolicy
+        .mockRejectedValueOnce({ code: 'ECONNRESET' })
+        .mockResolvedValueOnce(ownedExisting())
+
+      await apply(plainPolicy())
+
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+    })
   })
 
   describe('idempotent apply (stops generation churn)', () => {
@@ -9189,6 +9396,47 @@ describe('WorkflowRecipeReconciler', () => {
       expect(types).toContain('WebhookGatewayNotReady')
       const allFalse = (r.webhookConditions ?? []).every(c => c.status === 'False')
       expect(allFalse).toBe(true)
+    })
+
+    it('T6 (#575) applies the 3 gateway NetworkPolicies through the spec-hash gate', async () => {
+      // Two jobs. First: the gateway policies used to be written by an inline
+      // create-or-replace with no gate, so they were three no-op PUTs per pass.
+      // Second, and the reason this test is here rather than asserted by
+      // inspection: it proves the gateway builder is DETERMINISTIC. A gate only
+      // closes if the manifest hashes the same on the next pass, and a builder
+      // that iterated a Set or stamped a timestamp would leave the gate open
+      // forever — the failure mode of #413 and #579. If this test goes red, the
+      // builder acquired non-determinism; do not relax the assertion.
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+      await reconciler.reconcile(recipeWithWebhook())
+
+      const sealed = new Map<string, unknown>()
+      for (const call of mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls) {
+        const body = (call[0] as { body: k8s.V1NetworkPolicy }).body
+        sealed.set(body.metadata!.name!, JSON.parse(JSON.stringify(body)))
+      }
+      expect(sealed.size).toBe(3)
+
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+        ({ name }: { name: string }) => {
+          const previous = sealed.get(name) as k8s.V1NetworkPolicy | undefined
+          if (!previous) return Promise.resolve({ metadata: { name, resourceVersion: '1' } })
+          return Promise.resolve({
+            ...previous,
+            metadata: { ...previous.metadata, resourceVersion: '9' },
+          })
+        }
+      )
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+
+      await reconciler.reconcile(recipeWithWebhook())
+
+      for (const name of sealed.keys()) {
+        expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+          expect.objectContaining({ name })
+        )
+      }
     })
 
     it('fail-closed when secretRef is missing: no gateway resources, condition set, phase degraded', async () => {

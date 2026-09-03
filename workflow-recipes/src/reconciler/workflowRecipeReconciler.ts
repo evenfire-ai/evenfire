@@ -3031,28 +3031,19 @@ export class WorkflowRecipeReconciler {
       `WebhookGateway Service "${gatewayServiceName(recipeName)}"`
     )
 
+    // Same spec-hash gate as every other WRC NetworkPolicy (issue #575): these
+    // three are rebuilt verbatim from the recipe on every pass, so the inline
+    // replace was three no-op PUTs per reconcile. The wr-intdep-* ownership
+    // assertion inside applyNetworkPolicy returns immediately for these — their
+    // policy-type label differs — so routing through it changes the write gate and
+    // nothing else. The log label changes from `WebhookGateway NetworkPolicy "x"`
+    // to `NetworkPolicy "x" in <ns>`, which no test, alert or doc consumes.
     for (const policy of [
       built.proxyIngressPolicy,
       built.handlerEgressPolicy,
       built.handlerIngressPolicy,
     ]) {
-      const policyName = policy.metadata!.name!
-      await this.createOrReplace(
-        () => this.networkingApi.createNamespacedNetworkPolicy({ namespace: ns, body: policy }),
-        async () => {
-          const existing = await this.networkingApi.readNamespacedNetworkPolicy({
-            name: policyName,
-            namespace: ns,
-          })
-          policy.metadata!.resourceVersion = existing.metadata?.resourceVersion
-          return this.networkingApi.replaceNamespacedNetworkPolicy({
-            name: policyName,
-            namespace: ns,
-            body: policy,
-          })
-        },
-        `WebhookGateway NetworkPolicy "${policyName}"`
-      )
+      await this.applyNetworkPolicy(policy, ns)
     }
   }
 
@@ -3763,8 +3754,12 @@ export class WorkflowRecipeReconciler {
 
   /**
    * True when the existing object already carries the desired spec-hash, so the
-   * replace would be a no-op. A read failure returns false (fall through to
-   * replace) — never skip an update we cannot prove is unnecessary.
+   * replace would be a no-op. Anything thrown by `readExisting` — a read failure,
+   * or an invariant the caller asserts on what it just read — returns false and
+   * falls through to the replace: never skip an update we cannot prove is
+   * unnecessary. Callers whose `readExisting` asserts invariants must re-assert on
+   * their own read in `replaceFn`: this catch is total by design (see
+   * `applyNetworkPolicy`).
    */
   private async applyIsNoop(idempotency: {
     manifest: { metadata?: { annotations?: { [key: string]: string } } }
@@ -4876,8 +4871,37 @@ export class WorkflowRecipeReconciler {
     }
   }
 
+  /**
+   * Apply a WRC-authored NetworkPolicy through the spec-hash idempotency gate
+   * (issue #575). Every family funnelling through here — ui-ingress, wl-ingress,
+   * wr-intdep-*, oauth-broker egress, webhook-gateway, and wl-egress once #299 has
+   * decided a write is due — is rebuilt deterministically from the recipe on every
+   * pass, so the unconditional replace was one PUT per policy per ~16s that etcd
+   * never recorded: pure apiserver CPU and priority-and-fairness budget.
+   * Deployment, Service, CronJob, Job and DaemonSet already opted in; this was the
+   * kind whose skip counter stayed at zero.
+   *
+   * The wr-intdep-* ownership assertion runs INSIDE `readExisting`, i.e. on the
+   * very read the gate evaluates, so a spec-hash match can never shortcut it.
+   * `applyIsNoop` swallows EVERY error `readExisting` throws by design — a read
+   * failure must fall open to the replace — so the veto reaches the caller through
+   * `replaceFn`, which re-reads and re-asserts. The read is cached only AFTER the
+   * assertion passed: the replace path can never inherit a vetoed object, and the
+   * PUT carries the resourceVersion of the object that passed, so the apiserver
+   * rejects any change in between.
+   */
   private async applyNetworkPolicy(policy: k8s.V1NetworkPolicy, namespace: string): Promise<void> {
     const policyName = policy.metadata!.name!
+    let existing: k8s.V1NetworkPolicy | undefined
+    const readExistingAndAssertOwnership = async (): Promise<k8s.V1NetworkPolicy> => {
+      const fetched = await this.networkingApi.readNamespacedNetworkPolicy({
+        name: policyName,
+        namespace,
+      })
+      this.assertInternalDependencyPolicyOwnership(policy, fetched, namespace)
+      existing = fetched
+      return fetched
+    }
     await this.createOrReplace(
       () =>
         this.networkingApi.createNamespacedNetworkPolicy({
@@ -4885,19 +4909,18 @@ export class WorkflowRecipeReconciler {
           body: policy,
         }),
       async () => {
-        const existing = await this.networkingApi.readNamespacedNetworkPolicy({
-          name: policyName,
-          namespace,
-        })
-        this.assertInternalDependencyPolicyOwnership(policy, existing, namespace)
-        policy.metadata!.resourceVersion = existing.metadata?.resourceVersion
+        // `existing` is unset when the gate's read failed OR its assertion vetoed
+        // (applyIsNoop swallows both); re-read so the veto surfaces from here, loud.
+        const current = existing ?? (await readExistingAndAssertOwnership())
+        policy.metadata!.resourceVersion = current.metadata?.resourceVersion
         return this.networkingApi.replaceNamespacedNetworkPolicy({
           name: policyName,
           namespace,
           body: policy,
         })
       },
-      `NetworkPolicy "${policyName}" in ${namespace}`
+      `NetworkPolicy "${policyName}" in ${namespace}`,
+      { manifest: policy, readExisting: readExistingAndAssertOwnership }
     )
   }
 

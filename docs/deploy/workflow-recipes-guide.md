@@ -302,7 +302,10 @@ kubectl delete workflowrecipe my-nginx -n sandbox-recipes
 ## Reconcile idempotency & drift behavior
 
 WRC reconciles every recipe on a periodic resync. Each managed object (Deployment,
-StatefulSet, headless Service, CronJob, Job, DaemonSet, and the McpServer CRD) is
+StatefulSet, headless Service, CronJob, Job, DaemonSet, the McpServer CRD, and every
+WRC-authored NetworkPolicy applied through `applyNetworkPolicy` — `ui-ingress-*`,
+`wl-ingress-*`, `wr-intdep-*`, `wf-*-oauth-broker-egress`, the three webhook-gateway
+policies, and `wl-egress-*` once issue #299 has decided a write is due) is
 applied through a **spec-hash idempotency gate**: WRC stamps a `clerum.io/spec-hash`
 annotation (a hash of the _desired_ manifest) and, on the already-exists path, **skips
 the write entirely when the existing object's stamped hash matches**. This keeps
