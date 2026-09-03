@@ -42,6 +42,12 @@ export interface ClassifiedLike {
   retryable: boolean
   /** Provider-native code (e.g. `budget_denied`) used for terminal gates. */
   providerCode?: string
+  /**
+   * Mirrors `ClassifiedError.providerDispatched`: `false` only when the
+   * classifier proved no call left the process. `undefined` is unknown and
+   * must be read as dispatched.
+   */
+  providerDispatched?: boolean
 }
 
 export interface FailoverEngineOptions {

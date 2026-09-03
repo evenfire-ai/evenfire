@@ -1,5 +1,6 @@
 import { type NextFunction, type Request, type Response, Router } from 'express'
 import { rateLimit } from 'express-rate-limit'
+import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
@@ -7,6 +8,7 @@ import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
 import { createPluginWorkloadSdkRequestRateLimit } from '../../middleware/pluginWorkloadSdkRateLimits.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { pluginWorkloadSdkNotificationAuthDurationSeconds } from '../../observability/metrics.js'
+import { getSafeCodexSubscriptionConnection } from '../../services/codexSubscriptionConnection.js'
 import { enqueuePluginWorkloadSdkNotification } from '../../services/notificationEmitter.js'
 import {
   type PluginWorkloadSdkAuthzError,
@@ -192,8 +194,7 @@ function parsePromptBridgeFinalizationBody(
     reason.length > 128 ||
     !targetRef ||
     !provider ||
-    !model ||
-    !credentialSlot
+    !model
   ) {
     res.status(400).json({
       error:
@@ -218,7 +219,6 @@ function parsePromptBridgeFinalizationBody(
       ? Number(rawUsage.outputTokens)
       : -1
     if (
-      !llmSecretName ||
       !callerRef ||
       typeof rawUsage.fallbackUsed !== 'boolean' ||
       attemptCount < 1 ||
@@ -719,10 +719,51 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         isClientNotificationsPolicyReady(clientNotificationsGrant) &&
         (await hasUsableClientNotificationRecipients(clientNotificationsGrant))
       )
-      const primaryTarget = grant?.promptTargets[0] ?? null
+      const alignedPrimary =
+        grant &&
+        grant.promptTargets[0] &&
+        grant.defaultTargetRef !== null &&
+        grant.promptTargets[0].targetRef === grant.defaultTargetRef
+          ? grant.promptTargets[0]
+          : null
+      const reservationOnlyOauthBroker = Boolean(
+        alignedPrimary &&
+        isLlmProviderId(alignedPrimary.provider) &&
+        PROVIDER_AUTH_MODE[alignedPrimary.provider] === 'oauth-broker'
+      )
+      // Old mcp-host/WRC require capabilities.contractVersion === 2. Advertise
+      // 3 only for oauth-broker defaults so those binaries fail at reconcile
+      // instead of Validated-then-empty-ticket. Authorize/grant wire stays 2.
+      //
+      // #533 acceptance criterion 2 ties the Codex binding to the catalog and
+      // credential revisions, but those live on the connection row and never
+      // reached the host, so `codexBindingReady` could not compare them. They
+      // are advertised additively, gated by `codexBindingRevisions`, because
+      // the two rollout directions need opposite defaults: a host that
+      // predates the fields ignores them, and a host that postdates them must
+      // learn whether THIS API can send them at all — otherwise it would fail
+      // closed against an older control-api on a field that peer cannot emit,
+      // which is the #540 failure shape. Omitting the comparison is a
+      // readiness gap, never an unfenced spend: llmProviderAttemptAuthorizer
+      // and llmProviderAttemptRedemption already reject a stale revision.
+      //
+      // `codexBindingRevisions` is a STATIC capability of this binary —
+      // "I know how to publish the revisions" — not a statement about any one
+      // connection. Emitting it only alongside the numbers made a revoked or
+      // missing connection look like an older control-api, so the host skipped
+      // the freshness check exactly when the binding could not possibly be
+      // backed. With the flag static, absent numbers take the host's
+      // partial-deploy branch and fail closed, which is correct: a revoked
+      // connection can never back a live binding.
+      const codexConnection =
+        reservationOnlyOauthBroker && typeof alignedPrimary?.connectionRef === 'string'
+          ? await getSafeCodexSubscriptionConnection(pool, alignedPrimary.connectionRef)
+          : null
       res.status(200).json({
-        contractVersion: PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION,
-        supportedContractVersions: [2],
+        contractVersion: reservationOnlyOauthBroker
+          ? 3
+          : PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION,
+        supportedContractVersions: [2, 3],
         targetAwarePromptBridge: true,
         attemptLedger: true,
         credentialTickets: true,
@@ -730,9 +771,19 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         policyRevision: grant?.policyRevision ?? 0,
         policyHash: v2Ready && grant ? hashPromptTargetPolicy(grant) : null,
         defaultTargetRef: grant?.defaultTargetRef ?? null,
-        defaultProvider: primaryTarget?.provider ?? null,
-        defaultModel: primaryTarget?.model ?? null,
+        defaultProvider: alignedPrimary?.provider ?? null,
+        defaultModel: alignedPrimary?.model ?? null,
+        defaultConnectionRef: alignedPrimary?.connectionRef ?? null,
         v2Ready,
+        ...(reservationOnlyOauthBroker
+          ? { reservationOnlyOauthBroker: true, codexBindingRevisions: true }
+          : {}),
+        ...(codexConnection
+          ? {
+              defaultCatalogRevision: codexConnection.catalogRevision,
+              defaultCredentialRevision: codexConnection.credentialRevision,
+            }
+          : {}),
         clientNotificationsPolicyState: clientNotificationsGrant?.policyState ?? 'missing',
         clientNotificationsReady,
       })
@@ -1049,17 +1100,18 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
           const errorCode =
             error.code === 'conflict'
               ? 'idempotency_conflict'
-              : error.code === 'binding_mismatch'
-                ? 'provider_policy_denied'
-                : error.code === 'stale_attempt'
-                  ? 'provider_unavailable'
+              : error.code === 'ledger_pending' || error.code === 'stale_attempt'
+                ? 'provider_unavailable'
+                : error.code === 'binding_mismatch'
+                  ? 'provider_policy_denied'
                   : error.code === 'not_found'
                     ? 'invalid_request'
                     : error.code
           res.status(error.httpStatus).json({
             error: errorCode,
             message: error.message,
-            retryable: false,
+            retryable: error.retryable === true,
+            ...(error.code === 'ledger_pending' ? { reason: 'provider_unavailable' } : {}),
           })
           return
         }

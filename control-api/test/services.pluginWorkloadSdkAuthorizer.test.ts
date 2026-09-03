@@ -599,8 +599,14 @@ describe('authorizePromptBridge', () => {
     })
     expect(result).toMatchObject({
       ok: true,
-      value: { invocationId: 'inv-1', replay: false, maxOutputTokens: 2048 },
+      value: { invocationId: 'inv-1', replay: false },
     })
+    if (!result.ok) throw new Error('expected the authorization to succeed')
+    // The grant's output ceiling travels on the authorization again.
+    // An earlier round removed it on the premise that nothing enforced it, which held only
+    // for codex-subscription; every API-key provider sends it as `max_tokens`,
+    // so for them it was a working per-grant billing control.
+    expect(result.value.maxOutputTokens).toBe(2048)
     expect(sdkDb.insertInvocation).toHaveBeenCalledOnce()
     // Issue #348: the per-run leg is inert — no period quota is consumed even
     // though the grant still carries a legacy maxRequestsPerRun value.
@@ -803,6 +809,143 @@ describe('reissuePromptBridgeCredentialTicket', () => {
     })
     expect(result).toMatchObject({ ok: false, error: 'target_not_allowed' })
     expect(sdkDb.findGrant).not.toHaveBeenCalled()
+    expect(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).not.toHaveBeenCalled()
+  })
+
+  it('returns a reservation-only Codex ticket and leaves the physical row reserved', async () => {
+    const policy = grant({
+      promptTargets: [
+        {
+          targetRef: 'codex-primary',
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          credentialSlot: '',
+        },
+      ],
+      defaultTargetRef: 'codex-primary',
+    })
+    const policyHash = sdkDb.hashPromptTargetPolicy(policy)
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(policy)
+    vi.mocked(sdkDb.getInvocationById).mockResolvedValue(
+      invocation({
+        promptAuthorization: {
+          policyRevision: 1,
+          policyHash,
+          authorizedTargetRefs: ['codex-primary'],
+        },
+      })
+    )
+    vi.mocked(sdkDb.getPluginWorkloadSdkAttemptReceipt).mockResolvedValue({
+      invocationId: 'inv-1',
+      recipeNamespace: NS,
+      recipeName: RECIPE,
+      attemptGeneration: 1,
+      method: 'promptBridge',
+      targetRefs: ['codex-primary'],
+      policyRevision: 1,
+      policyHash,
+      status: 'in_progress',
+      startedAt: '2026-06-09T00:00:00.000Z',
+      leaseExpiresAt: '2026-06-09T00:01:00.000Z',
+      completedAt: null,
+    })
+    vi.mocked(sdkDb.reservePluginWorkloadSdkProviderAttempt).mockResolvedValue({
+      id: '44444444-4444-4444-8444-444444444444',
+      invocationId: 'inv-1',
+      recipeNamespace: NS,
+      recipeName: RECIPE,
+      attemptGeneration: 1,
+      attemptIndex: 1,
+      targetRef: 'codex-primary',
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+      credentialSlot: '',
+      status: 'reserved',
+      credentialJti: null,
+      startedAt: '2026-06-09T00:00:00.000Z',
+      leaseExpiresAt: '2026-06-09T00:01:00.000Z',
+      completedAt: null,
+      usageRequestId: null,
+    })
+
+    const result = await reissuePromptBridgeCredentialTicket({
+      claims: claims(),
+      invocationId: 'inv-1',
+      targetRef: 'codex-primary',
+      attemptGeneration: 1,
+    })
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        invocationId: 'inv-1',
+        targetRef: 'codex-primary',
+        credentialTicket: '',
+        reservationOnly: true,
+        providerAttemptId: '44444444-4444-4444-8444-444444444444',
+      },
+    })
+    expect(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).not.toHaveBeenCalled()
+    expect(sdkDb.markPluginWorkloadSdkProviderAttemptStatus).not.toHaveBeenCalled()
+  })
+
+  it('denies an oauth-broker fallback that is not the default target', async () => {
+    // The WRC installs the broker binding for the grant's default target only.
+    // A non-default Codex fallback is authorizable but not executable: without
+    // this guard it reserved an attempt, burned budget, and died in execution.
+    const policy = grant({
+      promptTargets: [
+        {
+          targetRef: 'primary-zai',
+          provider: 'zai',
+          model: 'glm-4.7',
+          credentialSlot: 'zai-api-key',
+        },
+        {
+          targetRef: 'codex-fallback',
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          credentialSlot: '',
+        },
+      ],
+      defaultTargetRef: 'primary-zai',
+    })
+    const policyHash = sdkDb.hashPromptTargetPolicy(policy)
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(policy)
+    vi.mocked(sdkDb.getInvocationById).mockResolvedValue(
+      invocation({
+        promptAuthorization: {
+          policyRevision: 1,
+          policyHash,
+          authorizedTargetRefs: ['primary-zai', 'codex-fallback'],
+        },
+      })
+    )
+    vi.mocked(sdkDb.getPluginWorkloadSdkAttemptReceipt).mockResolvedValue({
+      invocationId: 'inv-1',
+      recipeNamespace: NS,
+      recipeName: RECIPE,
+      attemptGeneration: 1,
+      method: 'promptBridge',
+      targetRefs: ['primary-zai', 'codex-fallback'],
+      policyRevision: 1,
+      policyHash,
+      status: 'in_progress',
+      startedAt: '2026-06-09T00:00:00.000Z',
+      leaseExpiresAt: '2026-06-09T00:01:00.000Z',
+      completedAt: null,
+    })
+
+    const result = await reissuePromptBridgeCredentialTicket({
+      claims: claims(),
+      invocationId: 'inv-1',
+      targetRef: 'codex-fallback',
+      attemptGeneration: 1,
+    })
+
+    expect(result).toMatchObject({ ok: false, error: 'target_not_allowed' })
+    // The denial precedes the reservation, so no attempt index is consumed.
+    expect(sdkDb.reservePluginWorkloadSdkProviderAttempt).not.toHaveBeenCalled()
     expect(sdkDb.registerPluginWorkloadSdkCredentialTicketJti).not.toHaveBeenCalled()
   })
 
