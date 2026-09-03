@@ -55,6 +55,7 @@ import {
   sameMcpServerDesiredRevision,
 } from './mcpServerSafety'
 import {
+  contextMetadataOnlyEventsTotal,
   hostDeleteCleanupTotal,
   hostFleetLifecycleCatchTotal,
   hostFleetRequestsTotal,
@@ -4372,10 +4373,21 @@ export class McpServerWatcher implements McpServerProvider {
       // NetworkPolicy revoke: without a delta certificate honorsLostFence is
       // false, so a lost delete fence still throws into full convergence.
       // Periodic resync (default 0 / #478) is not the healer for this path.
+      // No changeCallback here. The Context watch never notified before this PR,
+      // and adding the notification on THIS path would have fired it exactly
+      // where nothing changed — the label ping-pong this gate exists to silence —
+      // while a real desired-state change on the same watch still would not fire
+      // it. The only subscriber is a `console.log` in main.ts that reports the
+      // McpServer cache, so for a Context event the line is wrong, and the
+      // `getAllServers()` behind it is an O(n) rebuild on the hot path this PR
+      // removes work from (#568 review: jozer-rami #2 / zach88 R1-M1, converged).
       const metadataOnlyModified = type === 'MODIFIED' && !desiredStateChanged
-      if (metadataOnlyModified) {
-        this.changeCallback?.()
-      }
+      // The absorption must not be invisible: if the Loop A storm ever returns,
+      // HCC now silently eats it. A COUNTER rather than a log line, because this
+      // fires on exactly the churn that made the logs unreadable in the first
+      // place (#492) — a per-event line would reproduce the problem it is meant
+      // to make observable (claude[bot] audit, finding 1).
+      if (metadataOnlyModified) contextMetadataOnlyEventsTotal.inc()
 
       // Re-reconcile every SFS this Context referenced before or after the
       // change so SharedFileSystem.status.mountedByContexts stays in sync

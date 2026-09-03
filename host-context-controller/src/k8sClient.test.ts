@@ -38,6 +38,19 @@ async function flushMicrotasks(turns = 8): Promise<void> {
   }
 }
 
+/**
+ * How many Context MODIFIED events HCC has absorbed as metadata-only. Read from
+ * the real registry rather than a spy, because this is also the signal an
+ * operator watches for the #460 storm returning — a test that asserted on a mock
+ * would not tell us the metric is actually registered and named.
+ */
+async function metadataOnlyEventCount(): Promise<number> {
+  const metric = registry.getSingleMetric('clerum_hcc_context_metadata_only_events_total')
+  if (!metric) throw new Error('clerum_hcc_context_metadata_only_events_total is not registered')
+  const snapshot = await metric.get()
+  return snapshot.values[0]?.value ?? 0
+}
+
 async function readInitialConvergenceMetric(
   name:
     | 'clerum_hcc_initial_convergence_retries_total'
@@ -2152,6 +2165,22 @@ describe('McpServerWatcher startup', () => {
         expect.objectContaining({ name: 'steady-context' }),
         expect.objectContaining({ honorsLostFence: false })
       )
+      // Which of the two negative assertions below actually pins the gate, by
+      // mutation rather than by reading (#568 review, jozer-rami #3):
+      //
+      //   remove ONLY the `if (metadataOnlyModified) return`  -> this test STAYS GREEN
+      //   remove ONLY the `if (!metadataOnlyModified)` SFS skip -> this test DIES
+      //
+      // So `sfsPropagate` is the load-bearing one, and it is load-bearing because
+      // the SFS skip happens earlier, outside the try. `hostReconcile` is NOT
+      // pinning the gate on this input: the 409 is caught, the catch calls
+      // runInitialNetworkPolicyConvergence and RETURNS, and both the gate's early
+      // return and reconcileHostsReferencingContext are downstream of that return.
+      // The two are redundant here and no assertion in this test can tell them
+      // apart. Kept as a cheap regression guard on the catch's ordering — if the
+      // catch stopped returning, the gate would still have to hold the line — but
+      // the Host-skip itself is pinned by the two non-rejecting tests (T4 and the
+      // #460 Phase 2 test), which are the ones the first mutation kills.
       expect(hostReconcile).not.toHaveBeenCalled()
       expect(sfsPropagate).not.toHaveBeenCalled()
       await vi.waitFor(() =>
@@ -2783,6 +2812,10 @@ describe('McpServerWatcher startup', () => {
     hostReconcile.mockClear()
     sfsPropagate.mockClear()
 
+    const changeSpy = vi.fn()
+    watcher.onChange(changeSpy)
+    const metadataOnlyBefore = await metadataOnlyEventCount()
+
     const revisionBefore = (watcher as any).contextDesiredRevision
     const cachedBefore = (watcher as any).contexts.get('shared-context')
     await contextWatchCallback!('MODIFIED', added)
@@ -2803,6 +2836,22 @@ describe('McpServerWatcher startup', () => {
     )
     expect(hostReconcile).not.toHaveBeenCalled()
     expect(sfsPropagate).not.toHaveBeenCalled()
+
+    // The quiet path notifies nobody. An earlier revision called changeCallback
+    // here — the one event where nothing changed, and where this same commit
+    // deliberately does not even replace the cache entry — while a real
+    // desired-state change on this watch still did not call it. The only
+    // subscriber is a console.log in main.ts reporting the MCPSERVER cache, so
+    // for a Context event the line was wrong, and the getAllServers() behind it
+    // is an O(n) rebuild on the hot path this PR removes work from
+    // (#568 review: jozer-rami #2 / zach88 R1-M1, both independently).
+    expect(changeSpy).not.toHaveBeenCalled()
+
+    // …but the absorption is not invisible. The counter is the witness that this
+    // branch ran, which is also what makes the negative assertions above mean
+    // "correctly skipped" rather than "never executed", and it is what an
+    // operator watches to see the Loop A storm return.
+    expect(await metadataOnlyEventCount()).toBe(metadataOnlyBefore + 1)
 
     await watcher.stop()
   })

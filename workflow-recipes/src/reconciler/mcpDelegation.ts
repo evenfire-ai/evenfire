@@ -118,7 +118,20 @@ const CONTEXT_RECIPE_LABEL = 'clerum.io/recipe'
 const CONTEXT_MANAGED_BY_LABEL = 'clerum.io/managed-by'
 const CONTEXT_MANAGED_BY_WRC = 'wrc'
 
+/**
+ * Set equality, plus a length check so a DUPLICATED live entry can heal.
+ *
+ * Collapsing both sides to a Set made `['a','a']` and `['a']` compare equal, so
+ * a `spec.mcpServers` that had acquired a duplicate — out-of-band, or from the
+ * pre-dedupe private path — was reported unchanged on every pass and could never
+ * be repaired. Comparing lengths first makes exactly that case a write, and the
+ * write is idempotent because both branches of `mergedServers` now dedupe
+ * (#568 review, jozer-rami minors).
+ *
+ * Order stays irrelevant: `mcpServers` is an allowlist, not a sequence.
+ */
 function sameMcpServerSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false
   const leftSet = new Set(left)
   const rightSet = new Set(right)
   if (leftSet.size !== rightSet.size) return false
@@ -158,6 +171,22 @@ type ExistingContextSnapshot = {
   spec?: { contextId?: string; mcpServers?: string[]; [key: string]: unknown }
 }
 
+/**
+ * Identity of "an ownerRef this recipe planted", matched by kind + name only.
+ *
+ * `uid` is deliberately excluded: a STALE ref carries a stale uid, and matching
+ * on uid would stop the repair from ever recognising the thing it exists to
+ * strip. `apiVersion` is excluded for a subtler reason — including it would make
+ * a CRD version bump produce a ref we no longer recognise as ours, so
+ * `desiredOwnerReferences` would KEEP the old one and APPEND a new one, leaving
+ * the Context owned twice by the same recipe. Stricter here is worse.
+ *
+ * Correctness rests on one assumption, pinned here rather than left implicit:
+ * ownerReferences are namespace-local, and under canonical namespacing no
+ * WorkflowRecipe lives in the Context's namespace (`mcp-server`), so no
+ * same-named foreign recipe ref can exist to be stripped by mistake
+ * (#568 review: jozer-rami minors, claude[bot] finding 2).
+ */
 function isThisRecipeOwner(
   ref: ContextOwnerReference,
   recipeOwner: ContextOwnerReference
@@ -178,6 +207,16 @@ function desiredOwnerReferences(
   return kept
 }
 
+/**
+ * Order-INSENSITIVE ownerRef comparison, which is why it is not `stableJson`.
+ *
+ * `stableJson` (`:66`) sorts object keys but preserves array order, so using it
+ * here would report a merely REORDERED ownerReferences list as changed and turn
+ * a no-op into a write — the churn this PR exists to remove. Order carries no
+ * meaning in `ownerReferences`, so set semantics over a 6-field key is the
+ * correct comparison, not a hand-rolled duplicate of an existing helper
+ * (#568 review, jozer-rami minors).
+ */
 function ownerReferenceKey(ref: ContextOwnerReference): string {
   return [
     ref.apiVersion,
@@ -217,7 +256,7 @@ function observedContextId(value: unknown): string {
  * labels, normalized contextId, and the recipe-owned ownerRef relation already
  * match the body this reconcile would write.
  */
-function planContextReplacement(
+export function planContextReplacement(
   existing: ExistingContextSnapshot,
   args: {
     contextName: string
@@ -235,9 +274,13 @@ function planContextReplacement(
   nextOwnerReferences: ContextOwnerReference[]
 } | null {
   const existingServers = Array.isArray(existing.spec?.mcpServers) ? existing.spec.mcpServers : []
+  // Both paths dedupe. The private path used to pass `serverNames` through
+  // verbatim, so a duplicated entry would be written into `spec.mcpServers` and
+  // then hidden by `sameMcpServerSet`, which collapses both sides to a Set and
+  // would never see the difference again (#568 review, R1-L4).
   const mergedServers = args.explicitContext
     ? Array.from(new Set([...existingServers, ...args.serverNames]))
-    : [...args.serverNames]
+    : Array.from(new Set(args.serverNames))
   const existingLabels = existing.metadata?.labels ?? {}
   const authoredLabels = authoredContextLabels(args.explicitContext, args.recipeName)
   const observedId = observedContextId(existing.spec?.contextId)
@@ -835,10 +878,14 @@ export async function ensureRecipeContext(
       name: contextName,
       namespace,
       ...(!explicitContext && sameNsAsRecipe && { ownerReferences: [ownerReference] }),
-      labels: {
-        [CONTEXT_RECIPE_LABEL]: recipeName,
-        [CONTEXT_MANAGED_BY_LABEL]: CONTEXT_MANAGED_BY_WRC,
-      },
+      // Same projection as the replace path. Branding a SHARED Context with
+      // `clerum.io/recipe` at birth outlives the recipe that happened to create
+      // it: the label is never rewritten (authoredLabelsMatch does not check it
+      // for an explicit Context), so recipe A's name stays on an object whose
+      // only remaining users are B and C. The ownerReferences line above already
+      // gates on `explicitContext`; the labels were the one field in this
+      // literal that ignored it (#568 review, jozer-rami).
+      labels: authoredContextLabels(explicitContext, recipeName),
     },
     spec: {
       contextId: contextName,
@@ -924,6 +971,12 @@ export async function ensureRecipeContext(
     throw new Error(`failed to update Context "${contextName}" after conflict retries`)
   }
 
+  // One mechanism for all three outcomes of this one decision. The skip branch
+  // introduced `createLogger` while its siblings stayed on `console.log`, which
+  // left the same event reported two ways (#568 review, R1-L5). Scoped to this
+  // function: the file-wide console -> logger migration is #569.
+  const log = createLogger('wrc', recipeName)
+
   try {
     await deps.customApi.createNamespacedCustomObject({
       group: CRD_GROUP,
@@ -932,18 +985,18 @@ export async function ensureRecipeContext(
       plural: CONTEXT_PLURAL,
       body: contextBody,
     })
-    console.log(
-      `[MCP-Delegation] Created per-recipe Context "${contextName}" with ${serverNames.length} server(s)`
-    )
+    log.info('Created per-recipe Context', { contextName, servers: serverNames.length })
   } catch (error) {
     if (getErrorCode(error) === 409) {
       const { wrote } = await replaceExistingContext()
       if (wrote) {
-        console.log(
-          `[MCP-Delegation] Updated per-recipe Context "${contextName}" with ${serverNames.length} server(s)`
-        )
+        log.info('Updated per-recipe Context', { contextName, servers: serverNames.length })
       } else {
-        createLogger('wrc', recipeName).info('Context unchanged; skipping update', { contextName })
+        // DEBUG, not INFO. This is the steady state: it fires on every reconcile
+        // pass for every recipe, which at the current cadence is the log volume
+        // #492 exists about. The writes above are the events worth an INFO line;
+        // "nothing happened" is not (#568 review, jozer-rami minors).
+        log.debug('Context unchanged; skipping update', { contextName })
       }
     } else {
       throw error

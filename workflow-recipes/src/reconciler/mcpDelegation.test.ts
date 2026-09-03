@@ -989,6 +989,91 @@ describe('ensureRecipeContext', () => {
     )
   })
 
+  it('H04c — does NOT brand a shared Context with clerum.io/recipe at CREATE', async () => {
+    // Review of #568, jozer-rami #1. The replace path already omits the recipe
+    // label for an explicit Context — `authoredContextLabels(explicit=true, …)`
+    // returns `managed-by` only, and `authoredLabelsMatch` never checks it. The
+    // create path hardcoded it for every Context.
+    //
+    // Nothing rewrites it afterwards, so recipe A's name stayed on an object
+    // whose only remaining users were B and C, and it survived A's deletion. The
+    // PR body states the invariant as "shared Contexts do not stamp
+    // clerum.io/recipe", which was true on update and false on create.
+    //
+    // It is not purely cosmetic either: `scripts/e2e/e2e-snippet-runtime.sh`
+    // reaps with `kubectl delete mcpserver,context -l clerum.io/recipe=<name>`,
+    // so the brand puts a SHARED Context inside a delete-by-label blast radius.
+    const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
+    const mockCustomApi = {
+      createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+    }
+    const deps: DelegationDeps = {
+      customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
+      coreApi: {} as DelegationDeps['coreApi'],
+    }
+
+    const contextName = await ensureRecipeContext(
+      deps,
+      recipe,
+      ['test-recipe-redis-mcp'],
+      'mcp-server',
+      ownerRef,
+      'sandbox-recipes'
+    )
+
+    // Liveness witness: the create path really ran and really wrote this object.
+    // Without it, "no recipe label" is satisfied by a call that never happened.
+    expect(contextName).toBe('context1')
+    expect(mockCustomApi.createNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    const body = mockCustomApi.createNamespacedCustomObject.mock.calls[0][0].body
+    expect(body.metadata.name).toBe('context1')
+    // Ownership is still claimed, so this is a narrowing and not a removal …
+    expect(body.metadata.labels).toEqual({ 'clerum.io/managed-by': 'wrc' })
+    // … and cross-namespace/explicit still means no ownerReference, as before.
+    expect(body.metadata.ownerReferences).toBeUndefined()
+    // H04a is the other half: a PRIVATE wf-* Context must still be branded, so a
+    // fix that simply dropped the label everywhere fails there rather than here.
+  })
+
+  it('heals a duplicated live mcpServers entry instead of skipping forever', async () => {
+    // Review of #568, jozer-rami minors. `sameMcpServerSet` collapsed both sides
+    // to a Set, so `['a','a']` and `['a']` compared equal: a duplicate that had
+    // reached spec.mcpServers was reported unchanged on every pass and could
+    // never be repaired. The length check makes exactly that case a write.
+    const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
+    const mockCustomApi = {
+      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: { resourceVersion: '7', labels: { 'clerum.io/managed-by': 'wrc' } },
+        spec: {
+          contextId: 'context1',
+          mcpServers: ['existing-server', 'existing-server', 'test-recipe-redis-mcp'],
+        },
+      }),
+      replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+    }
+    const deps: DelegationDeps = {
+      customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
+      coreApi: {} as DelegationDeps['coreApi'],
+    }
+
+    await ensureRecipeContext(
+      deps,
+      recipe,
+      ['test-recipe-redis-mcp'],
+      'mcp-server',
+      ownerRef,
+      'sandbox-recipes'
+    )
+
+    // The pre-read happened (witness), and the pass did not skip.
+    expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    const written =
+      mockCustomApi.replaceNamespacedCustomObject.mock.calls[0][0].body.spec.mcpServers
+    expect(written).toEqual(['existing-server', 'test-recipe-redis-mcp'])
+  })
+
   it('H04b — writes on 409 when live Context has no mcpServers (empty→filled is not a skip)', async () => {
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
