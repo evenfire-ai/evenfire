@@ -275,21 +275,33 @@ async function auditFailure(input: CopyInput, error: unknown): Promise<void> {
   );
 }
 
+type AmbiguousInspection =
+  | { outcome: "full"; updatedAt: string }
+  | { outcome: "zero" }
+  | { outcome: "unsafe" };
+
 async function inspectAmbiguous(
   deps: Dependencies,
   input: CopyInput,
   reserved: ReservedNode[],
   budget: DeadlineBudget
-): Promise<"full" | "zero" | "unsafe"> {
+): Promise<AmbiguousInspection> {
   try {
     const published = await deps.manifests.resolvePublishedTree(input.drive, reserved, budget);
-    if (published !== null) return "full";
+    if (published !== null) {
+      const root = reserved[0];
+      if (!root) return { outcome: "unsafe" };
+      const rootRow = published.find(row => String(row.resource_id) === root.resourceId);
+      return { outcome: "full", updatedAt: toIsoTimestamp(rootRow?.updated_at) };
+    }
     return await deps.tx.transaction(async client => {
       const rows = await client.query(`SELECT resource_id FROM gfs_resources WHERE drive = $1 AND resource_id = ANY($2::uuid[])`, [input.drive, reserved.map(node => node.resourceId)]);
-      if (rows.rows.length === 0) return "zero";
-      return "unsafe";
+      if (rows.rows.length === 0) return { outcome: "zero" };
+      return { outcome: "unsafe" };
     }, budget);
-  } catch { return "unsafe"; }
+  } catch {
+    return { outcome: "unsafe" };
+  }
 }
 
 export async function publishCopy(deps: Dependencies, input: CopyInput): Promise<CopyPublicationResult> {
@@ -328,6 +340,7 @@ export async function publishCopy(deps: Dependencies, input: CopyInput): Promise
       stagedKeys.push(staged.blobKey);
     }
     const root = reserved[0];
+    if (!root) throw new Error("copy reserved an empty tree");
     let publishedUpdatedAt: string | undefined;
     await deps.tx.transaction(async client => {
       await revalidate(client, input);
@@ -350,7 +363,7 @@ export async function publishCopy(deps: Dependencies, input: CopyInput): Promise
     await deps.manifests.removeCommittedMany(input.requestId, stagedKeys, {
       deadlineAtMs: input.deadlineAtMs, signal: input.signal, now: input.now,
     }).catch(() => undefined);
-    return result(input, root, publishedUpdatedAt ?? new Date().toISOString());
+    return result(input, root, toIsoTimestamp(publishedUpdatedAt));
   } catch (error) {
     if ((error as Error).name === "CommitOutcomeUnknownError") {
       // COMMIT uncertainty is resolved with a fresh, short budget. The request
@@ -358,15 +371,24 @@ export async function publishCopy(deps: Dependencies, input: CopyInput): Promise
       // cannot safely gate the independent read-back.
       const recoveryBudget = ambiguousCommitBudget();
       const outcome = await inspectAmbiguous(deps, input, reserved, recoveryBudget);
-      if (outcome === "full") {
-        await deps.manifests.removeCommittedMany(input.requestId, stagedKeys, ambiguousCommitBudget()).catch(() => undefined);
-        return result(input, reserved[0], new Date().toISOString());
+      switch (outcome.outcome) {
+        case "full": {
+          const recoveredRoot = reserved[0];
+          if (!recoveredRoot) throw error as CommitOutcomeUnknownError;
+          await deps.manifests.removeCommittedMany(input.requestId, stagedKeys, ambiguousCommitBudget()).catch(() => undefined);
+          return result(input, recoveredRoot, outcome.updatedAt);
+        }
+        case "zero":
+          await cleanup(deps, ambiguousCommitBudget(), stagedKeys);
+          await auditFailure(input, error);
+          throw error as CommitOutcomeUnknownError;
+        case "unsafe":
+          throw error as CommitOutcomeUnknownError;
+        default: {
+          const _exhaustive: never = outcome;
+          throw _exhaustive;
+        }
       }
-      if (outcome === "zero") {
-        await cleanup(deps, ambiguousCommitBudget(), stagedKeys);
-        await auditFailure(input, error);
-      }
-      throw error as CommitOutcomeUnknownError;
     }
     await cleanup(deps, inputBudget(input), stagedKeys);
     await auditFailure(input, error);
