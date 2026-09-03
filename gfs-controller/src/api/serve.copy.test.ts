@@ -61,6 +61,7 @@ function fixture(options: { child?: boolean; snapshotCount?: number; omitLastPar
       resourceId: "10000000-0000-4000-8000-000000000001", drive: "main", parentResourceId: DEST,
       name: "source-copy", kind: "directory" as const, pathCache: "/archive/source-copy", version: 0,
       bytes: 0, blobKey: null, contentSha256: null, deletedAt: null,
+      updatedAt: "2026-01-01T00:00:00.000Z",
     }, requestId: input.requestId, objectCount: snapshot.length, fileCount: 0,
       folderCount: snapshot.length, totalBytes: 0n };
   });

@@ -14,8 +14,8 @@ import { withDeadlineTransaction, type DeadlineBudget, type DeadlineClient } fro
  *
  * Two node-postgres type quirks are normalized here so callers see clean JS
  * values: a `BIGINT` (`bytes`) comes back as a string, and a `TIMESTAMPTZ`
- * (`deleted_at`) comes back as a Date — both are coerced to the shapes
- * GfsResource declares (`number`, ISO `string | null`).
+ * (`deleted_at`, `updated_at`) comes back as a Date — both are coerced to the
+ * shapes GfsResource declares (`number`, ISO `string | null` / ISO `string`).
  */
 
 /** Minimal query surface — a pg Pool satisfies this; tests inject a fake. */
@@ -47,6 +47,15 @@ function toIsoOrNull(value: unknown): string | null {
   return String(value);
 }
 
+function toIsoTimestamp(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "string" && value.length > 0) {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString();
+  }
+  throw new Error("gfs_resources.updated_at is required");
+}
+
 function rowToResource(row: Record<string, unknown>): GfsResource {
   return {
     resourceId: String(row.resource_id),
@@ -60,6 +69,7 @@ function rowToResource(row: Record<string, unknown>): GfsResource {
     blobKey: row.blob_key == null ? null : String(row.blob_key),
     contentSha256: row.content_sha256 == null ? null : String(row.content_sha256),
     deletedAt: toIsoOrNull(row.deleted_at),
+    updatedAt: toIsoTimestamp(row.updated_at),
   };
 }
 
@@ -83,7 +93,7 @@ function rowToCopyNode(row: Record<string, unknown>): CopySnapshotNode {
 }
 
 const SELECT_COLUMNS =
-  "resource_id, drive, parent_resource_id, name, kind, path_cache, version, bytes, blob_key, content_sha256, deleted_at";
+  "resource_id, drive, parent_resource_id, name, kind, path_cache, version, bytes, blob_key, content_sha256, deleted_at, updated_at";
 
 function toDbResourceId(resourceId: string): string {
   const rid = normalizeResourceId(resourceId);

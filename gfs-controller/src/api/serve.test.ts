@@ -99,6 +99,7 @@ const FILE: GfsResource = {
   blobKey: null,
   contentSha256: null,
   deletedAt: null,
+  updatedAt: "2026-01-01T00:00:00.000Z",
 };
 const DIR: GfsResource = {
   ...FILE,
