@@ -537,6 +537,112 @@ describe('streamCodexCompletion', () => {
       { type: 'function_call', call_id: 'call-1', name: 'echo', arguments: '{"x":1}' },
       { type: 'function_call_output', call_id: 'call-1', output: 'ok' },
     ])
+    expect(body).not.toHaveProperty('max_output_tokens')
+    expect(body).not.toHaveProperty('temperature')
+  })
+
+  it('omits Notify-like generation fields on the Responses wire', async () => {
+    const fetchFn = vi.fn(async () =>
+      sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
+    )
+    await streamCodexCompletion({
+      executionTicket: 'ticket-1',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-1',
+        hostRef: 'research-host',
+        model: 'gpt-5.1',
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-1',
+      },
+      redeem: async () => redeemSuccess(),
+      finalize: vi.fn(async () => ({
+        providerAttemptId: 'att-1',
+        outcome: 'success',
+        duplicate: false,
+      })),
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    const body = JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body)) as Record<string, unknown>
+    expect(body.instructions).toBeUndefined()
+    expect(body).not.toHaveProperty('max_output_tokens')
+    expect(body).not.toHaveProperty('temperature')
+    expect(body.store).toBe(false)
+    expect(body.input).toEqual([{ role: 'user', content: 'hello' }])
+  })
+
+  it('keeps analysis instructions but omits max_output_tokens and temperature', async () => {
+    const request = {
+      ...REQUEST,
+      messages: [
+        { role: 'system' as const, content: 'review this repository' },
+        { role: 'user' as const, content: 'findings' },
+      ],
+      generation: { maxOutputTokens: 4096, temperature: 0.2 },
+    }
+    const requestHash = hashCodexCompletionRequestV1(request)
+    const fetchFn = vi.fn(async () =>
+      sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
+    )
+    await streamCodexCompletion({
+      executionTicket: 'ticket-1',
+      requestHash,
+      request,
+      ticket: {
+        jti: 'jti-1',
+        hostRef: 'research-host',
+        model: 'gpt-5.1',
+        requestHash,
+        providerAttemptId: 'att-1',
+      },
+      redeem: async () => redeemSuccess(),
+      finalize: vi.fn(async () => ({
+        providerAttemptId: 'att-1',
+        outcome: 'success',
+        duplicate: false,
+      })),
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    const body = JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body)) as Record<string, unknown>
+    expect(body.instructions).toBe('review this repository')
+    expect(body.input).toEqual([{ role: 'user', content: 'findings' }])
+    expect(body).not.toHaveProperty('max_output_tokens')
+    expect(body).not.toHaveProperty('temperature')
+  })
+
+  it('maps upstream 400 to invalid_request and finalizes error without usage', async () => {
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-1',
+      outcome: 'error' as const,
+      duplicate: false,
+    }))
+    await expect(
+      streamCodexCompletion({
+        executionTicket: 'ticket-1',
+        requestHash: REQUEST_HASH,
+        request: REQUEST,
+        ticket: {
+          jti: 'jti-1',
+          hostRef: 'research-host',
+          model: 'gpt-5.1',
+          requestHash: REQUEST_HASH,
+          providerAttemptId: 'att-1',
+        },
+        redeem: async () => redeemSuccess(),
+        finalize,
+        fetchFn: vi.fn(async () => new Response('bad request', { status: 400 })),
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      })
+    ).rejects.toMatchObject({ code: 'invalid_request' })
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        receipt: expect.objectContaining({ outcome: 'error' }),
+      })
+    )
+    expect(finalize.mock.calls[0]?.[0]?.receipt?.usage).toBeUndefined()
   })
 
   it('emits a tool call only after argument deltas complete', async () => {
