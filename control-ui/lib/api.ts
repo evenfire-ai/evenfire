@@ -3666,7 +3666,7 @@ export type PluginWorkloadSdkQuotaLimits = {
   maxInvocationsPerMinute?: number
   maxNotificationsPerMinute?: number
   /**
-   * @deprecated No longer enforced (J8); the Codex ChatGPT wire discards
+   * @deprecated No longer enforced; the Codex ChatGPT wire discards
    * max_output_tokens, so no layer capped the response by token count. Still
    * returned on legacy grants; never sent by this UI.
    */

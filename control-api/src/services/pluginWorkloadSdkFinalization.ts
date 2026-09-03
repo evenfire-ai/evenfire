@@ -500,7 +500,7 @@ export async function finalizePromptBridgeInTransaction(
   // a second billable Codex call. Only a spend proved `not_executed` — no
   // linked Codex row at all — is safe to leave revivable. `exact` obviously
   // billed; `unknown` means we cannot prove it did not, which is the same
-  // hazard — the invariant stated at pluginWorkloadSdkDb.ts:2118-2122.
+  // hazard — the invariant stated in `failStaleInvocations`' docblock.
   // provider_unavailable is the non-revivable terminal state for both. The
   // RESULT still echoes input.status: mcp-host's controlApiClient requires
   // result.status === body.status.

@@ -352,7 +352,7 @@ test('toEligiblePolicyBinding withholds the binding when the catalog carries no 
 })
 
 test('parity oracle: the execution binding and the execute scope never disagree', () => {
-  // The invariant behind unifying the two gates (N-03). A binding minted where
+  // The invariant behind unifying the two gates. A binding minted where
   // the scope gate says no is the dangerous direction — the recipe would hold
   // an execution policy the reconciler refuses to authorize — so it is
   // asserted unconditionally. The converse holds for every ConfigMap that
@@ -381,7 +381,8 @@ test('parity oracle: the execution binding and the execute scope never disagree'
 test('toPolicyBinding still serves Host chat through a degraded connection', () => {
   // Contract guard for mcp-host's configStore: hardening `toPolicyBinding` in
   // place would wipe a live Host binding on a transient `unavailable`, which is
-  // exactly the regression J4 closed. The execution gate is a separate function.
+  // exactly the regression an earlier round closed. The execution gate is a
+  // separate function.
   for (const status of ['reauth-required', 'unavailable', 'revoked', 'disconnected']) {
     const cm = withConnections(FIXTURE.mapped, parsed => {
       parsed['personal-pro'].status = status

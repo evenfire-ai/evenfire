@@ -207,7 +207,7 @@ describe('PromptBridgeHandler', () => {
     )
   })
 
-  // J8 dropped the clamp on the premise that nothing enforced the
+  // An earlier round dropped the clamp on the premise that nothing enforced the
   // ceiling. That held only for codex-subscription, whose ChatGPT wire rejects
   // `max_output_tokens`; every API-key provider does send it, so for them the
   // per-grant cap was a working billing control that the removal silenced.

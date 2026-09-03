@@ -18,10 +18,12 @@ import { parseAllowedModelsSnapshot, snapshotFromConfigMapError } from './llmAll
  * The last case in the file is the invariant sweep: it quantifies over every
  * row rather than trusting that someone remembered to assert it per case.
  *
- * Views are built by the SAME producers the reconciler uses — a hand-written
- * snapshot would let a ConfigMap-shape change break parsing in production
- * while these stayed green, because the verdict only falls back to
- * `view.snapshot` when it cannot re-derive from `view.configMap`.
+ * Views are built by the SAME producers `refreshCodexSnapshot` uses. Where a
+ * ConfigMap is present that is a typing fix rather than new coverage: the
+ * verdict re-derives from `view.configMap` and reads `view.snapshot` only for
+ * an unassigned grant. Where no ConfigMap arrived at all, the snapshot IS the
+ * only input, so deriving it from the real error producer is what keeps these
+ * cases from drifting away from what production would hand them.
  */
 
 const MODEL = 'gpt-5.6-luna'

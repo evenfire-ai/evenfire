@@ -6,9 +6,11 @@ import { isOauthBrokerProvider } from '../src/services/pluginWorkloadSdkSpendLed
 /**
  * `deriveEffectiveSpend` is a pure `(floor, linkedCodex) -> spend` merge
  * with precedence rules, and it was covered only by hand-enumerated cases.
- * Two sibling defects in that merge were both cases enumeration missed — the shape
- * of that miss is what these properties close: they quantify over the whole
- * input space instead of the examples someone thought of.
+ * Two sibling defects in that merge — a ledger_pending gate keyed on the wrong
+ * status, and a floor that skipped the linked Codex row — were both cases the
+ * enumeration missed. The shape of that miss is what these properties close:
+ * they quantify over the whole input space instead of the examples someone
+ * thought of.
  */
 
 const OUTCOMES = ['exact', 'unknown', 'not_executed'] as const

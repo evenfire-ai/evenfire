@@ -603,7 +603,7 @@ describe('authorizePromptBridge', () => {
     })
     if (!result.ok) throw new Error('expected the authorization to succeed')
     // The grant's output ceiling travels on the authorization again.
-    // J8 removed it on the premise that nothing enforced it, which held only
+    // An earlier round removed it on the premise that nothing enforced it, which held only
     // for codex-subscription; every API-key provider sends it as `max_tokens`,
     // so for them it was a working per-grant billing control.
     expect(result.value.maxOutputTokens).toBe(2048)

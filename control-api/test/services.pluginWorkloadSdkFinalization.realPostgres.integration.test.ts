@@ -643,7 +643,7 @@ describeRealPostgres('Plugin Workload SDK finalization on real PostgreSQL', () =
           replayClient
         )
         await commit(replayClient)
-        // J3: the outcome reports the derived truth...
+        // The outcome reports the derived truth...
         expect(replay).toMatchObject({ outcome: 'exact', idempotent: true, usageAccepted: false })
       } finally {
         replayClient.release()
