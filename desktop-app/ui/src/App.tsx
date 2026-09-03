@@ -69,8 +69,6 @@ import {
 import { AgentsPage } from '@pages/AgentsPage'
 import { AuthPage } from '@pages/AuthPage'
 import { ChatPage } from '@pages/ChatPage'
-import { ContextDetailsPage } from '@pages/ContextDetailsPage'
-import { ContextsPage } from '@pages/ContextsPage'
 import { FilesPage } from '@pages/FilesPage'
 import { McpServersPage } from '@pages/McpServersPage'
 import { OnboardingPage } from '@pages/OnboardingPage'
@@ -80,8 +78,6 @@ import type {
   SandboxUiShortcutOpenResult,
 } from '@pages/SandboxUiPage.types'
 import { SettingsPage } from '@pages/SettingsPage'
-import { TeamDetailsPage } from '@pages/TeamDetailsPage'
-import { TeamsPage } from '@pages/TeamsPage'
 import { UnavailablePage } from '@pages/UnavailablePage'
 import { WorkflowsPage } from '@pages/WorkflowsPage'
 import type { PendingSandboxUiDeepLink, SandboxUiDeepLinkEnvelope } from '@/App.types'
@@ -1449,15 +1445,11 @@ export function App() {
       }
       if (
         commandId === 'navigate.plugins' ||
-        commandId === 'navigate.contexts' ||
-        commandId === 'navigate.teams' ||
         commandId === 'navigate.connectors' ||
         commandId === 'navigate.files'
       ) {
         const routes = {
           'navigate.plugins': DESKTOP_ROUTES.plugins,
-          'navigate.contexts': DESKTOP_ROUTES.contexts,
-          'navigate.teams': DESKTOP_ROUTES.teams,
           'navigate.connectors': DESKTOP_ROUTES.connectors,
           'navigate.files': DESKTOP_ROUTES.files,
         } as const
@@ -1759,33 +1751,19 @@ export function App() {
       navItem: vm.navItem,
       selectedAgent: vm.selectedAgent,
       selectedAgentRoute: vm.selectedAgentRoute,
-      selectedContext: vm.selectedContext,
-      selectedContextTab: vm.selectedContextTab,
-      selectedTeam: vm.selectedTeam,
       handleNavSelect: vm.handleNavSelect,
       handleOpenAgentWorkspace: vm.handleOpenAgentWorkspace,
       handleSelectChatAgent: handleSelectChatAgentWithTabs,
       handleBackToAgents: vm.handleBackToAgents,
-      handleOpenContextDetails: vm.handleOpenContextDetails,
-      handleBackToContexts: vm.handleBackToContexts,
-      handleOpenTeamDetails: vm.handleOpenTeamDetails,
-      handleBackToTeams: vm.handleBackToTeams,
     }),
     [
       vm.handleBackToAgents,
-      vm.handleBackToContexts,
-      vm.handleBackToTeams,
       vm.handleNavSelect,
       vm.handleOpenAgentWorkspace,
-      vm.handleOpenContextDetails,
-      vm.handleOpenTeamDetails,
       handleSelectChatAgentWithTabs,
       vm.navItem,
       vm.selectedAgent,
       vm.selectedAgentRoute,
-      vm.selectedContext,
-      vm.selectedContextTab,
-      vm.selectedTeam,
     ]
   )
 
@@ -2047,13 +2025,7 @@ export function App() {
                       <DesktopStateProvider value={desktopStateValue}>
                         <main className="app-shell">
                           <SidebarNav
-                            navItem={
-                              vm.navItem === DESKTOP_ROUTES.teamDetails
-                                ? DESKTOP_ROUTES.teams
-                                : vm.navItem === DESKTOP_ROUTES.contextDetails
-                                  ? DESKTOP_ROUTES.contexts
-                                  : vm.navItem
-                            }
+                            navItem={vm.navItem}
                             activeSandboxUiApp={activeSandboxUiApp}
                             availableSandboxUiApps={availableSandboxUiApps}
                             collapsed={sidebarCollapsed}
@@ -2123,7 +2095,6 @@ export function App() {
                               {vm.navItem === DESKTOP_ROUTES.agents && (
                                 <AgentsPage scrollContainerRef={contentPanelRef} />
                               )}
-                              {vm.navItem === DESKTOP_ROUTES.contexts && <ContextsPage />}
                               {vm.navItem === DESKTOP_ROUTES.files && (
                                 <FilesPage
                                   pushToast={vm.pushToast}
@@ -2132,9 +2103,6 @@ export function App() {
                                 />
                               )}
                               {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
-                              {vm.navItem === DESKTOP_ROUTES.contextDetails && (
-                                <ContextDetailsPage />
-                              )}
                               {vm.navItem === DESKTOP_ROUTES.plugins && <WorkflowsPage />}
                               {vm.navItem === DESKTOP_ROUTES.apps && (
                                 <>
@@ -2214,8 +2182,6 @@ export function App() {
                                   }
                                 />
                               )}
-                              {vm.navItem === DESKTOP_ROUTES.teams && <TeamsPage />}
-                              {vm.navItem === DESKTOP_ROUTES.teamDetails && <TeamDetailsPage />}
                             </section>
                           </section>
                         </main>

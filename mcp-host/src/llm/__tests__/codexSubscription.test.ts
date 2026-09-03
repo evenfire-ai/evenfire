@@ -279,4 +279,55 @@ describe('CodexSubscriptionProvider', () => {
     expect(limited.retryable).toBe(true)
     expect(classifyFailoverClass(limited.code, limited.retryable)).toBe('rate_limited')
   })
+
+  it('records whether a classified Codex failure had already left the process', () => {
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
+
+    // Every CodexAuthorizeError throw site precedes `proxy.stream`.
+    expect(
+      provider.classifyError(new CodexAuthorizeError('no_grant', 'revoked')).providerDispatched
+    ).toBe(false)
+    expect(
+      provider.classifyError(new CodexAuthorizeError('budget_denied', 'over budget'))
+        .providerDispatched
+    ).toBe(false)
+    expect(
+      provider.classifyError(new CodexAuthorizeError('insufficient_scope', 'scope'))
+        .providerDispatched
+    ).toBe(false)
+
+    // The two pre-stream aborts are the only proxy errors that prove it.
+    expect(
+      provider.classifyError(new CodexProxyError('canceled', 'aborted before authorize', false))
+        .providerDispatched
+    ).toBe(false)
+
+    // Anything else on the proxy happened after the request was issued.
+    expect(
+      provider.classifyError(new CodexProxyError('provider_unavailable', 'upstream 5xx'))
+        .providerDispatched
+    ).toBe(true)
+    expect(
+      provider.classifyError(new CodexProxyError('rate_limited', 'upstream 429')).providerDispatched
+    ).toBe(true)
+
+    // An unrecognized error is not evidence that no call was made.
+    expect(provider.classifyError(new Error('who knows')).providerDispatched).toBeUndefined()
+  })
+
+  it('shares the caller deadline with the authorize hop', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    const controller = new AbortController()
+
+    await provider.completeSingleTurn([{ role: 'user', content: 'hi' }], {
+      signal: controller.signal,
+    })
+    expect(wired.authorize).toHaveBeenCalledWith(expect.any(Object), {
+      signal: controller.signal,
+    })
+
+    await provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    expect(wired.authorize).toHaveBeenNthCalledWith(2, expect.any(Object), {})
+  })
 })

@@ -678,13 +678,14 @@ function GrantFormModal({
     setError('')
     // Edit mode: the upsert is a full-column overwrite, and the form does not expose
     // the quota fields. Round-trip every quota key from the original grant except the
-    // deprecated per-run keys (no longer enforced, issue #348) so editing does not
-    // silently wipe values configured outside this form.
+    // deprecated ones (per-run: issue #348; maxOutputTokens — no longer enforced)
+    // so editing does not silently wipe values configured outside this form.
     const quotaLimits: PluginWorkloadSdkGrantInput['quotaLimits'] = {}
     if (grant) {
       const {
         maxRequestsPerRun: _d1,
         maxNotificationsPerRun: _d2,
+        maxOutputTokens: _d3,
         ...keptQuotaLimits
       } = grant.quotaLimits
       Object.assign(quotaLimits, keptQuotaLimits)

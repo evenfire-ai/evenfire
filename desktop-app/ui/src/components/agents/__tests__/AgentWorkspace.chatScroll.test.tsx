@@ -19,7 +19,19 @@ vi.mock('@hooks/domain/useAgentsDataController', () => ({
   useAgentsDataController: () => ({ agentNames: ['agent-x'] }),
 }))
 vi.mock('@hooks/domain/useContextsDataController', () => ({
-  useContextsDataController: () => ({ contextIds: [], loading: false, error: null }),
+  useContextsDataController: () => ({ accessCatalog: null }),
+}))
+vi.mock('@hooks/domain/useTeamsDataController', () => ({
+  useTeamsDataController: () => ({
+    teams: [],
+    currentTeamId: '',
+    teamMembers: [],
+    teamDirectory: {},
+    ensureHydrated: vi.fn(async () => undefined),
+  }),
+}))
+vi.mock('@contexts/AuthContext', () => ({
+  useAuthContext: () => ({ me: null }),
 }))
 vi.mock('@hooks/domain/useMcpServersDataController', () => ({
   useMcpServersDataController: () => ({
@@ -29,6 +41,22 @@ vi.mock('@hooks/domain/useMcpServersDataController', () => ({
     // undefined.
     agentDisplayByName: {},
     selectedAgentMcpServers: [],
+  }),
+}))
+// AgentWorkspace now mounts useConnectorsController (Connectors tab OAuth
+// actions). Its useQuery needs a QueryClientProvider this test does not set up;
+// stub the hook while keeping the real pure helpers (isActionableConnector).
+vi.mock('@hooks/domain/useConnectorsController', async importActual => ({
+  ...(await importActual<typeof import('@hooks/domain/useConnectorsController')>()),
+  useConnectorsController: () => ({
+    loading: false,
+    error: null,
+    agents: [],
+    pendingKey: null,
+    refresh: vi.fn(),
+    reset: vi.fn(),
+    authorize: vi.fn(async () => undefined),
+    disconnect: vi.fn(async () => undefined),
   }),
 }))
 vi.mock('../ComposerPanel', () => ({ ComposerPanel: () => null }))
@@ -118,17 +146,11 @@ function WorkspaceHarness({
         {
           navItem: 'agents',
           selectedAgent: 'agent-x',
-          selectedAgentRoute: 'details',
-          selectedContext: null,
-          selectedTeam: null,
+          selectedAgentRoute: 'mcp-servers',
           handleNavSelect: vi.fn(),
           handleOpenAgentWorkspace: vi.fn(),
           handleSelectChatAgent: vi.fn(),
           handleBackToAgents: vi.fn(),
-          handleOpenContextDetails: vi.fn(),
-          handleBackToContexts: vi.fn(),
-          handleOpenTeamDetails: vi.fn(),
-          handleBackToTeams: vi.fn(),
         } as never
       }
     >
