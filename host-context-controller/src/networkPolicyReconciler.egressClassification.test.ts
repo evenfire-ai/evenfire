@@ -314,8 +314,17 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
       reconciler.reconcileExternalEgress(bindings(['b.example.com']), { isCurrent: () => true })
     ).rejects.toThrow(TypeError)
 
+    // Exactly one delete, and it is A's. `toHaveBeenCalledWith` alone is a
+    // membership check, not an exclusivity one: it stays green when the cleanup
+    // deletes BOTH policies, which is what happens if the faulting binding is
+    // left out of desiredPolicyNames. The count and the negative assertion are
+    // what make this test pin the second-order effect it claims to.
+    expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
     expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'ext-egress-classify-mcp-a.example.com-443' })
+    )
+    expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'ext-egress-classify-mcp-b.example.com-443' })
     )
   })
 

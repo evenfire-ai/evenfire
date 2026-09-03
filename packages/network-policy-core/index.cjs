@@ -89,6 +89,19 @@ const TRANSIENT_DNS_CODES = new Set([
  */
 const PERMANENT_DNS_CODES = new Set(['ENODATA', 'ENOTFOUND', 'EBADNAME'])
 
+/**
+ * Seam worth knowing about, not a defect today: this set and TRANSIENT_DNS_CODES
+ * decide what the egress gates treat as a DNS verdict, while WRC's downstream
+ * retry classifier keys on a DIFFERENT set — RETRYABLE_SOCKET_CODES in
+ * `workflow-recipes/src/reconciler/k8sErrors.ts`. Codes in the gap
+ * (EHOSTUNREACH, ENETDOWN, EPIPE, UND_ERR_*) would be called a controller fault
+ * here and then re-rescued into a retry there. Unreachable in practice: c-ares
+ * emits ETIMEOUT/ENETUNREACH, both already transient. It is recorded because two
+ * sources of truth for "which failures are worth retrying" drifting apart is the
+ * same class of bug as issue #513 itself — one question's answer reused for
+ * another question.
+ */
+
 function isPermanentDnsCode(code) {
   return typeof code === 'string' && PERMANENT_DNS_CODES.has(code)
 }
