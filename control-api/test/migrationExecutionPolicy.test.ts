@@ -48,10 +48,10 @@ describe('D34 migration execution policy', () => {
     expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(25)
     expect(new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.name))).toHaveLength(25)
     expect(
-      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0107'))
+      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0109'))
     ).toHaveLength(18)
     expect(
-      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0109'))
+      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('010b'))
     ).toHaveLength(7)
     expect(
       PR1_ONLINE_INDEX_PLAN.some(index => index.name.startsWith('external_user_sessions_'))
@@ -282,6 +282,25 @@ describe('D34 PR1 migration runner', () => {
         recordMigration: vi.fn(),
       })
     ).rejects.toThrow('Unclassified post-0106 migrations')
+  })
+
+  it('does not classify dev-owned post-0106 migrations as PR1 migration work', async () => {
+    const recordMigration = vi.fn()
+    await applyPendingPr1Migrations({
+      db: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) },
+      migrations: [
+        { version: '0107_llm_provider_attempts_sdk_link', apply: vi.fn() },
+        { version: '0108_llm_provider_attempts_sdk_link_on_delete_set_null', apply: vi.fn() },
+        ...PR1_MIGRATION_VERSIONS.map(version => ({
+          version,
+          apply: vi.fn(async () => undefined),
+        })),
+      ],
+      appliedVersions: new Set(PR1_MIGRATION_VERSIONS),
+      recordMigration,
+    })
+
+    expect(recordMigration).not.toHaveBeenCalled()
   })
 })
 
