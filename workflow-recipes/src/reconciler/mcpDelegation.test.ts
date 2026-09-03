@@ -1074,6 +1074,53 @@ describe('ensureRecipeContext', () => {
     expect(written).toEqual(['existing-server', 'test-recipe-redis-mcp'])
   })
 
+  it('does not silently drop a new server when a duplicate makes the lengths match', async () => {
+    // The gap the first duplicate test did not close, found by the @claude
+    // re-audit of #568 and confirmed by mutation: deleting the INNER
+    // `leftSet.size !== rightSet.size` guard left the whole suite green.
+    //
+    // The other dup test compares 3 live entries against 2 merged ones, so the
+    // OUTER length guard catches it and line 137 never runs. This case makes the
+    // lengths equal on purpose:
+    //
+    //   live ['server-a','server-a']  vs  merged ['server-a','server-b']
+    //     outer: 2 === 2                              -> passes
+    //     leftSet {server-a} (1)  rightSet {a,b} (2)  -> only the inner guard sees it
+    //
+    // Without that guard, "every member of leftSet is in rightSet" is true, the
+    // sets compare EQUAL, the plan is null and the pass skips — so `server-b` is
+    // never authorized and the duplicate never heals. A silently dropped server
+    // is worse than the duplicate the length check was added for.
+    //
+    // The property tests cannot catch this: they all bail on `plan === null`
+    // before asserting, which is exactly the state the mutation produces, so
+    // no-shrink and no-duplicates pass vacuously on the corrupted input.
+    const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
+    const mockCustomApi = {
+      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: { resourceVersion: '9', labels: { 'clerum.io/managed-by': 'wrc' } },
+        spec: { contextId: 'context1', mcpServers: ['server-a', 'server-a'] },
+      }),
+      replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+    }
+    const deps: DelegationDeps = {
+      customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
+      coreApi: {} as DelegationDeps['coreApi'],
+    }
+
+    await ensureRecipeContext(deps, recipe, ['server-b'], 'mcp-server', ownerRef, 'sandbox-recipes')
+
+    // Witness: the pre-read happened, so a skip here would be a real decision
+    // rather than a path that never executed.
+    expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    const written =
+      mockCustomApi.replaceNamespacedCustomObject.mock.calls[0][0].body.spec.mcpServers
+    // The new server lands AND the duplicate is gone, in the same write.
+    expect(written).toEqual(['server-a', 'server-b'])
+  })
+
   it('H04b — writes on 409 when live Context has no mcpServers (empty→filled is not a skip)', async () => {
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),

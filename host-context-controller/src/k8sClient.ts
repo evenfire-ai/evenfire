@@ -4338,7 +4338,11 @@ export class McpServerWatcher implements McpServerProvider {
         // Keep the cached object identity when desired revision did not move.
         // Scoped revoke uses `contexts.get(name) === selectedContext`; replacing
         // the entry on every label/status MODIFIED aborts an in-flight pass.
-        if (desiredStateChanged || previous === undefined) {
+        // `desiredStateChanged` was just computed as
+        // `previous === undefined || !sameContextDesiredRevision(...)`, so the
+        // bootstrap case already implies it; a second disjunct here was dead
+        // (#568 review, jozer-rami minors).
+        if (desiredStateChanged) {
           this.contexts.set(context.name, context)
         }
       } else if (type === 'DELETED') {

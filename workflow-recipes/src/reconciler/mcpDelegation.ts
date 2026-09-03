@@ -968,6 +968,11 @@ export async function ensureRecipeContext(
         throw replaceError
       }
     }
+    // Unreachable: every iteration returns or throws, so the loop cannot fall
+    // through. Kept because TypeScript's control-flow analysis does not prove
+    // that and the function must return `{ wrote: boolean }` on every path
+    // (#568 review, jozer-rami minors). Not dead code to delete — deleting it
+    // is a compile error, not a cleanup.
     throw new Error(`failed to update Context "${contextName}" after conflict retries`)
   }
 
