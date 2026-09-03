@@ -1342,6 +1342,26 @@ describe('ensureRecipeContext', () => {
     expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
+  it('rewrites a same-namespace private ownerRef when controller flags drifted', async () => {
+    const driftedOwnerRef = { ...ownerRef, controller: false, blockOwnerDeletion: false }
+    const { mockCustomApi, deps, liveOf } = contextApiWithLiveState({
+      metadata: {
+        resourceVersion: '3',
+        labels: { 'clerum.io/recipe': 'test-recipe', 'clerum.io/managed-by': 'wrc' },
+        ownerReferences: [driftedOwnerRef],
+      },
+      spec: { contextId: 'wf-test-recipe', mcpServers: ['server-a', 'server-b'] },
+    })
+
+    await ensureRecipeContext(deps, 'test-recipe', ['server-a', 'server-b'], 'mcp-server', ownerRef)
+    await ensureRecipeContext(deps, 'test-recipe', ['server-a', 'server-b'], 'mcp-server', ownerRef)
+
+    expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    expect(
+      (liveOf().metadata as { ownerReferences?: unknown } | undefined)?.ownerReferences
+    ).toEqual([ownerRef])
+  })
+
   it('skips canonical private Context replace when servers and labels match without a recipe ownerRef', async () => {
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),

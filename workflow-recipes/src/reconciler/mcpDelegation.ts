@@ -20,6 +20,7 @@ import {
   isPlatformRegistryImage,
 } from '@clerum/workflow-runtime-core'
 import { loadConfig } from '../config'
+import { createLogger } from '../observability/logger'
 import { WorkflowRecipeCRD, WorkloadDef } from '../types'
 import { CRD_GROUP, CRD_VERSION } from './crdConstants'
 import { getErrorCode } from './k8sErrors'
@@ -177,13 +178,24 @@ function desiredOwnerReferences(
   return kept
 }
 
+function ownerReferenceKey(ref: ContextOwnerReference): string {
+  return [
+    ref.apiVersion,
+    ref.kind,
+    ref.name,
+    ref.uid,
+    ref.controller === true ? '1' : '0',
+    ref.blockOwnerDeletion === true ? '1' : '0',
+  ].join('\0')
+}
+
 function sameOwnerReferences(
   left: readonly ContextOwnerReference[],
   right: readonly ContextOwnerReference[]
 ): boolean {
   if (left.length !== right.length) return false
-  const keys = new Set(right.map(ref => `${ref.kind}/${ref.name}/${ref.uid}`))
-  return left.every(ref => keys.has(`${ref.kind}/${ref.name}/${ref.uid}`))
+  const keys = new Set(right.map(ownerReferenceKey))
+  return left.every(ref => keys.has(ownerReferenceKey(ref)))
 }
 
 function authoredLabelsMatch(
@@ -931,7 +943,7 @@ export async function ensureRecipeContext(
           `[MCP-Delegation] Updated per-recipe Context "${contextName}" with ${serverNames.length} server(s)`
         )
       } else {
-        console.log(`[MCP-Delegation] Context "${contextName}" unchanged; skipping update`)
+        createLogger('wrc', recipeName).info('Context unchanged; skipping update', { contextName })
       }
     } else {
       throw error
