@@ -76,9 +76,11 @@ function row(value: Record<string, unknown>): Row {
 }
 
 function resource(value: Row): GfsResource {
+  if (!value.updatedAt) throw new Error("rename returned a resource without updatedAt");
   return { resourceId: value.resourceId, drive: value.drive, parentResourceId: value.parentResourceId,
     name: value.name, kind: value.kind, pathCache: value.pathCache, version: value.version,
-    bytes: value.bytes, blobKey: value.blobKey, contentSha256: value.contentSha256, deletedAt: value.deletedAt };
+    bytes: value.bytes, blobKey: value.blobKey, contentSha256: value.contentSha256, deletedAt: value.deletedAt,
+    updatedAt: value.updatedAt };
 }
 
 function same(a: readonly Row[], b: readonly Row[]): boolean {
