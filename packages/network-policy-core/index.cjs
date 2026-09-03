@@ -68,6 +68,15 @@ const TRANSIENT_DNS_CODES = new Set([
 ])
 
 /**
+ * The subset that means "the resolver answered, and the answer was empty". Split
+ * out because the two permanent shapes need different words to the operator: a
+ * name with no records is not the same event as a name the resolver refused to
+ * query, and reporting both as "no A or AAAA records" sends someone hunting for
+ * missing records on a query that was never sent.
+ */
+const NO_RECORDS_DNS_CODES = Object.freeze(['ENODATA', 'ENOTFOUND'])
+
+/**
  * DNS codes that are a POSITIVE permanent verdict about the NAME (issue #513):
  * the two genuine no-records answers, plus EBADNAME — c-ares refused to send
  * the query because the name is malformed. EBADNAME is reachable from user
@@ -87,7 +96,22 @@ const TRANSIENT_DNS_CODES = new Set([
  * THIS set to decide what may reach the sliding-window classifier, and rethrow
  * the rest instead of laundering a fault into a prune.
  */
-const PERMANENT_DNS_CODES = new Set(['ENODATA', 'ENOTFOUND', 'EBADNAME'])
+/**
+ * Frozen array rather than a Set: a `Set` exported from a CommonJS module is a
+ * live mutable object, and `Object.freeze` does not stop `.add()` on one — the
+ * `ReadonlySet<string>` in index.d.ts would have been a claim the runtime did not
+ * back. Membership goes through `isPermanentDnsCode`.
+ */
+const PERMANENT_DNS_CODES = Object.freeze([...NO_RECORDS_DNS_CODES, 'EBADNAME'])
+
+function isPermanentDnsCode(code) {
+  return typeof code === 'string' && PERMANENT_DNS_CODES.includes(code)
+}
+
+/** True for the two genuine no-records answers, false for every other code. */
+function isNoRecordsDnsCode(code) {
+  return typeof code === 'string' && NO_RECORDS_DNS_CODES.includes(code)
+}
 
 /**
  * Seam worth knowing about, not a defect today: this set and TRANSIENT_DNS_CODES
@@ -101,10 +125,6 @@ const PERMANENT_DNS_CODES = new Set(['ENODATA', 'ENOTFOUND', 'EBADNAME'])
  * same class of bug as issue #513 itself — one question's answer reused for
  * another question.
  */
-
-function isPermanentDnsCode(code) {
-  return typeof code === 'string' && PERMANENT_DNS_CODES.has(code)
-}
 
 /**
  * Classify a DNS failure as 'transient' or 'permanent'. Accepts a raw code
@@ -458,4 +478,5 @@ module.exports = {
   classifyDnsError,
   PERMANENT_DNS_CODES,
   isPermanentDnsCode,
+  isNoRecordsDnsCode,
 }

@@ -2304,7 +2304,9 @@ export class NetworkPolicyReconciler {
               })
             }
             reconcileFaults.push({
-              dns: binding.dns ?? '(unnamed binding)',
+              // Inside `else if (binding.dns)`, so it is always a string here;
+              // a `??` fallback would be an unreachable branch pretending to be a guard.
+              dns: binding.dns,
               err,
               // Blocking only when there is nothing to serve. A fault on a
               // binding that has never been written has no frozen set behind it,

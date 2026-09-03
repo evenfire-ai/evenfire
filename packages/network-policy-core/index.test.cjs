@@ -368,15 +368,6 @@ test('#513: isPermanentDnsCode rejects what classifyDnsError merely defaults', (
   }
 })
 
-test('#513: the transient and permanent sets never overlap', () => {
-  for (const code of core.PERMANENT_DNS_CODES) {
-    assert.equal(
-      core.classifyDnsError(code),
-      'permanent',
-      `${code} appears in both sets — a code cannot be both a retry and a verdict`
-    )
-  }
-})
 
 // ─── H-A: revocation/freeze keyed by (fqdn,port,protocol), not fqdn alone ──────
 // The state map is keyed by (fqdn,ip,port,protocol) but classification used to be

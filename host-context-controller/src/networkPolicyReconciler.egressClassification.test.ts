@@ -23,14 +23,6 @@ import * as dns from 'node:dns/promises'
 import { NetworkPolicyReconciler } from './networkPolicyReconciler'
 import { McpServerCRD } from './types'
 
-vi.mock('./mcpServerSafety', async () => {
-  const actual = await vi.importActual<typeof import('./mcpServerSafety')>('./mcpServerSafety')
-  return {
-    ...actual,
-    confirmAuthoritativeMcpServerAbsence: vi.fn(actual.confirmAuthoritativeMcpServerAbsence),
-  }
-})
-
 const rec = (...ips: string[]): RecordWithTtl[] => ips.map(address => ({ address, ttl: 300 }))
 const resolve4Mock = vi.mocked(dns.resolve4) as unknown as Mock
 

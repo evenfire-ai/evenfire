@@ -153,6 +153,13 @@ export declare function classifyDnsError(
  * recognize; callers that must not launder an unclassified fault into a prune
  * gate on this set instead.
  */
-export declare const PERMANENT_DNS_CODES: ReadonlySet<string>
+export declare const PERMANENT_DNS_CODES: readonly string[]
 
 export declare function isPermanentDnsCode(code: unknown): boolean
+
+/**
+ * True for the two genuine no-records answers (ENODATA, ENOTFOUND) and false for
+ * every other code, PERMANENT_DNS_CODES members included. Lets a caller word a
+ * permanent verdict correctly: an empty answer is not a refused query.
+ */
+export declare function isNoRecordsDnsCode(code: unknown): boolean

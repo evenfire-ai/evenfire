@@ -1,6 +1,10 @@
 import type { RecordWithTtl } from 'node:dns'
 import { resolve4, resolve6 } from 'node:dns/promises'
-import { classifyDnsError, isPermanentDnsCode } from '@clerum/network-policy-core'
+import {
+  classifyDnsError,
+  isNoRecordsDnsCode,
+  isPermanentDnsCode,
+} from '@clerum/network-policy-core'
 import type { SandboxUiExternalEgress } from '../types'
 
 const BLOCKED_EGRESS_CIDRS = [
@@ -107,6 +111,16 @@ export type FqdnLookup = (host: string) => Promise<FqdnLookupResult>
  */
 
 /**
+ * `settleV4`/`settleV6` cast whatever the promise rejected with to
+ * `NodeJS.ErrnoException`; nothing guarantees it was an Error. Reading `.message`
+ * off a rejected string or object then interpolates `undefined` into the message
+ * an operator reads. Fall back to the value itself, never to a placeholder.
+ */
+function describeRejection(err: NodeJS.ErrnoException): string {
+  return typeof err?.message === 'string' ? err.message : String(err)
+}
+
+/**
  * Default FQDN lookup using node:dns/promises. Returns ipv4 and ipv6 record
  * sets independently; a missing record type for one family is fine as long as
  * the other resolves, so `api.example.com` (A only) and `ipv6-only.example.com`
@@ -179,18 +193,21 @@ export const defaultFqdnLookup: FqdnLookup = async host => {
   const unclassified = rejections.find(e => !isPermanentDnsCode(e.code))
   if (unclassified) {
     throw new Error(
-      `DNS lookup for "${host}" failed with a non-DNS error (${unclassified.code ?? 'no code'}): ${unclassified.message}`,
+      `DNS lookup for "${host}" failed with a non-DNS error (${unclassified.code ?? 'no code'}): ${describeRejection(unclassified)}`,
       { cause: unclassified }
     )
   }
 
-  // EBADNAME is permanent like NXDOMAIN, but it is not an empty answer: c-ares
-  // refused to send the query. Say so, or the operator hunts for missing records
-  // on a name the resolver never asked about.
-  if (rejections.some(e => e.code === 'EBADNAME')) {
+  // A permanent verdict that is NOT one of the two no-records answers means the
+  // resolver refused to send the query at all — EBADNAME today. Report the real
+  // code rather than testing for it: hardcoding 'EBADNAME' here would drift the
+  // moment PERMANENT_DNS_CODES gains another member, and the message would fall
+  // back to "no A or AAAA records" — the same lie this branch exists to remove.
+  const refused = rejections.find(e => !isNoRecordsDnsCode(e.code))
+  if (refused) {
     return {
       kind: 'error',
-      error: `malformed hostname "${host}" (EBADNAME) — the resolver refused to query it`,
+      error: `malformed hostname "${host}" (${refused.code}) — the resolver refused to query it`,
     }
   }
 
