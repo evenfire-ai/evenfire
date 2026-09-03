@@ -1310,12 +1310,15 @@ describe('ensureRecipeContext', () => {
   })
 
   it('skips private Context replace when mcpServers and WRC labels already match', async () => {
+    // Helper-compatibility path: omitted recipeNamespace means same-ns ownership.
+    // A valid private no-op must already carry this recipe's ownerRef.
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({
         metadata: {
           resourceVersion: '3',
           labels: { 'clerum.io/recipe': 'test-recipe', 'clerum.io/managed-by': 'wrc' },
+          ownerReferences: [ownerRef],
         },
         spec: { contextId: 'wf-test-recipe', mcpServers: ['server-a', 'server-b'] },
       }),
@@ -1336,6 +1339,35 @@ describe('ensureRecipeContext', () => {
 
     expect(contextName).toBe('wf-test-recipe')
     expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+  })
+
+  it('skips canonical private Context replace when servers and labels match without a recipe ownerRef', async () => {
+    const mockCustomApi = {
+      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: {
+          resourceVersion: '3',
+          labels: { 'clerum.io/recipe': 'test-recipe', 'clerum.io/managed-by': 'wrc' },
+        },
+        spec: { contextId: 'wf-test-recipe', mcpServers: ['server-a', 'server-b'] },
+      }),
+      replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+    }
+    const deps: DelegationDeps = {
+      customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
+      coreApi: {} as DelegationDeps['coreApi'],
+    }
+
+    await ensureRecipeContext(
+      deps,
+      'test-recipe',
+      ['server-a', 'server-b'],
+      'mcp-server',
+      ownerRef,
+      'sandbox-recipes'
+    )
+
     expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
@@ -1372,6 +1404,279 @@ describe('ensureRecipeContext', () => {
         }),
       })
     )
+  })
+
+  function contextApiWithLiveState(initial: {
+    metadata?: Record<string, unknown>
+    spec?: Record<string, unknown>
+  }) {
+    let live = structuredClone(initial)
+    const mockCustomApi = {
+      createNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 409 }),
+      getNamespacedCustomObject: vi
+        .fn()
+        .mockImplementation(() => Promise.resolve(structuredClone(live))),
+      replaceNamespacedCustomObject: vi.fn().mockImplementation((args: { body: typeof live }) => {
+        const currentRv = Number(
+          (live.metadata as { resourceVersion?: string } | undefined)?.resourceVersion ?? '0'
+        )
+        live = {
+          ...args.body,
+          metadata: {
+            ...((args.body.metadata as object | undefined) ?? {}),
+            resourceVersion: String(currentRv + 1),
+          },
+        }
+        return Promise.resolve({})
+      }),
+    }
+    const deps: DelegationDeps = {
+      customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
+      coreApi: {} as DelegationDeps['coreApi'],
+    }
+    return { mockCustomApi, deps, liveOf: () => live }
+  }
+
+  it('repairs a shared empty contextId once, then skips the next reconcile', async () => {
+    const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
+    const { mockCustomApi, deps, liveOf } = contextApiWithLiveState({
+      metadata: {
+        resourceVersion: '9',
+        labels: {
+          'clerum.io/recipe': 'other-recipe',
+          'clerum.io/managed-by': 'wrc',
+          'clerum.io/context-owner': 'admin',
+        },
+      },
+      spec: {
+        contextId: '',
+        mcpServers: ['existing-server', 'test-recipe-redis-mcp'],
+      },
+    })
+
+    await ensureRecipeContext(
+      deps,
+      recipe,
+      ['test-recipe-redis-mcp'],
+      'mcp-server',
+      ownerRef,
+      'sandbox-recipes'
+    )
+    await ensureRecipeContext(
+      deps,
+      recipe,
+      ['test-recipe-redis-mcp'],
+      'mcp-server',
+      ownerRef,
+      'sandbox-recipes'
+    )
+
+    expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    expect(liveOf().spec?.contextId).toBe('context1')
+  })
+
+  it('repairs a private empty contextId once, then skips the next reconcile', async () => {
+    const { mockCustomApi, deps, liveOf } = contextApiWithLiveState({
+      metadata: {
+        resourceVersion: '3',
+        labels: { 'clerum.io/recipe': 'test-recipe', 'clerum.io/managed-by': 'wrc' },
+        ownerReferences: [ownerRef],
+      },
+      spec: { contextId: '', mcpServers: ['server-a', 'server-b'] },
+    })
+
+    await ensureRecipeContext(deps, 'test-recipe', ['server-a', 'server-b'], 'mcp-server', ownerRef)
+    await ensureRecipeContext(deps, 'test-recipe', ['server-a', 'server-b'], 'mcp-server', ownerRef)
+
+    expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    expect(liveOf().spec?.contextId).toBe('wf-test-recipe')
+  })
+
+  it('keeps a non-empty contextId that differs from metadata.name and does not write', async () => {
+    const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
+    const mockCustomApi = {
+      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: {
+          resourceVersion: '9',
+          labels: { 'clerum.io/managed-by': 'wrc', 'clerum.io/recipe': 'other-recipe' },
+        },
+        spec: {
+          contextId: 'legacy-shared-id',
+          mcpServers: ['existing-server', 'test-recipe-redis-mcp'],
+        },
+      }),
+      replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+    }
+    const deps: DelegationDeps = {
+      customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
+      coreApi: {} as DelegationDeps['coreApi'],
+    }
+
+    await ensureRecipeContext(
+      deps,
+      recipe,
+      ['test-recipe-redis-mcp'],
+      'mcp-server',
+      ownerRef,
+      'sandbox-recipes'
+    )
+
+    expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+  })
+
+  it('strips a stale cross-namespace recipe ownerRef from a canonical private Context once', async () => {
+    const { mockCustomApi, deps, liveOf } = contextApiWithLiveState({
+      metadata: {
+        resourceVersion: '3',
+        labels: { 'clerum.io/recipe': 'test-recipe', 'clerum.io/managed-by': 'wrc' },
+        ownerReferences: [ownerRef],
+      },
+      spec: { contextId: 'wf-test-recipe', mcpServers: ['server-a', 'server-b'] },
+    })
+
+    await ensureRecipeContext(
+      deps,
+      'test-recipe',
+      ['server-a', 'server-b'],
+      'mcp-server',
+      ownerRef,
+      'sandbox-recipes'
+    )
+    await ensureRecipeContext(
+      deps,
+      'test-recipe',
+      ['server-a', 'server-b'],
+      'mcp-server',
+      ownerRef,
+      'sandbox-recipes'
+    )
+
+    expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    expect(liveOf().metadata).not.toHaveProperty('ownerReferences')
+  })
+
+  it('repairs empty contextId and a stale cross-namespace ownerRef in one write', async () => {
+    const { mockCustomApi, deps, liveOf } = contextApiWithLiveState({
+      metadata: {
+        resourceVersion: '3',
+        labels: { 'clerum.io/recipe': 'test-recipe', 'clerum.io/managed-by': 'wrc' },
+        ownerReferences: [ownerRef],
+      },
+      spec: { contextId: '', mcpServers: ['server-a', 'server-b'] },
+    })
+
+    await ensureRecipeContext(
+      deps,
+      'test-recipe',
+      ['server-a', 'server-b'],
+      'mcp-server',
+      ownerRef,
+      'sandbox-recipes'
+    )
+    await ensureRecipeContext(
+      deps,
+      'test-recipe',
+      ['server-a', 'server-b'],
+      'mcp-server',
+      ownerRef,
+      'sandbox-recipes'
+    )
+
+    expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    expect(liveOf().spec?.contextId).toBe('wf-test-recipe')
+    expect(liveOf().metadata).not.toHaveProperty('ownerReferences')
+  })
+
+  it('preserves foreign ownerReferences and finalizers on a necessary Context write', async () => {
+    const foreignOwner = {
+      apiVersion: 'example.com/v1',
+      kind: 'BackupOwner',
+      name: 'backup',
+      uid: 'uid-foreign',
+    }
+    const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
+    const mockCustomApi = {
+      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: {
+          resourceVersion: '9',
+          labels: { 'clerum.io/recipe': 'other-recipe' },
+          ownerReferences: [foreignOwner],
+          finalizers: ['example.com/protect'],
+        },
+        spec: {
+          contextId: 'context1',
+          mcpServers: ['existing-server', 'test-recipe-redis-mcp'],
+        },
+      }),
+      replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+    }
+    const deps: DelegationDeps = {
+      customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
+      coreApi: {} as DelegationDeps['coreApi'],
+    }
+
+    await ensureRecipeContext(
+      deps,
+      recipe,
+      ['test-recipe-redis-mcp'],
+      'mcp-server',
+      ownerRef,
+      'sandbox-recipes'
+    )
+
+    const replaceCall = mockCustomApi.replaceNamespacedCustomObject.mock.calls[0]?.[0] as {
+      body?: { metadata?: { ownerReferences?: unknown; finalizers?: string[] } }
+    }
+    expect(replaceCall.body?.metadata?.ownerReferences).toEqual([foreignOwner])
+    expect(replaceCall.body?.metadata?.finalizers).toEqual(['example.com/protect'])
+  })
+
+  it('does not write a shared Context when only foreign metadata is present', async () => {
+    const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
+    const mockCustomApi = {
+      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: {
+          resourceVersion: '9',
+          labels: {
+            'clerum.io/recipe': 'other-recipe',
+            'clerum.io/managed-by': 'wrc',
+          },
+          annotations: { 'operator.io/note': 'keep' },
+          ownerReferences: [
+            {
+              apiVersion: 'example.com/v1',
+              kind: 'BackupOwner',
+              name: 'backup',
+              uid: 'uid-foreign',
+            },
+          ],
+          finalizers: ['example.com/protect'],
+        },
+        spec: {
+          contextId: 'context1',
+          mcpServers: ['existing-server', 'test-recipe-redis-mcp'],
+        },
+      }),
+      replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+    }
+    const deps: DelegationDeps = {
+      customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
+      coreApi: {} as DelegationDeps['coreApi'],
+    }
+
+    await ensureRecipeContext(
+      deps,
+      recipe,
+      ['test-recipe-redis-mcp'],
+      'mcp-server',
+      ownerRef,
+      'sandbox-recipes'
+    )
+
+    expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('H04c — re-throws non-409 errors', async () => {

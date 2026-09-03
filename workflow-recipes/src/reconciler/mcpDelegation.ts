@@ -137,18 +137,121 @@ function authoredContextLabels(
   }
 }
 
-function contextReplaceIsNoOp(
-  existingLabels: Record<string, string> | undefined,
-  existingServers: readonly string[],
-  mergedServers: readonly string[],
+type ContextOwnerReference = {
+  apiVersion: string
+  kind: string
+  name: string
+  uid: string
+  controller?: boolean
+  blockOwnerDeletion?: boolean
+}
+
+type ExistingContextSnapshot = {
+  metadata?: {
+    resourceVersion?: string
+    labels?: Record<string, string>
+    annotations?: Record<string, string>
+    ownerReferences?: ContextOwnerReference[]
+    finalizers?: string[]
+  }
+  spec?: { contextId?: string; mcpServers?: string[]; [key: string]: unknown }
+}
+
+function isThisRecipeOwner(
+  ref: ContextOwnerReference,
+  recipeOwner: ContextOwnerReference
+): boolean {
+  return ref.kind === recipeOwner.kind && ref.name === recipeOwner.name
+}
+
+function desiredOwnerReferences(
+  existing: ContextOwnerReference[] | undefined,
+  explicitContext: boolean,
+  sameNsAsRecipe: boolean,
+  recipeOwner: ContextOwnerReference
+): ContextOwnerReference[] {
+  const kept = (existing ?? []).filter(ref => !isThisRecipeOwner(ref, recipeOwner))
+  if (!explicitContext && sameNsAsRecipe) {
+    return [...kept, recipeOwner]
+  }
+  return kept
+}
+
+function sameOwnerReferences(
+  left: readonly ContextOwnerReference[],
+  right: readonly ContextOwnerReference[]
+): boolean {
+  if (left.length !== right.length) return false
+  const keys = new Set(right.map(ref => `${ref.kind}/${ref.name}/${ref.uid}`))
+  return left.every(ref => keys.has(`${ref.kind}/${ref.name}/${ref.uid}`))
+}
+
+function authoredLabelsMatch(
+  existingLabels: Record<string, string>,
   authoredLabels: Record<string, string>
 ): boolean {
-  if (!sameMcpServerSet(existingServers, mergedServers)) return false
-  const labels = existingLabels ?? {}
   for (const [key, value] of Object.entries(authoredLabels)) {
-    if (labels[key] !== value) return false
+    if (existingLabels[key] !== value) return false
   }
   return true
+}
+
+function observedContextId(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+/**
+ * Single projection for Context replace: skip only when servers, WRC-authored
+ * labels, normalized contextId, and the recipe-owned ownerRef relation already
+ * match the body this reconcile would write.
+ */
+function planContextReplacement(
+  existing: ExistingContextSnapshot,
+  args: {
+    contextName: string
+    explicitContext: boolean
+    sameNsAsRecipe: boolean
+    recipeName: string
+    serverNames: readonly string[]
+    ownerReference: ContextOwnerReference
+  }
+): {
+  existingLabels: Record<string, string>
+  authoredLabels: Record<string, string>
+  mergedServers: string[]
+  nextContextId: string
+  nextOwnerReferences: ContextOwnerReference[]
+} | null {
+  const existingServers = Array.isArray(existing.spec?.mcpServers) ? existing.spec.mcpServers : []
+  const mergedServers = args.explicitContext
+    ? Array.from(new Set([...existingServers, ...args.serverNames]))
+    : [...args.serverNames]
+  const existingLabels = existing.metadata?.labels ?? {}
+  const authoredLabels = authoredContextLabels(args.explicitContext, args.recipeName)
+  const observedId = observedContextId(existing.spec?.contextId)
+  const nextContextId = observedId || args.contextName
+  const existingOwners = existing.metadata?.ownerReferences ?? []
+  const nextOwnerReferences = desiredOwnerReferences(
+    existingOwners,
+    args.explicitContext,
+    args.sameNsAsRecipe,
+    args.ownerReference
+  )
+  if (
+    sameMcpServerSet(existingServers, mergedServers) &&
+    authoredLabelsMatch(existingLabels, authoredLabels) &&
+    observedId === nextContextId &&
+    sameOwnerReferences(existingOwners, nextOwnerReferences)
+  ) {
+    return null
+  }
+  return {
+    existingLabels,
+    authoredLabels,
+    mergedServers,
+    nextContextId,
+    nextOwnerReferences,
+  }
 }
 
 /**
@@ -739,31 +842,46 @@ export async function ensureRecipeContext(
         namespace,
         plural: CONTEXT_PLURAL,
         name: contextName,
-      })) as {
-        metadata?: {
-          resourceVersion?: string
-          labels?: Record<string, string>
-          annotations?: Record<string, string>
-        }
-        spec?: { contextId?: string; mcpServers?: string[]; [key: string]: unknown }
-      }
-      const existingServers = Array.isArray(existing.spec?.mcpServers)
-        ? existing.spec.mcpServers
-        : []
-      const mergedServers = explicitContext
-        ? Array.from(new Set([...existingServers, ...serverNames]))
-        : serverNames
-      const existingLabels = existing.metadata?.labels ?? {}
+      })) as ExistingContextSnapshot
 
       // Semantic post-merge equality. Do not stamp clerum.io/spec-hash on a
       // shared Context: N recipe writers would flap the annotation the same
       // way clerum.io/recipe already flaps resourceVersion (#460 Phase 1).
-      const authoredLabels = authoredContextLabels(explicitContext, recipeName)
-      if (contextReplaceIsNoOp(existingLabels, existingServers, mergedServers, authoredLabels)) {
+      const plan = planContextReplacement(existing, {
+        contextName,
+        explicitContext,
+        sameNsAsRecipe,
+        recipeName,
+        serverNames,
+        ownerReference,
+      })
+      if (!plan) {
         return { wrote: false }
       }
 
       try {
+        const metadata: Record<string, unknown> = {
+          ...contextBody.metadata,
+          labels: {
+            ...plan.existingLabels,
+            ...plan.authoredLabels,
+          },
+          ...(existing.metadata?.annotations
+            ? { annotations: { ...existing.metadata.annotations } }
+            : {}),
+          ...(existing.metadata?.finalizers
+            ? { finalizers: [...existing.metadata.finalizers] }
+            : {}),
+          resourceVersion: existing.metadata?.resourceVersion,
+        }
+        // Always take ownerRefs from the plan so create-time recipe ownership
+        // cannot leak onto a shared or cross-namespace replace. Omit the key
+        // when empty so a replace still clears a stale list (full-object PUT).
+        if (plan.nextOwnerReferences.length > 0) {
+          metadata.ownerReferences = plan.nextOwnerReferences
+        } else {
+          delete metadata.ownerReferences
+        }
         await deps.customApi.replaceNamespacedCustomObject({
           group: CRD_GROUP,
           version: CRD_VERSION,
@@ -772,21 +890,11 @@ export async function ensureRecipeContext(
           name: contextName,
           body: {
             ...contextBody,
-            metadata: {
-              ...contextBody.metadata,
-              labels: {
-                ...existingLabels,
-                ...authoredLabels,
-              },
-              ...(existing.metadata?.annotations
-                ? { annotations: { ...existing.metadata.annotations } }
-                : {}),
-              resourceVersion: existing.metadata?.resourceVersion,
-            },
+            metadata,
             spec: {
               ...(existing.spec ?? {}),
-              contextId: existing.spec?.contextId || contextName,
-              mcpServers: mergedServers,
+              contextId: plan.nextContextId,
+              mcpServers: plan.mergedServers,
             },
           },
         })
