@@ -73,6 +73,13 @@ describe('GfsImagePreview layout', () => {
     )
 
     const modal = screen.getByRole('presentation')
+    const copyButton = screen.getByRole('button', { name: 'Copy image to clipboard' })
+    expect(copyButton.classList.contains('ui-button')).toBe(true)
+    expect(copyButton.classList.contains('da-gfs-image-preview-dialog__copy')).toBe(true)
+    expect(copyButton.textContent).toContain('Copy')
+    const closeButton = screen.getByRole('button', { name: 'Close image preview' })
+    expect(closeButton.classList.contains('ui-button')).toBe(true)
+    expect(closeButton.classList.contains('da-gfs-image-preview-dialog__close')).toBe(true)
     expect((modal as HTMLElement).style.left).toBe('74px')
     expect((modal as HTMLElement).style.right).toBe('0px')
 

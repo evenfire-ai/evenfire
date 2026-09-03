@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { IconButton, StatusBanner } from '@components/Common'
+import { Button, StatusBanner } from '@components/Common'
 import { IconClose, IconCopy } from '@components/SidebarNav/icons'
 import { assertGfsMarkdownPreviewSize } from '@lib/gfsMarkdownPreview'
 import { parseVanillaMarkdown } from '@lib/vanillaMarkdown'
@@ -166,28 +166,34 @@ export function GfsMarkdownPreview({
         <header className="da-gfs-markdown-preview-dialog__header">
           <h3 id={titleId}>{fileName}</h3>
           <div className="da-gfs-markdown-preview-dialog__header-actions">
-            <IconButton
-              label={
+            <Button
+              className="da-gfs-markdown-preview-dialog__copy"
+              aria-label={
                 copyState === 'copied'
                   ? 'Copied preview contents to clipboard'
                   : 'Copy preview contents to clipboard'
               }
+              color="neutral"
               disabled={source === null}
               onClick={() => void copySourceToClipboard()}
-              size="sm"
               variant="ghost"
             >
-              <IconCopy />
-            </IconButton>
-            <IconButton
+              <IconCopy width={18} height={18} />
+              <span className="da-gfs-preview-button__label">
+                {copyState === 'copied' ? 'Copied' : 'Copy'}
+              </span>
+            </Button>
+            <Button
+              className="da-gfs-markdown-preview-dialog__close"
+              data-preview-close
               ref={closeButtonRef}
-              label="Close preview"
+              aria-label="Close preview"
+              color="neutral"
               onClick={onClose}
-              size="sm"
               variant="ghost"
             >
-              <IconClose />
-            </IconButton>
+              <IconClose width={18} height={18} />
+            </Button>
           </div>
         </header>
         <div className="da-gfs-markdown-preview-dialog__body">

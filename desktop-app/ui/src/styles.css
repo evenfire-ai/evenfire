@@ -14890,6 +14890,34 @@ pre {
   gap: var(--space-2);
 }
 
+.da-gfs-image-preview-dialog__close.ui-button,
+.da-gfs-markdown-preview-dialog__close.ui-button,
+.da-gfs-video-preview-dialog__close.ui-button {
+  width: 2.25rem;
+  min-width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  border-radius: 999px;
+}
+
+.da-gfs-image-preview-dialog__copy.ui-button,
+.da-gfs-markdown-preview-dialog__copy.ui-button {
+  height: 2.25rem;
+  padding-inline: var(--space-3);
+  border-radius: 999px;
+  color: var(--text-muted);
+}
+
+.da-gfs-image-preview-dialog__copy.ui-button:hover:enabled,
+.da-gfs-markdown-preview-dialog__copy.ui-button:hover:enabled {
+  color: color-mix(in srgb, var(--accent-strong) 62%, var(--text-muted) 38%);
+}
+
+.da-gfs-preview-button__label {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+}
+
 .da-gfs-text-preview__content {
   min-width: 0;
   min-height: 0;
