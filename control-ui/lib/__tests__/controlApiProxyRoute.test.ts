@@ -612,6 +612,46 @@ describe('control-ui control-api proxy route', () => {
       expect(fetchMock).not.toHaveBeenCalled()
     })
 
+    // The upload branch is the one that actually holds a large charge for a long
+    // time, so the shed has to be proven HERE and not only on the JSON branch.
+    // `upload-chunk-length` is the declared length on this path, so the forecast
+    // must be read from it rather than from content-length.
+    it('sheds a part whose declared length cannot fit the remaining budget', async () => {
+      const BUDGET_KEY = 'CONTROL_UI_PROXY_MAX_INFLIGHT_BODY_BYTES'
+      const savedBudget = process.env[BUDGET_KEY]
+      // 2 MiB budget against a declared 4 MiB part (forecast 8 MiB).
+      process.env[BUDGET_KEY] = String(2 * 1024 * 1024)
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response(null, { status: 204 }))
+      try {
+        const req = new NextRequest(
+          'http://localhost:3000/control-api/api/v1/gfs/proxy/v1/uploads/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/parts/0',
+          {
+            method: 'PUT',
+            headers: { 'Upload-Chunk-Length': String(4 * 1024 * 1024) },
+            body: new Uint8Array(8),
+            duplex: 'half',
+          } as RequestInit & { duplex: 'half' }
+        )
+
+        const res = await POST(req, { params: { path } })
+
+        // 429, not 503: 503 is in GFS_UPLOAD_AMBIGUOUS_STATUS and would send the
+        // client reconciling a part that never left this process.
+        expect(res.status).toBe(429)
+        expect(res.headers.get('retry-after')).toBe('1')
+        await expect(res.json()).resolves.toEqual({ error: 'proxy_busy' })
+        // Shed before a single byte was buffered or forwarded.
+        expect(fetchMock).not.toHaveBeenCalled()
+        expect(__inFlightBodyBytesForTest()).toBe(0)
+      } finally {
+        if (savedBudget === undefined) delete process.env[BUDGET_KEY]
+        else process.env[BUDGET_KEY] = savedBudget
+        __resetInFlightBodyBytesForTest()
+      }
+    })
+
     it('rejects a streamed part above the hard 16 MiB cap even when the header lies', async () => {
       const fetchMock = vi
         .spyOn(globalThis, 'fetch')
