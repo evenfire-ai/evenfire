@@ -10,6 +10,7 @@ import type {
   AcceptInvitationResponse,
   DesktopAuthorizationResponse,
   DesktopEnvironmentResponse,
+  DesktopReleaseResponse,
   InvitationPreview,
   PasswordLoginResponse,
 } from '../app/types/api'
@@ -387,6 +388,17 @@ export async function createDesktopAuthorization(
 
 export async function getDesktopEnvironment(): Promise<DesktopEnvironmentResponse> {
   return apiGet('/api/v1/desktop/environment') as Promise<DesktopEnvironmentResponse>
+}
+
+// silentUnauthorized on purpose: the release identity only feeds a label, so a
+// 401 here must not run the global auth handler and bounce the user to login.
+// The page's own getMe() call owns that decision.
+export async function getDesktopRelease(): Promise<DesktopReleaseResponse> {
+  return apiGet(
+    '/api/v1/desktop/release',
+    {},
+    { silentUnauthorized: true }
+  ) as Promise<DesktopReleaseResponse>
 }
 
 export function getConfiguredExternalRestApiBaseUrl(): string {

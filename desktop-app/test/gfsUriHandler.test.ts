@@ -145,6 +145,17 @@ describe('GfsClient.listChildren', () => {
     )
     expect(opts).toEqual({ token: 'tok' })
   })
+
+  it('forwards updatedAt when present and keeps the field optional when omitted', async () => {
+    const withStamp = { ...CHILD, updatedAt: '2026-06-01T12:00:00.000Z' }
+    const requestJson = vi.fn(async () => ({
+      ok: true,
+      data: { items: [withStamp, CHILD], nextCursor: null },
+    })) as GfsTransport['requestJson']
+    const out = await new GfsClient(transport({ requestJson })).listChildren(RID, 'tok')
+    expect(out.items[0]?.updatedAt).toBe('2026-06-01T12:00:00.000Z')
+    expect(out.items[1]?.updatedAt).toBeUndefined()
+  })
 })
 
 describe('GfsClient.listAccessible', () => {

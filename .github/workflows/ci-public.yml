@@ -251,7 +251,8 @@ jobs:
             services.llmProviderAttemptRedemption.realPostgres.integration \
             services.llmProviderAttemptFinalization.realPostgres.integration \
             userAccessRuntimeContract.realPostgres.integration \
-            userSessionDatabaseClock.realPostgres.integration
+            userSessionDatabaseClock.realPostgres.integration \
+            pluginWorkloadSdkCodexDualLedger.realPostgres.integration
           do
             grep -Fq "$suite" "$normalized_log" || {
               echo "real-Postgres control-api lane omitted critical suite ${suite}" >&2

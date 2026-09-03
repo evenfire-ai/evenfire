@@ -32,6 +32,8 @@ import {
 import {
   applyLlmProviderAttemptConnectionIdSchema,
   applyLlmProviderAttemptSchema,
+  applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema,
+  applyLlmProviderAttemptSdkLinkSchema,
   applyLlmProviderAttemptTicketSchema,
 } from './services/llmProviderAttemptStore.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
@@ -6016,23 +6018,31 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyOAuthGrantsOwnerGeneralization,
   },
   {
-    version: '0107_user_access_foundation',
-    legacyVersions: ['0101_user_access_foundation'],
+    version: '0107_llm_provider_attempts_sdk_link',
+    apply: applyLlmProviderAttemptSdkLinkSchema,
+  },
+  {
+    version: '0108_llm_provider_attempts_sdk_link_on_delete_set_null',
+    apply: applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema,
+  },
+  {
+    version: '0109_user_access_foundation',
+    legacyVersions: ['0107_user_access_foundation', '0101_user_access_foundation'],
     apply: applyUserAccessFoundationSchema,
   },
   {
-    version: '0108_invitation_delivery_commands',
-    legacyVersions: ['0102_invitation_delivery_commands'],
+    version: '010a_invitation_delivery_commands',
+    legacyVersions: ['0108_invitation_delivery_commands', '0102_invitation_delivery_commands'],
     apply: applyInvitationDeliveryCommandFoundation,
   },
   {
-    version: '0109_catalog_utf8_ordering',
-    legacyVersions: ['0103_catalog_utf8_ordering'],
+    version: '010b_catalog_utf8_ordering',
+    legacyVersions: ['0109_catalog_utf8_ordering', '0103_catalog_utf8_ordering'],
     apply: applyCatalogUtf8OrderingSchema,
   },
   {
-    version: '010a_composable_catalog_revisions',
-    legacyVersions: ['0104_composable_catalog_revisions'],
+    version: '010c_composable_catalog_revisions',
+    legacyVersions: ['010a_composable_catalog_revisions', '0104_composable_catalog_revisions'],
     apply: applyComposableCatalogRevisionSchema,
   },
   {
@@ -6040,13 +6050,19 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     // body before the GFS resource-component mapping was completed. The
     // schema function is intentionally idempotent, so fresh and upgraded
     // databases converge on the same trigger/function/backfill state.
-    version: '010b_gfs_catalog_revision_components',
-    legacyVersions: ['0105_gfs_catalog_revision_components'],
+    version: '010d_gfs_catalog_revision_components',
+    legacyVersions: [
+      '010b_gfs_catalog_revision_components',
+      '0105_gfs_catalog_revision_components',
+    ],
     apply: applyComposableCatalogRevisionSchema,
   },
   {
-    version: '010c_legacy_password_security_epoch_backfill',
-    legacyVersions: ['0106_legacy_password_security_epoch_backfill'],
+    version: '010e_legacy_password_security_epoch_backfill',
+    legacyVersions: [
+      '010c_legacy_password_security_epoch_backfill',
+      '0106_legacy_password_security_epoch_backfill',
+    ],
     apply: backfillLegacyPasswordSecurityEpochs,
   },
 ]
