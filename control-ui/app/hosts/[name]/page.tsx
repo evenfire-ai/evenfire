@@ -106,7 +106,7 @@ function agentConnectorMutationError(error: unknown): string {
   if ((error as { status?: unknown } | null)?.status === 409) {
     return 'This agent’s connectors changed since they were loaded. Reload the agent and try again.'
   }
-  if (error instanceof Error && /context version is unavailable/i.test(error.message)) {
+  if (error instanceof Error && /required version is unavailable/i.test(error.message)) {
     return 'This agent’s connector settings are missing a server version. Reload the agent and try again.'
   }
   return contextMutationError(error, 'Failed to update connectors for this agent.')
