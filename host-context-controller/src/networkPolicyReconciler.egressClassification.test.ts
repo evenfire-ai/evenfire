@@ -344,6 +344,40 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     expect(egress.at(-1)?.reason).toBe('ExternalEgressReconcileFailed')
   })
 
+  it('T10 refuses to serve or report a live policy that drifted into a blocked range', async () => {
+    // Closing audit, H1. The fault branch reads CIDRs off the live policy and
+    // reports them as "what is enforced right now". That is only safe if the live
+    // policy is trustworthy. It is the one path that neither re-validates nor
+    // self-heals: the safety lane retains DNS policies modulo cidr, and the list
+    // is by label without an ownership read, so nothing else repairs drift.
+    //
+    // An out-of-band edit to a private range would otherwise be published in
+    // status.resolvedEgressIPs as the resolution of a public hostname, and
+    // counted as "something to serve" — keeping the pass non-blocking and the
+    // private range enforced on every resync for as long as the fault lasts.
+    await seedAccumulatedPolicy({ lapsed: false })
+    const items = (await mockApi.listNamespacedNetworkPolicy({ namespace: 'mcp-server' })) as {
+      items: Array<{ spec?: k8s.V1NetworkPolicySpec }>
+    }
+    const drifted = JSON.parse(JSON.stringify(items)) as typeof items
+    drifted.items[0].spec!.egress![0]!.to![0]!.ipBlock!.cidr = '10.0.0.5/32'
+    mockApi.listNamespacedNetworkPolicy.mockResolvedValue(drifted)
+    injectPostResolutionTypeError()
+
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(TypeError)
+
+    const reported = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls
+      // `mock.calls` is `any[][]`; a fixed-length tuple annotation does not
+      // typecheck under `tsc --noEmit`, which includes test files while
+      // `tsconfig.build.json` does not.
+      .flatMap((call: unknown[]) => (call[0] as { body?: Array<{ value?: unknown }> })?.body ?? [])
+      .map(op => JSON.stringify(op.value))
+      .join(' ')
+    expect(reported).not.toContain('10.0.0.5')
+  })
+
   it('T8 still throws on a fault with nothing to serve (bootstrap)', async () => {
     // The other half of the same decision, pinned so it cannot be lost: with no
     // live policy there is no frozen set, so serving is not an option and the

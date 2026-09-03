@@ -2254,9 +2254,15 @@ export class NetworkPolicyReconciler {
           // operator's misconfiguration, and it must keep pruning and reporting
           // ExternalEgressRejected rather than blame the controller.
           //
-          // `code` is read off any object, exactly as classifyDnsError does: a
-          // rejection that is not an Error instance must not be reclassified as a
-          // controller fault just because of how it was thrown.
+          // `code` is read off any object, so a rejection that is not an Error
+          // instance is still classified by its code rather than by how it was
+          // thrown. Not full parity with classifyDnsError, which also accepts a
+          // bare code string: a rejection whose value IS the string 'ENOTFOUND'
+          // classifies permanent there and yields no code here, so it lands in
+          // the fault branch. `node:dns` rejects with Error objects, so that
+          // shape does not occur in production; it is left explicit rather than
+          // handled, because inventing a string-rejection path would be code no
+          // caller reaches.
           const kind = classifyDnsError(err)
           const code =
             typeof err === 'object' && err !== null
@@ -2292,7 +2298,18 @@ export class NetworkPolicyReconciler {
               .flatMap(rule => rule.to ?? [])
               .map(to => to.ipBlock?.cidr)
               .filter((cidr): cidr is string => typeof cidr === 'string')
-            if (enforced.length > 0) {
+            // "What is enforced right now" is only worth serving if it is also
+            // allowed. This is the one path that neither re-validates nor
+            // self-heals the live policy — the safety lane retains DNS policies
+            // modulo cidr, and the orphan list is by label without an ownership
+            // read — so a policy edited out-of-band into a private range would be
+            // published as the resolution of a public hostname AND counted as
+            // something to serve, keeping the pass non-blocking and the range
+            // enforced on every resync. A set containing anything blocked is not
+            // known-good, so none of it is served and the fault blocks.
+            const allowed = enforced.filter(cidr => isAllowedExternalEgressCidr(cidr))
+            const trustworthy = allowed.length === enforced.length
+            if (trustworthy && enforced.length > 0) {
               // Without this the binding vanishes from status.resolvedEgressIPs —
               // the audit record an operator reads to learn what is allowed —
               // while its /32s stay enforced. The status message would claim
@@ -2312,7 +2329,7 @@ export class NetworkPolicyReconciler {
               // binding that has never been written has no frozen set behind it,
               // so completing the pass would publish a server as reconciled while
               // one of its declared destinations was never enforced at all.
-              blocking: enforced.length === 0,
+              blocking: !trustworthy || enforced.length === 0,
             })
             continue
           }
@@ -2409,7 +2426,12 @@ export class NetworkPolicyReconciler {
     // Reported only after cleanupExternalEgress above, so a binding removed from
     // the spec is still de-authorized on a pass that ends in a fault.
     if (reconcileFaults.length > 0) {
-      const first = reconcileFaults[0]
+      // The blocking fault is the one that propagates, so it is the one the
+      // status must name: reporting reconcileFaults[0] while throwing a different
+      // error hands the operator a condition and a log line about two different
+      // bindings. With no blocking fault, the first is the whole story.
+      const blocking = reconcileFaults.find(fault => fault.blocking)
+      const first = blocking ?? reconcileFaults[0]
       const parts = [
         `External egress reconciliation failed on binding "${first.dns}" with a non-DNS error ` +
           `(not a resolver condition, accumulated egress left untouched): ${this.errorMessage(first.err)}`,
@@ -2436,7 +2458,6 @@ export class NetworkPolicyReconciler {
       // fault that HAS a frozen set to serve takes a whole server's pod down over
       // one binding, healthy siblings included, on a retry ladder that cannot fix
       // a deterministic fault. Throw only when nothing could be served.
-      const blocking = reconcileFaults.find(fault => fault.blocking)
       if (blocking) throw blocking.err
       // Rejected input stays blocking as it always was, now that it has been said
       // out loud in the message above.
