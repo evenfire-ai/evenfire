@@ -12,7 +12,6 @@ import { Button, CheckboxField } from '@components/ui'
 import { GFS_MAX_BULK_SUBJECTS } from '@constants/gfsGrantSubjects'
 import {
   type AdminUser,
-  type GfsBulkShareSubjectInput,
   type GfsGrantError,
   type HostResource,
   type TeamListItem,
@@ -25,7 +24,6 @@ import {
   getGfsShares,
   getHosts,
   getRecipes,
-  postGfsShare,
   putGfsGrant,
 } from '@lib/api'
 import type { GfsExistingAccessItem, GfsGrantPanelProps } from './GfsGrantPanel.types'
@@ -33,10 +31,12 @@ import { buildGfsBulkSubjectOptions, toGfsBulkSubjectInputs } from './gfsGrantSu
 
 /**
  * P4-S07 — Operator delegation panel for the Global File System. The operator
- * (Control UI / Admin-JWT plane) seeds Layer-1/2 grants and creates URI shares
- * on a selected resource. Bulk actions accept users, teams, and canonical host
- * subjects; the intrinsic operator remains a singular request. The existing
- * server-side authority and no-escalation policies remain authoritative.
+ * (Control UI / Admin-JWT plane) seeds Layer-1/2 grants on a selected resource.
+ * Bulk actions accept users, teams, and canonical host subjects; the intrinsic
+ * operator remains a singular request. Existing URI shares remain visible and
+ * revocable, while share creation is intentionally unavailable in this UI.
+ * The existing server-side authority and no-escalation policies remain
+ * authoritative.
  */
 
 const PERMISSION_BITS = ['read', 'write', 'delete', 'manage_acl', 'share'] as const
@@ -53,7 +53,6 @@ const OPERATOR_OPTION: SelectionDropdownOption = {
 
 export function GfsGrantPanel({
   resource,
-  onCreateShareActionChange,
 }: GfsGrantPanelProps): React.JSX.Element {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
@@ -75,7 +74,6 @@ export function GfsGrantPanel({
   const [existingAccessError, setExistingAccessError] = useState('')
   const existingAccessRequest = useRef(0)
   const existingAccessController = useRef<AbortController | null>(null)
-  const submitShareRef = useRef<() => void>(() => undefined)
   const canIncludeDescendants = resource.kind === 'directory'
 
   const loadExistingAccess = useCallback(async () => {
@@ -186,8 +184,6 @@ export function GfsGrantPanel({
   const hasHost = selectedSubjects.some(subject => subject.type === 'host')
   const visiblePermissionBits = hasHost ? HOST_PERMISSION_BITS : PERMISSION_BITS
   const subjectValid = operatorSelected || selectedSubjects.length > 0
-  const canCreateShare =
-    operatorSelected || selectedSubjects.every(subject => subject.type !== 'host')
   const actionPending = busy || confirming
   const canSubmit = subjectValid && bits.length > 0 && !actionPending
 
@@ -217,7 +213,7 @@ export function GfsGrantPanel({
     setSelectedValues(bulkValues)
   }
 
-  async function submit(kind: 'grant' | 'share') {
+  async function submit() {
     setError('')
     if (!subjectValid || bits.length === 0) {
       setError('subject_and_permissions_required')
@@ -243,9 +239,9 @@ export function GfsGrantPanel({
 
     setConfirming(true)
     const confirmed = await confirm({
-      title: kind === 'grant' ? 'Grant access?' : 'Create share?',
-      message: `${kind === 'grant' ? 'Grant access' : 'Create a share'} for ${recipientSummary} on "${resource.name}". Permissions: ${bits.join(', ')}. Scope: ${scope}.`,
-      confirmLabel: kind === 'grant' ? 'Grant access' : 'Create share',
+      title: 'Grant access?',
+      message: `Grant access for ${recipientSummary} on "${resource.name}". Permissions: ${bits.join(', ')}. Scope: ${scope}.`,
+      confirmLabel: 'Grant access',
     })
     setConfirming(false)
     if (!confirmed) return
@@ -259,8 +255,7 @@ export function GfsGrantPanel({
           subject: { type: 'operator' as const },
           permissions: bits,
         }
-        if (kind === 'grant') await putGfsGrant({ ...body, inherit: includeDescendants })
-        else await postGfsShare({ ...body, includeDescendants })
+        await putGfsGrant({ ...body, inherit: includeDescendants })
       } else {
         const body = {
           drive: DRIVE,
@@ -268,17 +263,9 @@ export function GfsGrantPanel({
           subjects: selectedSubjects,
           permissions: bits,
         }
-        if (kind === 'grant') {
-          await putGfsGrant({ ...body, inherit: includeDescendants })
-        } else {
-          const shareSubjects = selectedSubjects.filter(
-            (subject): subject is GfsBulkShareSubjectInput => subject.type !== 'host'
-          )
-          if (shareSubjects.length !== selectedSubjects.length) throw new Error('subjects_invalid')
-          await postGfsShare({ ...body, subjects: shareSubjects, includeDescendants })
-        }
+        await putGfsGrant({ ...body, inherit: includeDescendants })
       }
-      showToast(kind === 'grant' ? 'Grant saved.' : 'Share created.', { tone: 'success' })
+      showToast('Grant saved.', { tone: 'success' })
       await loadExistingAccess()
       setBits([])
       setSelectedValues([])
@@ -303,16 +290,6 @@ export function GfsGrantPanel({
       setBusy(false)
     }
   }
-
-  submitShareRef.current = () => {
-    void submit('share')
-  }
-
-  useEffect(() => {
-    if (!onCreateShareActionChange) return
-    onCreateShareActionChange(() => submitShareRef.current(), !canSubmit || !canCreateShare)
-    return () => onCreateShareActionChange(null, true)
-  }, [canCreateShare, canSubmit, onCreateShareActionChange])
 
   function subjectLabel(item: GfsExistingAccessItem): string {
     if (item.subject.type === 'operator') return 'Operator'
@@ -404,7 +381,7 @@ export function GfsGrantPanel({
           />
         ) : null}
         <div className="cu-gfs-grant__actions">
-          <Button variant="primary" disabled={!canSubmit} onClick={() => submit('grant')}>
+          <Button variant="primary" disabled={!canSubmit} onClick={() => submit()}>
             Grant access
           </Button>
         </div>
@@ -417,7 +394,7 @@ export function GfsGrantPanel({
       <section className="cu-gfs-existing-access" aria-label="Who has access">
         <div className="cu-gfs-existing-access__header">
           <h4>Who has access</h4>
-          <p>Existing grants on this resource. Revoking is immediate.</p>
+          <p>Existing grants and shares on this resource. Revoking is immediate.</p>
         </div>
         {existingAccessLoading ? (
           <p className="cu-gfs-existing-access__empty" role="status">

@@ -12444,8 +12444,30 @@ button.cu-gfs-tree__button:focus-visible,
   background: rgba(var(--cu-accent-rgb), 0.06);
 }
 
+.cu-gfs-list__row[data-dragging='true'] {
+  opacity: 0.55;
+}
+
+.cu-gfs-list__row[data-drop-target='true'] {
+  outline: 2px solid rgba(var(--cu-accent-rgb), 0.72);
+  outline-offset: -2px;
+  background: rgba(var(--cu-accent-rgb), 0.14);
+}
+
+.cu-gfs-list__row[data-drop-target='true']:hover {
+  background: rgba(var(--cu-accent-rgb), 0.18);
+}
+
 .cu-gfs-list__row--clickable {
   cursor: pointer;
+}
+
+.cu-gfs-list__row[draggable='true'] {
+  cursor: grab;
+}
+
+.cu-gfs-list__row[draggable='true']:active {
+  cursor: grabbing;
 }
 
 .cu-gfs-list__row--clickable:focus-visible {

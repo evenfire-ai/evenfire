@@ -27,11 +27,8 @@ export type GfsGrantResource = {
   kind?: string
 }
 
-export type GfsCreateShareActionChange = (action: (() => void) | null, disabled: boolean) => void
-
 export interface GfsGrantPanelProps {
   resource: GfsGrantResource
-  onCreateShareActionChange?: GfsCreateShareActionChange
 }
 
 export type GfsExistingAccessItem =

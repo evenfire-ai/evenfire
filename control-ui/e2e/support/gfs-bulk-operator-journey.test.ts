@@ -16,7 +16,6 @@ import {
   uniqueGfsFixtureName,
 } from '../../../tests/e2e/gfsUiFixtures'
 import { E2E_TEST_EMAIL, E2E_TEST_NAME } from '../../../tests/e2e/testUser'
-import { exerciseGfsBulkShareJourney } from './gfs-bulk-share-journey.test'
 import {
   CONTROL_UI_BASE_URL,
   loginControlUi,
@@ -111,8 +110,6 @@ export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> 
       ).toHaveCount(0)
       await expect(permissionMenu.getByRole('menuitemcheckbox', { name: 'Share' })).toHaveCount(0)
       await expect(permissionMenu.getByRole('menuitemcheckbox', { name: 'Delete' })).toHaveCount(0)
-      await expect(panel.getByRole('button', { name: 'Create share', exact: true })).toBeDisabled()
-
       await chooseGrantSubject(panel, workflowRecipe.name, workflowRecipe.name)
       await expect(selectedSubjects).toContainText(workflowRecipe.name)
       await expect(selectedSubjects.getByRole('button', { name: /^Remove / })).toHaveCount(5)
@@ -242,14 +239,6 @@ export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> 
       page,
       unchangedHostSubjectIds: ['1st:mcp-host/chatllm-stateless', workflowRecipe.subjectId],
     })
-    await exerciseGfsBulkShareJourney({
-      fixture,
-      page,
-      targetTeam,
-      targetUserEmail: E2E_TEST_EMAIL,
-      targetUserId,
-    })
-
     await test.step('operator remains a distinct singular grant target', async () => {
       const panel = grantPanel()
       await chooseGrantSubject(panel, 'Operator', 'Operator')

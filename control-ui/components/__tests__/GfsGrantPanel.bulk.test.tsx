@@ -11,7 +11,6 @@ import {
   getGfsShares,
   getHosts,
   getRecipes,
-  postGfsShare,
   putGfsGrant,
 } from '@lib/api'
 import { GfsGrantPanel } from '../GfsGrantPanel'
@@ -26,7 +25,6 @@ vi.mock('@lib/api', () => ({
   getGfsShares: vi.fn(),
   deleteGfsGrant: vi.fn(),
   deleteGfsShare: vi.fn(),
-  postGfsShare: vi.fn(),
   putGfsGrant: vi.fn(),
 }))
 
@@ -38,7 +36,6 @@ const mockGetGfsGrants = vi.mocked(getGfsGrants)
 const mockGetGfsShares = vi.mocked(getGfsShares)
 const mockDeleteGfsGrant = vi.mocked(deleteGfsGrant)
 const mockDeleteGfsShare = vi.mocked(deleteGfsShare)
-const mockPostGfsShare = vi.mocked(postGfsShare)
 const mockPutGfsGrant = vi.mocked(putGfsGrant)
 
 const resource = {
@@ -58,9 +55,6 @@ const workflowHostSubject = {
 } as const
 const operatorSubject = { type: 'operator' } as const
 
-let createShareAction: (() => void) | null = null
-let createShareDisabled = true
-
 function successfulMutation(...updated: GfsSubjectInput[]): GfsMutationResponse {
   return { ok: true, resourceId: resource.resourceId, updated, count: updated.length }
 }
@@ -68,13 +62,7 @@ function successfulMutation(...updated: GfsSubjectInput[]): GfsMutationResponse 
 function renderPanel(target = resource) {
   return render(
     <ToastProvider>
-      <GfsGrantPanel
-        resource={target}
-        onCreateShareActionChange={(action, disabled) => {
-          createShareAction = action
-          createShareDisabled = disabled
-        }}
-      />
+      <GfsGrantPanel resource={target} />
     </ToastProvider>
   )
 }
@@ -110,16 +98,8 @@ function selectPermission(name: string) {
   fireEvent.click(within(openPermissionMenu()).getByRole('menuitemcheckbox', { name }))
 }
 
-async function submit(action: 'Grant access' | 'Create share') {
-  if (action === 'Create share') {
-    await waitFor(() => {
-      expect(createShareAction).not.toBeNull()
-      expect(createShareDisabled).toBe(false)
-    })
-    createShareAction?.()
-  } else {
-    fireEvent.click(screen.getByRole('button', { name: action }))
-  }
+async function submit(action: 'Grant access') {
+  fireEvent.click(screen.getByRole('button', { name: action }))
   const dialog = await screen.findByRole('alertdialog')
   fireEvent.click(within(dialog).getByRole('button', { name: action }))
 }
@@ -127,8 +107,6 @@ async function submit(action: 'Grant access' | 'Create share') {
 describe('GfsGrantPanel bulk access', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    createShareAction = null
-    createShareDisabled = true
     mockGetAdminUsers.mockResolvedValue({
       items: [
         {
@@ -358,8 +336,6 @@ describe('GfsGrantPanel bulk access', () => {
     expect(within(permissions).getByRole('menuitemcheckbox', { name: 'Write' })).not.toBeChecked()
     expect(within(permissions).queryByRole('menuitemcheckbox', { name: 'Delete' })).toBeNull()
     expect(within(permissions).queryByRole('menuitemcheckbox', { name: 'Share' })).toBeNull()
-    expect(createShareDisabled).toBe(true)
-
     await submit('Grant access')
 
     await waitFor(() =>
@@ -380,27 +356,6 @@ describe('GfsGrantPanel bulk access', () => {
     await waitFor(() => expect(mockGetGfsGrants).toHaveBeenCalledTimes(2))
   })
 
-  it('creates one bulk share for user and team subjects', async () => {
-    mockPostGfsShare.mockResolvedValue(successfulMutation(userSubject, teamSubject))
-    renderPanel()
-    await chooseSubjects('Ada Lovelace', 'Research')
-    selectPermission('Read')
-    await submit('Create share')
-
-    await waitFor(() =>
-      expect(mockPostGfsShare).toHaveBeenCalledWith({
-        drive: 'main',
-        resourceId: resource.resourceId,
-        subjects: [
-          { type: 'user', id: '11111111-1111-1111-1111-111111111111' },
-          { type: 'team', id: '22222222-2222-2222-2222-222222222222' },
-        ],
-        permissions: ['read'],
-        includeDescendants: false,
-      })
-    )
-  })
-
   it('requires an explicit scope review before creating access', async () => {
     const directory = { ...resource, name: 'reports', kind: 'directory' as const }
     renderPanel(directory)
@@ -414,8 +369,6 @@ describe('GfsGrantPanel bulk access', () => {
     expect(dialog).toHaveTextContent('"reports"')
     expect(dialog).toHaveTextContent('Permissions: read, write')
     expect(dialog).toHaveTextContent('Scope: this resource and all descendants')
-    expect(createShareDisabled).toBe(true)
-
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
     expect(mockPutGfsGrant).not.toHaveBeenCalled()
@@ -506,7 +459,6 @@ describe('GfsGrantPanel bulk access', () => {
       within(openPermissionMenu()).getByRole('menuitemcheckbox', { name: 'Delete' })
     ).not.toBeChecked()
     selectPermission('Read')
-    await waitFor(() => expect(createShareDisabled).toBe(false))
   })
 
   it('caps the UI selection at 100 subjects', async () => {

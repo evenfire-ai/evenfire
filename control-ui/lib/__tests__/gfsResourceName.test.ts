@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { GFS_RESOURCE_NAME_MAX_LENGTH, normalizeGfsResourceName } from '../gfsResourceName'
+import {
+  GFS_RESOURCE_NAME_MAX_LENGTH,
+  nextAvailableGfsResourceName,
+  normalizeGfsResourceName,
+} from '../gfsResourceName'
 
 const HASH_LENGTH = 12
 const EXTENSION_MAX_LENGTH = 48
@@ -52,4 +56,24 @@ describe('normalizeGfsResourceName', () => {
       )
     }
   )
+})
+
+describe('nextAvailableGfsResourceName', () => {
+  it('adds the first available numbered suffix before the extension', () => {
+    expect(
+      nextAvailableGfsResourceName('report.txt', ['report.txt', 'report (1).txt', 'report (3).txt'])
+    ).toBe('report (2).txt')
+  })
+
+  it('adds a suffix to names without an extension', () => {
+    expect(nextAvailableGfsResourceName('README', ['README'])).toBe('README (1)')
+  })
+
+  it('keeps numbered names within the GFS name limit', () => {
+    const name = `${'a'.repeat(GFS_RESOURCE_NAME_MAX_LENGTH - '.txt'.length)}.txt`
+    const candidate = nextAvailableGfsResourceName(name, [name])
+
+    expect(candidate).toBe(`${'a'.repeat(247)} (1).txt`)
+    expect(candidate).toHaveLength(GFS_RESOURCE_NAME_MAX_LENGTH)
+  })
 })
