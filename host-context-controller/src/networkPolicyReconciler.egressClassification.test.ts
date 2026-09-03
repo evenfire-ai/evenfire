@@ -446,6 +446,116 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     expect(egress.at(-1)?.message).not.toContain('left untouched')
   })
 
+  it('T11a revokes a policy whose CIDR drifted to an over-broad public prefix', async () => {
+    // #590. T11 pins the BLOCKED-range shape. This is the shape the guard read as
+    // clean: `isAllowedExternalEgressCidr` checks that a CIDR parses and does not
+    // overlap the blocked ranges, and 1.0.0.0/8 does neither — so the drifted
+    // policy was judged trustworthy, served, and published in
+    // `status.resolvedEgressIPs` as the resolution of the hostname, while the pass
+    // stayed non-blocking. 16.7 million addresses reported as one host.
+    //
+    // The verdict now also requires the /32 this controller is the only thing that
+    // ever writes. Anything wider is drift by definition, whatever it allows.
+    await seedAccumulatedPolicy({ lapsed: false })
+    const items = (await mockApi.listNamespacedNetworkPolicy({ namespace: 'mcp-server' })) as {
+      items: Array<{ metadata?: { name?: string }; spec?: k8s.V1NetworkPolicySpec }>
+    }
+    const drifted = JSON.parse(JSON.stringify(items)) as typeof items
+    drifted.items[0].spec!.egress![0]!.to![0]!.ipBlock!.cidr = '1.0.0.0/8'
+    const policyName = drifted.items[0].metadata!.name!
+    mockApi.listNamespacedNetworkPolicy.mockResolvedValue(drifted)
+    injectPostResolutionTypeError()
+
+    // Liveness witness: the fault branch ran and blocked. Without it, "the broad
+    // prefix is not served" is satisfied equally by never reaching the branch.
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(TypeError)
+
+    expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ name: policyName })
+    )
+    // Not published as the hostname's resolution either — that is the half a
+    // reader is most likely to trust. Read straight off the patch calls, the same
+    // source `statusConditions` uses.
+    const served = JSON.stringify(
+      mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.map(
+        (call: unknown[]) => (call[0] as { body?: unknown } | undefined)?.body
+      )
+    )
+    expect(served).not.toContain('1.0.0.0')
+
+    const egress = statusConditions().filter(c => c.type === 'ExternalEgressReady')
+    expect(egress.at(-1)?.reason).toBe('ExternalEgressReconcileFailed')
+    expect(egress.at(-1)?.message).toContain('REVOKED')
+  })
+
+  it('T11b revokes a policy that gained a non-ipBlock egress peer', async () => {
+    // #590, the subtler half. The projection mapped every `to[]` peer through
+    // `to.ipBlock?.cidr` and filtered out the undefineds — so a `namespaceSelector`
+    // peer vanished BEFORE the comparison, leaving `enforced.length` compared
+    // against itself and the verdict reading `true` for a policy that had grown a
+    // whole extra allow rule.
+    //
+    // The /32 beside it is untouched and valid, which is the point: the CIDRs the
+    // guard looked at were all fine. What made the policy untrustworthy was the
+    // shape it had acquired, and shape was exactly what the projection discarded.
+    await seedAccumulatedPolicy({ lapsed: false })
+    const items = (await mockApi.listNamespacedNetworkPolicy({ namespace: 'mcp-server' })) as {
+      items: Array<{ metadata?: { name?: string }; spec?: k8s.V1NetworkPolicySpec }>
+    }
+    const drifted = JSON.parse(JSON.stringify(items)) as typeof items
+    drifted.items[0].spec!.egress!.push({
+      to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'default' } } }],
+    })
+    const policyName = drifted.items[0].metadata!.name!
+    mockApi.listNamespacedNetworkPolicy.mockResolvedValue(drifted)
+    injectPostResolutionTypeError()
+
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(TypeError)
+
+    expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ name: policyName })
+    )
+    const egress = statusConditions().filter(c => c.type === 'ExternalEgressReady')
+    expect(egress.at(-1)?.reason).toBe('ExternalEgressReconcileFailed')
+    expect(egress.at(-1)?.message).toContain('REVOKED')
+  })
+
+  it('T11c still serves a clean /32 — the guard narrowed, it did not close', async () => {
+    // Anti-over-correction. T11/T11a/T11b all assert revocation, so a guard that
+    // simply declared everything untrustworthy would satisfy the three of them
+    // and destroy fail-static, which is the property five review rounds converged
+    // on. This is the case that must still be SERVED.
+    await seedAccumulatedPolicy({ lapsed: false })
+    injectPostResolutionTypeError()
+
+    // Fail-static in one assertion: a fault WITH something trustworthy to serve
+    // completes instead of throwing. T11/T11a/T11b are the three shapes that must
+    // block; this is the shape that must not, and it is also the liveness witness
+    // — the pass reached the fault branch and chose to serve, rather than never
+    // faulting at all. T8 pins the other side (nothing to serve ⇒ still throws).
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).resolves.toBeUndefined()
+
+    // The clean policy is kept, not revoked …
+    expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    // … and it is still reported as what is enforced right now.
+    const egress = statusConditions().filter(c => c.type === 'ExternalEgressReady')
+    expect(egress.at(-1)?.message).not.toContain('REVOKED')
+    // The /32 the fixture seeded is what gets served, so a guard that narrowed
+    // into rejecting everything would fail here rather than pass quietly.
+    const served = JSON.stringify(
+      mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.map(
+        (call: unknown[]) => (call[0] as { body?: unknown } | undefined)?.body
+      )
+    )
+    expect(served).toContain('1.2.3.4')
+  })
+
   it('T8 still throws on a fault with nothing to serve (bootstrap)', async () => {
     // The other half of the same decision, pinned so it cannot be lost: with no
     // live policy there is no frozen set, so serving is not an option and the

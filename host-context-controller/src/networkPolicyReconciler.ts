@@ -2299,8 +2299,8 @@ export class NetworkPolicyReconciler {
             // from the live object, not recomputed — recomputing is what faulted.
             // Only HCC: consumers of ExternalEgressReady treat any False as
             // terminal, so a dependent WRC recipe still fails (#577).
-            const enforced = (existingPolicy?.spec?.egress ?? [])
-              .flatMap(rule => rule.to ?? [])
+            const peers = (existingPolicy?.spec?.egress ?? []).flatMap(rule => rule.to ?? [])
+            const enforced = peers
               .map(to => to.ipBlock?.cidr)
               .filter((cidr): cidr is string => typeof cidr === 'string')
             // "What is enforced right now" is only worth serving if it is also
@@ -2312,8 +2312,26 @@ export class NetworkPolicyReconciler {
             // something to serve, keeping the pass non-blocking and the range
             // enforced on every resync. A set containing anything blocked is not
             // known-good, so none of it is served and the fault blocks.
-            const allowed = enforced.filter(cidr => isAllowedExternalEgressCidr(cidr))
-            const trustworthy = allowed.length === enforced.length
+            //
+            // The verdict has to judge the policy's SHAPE, not only the CIDRs it
+            // happens to expose. Projecting to `ipBlock` and filtering out
+            // everything else made two drift shapes invisible, because a
+            // `namespaceSelector` peer maps to `undefined` and is dropped before
+            // the comparison — leaving `enforced.length` compared against itself:
+            //
+            //   1. an added non-ipBlock egress rule beside a valid /32
+            //   2. an over-broad but non-blocked public prefix, e.g. 1.0.0.0/8
+            //
+            // Both read as clean, were served, and were published in
+            // `status.resolvedEgressIPs` as the resolution of the hostname. So:
+            // every peer must BE an ipBlock, and every CIDR must be the /32 this
+            // controller is the only thing that ever writes. Anything else is
+            // drift by definition, whatever it happens to allow.
+            const allIpBlocks = peers.every(to => typeof to.ipBlock?.cidr === 'string')
+            const allowed = enforced.filter(
+              cidr => isAllowedExternalEgressCidr(cidr) && cidr.endsWith('/32')
+            )
+            const trustworthy = allIpBlocks && allowed.length === enforced.length
 
             // Still DESIRED, but only while the live object is one we would keep.
             // The cleanup below deletes every external-egress policy NOT in this
