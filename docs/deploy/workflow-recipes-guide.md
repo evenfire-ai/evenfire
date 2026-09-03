@@ -322,6 +322,55 @@ the write entirely when the existing object's stamped hash matches**. This keeps
 - **First deploy after this change** does one stamping write per pre-existing managed
   object (they have no hash yet), then steady-state is quiet.
 
+## Stale NetworkPolicy reap
+
+WRC removes NetworkPolicies its recipes no longer want. Until issue #582 it did so
+blindly: on the branch where no policy was desired it issued a `DELETE` and swallowed
+the 404. A workload that never had a policy takes that branch too, so the delete fired
+on every pass forever — **15 115 `DELETE`/hour on clerum-dev, 100 % `NOT_FOUND`**.
+
+It now reaps from the live set instead. Once every lane has recorded what it wants, one
+`LIST` per namespace selects by ownership —
+`clerum.io/managed-by=workflow-recipes,clerum.io/recipe=<name>` — and deletes only what
+is live, belongs to a recipe family, and is not wanted. The `LIST` costs nothing new:
+the internal-dependency prune already issued exactly these.
+
+**Six families are reaped**: `ui-ingress-*`, `ui-egress-*`, `wl-egress-*`,
+`wl-ingress-*`, `wr-intdep-egress/ingress-*`, and `wf-*-oauth-broker-egress`. Family is
+decided by **name prefix**, because five of the six carry no distinguishing label
+(issue #524). The selector is scoped by ownership rather than by `policy-type` for the
+same reason — requiring that label would make the reap blind to five families.
+
+**Never touched**, because the classifier does not recognise them: the webhook gateway's
+policies (they carry no `clerum.io/recipe` label), the workflow run lane's, the
+`coordinator-to-gfs` policy, and anything created by hand.
+
+**Two deliberate exclusions**, each with its own issue:
+
+- **`wl-*` of a workload that gained `transport` or became the UI workload** — those
+  policies are stale and nothing writes them, but the producer is a spec edit rather
+  than the reconcile loop, so reaping them here would widen this change into a family it
+  does not own. Carved out explicitly (issue #583).
+- **`reconcileUiEgressPolicy`'s own delete** when `spec.ui` is unset is still
+  unconditional. Measured at 2/hour.
+
+**Operational consequences:**
+
+- **Logs:** `Deleted stale <family> NetworkPolicy "<name>" in <ns> (not in desired set)`
+  appears only on an actual deletion. There is deliberately no per-pass line — at three
+  namespaces × 19 recipes × ~206 passes/hour that would be ~12 k lines/hour.
+- **A denied delete does not fail the recipe.** An RBAC `403` leaves the policy
+  **enforced** and is reported three ways: an error log naming the policy, the
+  `NetworkPolicyReapFailed` condition on the recipe (cleared on the next clean pass),
+  and the `clerum_wrc_networkpolicy_reap_denied_total` counter, labelled by family.
+  **Alert on any sustained non-zero value** — it means a policy that should be gone is
+  still filtering traffic. The recipe `phase` is untouched on purpose: a latched `failed`
+  is invisible outside `kubectl` and self-heals only for transient-infra messages.
+- **A transient failure (5xx, timeout) degrades and retries** on the next pass, using the
+  same contract as any other transient infrastructure fault.
+- **Reaping still happens on real changes.** Dropping `egressBindings` from a workload
+  still deletes its policy on the next pass — the reap became conditional, not optional.
+
 ## Automated Tests
 
 ### Unit tests (vitest + @testing-library/react)

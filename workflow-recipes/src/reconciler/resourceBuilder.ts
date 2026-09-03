@@ -24,6 +24,10 @@ import {
   buildPluginWorkloadSdkEndpoint,
   buildPluginWorkloadSdkTokenSecretName,
 } from '../workflow/resourceNames'
+import {
+  INTERNAL_DEPENDENCY_EGRESS_PREFIX,
+  INTERNAL_DEPENDENCY_INGRESS_PREFIX,
+} from './internalDependencyNetworkPolicies'
 import { OWNER_RECIPE_LABEL_KEY } from './secretOwnership'
 import { buildWithOverrides } from './securityContext'
 import { workloadEffectiveContextRef } from './workflowContext'
@@ -494,7 +498,7 @@ export function buildOAuthBrokerTokenSecret(
 const CONTROL_API_PORT = 8090
 
 export function oauthBrokerEgressPolicyName(recipeName: string): string {
-  return `wf-${recipeName}-oauth-broker-egress`
+  return `${OAUTH_BROKER_EGRESS_PREFIX}${recipeName}${OAUTH_BROKER_EGRESS_SUFFIX}`
 }
 
 /**
@@ -1427,7 +1431,7 @@ export function buildUiEgressNetworkPolicy(
     apiVersion: 'networking.k8s.io/v1',
     kind: 'NetworkPolicy',
     metadata: {
-      name: `ui-egress-${recipeName}`,
+      name: uiEgressPolicyName(recipeName),
       namespace: sandboxUiNamespace,
       labels: {
         [MANAGED_BY_LABEL]: 'workflow-recipes',
@@ -1457,7 +1461,21 @@ export function buildUiEgressNetworkPolicy(
  * to fit the DNS-1123 63-char limit.
  */
 export function uiIngressPolicyName(recipeName: string, workloadId: string): string {
-  return composePolicyName('ui-ingress', recipeName, workloadId)
+  return composePolicyName(UI_INGRESS_PREFIX, recipeName, workloadId)
+}
+
+/**
+ * Name for the per-recipe UI egress NetworkPolicy.
+ *
+ * Unlike every other recipe NetworkPolicy this one is per-RECIPE, not per
+ * workload, so it does not go through `composePolicyName` and is not truncated.
+ * Extracted from three duplicated template literals (this builder, the
+ * reconciler's finalizer, and `reconcileUiEgressPolicy`) because issue #582's
+ * reap classifies live policies by name prefix: a name built in one place and
+ * classified in another has to have exactly one definition, or the two drift.
+ */
+export function uiEgressPolicyName(recipeName: string): string {
+  return `${UI_EGRESS_PREFIX}-${recipeName}`
 }
 
 /**
@@ -1648,11 +1666,79 @@ function composePolicyName(prefix: string, recipeName: string, workloadId: strin
 }
 
 export function workloadEgressPolicyName(recipeName: string, workloadId: string): string {
-  return composePolicyName('wl-egress', recipeName, workloadId)
+  return composePolicyName(WORKLOAD_EGRESS_PREFIX, recipeName, workloadId)
 }
 
 export function workloadIngressPolicyName(recipeName: string, workloadId: string): string {
-  return composePolicyName('wl-ingress', recipeName, workloadId)
+  return composePolicyName(WORKLOAD_INGRESS_PREFIX, recipeName, workloadId)
+}
+
+// ─── issue #582: classifying a LIVE policy back to its family ────────────────
+//
+// The reap no longer deletes per workload; it lists the recipe's policies and
+// deletes whatever is live but no longer desired. Deciding "is this one of the
+// six families I own?" is a name question, because five of the six carry no
+// distinguishing label (#524 — only wr-intdep-* has `policy-type`).
+//
+// Name parsing is safe here for one specific reason: NEITHER `composePolicyName`
+// implementation can touch the prefix. This file's version truncates only the
+// recipe segment; the internal-dependency lane's version shortens both segments
+// and appends a hash. Both interpolate the prefix whole. T9 pins that with a
+// round-trip over every builder, including names long enough to force truncation.
+//
+// Anything unrecognised classifies as `null` and is NEVER deleted: the webhook
+// gateway's policies, the run lane's, the coordinator-GFS one, and anything a
+// human created by hand.
+
+const UI_INGRESS_PREFIX = 'ui-ingress'
+const UI_EGRESS_PREFIX = 'ui-egress'
+const WORKLOAD_EGRESS_PREFIX = 'wl-egress'
+const WORKLOAD_INGRESS_PREFIX = 'wl-ingress'
+const OAUTH_BROKER_EGRESS_PREFIX = 'wf-'
+const OAUTH_BROKER_EGRESS_SUFFIX = '-oauth-broker-egress'
+
+export type RecipeNetworkPolicyFamily =
+  | 'ui-ingress'
+  | 'ui-egress'
+  | 'wl-egress'
+  | 'wl-ingress'
+  | 'internal-dependency'
+  | 'oauth-broker-egress'
+
+export const RECIPE_NETWORK_POLICY_FAMILIES: ReadonlySet<RecipeNetworkPolicyFamily> =
+  new Set<RecipeNetworkPolicyFamily>([
+    'ui-ingress',
+    'ui-egress',
+    'wl-egress',
+    'wl-ingress',
+    'internal-dependency',
+    'oauth-broker-egress',
+  ])
+
+/**
+ * Map a live NetworkPolicy name back to the recipe family that authors it, or
+ * `null` when this codebase does not author it.
+ *
+ * Order matters: `ui-ingress`/`ui-egress` and `wl-ingress`/`wl-egress` are
+ * mutually exclusive prefixes, but the oauth-broker name puts the recipe name in
+ * the MIDDLE (`wf-<recipe>-oauth-broker-egress`), so it needs both ends. A
+ * prefix-only test on `wf-` would swallow any future `wf-*` family.
+ */
+export function classifyRecipeNetworkPolicyName(name: string): RecipeNetworkPolicyFamily | null {
+  if (name.startsWith(`${UI_INGRESS_PREFIX}-`)) return 'ui-ingress'
+  if (name.startsWith(`${UI_EGRESS_PREFIX}-`)) return 'ui-egress'
+  if (name.startsWith(`${WORKLOAD_EGRESS_PREFIX}-`)) return 'wl-egress'
+  if (name.startsWith(`${WORKLOAD_INGRESS_PREFIX}-`)) return 'wl-ingress'
+  if (
+    name.startsWith(`${INTERNAL_DEPENDENCY_EGRESS_PREFIX}-`) ||
+    name.startsWith(`${INTERNAL_DEPENDENCY_INGRESS_PREFIX}-`)
+  ) {
+    return 'internal-dependency'
+  }
+  if (name.startsWith(OAUTH_BROKER_EGRESS_PREFIX) && name.endsWith(OAUTH_BROKER_EGRESS_SUFFIX)) {
+    return 'oauth-broker-egress'
+  }
+  return null
 }
 
 /**

@@ -1488,8 +1488,7 @@ describe('WorkflowRecipeReconciler', () => {
     })
     expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
       namespace: 'sandbox-recipes',
-      labelSelector:
-        'clerum.io/managed-by=workflow-recipes,clerum.io/policy-type=internal-dependency,clerum.io/recipe=test-recipe',
+      labelSelector: 'clerum.io/managed-by=workflow-recipes,clerum.io/recipe=test-recipe',
     })
   })
 
@@ -1647,12 +1646,20 @@ describe('WorkflowRecipeReconciler', () => {
     })
     expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
       namespace: 'sandbox-ui',
-      labelSelector:
-        'clerum.io/managed-by=workflow-recipes,clerum.io/policy-type=internal-dependency,clerum.io/recipe=test-recipe',
+      labelSelector: 'clerum.io/managed-by=workflow-recipes,clerum.io/recipe=test-recipe',
     })
+    // #582: the selector is scoped by OWNERSHIP (managed-by + recipe), not by
+    // policy-type — only one of the six families carries that label (#524), so
+    // requiring it would make the prune blind to the other five. The family is
+    // decided afterwards by `classifyRecipeNetworkPolicyName`, which is why
+    // dropping this term widens what the query SEES without widening what it
+    // DELETES.
     expect(mockNetworkingApi.listNamespacedNetworkPolicy.mock.calls[0][0].labelSelector).toContain(
-      'clerum.io/policy-type=internal-dependency'
+      'clerum.io/managed-by=workflow-recipes'
     )
+    expect(
+      mockNetworkingApi.listNamespacedNetworkPolicy.mock.calls[0][0].labelSelector
+    ).not.toContain('clerum.io/policy-type')
   })
 
   it('fails closed instead of replacing an existing non-WRC internal-dependency policy', async () => {
@@ -2071,13 +2078,11 @@ describe('WorkflowRecipeReconciler', () => {
 
     expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
       namespace: 'sandbox-recipes',
-      labelSelector:
-        'clerum.io/managed-by=workflow-recipes,clerum.io/policy-type=internal-dependency,clerum.io/recipe=test-recipe',
+      labelSelector: 'clerum.io/managed-by=workflow-recipes,clerum.io/recipe=test-recipe',
     })
     expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
       namespace: 'mcp-server',
-      labelSelector:
-        'clerum.io/managed-by=workflow-recipes,clerum.io/policy-type=internal-dependency,clerum.io/recipe=test-recipe',
+      labelSelector: 'clerum.io/managed-by=workflow-recipes,clerum.io/recipe=test-recipe',
     })
     expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
       name: 'wr-intdep-ingress-test-recipe-db',
@@ -2085,8 +2090,7 @@ describe('WorkflowRecipeReconciler', () => {
     })
     expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
       namespace: 'sandbox-ui',
-      labelSelector:
-        'clerum.io/managed-by=workflow-recipes,clerum.io/policy-type=internal-dependency,clerum.io/recipe=test-recipe',
+      labelSelector: 'clerum.io/managed-by=workflow-recipes,clerum.io/recipe=test-recipe',
     })
     expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
       name: 'wr-intdep-egress-test-recipe-mcp-recap',
@@ -4682,6 +4686,218 @@ describe('WorkflowRecipeReconciler', () => {
     expect(result.phase).toBe('degraded')
     expect(result.message).toContain('ui external egress resolution failed')
     expect(workflowReconcile).not.toHaveBeenCalled()
+  })
+
+  // ─── issue #582: reap from the live set, not blindly per workload ───────────
+  //
+  // Every NP lane used to call a `*IfExists` helper on the branch where no policy
+  // was desired. None of them checked existence: they issued the DELETE and
+  // swallowed the 404. A workload that never had a policy takes the same branch
+  // as one whose policy must go, so the reap fired forever — 15 115 DELETE/hour
+  // on clerum-dev, 100 % NOT_FOUND, 108 names at ~206/h each.
+  //
+  // The replacement records what each pass WANTS, then one prune per namespace
+  // deletes what is live, classifies into a recipe family, and is not wanted. The
+  // LIST it needs was already being issued for the internal-dependency prune, so
+  // the net request delta is zero.
+  //
+  // Every negative assertion below carries a liveness witness: `not.toHaveBeenCalled`
+  // is satisfied identically by "correctly skipped" and by "the code never ran",
+  // so each one is paired with proof the prune actually looked at the object.
+  describe('stale NetworkPolicy reap (issue #582)', () => {
+    const OWNER_SELECTOR = 'clerum.io/managed-by=workflow-recipes,clerum.io/recipe=test-recipe'
+
+    /** Serve `items` only in `namespace`; empty everywhere else. */
+    const liveIn = (namespace: string, ...names: string[]) => {
+      mockNetworkingApi.listNamespacedNetworkPolicy.mockImplementation(
+        ({ namespace: ns }: { namespace: string }) =>
+          Promise.resolve({
+            items: ns === namespace ? names.map(name => ({ metadata: { name } })) : [],
+          })
+      )
+    }
+
+    const allDeletedNames = () =>
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.map(
+        (call: unknown[]) => (call[0] as { name: string }).name
+      )
+
+    // `reconcileUiEgressPolicy` still issues one unconditional delete of its own
+    // policy when `spec.ui` is unset (the `if (!policy)` branch). That is out of
+    // scope here — measured at 2/hour against 15 115 — and stays until the family
+    // is folded into the prune. Excluded so these assertions describe what the
+    // PRUNE did; the exclusion is itself asserted in T0 so it cannot drift
+    // silently into something larger.
+    const UI_EGRESS_INLINE_DELETE = 'ui-egress-test-recipe'
+    const reapedNames = () => allDeletedNames().filter(n => n !== UI_EGRESS_INLINE_DELETE)
+
+    const recipeWithEgress = (bindings: unknown[]) =>
+      makeRecipe({
+        spec: {
+          workloads: [
+            { id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 },
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'nginx:1.30.1-alpine',
+              port: 9090,
+              egressBindings: bindings,
+            },
+          ],
+        },
+      } as Partial<WorkflowRecipeCRD>)
+
+    it('T1 issues NO DELETE in steady state, and proves it looked', async () => {
+      liveIn('sandbox-recipes')
+
+      const result = await reconciler.reconcile(makeRecipe())
+
+      expect(result.phase).toBe('active')
+      // Liveness witness: the prune ran and queried by ownership in every namespace.
+      expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        namespace: 'sandbox-recipes',
+        labelSelector: OWNER_SELECTOR,
+      })
+      expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        namespace: 'sandbox-ui',
+        labelSelector: OWNER_SELECTOR,
+      })
+      // The claim of the whole issue: nothing live, so the prune deletes nothing.
+      expect(reapedNames()).toEqual([])
+      // T0, stated rather than hidden: exactly ONE unconditional delete survives
+      // this PR — reconcileUiEgressPolicy's own, when `spec.ui` is unset. If this
+      // ever names something else, a lane regressed to blind deleting.
+      expect(allDeletedNames()).toEqual([UI_EGRESS_INLINE_DELETE])
+    })
+
+    it('T2 still reaps a policy whose workload dropped its egressBindings', async () => {
+      // The reap is not removed, only made conditional. Pass 1 authors the policy;
+      // pass 2 drops the bindings and the policy must go.
+      liveIn('sandbox-recipes', 'wl-egress-test-recipe-worker')
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+      try {
+        const result = await reconciler.reconcile(recipeWithEgress([]))
+
+        expect(result.phase).toBe('active')
+        expect(reapedNames()).toContain('wl-egress-test-recipe-worker')
+        expect(logSpy.mock.calls.flat().join(' ')).toContain(
+          'Deleted stale wl-egress NetworkPolicy "wl-egress-test-recipe-worker"'
+        )
+      } finally {
+        logSpy.mockRestore()
+      }
+    })
+
+    it('T2b reaps every recipe family the classifier owns', async () => {
+      liveIn(
+        'sandbox-recipes',
+        'ui-ingress-test-recipe-app',
+        'wl-ingress-test-recipe-worker',
+        'wr-intdep-egress-test-recipe-app',
+        'wf-test-recipe-oauth-broker-egress'
+      )
+
+      await reconciler.reconcile(makeRecipe())
+
+      expect(reapedNames().sort()).toEqual([
+        'ui-ingress-test-recipe-app',
+        'wf-test-recipe-oauth-broker-egress',
+        'wl-ingress-test-recipe-worker',
+        'wr-intdep-egress-test-recipe-app',
+      ])
+    })
+
+    it('T3 reaps policies of a workload that vanished from the spec', async () => {
+      // The old per-workload reap structurally could not do this: the loop no
+      // longer iterates over a workload that is gone, so nothing reached its
+      // policies. #368 is the same gap in HCC.
+      liveIn(
+        'sandbox-recipes',
+        'wl-egress-test-recipe-gone',
+        'wl-ingress-test-recipe-gone',
+        'ui-ingress-test-recipe-gone'
+      )
+
+      await reconciler.reconcile(makeRecipe())
+
+      expect(reapedNames().sort()).toEqual([
+        'ui-ingress-test-recipe-gone',
+        'wl-egress-test-recipe-gone',
+        'wl-ingress-test-recipe-gone',
+      ])
+    })
+
+    it('T4 never deletes a policy this codebase does not author', async () => {
+      liveIn(
+        'sandbox-recipes',
+        'allow-gateway-egress-to-handler-wf-test-recipe',
+        'test-recipe-coordinator-to-gfs',
+        'hand-made-policy',
+        'wl-egress-test-recipe-worker'
+      )
+
+      await reconciler.reconcile(makeRecipe())
+
+      // Liveness witness: the prune saw all four (one LIST, four items) …
+      expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        namespace: 'sandbox-recipes',
+        labelSelector: OWNER_SELECTOR,
+      })
+      // … and deleted only the one it owns.
+      expect(reapedNames()).toEqual(['wl-egress-test-recipe-worker'])
+    })
+
+    it('T6 treats a no-op-gated policy as DESIRED, not as stale', async () => {
+      // The trap of this change, and the one mistake here that causes an
+      // enforcement outage rather than a wasted request.
+      //
+      // `egressWriteNeeded` (issue #299) short-circuits when the enforced egress
+      // set is unchanged, so the lane `continue`s WITHOUT writing while the policy
+      // is alive and wanted. If the ledger were filled at the apply call, the
+      // prune would classify that live policy as undesired and delete it — every
+      // pass, forever.
+      //
+      // Feeding back the body the reconciler ACTUALLY created (rather than a
+      // hand-written one) is what makes the gate genuinely close: a fabricated
+      // policy whose signature happened to differ would leave the gate open and
+      // the test would pass for the wrong reason.
+      const clusterLocal = recipeWithEgress([
+        { dns: 'app.sandbox-recipes.svc.cluster.local', port: 8080 },
+      ])
+      liveIn('sandbox-recipes')
+
+      await reconciler.reconcile(clusterLocal)
+
+      const created = mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls
+        .map((call: unknown[]) => (call[0] as { body: { metadata?: { name?: string } } }).body)
+        .find(body => body.metadata?.name === 'wl-egress-test-recipe-worker')
+      expect(created).toBeDefined()
+
+      // Pass 2: the live object IS what pass 1 wrote, so the #299 gate closes.
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(created)
+      liveIn('sandbox-recipes', 'wl-egress-test-recipe-worker')
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockClear()
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+
+      try {
+        await reconciler.reconcile(clusterLocal)
+
+        const logged = logSpy.mock.calls.flat().join('\n')
+        // Liveness witness #1: the gate really closed. Without this the test
+        // would also pass when the gate stayed OPEN and the lane rewrote the
+        // policy — which is not the case being pinned.
+        expect(logged).toContain('egress set unchanged — no-op')
+        // Liveness witness #2: the prune ran and had this exact name in hand.
+        expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+          namespace: 'sandbox-recipes',
+          labelSelector: OWNER_SELECTOR,
+        })
+        // The assertion: recorded before the gate, therefore not reaped.
+        expect(reapedNames()).not.toContain('wl-egress-test-recipe-worker')
+      } finally {
+        logSpy.mockRestore()
+      }
+    })
   })
 
   it('R.8.24 — no ui-egress NetworkPolicy is created when spec.ui is unset', async () => {

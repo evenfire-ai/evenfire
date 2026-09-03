@@ -17,6 +17,7 @@ import * as k8s from '@kubernetes/client-node'
 import { STATE_ANNOTATION } from '@clerum/network-policy-core'
 import { OperatorConfig, loadConfig } from '../config'
 import { getPool } from '../db'
+import { networkPolicyReapDeniedTotal } from '../metrics'
 import { createLogger } from '../observability/logger'
 import {
   ConfigMapResourceDef,
@@ -266,6 +267,17 @@ function mergeInternalDependencyConditions(
   return mergeOwnedConditions(existing, fresh, INTERNAL_DEPENDENCY_CONDITION_TYPES)
 }
 
+// Issue #582 — stale NetworkPolicies the reap was forbidden to delete. Owned by
+// Step 9e. Emitted in both directions, so a recovered RBAC clears it.
+const NETWORK_POLICY_REAP_CONDITION_TYPES = new Set(['NetworkPolicyReapFailed'])
+
+function mergeNetworkPolicyReapConditions(
+  existing: StatusCondition[] | undefined,
+  fresh: StatusCondition[] | undefined
+): StatusCondition[] | undefined {
+  return mergeOwnedConditions(existing, fresh, NETWORK_POLICY_REAP_CONDITION_TYPES)
+}
+
 // Issue #637 — recipe↔Secret cross-ownership boundary for workload refs
 // (envSecret + imagePullSecrets). Owned by the Step 8 ownership gate.
 const SECRET_OWNERSHIP_CONDITION_TYPES = new Set(['EnvSecretOwnershipDenied'])
@@ -493,6 +505,63 @@ class ImmutableStatefulSetDriftError extends Error {
 }
 
 /**
+ * Every NetworkPolicy this reconcile pass wants to exist, keyed by namespace
+ * (issue #582).
+ *
+ * The reap used to be per workload: on the branch where no policy was desired it
+ * fired a `DELETE` and swallowed the 404. That is ~15 100 rejected requests an
+ * hour, because a workload that never had a policy takes the same branch as one
+ * whose policy must be removed. The reap has to know what exists, and the cheap
+ * way to know is to record what is wanted and compare against one LIST.
+ *
+ * **`remember` must be called on every branch that leaves a policy alive, not
+ * only where one is applied.** Both egress lanes have a no-op gate that returns
+ * without writing when the enforced set is unchanged: the policy is live and
+ * desired, and recording it only at the apply call would have the prune delete
+ * it on every pass. That is the one mistake in this change that causes an
+ * enforcement outage rather than a wasted request.
+ */
+/** A stale NetworkPolicy the reap was forbidden to delete (issue #582). */
+type ReapDenial = {
+  name: string
+  namespace: string
+  family: rb.RecipeNetworkPolicyFamily
+}
+
+class DesiredNetworkPolicyLedger {
+  private readonly byNamespace = new Map<string, Set<string>>()
+
+  /**
+   * Record a policy as desired. Throws on a manifest with no name or namespace:
+   * the predecessor (`rememberDesired`) returned silently there, which was
+   * harmless when the prune only compared internal-dependency names, but under
+   * the unified prune an unrecorded policy is a DELETED policy. Fail loud.
+   */
+  remember(policy: k8s.V1NetworkPolicy): void {
+    const namespace = policy.metadata?.namespace
+    const name = policy.metadata?.name
+    if (!namespace || !name) {
+      throw new Error(
+        `Cannot record a desired NetworkPolicy without both name and namespace (name=${
+          name ?? '<none>'
+        }, namespace=${namespace ?? '<none>'})`
+      )
+    }
+    const names = this.byNamespace.get(namespace) ?? new Set<string>()
+    names.add(name)
+    this.byNamespace.set(namespace, names)
+  }
+
+  has(namespace: string, name: string): boolean {
+    return this.byNamespace.get(namespace)?.has(name) ?? false
+  }
+
+  namespaces(): string[] {
+    return [...this.byNamespace.keys()]
+  }
+}
+
+/**
  * Build the error thrown when external egress FQDNs can't be resolved. Returns
  * a `RetryableReconcileError` only when EVERY failure was transient (a resolver
  * blip worth retrying); a single permanent failure (no records or a blocked
@@ -520,6 +589,13 @@ export interface ReconcileResult {
   webhookConditions?: StatusCondition[]
   workflowConditions?: StatusCondition[]
   internalDependencyConditions?: StatusCondition[]
+  /**
+   * NetworkPolicyReapFailed condition(s) from Step 9e (issue #582). `True` when
+   * RBAC denied deleting a stale policy, which therefore stays enforced; `False`
+   * on a clean pass. Never affects `phase`: a latched failure would be invisible
+   * (nothing outside kubectl renders a recipe phase) and sticky.
+   */
+  networkPolicyReapConditions?: StatusCondition[]
   /**
    * EnvSecretOwnershipDenied condition(s) from the Step 8 ownership gate
    * (Issue #637). `True` when a workload references a Secret it does not own;
@@ -1884,6 +1960,7 @@ export class WorkflowRecipeReconciler {
       }
 
       let workflowInternalDependencyConditions: StatusCondition[] | undefined
+      let workflowNetworkPolicyReapConditions: StatusCondition[] | undefined
       let workflowSecretOwnershipConditions: StatusCondition[] | undefined
       let workflowWorkloadConditions: StatusCondition[] | undefined
       if (workflowWorkloads.length > 0) {
@@ -1893,6 +1970,7 @@ export class WorkflowRecipeReconciler {
         try {
           const workflowDeploy = await this.deployWorkflowWorkloads(recipe, name)
           workflowInternalDependencyConditions = workflowDeploy.internalDependencyConditions
+          workflowNetworkPolicyReapConditions = workflowDeploy.networkPolicyReapConditions
           workflowWorkloadConditions = workflowDeploy.workloadConditions
           // Issue #637 — surface the EnvSecretOwnershipDenied condition from the
           // workflow build path too; previously it was computed and dropped, so a
@@ -2010,6 +2088,7 @@ export class WorkflowRecipeReconciler {
           !result.skipStatusPatch &&
           (result.phase === 'deploying' || result.pluginWorkloadSdkPolicyPending === true),
         internalDependencyConditions: workflowInternalDependencyConditions,
+        networkPolicyReapConditions: workflowNetworkPolicyReapConditions,
         secretOwnershipConditions: workflowSecretOwnershipConditions,
       }
     }
@@ -2486,10 +2565,14 @@ export class WorkflowRecipeReconciler {
       // Step 9b: Sandbox UI egress policy + symmetric ingress on each
       // internal-egress target (without the ingress side the target stays
       // behind deny-all-<ns> and UI→backend traffic is dropped).
-      await this.reconcileUiEgressPolicy(recipe)
-      await this.reconcileUiIngressPolicies(recipe)
+      // #582: every NP lane records what it wants here; one prune after them all
+      // deletes whatever is live and no longer wanted. Replaces six per-workload
+      // unconditional DELETEs that returned NOT_FOUND ~15 100 times an hour.
+      const desiredNetworkPolicies = new DesiredNetworkPolicyLedger()
+      await this.reconcileUiEgressPolicy(recipe, desiredNetworkPolicies)
+      await this.reconcileUiIngressPolicies(recipe, desiredNetworkPolicies)
       // Egress for background-OAuth workloads → control-api broker route.
-      await this.reconcileOAuthBrokerEgressPolicy(recipe)
+      await this.reconcileOAuthBrokerEgressPolicy(recipe, desiredNetworkPolicies)
 
       // Step 9c: Per-workload egressBindings → NetworkPolicies
       // For each non-MCP, non-UI workload that declares egressBindings,
@@ -2497,11 +2580,17 @@ export class WorkflowRecipeReconciler {
       // any sibling targets it points at. MCP workloads inherit egress
       // through HCC via the McpServer CRD path; UI workloads use
       // `spec.ui.egress.*` which is handled by reconcileUiEgressPolicy.
-      await this.reconcileWorkloadEgressPolicies(recipe)
+      const skippedWorkloadIds = await this.reconcileWorkloadEgressPolicies(
+        recipe,
+        desiredNetworkPolicies
+      )
 
       // Step 9d: WRC-owned intra-recipe internal dependency policies.
       // This lane is separate from HCC binding-allow and legacy wl-* policies.
-      const internalDependencyConditions = await this.reconcileInternalDependencyPolicies(recipe)
+      const internalDependencyConditions = await this.reconcileInternalDependencyPolicies(
+        recipe,
+        desiredNetworkPolicies
+      )
       const internalDependencyNotReady = internalDependencyConditions.some(
         c => c.status === 'False'
       )
@@ -2515,6 +2604,17 @@ export class WorkflowRecipeReconciler {
           internalDependencyConditions,
         }
       }
+
+      // Step 9e (#582): reap what is live but no longer desired. Runs only once
+      // every lane has completed — a lane that threw leaves a half-built ledger,
+      // and reaping against that would delete live policies.
+      const reap = await this.pruneStaleRecipeNetworkPolicies(
+        recipe,
+        desiredNetworkPolicies,
+        rb.RECIPE_NETWORK_POLICY_FAMILIES,
+        skippedWorkloadIds
+      )
+      const networkPolicyReapConditions = [this.networkPolicyReapCondition(reap.reapDenied)]
 
       // Step 9a: MCP delegation — finalize (Context patch + ensure McpServer CRDs).
       // McpServer CRDs were already created in Step 7b (pre-deploy handshake).
@@ -2646,6 +2746,7 @@ export class WorkflowRecipeReconciler {
         workloadStatuses,
         webhookConditions: webhookOutcome.conditions,
         internalDependencyConditions,
+        networkPolicyReapConditions,
         secretOwnershipConditions: secretOwnership.conditions,
         workloadConditions,
         pluginWorkloadSdkProviderUnavailable: sdkOnlyProviderUnavailable,
@@ -3113,6 +3214,7 @@ export class WorkflowRecipeReconciler {
     name: string
   ): Promise<{
     internalDependencyConditions: StatusCondition[]
+    networkPolicyReapConditions: StatusCondition[]
     secretOwnershipConditions: StatusCondition[]
     workloadConditions: StatusCondition[]
   }> {
@@ -3120,6 +3222,7 @@ export class WorkflowRecipeReconciler {
     if (workloads.length === 0)
       return {
         internalDependencyConditions: [],
+        networkPolicyReapConditions: [],
         secretOwnershipConditions: [],
         workloadConditions: [],
       }
@@ -3129,6 +3232,7 @@ export class WorkflowRecipeReconciler {
       )
       return {
         internalDependencyConditions: [],
+        networkPolicyReapConditions: [],
         secretOwnershipConditions: [],
         workloadConditions: [],
       }
@@ -3188,6 +3292,7 @@ export class WorkflowRecipeReconciler {
       )
       return {
         internalDependencyConditions: [],
+        networkPolicyReapConditions: [],
         secretOwnershipConditions: [],
         workloadConditions: [],
       }
@@ -3315,10 +3420,12 @@ export class WorkflowRecipeReconciler {
 
     // Sandbox UI egress policy + symmetric ingress on internal-egress
     // targets (no-op when spec.ui is unset; idempotent)
+    // #582: same ledger-then-prune shape as reconcileInternal.
+    const desiredNetworkPolicies = new DesiredNetworkPolicyLedger()
     try {
-      await this.reconcileUiEgressPolicy(recipe)
-      await this.reconcileUiIngressPolicies(recipe)
-      await this.reconcileOAuthBrokerEgressPolicy(recipe)
+      await this.reconcileUiEgressPolicy(recipe, desiredNetworkPolicies)
+      await this.reconcileUiIngressPolicies(recipe, desiredNetworkPolicies)
+      await this.reconcileOAuthBrokerEgressPolicy(recipe, desiredNetworkPolicies)
     } catch (err) {
       console.error(
         `[WR-Reconciler] UI egress/ingress policies failed for workflow "${name}":`,
@@ -3329,14 +3436,21 @@ export class WorkflowRecipeReconciler {
 
     // Per-workload egressBindings → NetworkPolicies (idempotent; no-op when
     // no workload declares egressBindings).
+    let skippedWorkloadIds: ReadonlySet<string>
     try {
-      await this.reconcileWorkloadEgressPolicies(recipe)
+      skippedWorkloadIds = await this.reconcileWorkloadEgressPolicies(
+        recipe,
+        desiredNetworkPolicies
+      )
     } catch (err) {
       console.error(`[WR-Reconciler] Workload egress policies failed for workflow "${name}":`, err)
       throw err
     }
 
-    const internalDependencyConditions = await this.reconcileInternalDependencyPolicies(recipe)
+    const internalDependencyConditions = await this.reconcileInternalDependencyPolicies(
+      recipe,
+      desiredNetworkPolicies
+    )
     const internalDependencyNotReady = internalDependencyConditions.some(c => c.status === 'False')
     if (internalDependencyNotReady) {
       throw new InternalDependencyReconcileError(
@@ -3345,6 +3459,18 @@ export class WorkflowRecipeReconciler {
         internalDependencyConditions
       )
     }
+
+    // Step 9e (#582): reap what is live but no longer desired, once every lane
+    // has recorded what it wants. A RetryableReconcileError from here reaches
+    // the caller's catch at :1901, which maps it to `degraded` + retry rather
+    // than the default `failed` + `workflowPhase: failed`.
+    const reap = await this.pruneStaleRecipeNetworkPolicies(
+      recipe,
+      desiredNetworkPolicies,
+      rb.RECIPE_NETWORK_POLICY_FAMILIES,
+      skippedWorkloadIds
+    )
+    const networkPolicyReapConditions = [this.networkPolicyReapCondition(reap.reapDenied)]
 
     // MCP delegation — finalize Context allowlist and McpServer CRDs.
     // Children live in `mcp-server` (mcpBatchNs), not the recipe's own ns.
@@ -3355,6 +3481,7 @@ export class WorkflowRecipeReconciler {
         )
         return {
           internalDependencyConditions,
+          networkPolicyReapConditions,
           secretOwnershipConditions: secretOwnership.conditions,
           workloadConditions: [],
         }
@@ -3385,6 +3512,7 @@ export class WorkflowRecipeReconciler {
 
     return {
       internalDependencyConditions,
+      networkPolicyReapConditions,
       secretOwnershipConditions: secretOwnership.conditions,
       workloadConditions: [],
     }
@@ -3685,7 +3813,7 @@ export class WorkflowRecipeReconciler {
     // The ui-egress NetworkPolicy lives in sandbox-ui (cross-namespace from the
     // CRD), so K8s GC does not reap it via the Recipe's ownerReference. Always
     // attempt deletion — safeDelete swallows 404 when no policy was created.
-    const uiPolicyName = `ui-egress-${recipe.metadata.name}`
+    const uiPolicyName = rb.uiEgressPolicyName(recipe.metadata.name)
     await this.safeDelete(
       () =>
         this.networkingApi.deleteNamespacedNetworkPolicy({
@@ -4101,8 +4229,11 @@ export class WorkflowRecipeReconciler {
    * it carries no ownerReference and relies on this method (and reconcileDelete)
    * for cleanup.
    */
-  private async reconcileUiEgressPolicy(recipe: WorkflowRecipeCRD): Promise<void> {
-    const policyName = `ui-egress-${recipe.metadata.name}`
+  private async reconcileUiEgressPolicy(
+    recipe: WorkflowRecipeCRD,
+    desired: DesiredNetworkPolicyLedger
+  ): Promise<void> {
+    const policyName = rb.uiEgressPolicyName(recipe.metadata.name)
     const ns = this.config.sandboxUiNamespace
 
     const externals = recipe.spec.ui?.egress?.external ?? []
@@ -4198,6 +4329,11 @@ export class WorkflowRecipeReconciler {
       return
     }
 
+    // #582: record BEFORE the no-op gate. The gate returns without writing while
+    // the policy is live and desired; recording only at the apply below would
+    // make the prune delete it on every pass.
+    desired.remember(policy)
+
     // issue #299: NO-OP when the accumulated egress set and rules are already
     // live — a TTL-only refresh must not churn the apiserver/dataplane. But DO
     // write when the persisted window is aging (renewalDue, audit M1), even if
@@ -4251,7 +4387,10 @@ export class WorkflowRecipeReconciler {
    * no longer referenced has its stale policy reaped — mirrors the
    * ingress-side handling in `reconcileWorkloadEgressPolicies`.
    */
-  private async reconcileUiIngressPolicies(recipe: WorkflowRecipeCRD): Promise<void> {
+  private async reconcileUiIngressPolicies(
+    recipe: WorkflowRecipeCRD,
+    desired: DesiredNetworkPolicyLedger
+  ): Promise<void> {
     const ns = this.config.sandboxNamespace
     const internal = recipe.spec.ui?.egress?.internal ?? []
 
@@ -4265,10 +4404,9 @@ export class WorkflowRecipeReconciler {
 
     for (const w of recipe.spec.workloads ?? []) {
       const ports = portsByWorkload.get(w.id)
-      if (!ports || ports.size === 0) {
-        await this.deleteUiIngressIfExists(recipe.metadata.name, w.id, ns)
-        continue
-      }
+      // No ports declared → no policy wanted. The stale one, if any, is reaped by
+      // pruneStaleRecipeNetworkPolicies rather than by an unconditional DELETE here.
+      if (!ports || ports.size === 0) continue
       const policy = rb.buildUiIngressNetworkPolicy(
         recipe,
         w.id,
@@ -4276,24 +4414,40 @@ export class WorkflowRecipeReconciler {
         ns,
         this.config.sandboxUiNamespace
       )
-      if (!policy) {
-        await this.deleteUiIngressIfExists(recipe.metadata.name, w.id, ns)
-        continue
-      }
+      if (!policy) continue
+      desired.remember(policy)
       await this.applyNetworkPolicy(policy, ns)
     }
   }
 
-  private async deleteUiIngressIfExists(
-    recipeName: string,
-    workloadId: string,
-    namespace: string
-  ): Promise<void> {
-    const name = rb.uiIngressPolicyName(recipeName, workloadId)
-    await this.safeDelete(
-      () => this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace }),
-      `NetworkPolicy "${name}" in ${namespace}`
-    )
+  /**
+   * Surface stale NetworkPolicies the reap could not delete (issue #582).
+   *
+   * Emitted in BOTH directions so it clears on the next successful pass — a
+   * condition written only on failure latches `True` forever and stops meaning
+   * anything. The recipe phase is deliberately untouched: see the 403 branch of
+   * `pruneStaleRecipeNetworkPolicies`.
+   */
+  private networkPolicyReapCondition(reapDenied: readonly ReapDenial[]): StatusCondition {
+    const base = {
+      type: 'NetworkPolicyReapFailed',
+      lastTransitionTime: new Date().toISOString(),
+    }
+    if (reapDenied.length === 0) {
+      return {
+        ...base,
+        status: 'False',
+        reason: 'Reaped',
+        message: 'No stale WRC NetworkPolicy deletions were denied',
+      }
+    }
+    const listed = reapDenied.map(d => `"${d.name}" in ${d.namespace} (${d.family})`).join('; ')
+    return {
+      ...base,
+      status: 'True',
+      reason: 'DeleteForbidden',
+      message: `RBAC denied deleting ${reapDenied.length} stale NetworkPolicy(ies), which remain enforced: ${listed}`,
+    }
   }
 
   private internalDependencyCondition(
@@ -4316,7 +4470,8 @@ export class WorkflowRecipeReconciler {
   }
 
   private async reconcileInternalDependencyPolicies(
-    recipe: WorkflowRecipeCRD
+    recipe: WorkflowRecipeCRD,
+    desired: DesiredNetworkPolicyLedger
   ): Promise<StatusCondition[]> {
     const workloads = recipe.spec.workloads ?? []
     if (workloads.length === 0) {
@@ -4348,7 +4503,11 @@ export class WorkflowRecipeReconciler {
         ? 'OwnershipConflict'
         : 'InvalidInternalDependency'
       try {
-        await this.pruneStaleInternalDependencyPolicies(recipe, new Map())
+        await this.pruneStaleRecipeNetworkPolicies(
+          recipe,
+          new DesiredNetworkPolicyLedger(),
+          new Set<rb.RecipeNetworkPolicyFamily>(['internal-dependency'])
+        )
       } catch (error) {
         return [
           this.internalDependencyCondition(
@@ -4407,16 +4566,6 @@ export class WorkflowRecipeReconciler {
       sourcesByTarget.set(dep.targetWorkloadId, sources)
     }
 
-    const desiredByNamespace = new Map<string, Set<string>>()
-    const rememberDesired = (policy: k8s.V1NetworkPolicy): void => {
-      const namespace = policy.metadata?.namespace
-      const name = policy.metadata?.name
-      if (!namespace || !name) return
-      const names = desiredByNamespace.get(namespace) ?? new Set<string>()
-      names.add(name)
-      desiredByNamespace.set(namespace, names)
-    }
-
     try {
       for (const [sourceWorkloadId, targets] of targetsBySource.entries()) {
         const source = workloadById.get(sourceWorkloadId)
@@ -4429,7 +4578,7 @@ export class WorkflowRecipeReconciler {
           targets
         )
         if (!policy) continue
-        rememberDesired(policy)
+        desired.remember(policy)
         await this.applyNetworkPolicy(policy, sourceNamespace)
       }
 
@@ -4444,11 +4593,15 @@ export class WorkflowRecipeReconciler {
           sources
         )
         if (!policy) continue
-        rememberDesired(policy)
+        desired.remember(policy)
         await this.applyNetworkPolicy(policy, targetNamespace)
       }
-
-      await this.pruneStaleInternalDependencyPolicies(recipe, desiredByNamespace)
+      // The prune moved OUT of this try (issue #582). It now runs once, after
+      // every lane has recorded what it wants, for two reasons: this catch maps
+      // any error to OwnershipConflict/PolicyApplyFailed, which would swallow the
+      // RetryableReconcileError the prune raises on a 5xx and lose the `degraded`
+      // + retry path; and reaping against a ledger only this lane filled would
+      // delete every live policy the other five lanes own.
     } catch (error) {
       const reason =
         error instanceof NetworkPolicyOwnershipConflictError
@@ -4474,45 +4627,127 @@ export class WorkflowRecipeReconciler {
     ]
   }
 
+  /**
+   * Finalizer path: remove every internal-dependency policy of a recipe being
+   * deleted. An empty ledger means "nothing is desired", so all of them go.
+   *
+   * Scoped to `internal-dependency` in this PR to keep the finalizer's behaviour
+   * byte-identical; widening it to all six families is what closes the 47 orphan
+   * policies of deleted recipes, and it needs its own failure contract (a
+   * finalizer that throws can wedge a recipe in `Terminating`). Separate PR.
+   */
   private async cleanupInternalDependencyPolicies(recipe: WorkflowRecipeCRD): Promise<void> {
-    await this.pruneStaleInternalDependencyPolicies(recipe, new Map())
+    await this.pruneStaleRecipeNetworkPolicies(
+      recipe,
+      new DesiredNetworkPolicyLedger(),
+      new Set<rb.RecipeNetworkPolicyFamily>(['internal-dependency'])
+    )
   }
 
-  private async pruneStaleInternalDependencyPolicies(
+  /**
+   * Delete every recipe NetworkPolicy that is LIVE but no longer desired
+   * (issue #582).
+   *
+   * Replaces the per-workload reap, which fired an unconditional `DELETE` on the
+   * branch where no policy was wanted and swallowed the 404 — ~15 100 rejected
+   * requests an hour on clerum-dev, 100 % `NOT_FOUND`, because a workload that
+   * never had a policy takes the same branch as one whose policy must go.
+   *
+   * Costs nothing extra: the intdep prune already issued exactly these LISTs
+   * every pass. Widening the selector and the family set reuses them.
+   *
+   * Selection is by OWNERSHIP (`managed-by` + `recipe`), classification by NAME.
+   * The `policy-type` term is dropped from the selector because only one of the
+   * six families carries that label (#524) — dropping it makes the query see
+   * more, never less, and the family check re-narrows it. Anything the classifier
+   * does not recognise is left alone: the webhook gateway's policies (no `recipe`
+   * label), the run lane's, coordinator-to-gfs, and anything hand-made.
+   *
+   * `excludedWorkloadIds` carves out the `wl-*` policies of workloads that gained
+   * `transport` or became the UI workload. Nothing writes those names for those
+   * workloads, so they are stale — but they are produced by a spec edit rather
+   * than the reconcile loop, contribute nothing to the storm, and reaping them
+   * here would widen this change into a family it does not own. Tracked as #583.
+   */
+  private async pruneStaleRecipeNetworkPolicies(
     recipe: WorkflowRecipeCRD,
-    desiredByNamespace: Map<string, Set<string>>
-  ): Promise<void> {
+    desired: DesiredNetworkPolicyLedger,
+    families: ReadonlySet<rb.RecipeNetworkPolicyFamily>,
+    excludedWorkloadIds: ReadonlySet<string> = new Set()
+  ): Promise<{ deleted: number; reapDenied: ReapDenial[] }> {
     const namespaces = new Set<string>([
       this.config.sandboxNamespace,
       this.config.namespace,
       this.config.sandboxUiNamespace,
-      ...desiredByNamespace.keys(),
+      ...desired.namespaces(),
     ])
     const labelSelector = [
       'clerum.io/managed-by=workflow-recipes',
-      `${NETWORK_POLICY_TYPE_LABEL}=${INTERNAL_DEPENDENCY_POLICY_TYPE}`,
       `clerum.io/recipe=${recipe.metadata.name}`,
     ].join(',')
+
+    const excludedNames = new Set<string>()
+    for (const workloadId of excludedWorkloadIds) {
+      excludedNames.add(rb.workloadEgressPolicyName(recipe.metadata.name, workloadId))
+      excludedNames.add(rb.workloadIngressPolicyName(recipe.metadata.name, workloadId))
+    }
+
+    let deleted = 0
+    const reapDenied: ReapDenial[] = []
 
     for (const namespace of namespaces) {
       const list = (await this.networkingApi.listNamespacedNetworkPolicy({
         namespace,
         labelSelector,
       })) as k8s.V1NetworkPolicyList
-      const desiredNames = desiredByNamespace.get(namespace) ?? new Set<string>()
       for (const policy of list.items ?? []) {
         const name = policy.metadata?.name
-        if (!name || desiredNames.has(name)) continue
+        if (!name) continue
+        const family = rb.classifyRecipeNetworkPolicyName(name)
+        if (family === null) continue
+        if (!families.has(family)) continue
+        if (desired.has(namespace, name)) continue
+        if (excludedNames.has(name)) continue
         try {
           await this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace })
+          deleted += 1
+          // Logged ONLY on an actual deletion. A per-pass line would be ~12k
+          // lines/hour across 3 namespaces × 19 recipes × 206 passes, which is
+          // the log volume #492 exists to reduce.
           console.log(
-            `[WR-Reconciler] Deleted stale internal-dependency NetworkPolicy "${name}" in ${namespace}`
+            `[WR-Reconciler] Deleted stale ${family} NetworkPolicy "${name}" in ${namespace} (not in desired set)`
           )
         } catch (error) {
-          if (getErrorCode(error) !== 404) throw error
+          const code = getErrorCode(error)
+          // The normal case: something else already removed it.
+          if (code === 404) continue
+          if (code === 403) {
+            // An enforcement leak, not a transient fault: the policy is no longer
+            // desired and stays enforced. Report on three channels and keep going
+            // — deliberately NOT a throw, because the caller's default arm maps an
+            // unrecognised error to `phase: failed` + `workflowPhase: failed`, and
+            // a latched recipe is both invisible (nothing outside kubectl renders
+            // a recipe phase) and sticky (self-heal at :1536 requires the message
+            // to match isRetryableInfraError, which a 403 does not).
+            console.error(
+              `[WR-Reconciler] FORBIDDEN deleting stale ${family} NetworkPolicy "${name}" in ${namespace} — it remains enforced:`,
+              error
+            )
+            networkPolicyReapDeniedTotal.inc({ family })
+            reapDenied.push({ name, namespace, family })
+            continue
+          }
+          // 5xx, timeouts, transport faults: hand the caller the type its own
+          // catch already maps to `degraded` + retry next pass (see :1907).
+          throw new RetryableReconcileError(
+            `Pruning stale ${family} NetworkPolicy "${name}" in ${namespace} failed transiently`,
+            { cause: error }
+          )
         }
       }
     }
+
+    return { deleted, reapDenied }
   }
 
   /**
@@ -4530,10 +4765,23 @@ export class WorkflowRecipeReconciler {
    * silent authorization drift, so any unresolved or blocked hostname fails
    * the reconcile before policy apply.
    */
-  private async reconcileWorkloadEgressPolicies(recipe: WorkflowRecipeCRD): Promise<void> {
+  /**
+   * Returns the workload ids whose `wl-*` policies this lane does NOT manage —
+   * workloads with a `transport` and the UI workload, both skipped by the loops
+   * below. The prune needs them so it does not reap a family this change does not
+   * own (issue #583). Derived here, next to the `continue`s that cause it, so the
+   * carve-out follows the skip if the skip ever changes.
+   */
+  private async reconcileWorkloadEgressPolicies(
+    recipe: WorkflowRecipeCRD,
+    desired: DesiredNetworkPolicyLedger
+  ): Promise<ReadonlySet<string>> {
     const workloads = recipe.spec.workloads ?? []
-    if (workloads.length === 0) return
     const uiWorkloadId = recipe.spec.ui?.workloadRef
+    const skippedWorkloadIds = new Set<string>(
+      workloads.filter(w => w.transport || (uiWorkloadId && w.id === uiWorkloadId)).map(w => w.id)
+    )
+    if (workloads.length === 0) return skippedWorkloadIds
 
     // Aggregate ingress sources keyed by target workload id. Filled as we
     // walk each source workload's cluster-local bindings.
@@ -4545,12 +4793,11 @@ export class WorkflowRecipeReconciler {
       if (uiWorkloadId && w.id === uiWorkloadId) continue
       const wlNs = this.resolveWorkloadNamespace(w, uiWorkloadId)
       const bindings = w.egressBindings ?? []
-      if (bindings.length === 0) {
-        // Reap any policy left over from a previous reconcile that DID
-        // have bindings — keeps the policy set in lockstep with the spec.
-        await this.deleteWorkloadEgressIfExists(recipe.metadata.name, w.id, wlNs)
-        continue
-      }
+      // No bindings → no policy wanted. Any leftover from a pass that DID have
+      // bindings is reaped by pruneStaleRecipeNetworkPolicies, which knows what
+      // exists. This branch used to fire an unconditional DELETE, and a workload
+      // that never had bindings takes it too — 2 004 NOT_FOUND/hour (issue #582).
+      if (bindings.length === 0) continue
 
       // Split into cluster-local sibling targets vs external FQDNs.
       const externalDeclared: { fqdn: string; port: number }[] = []
@@ -4641,10 +4888,13 @@ export class WorkflowRecipeReconciler {
         effectiveExternal,
         wlStateAnnotations
       )
-      if (!policy) {
-        await this.deleteWorkloadEgressIfExists(recipe.metadata.name, w.id, wlNs)
-        continue
-      }
+      if (!policy) continue
+
+      // #582: record BEFORE the no-op gate. The gate `continue`s without writing
+      // while the policy is live and desired; recording only at the apply below
+      // would make the prune delete it on every pass.
+      desired.remember(policy)
+
       // issue #299: NO-OP when the accumulated set and rules are already live —
       // but still write when the persisted window is aging (renewalDue, M1).
       if (
@@ -4675,17 +4925,16 @@ export class WorkflowRecipeReconciler {
       if (uiWorkloadId && w.id === uiWorkloadId) continue
       const wlNs = this.resolveWorkloadNamespace(w, uiWorkloadId)
       const sources = ingressSourcesByTarget.get(w.id) ?? []
-      if (sources.length === 0) {
-        await this.deleteWorkloadIngressIfExists(recipe.metadata.name, w.id, wlNs)
-        continue
-      }
+      // Nobody points at this workload → no policy wanted; the prune reaps any
+      // leftover. Same defect as the egress branch above (3 591 NOT_FOUND/hour).
+      if (sources.length === 0) continue
       const policy = rb.buildWorkloadIngressNetworkPolicy(w, recipe, wlNs, sources)
-      if (!policy) {
-        await this.deleteWorkloadIngressIfExists(recipe.metadata.name, w.id, wlNs)
-        continue
-      }
+      if (!policy) continue
+      desired.remember(policy)
       await this.applyNetworkPolicy(policy, wlNs)
     }
+
+    return skippedWorkloadIds
   }
 
   private assertInternalDependencyPolicyOwnership(
@@ -5041,30 +5290,6 @@ export class WorkflowRecipeReconciler {
     }
     throw new NetworkPolicyOwnershipConflictError(
       `Refusing to mutate NetworkPolicy "${recipeName}-coordinator-to-gfs" in ${namespace}: existing policy is not owned by WRC for WorkflowRecipe "${recipeName}"`
-    )
-  }
-
-  private async deleteWorkloadEgressIfExists(
-    recipeName: string,
-    workloadId: string,
-    namespace: string
-  ): Promise<void> {
-    const name = rb.workloadEgressPolicyName(recipeName, workloadId)
-    await this.safeDelete(
-      () => this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace }),
-      `NetworkPolicy "${name}" in ${namespace}`
-    )
-  }
-
-  private async deleteWorkloadIngressIfExists(
-    recipeName: string,
-    workloadId: string,
-    namespace: string
-  ): Promise<void> {
-    const name = rb.workloadIngressPolicyName(recipeName, workloadId)
-    await this.safeDelete(
-      () => this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace }),
-      `NetworkPolicy "${name}" in ${namespace}`
     )
   }
 
@@ -6199,9 +6424,11 @@ export class WorkflowRecipeReconciler {
    * this the `/recipe-oauth/token` call is dropped. Reaped when no workload
    * opts in via `oauthClientRefs`. Path B, spec §9.2.
    */
-  private async reconcileOAuthBrokerEgressPolicy(recipe: WorkflowRecipeCRD): Promise<void> {
+  private async reconcileOAuthBrokerEgressPolicy(
+    recipe: WorkflowRecipeCRD,
+    desired: DesiredNetworkPolicyLedger
+  ): Promise<void> {
     const ns = this.config.sandboxNamespace
-    const policyName = rb.oauthBrokerEgressPolicyName(recipe.metadata.name)
     const optedIn = (recipe.spec.workloads ?? [])
       .filter(w => rb.workloadUsesBackgroundOauth(w, recipe))
       .map(w => w.id)
@@ -6211,13 +6438,11 @@ export class WorkflowRecipeReconciler {
       ns,
       this.config.controlPlaneNamespace
     )
-    if (!policy) {
-      await this.safeDelete(
-        () => this.networkingApi.deleteNamespacedNetworkPolicy({ name: policyName, namespace: ns }),
-        `NetworkPolicy "${policyName}" in ${ns}`
-      )
-      return
-    }
+    // No workload opted into background OAuth → no policy wanted. This branch
+    // used to issue an unconditional DELETE every pass: 1 053 NOT_FOUND/hour
+    // (issue #582). The prune removes the leftover when there is one.
+    if (!policy) return
+    desired.remember(policy)
     await this.applyNetworkPolicy(policy, ns)
   }
 
@@ -6378,8 +6603,16 @@ export class WorkflowRecipeReconciler {
       workflowOutputMergedConditions ?? webhookMergedConditions ?? recipe.status?.conditions,
       result.internalDependencyConditions
     )
-    const secretOwnershipMergedConditions = mergeSecretOwnershipConditions(
+    const networkPolicyReapMergedConditions = mergeNetworkPolicyReapConditions(
       internalDependencyMergedConditions ??
+        workflowOutputMergedConditions ??
+        webhookMergedConditions ??
+        recipe.status?.conditions,
+      result.networkPolicyReapConditions
+    )
+    const secretOwnershipMergedConditions = mergeSecretOwnershipConditions(
+      networkPolicyReapMergedConditions ??
+        internalDependencyMergedConditions ??
         workflowOutputMergedConditions ??
         webhookMergedConditions ??
         recipe.status?.conditions,
