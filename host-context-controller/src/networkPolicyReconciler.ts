@@ -2292,8 +2292,10 @@ export class NetworkPolicyReconciler {
             // D4 fail-static, applied to a fault exactly as the transient branch
             // applies it to a resolver outage: when there is a live policy, its
             // rules are what is enforced right now, so report them and let the
-            // workload run on the last known-good egress. Read from the live
-            // object, not recomputed — recomputing is what faulted.
+            // HCC-managed Deployment start on the last known-good egress. Read
+            // from the live object, not recomputed — recomputing is what faulted.
+            // Only HCC: consumers of ExternalEgressReady treat any False as
+            // terminal, so a dependent WRC recipe still fails (#577).
             const enforced = (existingPolicy?.spec?.egress ?? [])
               .flatMap(rule => rule.to ?? [])
               .map(to => to.ipBlock?.cidr)

@@ -330,7 +330,12 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     // permanent DNS failure line, no prune". D4 fail-static is the house rule for
     // a condition we cannot resolve this pass, and the transient branch already
     // obeys it. When there is a live policy to serve, serve it, report the fault,
-    // and let the workload run on the last known-good egress.
+    // and let the HCC-managed Deployment start on the last known-good egress.
+    //
+    // Scoped to HCC on purpose. Every consumer of ExternalEgressReady treats a
+    // False as terminal whatever the reason, so a WRC recipe depending on this
+    // server still fails — see #577, which is a decision about what the
+    // condition means, not something this test can assert away.
     await seedAccumulatedPolicy({ lapsed: false })
     injectPostResolutionTypeError()
 
