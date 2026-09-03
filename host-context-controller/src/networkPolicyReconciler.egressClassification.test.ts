@@ -198,9 +198,15 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
    */
   function statusConditions(): Condition[] {
     type Op = { op?: string; path?: string; value?: unknown }
+    // `mock.calls` is `any[][]`, so the parameter is typed as the loose array it
+    // actually is and the argument shape is asserted inside. Annotating it as a
+    // fixed-length tuple does not typecheck under `tsc --noEmit` (which, unlike
+    // `tsconfig.build.json`, includes test files): an `any[]` may have fewer
+    // elements than a 1-tuple requires.
     return mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.flatMap(
-      (call: [{ body?: Op[] }]) =>
-        (call[0]?.body ?? []).flatMap((op): Condition[] => {
+      (call: unknown[]): Condition[] => {
+        const body = (call[0] as { body?: Op[] } | undefined)?.body ?? []
+        return body.flatMap((op): Condition[] => {
           if (op.path === '/status/conditions') return (op.value ?? []) as Condition[]
           if (op.path === '/status') {
             return (((op.value ?? {}) as { conditions?: Condition[] }).conditions ??
@@ -208,6 +214,7 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
           }
           return []
         })
+      }
     )
   }
 
@@ -268,6 +275,33 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
 
     const egress = statusConditions().filter(c => c.type === 'ExternalEgressReady')
     expect(egress.at(-1)?.reason).toBe('ExternalEgressRejected')
+  })
+
+  it('T5 keeps freezing the lapsed window on a real transient resolver code', async () => {
+    // The gate has two exemptions and this pins the one the other tests do not
+    // touch. Deleting `kind !== 'transient'` from the condition turns every
+    // transient failure into a rethrow — fail-static (D4) collapses, and an
+    // outage at the resolver would take the accumulated /32s with it.
+    //
+    // The only other coverage of this branch lives in
+    // `networkPolicyReconciler.egressFailStatic.test.ts`, and it arrives via the
+    // bounded-timeout wrapper's synthetic ETIMEDOUT rather than an answer the
+    // resolver actually gave. ESERVFAIL is that answer.
+    await seedAccumulatedPolicy({ lapsed: true })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    resolve4Mock.mockRejectedValueOnce(
+      Object.assign(new Error('queryA ESERVFAIL api.example.com'), { code: 'ESERVFAIL' })
+    )
+
+    // Freezing means the reconcile completes: no rethrow, no prune, no delete.
+    await reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+
+    expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(warn.mock.calls.flat().join('\n')).not.toContain('permanent DNS failure')
+    warn.mockRestore()
+
+    const egress = statusConditions().filter(c => c.type === 'ExternalEgressReady')
+    expect(egress.at(-1)?.reason).not.toBe('ExternalEgressReconcileFailed')
   })
 
   it("T4 treats EBADNAME as the operator's malformed name, not as a controller fault", async () => {

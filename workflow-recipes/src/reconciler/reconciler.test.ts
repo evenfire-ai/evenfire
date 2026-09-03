@@ -3977,6 +3977,46 @@ describe('WorkflowRecipeReconciler', () => {
       .find(b => b.metadata?.name === name)
   }
 
+  it('#513: a throwing lookup fails the recipe without touching the ui egress policy', async () => {
+    // The workload lane has the same guard; this is the ui lane, which reaches
+    // `resolveExternalEgress` through a different call site
+    // (`reconcileUiEgressPolicy`) with its own error routing. `defaultFqdnLookup`
+    // now throws rather than dressing an unclassifiable fault as "no A or AAAA
+    // records", and that only helps if BOTH call sites land somewhere honest:
+    // the terminal `failed` phase carrying the real code, reached before any
+    // write or delete, so a live `ui-egress-*` policy is left as it was.
+    const kc = new k8s.KubeConfig()
+    const rec = new WorkflowRecipeReconciler(kc, undefined, {
+      fqdnLookup: async () => {
+        throw new Error(
+          'DNS lookup for "api.stripe.com" failed with a non-DNS error (EBADFAMILY): queryA EBADFAMILY',
+          { cause: Object.assign(new Error('queryA EBADFAMILY'), { code: 'EBADFAMILY' }) }
+        )
+      },
+    })
+
+    const result = await rec.reconcile(
+      uiRecipeWithExternals([{ fqdn: 'api.stripe.com', port: 443 }])
+    )
+
+    expect(result.phase).toBe('failed')
+    expect(result.message).toContain('EBADFAMILY')
+    // Not laundered into the operator-facing no-records wording.
+    expect(result.message).not.toContain('no A or AAAA records')
+
+    expect(createdPolicy('ui-egress-test-recipe')).toBeUndefined()
+    expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          metadata: expect.objectContaining({ name: 'ui-egress-test-recipe' }),
+        }),
+      })
+    )
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'ui-egress-test-recipe' })
+    )
+  })
+
   it('records the ui lane egress set with the exact enforced cidrs and ports', async () => {
     const cap = captureEgressRecords()
     try {
