@@ -8,7 +8,7 @@ describe('GfsResourceMenu', () => {
     cleanup()
   })
 
-  it('uses a vertical kebab and presents a compact menu panel', () => {
+  it('uses a vertical kebab and presents an icon-led menu panel', () => {
     render(
       <GfsResourceMenu
         onCopyLink={vi.fn()}
@@ -34,6 +34,8 @@ describe('GfsResourceMenu', () => {
     const menu = screen.getByRole('menu')
     expect(menu.tagName).toBe('DIV')
     expect(menu.classList.contains('da-gfs-resource-menu__panel')).toBe(true)
+    expect(menu.querySelectorAll('[role="separator"]')).toHaveLength(2)
+    expect(menu.querySelectorAll('.ui-menu-item__icon')).toHaveLength(3)
     expect(screen.getByRole('menuitem', { name: 'Preview' })).toBeTruthy()
   })
 })
