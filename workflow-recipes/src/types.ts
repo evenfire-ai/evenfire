@@ -429,11 +429,36 @@ export interface SandboxUiSpec {
  * Known-shape OAuth provider adapters baked into control-api. Adding a
  * provider is a control-api change — recipes cannot speak OAuth to
  * arbitrary endpoints. Spec §9.9 / Decision 20.
+ *
+ * R1-L2: this is the full control-api ADAPTER SET (shared with mcp-servers),
+ * NOT the recipe-admissible set. monday/clickup/vercel (U2, spec 06) are
+ * mcpserver-only: the WorkflowRecipe CRD `provider` enum deliberately stays at
+ * the five legacy providers, so a recipe declaring one of the three is rejected
+ * at admission (fail-closed). Do NOT treat membership in this union / a true
+ * `isOAuthProvider` result as "valid for a recipe" — the recipe CRD enum is the
+ * authoritative gate for recipe OAuth clients.
  */
-export type OAuthProvider = 'salesforce' | 'slack' | 'notion' | 'microsoft-graph' | 'google'
+export type OAuthProvider =
+  | 'salesforce'
+  | 'slack'
+  | 'notion'
+  | 'microsoft-graph'
+  | 'google'
+  | 'monday'
+  | 'clickup'
+  | 'vercel'
 
 export function isOAuthProvider(value: string): value is OAuthProvider {
-  return ['salesforce', 'slack', 'notion', 'microsoft-graph', 'google'].includes(value)
+  return [
+    'salesforce',
+    'slack',
+    'notion',
+    'microsoft-graph',
+    'google',
+    'monday',
+    'clickup',
+    'vercel',
+  ].includes(value)
 }
 
 /** Reference to a Secret in the recipe's sandbox-recipes namespace. */
@@ -482,13 +507,15 @@ export interface OAuthClientDef {
 export interface PluginWorkloadSdkSpec {
   promptBridge?: {
     allowedModels?: string[]
+    /** Per-grant output ceiling. Enforced as `max_tokens` on API-key providers; codex-subscription cannot bind it on the ChatGPT wire and is bounded there by the contract limit of 16384 instead. */
     maxOutputTokens?: number
+    /** @deprecated Accepted for compatibility; no longer enforced (issue #348). Platform per-minute rate limits apply. */
     maxRequestsPerRun?: number
     /** Max total bytes across messages[].content. */
     maxRequestContentBytes?: number
     /** Max parallel promptBridge calls per workload; default 5. */
     maxConcurrentInvocations?: number
-    /** Rate limit per workload; default 60. */
+    /** Rate limit per workload; platform default 120 when unset (ENV CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN, issue #348). */
     maxInvocationsPerMinute?: number
     /** How long invocation results are queryable; default 24. */
     resultRetentionHours?: number
@@ -501,8 +528,9 @@ export interface PluginWorkloadSdkSpec {
     allowedEventTypes: string[]
     allowedTargetRefs?: string[]
     allowedUserRefs?: boolean
+    /** @deprecated Accepted for compatibility; no longer enforced (issue #348). Platform per-minute rate limits apply. */
     maxNotificationsPerRun?: number
-    /** Rate limit per workload; default 120. */
+    /** Rate limit per workload; platform default 150 when unset (ENV CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN, issue #348). */
     maxNotificationsPerMinute?: number
     /** Default 256. */
     maxTitleBytes?: number
@@ -521,6 +549,7 @@ export interface PluginWorkloadSdkSpec {
 export interface PluginWorkloadSdkSnippetConfig {
   promptBridge?: {
     allowedModels?: string[]
+    /** Per-grant output ceiling. Enforced as `max_tokens` on API-key providers; codex-subscription cannot bind it on the ChatGPT wire and is bounded there by the contract limit of 16384 instead. */
     maxOutputTokens?: number
   }
   clientNotifications?: {
@@ -544,7 +573,7 @@ export interface PluginWorkloadSdkCapabilityStatus {
   // explicitly send null so a previous validated record cannot survive a
   // later degraded/awaiting-policy transition.
   validatedAt?: string | null
-  bootstrapContractVersion?: 2 | null
+  bootstrapContractVersion?: 2 | 3 | null
   bootstrapPodUid?: string | null
   bootstrapProvider?: string | null
   bootstrapModel?: string | null
@@ -596,6 +625,10 @@ export interface WorkflowRecipeSpec {
   agent?: {
     model: string
     provider: LlmProviderId
+    /**
+     * Optional static-credential Secret. Omitted for oauth-broker providers
+     * such as `codex-subscription`; Control API remains the OAuth custodian.
+     */
     secretRef?: { name: string; namespace?: string }
     soulRef?: {
       storageRef: {

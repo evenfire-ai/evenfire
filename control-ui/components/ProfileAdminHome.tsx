@@ -6,7 +6,9 @@ import { CONTROL_ROUTES } from '@constants/routes'
 import {
   AdminPendingInvitationListItem,
   AdminUser,
+  DeleteAdminUserRequest,
   TeamListItem,
+  createDeleteAdminUserRequest,
   deleteAdminTeam,
   deleteAdminUser,
   getAdminTeams,
@@ -22,7 +24,7 @@ import { formatTeamRole } from '../lib/teamRoles'
 import { ControlAdminsPanel } from './ControlAdminsPanel'
 import type { ProfileAdminHomeProps, ProfileAdminTab } from './ProfileAdminHome.types'
 import { SectionSearchInput } from './SectionSearchInput'
-import { IconSettings, IconUsers } from './Sidebar/icons'
+import { IconShield, IconUsers } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
 import { TabBar } from './TabBar'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -30,7 +32,7 @@ import { useToast } from './Toast'
 import { IconAlertTriangle, IconRefresh, IconX } from './icons'
 import { CheckboxField } from './ui'
 
-type TeamSortKey = 'members' | 'agents' | 'contexts'
+type TeamSortKey = 'members' | 'agents'
 
 export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: ProfileAdminHomeProps) {
   const router = useRouter()
@@ -62,7 +64,6 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
   const [deleteDialogError, setDeleteDialogError] = useState('')
 
   const [teamAgentCounts, setTeamAgentCounts] = useState<Record<string, number>>({})
-  const [teamContextCounts, setTeamContextCounts] = useState<Record<string, number>>({})
   const [pendingInvitations, setPendingInvitations] = useState<AdminPendingInvitationListItem[]>([])
   const [resendingInvitationId, setResendingInvitationId] = useState<string | null>(null)
   const [resendingPasswordSetupUserId, setResendingPasswordSetupUserId] = useState<string | null>(
@@ -73,6 +74,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
   const isInitialLoad = busy && !loaded
   const isListRefreshing = busy && loaded
   const deleteUserTeamCheckIdRef = useRef(0)
+  const deleteUserRequestRef = useRef<DeleteAdminUserRequest | null>(null)
 
   function openUserTeams(user: AdminUser) {
     router.push(CONTROL_ROUTES.usersAndTeams.userTab(user.id, 'teams'))
@@ -121,7 +123,6 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
         Array.isArray(overview.pendingInvitations) ? overview.pendingInvitations : []
       )
       setTeamAgentCounts(overview.teamAgentCounts || {})
-      setTeamContextCounts(overview.teamContextCounts || {})
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load data')
     } finally {
@@ -183,17 +184,15 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
       let countDiff = 0
       if (teamSortKey === 'members') {
         countDiff = a.memberCount - b.memberCount
-      } else if (teamSortKey === 'agents') {
-        countDiff = (teamAgentCounts[a.id] ?? 0) - (teamAgentCounts[b.id] ?? 0)
       } else {
-        countDiff = (teamContextCounts[a.id] ?? 0) - (teamContextCounts[b.id] ?? 0)
+        countDiff = (teamAgentCounts[a.id] ?? 0) - (teamAgentCounts[b.id] ?? 0)
       }
       countDiff *= direction
       if (countDiff !== 0) return countDiff
       return a.name.localeCompare(b.name)
     })
     return sorted
-  }, [filteredTeams, teamAgentCounts, teamContextCounts, teamSortDir, teamSortKey])
+  }, [filteredTeams, teamAgentCounts, teamSortDir, teamSortKey])
 
   const sortedUsers = useMemo(() => {
     const sorted = [...visibleUsers]
@@ -355,6 +354,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
     setDeleteUserSoloTeams([])
     setDeleteEmptyTeamsWithUser(false)
     setDeleteUserTeamCheckLoading(false)
+    deleteUserRequestRef.current = createDeleteAdminUserRequest()
     setUserToDelete(user)
     if ((user.activeTeamCount || 0) === 0) return
 
@@ -389,7 +389,11 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
     setDeleteUserTeamCheckError('')
     const teamsToDelete = deleteEmptyTeamsWithUser ? deleteUserSoloTeams : []
     try {
-      await deleteAdminUser(userToDelete.id)
+      await deleteAdminUser(
+        userToDelete.id,
+        deleteUserRequestRef.current ??
+          (deleteUserRequestRef.current = createDeleteAdminUserRequest())
+      )
       const teamDeleteResults = await Promise.allSettled(
         teamsToDelete.map(team => deleteAdminTeam(team.id))
       )
@@ -398,6 +402,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
         return result?.status === 'rejected'
       })
       setUserToDelete(null)
+      deleteUserRequestRef.current = null
       setDeleteUserSoloTeams([])
       setDeleteEmptyTeamsWithUser(false)
       await loadData()
@@ -582,9 +587,6 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                         <th style={{ width: '5rem', textAlign: 'right' }}>
                           {renderTeamSortButton('agents', 'Agents')}
                         </th>
-                        <th style={{ width: '5rem', textAlign: 'right' }}>
-                          {renderTeamSortButton('contexts', 'Contexts')}
-                        </th>
                         <th style={{ width: '4.5rem', textAlign: 'right' }} aria-label="Actions" />
                       </tr>
                     </thead>
@@ -608,9 +610,6 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                         </th>
                         <th style={{ width: '5rem', textAlign: 'right' }}>
                           {renderTeamSortButton('agents', 'Agents')}
-                        </th>
-                        <th style={{ width: '5rem', textAlign: 'right' }}>
-                          {renderTeamSortButton('contexts', 'Contexts')}
                         </th>
                         <th style={{ width: '4.5rem', textAlign: 'right' }} aria-label="Actions" />
                       </tr>
@@ -655,15 +654,6 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                             }}
                           >
                             {teamAgentCounts[team.id] ?? 0}
-                          </td>
-                          <td
-                            style={{
-                              fontVariantNumeric: 'tabular-nums',
-                              color: 'var(--cu-text-muted)',
-                              textAlign: 'right',
-                            }}
-                          >
-                            {teamContextCounts[team.id] ?? 0}
                           </td>
                           <td style={{ textAlign: 'right' }}>
                             <button
@@ -763,7 +753,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                                   <div className="cu-row-actions cu-row-actions--wrap">
                                     <button
                                       type="button"
-                                      className="cu-btn cu-btn--secondary cu-btn--sm"
+                                      className="cu-btn cu-btn--sm"
                                       onClick={() => void resendPendingInvitation(invitation)}
                                       disabled={
                                         (busy && !loaded) || resendingInvitationId === invitation.id
@@ -828,7 +818,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                             <th className="cu-table__col-count">
                               <button
                                 type="button"
-                                className="cu-link cu-link--sm cu-table__sort-link"
+                                className="cu-table__sort-link"
                                 onClick={() =>
                                   setMemberTeamsSortDir(prev => (prev === 'asc' ? 'desc' : 'asc'))
                                 }
@@ -893,7 +883,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                                   {user.passwordPendingFromAcceptedInvitation ? (
                                     <button
                                       type="button"
-                                      className="cu-btn cu-btn--secondary cu-btn--sm cu-nowrap"
+                                      className="cu-btn cu-btn--sm cu-nowrap"
                                       onClick={event => {
                                         event.stopPropagation()
                                         void resendPasswordSetupInvitation(user)
@@ -918,18 +908,15 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                                     }}
                                     onKeyDown={event => event.stopPropagation()}
                                     disabled={busy && !loaded}
-                                    aria-label={
-                                      user.controlAdminId
-                                        ? `Open admin for member ${user.name || user.email}`
-                                        : `Create admin for member ${user.name || user.email}`
-                                    }
-                                    title={
-                                      user.controlAdminId
-                                        ? 'Open matching admin'
-                                        : 'Create admin from member'
-                                    }
+                                    aria-label={`${
+                                      user.controlAdminId ? 'View admin' : 'Create admin'
+                                    } for member ${user.name || user.email}`}
+                                    title={user.controlAdminId ? 'View admin' : 'Create admin'}
                                   >
-                                    <IconSettings />
+                                    <IconShield
+                                      createBadge={!user.controlAdminId}
+                                      relationshipRole="admin"
+                                    />
                                   </button>
                                   <button
                                     type="button"
@@ -1079,7 +1066,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
             </div>
             <p className="cu-muted" style={{ fontSize: '0.875rem', margin: '0 0 1rem' }}>
               Permanently delete <strong>{teamToDelete.name}</strong> and all memberships, pending
-              invitations, and team context/agent mappings. This cannot be undone.
+              invitations, and team access/agent mappings. This cannot be undone.
             </p>
             {deleteDialogError ? (
               <div className="cu-banner cu-banner--error" style={{ marginBottom: '0.75rem' }}>

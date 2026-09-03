@@ -104,18 +104,24 @@ export function registerCommunicationChannelCredentialsRoutes(
       }
       const existingSecretName = cc.spec?.credentialsSecretRef?.name
       if (existingSecretName) {
-        const merged = await gateway.mergeSecret({
+        await gateway.mergeSecret({
           name: existingSecretName,
           namespace: ns,
           type: 'Opaque',
           stringData: data,
         })
+        // Names-only response (mirrors routes/admin/secrets.ts, PR #223 policy):
+        // respond with only the rotated key NAMES, never secret values. The write
+        // result is not echoed — a merge-patch touches the whole Secret (including
+        // keys the caller did not send), so echoing raw k8s data would leak values
+        // into the HTTP response body (logs/proxies/error-trackers). `rotatedKeys`
+        // reflects exactly the keys this request wrote.
         res.status(200).json({
           name,
           secretName: existingSecretName,
           namespace: ns,
           rotated: true,
-          result: merged,
+          rotatedKeys: Object.keys(data).sort((a, b) => a.localeCompare(b)),
         })
         return
       }
@@ -131,18 +137,16 @@ export function registerCommunicationChannelCredentialsRoutes(
         ...(cc.spec ?? {}),
         credentialsSecretRef: { name: secretName },
       }
-      const updated = await gateway.updateResource(
-        'communicationchannels',
-        name,
-        { spec: nextSpec },
-        ns
-      )
+      await gateway.updateResource('communicationchannels', name, { spec: nextSpec }, ns)
+      // Names-only for consistency with the rotated:true branch and the #223
+      // policy. The updateResource result (the CommunicationChannel CRD) is not
+      // echoed — respond with only the written key NAMES.
       res.status(200).json({
         name,
         secretName,
         namespace: ns,
         rotated: false,
-        result: updated,
+        rotatedKeys: Object.keys(data).sort((a, b) => a.localeCompare(b)),
       })
     })
   )

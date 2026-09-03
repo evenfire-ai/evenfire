@@ -1,6 +1,7 @@
 import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { ToastProvider } from '@components/Toast'
 import EditCommunicationChannelPage from '../../app/communication-channels/[name]/edit/page'
 import * as api from '../../lib/api'
@@ -138,7 +139,10 @@ describe('EditCommunicationChannelPage', () => {
     })
 
     expect(screen.getByText('Teams Request URL')).toBeInTheDocument()
-    expect(screen.getByText(/\/webhooks\/teams\//)).toBeInTheDocument()
+    // Scoped to the readonly value field: the placeholder command block below
+    // also renders this same path as part of its (marker-origin) endpoint.
+    const requestUrlValue = document.querySelector('.cu-readonly-field.cu-copy-field__value')
+    expect(requestUrlValue?.textContent ?? '').toMatch(/\/webhooks\/teams\//)
     expect(screen.getByText('General')).toBeInTheDocument()
     expect(screen.getByText('Channel')).toBeInTheDocument()
   })
@@ -501,5 +505,454 @@ describe('EditCommunicationChannelPage Slack app manifest', () => {
     ])
     // Nothing was persisted to get here: no PUT, and the manifest is on screen.
     expect(vi.mocked(api.apiSend)).not.toHaveBeenCalled()
+  })
+})
+
+describe('EditCommunicationChannelPage Teams request URL', () => {
+  it('shows the Teams request URL from an unsaved draft, before any Teams settings are persisted', async () => {
+    mockChannel('teams-support', { hostRef: 'agentjose' })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    // Before typing, the URL should show Unavailable
+    expect(screen.getByText('Unavailable')).toBeInTheDocument()
+    expect(screen.queryByText(/\/webhooks\/teams\/teams%3A/)).not.toBeInTheDocument()
+
+    await user.type(screen.getByLabelText(/name/i), 'evenfire-bot')
+
+    // After typing into the bot name field, the URL should appear. Scoped to
+    // the readonly value field: the placeholder command block below also
+    // renders this same path as part of its (marker-origin) endpoint.
+    expect(screen.queryByText('Unavailable')).not.toBeInTheDocument()
+    await waitFor(() => {
+      const requestUrlValue = document.querySelector('.cu-readonly-field.cu-copy-field__value')
+      expect(requestUrlValue?.textContent ?? '').toMatch(/\/webhooks\/teams\/teams%3A/)
+    })
+  })
+
+  it('tells the operator the URL is a path when no public origin is configured', async () => {
+    // Without an origin the field renders a bare path, which Teams cannot accept
+    // as a Messaging endpoint. Saying "use this URL" there contradicts the
+    // warning directly beneath it, so the hint has three states, not two.
+    mockChannel('teams-support', { hostRef: 'agentjose' })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    expect(screen.getByText('Unavailable')).toBeInTheDocument()
+    expect(
+      screen.getByText('Enter the Name above and this channel gets its Teams Request URL.')
+    ).toBeInTheDocument()
+
+    await user.type(screen.getByLabelText(/name/i), 'evenfire-bot')
+
+    // A URL now exists, but it is relative, so the hint must not claim it is usable.
+    expect(
+      screen.getByText(
+        'This is a path, not a full URL. Prefix it with your public webhook origin before using it as the Messaging endpoint.'
+      )
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText('Use this URL as the Messaging endpoint for the Teams bot app.')
+    ).not.toBeInTheDocument()
+  })
+
+  it('tells the operator to use the URL directly once a public origin is configured', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    mockChannel('teams-support', { hostRef: 'agentjose' })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    await user.type(screen.getByLabelText(/name/i), 'evenfire-bot')
+
+    expect(
+      screen.getByText('Use this URL as the Messaging endpoint for the Teams bot app.')
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText(
+        'This is a path, not a full URL. Prefix it with your public webhook origin before using it as the Messaging endpoint.'
+      )
+    ).not.toBeInTheDocument()
+  })
+
+  it('does not render a Teams request URL for a channel with only the stale teams-app-name annotation', async () => {
+    mockChannel(
+      'telegram-channel',
+      { telegramSettings: { botHandle: '@ops_bot' } },
+      {
+        'clerum.io/teams-app-name': 'Stale Teams Name',
+      }
+    )
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    expect(screen.getByText('Unavailable')).toBeInTheDocument()
+    expect(screen.queryByText(/\/webhooks\/teams\/teams%3A/)).not.toBeInTheDocument()
+  })
+
+  it('shows the Teams request URL once an App Name is typed over a stale annotation', async () => {
+    mockChannel(
+      'telegram-channel',
+      { telegramSettings: { botHandle: '@ops_bot' } },
+      {
+        'clerum.io/teams-app-name': 'Stale Teams Name',
+      }
+    )
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    expect(screen.getByText('Unavailable')).toBeInTheDocument()
+
+    await user.type(screen.getByLabelText(/name/i), 'New Bot Name')
+
+    // Scoped to the readonly value field: the placeholder command block below
+    // also renders this same path as part of its (marker-origin) endpoint.
+    expect(screen.queryByText('Unavailable')).not.toBeInTheDocument()
+    await waitFor(() => {
+      const requestUrlValue = document.querySelector('.cu-readonly-field.cu-copy-field__value')
+      expect(requestUrlValue?.textContent ?? '').toMatch(/\/webhooks\/teams\/teams%3A/)
+    })
+  })
+})
+
+/**
+ * The `teams app create` command previously existed only on the create page, so
+ * an operator returning to fix or recreate a saved Teams channel had no way back
+ * to it -- including the repair path when a channel is recreated under a new
+ * name, which only needs the Name field retyped to regenerate a correct command.
+ */
+describe('EditCommunicationChannelPage Teams setup command', () => {
+  it('renders the create command with an absolute endpoint once the webhook origin is public', async () => {
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    mockChannel('teams-channel', {
+      teamsSettings: { appName: 'evenfire', appId: '', tenantId: '' },
+    })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    expect(screen.getByText('Create the Teams bot')).toBeInTheDocument()
+    const command = screen.getByText(/teams app create/).closest('pre')
+    expect(command).toHaveTextContent('--name "evenfire"')
+    expect(command).toHaveTextContent('--endpoint "https://webhook.example.com/webhooks/teams/')
+    expect(command).toHaveTextContent('--env .env')
+    expect(screen.getByRole('button', { name: 'Copy Teams bot create command' })).toBeEnabled()
+    expect(screen.queryByText(/no public webhook origin/)).not.toBeInTheDocument()
+
+    // Repair path: retyping the Name field, as when a channel is recreated under
+    // a new name, regenerates the command with the new name and the same origin.
+    await user.clear(screen.getByLabelText(/name/i))
+    await user.type(screen.getByLabelText(/name/i), 'evenfire-bot-2')
+    const updatedCommand = screen.getByText(/teams app create/).closest('pre')
+    expect(updatedCommand).toHaveTextContent('--name "evenfire-bot-2"')
+  })
+
+  it('warns and still renders a placeholder-origin command when the deployment has no public webhook origin', async () => {
+    // No NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL and jsdom's hostname is
+    // localhost, which is the minikube case: the Teams Request URL above renders
+    // as a bare path, and registering a bot against that path would point the
+    // CLI at a host that does not exist -- but leaving the operator with
+    // nothing to run is worse: the documented minikube workflow is to
+    // substitute a real origin for the placeholder by hand, so the command
+    // still renders, built from the marker origin.
+    mockChannel('teams-channel', {
+      teamsSettings: { appName: 'evenfire', appId: '', tenantId: '' },
+    })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    const warning = document.querySelector('.cu-banner--warning')
+    expect(warning?.textContent ?? '').toMatch(/no public webhook origin/)
+    expect(screen.getByText('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL')).toBeInTheDocument()
+
+    const command = screen.getByText(/teams app create/).closest('pre')
+    expect(command).toHaveTextContent('--name "evenfire"')
+    // Pin the literal placeholder origin: this is what the operator is being
+    // told to replace by hand.
+    expect(command).toHaveTextContent('--endpoint "https://<public-webhook-origin>/webhooks/teams/')
+    expect(screen.getByRole('button', { name: 'Copy Teams bot create command' })).toBeEnabled()
+  })
+
+  it('disables Copy on a command with a blank bot name, matching the create page', async () => {
+    // hasTeamsConfigForRequestUrl is satisfied by CLIENT_ID or TENANT_ID alone,
+    // so a channel with credentials but a blank Name still renders a command --
+    // one that buildTeamsAppCreateCommand fills with the literal placeholder
+    // <bot-name>. That placeholder must not look copyable and runnable.
+    vi.stubEnv('NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL', 'https://webhook.example.com')
+    mockChannel('teams-channel', {
+      teamsSettings: { appName: '', appId: '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82', tenantId: '' },
+    })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    const command = screen.getByText(/teams app create/).closest('pre')
+    expect(command).toHaveTextContent('--name "<bot-name>"')
+    expect(screen.getByRole('button', { name: 'Copy Teams bot create command' })).toBeDisabled()
+
+    await user.type(screen.getByLabelText(/name/i), 'evenfire-bot')
+
+    expect(screen.getByRole('button', { name: 'Copy Teams bot create command' })).toBeEnabled()
+  })
+
+  it('renders neither the command nor the warning until this channel has Teams config', async () => {
+    // Mirrors the Slack manifest gate: a URL or a command on a channel with no
+    // real Teams provider is a copyable dead end, so both wait for the draft to
+    // carry actual Teams config.
+    mockChannel('telegram-channel', { telegramSettings: { botHandle: '@ops_bot' } })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    expect(screen.getByText('Unavailable')).toBeInTheDocument()
+    expect(screen.queryByText('Create the Teams bot')).not.toBeInTheDocument()
+    expect(screen.queryByText(/teams app create/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/no public webhook origin/)).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * An operator without an authenticated Teams CLI, or without a tenant that
+ * permits sideloading, used to hit both assumptions unannounced, only after
+ * copying the `teams app create` command. The prerequisites block exists to
+ * surface both before that command, and to point at the full guide. Unlike
+ * the create page, this section renders unconditionally on the Teams tab
+ * (it does not wait for teamsRequestUrl), so no draft setup is needed here.
+ */
+describe('EditCommunicationChannelPage Teams prerequisites', () => {
+  const TEAMS_GUIDE_URL =
+    'https://github.com/evenfire-ai/evenfire/blob/main/docs/how-to/connect-teams.md'
+
+  it('shows CLI install/login and the sideloading check on the Teams tab', async () => {
+    mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    expect(screen.getByText(/npm install -g @microsoft\/teams\.cli/)).toBeInTheDocument()
+    expect(screen.getByText('teams login')).toBeInTheDocument()
+    expect(screen.getByText('Sideloading: enabled')).toBeInTheDocument()
+    // The point of running `teams status` at all: it proves both prerequisites
+    // in one shot, and a disabled result means propagation, not breakage.
+    expect(screen.getByText(/proves both prerequisites/i)).toBeInTheDocument()
+    expect(screen.getByText(/not that anything is broken/i)).toBeInTheDocument()
+  })
+
+  it('links to the Teams setup guide', async () => {
+    mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    const link = screen.getByRole('link', { name: /Teams setup guide/i })
+    expect(link).toHaveAttribute('href', TEAMS_GUIDE_URL)
+    expect(link).toHaveAttribute('target', '_blank')
+  })
+
+  it('does not show the Teams prerequisites on the Slack tab', async () => {
+    mockChannel('slack-channel', SLACK_CHANNEL_SPEC)
+    await renderLoadedPage()
+
+    expect(screen.queryByText('Sideloading: enabled')).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /Teams setup guide/i })).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * spec.teamsSettings.appName is a free-form DISPLAY name: the CRD declares it
+ * with no pattern (unlike tenantId right below it), control-api checks only
+ * non-empty and 80 characters (unlike appId, which carries a UUID regex), and
+ * the Teams CLI documents --name the same way. A kebab rule invented in the UI
+ * mangled legitimate names as they were typed and, worse, locked an operator out
+ * of saving ANY change on a channel whose stored name predated it.
+ */
+describe('EditCommunicationChannelPage Teams name validation', () => {
+  it('keeps a free-form display name exactly as typed', async () => {
+    mockChannel('teams-channel', { teamsSettings: { appName: '' } })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    const nameInput = screen.getByLabelText(/^name$/i) as HTMLInputElement
+    // The placeholder is a display name, so it does not imply a kebab rule.
+    expect(nameInput.placeholder).toBe('Evenfire Bot')
+
+    await user.type(nameInput, 'My Bot')
+
+    expect(nameInput).toHaveValue('My Bot')
+  })
+
+  it('saves an unrelated field on a channel whose stored name has a space', async () => {
+    // The regression the invented rule caused: `My Bot` is a legitimate stored
+    // appName, and the gate validated the whole hydrated draft, so this channel
+    // could not save CLIENT_ID, access, or anything else until the name was
+    // rewritten.
+    mockChannel('teams-channel', { teamsSettings: { appName: 'My Bot' } })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    await user.type(screen.getByLabelText(/^CLIENT_ID/), '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82')
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
+    const [, , body] = vi.mocked(api.apiSend).mock.calls[0] as [string, string, { spec: unknown }]
+    const teamsSettings = (body.spec as { teamsSettings: { appName: string; appId: string } })
+      .teamsSettings
+    expect(teamsSettings.appName).toBe('My Bot')
+    expect(teamsSettings.appId).toBe('7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82')
+  })
+
+  it('blocks Save and does not persist a Teams bot name past the server limit', async () => {
+    mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    const nameInput = screen.getByLabelText(/^name$/i) as HTMLInputElement
+    await user.clear(nameInput)
+    // Pasted rather than typed: 81 keystrokes through userEvent is slow, and the
+    // field holds what it is given either way.
+    fireEvent.change(nameInput, { target: { value: 'a'.repeat(81) } })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(
+      await screen.findByText('Teams bot name must be 80 characters or fewer.')
+    ).toBeInTheDocument()
+    expect(api.apiSend).not.toHaveBeenCalled()
+    expect(navigation.push).not.toHaveBeenCalled()
+  })
+
+  it('saves a display name typed over the previous value', async () => {
+    mockChannel('teams-channel', { teamsSettings: { appName: 'evenfire' } })
+    await renderLoadedPage()
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+
+    const nameInput = screen.getByLabelText(/^name$/i) as HTMLInputElement
+    await user.clear(nameInput)
+    await user.type(nameInput, 'Evenfire Bot 2')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
+    const [, , body] = vi.mocked(api.apiSend).mock.calls[0] as [string, string, { spec: unknown }]
+    expect((body.spec as { teamsSettings: { appName: string } }).teamsSettings.appName).toBe(
+      'Evenfire Bot 2'
+    )
+  })
+})
+
+/**
+ * deleteConversation persists a full spec through persistDraft without going
+ * anywhere near handleSave, so a check that lived only in handleSave let it
+ * write a value Save would refuse. Validation lives on persistDraft, the one
+ * boundary both paths cross.
+ */
+describe('EditCommunicationChannelPage conversation delete validation', () => {
+  const TEAMS_CONVERSATION = {
+    channelId: '19:channel@thread.tacv2',
+    tenantId: '21e08d37-8d53-4144-87cb-557b8298aed3',
+    conversationType: 'channel',
+    title: 'General',
+    confirmedAt: '2026-07-10T12:00:00Z',
+  }
+
+  async function openTeamsTabWithConversation(appName: string) {
+    mockChannel('teams-channel', {
+      teamsSettings: { appName, appId: '', tenantId: '' },
+      teams: [TEAMS_CONVERSATION],
+    })
+    await renderLoadedPage()
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('radio', { name: /microsoft teams/i }))
+    return user
+  }
+
+  it('deletes a conversation through the same validation as Save', async () => {
+    const user = await openTeamsTabWithConversation('My Bot')
+
+    await user.click(screen.getByRole('button', { name: 'Delete General' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete conversation' }))
+
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
+    const [, , body] = vi.mocked(api.apiSend).mock.calls[0] as [string, string, { spec: unknown }]
+    const spec = body.spec as { teams: unknown[]; teamsSettings: { appName: string } }
+    expect(spec.teams).toEqual([])
+    expect(spec.teamsSettings.appName).toBe('My Bot')
+  })
+
+  it('refuses to delete a conversation while the Name field holds a value Save would refuse', async () => {
+    const user = await openTeamsTabWithConversation('evenfire')
+
+    const nameInput = screen.getByLabelText(/^name$/i) as HTMLInputElement
+    await user.clear(nameInput)
+    fireEvent.change(nameInput, { target: { value: 'a'.repeat(81) } })
+
+    await user.click(screen.getByRole('button', { name: 'Delete General' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete conversation' }))
+
+    expect(
+      await screen.findByText('Teams bot name must be 80 characters or fewer.')
+    ).toBeInTheDocument()
+    // The whole point: this path used to persist a spec Save rejects.
+    expect(api.apiSend).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * The helper tests round-trip spec.email through the draft builder. They do
+ * not cover the page → request boundary where #386 actually happened: Save
+ * is a full-spec PUT, the edit page has no email controls, and control-api
+ * preserves only credentialsSecretRef. If persistDraft ever built that PUT
+ * without the loaded email groups, the inbox would drop out of the poll set
+ * after an unrelated edit.
+ */
+describe('EditCommunicationChannelPage spec.email preservation on Save', () => {
+  const EMAIL_GROUPS = [{ channelId: 'INBOX', emails: ['someone@example.com'] }]
+
+  it('keeps populated spec.email in the PUT when only a modelled field is edited', async () => {
+    mockChannel('inbox-channel', {
+      email: EMAIL_GROUPS,
+      telegram: [{ channelId: '424242', chatType: 'private' }],
+      telegramSettings: { botHandle: '@bot', replyOnlyWhenMentioned: true },
+    })
+    await renderLoadedPage()
+
+    fireEvent.change(screen.getByLabelText(/Telegram bot handle/), {
+      target: { value: '@new_bot' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
+    const [method, path, body] = vi.mocked(api.apiSend).mock.calls[0] as [
+      string,
+      string,
+      { spec: { email?: unknown; telegramSettings?: { botHandle?: string } } },
+    ]
+    expect(method).toBe('PUT')
+    expect(path).toBe('/api/v1/admin/communication-channels/inbox-channel')
+    expect(body.spec.email).toEqual(EMAIL_GROUPS)
+    expect(body.spec.telegramSettings?.botHandle).toBe('@new_bot')
   })
 })

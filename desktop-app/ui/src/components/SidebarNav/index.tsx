@@ -18,12 +18,10 @@ import {
   IconChevronRight,
   IconConnectors,
   IconContexts,
-  IconData,
   IconMoreHorizontal,
   IconNewChat,
   IconSandboxUi,
   IconSettings,
-  IconTeams,
   IconWorkflows,
 } from './icons'
 import type { SidebarNavProps } from './types'
@@ -42,9 +40,11 @@ export function SidebarNav({
   activeSandboxUiApp,
   availableSandboxUiApps,
   onCollapsedChange,
+  onNewChat,
   onOpenSandboxUiApp,
   onSettingsMenuOpenChange,
   onSelect,
+  toggleRequestId = 0,
 }: SidebarNavProps) {
   const { busy, me, handleLogout: onLogout } = useAuthContext()
   const { activeChatId, latestChatSessions, latestChatSessionsLoading, sessionStateByChatKey } =
@@ -56,7 +56,6 @@ export function SidebarNav({
   const { selectedAgent, handleSelectChatAgent: onSelectChatAgent } = useNavigationContext()
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
-  const [dataSubmenuOpen, setDataSubmenuOpen] = useState(false)
   const [chatSessionsOpen, setChatSessionsOpen] = useState(true)
   const [appsOpen, setAppsOpen] = useState(true)
   const [sessionMenuId, setSessionMenuId] = useState<string | null>(null)
@@ -67,6 +66,7 @@ export function SidebarNav({
     chatId: string
     title: string
   } | null>(null)
+  const lastToggleRequestIdRef = useRef(0)
   const desktopAppInfo = useDesktopAppInfo()
   const desktopVersionTooltip = formatDesktopAppVersionTooltip(desktopAppInfo)
   const sidebarRef = useRef<HTMLElement | null>(null)
@@ -84,10 +84,19 @@ export function SidebarNav({
 
   useClickOutside(settingsMenuRef, settingsMenuOpen, () => {
     updateSettingsMenuOpen(false)
-    setDataSubmenuOpen(false)
   })
   useClickOutside(sidebarRef, mobileMenuOpen, () => setMobileMenuOpen(false))
   useClickOutside(sessionsRef, Boolean(sessionMenuId), () => setSessionMenuId(null))
+
+  useEffect(() => {
+    if (toggleRequestId <= lastToggleRequestIdRef.current) return
+    lastToggleRequestIdRef.current = toggleRequestId
+    if (isMobileSidebarViewport()) {
+      setMobileMenuOpen(open => !open)
+    } else {
+      onCollapsedChange(!collapsed)
+    }
+  }, [collapsed, onCollapsedChange, toggleRequestId])
 
   const email = me?.email
   const displayName = me?.name || email?.split('@')[0] || 'Unknown'
@@ -147,28 +156,10 @@ export function SidebarNav({
   }> = useMemo(
     () => [
       {
-        id: DESKTOP_ROUTES.plugins,
-        label: 'Plugins',
-        testId: 'nav-workflows',
-        icon: <IconWorkflows />,
-      },
-      {
         id: DESKTOP_ROUTES.agents,
         label: 'Agents',
         testId: 'nav-agents',
         icon: <IconAgents />,
-      },
-      {
-        id: DESKTOP_ROUTES.contexts,
-        label: 'Contexts',
-        testId: 'nav-contexts',
-        icon: <IconContexts />,
-      },
-      {
-        id: DESKTOP_ROUTES.teams,
-        label: 'Teams',
-        testId: 'nav-teams',
-        icon: <IconTeams />,
       },
       {
         id: DESKTOP_ROUTES.connectors,
@@ -177,19 +168,16 @@ export function SidebarNav({
         icon: <IconConnectors />,
       },
       {
-        id: DESKTOP_ROUTES.files,
-        label: 'Global File System',
-        testId: 'nav-files',
-        icon: <IconAttachFile />,
+        id: DESKTOP_ROUTES.plugins,
+        label: 'Plugins',
+        testId: 'nav-workflows',
+        icon: <IconWorkflows />,
       },
     ],
     []
   )
 
-  const dataMenuActive =
-    dataRouteItems.some(item => item.id === navItem) ||
-    navItem === DESKTOP_ROUTES.contextDetails ||
-    navItem === DESKTOP_ROUTES.teamDetails
+  const dataMenuActive = dataRouteItems.some(item => item.id === navItem)
   const settingsMenuActive = navItem === DESKTOP_ROUTES.settings || dataMenuActive
   const visibleLatestChatSessions = useMemo(
     () => latestChatSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT),
@@ -201,7 +189,6 @@ export function SidebarNav({
     onSelect(item)
     setMobileMenuOpen(false)
     updateSettingsMenuOpen(false)
-    setDataSubmenuOpen(false)
     setSessionMenuId(null)
   }
 
@@ -238,7 +225,6 @@ export function SidebarNav({
     if (isMobileSidebarViewport()) {
       setMobileMenuOpen(open => !open)
       updateSettingsMenuOpen(false)
-      setDataSubmenuOpen(false)
       return
     }
     handleSelect(DESKTOP_ROUTES.chat)
@@ -246,7 +232,6 @@ export function SidebarNav({
 
   const closeSettingsMenuWithFocus = () => {
     updateSettingsMenuOpen(false)
-    setDataSubmenuOpen(false)
     settingsTriggerRef.current?.focus()
   }
 
@@ -272,7 +257,6 @@ export function SidebarNav({
           onClick={() => {
             setMobileMenuOpen(false)
             updateSettingsMenuOpen(false)
-            setDataSubmenuOpen(false)
           }}
         />
         <div className="sidebar-logo">
@@ -353,7 +337,7 @@ export function SidebarNav({
                       data-testid="nav-new-chat"
                       onClick={event => {
                         event.stopPropagation()
-                        handleSelect(DESKTOP_ROUTES.chat)
+                        onNewChat()
                       }}
                       variant="ghost"
                     >
@@ -561,6 +545,27 @@ export function SidebarNav({
                   )}
               </React.Fragment>
             ))}
+
+            <div
+              className={`nav-link${navItem === DESKTOP_ROUTES.files ? ' active' : ''}`}
+              title={collapsed ? 'Files' : undefined}
+              data-tooltip="Files"
+            >
+              <NavItemControl
+                data-testid="nav-files"
+                className="nav-link-main"
+                onClick={() => handleSelect(DESKTOP_ROUTES.files)}
+                aria-label="Files"
+                leadingIcon={<IconContexts />}
+                trailingIcon={
+                  <span className="nav-tooltip" role="tooltip">
+                    Files
+                  </span>
+                }
+              >
+                Files
+              </NavItemControl>
+            </div>
           </nav>
 
           <div className="sidebar-footer">
@@ -576,7 +581,6 @@ export function SidebarNav({
                 className={`nav-link sidebar-settings-trigger${settingsMenuOpen ? ' open' : ''}`}
                 onClick={() => {
                   updateSettingsMenuOpen(!settingsMenuOpen)
-                  setDataSubmenuOpen(false)
                 }}
                 aria-haspopup="menu"
                 aria-expanded={settingsMenuOpen}
@@ -613,52 +617,19 @@ export function SidebarNav({
                     </div>
                   </div>
 
-                  <div
-                    className={`sidebar-settings-menu-item-wrapper sidebar-settings-menu-item-wrapper--data${
-                      dataSubmenuOpen ? ' is-open' : ''
-                    }`}
-                  >
+                  {dataRouteItems.map(item => (
                     <MenuItem
-                      data-testid="nav-data-menu"
-                      active={dataMenuActive}
+                      key={item.id}
+                      data-testid={item.testId}
+                      active={navItem === item.id}
                       className="sidebar-settings-menu-item sidebar-settings-route"
-                      onClick={() => setDataSubmenuOpen(open => !open)}
+                      onClick={() => handleSelect(item.id)}
                       role="menuitem"
-                      aria-haspopup="menu"
-                      aria-expanded={dataSubmenuOpen}
-                      leadingIcon={<IconData />}
-                      trailingIcon={
-                        <span className="sidebar-settings-menu-arrow" aria-hidden="true">
-                          <svg viewBox="0 0 16 16">
-                            <path d="m6 4.5 3.5 3.5L6 11.5" />
-                          </svg>
-                        </span>
-                      }
+                      leadingIcon={item.icon}
                     >
-                      Resources
+                      {item.label}
                     </MenuItem>
-                    <div className="sidebar-data-submenu" role="menu" aria-label="Resources">
-                      {dataRouteItems.map(item => (
-                        <MenuItem
-                          key={item.id}
-                          data-testid={item.testId}
-                          active={
-                            navItem === item.id ||
-                            (item.id === DESKTOP_ROUTES.contexts &&
-                              navItem === DESKTOP_ROUTES.contextDetails) ||
-                            (item.id === DESKTOP_ROUTES.teams &&
-                              navItem === DESKTOP_ROUTES.teamDetails)
-                          }
-                          className="sidebar-settings-menu-item sidebar-settings-route"
-                          onClick={() => handleSelect(item.id)}
-                          role="menuitem"
-                          leadingIcon={item.icon}
-                        >
-                          {item.label}
-                        </MenuItem>
-                      ))}
-                    </div>
-                  </div>
+                  ))}
 
                   <MenuItem
                     data-testid="nav-settings"
@@ -678,7 +649,6 @@ export function SidebarNav({
                     onClick={() => {
                       updateSettingsMenuOpen(false)
                       setMobileMenuOpen(false)
-                      setDataSubmenuOpen(false)
                       onLogout()
                     }}
                     disabled={busy}

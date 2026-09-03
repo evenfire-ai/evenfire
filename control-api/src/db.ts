@@ -5,6 +5,27 @@ import {
   createBoundedPgPoolForConnection,
 } from './boundedPgPool.js'
 import { config } from './config.js'
+import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
+import {
+  applyCodexChatgptAccountIdSchema,
+  applyCodexGrantDefaultModelSchema,
+  applyCodexMultiConnectionSchema,
+  applyCodexReusableConnectionKeySchema,
+  applyCodexSubscriptionConnectionSchema,
+} from './services/codexSubscriptionConnection.js'
+import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
+import {
+  applyGfsUploadCleanupSchema,
+  applyGfsUploadFinalizingSchema,
+  applyGfsUploadSessionSchema,
+} from './services/gfsUploadSchema.js'
+import {
+  applyLlmProviderAttemptConnectionIdSchema,
+  applyLlmProviderAttemptSchema,
+  applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema,
+  applyLlmProviderAttemptSdkLinkSchema,
+  applyLlmProviderAttemptTicketSchema,
+} from './services/llmProviderAttemptStore.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
 import {
   addPluginWorkloadSdkAttemptLedgerColumns,
@@ -29,6 +50,20 @@ import { applyRegistryConnectionSchema } from './services/registryConnectionSche
 
 export type DbClient = {
   query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
+}
+
+// issue #375 M3 (jozer review): brand for clients that live INSIDE an open
+// transaction. `DbClient` is structural (`{ query }`), so `Pool` satisfies it
+// and a refactor from the in-transaction `db` to the module-level `pool` still
+// typechecks while silently breaking COMMIT/ROLLBACK coupling (e.g. a
+// transactional `pg_notify` becoming an autocommitted one). The unique-symbol
+// brand cannot be satisfied structurally, so any API that REQUIRES the
+// transaction session (like the grant-update NOTIFY) declares
+// `DbTransactionClient` and the pool no longer compiles there. It remains
+// assignable to `DbClient`, so passing it onward to ordinary helpers is free.
+declare const dbTransactionClientBrand: unique symbol
+export type DbTransactionClient = DbClient & {
+  readonly [dbTransactionClientBrand]: 'transaction'
 }
 
 type DbSessionClient = DbClient & {
@@ -58,6 +93,20 @@ const MIN_CONNECTION_TIMEOUT_MS = 100
 const MAX_CONNECTION_TIMEOUT_MS = 30_000
 const MIN_STATEMENT_TIMEOUT_MS = 100
 const MAX_STATEMENT_TIMEOUT_MS = 30_000
+
+// R1-H3 fase 1 (host↔model serialization). The reductor (llm-model disable/
+// delete) and the referencer (host create/update) both take a per-MODEL-NAME
+// advisory lock and HOLD it across the K8s write (Decisión A of
+// work-tracker/reviews/pr-339/minispec-R1-H3-concurrency.md). While the carrier
+// transaction awaits the K8s API it is idle-in-transaction, so neither
+// statement_timeout nor lock_timeout bounds the lock/connection tenancy — only
+// idle_in_transaction_session_timeout does (adenda A2). We set it per-carrier-
+// transaction (SET LOCAL) so a hung K8s call fails fast and releases the lock +
+// the scarce pool connection (core pool max defaults to 10) instead of pinning
+// them indefinitely.
+const MIN_CARRIER_IDLE_TIMEOUT_MS = 1_000
+const MAX_CARRIER_IDLE_TIMEOUT_MS = 60_000
+const DEFAULT_CARRIER_IDLE_TIMEOUT_MS = 15_000
 
 const DEFAULT_CORE_POOL_MAX = 10
 const DEFAULT_CORE_POOL_IDLE_TIMEOUT_MS = 30_000
@@ -2598,6 +2647,388 @@ async function reconcilePluginWorkloadSdkRuntimeContracts(db: DbClient): Promise
     -- the 60s timeout. 0090 is currently last (so this is latent today), but keep
     -- the transaction state hygienic for whatever ships next.
     SET LOCAL lock_timeout = '0';
+  `)
+}
+
+async function applyGfsDesktopOperatorLinksSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    -- Current-state, one-to-one identity link. Revocation is represented by
+    -- deleting this row only after its governed lifecycle event is appended.
+    -- Deliberately no email backfill: link creation always requires both exact
+    -- server-known UUIDs.
+    CREATE TABLE IF NOT EXISTS gfs_desktop_operator_links (
+      user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      control_admin_id UUID NOT NULL UNIQUE REFERENCES control_admin_users(id) ON DELETE CASCADE,
+      source TEXT NOT NULL CHECK (source IN ('initial_setup')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    REVOKE ALL ON TABLE gfs_desktop_operator_links FROM PUBLIC;
+    GRANT SELECT, INSERT, DELETE ON TABLE gfs_desktop_operator_links TO control_api_runtime;
+  `)
+}
+
+async function applyGfsAuditActorCorrelationSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE gfs_audit
+      ADD COLUMN IF NOT EXISTS desktop_user_id UUID NULL,
+      ADD COLUMN IF NOT EXISTS authority_source TEXT NULL;
+
+    DO $$ BEGIN
+      ALTER TABLE gfs_audit
+        ADD CONSTRAINT gfs_audit_actor_correlation_valid
+        CHECK (
+          (desktop_user_id IS NULL AND authority_source IS NULL)
+          OR
+          (desktop_user_id IS NOT NULL
+            AND authority_source = 'user-session'
+            AND actor_on_behalf_of IS NULL)
+          OR
+          (desktop_user_id IS NOT NULL
+            AND authority_source = 'linked-admin'
+            AND actor_on_behalf_of IS NOT NULL)
+        );
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS gfs_audit_desktop_user_time_idx
+      ON gfs_audit (desktop_user_id, event_time);
+  `)
+}
+
+/** Preserve operator-link history while making revocation a state transition. */
+async function evolveGfsDesktopOperatorLinksToGenerations(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE gfs_desktop_operator_links
+      ADD COLUMN IF NOT EXISTS id UUID,
+      ADD COLUMN IF NOT EXISTS lineage_id UUID,
+      ADD COLUMN IF NOT EXISTS generation INTEGER,
+      ADD COLUMN IF NOT EXISTS predecessor_id UUID,
+      ADD COLUMN IF NOT EXISTS state TEXT,
+      ADD COLUMN IF NOT EXISTS created_by UUID,
+      ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS revoked_by_type TEXT,
+      ADD COLUMN IF NOT EXISTS revoked_by_id UUID,
+      ADD COLUMN IF NOT EXISTS revocation_reason TEXT,
+      ADD COLUMN IF NOT EXISTS row_version BIGINT;
+
+    UPDATE gfs_desktop_operator_links
+       SET id = COALESCE(id, gen_random_uuid()),
+           lineage_id = COALESCE(lineage_id, gen_random_uuid()),
+           generation = COALESCE(generation, 1),
+           state = COALESCE(state, 'active'),
+           created_by = COALESCE(created_by, control_admin_id),
+           row_version = COALESCE(row_version, 1)
+     WHERE id IS NULL OR lineage_id IS NULL OR generation IS NULL OR state IS NULL
+        OR created_by IS NULL OR row_version IS NULL;
+
+    ALTER TABLE gfs_desktop_operator_links
+      ALTER COLUMN id SET NOT NULL,
+      ALTER COLUMN lineage_id SET NOT NULL,
+      ALTER COLUMN generation SET NOT NULL,
+      ALTER COLUMN state SET NOT NULL,
+      ALTER COLUMN created_by SET NOT NULL,
+      ALTER COLUMN row_version SET NOT NULL;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_pkey;
+    ALTER TABLE gfs_desktop_operator_links ADD PRIMARY KEY (id);
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_user_id_key;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_control_admin_id_key;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_predecessor_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_predecessor_id_fkey
+      FOREIGN KEY (predecessor_id) REFERENCES gfs_desktop_operator_links(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_user_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_user_id_fkey
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_control_admin_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_control_admin_id_fkey
+      FOREIGN KEY (control_admin_id) REFERENCES control_admin_users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_created_by_fkey;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_created_by_fkey
+      FOREIGN KEY (created_by) REFERENCES control_admin_users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_revoked_by_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_revoked_by_id_fkey
+      FOREIGN KEY (revoked_by_id) REFERENCES control_admin_users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_generation_check;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_generation_check CHECK (generation > 0);
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_row_version_check;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_row_version_check CHECK (row_version > 0);
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_state_check;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_state_check CHECK (state IN ('active', 'revoked'));
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_lifecycle_check;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_lifecycle_check CHECK (
+      (state = 'active' AND revoked_at IS NULL AND revoked_by_type IS NULL AND revoked_by_id IS NULL AND revocation_reason IS NULL)
+      OR (state = 'revoked' AND revoked_at IS NOT NULL AND revoked_by_type = 'control_admin' AND revoked_by_id IS NOT NULL AND revocation_reason IS NOT NULL)
+    );
+    ALTER TABLE gfs_desktop_operator_links DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_predecessor_check;
+    ALTER TABLE gfs_desktop_operator_links ADD CONSTRAINT gfs_desktop_operator_links_predecessor_check CHECK (
+      (generation = 1 AND predecessor_id IS NULL) OR (generation > 1 AND predecessor_id IS NOT NULL)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS gfs_desktop_operator_links_lineage_generation_key ON gfs_desktop_operator_links(lineage_id, generation);
+    CREATE UNIQUE INDEX IF NOT EXISTS gfs_desktop_operator_links_predecessor_key ON gfs_desktop_operator_links(predecessor_id) WHERE predecessor_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS gfs_desktop_operator_links_active_user_key ON gfs_desktop_operator_links(user_id) WHERE state = 'active';
+    CREATE UNIQUE INDEX IF NOT EXISTS gfs_desktop_operator_links_active_admin_key ON gfs_desktop_operator_links(control_admin_id) WHERE state = 'active';
+    CREATE INDEX IF NOT EXISTS gfs_desktop_operator_links_revoked_at_idx
+      ON gfs_desktop_operator_links(revoked_at) WHERE state = 'revoked';
+    GRANT SELECT, INSERT, UPDATE ON TABLE gfs_desktop_operator_links TO control_api_runtime;
+    REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE gfs_desktop_operator_links FROM control_api_runtime;
+  `)
+}
+
+/**
+ * Governed Desktop-user retirement is a state transition, not a destructive
+ * shortcut around retained operator-link history.  This remains additive so
+ * historical users are explicitly backfilled into the active lifecycle state.
+ */
+async function applyDesktopUserRetirementLifecycleSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS lifecycle_state TEXT,
+      ADD COLUMN IF NOT EXISTS retired_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS retirement_reason TEXT,
+      ADD COLUMN IF NOT EXISTS retired_by_type TEXT,
+      ADD COLUMN IF NOT EXISTS retired_by_control_admin_id UUID,
+      ADD COLUMN IF NOT EXISTS retired_by_desktop_user_id UUID,
+      ADD COLUMN IF NOT EXISTS retirement_request_id TEXT,
+      ADD COLUMN IF NOT EXISTS retirement_operation_id UUID,
+      ADD COLUMN IF NOT EXISTS lifecycle_version BIGINT;
+
+    -- Fresh and already-existing users are both active until an explicit
+    -- governed retirement transition records actor, reason, and outcome.
+    UPDATE users
+       SET lifecycle_state = COALESCE(lifecycle_state, 'active'),
+           lifecycle_version = COALESCE(lifecycle_version, 1)
+     WHERE lifecycle_state IS NULL OR lifecycle_version IS NULL;
+
+    ALTER TABLE users
+      ALTER COLUMN lifecycle_state SET DEFAULT 'active',
+      ALTER COLUMN lifecycle_state SET NOT NULL,
+      ALTER COLUMN lifecycle_version SET DEFAULT 1,
+      ALTER COLUMN lifecycle_version SET NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS desktop_user_retirement_operations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      operation TEXT NOT NULL DEFAULT 'retire_desktop_user'
+        CHECK (operation = 'retire_desktop_user'),
+      actor_type TEXT NOT NULL CHECK (actor_type IN ('control_admin', 'platform_user')),
+      actor_control_admin_id UUID NULL,
+      actor_desktop_user_id UUID NULL,
+      target_user_id UUID NOT NULL,
+      idempotency_key_hash TEXT NOT NULL CHECK (idempotency_key_hash ~ '^[0-9a-f]{64}$'),
+      request_fingerprint TEXT NOT NULL CHECK (request_fingerprint ~ '^[0-9a-f]{64}$'),
+      reason TEXT NOT NULL CHECK (char_length(reason) BETWEEN 1 AND 512),
+      request_id TEXT NULL CHECK (request_id IS NULL OR char_length(request_id) <= 256),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed')),
+      outcome TEXT NULL CHECK (outcome IS NULL OR outcome IN ('retired', 'deleted')),
+      lifecycle_version BIGINT NULL CHECK (lifecycle_version IS NULL OR lifecycle_version > 0),
+      lifecycle_operation_id UUID NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMPTZ NULL,
+      CHECK (
+        (actor_type = 'control_admin'
+          AND actor_control_admin_id IS NOT NULL
+          AND actor_desktop_user_id IS NULL)
+        OR
+        (actor_type = 'platform_user'
+          AND actor_control_admin_id IS NULL
+          AND actor_desktop_user_id IS NOT NULL)
+      ),
+      CHECK (
+        (status = 'pending'
+          AND outcome IS NULL
+          AND lifecycle_version IS NULL
+          AND lifecycle_operation_id IS NULL
+          AND completed_at IS NULL)
+        OR
+        (status = 'completed'
+          AND outcome IS NOT NULL
+          AND completed_at IS NOT NULL
+          AND (
+            (outcome = 'retired' AND lifecycle_version IS NOT NULL AND lifecycle_operation_id IS NOT NULL)
+            OR
+            (outcome = 'deleted' AND lifecycle_version IS NULL AND lifecycle_operation_id IS NULL)
+          ))
+      )
+    );
+
+    -- The target deliberately has no FK: a legacy-compatible hard-delete for
+    -- a user with no link history must still leave an idempotent outcome record.
+    -- Actor columns remain separate; no caller identity is inferred from UUID shape.
+    CREATE UNIQUE INDEX IF NOT EXISTS desktop_user_retirement_operations_control_admin_key
+      ON desktop_user_retirement_operations
+         (operation, actor_control_admin_id, target_user_id, idempotency_key_hash)
+      WHERE actor_type = 'control_admin';
+    CREATE UNIQUE INDEX IF NOT EXISTS desktop_user_retirement_operations_platform_user_key
+      ON desktop_user_retirement_operations
+         (operation, actor_desktop_user_id, target_user_id, idempotency_key_hash)
+      WHERE actor_type = 'platform_user';
+    CREATE INDEX IF NOT EXISTS desktop_user_retirement_operations_target_idx
+      ON desktop_user_retirement_operations (target_user_id, completed_at DESC);
+
+    ALTER TABLE users
+      DROP CONSTRAINT IF EXISTS users_retired_by_control_admin_id_fkey;
+    ALTER TABLE users
+      ADD CONSTRAINT users_retired_by_control_admin_id_fkey
+      FOREIGN KEY (retired_by_control_admin_id)
+      REFERENCES control_admin_users(id) ON DELETE RESTRICT;
+    ALTER TABLE users
+      DROP CONSTRAINT IF EXISTS users_retired_by_desktop_user_id_fkey;
+    ALTER TABLE users
+      ADD CONSTRAINT users_retired_by_desktop_user_id_fkey
+      FOREIGN KEY (retired_by_desktop_user_id)
+      REFERENCES users(id) ON DELETE RESTRICT;
+    ALTER TABLE users
+      DROP CONSTRAINT IF EXISTS users_retirement_operation_id_fkey;
+    ALTER TABLE users
+      ADD CONSTRAINT users_retirement_operation_id_fkey
+      FOREIGN KEY (retirement_operation_id)
+      REFERENCES desktop_user_retirement_operations(id) ON DELETE RESTRICT;
+    ALTER TABLE users
+      DROP CONSTRAINT IF EXISTS users_lifecycle_version_check;
+    ALTER TABLE users
+      ADD CONSTRAINT users_lifecycle_version_check CHECK (lifecycle_version > 0);
+    ALTER TABLE users
+      DROP CONSTRAINT IF EXISTS users_lifecycle_state_check;
+    ALTER TABLE users
+      ADD CONSTRAINT users_lifecycle_state_check CHECK (
+        (lifecycle_state = 'active'
+          AND retired_at IS NULL
+          AND retirement_reason IS NULL
+          AND retired_by_type IS NULL
+          AND retired_by_control_admin_id IS NULL
+          AND retired_by_desktop_user_id IS NULL
+          AND retirement_request_id IS NULL
+          AND retirement_operation_id IS NULL)
+        OR
+        (lifecycle_state = 'retired'
+          AND retired_at IS NOT NULL
+          AND char_length(retirement_reason) BETWEEN 1 AND 512
+          AND retirement_operation_id IS NOT NULL
+          AND (
+            (retired_by_type = 'control_admin'
+              AND retired_by_control_admin_id IS NOT NULL
+              AND retired_by_desktop_user_id IS NULL)
+            OR
+            (retired_by_type = 'platform_user'
+              AND retired_by_control_admin_id IS NULL
+              AND retired_by_desktop_user_id IS NOT NULL)
+          ))
+      );
+    CREATE INDEX IF NOT EXISTS users_lifecycle_state_idx ON users (lifecycle_state);
+
+    ALTER TABLE gfs_desktop_operator_links
+      ADD COLUMN IF NOT EXISTS revoked_by_control_admin_id UUID,
+      ADD COLUMN IF NOT EXISTS revoked_by_desktop_user_id UUID;
+
+    -- 0093 could only record a Control Admin in revoked_by_id.  Preserve that
+    -- exact historic actor in the typed column before broadening the union.
+    UPDATE gfs_desktop_operator_links
+       SET revoked_by_control_admin_id = revoked_by_id
+     WHERE state = 'revoked'
+       AND revoked_by_type = 'control_admin'
+       AND revoked_by_control_admin_id IS NULL;
+
+    ALTER TABLE gfs_desktop_operator_links
+      DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_revoked_by_control_admin_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links
+      ADD CONSTRAINT gfs_desktop_operator_links_revoked_by_control_admin_id_fkey
+      FOREIGN KEY (revoked_by_control_admin_id)
+      REFERENCES control_admin_users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links
+      DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_revoked_by_desktop_user_id_fkey;
+    ALTER TABLE gfs_desktop_operator_links
+      ADD CONSTRAINT gfs_desktop_operator_links_revoked_by_desktop_user_id_fkey
+      FOREIGN KEY (revoked_by_desktop_user_id)
+      REFERENCES users(id) ON DELETE RESTRICT;
+    ALTER TABLE gfs_desktop_operator_links
+      DROP CONSTRAINT IF EXISTS gfs_desktop_operator_links_lifecycle_check;
+    ALTER TABLE gfs_desktop_operator_links
+      ADD CONSTRAINT gfs_desktop_operator_links_lifecycle_check CHECK (
+        (state = 'active'
+          AND revoked_at IS NULL
+          AND revoked_by_type IS NULL
+          AND revoked_by_id IS NULL
+          AND revoked_by_control_admin_id IS NULL
+          AND revoked_by_desktop_user_id IS NULL
+          AND revocation_reason IS NULL)
+        OR
+        (state = 'revoked'
+          AND revoked_at IS NOT NULL
+          AND revocation_reason IS NOT NULL
+          AND (
+            (revoked_by_type = 'control_admin'
+              AND revoked_by_id IS NOT NULL
+              AND revoked_by_control_admin_id = revoked_by_id
+              AND revoked_by_desktop_user_id IS NULL)
+            OR
+            (revoked_by_type = 'platform_user'
+              AND revoked_by_id IS NULL
+              AND revoked_by_control_admin_id IS NULL
+              AND revoked_by_desktop_user_id IS NOT NULL)
+          ))
+      );
+
+    GRANT SELECT, INSERT, UPDATE ON TABLE desktop_user_retirement_operations TO control_api_runtime;
+    REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE desktop_user_retirement_operations FROM control_api_runtime;
+  `)
+}
+
+/**
+ * Expose only the authoritative lifecycle/link projection needed by gfsc.
+ * The data-plane resolver must be able to deny a stale bearer directly, but it
+ * must not gain write access to identity or relationship tables.
+ */
+async function applyGfsLifecycleAuthorityProjectionSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    -- Generation zero was the pre-lifecycle default. Normalize existing admins
+    -- before gfsc begins treating session_version as an authorization epoch.
+    UPDATE control_admin_users
+       SET session_version = 1
+     WHERE session_version IS NULL OR session_version < 1;
+
+    REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+      ON users, control_admin_users, gfs_desktop_operator_links
+      FROM gfs_controller, gfs_controller_reader;
+
+    GRANT SELECT (id, lifecycle_state, lifecycle_version)
+      ON users TO gfs_controller, gfs_controller_reader;
+    GRANT SELECT (id, status, session_version)
+      ON control_admin_users TO gfs_controller, gfs_controller_reader;
+    GRANT SELECT (id, lineage_id, generation, user_id, control_admin_id, state, source)
+      ON gfs_desktop_operator_links TO gfs_controller, gfs_controller_reader;
+
+    REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+      ON users, control_admin_users, gfs_desktop_operator_links
+      FROM PUBLIC;
+  `)
+}
+
+/**
+ * The authorization epoch is one-based. Keep this as a new migration rather
+ * than editing the shipped baseline/session-version migrations: existing
+ * installations must receive the same default as fresh installations, and
+ * invitation inserts also stamp the first epoch explicitly.
+ */
+async function applyControlAdminSessionVersionDefaultSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    UPDATE control_admin_users
+       SET session_version = 1
+     WHERE session_version IS NULL OR session_version < 1;
+    ALTER TABLE control_admin_users
+      ALTER COLUMN session_version SET DEFAULT 1,
+      ALTER COLUMN session_version SET NOT NULL;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+          FROM pg_constraint
+         WHERE conrelid = 'control_admin_users'::regclass
+           AND conname = 'control_admin_session_version_positive'
+      ) THEN
+        ALTER TABLE control_admin_users
+          ADD CONSTRAINT control_admin_session_version_positive
+          CHECK (session_version >= 1);
+      END IF;
+    END $$;
   `)
 }
 
@@ -5463,6 +5894,126 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0090_plugin_workload_sdk_runtime_contract_reconciliation',
     apply: reconcilePluginWorkloadSdkRuntimeContracts,
   },
+  {
+    version: '0091_gfs_desktop_operator_links',
+    apply: applyGfsDesktopOperatorLinksSchema,
+  },
+  {
+    version: '0092_gfs_audit_actor_correlation',
+    apply: applyGfsAuditActorCorrelationSchema,
+  },
+  {
+    version: '0093_gfs_desktop_operator_link_generations',
+    apply: evolveGfsDesktopOperatorLinksToGenerations,
+  },
+  {
+    version: '0094_desktop_user_retirement_lifecycle',
+    apply: applyDesktopUserRetirementLifecycleSchema,
+  },
+  {
+    version: '0095_gfs_lifecycle_authority_projection',
+    apply: applyGfsLifecycleAuthorityProjectionSchema,
+  },
+  {
+    version: '0096_control_admin_session_version_default',
+    apply: applyControlAdminSessionVersionDefaultSchema,
+  },
+  {
+    version: '0097_gfs_upload_sessions',
+    apply: applyGfsUploadSessionSchema,
+  },
+  {
+    version: '0098_gfs_upload_cleanup_receipt',
+    apply: applyGfsUploadCleanupSchema,
+  },
+  {
+    version: '0099_gfs_upload_finalizing_recovery',
+    apply: applyGfsUploadFinalizingSchema,
+  },
+  {
+    version: '00a0_codex_subscription_connections',
+    apply: applyCodexSubscriptionConnectionSchema,
+  },
+  {
+    version: '00a1_codex_subscription_oauth_states',
+    apply: applyCodexSubscriptionOAuthStateSchema,
+  },
+  {
+    version: '00a2_llm_provider_attempts',
+    apply: applyLlmProviderAttemptSchema,
+  },
+  {
+    version: '00a3_llm_provider_attempt_tickets',
+    apply: applyLlmProviderAttemptTicketSchema,
+  },
+  {
+    version: '00a4_codex_chatgpt_account_id',
+    apply: applyCodexChatgptAccountIdSchema,
+  },
+  {
+    version: '0100_seed_minimax_allowed_model',
+    apply: async db => {
+      // Seed one sensible default model for the newly added `minimax` provider
+      // (packages/llm-providers). Same shape as 0056/0057/0058: enabled=true (a
+      // provider without credentials is unusable regardless), a `vendor` label
+      // for UI grouping, and ON CONFLICT DO NOTHING so the migration stays
+      // idempotent and never clobbers an admin-edited row. `MiniMax-M2` mirrors
+      // registryCore's minimax defaultModel. Operators curate the rest via
+      // /llm-models.
+      await db.query(`
+        INSERT INTO llm_allowed_models (provider, model, vendor)
+        VALUES
+          ('minimax', 'MiniMax-M2', 'MiniMax')
+        ON CONFLICT DO NOTHING;
+      `)
+    },
+  },
+  {
+    version: '0101_codex_multi_connection',
+    apply: applyCodexMultiConnectionSchema,
+  },
+  {
+    version: '0102_codex_catalog_models',
+    apply: applyCodexCatalogModelsSchema,
+  },
+  {
+    version: '0103_llm_provider_attempts_connection_id',
+    apply: applyLlmProviderAttemptConnectionIdSchema,
+  },
+  {
+    version: '0104_codex_grant_default_model',
+    apply: applyCodexGrantDefaultModelSchema,
+  },
+  {
+    version: '0105_codex_reusable_connection_key',
+    apply: applyCodexReusableConnectionKeySchema,
+  },
+  {
+    version: '0106_oauth_grants_owner_generalization',
+    // Renamed repeatedly while rebasing onto dev: 0091 -> 0100 -> 0101 -> 0106
+    // (each dev sync collided with a migration dev landed at the same number; the
+    // latest sync brought dev's 0101–0105 codex migrations, so 0101 is now taken
+    // by 0101_codex_multi_connection). Environments where the feature branch
+    // already deployed recorded it under an earlier name (the dev cluster most
+    // likely as 0100_...). legacyVersions lets the runner mark 0106 applied from
+    // that prior row instead of re-running the DDL and leaving an orphan
+    // schema_migrations entry. Every prior name is unique to this migration, so
+    // there is no false-skip.
+    legacyVersions: [
+      '0101_oauth_grants_owner_generalization',
+      '0100_oauth_grants_owner_generalization',
+      '0091_oauth_grants_owner_generalization',
+    ],
+    apply: applyOAuthGrantsOwnerGeneralization,
+  },
+  {
+    version: '0107_llm_provider_attempts_sdk_link',
+    apply: applyLlmProviderAttemptSdkLinkSchema,
+  },
+  {
+    version: '0108_llm_provider_attempts_sdk_link_on_delete_set_null',
+    apply: applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema,
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
@@ -5564,6 +6115,80 @@ async function applyOAuthServiceGrants(db: DbClient): Promise<void> {
   `)
 }
 
+async function applyOAuthGrantsOwnerGeneralization(db: DbClient): Promise<void> {
+  // U1 — generalize `oauth_grants` beyond recipe-owned grants so OAuth
+  // mcp-servers can own grants too, and introduce the `shared` (context-scoped)
+  // identity grant. NON-DESTRUCTIVE + idempotent: `recipe_namespace`/`recipe_name`
+  // are NOT renamed (they are reinterpreted as owner coordinates); the rename to
+  // `owner_*` is deferred.
+  //
+  //   - `owner_kind`  — discriminator; DEFAULT 'recipe' so every pre-existing row
+  //                     keeps its meaning and uniqueness.
+  //   - `context_id`  — replaces `user_id` in the key for `shared` grants (the
+  //                     Context the shared identity belongs to).
+  //   - `bootstrapped_by_user_id` — audit: who first authorized a shared identity.
+  //                     OUTSIDE the key and never rewritten on refresh.
+  //
+  // The kind/user_id CHECK is REPLACED (not extended) to admit 'shared': without
+  // this, any `shared` INSERT would violate the old `user`/`service`-only CHECK.
+  await db.query(`
+    ALTER TABLE oauth_grants
+      ADD COLUMN IF NOT EXISTS owner_kind TEXT NOT NULL DEFAULT 'recipe';
+    ALTER TABLE oauth_grants
+      ADD COLUMN IF NOT EXISTS context_id TEXT;
+    ALTER TABLE oauth_grants
+      ADD COLUMN IF NOT EXISTS bootstrapped_by_user_id TEXT;
+
+    ALTER TABLE oauth_grants
+      DROP CONSTRAINT IF EXISTS oauth_grants_kind_userid_check;
+    DO $$ BEGIN
+      ALTER TABLE oauth_grants
+        ADD CONSTRAINT oauth_grants_kind_userid_check
+        CHECK ((grant_kind = 'user' AND user_id IS NOT NULL)
+            OR (grant_kind = 'service' AND user_id IS NULL)
+            OR (grant_kind = 'shared' AND user_id IS NULL
+                AND context_id IS NOT NULL
+                AND bootstrapped_by_user_id IS NOT NULL));
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$;
+
+    -- Recreate oauth_grants_unique as a superset with owner_kind. Existing rows
+    -- are owner_kind='recipe', so the recipe user-grant uniqueness is preserved;
+    -- a McpServer owner (owner_kind='mcpserver') with the same ns/name can now
+    -- coexist. Governs user grants (non-null user_id) across owner domains.
+    ALTER TABLE oauth_grants
+      DROP CONSTRAINT IF EXISTS oauth_grants_unique;
+    DO $$ BEGIN
+      ALTER TABLE oauth_grants
+        ADD CONSTRAINT oauth_grants_unique
+        UNIQUE (owner_kind, recipe_namespace, recipe_name, user_id, oauth_client_id);
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$;
+
+    -- Shared-identity uniqueness: exactly one shared grant per
+    -- (owner, ns, name, context, client). The user/service grants keep their own
+    -- uniqueness (superset constraint + oauth_grants_service_unique). The key
+    -- asymmetry is deliberate: user grants keep user_id (per-user, global across
+    -- contexts), shared grants replace it with context_id (identity scoped to the
+    -- Context, prevents cross-context leakage; sec 5.2/U6).
+    CREATE UNIQUE INDEX IF NOT EXISTS oauth_grants_shared_unique
+      ON oauth_grants (owner_kind, recipe_namespace, recipe_name, context_id, oauth_client_id)
+      WHERE grant_kind = 'shared';
+    -- NOTE (R1-M2): oauth_grants_service_unique (applyOAuthServiceGrants above)
+    -- is DELIBERATELY left owner-blind — it is NOT recreated here with
+    -- owner_kind, unlike its two siblings (oauth_grants_unique,
+    -- oauth_grants_shared_unique). Rationale: service grants are recipe-only.
+    -- OAuth mcp-servers never create them — resolveServerOAuth only ever derives
+    -- grantScope 'user'|'context' (mcpServerOAuthSpec.ts), so an mcp-server's
+    -- grant_kind is never 'service'. Every service row therefore has
+    -- owner_kind='recipe', making (recipe_namespace, recipe_name, oauth_client_id)
+    -- unique without owner_kind in the key. If a future unit lets an
+    -- owner_kind='mcpserver' row take grant_kind='service', this index MUST gain
+    -- owner_kind (else a service INSERT could DO UPDATE a same-key recipe row's
+    -- tokens — silent cross-owner overwrite).
+  `)
+}
+
 async function ensureSchemaMigrationsTable(db: DbClient): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -5642,18 +6267,22 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
 }
 
 export async function assertDbReady(db: DbClient = pool): Promise<void> {
-  const requiredVersion = CONTROL_API_MIGRATIONS.at(-1)?.version
-  if (!requiredVersion) throw new Error('Control API database has no registered migrations')
-  const result = await db.query(
-    'SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1) AS ready',
-    [requiredVersion]
-  )
-  if (!(result.rows[0] as { ready?: boolean } | undefined)?.ready) {
-    throw new Error(`Control API database is not ready: migration ${requiredVersion} is required`)
+  if (!CONTROL_API_MIGRATIONS.length) {
+    throw new Error('Control API database has no registered migrations')
+  }
+  const applied = await loadAppliedMigrationVersions(db)
+  const missing = CONTROL_API_MIGRATIONS.filter(migration => {
+    if (applied.has(migration.version)) return false
+    return !migration.legacyVersions?.some(version => applied.has(version))
+  }).map(migration => migration.version)
+  if (missing.length) {
+    throw new Error(`Control API database is not ready: missing migrations ${missing.join(', ')}`)
   }
 }
 
-export async function withTransaction<T>(work: (db: DbClient) => Promise<T>): Promise<T> {
+export async function withTransaction<T>(
+  work: (db: DbTransactionClient) => Promise<T>
+): Promise<T> {
   const client = (await pool.connect()) as PoolClient
   let transactionStarted = false
   let commitSent = false
@@ -5661,7 +6290,10 @@ export async function withTransaction<T>(work: (db: DbClient) => Promise<T>): Pr
   try {
     await client.query('BEGIN')
     transactionStarted = true
-    const result = await work(client)
+    // The brand is nominal-only (a declared unique symbol); the checked-out
+    // client IS the transaction session, so this cast is the single blessed
+    // point where the brand is minted (issue #375 M3).
+    const result = await work(client as unknown as DbTransactionClient)
     commitSent = true
     await client.query('COMMIT')
     return result
@@ -5679,4 +6311,72 @@ export async function withTransaction<T>(work: (db: DbClient) => Promise<T>): Pr
   } finally {
     client.release(releaseError)
   }
+}
+
+// ── R1-H3 fase 1: host↔model write serialization ────────────────────────────
+//
+// A single advisory-lock namespace for the LLM-model availability seam. EVERY
+// writer that can either reduce a model's availability (llm-model disable/delete,
+// the reductor) or create a live reference to it (Host CR create/update, the
+// referencer) takes THIS lock, so the impact enumeration and the mutation/write
+// cannot interleave and strand a reference (INV-1). The lock is derived from ONE
+// place (regla D4) so the two sides can never disagree on the key.
+//
+// GRANULARITY = MODEL NAME, not (provider, model): the impact enumeration matches
+// grants by model name only (`listGrantsReferencingModel`), and an
+// `allowed_models` entry may carry no derivable provider, so a per-pair key would
+// leave that seam unserialized (adenda A1). By name, a disable of (provA, M) and a
+// host-create of (provB, M) merely contend — harmless at admin QPS — while each
+// side's impact recompute is still per-pair, so independent pairs both win.
+const LLM_MODEL_LOCK_NAMESPACE = 'llm-model:'
+
+export const HOST_MODEL_WRITE_CARRIER_IDLE_TIMEOUT_MS = boundedEnvInteger(
+  'CONTROL_API_HOST_MODEL_WRITE_LOCK_IDLE_TIMEOUT_MS',
+  DEFAULT_CARRIER_IDLE_TIMEOUT_MS,
+  MIN_CARRIER_IDLE_TIMEOUT_MS,
+  MAX_CARRIER_IDLE_TIMEOUT_MS
+)
+
+/**
+ * Take the transaction-scoped advisory lock for one model NAME. Auto-released on
+ * COMMIT/ROLLBACK and on backend death, so it never orphans. Must be a statement
+ * inside an open transaction (`withTransaction`); the caller HOLDS it across the
+ * subsequent impact read + mutation / K8s write.
+ */
+export async function advisoryLockModelName(db: DbTransactionClient, model: string): Promise<void> {
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
+    `${LLM_MODEL_LOCK_NAMESPACE}${model}`,
+  ])
+}
+
+/**
+ * Take the advisory locks for several model NAMES in one transaction. Dedups and
+ * acquires in a TOTAL (ascending) order to preclude deadlock when two operations
+ * reference an overlapping set (adenda A5). A host that references no allowlist
+ * pair acquires nothing (an empty set is a no-op). Key derivation stays in
+ * `advisoryLockModelName` (regla D4).
+ */
+export async function advisoryLockModelNames(
+  db: DbTransactionClient,
+  models: string[]
+): Promise<void> {
+  const ordered = Array.from(new Set(models)).sort()
+  for (const model of ordered) {
+    await advisoryLockModelName(db, model)
+  }
+}
+
+/**
+ * Bound the idle-in-transaction tenancy of a carrier transaction that HOLDS a
+ * model advisory lock across a Kubernetes write (Decisión A / adenda A2). While
+ * the transaction awaits the K8s API no statement runs, so this is the only
+ * timeout that can release the lock + connection if that call hangs. SET LOCAL
+ * scope: reverts on COMMIT/ROLLBACK. The value is milliseconds (the GUC's base
+ * unit) and comes from a bounded env, so it can never inject SQL.
+ */
+export async function boundCarrierTransactionIdleTimeout(
+  db: DbTransactionClient,
+  ms: number = HOST_MODEL_WRITE_CARRIER_IDLE_TIMEOUT_MS
+): Promise<void> {
+  await db.query(`SELECT set_config('idle_in_transaction_session_timeout', $1, true)`, [String(ms)])
 }

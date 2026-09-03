@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { FilterSelect } from '@components/FilterSelect'
 import { MarketplaceTabs } from '@components/MarketplaceTabs'
-import { type RowAction, RowActionsMenu } from '@components/RowActionsMenu'
+import { type RowActionMenuItem, RowActionsMenu } from '@components/RowActionsMenu'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { IconStore } from '@components/Sidebar/icons'
 import { SkeletonTableRows } from '@components/SkeletonTableRows'
@@ -183,7 +183,7 @@ export default function RegistryCatalog() {
     return (
       <button
         type="button"
-        className={`cu-link cu-link--sm cu-table__sort-link${isActive ? ' is-active' : ''}`}
+        className={`cu-table__sort-link${isActive ? ' is-active' : ''}`}
         onClick={() => toggleSort(key)}
         aria-label={`Sort by ${label.toLowerCase()} ${nextDirection}`}
         aria-pressed={isActive}
@@ -434,7 +434,7 @@ export default function RegistryCatalog() {
                                       setRemoveTarget(entry)
                                     },
                                   },
-                                ] satisfies RowAction[]
+                                ] satisfies RowActionMenuItem[]
                               }
                             />
                           </td>
@@ -452,30 +452,39 @@ export default function RegistryCatalog() {
                                   <span className="cu-expandable-field__label">Type</span>
                                   <span className="cu-registry-type-meta">{typeMeta}</span>
                                 </div>
-                                <div className="cu-expandable-field cu-expandable-field--wide">
-                                  <div className="cu-expandable-tags">
-                                    <span
-                                      className="cu-registry-chip"
-                                      style={{
-                                        color: trustColor(entry.trust_level),
-                                        background: trustBgColor(entry.trust_level),
-                                        borderColor: trustColor(entry.trust_level),
-                                      }}
-                                    >
-                                      {entry.trust_level.toUpperCase()}
-                                    </span>
-                                    <span
-                                      className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
-                                    >
-                                      {entry.quality_tier}
-                                    </span>
-                                    {entry.tags.map(tag => (
-                                      <span key={tag} className="cu-registry-tag">
-                                        {tag}
-                                      </span>
-                                    ))}
-                                  </div>
+                                <div className="cu-expandable-field">
+                                  <span className="cu-expandable-field__label">Trust</span>
+                                  <span
+                                    className="cu-registry-chip"
+                                    style={{
+                                      color: trustColor(entry.trust_level),
+                                      background: trustBgColor(entry.trust_level),
+                                      borderColor: trustColor(entry.trust_level),
+                                    }}
+                                  >
+                                    {entry.trust_level.toUpperCase()}
+                                  </span>
                                 </div>
+                                <div className="cu-expandable-field">
+                                  <span className="cu-expandable-field__label">Verification</span>
+                                  <span
+                                    className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
+                                  >
+                                    {entry.quality_tier}
+                                  </span>
+                                </div>
+                                {entry.tags.length > 0 && (
+                                  <div className="cu-expandable-field">
+                                    <span className="cu-expandable-field__label">Tags</span>
+                                    <div className="cu-expandable-tags">
+                                      {entry.tags.map(tag => (
+                                        <span key={tag} className="cu-registry-tag">
+                                          {tag}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
                               </div>
                             </div>
                           </td>

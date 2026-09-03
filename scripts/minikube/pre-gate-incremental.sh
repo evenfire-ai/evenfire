@@ -25,6 +25,36 @@ INCREMENTAL_UNMAPPED=()
 INCREMENTAL_REPULL_ALL=false
 INCREMENTAL_SHADOWED=()
 INCREMENTAL_DOCKER_ENV_APPLIED=false
+INCREMENTAL_DEADLINE_RUNNER="${INCREMENTAL_DEADLINE_RUNNER:-${PROJECT_DIR}/scripts/minikube/run-with-deadline.mjs}"
+INCREMENTAL_RUNTIME_TIMEOUT_SECONDS="${INCREMENTAL_RUNTIME_TIMEOUT_SECONDS:-30}"
+INCREMENTAL_IMAGE_LOAD_TIMEOUT_SECONDS="${INCREMENTAL_IMAGE_LOAD_TIMEOUT_SECONDS:-1800}"
+
+incremental_validate_deadline() {
+  local name="$1" value="$2" maximum="$3"
+  if ! [[ "${value}" =~ ^[1-9][0-9]*$ ]] || (( 10#${value} > maximum )); then
+    log "ERROR: ${name} must be an integer from 1 to ${maximum}" >&2
+    return 1
+  fi
+}
+
+incremental_validate_deadline INCREMENTAL_RUNTIME_TIMEOUT_SECONDS \
+  "${INCREMENTAL_RUNTIME_TIMEOUT_SECONDS}" 300 || exit 1
+incremental_validate_deadline INCREMENTAL_IMAGE_LOAD_TIMEOUT_SECONDS \
+  "${INCREMENTAL_IMAGE_LOAD_TIMEOUT_SECONDS}" 3600 || exit 1
+[[ -f "${INCREMENTAL_DEADLINE_RUNNER}" ]] || {
+  log "ERROR: bounded runtime helper is missing: ${INCREMENTAL_DEADLINE_RUNNER}" >&2
+  exit 1
+}
+
+incremental_run_with_deadline() {
+  local label="$1" timeout_seconds="$2"
+  shift 2
+  node "${INCREMENTAL_DEADLINE_RUNNER}" \
+    --timeout-seconds "${timeout_seconds}" \
+    --heartbeat-seconds "${MINIKUBE_DOCKER_HEARTBEAT_SECONDS:-20}" \
+    --kill-grace-seconds "${MINIKUBE_DOCKER_KILL_GRACE_SECONDS:-5}" \
+    --label "${label}" -- "$@"
+}
 
 incremental_add_target() {
   local selector="$1" namespace="$2" deployment="$3" target
@@ -39,13 +69,13 @@ incremental_add_target() {
 
 # The commit the cluster's images were last synced to, or nothing.
 #
-# In ghcr mode the marker is only a usable baseline while the image set it was
-# stamped against is still in place. `make minikube-setup` re-pulls every
-# release image, discarding any shadow build, and does not touch this marker --
-# so a marker whose acquisition stamp predates the current one describes a
-# cluster that no longer exists, and trusting its gitHead would compute an empty
-# delta and gate on release code. Local mode has no such hazard: a full local
-# build puts every image at the tree state the marker names.
+# The marker is only a usable baseline while the image set it was stamped
+# against is still the set the profile can prove. Both a GHCR acquisition and a
+# local build can replace image IDs without changing gitHead; trusting that
+# head after a newer acquisition would compute an empty delta and gate without
+# proving that the running pods use the newly acquired images. A stamp mismatch
+# therefore invalidates the baseline in every image mode; the caller chooses
+# the established full local build or GHCR recovery path below.
 incremental_marker_git_head() {
   local git_head marker_generated
   git_head="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane \
@@ -53,12 +83,11 @@ incremental_marker_git_head() {
   if [[ -z "${git_head}" ]]; then
     return 0
   fi
-  if [[ "${IMAGE_SOURCE}" == "ghcr" ]]; then
-    marker_generated="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane \
-      -o jsonpath='{.data.imagesGeneratedAt}' 2>/dev/null || true)"
-    if [[ "${marker_generated}" != "${IMAGES_GENERATED_AT:-}" ]]; then
-      return 0
-    fi
+  marker_generated="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane \
+    -o jsonpath='{.data.imagesGeneratedAt}' 2>/dev/null || true)"
+  if [[ -z "${marker_generated}" || -z "${IMAGES_GENERATED_AT:-}" ||
+        "${marker_generated}" != "${IMAGES_GENERATED_AT}" ]]; then
+    return 0
   fi
   printf '%s' "${git_head}"
 }
@@ -77,13 +106,21 @@ incremental_use_minikube_docker() {
     INCREMENTAL_DOCKER_ENV_APPLIED=true
     return 0
   fi
-  if ! env_script="$(minikube -p "${PROFILE}" docker-env)"; then
+  if ! env_script="$(incremental_run_with_deadline incremental-docker-env \
+    "${INCREMENTAL_RUNTIME_TIMEOUT_SECONDS}" \
+    minikube -p "${PROFILE}" docker-env --shell bash)" || \
+     [[ -z "${env_script}" ]] || \
+     ! grep -Eq '(^|[[:space:]])export[[:space:]]+DOCKER_HOST=' <<<"${env_script}"; then
     # >&2 because this runs inside a command substitution on the baseline
     # path, where anything on stdout would be captured AS the baseline.
-    log "ERROR: could not point Docker at minikube's daemon; a shadow build would land in the wrong daemon" >&2
+    log "ERROR: DOCKER_ENV_UNRESOLVED: could not point Docker at minikube's daemon; a shadow build would land in the wrong daemon" >&2
     exit 1
   fi
   eval "${env_script}"
+  if [[ -z "${DOCKER_HOST:-}" ]]; then
+    log "ERROR: DOCKER_ENV_UNRESOLVED: minikube docker-env did not set DOCKER_HOST" >&2
+    exit 1
+  fi
   unset DOCKER_API_VERSION 2>/dev/null || true
   INCREMENTAL_DOCKER_ENV_APPLIED=true
 }
@@ -101,7 +138,9 @@ incremental_release_baseline_commit() {
   incremental_use_minikube_docker
   for probe in control-api workflow-recipes external-rest-api; do
     ref="ghcr.io/evenfire-ai/${probe}:${IMAGE_TAG}"
-    revision="$(docker inspect --format='{{index .Config.Labels "org.opencontainers.image.revision"}}' "${ref}" 2>&1)"
+    revision="$(incremental_run_with_deadline incremental-image-inspect \
+      "${INCREMENTAL_RUNTIME_TIMEOUT_SECONDS}" \
+      docker inspect --format='{{index .Config.Labels "org.opencontainers.image.revision"}}' "${ref}")"
     rc=$?
     if [[ "${rc}" -ne 0 ]]; then
       continue
@@ -141,7 +180,10 @@ incremental_classify_path() {
     rpc-proxy/*) incremental_add_target rpc-proxy rpc-proxy rpc-proxy ;;
     mcp-host/*) incremental_add_target mcp-host mcp-host chatllm ;;
     host-context-controller/*) incremental_add_target host-context-controller control-plane host-context-controller ;;
-    gfs-controller/*) incremental_add_target gfs-controller control-plane host-context-controller ;;
+    gfs-controller/*)
+      incremental_add_target gfs-controller gfs gfsc-writer
+      incremental_add_target gfs-controller gfs gfsc-reader
+      ;;
     workflow-recipes/*|packages/workflow-runtime-core/*|packages/workflow-sdk/*)
       incremental_add_target workflow control-plane workflow-recipes
       ;;
@@ -151,8 +193,20 @@ incremental_classify_path() {
     channel-reader/*) incremental_add_target channel-reader channels channel-reader-chatllm ;;
     mcp-proxy/*) incremental_add_target mcp-proxy mcp-server mcp-proxy ;;
     control-ui/*) incremental_add_target control-ui control-plane control-ui ;;
+    packages/display-field/*)
+      # display-field is consumed ONLY by the control-api and control-ui images
+      # (their Dockerfiles COPY it and their field validation runs off it), so a
+      # change here changes exactly those two image outputs. Reshadow both
+      # instead of falling into the unmapped full-build/abort path below.
+      # (llm-providers is deliberately NOT mapped here: it has five consumers,
+      # so it stays on the fail-closed full-build default rather than risk a
+      # partial, drift-prone target list — see work-tracker/issues.)
+      incremental_add_target control-api control-plane control-api
+      incremental_add_target control-ui control-plane control-ui
+      ;;
     profile-ui/*) incremental_add_target profile-ui profiles profile-ui ;;
     webhook-proxy/*) incremental_add_target webhook-proxy webhook-ingress webhook-proxy ;;
+    codex-llm-proxy/*) incremental_add_target codex-llm-proxy control-plane codex-llm-proxy ;;
     tests/e2e/fixtures/workflow-plugin-sdk-e2e/*)
       incremental_add_target workflow-plugin-sdk-e2e sandbox-recipes workflow-plugin-sdk-e2e
       ;;
@@ -310,12 +364,16 @@ incremental_shadow_selector() {
       log "  ${local_ref} has no published counterpart; the local build is what runs"
       continue
     fi
-    if ! docker tag "${local_ref}" "${shadow_ref}"; then
+    if ! incremental_run_with_deadline incremental-image-tag \
+      "${INCREMENTAL_RUNTIME_TIMEOUT_SECONDS}" \
+      docker tag "${local_ref}" "${shadow_ref}"; then
       log "ERROR: could not shadow ${shadow_ref} with ${local_ref}; the gate would test undeployed code"
       exit 1
     fi
     if [[ "${MINIKUBE_MULTI_NODE:-false}" == "true" ]]; then
-      minikube -p "${PROFILE}" image load "${shadow_ref}" >/dev/null
+      incremental_run_with_deadline incremental-image-load \
+        "${INCREMENTAL_IMAGE_LOAD_TIMEOUT_SECONDS}" \
+        minikube -p "${PROFILE}" image load "${shadow_ref}" >/dev/null
     fi
     INCREMENTAL_SHADOWED+=("${shadow_ref} <- ${local_ref}")
     shadowed=$((shadowed + 1))
@@ -374,7 +432,7 @@ incremental_abort_unshadowable() {
 }
 
 incremental_build_images() {
-  local target selector
+  local target selector built="|"
 
   if [[ "${IMAGE_SOURCE}" == "ghcr" ]]; then
     incremental_build_images_ghcr
@@ -398,6 +456,8 @@ incremental_build_images() {
 
   for target in "${INCREMENTAL_TARGETS[@]}"; do
     selector="${target%%|*}"
+    [[ "${built}" == *"|${selector}|"* ]] && continue
+    built+="${selector}|"
     log "Building only image selector ${selector}"
     MINIKUBE_PROFILE="${PROFILE}" \
       bash "${PROJECT_DIR}/scripts/minikube/build-images.sh" "--only=${selector}"
@@ -405,7 +465,7 @@ incremental_build_images() {
 }
 
 incremental_build_images_ghcr() {
-  local target selector
+  local target selector built="|"
 
   if [[ "${INCREMENTAL_FULL_IMAGE_BUILD}" == "true" ]]; then
     incremental_abort_unshadowable
@@ -433,6 +493,8 @@ incremental_build_images_ghcr() {
 
   for target in "${INCREMENTAL_TARGETS[@]}"; do
     selector="${target%%|*}"
+    [[ "${built}" == *"|${selector}|"* ]] && continue
+    built+="${selector}|"
     log "Building only image selector ${selector}"
     MINIKUBE_PROFILE="${PROFILE}" \
       bash "${PROJECT_DIR}/scripts/minikube/build-images.sh" "--only=${selector}"
@@ -443,7 +505,7 @@ incremental_build_images_ghcr() {
 }
 
 incremental_restart_targets() {
-  local target selector remainder namespace deployment deployment_key
+  local target selector remainder namespace deployment deployment_key deployment_probe
   local restarted="|"
 
   for target in "${INCREMENTAL_TARGETS[@]}"; do
@@ -455,13 +517,27 @@ incremental_restart_targets() {
 
     [[ "${restarted}" == *"${deployment_key}"* ]] && continue
     restarted+="${namespace}/${deployment}|"
-    if ! ${KC} get deployment "${deployment}" -n "${namespace}" >/dev/null 2>&1; then
-      log "Skipping absent ${namespace}/${deployment} for image selector ${selector}"
-      continue
+    deployment_probe=""
+    if ! deployment_probe="$(${KC} get deployment "${deployment}" -n "${namespace}" 2>&1)"; then
+      if [[ "${deployment_probe}" == *NotFound* || "${deployment_probe}" == *"not found"* ]]; then
+        log "Skipping absent ${namespace}/${deployment} for image selector ${selector}"
+        continue
+      fi
+      log "ERROR: unable to inspect ${namespace}/${deployment} for image selector ${selector}: ${deployment_probe}"
+      return 1
     fi
     ${KC} rollout restart "deployment/${deployment}" -n "${namespace}" >/dev/null
     log "Restarted ${namespace}/${deployment} for image selector ${selector}"
-    rollout_if_present "${namespace}" "${deployment}"
+    if [[ "${namespace}/${deployment}" == "gfs/gfsc-reader" ]]; then
+      # HCC owns the reader template and strips kubectl's restartedAt
+      # annotation. The canonical shim judges Ready replicas/pods instead of
+      # waiting forever on a deployment generation HCC can rewrite.
+      PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
+        CONTEXT="${PROFILE}" ${KC} rollout status "deployment/${deployment}" \
+          -n "${namespace}" --timeout=120s >/dev/null
+    else
+      rollout_if_present "${namespace}" "${deployment}"
+    fi
   done
 }
 

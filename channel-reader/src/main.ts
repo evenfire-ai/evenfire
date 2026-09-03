@@ -100,8 +100,65 @@ const PROVIDER_EVENT_DEDUPE_TTL_MS = 10 * 60 * 1000 // 10 minutes
 /** One "you are not linked" notice per Slack user per conversation per day. */
 const UNRESOLVED_NOTICE_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
 const UNRESOLVED_NOTICE_COPY =
-  "I can't accept messages from this Slack account. If you haven't linked it yet, " +
-  'do that in your evenfire profile. If you think you should already have access, contact your admin.'
+  "I can't accept messages from this Slack account. If you haven't linked it yet on the " +
+  'profile UI, open Settings > Social channels > Slack and choose Connect Slack. ' +
+  'If you think you should already have access, contact your admin.'
+const UNRESOLVED_NOTICE_COPY_TEAMS =
+  "I can't accept messages from this Teams account. If you haven't linked it yet on the " +
+  'profile UI, open Settings > Social channels > Teams and choose Connect Microsoft Teams. ' +
+  'If you think you should already have access, contact your admin.'
+
+/**
+ * Profile UI tab that owns the Connect button for a provider.
+ *
+ * The bare Profile UI root lands the user on their profile with no sign of
+ * where to go next, and the control they need is four levels in: Settings >
+ * Social channels > <provider> > Connect. These are real App Router segments
+ * (profile-ui/app/settings/social/[network]), not query params, so they are
+ * safe to link directly.
+ *
+ * The copy above still names the path in words. A deep link can be defeated by
+ * a sign-in redirect that drops the user at the root, and someone reading this
+ * from a phone needs to be able to find the screen without the link.
+ */
+const PROFILE_SOCIAL_CHANNEL_PATH: Partial<Record<ChannelType, string>> = {
+  slack: '/settings/social/slack',
+  teams: '/settings/social/teams',
+}
+
+/**
+ * Profile UI link for the tab where `channelType` is linked. Falls back to the
+ * configured base URL for a provider with no such tab, so a new channel type
+ * degrades to today's behaviour rather than emitting a 404 path.
+ */
+export function profileSocialChannelUrl(baseUrl: string, channelType: ChannelType): string {
+  const trimmed = baseUrl.trim()
+  // Trailing slashes are walked off by index rather than matched with /\/+$/.
+  // An end-anchored `+` over a run of the same character backtracks
+  // polynomially (CodeQL js/polynomial-redos), and profileUiUrl is deployment
+  // config that arrives here unvalidated. The walk is linear and needs no
+  // reasoning about the regex engine to stay that way.
+  let end = trimmed.length
+  while (end > 0 && trimmed.charCodeAt(end - 1) === 47 /* '/' */) end--
+  return `${trimmed.slice(0, end)}${PROFILE_SOCIAL_CHANNEL_PATH[channelType] ?? ''}`
+}
+// Telegram deliberately gets no Profile UI link and no product name: unlike Teams
+// and Slack, anyone who discovers the bot handle can message it, so a reply must
+// not confirm what the bot belongs to.
+const UNRESOLVED_NOTICE_COPY_TELEGRAM =
+  "I can't accept messages from this account. If you think that is wrong, contact your administrator."
+/**
+ * Ceiling on live notice records, so a misconfiguration cannot turn the bot
+ * into a flooder. Exported so tests assert against the real value.
+ */
+export const UNRESOLVED_NOTICE_GLOBAL_CAP = 50
+/**
+ * Limiter key prefix for a provider identity with no workspace/tenant scope.
+ * Only Telegram ever reaches this: Slack and Teams identities always carry a
+ * real workspaceId (sendUnresolvedSenderNotice returns early otherwise), so
+ * this literal can never collide with an actual workspace or tenant id.
+ */
+const UNRESOLVED_NOTICE_NO_WORKSPACE_KEY = 'no-workspace'
 const SLACK_VERIFICATION_SCAN_INTERVAL_MS = 60 * 1000
 const TOOL_APPROVAL_ACTION_RE = /^tool:([ald]):([A-Za-z0-9_-]{16})$/
 /**
@@ -288,6 +345,13 @@ export class ChannelReader {
   private processedProviderEvents: Map<string, ProcessedProviderEvent> = new Map()
   /** Unresolved-sender notices already sent, keyed by workspace + user + channel. */
   private unresolvedNoticesSent: Map<string, { seenAt: number }> = new Map()
+  /**
+   * Whether the global-cap warning below has already logged for the current
+   * capped episode. Reset to false once cleanupStaleApprovals' TTL sweep drains
+   * unresolvedNoticesSent back under UNRESOLVED_NOTICE_GLOBAL_CAP, so a later
+   * trip into the cap logs again instead of staying silent forever.
+   */
+  private unresolvedNoticeCapLogged = false
   /** Adapter route key by provider + CommunicationChannel ref. */
   private adapterKeysByCommunicationChannel: Map<string, string> = new Map()
   /** Adapter route key by provider + runtime channel id. */
@@ -1233,9 +1297,33 @@ export class ChannelReader {
       const { spec } = channelCRD
 
       // Process Telegram private chats, groups, and supergroups. Personal identity is verified separately.
-      if (spec.telegram) {
+      //
+      // Two separate hazards are guarded here, and both used to cost the channel
+      // every provider declared after telegram.
+      //
+      // 1. Guard on length, not presence. Channels created before this release
+      //    carry `telegram: []` even when they are Teams or Slack channels, and
+      //    an empty array is truthy. An empty array means "no telegram groups to
+      //    poll", not "this is a telegram channel".
+      // 2. The exits below leave the LABELLED BLOCK, not the channel loop. A
+      //    `continue` here aborted the whole channel, so a channel with real
+      //    telegram groups but no telegram adapter (credentials absent) silently
+      //    stopped polling its email and everything else too.
+      //    charts/clerum-crds/examples/channels.yaml ships exactly that shape:
+      //    one CommunicationChannel carrying telegram + email + slack.
+      telegramGroups: if (spec.telegram?.length) {
         const adapter = this.adapterForChannel('telegram', channelCRD)
-        if (!adapter) continue
+        if (!adapter) {
+          // Previously silent, which is what made this hard to diagnose.
+          console.warn(
+            '[Main] Skipping Telegram groups for ' +
+              channelCRD.namespace +
+              '/' +
+              channelCRD.name +
+              ': no telegram adapter; other providers on this channel still poll'
+          )
+          break telegramGroups
+        }
         const providerTarget = providerTargetFromChannel(channelCRD)
         if (!providerTarget) {
           console.warn(
@@ -1245,7 +1333,7 @@ export class ChannelReader {
               channelCRD.name +
               ': provider target is incomplete'
           )
-          continue
+          break telegramGroups
         }
         const telegramPollGroups = new Map<
           string,
@@ -1314,10 +1402,12 @@ export class ChannelReader {
         }
       }
 
-      // Process Email groups
-      if (spec.email) {
+      // Process Email groups. Same two hazards as the telegram guard above: an
+      // empty array is not an email channel, and a missing adapter must not cost
+      // the channel its remaining providers.
+      emailGroups: if (spec.email?.length) {
         const adapter = this.adapterForChannel('email', channelCRD)
-        if (!adapter) continue
+        if (!adapter) break emailGroups
         for (const group of spec.email) {
           const allowedSenders = new Set(group.emails)
           const messages = await adapter.fetchMessages(group.channelId, allowedSenders)
@@ -1550,33 +1640,93 @@ export class ChannelReader {
   }
 
   /**
-   * Tell an unresolved Slack sender why the agent is ignoring them, at most once
-   * per user per conversation per UNRESOLVED_NOTICE_TTL_MS.
+   * Tell an unresolved Slack, Teams, or Telegram sender why the agent is ignoring
+   * them, at most once per user per conversation per UNRESOLVED_NOTICE_TTL_MS, and
+   * never past UNRESOLVED_NOTICE_GLOBAL_CAP live notice records in total.
    */
   private async sendUnresolvedSenderNotice(msg: Message): Promise<void> {
-    if (msg.channelType !== 'slack') return
+    if (
+      msg.channelType !== 'slack' &&
+      msg.channelType !== 'teams' &&
+      msg.channelType !== 'telegram'
+    )
+      return
     const identity = msg.providerIdentity
     const userId = identity?.providerUserId?.trim()
     const workspaceId = identity?.providerWorkspaceId?.trim()
     const channelId = msg.channelId?.trim()
-    if (!userId || !workspaceId || !channelId) return
+    if (!userId || !channelId) return
+    // Slack and Teams identities are scoped to a workspace/tenant an admin
+    // controls, and the limiter key below relies on that scope. Telegram has no
+    // such concept: every real Telegram message carries providerWorkspaceId: null,
+    // so requiring one here would silently drop the notice for every Telegram
+    // sender.
+    if (msg.channelType !== 'telegram' && !workspaceId) return
 
     // Scope the limiter by provider identity, the same way pendingApprovalChannelScope
     // does. The SEND still targets msg.channelId, which is what replyChannelId hands
     // every other outbound Slack call; only the dedupe identity is provider-scoped.
     const conversationId = identity?.providerChannelId?.trim() || channelId
-    const key = `${workspaceId}:${userId}:${conversationId}`
+    const key = `${workspaceId ?? UNRESOLVED_NOTICE_NO_WORKSPACE_KEY}:${userId}:${conversationId}`
     if (this.unresolvedNoticesSent.has(key)) return
+    if (this.unresolvedNoticesSent.size >= UNRESOLVED_NOTICE_GLOBAL_CAP) {
+      // Log only on the transition into the capped state, not on every blocked
+      // send: at the cap, every inbound message from every unresolved sender
+      // across every provider would otherwise emit its own warning, which is
+      // loudest in exactly the misconfiguration this cap exists to contain.
+      // unresolvedNoticeCapLogged resets once cleanupStaleApprovals' TTL sweep
+      // drains the map back under the cap, so a later trip logs again.
+      if (!this.unresolvedNoticeCapLogged) {
+        this.unresolvedNoticeCapLogged = true
+        console.warn(
+          `[Main] Unresolved-sender notice cap (${UNRESOLVED_NOTICE_GLOBAL_CAP}) reached; ` +
+            `suppressing further notices until the TTL sweep frees a slot.`
+        )
+      }
+      return
+    }
     // Record on ATTEMPT, not on success: a conversation Slack keeps rejecting
     // must not produce one outbound call per inbound message.
     this.unresolvedNoticesSent.set(key, { seenAt: Date.now() })
 
     const adapter = this.adapterForMessage(msg)
-    if (!adapter?.sendEphemeral) return
-    const profileUrl = config.profileUiUrl?.trim()
-    const content = profileUrl ? `${UNRESOLVED_NOTICE_COPY} ${profileUrl}` : UNRESOLVED_NOTICE_COPY
+    if (!adapter) return
+    let content: string
+    if (msg.channelType === 'telegram') {
+      content = UNRESOLVED_NOTICE_COPY_TELEGRAM
+    } else {
+      const profileUrl = config.profileUiUrl?.trim()
+      const baseCopy =
+        msg.channelType === 'teams' ? UNRESOLVED_NOTICE_COPY_TEAMS : UNRESOLVED_NOTICE_COPY
+      content = profileUrl
+        ? `${baseCopy} ${profileSocialChannelUrl(profileUrl, msg.channelType)}`
+        : baseCopy
+    }
     try {
-      await adapter.sendEphemeral(channelId, userId, content)
+      if (msg.channelType === 'teams') {
+        // TeamsAdapter has no ephemeral concept, so the notice is a normal message.
+        // Thread it under the triggering message so an unconnected user does not
+        // produce a top-level post in a shared channel.
+        //
+        // The reply target is the thread ROOT, the same target replyTargetMessageId
+        // picks for every other Teams reply. threadId is the root activity id
+        // (providerReplyToMessageId) and messageId is the leaf activity that just
+        // arrived; replying to the leaf does not attach the notice to the
+        // conversation, which is the whole mitigation here. The fallback is for a
+        // direct chat, which has no separate root.
+        await adapter.sendMessage(channelId, content, msg.threadId || msg.messageId)
+      } else if (msg.channelType === 'telegram') {
+        // No reply id: the spec fixes this as sendMessage(channelId, content) for
+        // Telegram, with no threading. Group and supergroup chats do have a
+        // channel-wide audience (see telegramOperationalMessage.ts), so this is
+        // not a threading-is-pointless argument; the copy itself is deliberately
+        // terse so a top-level post leaks nothing meaningful, and threading here
+        // is a possible follow-up.
+        await adapter.sendMessage(channelId, content)
+      } else {
+        if (!adapter.sendEphemeral) return
+        await adapter.sendEphemeral(channelId, userId, content)
+      }
     } catch (error) {
       // Contain the failure HERE. SlackAdapter swallows its own errors today, but
       // the ChannelAdapter interface promises nothing, and this runs inside the
@@ -2209,6 +2359,11 @@ export class ChannelReader {
       if (now - notice.seenAt > UNRESOLVED_NOTICE_TTL_MS) {
         this.unresolvedNoticesSent.delete(key)
       }
+    }
+    // A later trip into the cap must warn again, so once eviction above drains
+    // the map back under it, allow the next crossing to log.
+    if (this.unresolvedNoticesSent.size < UNRESOLVED_NOTICE_GLOBAL_CAP) {
+      this.unresolvedNoticeCapLogged = false
     }
   }
 

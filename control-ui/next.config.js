@@ -111,6 +111,56 @@ const nextConfig = {
       { source: '/publisher/:path*', destination: '/marketplace/org/entries', permanent: true },
       { source: '/cost', destination: '/cost-and-usage/usage', permanent: true },
       { source: '/cost/:path*', destination: '/cost-and-usage/:path*', permanent: true },
+      // Host detail tab consolidation (R1-H1 in feat/agent-ux-polish PR
+      // review): the old top-level tabs are now sub-tabs under the new
+      // `access` and `advanced` parents. Send each old slug to its new
+      // parent so bookmarks, shared links, and the approval-tools E2E
+      // (which navigates to /hosts/<name>/approvals) still reach the
+      // section they used to.
+      {
+        source: '/agents/:name/member-access',
+        destination: '/agents/:name/access',
+        permanent: true,
+      },
+      { source: '/agents/:name/team-access', destination: '/agents/:name/access', permanent: true },
+      { source: '/agents/:name/approvals', destination: '/agents/:name/advanced', permanent: true },
+      { source: '/agents/:name/env-vars', destination: '/agents/:name/advanced', permanent: true },
+      // The agent-scoped Contexts tab was renamed to Connectors. Keep old
+      // bookmarks and shared links working before the /agents -> /hosts
+      // rewrite reaches the physical tab route.
+      {
+        source: '/agents/:name/contexts',
+        destination: '/agents/:name/connectors',
+        permanent: true,
+      },
+      // Connector edit "Context" tab renamed to "Access".
+      {
+        source: '/connectors/:name/edit/context',
+        destination: '/connectors/:name/edit/access',
+        permanent: true,
+      },
+      // Users & Teams access tabs consolidated onto "Agents" (D10): the old
+      // "Contexts" and "Access" tab URLs all land on the Agents tab.
+      {
+        source: '/users-and-teams/users/:id/contexts',
+        destination: '/users-and-teams/users/:id/agents',
+        permanent: true,
+      },
+      {
+        source: '/users-and-teams/teams/:id/contexts',
+        destination: '/users-and-teams/teams/:id/agents',
+        permanent: true,
+      },
+      {
+        source: '/users-and-teams/users/:id/access',
+        destination: '/users-and-teams/users/:id/agents',
+        permanent: true,
+      },
+      {
+        source: '/users-and-teams/teams/:id/access',
+        destination: '/users-and-teams/teams/:id/agents',
+        permanent: true,
+      },
       { source: '/marketplace', destination: '/marketplace/connectors', permanent: true },
       { source: '/cost-and-usage', destination: '/cost-and-usage/usage', permanent: true },
       {
@@ -120,11 +170,6 @@ const nextConfig = {
       },
       { source: '/outputs', destination: '/agent-outputs/recipe-artifacts', permanent: true },
       { source: '/outputs/:path*', destination: '/agent-outputs/:path*', permanent: true },
-      {
-        source: '/contexts/:name/shared-files',
-        destination: '/contexts/:name/agent-files',
-        permanent: true,
-      },
       { source: '/secrets', destination: '/secrets/llm', permanent: true },
       { source: '/settings', destination: '/settings/ui', permanent: true },
       { source: '/traces/hosts', destination: '/traces', permanent: true },

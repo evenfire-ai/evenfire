@@ -7,6 +7,7 @@ export type IdentityFieldConfig = {
   help: string
   key: IdentityFieldKey
   label: string
+  placeholder: string
   promptHeader: string
 }
 

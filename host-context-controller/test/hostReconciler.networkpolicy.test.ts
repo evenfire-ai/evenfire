@@ -22,6 +22,7 @@ vi.mock('../src/config', () => ({
     hostNamespace: 'mcp-host',
     rpcProxyNamespace: 'rpc-proxy',
     channelsNamespace: 'channels',
+    llmHooksNamespace: 'llm-hooks',
     hostFullReconcileConcurrency: 2,
     channelReaderImage: 'clerum/channel-reader:test',
     channelReaderImagePullPolicy: 'IfNotPresent',
@@ -151,6 +152,12 @@ describe('HostReconciler.ensureChannelReaderEgressNetworkPolicy', () => {
     expect(JSON.stringify(call.body.spec.egress)).not.toContain('control-plane')
   })
 })
+
+// NOTE: the mcp-host→llm-hooks egress policy moved to LlmHookReconciler
+// (per-host, scoped to referenced hook pods — N1/N7); see
+// src/llmHookReconciler.test.ts "per-host egress". HostReconciler still deletes
+// `mcp-host-<host>-egress-llm-hooks` on host delete (covered by the
+// deleteHostNetworkPolicies test below).
 
 describe('HostReconciler.ensureMcpHostIngressNetworkPolicy', () => {
   it('creates the ingress NP in mcp-host namespace with correct selectors', async () => {
@@ -292,7 +299,7 @@ describe('HostReconciler.deleteHostNetworkPolicies', () => {
 
     await (reconciler as any).deleteHostNetworkPolicies('chatllm', 'mcp-host')
 
-    expect(mocks.networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(5)
+    expect(mocks.networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(6)
     const calls = (mocks.networkingApi.deleteNamespacedNetworkPolicy as any).mock.calls
     expect(calls).toContainEqual([
       { name: 'mcp-host-chatllm-ingress-channel-reader', namespace: 'mcp-host' },
@@ -301,7 +308,9 @@ describe('HostReconciler.deleteHostNetworkPolicies', () => {
       { name: 'mcp-host-chatllm-ingress-rpc-proxy', namespace: 'mcp-host' },
     ])
     expect(calls).toContainEqual([{ name: 'mcp-host-chatllm-egress-gfs', namespace: 'mcp-host' }])
-    expect(calls).toContainEqual([{ name: 'mcp-host-chatllm-egress-gfs', namespace: 'mcp-host' }])
+    expect(calls).toContainEqual([
+      { name: 'mcp-host-chatllm-egress-codex-proxy', namespace: 'mcp-host' },
+    ])
     expect(calls).toContainEqual([{ name: 'channel-reader-chatllm-egress', namespace: 'channels' }])
     expect(calls).toContainEqual([
       { name: 'rpc-proxy-chatllm-egress-mcp-host', namespace: 'rpc-proxy' },

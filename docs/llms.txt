@@ -32,9 +32,10 @@
 
 - Connect Telegram: how-to/connect-telegram.md
 - Connect Slack (app scopes, request URL, verify flow, approval buttons): how-to/connect-slack.md
+- Connect Microsoft Teams (Teams CLI registration, derived endpoint, single-tenant requirement, verify flow): how-to/connect-teams.md
 - Configure approvals: how-to/configure-approvals.md
 - Add MCP server: how-to/add-mcp-server.md
-- LLM providers overview (the 21 providers, mental model, support matrix): llm-providers/README.md
+- LLM providers overview (the 23 providers, including oauth-broker ChatGPT, mental model, support matrix): llm-providers/README.md
 - Configure LLM providers (credentials, model allowlist, session selector): deploy/llm-providers.md
 - Add an LLM provider (data-only vs driver-based integration): llm-providers/adding-a-provider.md
 - Desktop setup & updates (environments, invitation, updates): how-to/desktop-setup-and-updates.md

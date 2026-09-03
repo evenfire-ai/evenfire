@@ -6,18 +6,22 @@ import remarkGfm from 'remark-gfm'
 import { Button, IconButton, Pill, SelectableOption, TextInput } from '@components/Common'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
-import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
+import { useSearchPluginsAppsController } from '@hooks/domain/useSearchPluginsAppsController'
 import { useTeamsDataController } from '@hooks/domain/useTeamsDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { notificationKindLabel, notificationPreviewText } from '@/lib/notifications'
 import type { AppNotificationKind } from '@/uiTypes'
 import type {
   AppHeaderProps,
+  SearchAppResult,
   SearchEntityResult,
-  SearchMemberResult,
-  SearchTeamResult,
+  SearchPluginResult,
 } from './types'
+
+const FULL_SEARCH_PLACEHOLDER = 'Search agents, connectors, plugins or apps...'
+const COMPACT_SEARCH_PLACEHOLDER = 'Search workspace...'
+const COMPACT_SEARCH_BREAKPOINT = 1220
 
 function formatApprovalTimestamp(value: string, mode: 'relative' | 'absolute'): string {
   const date = new Date(value)
@@ -79,25 +83,30 @@ function notificationPillLabel(kind: AppNotificationKind): string {
 }
 
 export const AppHeader = React.memo(function AppHeader({
+  searchFocusRequestId = 0,
+  notificationOpenRequestId = 0,
   notificationTrayMode = 'overlay',
   notificationTrayReady = true,
   onNotificationTrayOpenChange,
   onShellOverlayOpenChange,
 }: AppHeaderProps) {
   const { accessCatalog: agentsAccessCatalog } = useAgentsDataController()
-  const { contextIds } = useContextsDataController()
   const { globalMcpServers, mcpServersByAgent } = useMcpServersDataController()
   const {
     teams,
-    teamMembers,
     teamDirectory,
     loading: teamDirectoryLoading,
     teamDirectoryHydrated,
     currentTeamId,
     ensureHydrated: onEnsureTeamDirectory,
   } = useTeamsDataController()
-  const { navItem, handleNavSelect, handleOpenContextDetails, handleOpenTeamDetails } =
-    useNavigationContext()
+  const {
+    plugins: searchPlugins,
+    apps: searchApps,
+    loading: pluginsAppsLoading,
+    ensureLoaded: ensurePluginsAppsLoaded,
+  } = useSearchPluginsAppsController()
+  const { handleNavSelect } = useNavigationContext()
   const {
     notifications,
     unreadNotificationCount,
@@ -121,7 +130,11 @@ export const AppHeader = React.memo(function AppHeader({
   const [searchQuery, setSearchQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [compactSearch, setCompactSearch] = useState(
+    () => window.innerWidth <= COMPACT_SEARCH_BREAKPOINT
+  )
   const searchRef = useRef<HTMLDivElement | null>(null)
+  const searchInputRef = useRef<HTMLInputElement | null>(null)
   const notificationsRef = useRef<HTMLDivElement | null>(null)
   const searchDirectoryInFlightRef = useRef(false)
   const searchDirectoryRefreshQueryRef = useRef('')
@@ -135,8 +148,32 @@ export const AppHeader = React.memo(function AppHeader({
     return () => window.clearInterval(timer)
   }, [])
 
+  useEffect(() => {
+    const updateCompactSearch = () =>
+      setCompactSearch(window.innerWidth <= COMPACT_SEARCH_BREAKPOINT)
+    window.addEventListener('resize', updateCompactSearch)
+    return () => window.removeEventListener('resize', updateCompactSearch)
+  }, [])
+
   useClickOutside(searchRef, searchOpen, () => setSearchOpen(false))
   useClickOutside(notificationsRef, notificationsOpen, () => setNotificationsOpen(false))
+
+  useEffect(() => {
+    if (searchFocusRequestId <= 0) return
+    setNotificationsOpen(false)
+    // Open based on query presence rather than delegating to the input's
+    // onFocus: when the field is already focused (e.g. Escape then re-triggering
+    // the shortcut) focus() is a no-op and onFocus would not re-fire. Read the
+    // live input value so this stays keyed only on the request id.
+    setSearchOpen((searchInputRef.current?.value ?? '').trim().length > 0)
+    searchInputRef.current?.focus()
+  }, [searchFocusRequestId])
+
+  useEffect(() => {
+    if (notificationOpenRequestId <= 0) return
+    setSearchOpen(false)
+    setNotificationsOpen(true)
+  }, [notificationOpenRequestId])
 
   React.useLayoutEffect(() => {
     onShellOverlayOpenChange?.(searchOpen || (notificationsOpen && !notificationTrayUsesDrawer))
@@ -179,11 +216,6 @@ export const AppHeader = React.memo(function AppHeader({
 
   const currentTeamName = teamNameById[currentTeamId] || currentTeamId || 'Workspace team'
 
-  const memberInitial = (member: { label: string; email: string }) => {
-    const source = member.label || member.email
-    return source ? source.charAt(0).toUpperCase() : '?'
-  }
-
   const formatNotificationTime = (timestamp: number) => {
     const elapsedMs = Math.max(0, now - timestamp)
     if (elapsedMs < 60_000) return 'just now'
@@ -225,38 +257,6 @@ export const AppHeader = React.memo(function AppHeader({
     event.preventDefault()
     openNotification(notification)
   }
-
-  const selectedTeamMembers = useMemo<SearchMemberResult[]>(() => {
-    return teamMembers.map(member => ({
-      key: `${currentTeamId}:${member.id}`,
-      id: member.id,
-      label: (member.name || member.email).trim(),
-      email: member.email,
-      role: member.role,
-      teamId: currentTeamId,
-      teamName: currentTeamName,
-    }))
-  }, [currentTeamId, currentTeamName, teamMembers])
-
-  const otherTeamMembers = useMemo<SearchMemberResult[]>(() => {
-    const rows: SearchMemberResult[] = []
-    for (const team of teams) {
-      if (team.id === currentTeamId) continue
-      const members = teamDirectory[team.id]?.members || []
-      for (const member of members) {
-        rows.push({
-          key: `${team.id}:${member.id}`,
-          id: member.id,
-          label: (member.name || member.email).trim(),
-          email: member.email,
-          role: member.role,
-          teamId: team.id,
-          teamName: team.name,
-        })
-      }
-    }
-    return rows
-  }, [currentTeamId, teamDirectory, teams])
 
   const aggregatedAgents = useMemo<SearchEntityResult[]>(() => {
     const byName = new Map<
@@ -307,110 +307,34 @@ export const AppHeader = React.memo(function AppHeader({
       }
     }
 
+    // Visible name = agent `spec.host` (catalog `agentDisplayByName`, total over
+    // catalog agents at the producer). The `?? value` covers cross-team agents
+    // added from the team directory (no catalog display source), not a defensive
+    // guard on catalog agents — see spec Decision #6.
+    const agentDisplayByName = accessCatalog?.agentDisplayByName
     return [...byName.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([value, details]) => ({
         key: value,
         value,
+        display: agentDisplayByName?.[value] ?? value,
         fromSelectedScope: details.fromSelectedScope,
         fromUserScope: details.fromUserScope,
         teamNames: [...details.teamNames].sort((a, b) => a.localeCompare(b)),
       }))
   }, [accessCatalog, currentTeamId, currentTeamName, teamDirectory, teams])
 
-  const filteredSelectedMembers = useMemo(
-    () =>
-      hasSearch
-        ? selectedTeamMembers.filter(
-            member =>
-              member.label.toLowerCase().includes(normalizedSearch) ||
-              member.email.toLowerCase().includes(normalizedSearch) ||
-              member.role.toLowerCase().includes(normalizedSearch) ||
-              member.teamName.toLowerCase().includes(normalizedSearch)
-          )
-        : [],
-    [hasSearch, selectedTeamMembers, normalizedSearch]
-  )
-  const filteredOtherMembers = useMemo(
-    () =>
-      hasSearch
-        ? otherTeamMembers.filter(
-            member =>
-              member.label.toLowerCase().includes(normalizedSearch) ||
-              member.email.toLowerCase().includes(normalizedSearch) ||
-              member.role.toLowerCase().includes(normalizedSearch) ||
-              member.teamName.toLowerCase().includes(normalizedSearch)
-          )
-        : [],
-    [hasSearch, otherTeamMembers, normalizedSearch]
-  )
-  const filteredMembers = useMemo(
-    () =>
-      [...filteredSelectedMembers, ...filteredOtherMembers].sort((left, right) => {
-        const labelCompare = left.label.localeCompare(right.label)
-        if (labelCompare !== 0) return labelCompare
-        return left.teamName.localeCompare(right.teamName)
-      }),
-    [filteredOtherMembers, filteredSelectedMembers]
-  )
   const filteredAgents = useMemo(
     () =>
       hasSearch
         ? aggregatedAgents.filter(
             agent =>
               agent.value.toLowerCase().includes(normalizedSearch) ||
+              agent.display.toLowerCase().includes(normalizedSearch) ||
               agent.teamNames.some(teamName => teamName.toLowerCase().includes(normalizedSearch))
           )
         : [],
     [aggregatedAgents, hasSearch, normalizedSearch]
-  )
-  const aggregatedContexts = useMemo<SearchEntityResult[]>(() => {
-    const byId = new Map<string, { fromSelectedScope: boolean; teamNames: Set<string> }>()
-    const add = (contextId: string, options: { selectedScope?: boolean; teamName?: string }) => {
-      const normalized = contextId.trim()
-      if (!normalized) return
-      const current = byId.get(normalized) || {
-        fromSelectedScope: false,
-        teamNames: new Set<string>(),
-      }
-      if (options.selectedScope) current.fromSelectedScope = true
-      if (options.teamName) current.teamNames.add(options.teamName)
-      byId.set(normalized, current)
-    }
-
-    for (const contextId of contextIds) {
-      add(contextId, { selectedScope: true })
-    }
-
-    if (!contextIds.length) {
-      for (const team of teams) {
-        const ids = teamDirectory[team.id]?.contextIds || []
-        for (const contextId of ids) {
-          add(contextId, { teamName: team.name })
-        }
-      }
-    }
-
-    return [...byId.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([value, details]) => ({
-        key: value,
-        value,
-        fromSelectedScope: details.fromSelectedScope,
-        fromUserScope: false,
-        teamNames: [...details.teamNames].sort((a, b) => a.localeCompare(b)),
-      }))
-  }, [contextIds, teamDirectory, teams])
-  const filteredContexts = useMemo(
-    () =>
-      hasSearch
-        ? aggregatedContexts.filter(
-            context =>
-              context.value.toLowerCase().includes(normalizedSearch) ||
-              context.teamNames.some(teamName => teamName.toLowerCase().includes(normalizedSearch))
-          )
-        : [],
-    [aggregatedContexts, hasSearch, normalizedSearch]
   )
   const filteredConnectors = useMemo<SearchEntityResult[]>(() => {
     if (!hasSearch) return []
@@ -438,43 +362,53 @@ export const AppHeader = React.memo(function AppHeader({
       .map(([value, agentNames]) => ({
         key: value,
         value,
+        // Connectors have no separate display name; the server name is the label.
+        display: value,
         fromSelectedScope: true,
         fromUserScope: false,
         teamNames: [...agentNames].sort((a, b) => a.localeCompare(b)),
       }))
   }, [globalMcpServers, hasSearch, mcpServersByAgent, normalizedSearch])
-  const filteredTeams = useMemo<SearchTeamResult[]>(
+  const filteredPlugins = useMemo<SearchPluginResult[]>(
     () =>
       hasSearch
-        ? teams
-            .filter(team => {
-              const members =
-                team.id === currentTeamId
-                  ? teamMembers.length
-                  : (teamDirectory[team.id]?.members || []).length
-              return (
-                team.name.toLowerCase().includes(normalizedSearch) ||
-                String(members).includes(normalizedSearch)
-              )
-            })
-            .map(team => ({
-              id: team.id,
-              name: team.name,
-              memberCount:
-                team.id === currentTeamId
-                  ? teamMembers.length
-                  : (teamDirectory[team.id]?.members || []).length,
+        ? searchPlugins
+            .filter(
+              plugin =>
+                plugin.name.toLowerCase().includes(normalizedSearch) ||
+                plugin.namespace.toLowerCase().includes(normalizedSearch)
+            )
+            .sort((left, right) => left.name.localeCompare(right.name))
+            .map(plugin => ({
+              key: `${plugin.namespace}/${plugin.name}`,
+              name: plugin.name,
+              namespace: plugin.namespace,
+              status: plugin.status ?? null,
             }))
         : [],
-    [currentTeamId, hasSearch, normalizedSearch, teamDirectory, teamMembers.length, teams]
+    [hasSearch, normalizedSearch, searchPlugins]
   )
+  const filteredApps = useMemo<SearchAppResult[]>(() => {
+    if (!hasSearch) return []
+    return searchApps
+      .map(app => ({
+        key: app.appRef,
+        appRef: app.appRef,
+        label: (app.title ?? '').trim() || app.appRef,
+        description: (app.description ?? '').trim() || null,
+        ready: app.ready,
+      }))
+      .filter(
+        app =>
+          app.label.toLowerCase().includes(normalizedSearch) ||
+          app.appRef.toLowerCase().includes(normalizedSearch) ||
+          (app.description?.toLowerCase().includes(normalizedSearch) ?? false)
+      )
+      .sort((left, right) => left.label.localeCompare(right.label))
+  }, [hasSearch, normalizedSearch, searchApps])
 
   const totalMatches =
-    filteredTeams.length +
-    filteredMembers.length +
-    filteredAgents.length +
-    filteredContexts.length +
-    filteredConnectors.length
+    filteredAgents.length + filteredConnectors.length + filteredPlugins.length + filteredApps.length
   const pendingApprovalsCount = pendingApprovals.length
   const inboxNotificationCount = notifications.length
   const totalAttentionCount = pendingApprovalsCount + unreadNotificationCount
@@ -483,23 +417,17 @@ export const AppHeader = React.memo(function AppHeader({
       ? 'Inbox'
       : `${totalAttentionCount} item${totalAttentionCount === 1 ? '' : 's'} in inbox`
 
-  const navigateToSection = (target: 'agents' | 'connectors') => {
+  const navigateToSection = (target: 'agents' | 'connectors' | 'plugins' | 'apps') => {
     setSearchOpen(false)
     if (target === 'agents') {
       onOpenAgents()
       return
     }
-    onOpenConnectors()
-  }
-
-  const navigateToTeam = (teamId: string) => {
-    setSearchOpen(false)
-    handleOpenTeamDetails(teamId)
-  }
-
-  const navigateToContext = (contextId: string) => {
-    setSearchOpen(false)
-    handleOpenContextDetails(contextId)
+    if (target === 'connectors') {
+      onOpenConnectors()
+      return
+    }
+    handleNavSelect(target === 'plugins' ? DESKTOP_ROUTES.plugins : DESKTOP_ROUTES.apps)
   }
 
   useEffect(() => {
@@ -519,21 +447,28 @@ export const AppHeader = React.memo(function AppHeader({
       })
   }, [hasSearch, normalizedSearch, onEnsureTeamDirectory, searchOpen, teamDirectoryLoading])
 
+  useEffect(() => {
+    if (!searchOpen || !hasSearch) return
+    void ensurePluginsAppsLoaded()
+  }, [ensurePluginsAppsLoaded, hasSearch, searchOpen])
+
   return (
     <header className="top-bar">
       <div className="header-left">
-        <div className="global-search" ref={searchRef}>
+        <div className={`global-search${searchOpen ? ' is-open' : ''}`} ref={searchRef}>
           <TextInput
+            ref={searchInputRef}
             type="text"
-            placeholder="Search teams, contexts, members, agents or connectors..."
+            placeholder={compactSearch ? COMPACT_SEARCH_PLACEHOLDER : FULL_SEARCH_PLACEHOLDER}
             className="search-input"
             aria-label="Search"
+            title={FULL_SEARCH_PLACEHOLDER}
             value={searchQuery}
             onChange={event => {
               setSearchQuery(event.target.value)
-              setSearchOpen(true)
+              setSearchOpen(event.target.value.trim().length > 0)
             }}
-            onFocus={() => setSearchOpen(true)}
+            onFocus={() => setSearchOpen(searchQuery.trim().length > 0)}
             onKeyDown={event => {
               if (event.key === 'Escape') {
                 setSearchOpen(false)
@@ -551,93 +486,11 @@ export const AppHeader = React.memo(function AppHeader({
                 </div>
 
                 {teamDirectoryLoading && !teamDirectoryHydrated && (
-                  <p className="search-results-loading">
-                    Loading members and agents from your other teams...
-                  </p>
+                  <p className="search-results-loading">Loading agents from your other teams...</p>
                 )}
 
-                {Boolean(filteredTeams.length) && (
-                  <section className="search-results-group">
-                    <header className="search-results-group-title">Teams</header>
-                    <div className="search-results-list">
-                      {filteredTeams.map(team => (
-                        <SelectableOption
-                          key={team.id}
-                          className="search-result-item search-result-item-button"
-                          onClick={() => navigateToTeam(team.id)}
-                          size="sm"
-                        >
-                          <div className="search-result-main">
-                            <strong>{team.name}</strong>
-                            <span className="search-result-subline">
-                              {team.memberCount} member{team.memberCount === 1 ? '' : 's'}
-                            </span>
-                          </div>
-                          <span className="search-result-tag">Team</span>
-                        </SelectableOption>
-                      ))}
-                    </div>
-                  </section>
-                )}
-
-                {Boolean(filteredContexts.length) && (
-                  <section className="search-results-group">
-                    <header className="search-results-group-title">Contexts</header>
-                    <div className="search-results-list">
-                      {filteredContexts.map(context => (
-                        <SelectableOption
-                          key={context.key}
-                          className="search-result-item search-result-item-button"
-                          onClick={() => navigateToContext(context.value)}
-                          size="sm"
-                        >
-                          <div className="search-result-main">
-                            <strong>{context.value}</strong>
-                            <span className="search-result-subline">
-                              {context.teamNames.length
-                                ? `Teams: ${context.teamNames.join(', ')}`
-                                : 'Access scope'}
-                            </span>
-                          </div>
-                          <span className="search-result-tag">Context</span>
-                        </SelectableOption>
-                      ))}
-                    </div>
-                  </section>
-                )}
-
-                {Boolean(filteredMembers.length) && (
-                  <section className="search-results-group">
-                    <header className="search-results-group-title">Members</header>
-                    <div className="search-results-list">
-                      {filteredMembers.map(member => (
-                        <SelectableOption
-                          key={member.key}
-                          className="search-result-item search-result-item-button"
-                          onClick={() => navigateToTeam(member.teamId)}
-                          size="sm"
-                        >
-                          <span className="team-member-initial-avatar">
-                            {memberInitial(member)}
-                          </span>
-                          <div className="search-result-main">
-                            <strong>{member.label}</strong>
-                            <span className="search-result-subline">
-                              {member.email}
-                              {member.role && (
-                                <>
-                                  {' '}
-                                  {' · '}
-                                  {member.role}
-                                </>
-                              )}
-                            </span>
-                          </div>
-                          <span className="search-result-tag">{member.teamName}</span>
-                        </SelectableOption>
-                      ))}
-                    </div>
-                  </section>
+                {pluginsAppsLoading && !searchPlugins.length && !searchApps.length && (
+                  <p className="search-results-loading">Loading plugins and apps...</p>
                 )}
 
                 {Boolean(filteredAgents.length) && (
@@ -652,7 +505,7 @@ export const AppHeader = React.memo(function AppHeader({
                           size="sm"
                         >
                           <div className="search-result-main">
-                            <strong>{agent.value}</strong>
+                            <strong>{agent.display}</strong>
                             <span className="search-result-subline">
                               {agent.teamNames.length
                                 ? `Teams: ${agent.teamNames.join(', ')}`
@@ -690,10 +543,58 @@ export const AppHeader = React.memo(function AppHeader({
                   </section>
                 )}
 
-                {!totalMatches && !teamDirectoryLoading && (
+                {Boolean(filteredPlugins.length) && (
+                  <section className="search-results-group">
+                    <header className="search-results-group-title">Plugins</header>
+                    <div className="search-results-list">
+                      {filteredPlugins.map(plugin => (
+                        <SelectableOption
+                          key={plugin.key}
+                          className="search-result-item search-result-item-button"
+                          onClick={() => navigateToSection('plugins')}
+                          size="sm"
+                        >
+                          <div className="search-result-main">
+                            <strong>{plugin.name}</strong>
+                            <span className="search-result-subline">
+                              {plugin.namespace} · {plugin.status ?? 'Status unknown'}
+                            </span>
+                          </div>
+                          <span className="search-result-tag">Plugin</span>
+                        </SelectableOption>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                {Boolean(filteredApps.length) && (
+                  <section className="search-results-group">
+                    <header className="search-results-group-title">Apps</header>
+                    <div className="search-results-list">
+                      {filteredApps.map(app => (
+                        <SelectableOption
+                          key={app.key}
+                          className="search-result-item search-result-item-button"
+                          onClick={() => navigateToSection('apps')}
+                          size="sm"
+                        >
+                          <div className="search-result-main">
+                            <strong>{app.label}</strong>
+                            <span className="search-result-subline">
+                              {app.description ? `${app.description} · ` : ''}
+                              {app.ready ? 'Ready' : 'Starting up'}
+                            </span>
+                          </div>
+                          <span className="search-result-tag">App</span>
+                        </SelectableOption>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                {!totalMatches && !teamDirectoryLoading && !pluginsAppsLoading && (
                   <p className="search-results-empty">
-                    No matches for "{searchQuery.trim()}". Try a member email, team name, context,
-                    agent, or connector.
+                    No matches for "{searchQuery.trim()}". Try an agent, connector, plugin, or app.
                   </p>
                 )}
               </div>

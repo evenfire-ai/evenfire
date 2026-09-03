@@ -27,17 +27,28 @@ spec:
               required:
                 - host
                 - contextRef
-                - secretRef
+              x-kubernetes-validations:
+                - rule: "(has(self.model) && self.model.provider == 'codex-subscription' && (!has(self.llmPolicy) || !has(self.llmPolicy.fallbacks) || !self.llmPolicy.fallbacks.exists(f, f.provider != 'codex-subscription'))) || (has(self.secretRef) && size(self.secretRef) > 0)"
+                  message: spec.secretRef is required unless every LLM target is the Codex subscription broker
+                - rule: "!has(self.llmPolicy) || !has(self.llmPolicy.fallbacks) || !self.llmPolicy.fallbacks.exists(f, f.provider == 'codex-subscription' && has(f.credentialSlot))"
+                  message: credentialSlot is not supported for oauth-broker providers
               properties:
                 host:
                   type: string
-                  description: Host identifier (e.g. chatLLM).
+                  description: >-
+                    Display name for this agent, freely editable (spaces and
+                    capitals allowed). It is the human-facing visible name, not an
+                    identifier — the immutable RFC1123 identifier is metadata.name.
+                    Length is validated by control-api (free text; no pattern here).
                 contextRef:
                   type: string
                   description: Reference to the context (e.g. context1) used for MPC servers and secrets.
                 secretRef:
                   type: string
-                  description: Name of the Kubernetes Secret containing API keys (openai-api-key, claude-api-key, zai-api-key).
+                  description: >-
+                    Name of the Kubernetes Secret containing static LLM API keys.
+                    Required when any primary or fallback target uses
+                    static-credentials. Optional for a Codex-subscription-only Host.
                 channels:
                   type: array
                   description: List of CommunicationChannel names this host interacts with.
@@ -70,11 +81,24 @@ spec:
                         - moonshot
                         - nebius
                         - novita
+                        - minimax
                         - azure
+                        - codex-subscription
                       description: LLM provider to use.
                     name:
                       type: string
                       description: Model name (e.g. gpt-5.4-mini, claude-opus-4-7, glm-5.1).
+                    connectionRef:
+                      type: string
+                      maxLength: 63
+                      pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+                      description: >-
+                        Named Codex subscription key this Host is assigned to.
+                        Absent or empty Codex Hosts persist unassigned and must
+                        not spend a grant. Do not invent deployment-default.
+                        ROLLOUT ORDER — CRD FIRST: apiextensions/v1 prunes unknown
+                        fields, so this property must be applied before control-api
+                        or Control UI persist spec.model.connectionRef.
                 allowedModels:
                   # Per-host model allowlist subset (spec v2 Topic 3a). OPTIONAL,
                   # ADDITIVE: when absent or empty, the host offers the FULL global
@@ -185,7 +209,9 @@ spec:
                               - moonshot
                               - nebius
                               - novita
+                              - minimax
                               - azure
+                              - codex-subscription
                             description: >-
                               Fallback LLM provider. Same enum as spec.model.provider.
                           model:
@@ -339,6 +365,164 @@ spec:
                     user:
                       type: string
                       description: Content of USER.md (system-prompt section "## User Context").
+                guardrails:
+                  # Guardrail policy (guardrails spec §5). ADDITIVE, OPT-IN: a Host
+                  # with no guardrails block behaves exactly as before — no rules, no
+                  # installed hooks, no built-ins (byte-identical to prior behavior).
+                  #
+                  # ROLLOUT ORDER — CRD FIRST. apiextensions/v1 silently PRUNES
+                  # unknown fields: if the runtime writes a Host with `guardrails`
+                  # while the OLD CRD (without this schema) is applied, the apiserver
+                  # drops it on admission with no error. Apply this CRD before any
+                  # component reads or writes spec.guardrails (mcp-host, control-api).
+                  # The loosely-typed `rules` and `builtins` entries carry
+                  # x-kubernetes-preserve-unknown-fields so their nested shape (which
+                  # mcp-host/control-api validate) survives admission rather than
+                  # being pruned.
+                  type: object
+                  description: >-
+                    Guardrail policy for this Host: ordered tool-lane rules,
+                    installed LlmHook references grouped by lifecycle phase,
+                    first-party built-ins, and the capability/trust ceilings that
+                    bound the installed hooks.
+                  properties:
+                    rules:
+                      type: array
+                      description: >-
+                        Ordered tool-lane allow/ask/deny rules, evaluated top-down.
+                        Each entry: { id, action: allow|ask|deny, reasonCode,
+                        match{ tool, arguments[] } } — shape validated by
+                        mcp-host/control-api (§6.1).
+                      items:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                    hooks:
+                      type: object
+                      description: >-
+                        Installed LlmHook CRs this Host runs, grouped by lifecycle
+                        phase. Each entry references an LlmHook CR by name (llm-hooks
+                        namespace) plus the expected image digest (§8.2 resolution).
+                      properties:
+                        preToolUse:
+                          type: array
+                          items:
+                            type: object
+                            required:
+                              - id
+                            properties:
+                              id:
+                                type: string
+                              digest:
+                                type: string
+                        postToolUse:
+                          type: array
+                          items:
+                            type: object
+                            required:
+                              - id
+                            properties:
+                              id:
+                                type: string
+                              digest:
+                                type: string
+                        preCall:
+                          type: array
+                          items:
+                            type: object
+                            required:
+                              - id
+                            properties:
+                              id:
+                                type: string
+                              digest:
+                                type: string
+                        moderate:
+                          type: array
+                          items:
+                            type: object
+                            required:
+                              - id
+                            properties:
+                              id:
+                                type: string
+                              digest:
+                                type: string
+                        postCallSuccess:
+                          type: array
+                          items:
+                            type: object
+                            required:
+                              - id
+                            properties:
+                              id:
+                                type: string
+                              digest:
+                                type: string
+                        onError:
+                          type: array
+                          items:
+                            type: object
+                            required:
+                              - id
+                            properties:
+                              id:
+                                type: string
+                              digest:
+                                type: string
+                    builtins:
+                      type: array
+                      description: >-
+                        First-party hooks compiled into mcp-host (§7.2). Each entry:
+                        { type: prompt-shaping|token-trim|…, order, failMode,
+                        timeoutMs, config } — shape validated by mcp-host.
+                      items:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                    minInstalledHookTrustLevel:
+                      type: string
+                      enum:
+                        - low
+                        - mid
+                        - high
+                      description: Minimum platform-assigned trust level an installed LlmHook must carry to run on this Host.
+                    approvalPolicies:
+                      type: array
+                      description: >-
+                        Approval policies available to guardrail `ask` decisions.
+                        NOTE: overlaps conceptually with spec.approval.defaultPolicy;
+                        reconciling the two is a follow-up decision.
+                      items:
+                        type: string
+                        enum:
+                          - cli_only
+                          - channel_users
+                          - designated_approvers
+                    capabilityCeiling:
+                      type: array
+                      description: Upper bound on capabilities any installed hook may exercise on this Host.
+                      items:
+                        type: string
+                        enum:
+                          - may_deny
+                          - may_rewrite
+                          - may_substitute_result
+                          - may_add_context
+                    limits:
+                      type: object
+                      description: Guardrail sizing limits (defaults applied by mcp-host when omitted).
+                      properties:
+                        maxRules:
+                          type: integer
+                          default: 100
+                        maxHooksPerPhase:
+                          type: integer
+                          default: 8
+                        maxHookTimeoutMs:
+                          type: integer
+                          default: 5000
+                        maxHookOutputBytes:
+                          type: integer
+                          default: 65536
             status:
               type: object
               properties:

@@ -7,7 +7,7 @@ import { usePathname } from 'next/navigation'
 import packageJson from '../../package.json'
 import { IconChevronRight } from '../icons'
 import { activeSidebarChildHref } from './activeChild'
-import { SIDEBAR_TABS } from './constants'
+import { SIDEBAR_TABS, SIDEBAR_TAB_ORDER } from './constants'
 import { IconLogout } from './icons'
 import type { SidebarItem, SidebarProps, SidebarTab } from './types'
 
@@ -18,7 +18,7 @@ export function Sidebar({ currentTab, isOpen = false, onNavigate, onLogout }: Si
   )
   const entries = (Object.entries(SIDEBAR_TABS) as Array<[SidebarTab, SidebarItem]>)
     .filter(([tabKey, item]) => !item.hidden && tabKey !== 'settings')
-    .sort(([, first], [, second]) => first.label.localeCompare(second.label))
+    .sort(([a], [b]) => SIDEBAR_TAB_ORDER.indexOf(a) - SIDEBAR_TAB_ORDER.indexOf(b))
   const settings = SIDEBAR_TABS.settings
 
   function toggleGroup(tabKey: SidebarTab) {

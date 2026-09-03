@@ -247,6 +247,22 @@ export function registerIpcHandlers(service: AppService): void {
       )
     }
   )
+  ipcMain.handle('auth:diagnoseLoginBackend', async event => {
+    assertTrustedSender(event)
+    return service.diagnoseLoginBackend()
+  })
+  ipcMain.handle('auth:probeLocalhostReachable', async event => {
+    assertTrustedSender(event)
+    return service.probeLocalhostReachable()
+  })
+  ipcMain.handle('auth:openDeploymentDocs', async event => {
+    assertTrustedSender(event)
+    return service.openDeploymentDocs()
+  })
+  ipcMain.handle('auth:openHostedSignup', async event => {
+    assertTrustedSender(event)
+    return service.openHostedSignup()
+  })
   ipcMain.handle('auth:startDesktopSetup', async (event, payload: { email: string }) => {
     assertTrustedSender(event)
     return service.startDesktopSetup(sanitizeString(payload?.email).toLowerCase())
@@ -433,6 +449,119 @@ export function registerIpcHandlers(service: AppService): void {
     }
   )
   ipcMain.handle(
+    'gfs:createFileFromPath',
+    async (
+      event,
+      payload: { parentResourceId: string; name: string; filePath: string; drive?: string }
+    ) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      return service.createGfsFileFromPath(
+        sanitizeString(payload?.parentResourceId),
+        sanitizeString(payload?.name),
+        sanitizeString(payload?.filePath),
+        drive
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:startFileUpload',
+    async (
+      event,
+      payload: {
+        parentResourceId: string
+        name: string
+        filePath: string
+        drive?: string
+        resumeUploadId?: string
+      }
+    ) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const resumeUploadId = payload?.resumeUploadId
+        ? sanitizeString(payload.resumeUploadId)
+        : undefined
+      return service.startGfsFileUpload(
+        sanitizeString(payload?.parentResourceId),
+        sanitizeString(payload?.name),
+        sanitizeString(payload?.filePath),
+        drive,
+        resumeUploadId
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:startFileReplace',
+    async (
+      event,
+      payload: {
+        resourceId: string
+        filePath: string
+        drive?: string
+        ifMatch?: number
+        resumeUploadId?: string
+      }
+    ) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const resumeUploadId = payload?.resumeUploadId
+        ? sanitizeString(payload.resumeUploadId)
+        : undefined
+      return service.startGfsFileReplace(
+        sanitizeString(payload?.resourceId),
+        sanitizeString(payload?.filePath),
+        drive,
+        sanitizeOptionalInteger(payload?.ifMatch),
+        resumeUploadId
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:getUploadSnapshot',
+    async (event, payload: { uploadId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      return service.getGfsUploadSnapshot(
+        sanitizeString(payload?.uploadId),
+        payload?.drive ? sanitizeString(payload.drive) : undefined
+      )
+    }
+  )
+  ipcMain.handle('gfs:listUploadSessions', async (event, payload?: { drive?: string }) => {
+    assertTrustedSender(event)
+    return service.listGfsUploadSessions(payload?.drive ? sanitizeString(payload.drive) : undefined)
+  })
+  ipcMain.handle(
+    'gfs:pauseUpload',
+    async (event, payload: { uploadId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      return service.pauseGfsUpload(
+        sanitizeString(payload?.uploadId),
+        payload?.drive ? sanitizeString(payload.drive) : undefined
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:resumeUpload',
+    async (event, payload: { uploadId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      return service.resumeGfsUpload(
+        sanitizeString(payload?.uploadId),
+        payload?.drive ? sanitizeString(payload.drive) : undefined
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:cancelUpload',
+    async (event, payload: { uploadId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      await service.cancelGfsUpload(
+        sanitizeString(payload?.uploadId),
+        payload?.drive ? sanitizeString(payload.drive) : undefined
+      )
+      return { ok: true }
+    }
+  )
+  ipcMain.handle(
     'gfs:replaceFile',
     async (
       event,
@@ -449,6 +578,22 @@ export function registerIpcHandlers(service: AppService): void {
     }
   )
   ipcMain.handle(
+    'gfs:replaceFileFromPath',
+    async (
+      event,
+      payload: { resourceId: string; filePath: string; drive?: string; ifMatch?: number }
+    ) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      return service.replaceGfsFileFromPath(
+        sanitizeString(payload?.resourceId),
+        sanitizeString(payload?.filePath),
+        drive,
+        sanitizeOptionalInteger(payload?.ifMatch)
+      )
+    }
+  )
+  ipcMain.handle(
     'gfs:renameResource',
     async (
       event,
@@ -459,6 +604,22 @@ export function registerIpcHandlers(service: AppService): void {
       return service.renameGfsResource(
         sanitizeString(payload?.resourceId),
         sanitizeString(payload?.newName),
+        drive,
+        sanitizeOptionalInteger(payload?.ifMatch)
+      )
+    }
+  )
+  ipcMain.handle(
+    'gfs:moveResource',
+    async (
+      event,
+      payload: { resourceId: string; destinationId: string; drive?: string; ifMatch?: number }
+    ) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      return service.moveGfsResource(
+        sanitizeString(payload?.resourceId),
+        sanitizeString(payload?.destinationId),
         drive,
         sanitizeOptionalInteger(payload?.ifMatch)
       )
@@ -515,6 +676,18 @@ export function registerIpcHandlers(service: AppService): void {
   ipcMain.handle('gfs:revokeGrant', async (event, payload: { grantId: string }) => {
     assertTrustedSender(event)
     return service.revokeGfsGrant(sanitizeString(payload?.grantId))
+  })
+  ipcMain.handle(
+    'gfs:listShares',
+    async (event, payload: { resourceId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      return service.listGfsShares(sanitizeString(payload?.resourceId), drive)
+    }
+  )
+  ipcMain.handle('gfs:revokeShare', async (event, payload: { shareId: string }) => {
+    assertTrustedSender(event)
+    return service.revokeGfsShare(sanitizeString(payload?.shareId))
   })
   ipcMain.handle(
     'gfs:createShare',
@@ -970,6 +1143,47 @@ export function registerIpcHandlers(service: AppService): void {
         targetHostRefs,
         { teamId: sanitizeString(teamId) || undefined }
       )
+    }
+  )
+
+  // U5 (mcp-oauth reactive consent): the renderer's "Connect <server>" button.
+  // Fetches a fresh provider authorize-URL (host-bound to the suspended
+  // conversation's hostRef) and opens it in the OS browser. The deep-link return
+  // (`clerum://oauth-completed?…&source=mcp`) is routed by main.ts back to the
+  // renderer to resume the suspended task.
+  ipcMain.handle(
+    'rpc:connectMcpServer',
+    async (event, { mcpServerName, hostRef, contextId, options }) => {
+      assertTrustedSender(event)
+      const server = sanitizeString(mcpServerName)
+      const targetHostRef = sanitizeString(hostRef)
+      const ctx = sanitizeString(contextId) || undefined
+      // `confirmShared` is a UX-only flag (the server-side authz per flavor is
+      // authoritative). The panel sets it for `oauth-context` connectors so main
+      // shows a team-wide confirm dialog; the reactive U5 path omits it.
+      const confirmShared = options && typeof options === 'object' && options.confirmShared === true
+      return service.requestMcpOauthAuthorize(server, targetHostRef, ctx, { confirmShared })
+    }
+  )
+
+  // Proactive connectors panel (spec 11 U2): the classified per-agent fleet.
+  ipcMain.handle('rpc:listConnectors', async event => {
+    assertTrustedSender(event)
+    return service.getConnectors()
+  })
+
+  // Proactive disconnect (spec 11 U4): revoke an mcp-server's OAuth grant. Main
+  // shows an explicit confirm dialog before the DELETE (destructive; team-wide
+  // for `oauth-context`). `shared` drives only the confirm copy.
+  ipcMain.handle(
+    'rpc:disconnectMcpServer',
+    async (event, { mcpServerName, hostRef, contextId, options }) => {
+      assertTrustedSender(event)
+      const server = sanitizeString(mcpServerName)
+      const targetHostRef = sanitizeString(hostRef)
+      const ctx = sanitizeString(contextId) || undefined
+      const shared = options && typeof options === 'object' && options.shared === true
+      return service.disconnectMcpServer(server, targetHostRef, ctx, { shared })
     }
   )
 
@@ -1544,6 +1758,51 @@ export function registerIpcHandlers(service: AppService): void {
     return service.captureSandboxUiPreview()
   })
 
+  ipcMain.handle(
+    'sandboxUi:findInPage',
+    async (
+      event,
+      payload: {
+        query?: unknown
+        operation?: unknown
+        clientRequestId?: unknown
+      }
+    ) => {
+      assertTrustedSender(event)
+      const query = typeof payload?.query === 'string' ? payload.query : ''
+      if (!query.trim() || query.length > 500) {
+        throw new Error('find query must contain 1 to 500 characters')
+      }
+      if (!['start', 'next', 'previous'].includes(String(payload?.operation))) {
+        throw new Error('find operation must be start, next, or previous')
+      }
+      if (!Number.isSafeInteger(payload?.clientRequestId) || Number(payload.clientRequestId) <= 0) {
+        throw new Error('find client request ID must be a positive safe integer')
+      }
+      const clientRequestId = Number(payload.clientRequestId)
+      return service.findInActiveSandboxUi(
+        query,
+        payload.operation as 'start' | 'next' | 'previous',
+        clientRequestId,
+        result => {
+          if (!event.sender.isDestroyed()) {
+            event.sender.send('sandboxUi:findResult', { ...result, clientRequestId })
+          }
+        }
+      )
+    }
+  )
+
+  ipcMain.handle('sandboxUi:stopFindInPage', async event => {
+    assertTrustedSender(event)
+    await service.stopActiveSandboxUiFind()
+  })
+
+  ipcMain.handle('sandboxUi:focusActive', async event => {
+    assertTrustedSender(event)
+    return service.focusActiveSandboxUi()
+  })
+
   // Embed-side refresh request. NOTE: this IPC is exposed to *untrusted*
   // recipe JS via the embed preload, so we deliberately do NOT call
   // `assertTrustedSender` (the embed loads from the rpc-proxy URL, not
@@ -1590,7 +1849,7 @@ export function registerIpcHandlers(service: AppService): void {
   // The consent resolve channel IS trusted-sender guarded. That is what stops
   // an embed from answering its own permission prompt, and it pairs with the
   // main-generated `promptId` nonce: a resolve for an unknown or already-
-  // answered prompt is dropped inside the gate (spec §9.4).
+  // answered prompt is dropped inside the gate.
 
   ipcMain.handle(
     PLUGIN_SDK_CONSENT_RESOLVE_CHANNEL,

@@ -7,6 +7,7 @@ resources:
   - control-plane
   - mcp-host
   - mcp-server
+  - llm-hooks
   - channels
   - profiles
   - rpc-proxy
@@ -73,5 +74,12 @@ replacements:
           version: v1
           kind: NetworkPolicy
           name: workflow-recipes-external-egress
+        fieldPaths:
+          - spec.egress.*.to.*.ipBlock.except
+      - select:
+          group: networking.k8s.io
+          version: v1
+          kind: NetworkPolicy
+          name: codex-llm-proxy-egress
         fieldPaths:
           - spec.egress.*.to.*.ipBlock.except

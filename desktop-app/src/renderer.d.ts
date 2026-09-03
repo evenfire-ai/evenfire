@@ -1,3 +1,4 @@
+import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
 import type {
   PluginAuditEntryView,
   PluginConsentRequest,
@@ -23,12 +24,15 @@ import {
   HostModelsResult,
   HostRuntimeStatus,
   HostStatusStreamEvent,
+  LoginBackendHint,
+  MessageToolStep,
   PasswordLoginResult,
   PendingWorkflowApproval,
   PrewarmHostResult,
   ProfileSettingsOpenOptions,
   ReplaceChatMessagesOptions,
   RpcAllowedServersResult,
+  RpcConnectorsResult,
   SandboxUiApp,
   SandboxUiDeepLinkEnvelope,
   SessionLifecycleState,
@@ -53,6 +57,11 @@ import {
 declare global {
   interface Window {
     clerum: {
+      shortcuts: {
+        onCommand: (
+          callback: (commandId: DesktopCommandId, source: DesktopCommandSource) => void
+        ) => () => void
+      }
       auth: {
         getSessionState: () => Promise<SessionState>
         getDependenciesHealth: () => Promise<{
@@ -66,6 +75,10 @@ declare global {
         deleteRuntimeConfig: (optionId: string) => Promise<DesktopRuntimeConfigState>
         googleLogin: (idToken: string) => Promise<SessionState>
         passwordLogin: (email: string, password: string) => Promise<PasswordLoginResult>
+        diagnoseLoginBackend: () => Promise<LoginBackendHint | null>
+        probeLocalhostReachable: () => Promise<boolean>
+        openDeploymentDocs: () => Promise<{ opened: true }>
+        openHostedSignup: () => Promise<{ opened: true }>
         startDesktopSetup: (email: string) => Promise<{ profileUiUrl: string; appName: string }>
         openForgotPassword: (email?: string) => Promise<{ profileUiUrl: string }>
         openProfileSettings: (
@@ -108,6 +121,7 @@ declare global {
           path?: string | null
           version: number
           bytes?: number
+          updatedAt?: string
         }>
         download: (uri: string) => Promise<{
           resource: {
@@ -122,6 +136,7 @@ declare global {
             path?: string | null
             version: number
             bytes?: number
+            updatedAt?: string
           }
           bytes: ArrayBuffer
         }>
@@ -133,18 +148,21 @@ declare global {
             resourceId: string
             rid: string
             gfsUri: string
-            drive: string
-            parentResourceId: string | null
+            drive?: string
+            parentResourceId?: string | null
             name: string
             kind: 'file' | 'directory'
             path: string | null
             version: number
             bytes: number
-            sources: string[]
-            permissions: string[]
-            coversDescendants: boolean
+            updatedAt?: string
+            sources?: string[]
+            permissions?: string[]
+            coversDescendants?: boolean
           }>
           nextCursor: string | null
+          rootResourceId?: string
+          view?: 'operator'
         }>
         listChildren: (
           resourceId: string,
@@ -162,6 +180,7 @@ declare global {
             path: string | null
             version: number
             bytes: number
+            updatedAt?: string
           }>
           nextCursor: string | null
         }>
@@ -207,6 +226,89 @@ declare global {
           version: number
           bytes: number
         }>
+        createFileFromPath: (
+          parentResourceId: string,
+          name: string,
+          filePath: string,
+          drive?: string
+        ) => Promise<{
+          uploadId: string
+          state: string
+          resultResourceId?: string
+          resultVersion?: number
+        }>
+        startFileUpload: (
+          parentResourceId: string,
+          name: string,
+          filePath: string,
+          drive?: string,
+          resumeUploadId?: string
+        ) => Promise<{
+          uploadId: string
+          state: string
+          expectedBytes: number
+          committedBytes: number
+          partBytes: number
+          partCount: number
+        }>
+        startFileReplace: (
+          resourceId: string,
+          filePath: string,
+          drive?: string,
+          ifMatch?: number,
+          resumeUploadId?: string
+        ) => Promise<{
+          uploadId: string
+          state: string
+          expectedBytes: number
+          committedBytes: number
+          partBytes: number
+          partCount: number
+        }>
+        getUploadSnapshot: (
+          uploadId: string,
+          drive?: string
+        ) => Promise<{
+          state:
+            | 'initiated'
+            | 'uploading'
+            | 'paused'
+            | 'suspended_auth'
+            | 'finalizing'
+            | 'canceling'
+            | 'completed'
+            | 'aborted'
+            | 'failed'
+          session: {
+            uploadId: string
+            state: string
+            expectedBytes: number
+            committedBytes: number
+            resultResourceId?: string
+            resultVersion?: number
+          } | null
+          uploadedBytes: number
+          totalBytes: number
+        } | null>
+        listUploadSessions: (drive?: string) => Promise<
+          Array<{
+            uploadId: string
+            fileName: string
+            fileSize: number
+            name: string
+            drive: string
+            status: 'active' | 'paused' | 'failed' | 'suspended_auth'
+            target: {
+              operation: 'create' | 'replace'
+              parentRid?: string
+              resourceRid?: string
+              ifMatch?: number
+            }
+          }>
+        >
+        pauseUpload: (uploadId: string, drive?: string) => Promise<unknown>
+        resumeUpload: (uploadId: string, drive?: string) => Promise<unknown>
+        cancelUpload: (uploadId: string, drive?: string) => Promise<{ ok: true }>
         replaceFile: (
           resourceId: string,
           encodedData: string,
@@ -224,9 +326,27 @@ declare global {
           version: number
           bytes: number
         }>
+        replaceFileFromPath: (
+          resourceId: string,
+          filePath: string,
+          drive?: string,
+          ifMatch?: number
+        ) => Promise<{
+          uploadId: string
+          state: string
+          resultResourceId?: string
+          resultVersion?: number
+        }>
+        getPathForFile: (file: File) => string
         renameResource: (
           resourceId: string,
           newName: string,
+          drive?: string,
+          ifMatch?: number
+        ) => Promise<{ resourceId: string; version: number }>
+        moveResource: (
+          resourceId: string,
+          destinationId: string,
           drive?: string,
           ifMatch?: number
         ) => Promise<{ resourceId: string; version: number }>
@@ -256,6 +376,20 @@ declare global {
           }>
         >
         revokeGrant: (grantId: string) => Promise<void>
+        listShares: (
+          resourceId: string,
+          drive?: string
+        ) => Promise<
+          Array<{
+            id: string
+            drive: string
+            resourceId: string
+            subject: { type: string; id?: string }
+            permissions: string[]
+            includeDescendants: boolean
+          }>
+        >
+        revokeShare: (shareId: string) => Promise<void>
         createShare: (resourceId: string, subjectKeys: string[], drive?: string) => Promise<void>
       }
       agents: {
@@ -443,6 +577,30 @@ declare global {
           hostRefs?: string[]
         ) => Promise<SetHostModelResult>
         getTokenMetadata: () => Promise<TokenMetadata>
+        // U5 (mcp-oauth reactive consent): "Connect <server>" for a task
+        // suspended with `connect_required`. Host-bound to that conversation.
+        connectMcpServer: (
+          mcpServerName: string,
+          hostRef: string,
+          contextId?: string,
+          options?: { confirmShared?: boolean }
+        ) => Promise<void>
+        // Proactive connectors panel (spec 11 U2): the classified per-agent fleet.
+        listConnectors: () => Promise<RpcConnectorsResult>
+        // Proactive disconnect (spec 11 U4): revoke an mcp-server's OAuth grant.
+        // Main shows a native confirm dialog first; resolves `{ confirmed:false }`
+        // when the user cancels. `options.shared` drives only the confirm copy.
+        disconnectMcpServer: (
+          mcpServerName: string,
+          hostRef: string,
+          contextId?: string,
+          options?: { shared?: boolean }
+        ) => Promise<{ confirmed: boolean }>
+        // Push fired when the OAuth deep-link returns with `source=mcp`; the
+        // renderer correlates `mcpServerName` and resumes the suspended task.
+        onMcpOauthCompleted: (
+          callback: (args: { mcpServerName: string; provider: string }) => void
+        ) => () => void
       }
       app: {
         openUrl: (url: string) => Promise<void>
@@ -550,6 +708,30 @@ declare global {
         }) => Promise<void>
         setVisible: (visible: boolean) => Promise<void>
         capturePreview: () => Promise<string | null>
+        findInPage: (
+          query: string,
+          options: {
+            operation: 'start' | 'next' | 'previous'
+            clientRequestId: number
+          }
+        ) => Promise<
+          | { status: 'started'; requestId: number }
+          | {
+              status: 'unavailable'
+              reason: 'no-active-view' | 'document-loading' | 'no-session'
+            }
+        >
+        stopFindInPage: () => Promise<void>
+        focusActive: () => Promise<boolean>
+        onFindResult: (
+          callback: (result: {
+            requestId: number
+            clientRequestId: number
+            activeMatchOrdinal: number
+            matches: number
+            finalUpdate: boolean
+          }) => void
+        ) => () => void
         onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
         onClosed: (callback: (args: { appRef: string }) => void) => () => void
         onRefreshError: (

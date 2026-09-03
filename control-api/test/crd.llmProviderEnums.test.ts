@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parse } from 'yaml'
+import { PROVIDER_AUTH_MODE, PROVIDER_IDS } from '@clerum/llm-providers'
 
 // These are CRD-enum (K8s admission) invariants, not control-api code paths:
 // a provider missing from a CRD enum is rejected by the apiserver on write. We
@@ -26,6 +27,7 @@ const NEW_SINGLE_KEY = [
   'moonshot',
   'nebius',
   'novita',
+  'minimax',
 ] as const
 
 function collectProviderEnums(crdFile: string): string[][] {
@@ -55,12 +57,12 @@ function collectProviderEnums(crdFile: string): string[][] {
 }
 
 describe('LLM provider CRD enums', () => {
-  it('host.yaml carries all 15 new providers (incl. azure) in both provider enums', () => {
+  it('host.yaml carries all 16 new providers (incl. azure) in both provider enums', () => {
     const enums = collectProviderEnums('host.yaml')
     // spec.model.provider + spec.llmPolicy.fallbacks[].provider
     expect(enums).toHaveLength(2)
     for (const e of enums) {
-      for (const id of [...NEW_SINGLE_KEY, 'azure']) {
+      for (const id of [...NEW_SINGLE_KEY, 'azure', 'codex-subscription']) {
         expect(e).toContain(id)
       }
       // additive: original providers preserved
@@ -69,17 +71,28 @@ describe('LLM provider CRD enums', () => {
     }
   })
 
-  it('workflowrecipe.yaml carries the 14 single-key providers but EXCLUDES azure and bedrock', () => {
+  it('workflowrecipe.yaml carries the 15 single-key providers but EXCLUDES azure and bedrock', () => {
     const enums = collectProviderEnums('workflowrecipe.yaml')
     // the two WRC provider enums (model.provider + a second one ~line 543)
     expect(enums).toHaveLength(2)
     for (const e of enums) {
-      for (const id of NEW_SINGLE_KEY) {
+      for (const id of [...NEW_SINGLE_KEY, 'codex-subscription']) {
         expect(e).toContain(id)
       }
       // azure and bedrock must fail at admission (mono-credential WRC transport).
       expect(e).not.toContain('azure')
       expect(e).not.toContain('bedrock')
+    }
+  })
+
+  it('Host and WorkflowRecipe CEL mention every oauth-broker provider', () => {
+    const host = readFileSync(resolve(crdsDir, 'host.yaml'), 'utf8')
+    const recipe = readFileSync(resolve(crdsDir, 'workflowrecipe.yaml'), 'utf8')
+    const brokers = PROVIDER_IDS.filter(id => PROVIDER_AUTH_MODE[id] === 'oauth-broker')
+    expect(brokers.length).toBeGreaterThan(0)
+    for (const id of brokers) {
+      expect(host).toMatch(new RegExp(`provider == '${id}'`))
+      expect(recipe).toMatch(new RegExp(`provider (==|!=) '${id}'`))
     }
   })
 })

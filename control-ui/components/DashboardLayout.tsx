@@ -69,9 +69,6 @@ function PersistentDashboardFrame({ children }: Pick<DashboardLayoutProps, 'chil
     if (isControlRouteSection(pathname, CONTROL_ROUTES.agents.root)) {
       return 'hosts'
     }
-    if (isControlRouteSection(pathname, CONTROL_ROUTES.contexts.root)) {
-      return 'contexts'
-    }
     if (isControlRouteSection(pathname, CONTROL_ROUTES.usersAndTeams.base)) {
       return 'profile-admin'
     }
@@ -83,6 +80,9 @@ function PersistentDashboardFrame({ children }: Pick<DashboardLayoutProps, 'chil
     }
     if (isControlRouteSection(pathname, CONTROL_ROUTES.connectors.root)) {
       return 'mcp-servers'
+    }
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.guardrails.root)) {
+      return 'guardrails'
     }
     if (isControlRouteSection(pathname, CONTROL_ROUTES.agentFiles.root)) {
       return 'directories'

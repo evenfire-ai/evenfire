@@ -17,6 +17,7 @@ import * as k8s from '@kubernetes/client-node'
 import { STATE_ANNOTATION } from '@clerum/network-policy-core'
 import { OperatorConfig, loadConfig } from '../config'
 import { getPool } from '../db'
+import { createLogger } from '../observability/logger'
 import {
   ConfigMapResourceDef,
   CronJobDef,
@@ -31,6 +32,7 @@ import {
   StatefulSetDef,
   StatusCondition,
   WorkflowRecipeCRD,
+  WorkflowRecipeSpec,
   WorkflowRecipeStatus,
   WorkloadDef,
 } from '../types'
@@ -41,6 +43,7 @@ import {
 import { HttpMcpHostClient } from '../workflow/httpMcpHostClient'
 import { JwtTokenFactory } from '../workflow/jwtTokenFactory'
 import { K8sSecretReaderImpl } from '../workflow/k8sSecretReaderImpl'
+import { readRecipeCodexConnectionRef } from '../workflow/llmAllowedModelsSnapshot'
 import { ModelConfigHandler } from '../workflow/modelConfigHandler'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
 import type { EagerSdkBootstrapProof } from '../workflow/pluginWorkloadSdkProvisioner'
@@ -91,6 +94,7 @@ import {
   PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
   PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
   PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE,
+  type PluginWorkloadSdkStatusProjection,
   buildPluginWorkloadSdkStatus,
   validatePluginWorkloadSdkSpec,
 } from './pluginWorkloadSdkValidator'
@@ -158,6 +162,32 @@ function declaresInheritedParentResources(recipe: WorkflowRecipeCRD): boolean {
         ownerRef.controller === true
     )
   )
+}
+
+/**
+ * Order `a.b.c.d/32` strings by address, not by lexeme (issue #299).
+ *
+ * A plain string sort puts "140.82.112.4/32" before "93.184.216.10/32" because
+ * it compares '1' to '9' — the opposite of the numeric order, and confusing in
+ * a record meant to be read. The accumulator already emits its entries in a
+ * stable key order, so this is about the record's OWN readable contract rather
+ * than about rescuing an unordered input.
+ *
+ * INVARIANT IT RELIES ON: input is always a valid IPv4 `a.b.c.d/32`. That holds
+ * upstream — `resolveExternalEgress` emits `/32` only from `result.ipv4`
+ * (AAAA is resolved and dropped), and `parseState` admits an entry only if
+ * `isValidIpv4`. A non-numeric octet would yield NaN and an unstable order —
+ * never a throw — so if IPv6 egress is ever added, order silently degrades
+ * here and this comparator is the place to fix.
+ */
+function compareCidrByAddress(a: string, b: string): number {
+  const octets = (cidr: string) => cidr.split('/')[0].split('.').map(Number)
+  const left = octets(a)
+  const right = octets(b)
+  for (let i = 0; i < 4; i += 1) {
+    if (left[i] !== right[i]) return left[i] - right[i]
+  }
+  return 0
 }
 
 function isTerminalWorkflowStatusPhase(phase: unknown): boolean {
@@ -508,6 +538,17 @@ export interface ReconcileResult {
   /** Cleanup completed successfully while the SDK feature flag was off. */
   pluginWorkloadSdkTeardownConfirmed?: boolean
   pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
+  /**
+   * SDK capability projection (conditions + `status.pluginWorkloadSdk` value)
+   * derived once per reconcile from this result. Populated by the watcher after
+   * `reconcile()` returns (see `projectPluginWorkloadSdk`) so BOTH
+   * `shouldPatchRecipeStatus` (to detect a computed awaiting_policy↔validated
+   * transition that no other diff would surface — issue #375) and `patchStatus`
+   * (to avoid recomputing it) consume the same object. Left undefined on paths
+   * that do not run the SDK lane (e.g. workload-status-only refresh), where the
+   * SDK comparison is intentionally skipped.
+   */
+  pluginWorkloadSdkProjection?: PluginWorkloadSdkStatusProjection
   workflowPhase?: import('../workflow/types').WorkflowPhase
   clearWorkflowExecution?: boolean
   /** When true, the caller should NOT patch the CRD status — the phase hasn't changed. */
@@ -989,6 +1030,66 @@ export class WorkflowRecipeReconciler {
     return recipe.metadata.name
   }
 
+  private claimedCodexParent(recipe: WorkflowRecipeCRD): boolean {
+    const parentLabel = recipe.metadata.labels?.[PARENT_RECIPE_LABEL]?.trim()
+    const ownerRef = recipe.metadata.ownerReferences?.some(
+      ref =>
+        ref.kind === 'WorkflowRecipe' &&
+        ref.controller === true &&
+        typeof ref.name === 'string' &&
+        ref.name.trim().length > 0
+    )
+    return Boolean(parentLabel || ownerRef)
+  }
+
+  private async loadCodexParent(
+    recipe: WorkflowRecipeCRD,
+    runtimeScopeRecipeName: string
+  ): Promise<{ spec: WorkflowRecipeSpec | null; annotations?: Record<string, string> }> {
+    if (runtimeScopeRecipeName === recipe.metadata.name) return { spec: null }
+    try {
+      const live = (await this.customApi.getNamespacedCustomObject({
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: recipe.metadata.namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: runtimeScopeRecipeName,
+      })) as { metadata?: { annotations?: Record<string, string> }; spec?: WorkflowRecipeSpec }
+      return { spec: live.spec ?? null, annotations: live.metadata?.annotations }
+    } catch {
+      return { spec: null }
+    }
+  }
+
+  private async bindCodexReconcileContext(
+    recipe: WorkflowRecipeCRD,
+    runtimeScopeRecipeName: string
+  ): Promise<void> {
+    const setter = this.workflowReconciler?.setCodexReconcileContext
+    if (typeof setter !== 'function') return
+    const parent = await this.loadCodexParent(recipe, runtimeScopeRecipeName)
+    // The Codex grant (connection key) follows the same authority rule as the
+    // Codex spec: the runtime-scope parent's annotation when inherited, the
+    // recipe's own annotation when standalone. Missing/unreadable annotations
+    // resolve to the fail-closed `unassigned` sentinel inside the reader.
+    const recipeUid = recipe.metadata.uid?.trim()
+    // No Kubernetes uid yet → skip bind. Miss stays fail-closed `unassigned`;
+    // never key the Map by recipe name.
+    if (!recipeUid) return
+    const grantAnnotations =
+      runtimeScopeRecipeName !== recipe.metadata.name
+        ? parent.annotations
+        : recipe.metadata.annotations
+    setter.call(this.workflowReconciler, {
+      recipeUid,
+      recipeName: recipe.metadata.name,
+      runtimeScopeRecipeName,
+      claimedParent: this.claimedCodexParent(recipe),
+      parentSpec: parent.spec,
+      connectionKey: readRecipeCodexConnectionRef(grantAnnotations),
+    })
+  }
+
   private async hasVerifiedInheritedParentResources(recipe: WorkflowRecipeCRD): Promise<boolean> {
     if (!declaresInheritedParentResources(recipe)) return false
     const parentName = recipe.metadata.labels?.[PARENT_RECIPE_LABEL]?.trim()
@@ -1076,6 +1177,7 @@ export class WorkflowRecipeReconciler {
     if (!this.workflowReconciler) return
     const runtimeScopeRecipeName =
       resolvedRuntimeScopeRecipeName ?? (await this.workflowRuntimeScopeRecipeName(recipe))
+    await this.bindCodexReconcileContext(recipe, runtimeScopeRecipeName)
     const coordinatorRefresher = this.workflowReconciler as WorkflowReconciler & {
       ensureCoordinatorRuntimeCredentials?: (
         recipeNamespace: string,
@@ -1102,7 +1204,8 @@ export class WorkflowRecipeReconciler {
         recipe.metadata.namespace,
         recipe.metadata.name,
         recipe.spec,
-        runtimeScopeRecipeName
+        runtimeScopeRecipeName,
+        recipe.metadata.uid
       )
     } catch (error) {
       console.error(
@@ -1288,6 +1391,19 @@ export class WorkflowRecipeReconciler {
   // ─── Main Pipeline ────────────────────────────────────────────────
 
   async reconcile(recipe: WorkflowRecipeCRD): Promise<ReconcileResult> {
+    // issue #375: compute the Plugin Workload SDK capability projection ONCE per
+    // reconcile and attach it to the result. shouldPatchRecipeStatus reads it to
+    // publish a computed awaiting_policy↔validated transition that no
+    // phase/message/workload diff would otherwise surface; patchStatus reuses
+    // the same object instead of rebuilding it. Paths that bypass this method
+    // (e.g. observeCurrentWorkloadStatus) leave the projection undefined, which
+    // both consumers treat as "no SDK opinion this pass".
+    const result = await this.reconcileInternal(recipe)
+    result.pluginWorkloadSdkProjection = this.projectPluginWorkloadSdk(recipe, result)
+    return result
+  }
+
+  private async reconcileInternal(recipe: WorkflowRecipeCRD): Promise<ReconcileResult> {
     const name = recipe.metadata.name
     const ns = recipe.metadata.namespace
     const currentPhase = recipe.status?.phase ?? 'candidate'
@@ -1492,13 +1608,17 @@ export class WorkflowRecipeReconciler {
       }
 
       if (currentPhase === 'active' && awaitsTriggeredRun && !wfExecPhase) {
-        // Plugin Workload SDK promptBridge recipes keep an eager mcp-host whose
-        // provider must be (re-)configured once it becomes Ready and after any
-        // pod restart. Fall through to the inner reconcile so ensureEagerSdkMcpHost
-        // retries the /configure; the short-circuit below would freeze it
-        // provider_unavailable forever. clientNotifications-only needs no provider,
-        // so it keeps the cheap short-circuit.
-        if (!recipe.spec.pluginWorkloadSdk?.promptBridge) {
+        // Plugin Workload SDK recipes (BOTH families) keep an eager mcp-host and
+        // must fall through to the inner reconcile: promptBridge so
+        // ensureEagerSdkMcpHost retries the /configure (the short-circuit below
+        // would freeze it provider_unavailable forever), and clientNotifications-
+        // only so the reconcile re-gathers the bootstrap proof and recomputes the
+        // capability projection (issue #375 jozer BLOCKER: short-circuiting here
+        // returned skipStatusPatch:true, so a computed awaiting_policy→validated
+        // transition was never published for that family). The Step 8 ownership
+        // gate inside the inner reconcile covers Secret-ownership revocation on
+        // the fall-through path, exactly as it already did for promptBridge.
+        if (!recipe.spec.pluginWorkloadSdk) {
           if (coordinatorGfsPolicyCanOpen) {
             await this.ensureCoordinatorGfsNetworkPolicyIfEnabled(recipe)
           }
@@ -1624,11 +1744,24 @@ export class WorkflowRecipeReconciler {
         // operator re-labels the Secret.
         const activeOwnership = await this.revokeOrRequeueSteadyWorkflow(recipe, 'active')
         if (activeOwnership) return activeOwnership
-        return {
-          phase: 'active' as RecipePhase,
-          message: wfExecPhase ? `Workflow ${wfExecPhase}` : 'Workflow completed',
-          workloadStatuses: [],
-          skipStatusPatch: true,
+        // issue #375 (jozer BLOCKER): Plugin Workload SDK recipes fall through to
+        // the inner reconcile (mirroring the awaiting-trigger carve-out above) so
+        // the bootstrap proof is re-gathered and a computed capability transition
+        // (e.g. awaiting_policy→validated) is actually published — this
+        // short-circuit's skipStatusPatch:true suppressed it unconditionally.
+        // The gfs/credentials/ownership enforcement above has already run.
+        // EXCEPTION: while a workflow execution is in progress the short-circuit
+        // is kept even for SDK recipes — this branch exists to protect the
+        // coordinator's 409-free windows, and the capability publication is
+        // level-triggered (requeue + watchdog) so it lands on the next
+        // non-running pass.
+        if (!recipe.spec.pluginWorkloadSdk || wfInProgress) {
+          return {
+            phase: 'active' as RecipePhase,
+            message: wfExecPhase ? `Workflow ${wfExecPhase}` : 'Workflow completed',
+            workloadStatuses: [],
+            skipStatusPatch: true,
+          }
         }
       }
 
@@ -1818,6 +1951,7 @@ export class WorkflowRecipeReconciler {
             resourceInstances: recipe.status.resourceInstances,
           }
         : undefined
+      await this.bindCodexReconcileContext(recipe, approvalScopeRecipeName)
       const result = await this.workflowReconciler.reconcile(
         name,
         recipe.metadata.uid ?? '',
@@ -2382,10 +2516,17 @@ export class WorkflowRecipeReconciler {
         }
       }
 
-      // Step 9a: MCP delegation — finalize (Context patch + remove pre-deploy annotation)
+      // Step 9a: MCP delegation — finalize (Context patch + ensure McpServer CRDs).
       // McpServer CRDs were already created in Step 7b (pre-deploy handshake).
       // This step patches the Context allowlist and ensures McpServer CRDs are up-to-date.
       // Same namespace invariant as Step 7b: MCP children live in mcp-server.
+      //
+      // NOTE: `pre-deploy` is deliberately NOT removed here. `buildMcpServerManifest`
+      // omits it, but the replace merge in `ensureMcpServer` carries the live object's
+      // `pre-deploy: "true"` over, so it persists — by design. HCC's network-ready
+      // re-ack guard keys off `pre-deploy === "true"`, so stripping it would break the
+      // stdio readiness handshake. The spec-hash gate excludes `pre-deploy` from the
+      // hash (see HASH_EXCLUDED_ANNOTATIONS) so 7b and 9a converge to a no-op write.
       if (hasTransportWorkloads) {
         if (!(await this.recipeStillActive(recipe))) {
           return this.staleRecipeResult(recipe, 'MCP delegation finalization')
@@ -2599,11 +2740,14 @@ export class WorkflowRecipeReconciler {
         message: 'Plugin Workload SDK subsystem not initialized — missing clerum-wrc-signing-key',
       }
     }
+    const runtimeScopeRecipeName = await this.workflowRuntimeScopeRecipeName(recipe)
+    await this.bindCodexReconcileContext(recipe, runtimeScopeRecipeName)
     return this.workflowReconciler.reconcilePluginWorkloadSdkOnly(
       recipe.metadata.name,
       recipe.metadata.uid ?? '',
       recipe.metadata.namespace,
-      recipe.spec
+      recipe.spec,
+      runtimeScopeRecipeName
     )
   }
 
@@ -4085,6 +4229,14 @@ export class WorkflowRecipeReconciler {
       },
       `NetworkPolicy "${policyName}" in ${ns}`
     )
+    // #299: the policy has landed — record the set it actually enforces.
+    this.logResolvedEgressSet(
+      recipe.metadata.name,
+      policyName,
+      externals.map(e => e.fqdn),
+      effectiveResolved,
+      egressStateChanged
+    )
   }
 
   /**
@@ -4506,6 +4658,14 @@ export class WorkflowRecipeReconciler {
         continue
       }
       await this.applyNetworkPolicy(policy, wlNs)
+      // #299: the policy has landed — record the set it actually enforces.
+      this.logResolvedEgressSet(
+        recipe.metadata.name,
+        wlPolicyName,
+        externalDeclared.map(e => e.fqdn),
+        effectiveExternal,
+        wlEgressStateChanged
+      )
     }
 
     // Now ingress side: for each target workload that any sibling pointed
@@ -4645,6 +4805,74 @@ export class WorkflowRecipeReconciler {
           acc.evicted.length === 1 ? 'y' : 'ies'
         } (never rejecting the policy).`
       )
+    }
+  }
+
+  /**
+   * Record the external egress set that was just written — one entry per
+   * declared FQDN — so the WRC lane leaves a reconstructable history (#299).
+   *
+   * WHY THIS EXISTS. HCC emits `[NetPol] Resolved <fqdn> → [cidrs]` per DNS
+   * binding (`host-context-controller/src/networkPolicyReconciler.ts`), so its
+   * lane can be replayed from retained logs: which addresses a host actually
+   * used over weeks, whether that universe is closed, whether it drifts. WRC has
+   * had its own resolution path since the SAME initial commit (`fqdnResolver.ts`)
+   * and simply never got the equivalent record; #299 later added the sliding
+   * window on top of it. The asymmetry is an omission, not a consequence of
+   * arriving later — and `wl-egress-*`/`ui-egress-*` is the lane where the hosts
+   * whose DNS round outruns their retention sit, so the half of the fleet that
+   * most needs the history is the half that had none.
+   *
+   * PER FQDN, NOT PER POLICY. `egress.external[]` is a list, so one policy
+   * routinely covers several hosts. Flattening their IPs into a single union
+   * cannot answer which host used which address — the only question the history
+   * exists for. Keyed by `source.fqdn`, this matches HCC's shape.
+   *
+   * AFTER THE WRITE, ON THE ENFORCED SET. Called once the policy has landed, and
+   * given the post-M3 (`isBlockedExternalIPv4`) filtered set that was actually
+   * rendered — not the accumulator's raw entries, which can still carry a
+   * rehydrated blocked address the policy then drops. A record that disagrees
+   * with the policy is worse than no record: it would attest to an allowance
+   * that never existed.
+   *
+   * ON CHANGE ONLY. `changed` is `acc.changed` — true iff the
+   * (fqdn,ip,port,protocol) set differs from the persisted state, so a
+   * timestamp-only refresh stays silent. It is ONE of the three terms the H4
+   * write gate keys on, so every entry here corresponds to a write that landed;
+   * the converse does not hold — a renewal (M1) or an annotation migration
+   * writes without emitting one.
+   *
+   * A DECLARED FQDN THAT RESOLVED TO NOTHING STILL EMITS, with `cidrs: []`. A
+   * set collapsing to empty is the most consequential event in the series and
+   * must not be indistinguishable from "nothing happened".
+   *
+   * WHAT THE RECORD DOES NOT CARRY. `cidrs` and `ports` are two independent
+   * deduped projections, not pairs: a host on `(A,443)` and `(B,8443)` renders
+   * `cidrs:[A,B] ports:[443,8443]`, which reads the same as both addresses on
+   * both ports. The record is an ADDRESS history — that is what it is for — so
+   * it matches the enforced policy on each projection, not on their pairing.
+   */
+  private logResolvedEgressSet(
+    recipeName: string,
+    policyName: string,
+    declaredFqdns: string[],
+    resolved: rb.ResolvedExternalEgressInput[],
+    changed: boolean
+  ): void {
+    if (!changed) return
+    const log = createLogger('wrc', recipeName)
+    for (const fqdn of [...new Set(declaredFqdns)].sort()) {
+      const forHost = resolved.filter(r => r.source.fqdn === fqdn)
+      log.info('resolved external egress set', {
+        policy: policyName,
+        fqdn,
+        // Sorted by ADDRESS so an unchanged set renders byte-identically and a
+        // real change is visible as a diff. Ports are carried separately because
+        // `changed` is defined over (fqdn,ip,port,protocol): a port-only change
+        // must not render an identical entry.
+        cidrs: [...new Set(forHost.map(r => r.cidr))].sort(compareCidrByAddress),
+        ports: [...new Set(forHost.map(r => r.port))].sort((a, b) => a - b),
+      })
     }
   }
 
@@ -6031,6 +6259,44 @@ export class WorkflowRecipeReconciler {
   // ─── Status Patch ─────────────────────────────────────────────────
 
   /** Persist reconcile result to the CRD status subresource. */
+  /**
+   * Build the Plugin Workload SDK status projection (owned conditions +
+   * `status.pluginWorkloadSdk` value) from a reconcile result. Extracted so it
+   * can be computed ONCE per reconcile by the watcher (issue #375): the watcher
+   * attaches it to `result.pluginWorkloadSdkProjection` after `reconcile()`
+   * returns, `shouldPatchRecipeStatus` reads it to detect an
+   * awaiting_policy↔validated transition that no other diff would surface, and
+   * `patchStatus` reuses it instead of recomputing. `providerUnavailable` is
+   * derived here (not inferred from phase/message) so the SDK-only provider
+   * health bit stays explicit.
+   */
+  projectPluginWorkloadSdk(
+    recipe: WorkflowRecipeCRD,
+    result: ReconcileResult,
+    now: string = new Date().toISOString()
+  ): PluginWorkloadSdkStatusProjection {
+    return buildPluginWorkloadSdkStatus({
+      spec: recipe.spec,
+      existingConditions: recipe.status?.conditions,
+      phase: result.phase,
+      featureFlagEnabled: this.config.pluginWorkloadSdkEnabled,
+      providerUnavailable:
+        result.pluginWorkloadSdkProviderUnavailable === true ||
+        (result.workflowConditions ?? []).some(
+          condition =>
+            condition.type === PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE &&
+            condition.status === 'True'
+        ),
+      teardownConfirmed: result.pluginWorkloadSdkTeardownConfirmed === true,
+      policyPending: result.pluginWorkloadSdkPolicyPending === true,
+      bootstrapProof: result.pluginWorkloadSdkBootstrapProof,
+      now,
+      // issue #375 (R1): carry forward the stable validatedAt marker across
+      // steady-state throttle patches instead of resetting it to `now`.
+      existingCapability: recipe.status?.pluginWorkloadSdk,
+    })
+  }
+
   async patchStatus(recipe: WorkflowRecipeCRD, result: ReconcileResult): Promise<void> {
     const workloads = result.workloadStatuses.map(ws => {
       const def = (recipe.spec.workloads ?? []).find(w => w.id === ws.id)
@@ -6127,27 +6393,16 @@ export class WorkflowRecipeReconciler {
         recipe.status?.conditions,
       result.workloadConditions
     )
-    // Plugin Workload SDK conditions are derived here so every status patch
-    // carries a consistent projection of spec.pluginWorkloadSdk + feature flag,
-    // while the SDK-only provider health bit is propagated explicitly through
-    // ReconcileResult rather than inferred from a free-form phase/message.
-    const pluginSdkProjection = buildPluginWorkloadSdkStatus({
-      spec: recipe.spec,
-      existingConditions: recipe.status?.conditions,
-      phase: result.phase,
-      featureFlagEnabled: this.config.pluginWorkloadSdkEnabled,
-      providerUnavailable:
-        result.pluginWorkloadSdkProviderUnavailable === true ||
-        (result.workflowConditions ?? []).some(
-          condition =>
-            condition.type === PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE &&
-            condition.status === 'True'
-        ),
-      teardownConfirmed: result.pluginWorkloadSdkTeardownConfirmed === true,
-      policyPending: result.pluginWorkloadSdkPolicyPending === true,
-      bootstrapProof: result.pluginWorkloadSdkBootstrapProof,
-      now,
-    })
+    // Plugin Workload SDK conditions are derived so every status patch carries a
+    // consistent projection of spec.pluginWorkloadSdk + feature flag, while the
+    // SDK-only provider health bit is propagated explicitly through
+    // ReconcileResult rather than inferred from a free-form phase/message. Reuse
+    // the projection the watcher already computed for the patch decision
+    // (issue #375) so the exact object that drove shouldPatchRecipeStatus is
+    // what gets written; recompute only on paths that never attached one (e.g.
+    // observeCurrentWorkloadStatus).
+    const pluginSdkProjection =
+      result.pluginWorkloadSdkProjection ?? this.projectPluginWorkloadSdk(recipe, result, now)
     const pluginSdkMergedConditions = mergePluginWorkloadSdkConditions(
       workloadReconcileMergedConditions ??
         secretOwnershipMergedConditions ??

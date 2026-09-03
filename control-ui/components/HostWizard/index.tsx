@@ -4,12 +4,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
 import { LlmProviderConfig } from '@/components/LlmProviderConfig'
+import { LlmSecretSelect } from '@/components/LlmSecretSelect'
 import { SelectionDropdown } from '@/components/SelectionDropdown'
 import { useToast } from '@/components/Toast'
-import { IconAlertTriangle, IconCheck, IconInfoCircle, IconX } from '@/components/icons'
+import { IconAlertTriangle, IconCheck, IconX } from '@/components/icons'
 import { Button, CheckboxField, Field, TextInput } from '@/components/ui'
 import {
-  apiGet,
   apiSend,
   getAdminTeams,
   getAdminUsers,
@@ -17,22 +17,37 @@ import {
   updateAgentUsers,
 } from '@/lib/api'
 import { cn } from '@/lib/cn'
+import {
+  CODEX_UNASSIGNED_CONNECTION_KEY,
+  type CodexSubscriptionConnectionView,
+  isAssignableCodexGrant,
+  listCodexConnectionModels,
+  listCodexSubscriptionConnections,
+} from '@/lib/codexSubscription'
+import { isDisabledCapabilityError } from '@/lib/codexSubscriptionFeature'
 import { useLlmAllowedModels } from '@/lib/hooks/useLlmAllowedModels'
+import { getAgentNameError } from '@/lib/k8sValidation'
 import {
   type HostAllowedModel,
   type LlmPolicy,
   type LlmProvider,
   buildAllowedModelsSpec,
+  constrainModelOptions,
   createEmptyLlmKeyDraft,
   getActiveCredentialKeys,
   getModelOptions,
   getProviderLabel,
   getProvidersWithCompleteCredentials,
   isProviderUsable,
+  llmChainRequiresSecret,
+  offeredCodexModelNames,
   projectCredentialDraft,
+  resolveCodexGrantModel,
   resolveDefaultModel,
   validateLlmSecretData,
 } from '@/lib/llm'
+import { credentialSelectValue, parseCredentialSelect } from '@/lib/llmCredentialSelect'
+import { createPrivateContext } from '@/lib/privateContext'
 import { toKebabCase, toKebabInput } from '@/lib/string'
 import {
   HOST_NAMESPACE,
@@ -41,7 +56,7 @@ import {
   STEPS,
   STEP_DETAILS,
 } from './constants'
-import type { ContextOption, HostWizardProps, WizardSelectProps } from './types'
+import type { CreatedResource, HostWizardProps, HostWizardValidationState } from './types'
 
 // Stateless lifecycle support remains intact in the API and existing-agent UI;
 // only creation through this wizard is temporarily unavailable.
@@ -54,101 +69,108 @@ function primaryCredentialUsable(provider: LlmProvider, draft: Record<string, st
   return isProviderUsable(provider, key => (draft[key] ?? '').trim().length > 0)
 }
 
-function WizardSelect({
-  className,
-  disabled,
-  onChange,
-  options,
-  placeholder,
-  value,
-}: WizardSelectProps) {
-  const [open, setOpen] = useState(false)
-  const selectedOption = options.find(option => option.value === value)
-
-  return (
-    <div
-      className={cn('cu-agent-select', className)}
-      onBlur={event => {
-        if (!event.currentTarget.contains(event.relatedTarget)) {
-          setOpen(false)
-        }
-      }}
-    >
-      <button
-        type="button"
-        className="cu-agent-select__button"
-        aria-expanded={open}
-        aria-haspopup="listbox"
-        disabled={disabled}
-        onClick={() => setOpen(prev => !prev)}
-      >
-        <span className="cu-agent-select__button-copy">
-          <span>{selectedOption?.label || placeholder}</span>
-          {selectedOption?.meta ? (
-            <span className="cu-agent-select__button-meta">{selectedOption.meta}</span>
-          ) : null}
-        </span>
-        <span className="cu-agent-select__chevron" aria-hidden="true" />
-      </button>
-      {open ? (
-        <div className="cu-agent-select__menu" role="listbox">
-          {options.length === 0 ? (
-            <span className="cu-agent-select__empty">No options available.</span>
-          ) : (
-            options.map(option => (
-              <button
-                key={option.value}
-                type="button"
-                className="cu-agent-select__option"
-                data-active={value === option.value ? 'true' : 'false'}
-                role="option"
-                aria-selected={value === option.value}
-                onClick={() => {
-                  onChange(option.value)
-                  setOpen(false)
-                }}
-              >
-                <span className="cu-agent-select__option-copy">
-                  <span className="cu-agent-select__option-name">{option.label}</span>
-                  {option.meta ? (
-                    <span className="cu-agent-select__option-meta">{option.meta}</span>
-                  ) : null}
-                </span>
-              </button>
-            ))
-          )}
-        </div>
-      ) : null}
-    </div>
-  )
+// The DELETE path for one tracked sibling. The server fixes each resource's
+// namespace (secrets → config.secretsNamespace; hosts/contexts/channels →
+// their configured namespace), so — exactly like the SecretsTable /
+// CommunicationChannelsTable / deleteContext call-sites — no namespace query is
+// sent. Deleting a communicationchannel also removes its credentials Secret
+// server-side, so a channel's credential Secret is never tracked or deleted
+// separately here.
+function compensationPath(entry: CreatedResource): string {
+  const encoded = encodeURIComponent(entry.name)
+  switch (entry.kind) {
+    case 'secret':
+      return `/api/v1/admin/secrets/${encoded}`
+    case 'context':
+      return `/api/v1/admin/contexts/${encoded}`
+    case 'communication-channel':
+      return `/api/v1/admin/communication-channels/${encoded}`
+  }
 }
 
-function isStepValid(
-  stepIndex: number,
-  state: {
-    hostName: string
-    contextMode: 'existing' | 'new'
-    contextName: string
-    selectedExistingContext: string
-    selectedMcp: string[]
-    secretMode: 'existing' | 'new'
-    existingSecret: string
-    newSecretName: string
-    llmKeyDraft: Record<string, string>
-    llmPolicy: LlmPolicy | undefined
-    provider: LlmProvider
-    modelName: string
-    selectedUserIds: string[]
-    selectedTeamIds: string[]
-    directoryLoadFailed: boolean
+// Inverse-order (channel → context → secret) best-effort rollback of the
+// siblings THIS run created before the Host create failed, so a failed create
+// never leaves an orphaned secret/context/channel behind. Best-effort: each
+// DELETE is independent, a 404 is success (idempotent — the resource is already
+// gone), and NO failure is re-thrown — a rollback error must never mask the
+// original create error the caller is about to surface. The server performs a
+// direct delete with no referential-integrity/finalizer coupling between the
+// siblings, so inverse order is for tidiness, not correctness.
+async function compensateCreated(created: CreatedResource[]): Promise<void> {
+  for (let i = created.length - 1; i >= 0; i -= 1) {
+    const entry = created[i]
+    try {
+      await apiSend('DELETE', compensationPath(entry))
+    } catch (err) {
+      console.warn(
+        `HostWizard: best-effort rollback of ${entry.kind} "${entry.name}" failed after a create error`,
+        err
+      )
+    }
   }
-): boolean {
-  if (stepIndex === 0) return state.hostName.trim().length > 0
+}
+
+// A create-only POST, with the 409 disambiguation done HERE — at the create
+// site — never in the shared submitAll catch. This is deliberate: only a POST to
+// a create-only /admin/{secrets,contexts,communication-channels,hosts} endpoint
+// can turn a code-less 409 into an UNAMBIGUOUS AlreadyExists name collision. The
+// grant endpoints (409 `deleted_agent_history_limit_exceeded`) share the
+// top-level catch but can NEVER reach here, so their messages are preserved.
+//
+// The two 409 shapes from THESE endpoints (V-1):
+//   - WITH a body `code` (context_crd_outdated / communication_channel_crd_outdated)
+//     → a CRD-outdated response, NOT a collision. formatApiError already set
+//       e.message to the server's human `error` text, so re-throw e untouched.
+//   - WITHOUT a body `code` → apiserver AlreadyExists. The create-only POST
+//     refused to overwrite a foreign resource; replace the raw K8s text with the
+//     friendly, per-resource `collisionMessage`.
+// Discriminate on `body.code` (the field INSIDE the JSON body), never on the
+// client's `.code` (which formatApiError sets from `body.error`, the message).
+// Any non-409 error is re-thrown verbatim.
+class ResourceNameCollisionError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ResourceNameCollisionError'
+  }
+}
+
+async function createOrThrow(path: string, body: unknown, collisionMessage: string): Promise<void> {
+  try {
+    await apiSend('POST', path, body)
+  } catch (e) {
+    if (e instanceof Error && (e as Error & { status?: number }).status === 409) {
+      const errBody = (e as Error & { body?: { code?: unknown } }).body
+      const hasCode = typeof errBody?.code === 'string' && errBody.code.length > 0
+      // Code-less 409 from a create-only POST = unambiguous name collision.
+      if (!hasCode) throw new ResourceNameCollisionError(collisionMessage)
+      // Coded 409 (CRD-outdated) keeps the server's own message (e.message).
+    }
+    throw e
+  }
+}
+
+function isStepValid(stepIndex: number, state: HostWizardValidationState): boolean {
+  if (stepIndex === 0)
+    return state.hostName.trim().length > 0 && getAgentNameError(state.hostName) === ''
   if (stepIndex === 1) {
-    if (state.contextMode === 'existing') return state.selectedExistingContext.trim().length > 0
-    return state.contextName.trim().length > 0
-  }
-  if (stepIndex === 2) {
+    if (!state.modelName.trim()) return false
+    if (
+      state.provider === 'codex-subscription' &&
+      (!state.connectionRef.trim() ||
+        state.connectionRef.trim() === CODEX_UNASSIGNED_CONNECTION_KEY ||
+        (state.codexModels.length > 0 && !state.codexModels.includes(state.modelName.trim())))
+    ) {
+      return false
+    }
+    // Broker-only chains (Codex with no static fallback) need the grant in the
+    // shared LLM Secret picker. Any static primary/fallback still requires the
+    // exact credential slots (existing Secret or a complete new one).
+    if (!llmChainRequiresSecret(state.provider, state.llmPolicy?.fallbacks)) {
+      return (
+        state.provider === 'codex-subscription' &&
+        parseCredentialSelect(state.existingSecret).kind === 'subscription'
+      )
+    }
     // New secret: the PRIMARY provider must be usable (asymmetric gate — a
     // fallback missing its key only warns). Cross-slot mistakes (half Bedrock
     // pair, malformed Vertex JSON) anywhere still block. Existing secret: the
@@ -162,13 +184,15 @@ function isStepValid(
     )
     const hasValidSecret =
       state.secretMode === 'existing'
-        ? state.existingSecret.trim().length > 0
+        ? state.provider === 'codex-subscription'
+          ? state.existingLlmSecret.trim().length > 0
+          : parseCredentialSelect(state.existingSecret).kind === 'secret'
         : toKebabCase(state.newSecretName).length > 0 &&
           primaryCredentialUsable(state.provider, state.llmKeyDraft) &&
           validateLlmSecretData(projectedDraft).length === 0
-    return hasValidSecret && state.modelName.trim().length > 0
+    return hasValidSecret
   }
-  if (stepIndex === 3) return true
+  if (stepIndex === 2 || stepIndex === 3) return true
   return false
 }
 
@@ -197,19 +221,15 @@ export function HostWizard({
 
   const [hostName, setHostName] = useState('')
   const hostNamespace = HOST_NAMESPACE
+  const agentNameError = getAgentNameError(hostName)
 
-  const [contextName, setContextName] = useState('')
-  const [contextMode, setContextMode] = useState<'existing' | 'new'>('existing')
-  const [selectedExistingContext, setSelectedExistingContext] = useState('')
-  const [contextSelectOpen, setContextSelectOpen] = useState(false)
   const [selectedMcp, setSelectedMcp] = useState<string[]>([])
-  const [existingContexts, setExistingContexts] = useState<ContextOption[]>([])
-  const contextSelectRef = useRef<HTMLDivElement | null>(null)
 
   // Reuse an existing shared Secret by default. Creating an agent-specific Secret
   // remains available when the operator explicitly chooses New credential.
   const [secretMode, setSecretMode] = useState<'existing' | 'new'>('existing')
   const [existingSecret, setExistingSecret] = useState('')
+  const [existingLlmSecret, setExistingLlmSecret] = useState('')
   const [newSecretName, setNewSecretName] = useState('')
   const [secretNameTouched, setSecretNameTouched] = useState(false)
   const [llmKeyDraft, setLlmKeyDraft] = useState<Record<string, string>>(createEmptyLlmKeyDraft)
@@ -228,6 +248,9 @@ export function HostWizard({
     error: modelsError,
   } = useLlmAllowedModels()
   const [modelName, setModelName] = useState('')
+  const [connectionRef, setConnectionRef] = useState(CODEX_UNASSIGNED_CONNECTION_KEY)
+  const [codexModels, setCodexModels] = useState<string[]>([])
+  const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
   const [stateless, setStateless] = useState(false)
   const [users, setUsers] = useState<
     Array<{ id: string; email: string; name: string | null; displayName: string | null }>
@@ -247,8 +270,8 @@ export function HostWizard({
   )
 
   const secretOptions = useMemo(
-    () =>
-      existingSecrets
+    () => [
+      ...existingSecrets
         .map(secret => {
           const name = secret.name || secret.metadata?.name
           if (!name) return null
@@ -262,53 +285,138 @@ export function HostWizard({
                 ? `Providers: ${providers.map(getProviderLabel).join(', ')}`
                 : 'No recognized provider credentials'
           return {
+            group: 'API keys',
             value: name,
             label: name,
-            meta: `${secret.metadata?.namespace || HOST_NAMESPACE} · ${providerSummary}`,
+            meta: providerSummary,
+            providers:
+              providers && providers.length > 0
+                ? providers.map(id => ({ id, label: getProviderLabel(id) }))
+                : undefined,
           }
         })
         .filter(option => option !== null)
         .sort((left, right) => left.value.localeCompare(right.value)),
-    [existingSecrets]
+      ...codexConnections.filter(isAssignableCodexGrant).map(row => ({
+        group: 'ChatGPT subscriptions',
+        value: credentialSelectValue('', row.connectionKey),
+        label: row.displayName || row.connectionKey,
+        meta: 'ChatGPT subscription',
+        providers: [{ id: 'codex-subscription', label: 'ChatGPT Subscription' }],
+      })),
+    ],
+    [codexConnections, existingSecrets]
   )
-  const selectedContextOption = useMemo(
-    () =>
-      existingContexts.find(ctx => `${ctx.namespace}/${ctx.name}` === selectedExistingContext) ||
-      null,
-    [existingContexts, selectedExistingContext]
+  const apiKeyOptions = useMemo(
+    () => secretOptions.filter(option => option.group === 'API keys'),
+    [secretOptions]
   )
-  const selectedContextLabel = selectedContextOption?.contextId || 'Select context...'
+  const catalogForEditor = useMemo(() => {
+    if (provider !== 'codex-subscription') return allowedCatalog
+    const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
+    if (codexModels.length === 0) return others
+    return [
+      ...others,
+      ...codexModels.map(model => ({
+        id: `codex:${model}`,
+        provider: 'codex-subscription',
+        model,
+        vendor: 'OpenAI',
+        display_name: model,
+        context_window_tokens: null,
+        enabled: true,
+        source: 'discovery' as const,
+        stale: false,
+      })),
+    ]
+  }, [allowedCatalog, provider, codexModels])
   const providerModelOptions = useMemo(
-    () => getModelOptions(allowedCatalog, provider),
-    [allowedCatalog, provider]
+    () => getModelOptions(catalogForEditor, provider),
+    [catalogForEditor, provider]
   )
+  const chainRequiresSecret = llmChainRequiresSecret(provider, llmPolicy?.fallbacks)
   const handleExistingSecretChange = useCallback(
     (secretName: string) => {
       setExistingSecret(secretName)
+      const parsed = parseCredentialSelect(secretName)
+      if (parsed.kind === 'subscription') {
+        setConnectionRef(parsed.connectionKey)
+        setProvider('codex-subscription')
+        setModelName('')
+        return
+      }
+      setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
+      setCodexModels([])
       const selectedSecret = existingSecrets.find(
         secret => (secret.name || secret.metadata?.name) === secretName
       )
       if (!Array.isArray(selectedSecret?.keys)) return
       const [linkedProvider] = getProvidersWithCompleteCredentials(selectedSecret.keys)
       if (!linkedProvider) return
-      setProvider(linkedProvider)
-      setModelName(
-        resolveDefaultModel(linkedProvider, getModelOptions(allowedCatalog, linkedProvider))
-      )
+      const nextProvider = linkedProvider === 'codex-subscription' ? 'openai' : linkedProvider
+      setProvider(nextProvider)
+      setModelName(resolveDefaultModel(nextProvider, getModelOptions(allowedCatalog, nextProvider)))
     },
     [allowedCatalog, existingSecrets]
   )
+  useEffect(() => {
+    let cancelled = false
+    void listCodexSubscriptionConnections()
+      .then(rows => {
+        if (!cancelled) setCodexConnections(rows)
+      })
+      .catch(err => {
+        if (!cancelled) {
+          setCodexConnections([])
+          if (!isDisabledCapabilityError(err)) {
+            setError(err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions')
+          }
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  useEffect(() => {
+    if (!connectionRef.trim() || connectionRef === CODEX_UNASSIGNED_CONNECTION_KEY) {
+      setCodexModels([])
+      return
+    }
+    let cancelled = false
+    void listCodexConnectionModels(connectionRef)
+      .then(models => {
+        if (!cancelled) setCodexModels(offeredCodexModelNames(models))
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCodexModels([])
+          setModelName('')
+          setError('Could not load ChatGPT grant models')
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [connectionRef])
   // Keep the selected model valid for the current provider's enabled models:
   // seed the default once the allowlist loads, and re-default if a provider
   // switch left the model out of range.
   useEffect(() => {
     if (modelsLoading) return
+    if (provider === 'codex-subscription') {
+      const offered = constrainModelOptions(catalogForEditor, allowedModels, provider)
+      if (offered.length === 0) return
+      const grant = codexConnections.find(row => row.connectionKey === connectionRef)
+      const next = resolveCodexGrantModel(modelName, offered, grant?.defaultModel)
+      if (next !== modelName) setModelName(next)
+      return
+    }
     if (!providerModelOptions.includes(modelName)) {
       setModelName(resolveDefaultModel(provider, providerModelOptions))
     }
     // Intentionally omit modelName: this reconciles the picker to the options.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [providerModelOptions, modelsLoading])
+  }, [allowedModels, catalogForEditor, modelsLoading, provider, providerModelOptions])
 
   // Auto-derive the new Secret name from the agent name ("this agent's
   // credentials") until the operator edits it, so naming a Kubernetes Secret is
@@ -350,82 +458,52 @@ export function HostWizard({
     [teams]
   )
 
-  const canNext = useMemo(() => {
-    return isStepValid(step, {
+  const validationState = useMemo<HostWizardValidationState>(
+    () => ({
       hostName,
-      contextMode,
-      contextName,
-      selectedExistingContext,
-      selectedMcp,
       secretMode,
       existingSecret,
+      existingLlmSecret,
       newSecretName,
       llmKeyDraft,
       llmPolicy,
       provider,
       modelName,
-      selectedUserIds,
-      selectedTeamIds,
-      directoryLoadFailed: directoryLoadError.length > 0,
-    })
-  }, [
-    step,
-    hostName,
-    contextMode,
-    contextName,
-    selectedExistingContext,
-    selectedMcp,
-    secretMode,
-    existingSecret,
-    newSecretName,
-    llmKeyDraft,
-    llmPolicy,
-    provider,
-    modelName,
-    selectedUserIds,
-    selectedTeamIds,
-    directoryLoadError,
-  ])
+      connectionRef,
+      codexModels,
+    }),
+    [
+      hostName,
+      secretMode,
+      existingSecret,
+      existingLlmSecret,
+      newSecretName,
+      llmKeyDraft,
+      llmPolicy,
+      provider,
+      modelName,
+      connectionRef,
+      codexModels,
+    ]
+  )
+
+  const canNext = useMemo(() => isStepValid(step, validationState), [step, validationState])
 
   const loadDirectory = useCallback(async () => {
     setDirectoryLoading(true)
     setDirectoryLoadError('')
     setError('')
     try {
-      const [usersData, teamsData, contextsData] = await Promise.all([
-        getAdminUsers(''),
-        getAdminTeams(),
-        apiGet('/api/v1/admin/contexts') as Promise<{
-          items?: Array<{
-            metadata?: { name?: string; namespace?: string }
-            spec?: { contextId?: string; mcpServers?: unknown[] }
-          }>
-        }>,
-      ])
+      const [usersData, teamsData] = await Promise.all([getAdminUsers(''), getAdminTeams()])
       if (!mountedRef.current) return
       setUsers(Array.isArray(usersData.items) ? usersData.items : [])
       setTeams(Array.isArray(teamsData.items) ? teamsData.items : [])
-      const contextOptions = (contextsData.items || [])
-        .map(ctx => ({
-          name: String(ctx.metadata?.name || '').trim(),
-          namespace: String(ctx.metadata?.namespace || 'default').trim(),
-          contextId: String(ctx.spec?.contextId || ctx.metadata?.name || '').trim(),
-          mcpServers: Array.isArray(ctx.spec?.mcpServers)
-            ? ctx.spec?.mcpServers
-                .map(String)
-                .map(v => v.trim())
-                .filter(Boolean)
-            : [],
-        }))
-        .filter(ctx => ctx.name && ctx.contextId)
-        .sort((a, b) => `${a.namespace}/${a.name}`.localeCompare(`${b.namespace}/${b.name}`))
-      setExistingContexts(contextOptions)
     } catch (e) {
       if (!mountedRef.current) return
       const message =
         e instanceof Error
-          ? `Failed to load users/teams/contexts: ${e.message}. You may not be able to grant access from this wizard — retry or check your session.`
-          : 'Failed to load users/teams/contexts. You may not be able to grant access from this wizard.'
+          ? `Failed to load users/teams: ${e.message}. You may not be able to grant access from this wizard — retry or check your session.`
+          : 'Failed to load users/teams. You may not be able to grant access from this wizard.'
       setDirectoryLoadError(message)
       setError(message)
     } finally {
@@ -441,66 +519,39 @@ export function HostWizard({
     () => (targetStep: number) => {
       if (targetStep <= step) return true
       for (let i = 0; i < targetStep; i += 1) {
-        if (
-          !isStepValid(i, {
-            hostName,
-            contextMode,
-            contextName,
-            selectedExistingContext,
-            selectedMcp,
-            secretMode,
-            existingSecret,
-            newSecretName,
-            llmKeyDraft,
-            llmPolicy,
-            provider,
-            modelName,
-            selectedUserIds,
-            selectedTeamIds,
-            directoryLoadFailed: directoryLoadError.length > 0,
-          })
-        ) {
+        if (!isStepValid(i, validationState)) {
           return false
         }
       }
       return true
     },
-    [
-      step,
-      hostName,
-      contextMode,
-      contextName,
-      selectedExistingContext,
-      selectedMcp,
-      secretMode,
-      existingSecret,
-      newSecretName,
-      llmKeyDraft,
-      llmPolicy,
-      provider,
-      modelName,
-      selectedUserIds,
-      selectedTeamIds,
-      directoryLoadError,
-    ]
+    [step, validationState]
   )
 
   const validationMessage = useMemo(() => {
-    if (step === 0 && !hostName.trim()) return 'Agent name is required.'
-    if (step === 1 && contextMode === 'existing' && !selectedExistingContext.trim())
-      return 'Select an existing context.'
-    if (step === 1 && contextMode === 'new' && !contextName.trim())
-      return 'Context name is required.'
-    if (step === 2 && !modelName.trim()) return 'Model name is required.'
-    if (step === 2 && secretMode === 'existing' && !existingSecret.trim())
-      return 'Select an existing secret.'
-    if (step === 2 && secretMode === 'new' && !toKebabCase(newSecretName)) {
-      return 'For a new secret, set a name.'
+    if (step === 0) {
+      const agentNameError = getAgentNameError(hostName)
+      if (agentNameError) return agentNameError
     }
-    if (step === 2 && secretMode === 'new' && !primaryCredentialUsable(provider, llmKeyDraft)) {
+    if (step === 1 && !modelName.trim()) return 'Model name is required.'
+    if (step === 1 && secretMode === 'existing' && !existingSecret.trim())
+      return 'Select an existing LLM Secret.'
+    if (
+      step === 1 &&
+      secretMode === 'existing' &&
+      provider === 'codex-subscription' &&
+      chainRequiresSecret &&
+      !existingLlmSecret.trim()
+    ) {
+      return 'Select an existing LLM Secret.'
+    }
+    if (step === 1 && secretMode === 'new' && !toKebabCase(newSecretName)) {
+      return 'For a new LLM Secret, set a name.'
+    }
+    if (step === 1 && secretMode === 'new' && !primaryCredentialUsable(provider, llmKeyDraft)) {
       return `Add the ${getProviderLabel(provider)} credential for the primary model.`
     }
-    if (step === 2 && secretMode === 'new') {
+    if (step === 1 && secretMode === 'new') {
       const projected = projectCredentialDraft(
         llmKeyDraft,
         getActiveCredentialKeys(provider, llmPolicy)
@@ -512,46 +563,26 @@ export function HostWizard({
   }, [
     step,
     hostName,
-    contextMode,
-    contextName,
-    selectedExistingContext,
-    selectedMcp,
     secretMode,
     existingSecret,
+    existingLlmSecret,
     newSecretName,
     llmKeyDraft,
     llmPolicy,
     provider,
     modelName,
-    selectedUserIds,
-    selectedTeamIds,
+    chainRequiresSecret,
   ])
-
-  async function upsertResource(
-    pluralPath: string,
-    name: string,
-    createBody: unknown,
-    updateBody: unknown
-  ) {
-    try {
-      await apiSend('PUT', `/api/v1/${pluralPath}/${encodeURIComponent(name)}`, updateBody)
-    } catch {
-      await apiSend('POST', `/api/v1/${pluralPath}`, createBody)
-    }
-  }
 
   function resetForm() {
     setStep(0)
     setError('')
 
     setHostName('')
-    setContextName('')
-    setContextMode('existing')
-    setSelectedExistingContext('')
-    setContextSelectOpen(false)
     setSelectedMcp([])
     setSecretMode('existing')
     setExistingSecret('')
+    setExistingLlmSecret('')
     setNewSecretName('')
     setSecretNameTouched(false)
     setLlmKeyDraft(createEmptyLlmKeyDraft())
@@ -559,6 +590,8 @@ export function HostWizard({
     setAllowedModels([])
     setProvider('openai')
     setModelName(resolveDefaultModel('openai', getModelOptions(allowedCatalog, 'openai')))
+    setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
+    setCodexModels([])
     setStateless(false)
     setSelectedUserIds([])
     setSelectedTeamIds([])
@@ -578,22 +611,21 @@ export function HostWizard({
     })
   }
 
-  function selectExistingContext(context: ContextOption) {
-    setSelectedExistingContext(`${context.namespace}/${context.name}`)
-    setContextSelectOpen(false)
-  }
-
   async function submitAll() {
     setBusy(true)
     setError('')
+    // Rollback ledger for the create-only seam: every sibling THIS run POSTs
+    // successfully is appended here so a later failure (before the Host exists)
+    // can inverse-compensate it. Only successful POSTs of this execution are
+    // tracked — never inferred from slug/label. Declared outside the try so the
+    // catch can read it.
+    const created: CreatedResource[] = []
+    let hostCreated = false
     try {
       const normalizedHostName = toKebabCase(hostName)
-      const normalizedContextName = toKebabCase(contextName)
-      const resolvedContextName =
-        contextMode === 'existing' ? selectedContextOption?.contextId || '' : normalizedContextName
       const normalizedSecretName = toKebabCase(newSecretName)
 
-      if (secretMode === 'new') {
+      if (chainRequiresSecret && secretMode === 'new') {
         // Project the draft onto the active domain before writing: only the
         // primary provider's slots ∪ each fallback's effective slot(s) reach the
         // Secret — a key left behind by a since-removed provider is dropped, not
@@ -607,37 +639,38 @@ export function HostWizard({
         if (slotErrors.length > 0) {
           throw new Error(slotErrors[0])
         }
-        await apiSend('POST', '/api/v1/admin/secrets', {
-          name: normalizedSecretName,
-          namespace: hostNamespace,
-          labels: {
-            [HOST_SECRET_LABEL_KEY]: HOST_SECRET_LABEL_VALUE,
+        // Create-only POST (R5-C1/R5-B1): a name collision must 409 AlreadyExists
+        // server-side, never silently overwrite a foreign Secret via a PUT. The
+        // 409 → friendly message translation is scoped to createOrThrow.
+        await createOrThrow(
+          '/api/v1/admin/secrets',
+          {
+            name: normalizedSecretName,
+            namespace: hostNamespace,
+            labels: {
+              [HOST_SECRET_LABEL_KEY]: HOST_SECRET_LABEL_VALUE,
+            },
+            stringData,
           },
-          stringData,
-        })
+          `A credential secret named "${normalizedSecretName}" already exists — choose another name.`
+        )
+        // The host's own LLM Secret (${slug}-llm). Tracked so a later failure
+        // rolls it back explicitly by name.
+        created.push({ kind: 'secret', name: normalizedSecretName })
       }
 
-      if (contextMode === 'new') {
-        await upsertResource(
-          'admin/contexts',
-          normalizedContextName,
-          {
-            metadata: { name: normalizedContextName },
-            spec: {
-              contextId: normalizedContextName,
-              description: `Context for agent ${normalizedHostName}`,
-              mcpServers: Array.from(new Set(selectedMcp)),
-            },
-          },
-          {
-            spec: {
-              contextId: normalizedContextName,
-              description: `Context for agent ${normalizedHostName}`,
-              mcpServers: Array.from(new Set(selectedMcp)),
-            },
-          }
-        )
-      }
+      // Every agent gets a private implementation context. The context name is
+      // intentionally generated here instead of being exposed as a wizard
+      // field; the agent still needs a contextRef for its runtime contract.
+      const generatedContextName = await createPrivateContext(
+        {
+          subject: normalizedHostName,
+          description: `Connector context for agent ${normalizedHostName}`,
+          mcpServers: Array.from(new Set(selectedMcp)),
+        },
+        'We couldn’t finish setting up this agent’s connectors — please try again.'
+      )
+      created.push({ kind: 'context', name: generatedContextName })
 
       // Effective per-host model subset (Topic 3a): prune the draft to the
       // providers actually in this host's domain (primary + fallbacks), then
@@ -651,14 +684,25 @@ export function HostWizard({
         allowedCatalog
       )
 
+      const resolvedSecretRef = !chainRequiresSecret
+        ? ''
+        : secretMode === 'new'
+          ? normalizedSecretName
+          : provider === 'codex-subscription'
+            ? existingLlmSecret.trim()
+            : parseCredentialSelect(existingSecret).kind === 'secret'
+              ? existingSecret
+              : ''
+
       const hostSpec: Record<string, unknown> = {
         host: normalizedHostName,
-        contextRef: resolvedContextName,
-        secretRef: secretMode === 'existing' ? existingSecret : normalizedSecretName,
+        contextRef: generatedContextName,
+        ...(resolvedSecretRef ? { secretRef: resolvedSecretRef } : {}),
         channels: [],
         model: {
           provider,
           name: modelName,
+          ...(provider === 'codex-subscription' ? { connectionRef } : {}),
         },
         // Opt-in fallback policy (spec §3-R5): only set when at least one
         // fallback is configured, so a Host without fallbacks behaves as today.
@@ -670,21 +714,26 @@ export function HostWizard({
         ...(stateless ? { lifecycle: { stateless: true } } : {}),
       }
 
-      await upsertResource(
-        'admin/hosts',
-        normalizedHostName,
+      // Create-only POST (R5-C1/R5-B1): the Host is the seam boundary. A name
+      // collision must 409 AlreadyExists rather than overwrite a foreign agent's
+      // entire spec. Once this resolves, hostCreated flips the compensation off:
+      // the siblings now belong to a real Host and must NOT be rolled back.
+      await createOrThrow(
+        '/api/v1/admin/hosts',
         {
           metadata: { name: normalizedHostName },
           spec: hostSpec,
         },
-        {
-          spec: hostSpec,
-        }
+        `That agent name is already in use — choose another name.`
       )
+      hostCreated = true
 
       // Associate authorized users and teams with the new agent in a single
       // atomic call each, rather than looping N×(GET+PUT) per selection.
       // Uses the agent-centric endpoints PUT /admin/agents/:name/users|teams.
+      // These run AFTER hostCreated=true: if a grant fails, the Host + siblings
+      // stay (V-7) — the operator retries grants from the agent detail page — so
+      // no compensation runs for a grant failure.
       if (selectedUserIds.length > 0) {
         await updateAgentUsers(normalizedHostName, selectedUserIds)
       }
@@ -698,6 +747,20 @@ export function HostWizard({
       if (!mountedRef.current) return
       onClose()
     } catch (e) {
+      // The Host is the compensation boundary (V-7): if it never got created, the
+      // siblings created before it are orphans — inverse-compensate them
+      // best-effort. If it DID get created, leave everything (a grant failure is
+      // recoverable from the agent detail page). Always await the rollback before
+      // surfacing the error so a caller/test observes the terminal state.
+      if (!hostCreated) {
+        await compensateCreated(created)
+      }
+      // NO 409 remap here: each create-only POST already translated its OWN
+      // collision inside createOrThrow. This catch also sees errors from paths
+      // that run AFTER the Host — the grant calls (409
+      // `deleted_agent_history_limit_exceeded`) — whose messages formatApiError
+      // already produced; masking them as "already in use" told the operator a
+      // collision that never happened. Preserve e.message verbatim.
       if (mountedRef.current) {
         setError(e instanceof Error ? e.message : 'Failed to create agent resources')
       }
@@ -750,9 +813,18 @@ export function HostWizard({
                   autoFocus
                 />
                 {hostName.trim() ? (
-                  <span className="cu-agent-input-shell__status" aria-label="Valid agent name">
-                    <IconCheck width={16} height={16} />
-                  </span>
+                  agentNameError ? (
+                    <span
+                      className="cu-agent-input-shell__status cu-agent-input-shell__status--invalid"
+                      aria-label={agentNameError}
+                    >
+                      <IconAlertTriangle width={16} height={16} />
+                    </span>
+                  ) : (
+                    <span className="cu-agent-input-shell__status" aria-label="Valid agent name">
+                      <IconCheck width={16} height={16} />
+                    </span>
+                  )
                 ) : null}
               </span>
             </Field>
@@ -801,164 +873,15 @@ export function HostWizard({
                 </div>
               </div>
             ) : null}
-            <div className="cu-agent-info-card">
-              <IconInfoCircle width={16} height={16} />
-              <div>
-                <strong>Naming conventions</strong>
-                <p>
-                  Use lowercase letters, numbers, and hyphens only. Must start with a letter and be
-                  3-63 characters long.
-                </p>
-              </div>
-            </div>
           </div>
         )}
 
         {step === 1 && (
           <div className="cu-form-stack cu-agent-form-stack">
-            <div className="cu-agent-radio-group">
-              <label className="cu-agent-radio cu-agent-radio--card">
-                <input
-                  type="radio"
-                  checked={contextMode === 'existing'}
-                  onChange={() => setContextMode('existing')}
-                />
-                <span className="cu-agent-radio__copy">
-                  <span className="cu-agent-radio__title">Use existing context</span>
-                  <span className="cu-agent-radio__description">
-                    Select a saved context and reuse its MCP server attachments.
-                  </span>
-                </span>
-              </label>
-              <label className="cu-agent-radio cu-agent-radio--card">
-                <input
-                  type="radio"
-                  checked={contextMode === 'new'}
-                  onChange={() => setContextMode('new')}
-                />
-                <span className="cu-agent-radio__copy">
-                  <span className="cu-agent-radio__title">Create new context</span>
-                  <span className="cu-agent-radio__description">
-                    Create a context for this agent. MCP servers can be attached now or later.
-                  </span>
-                </span>
-              </label>
-            </div>
-            {contextMode === 'existing' ? (
-              <>
-                <div className="cu-agent-access-section">
-                  <strong>Select Context</strong>
-                  <div
-                    className="cu-agent-select"
-                    ref={contextSelectRef}
-                    onBlur={event => {
-                      if (!event.currentTarget.contains(event.relatedTarget)) {
-                        setContextSelectOpen(false)
-                      }
-                    }}
-                  >
-                    <button
-                      type="button"
-                      className="cu-agent-select__button"
-                      aria-expanded={contextSelectOpen}
-                      aria-haspopup="listbox"
-                      onClick={() => setContextSelectOpen(open => !open)}
-                    >
-                      <span>{selectedContextLabel}</span>
-                      <span className="cu-agent-select__chevron" aria-hidden="true" />
-                    </button>
-                    {contextSelectOpen ? (
-                      <div className="cu-agent-select__menu" role="listbox">
-                        {existingContexts.length === 0 ? (
-                          <span className="cu-agent-select__empty">No contexts available.</span>
-                        ) : (
-                          existingContexts.map(ctx => {
-                            const value = `${ctx.namespace}/${ctx.name}`
-                            return (
-                              <button
-                                key={value}
-                                type="button"
-                                className="cu-agent-select__option"
-                                data-active={selectedExistingContext === value ? 'true' : 'false'}
-                                role="option"
-                                aria-selected={selectedExistingContext === value}
-                                onClick={() => selectExistingContext(ctx)}
-                              >
-                                {ctx.contextId}
-                              </button>
-                            )
-                          })
-                        )}
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-                {selectedContextOption && (
-                  <section
-                    className="cu-agent-context-mcp-summary"
-                    aria-label="Attached MCP servers"
-                  >
-                    <div className="cu-agent-context-mcp-summary__head">
-                      <span>MCP servers</span>
-                      <span>{selectedContextOption.mcpServers.length}</span>
-                    </div>
-                    {selectedContextOption.mcpServers.length > 0 ? (
-                      <ul className="cu-agent-context-mcp-summary__list">
-                        {selectedContextOption.mcpServers.map(server => (
-                          <li key={server} title={server}>
-                            {server}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="cu-muted">No MCP servers attached.</p>
-                    )}
-                  </section>
-                )}
-              </>
-            ) : (
-              <>
-                <Field
-                  description="Automatically formatted to lowercase with hyphens."
-                  label="Context name"
-                >
-                  <TextInput
-                    value={contextName}
-                    onChange={e => setContextName(toKebabInput(e.target.value))}
-                    placeholder="context-name"
-                  />
-                </Field>
-                <div className="cu-agent-section-label">MCP servers (optional)</div>
-                <div className="cu-agent-mcp-grid">
-                  {availableMcp.map(name => (
-                    <CheckboxField
-                      key={name}
-                      checked={selectedMcp.includes(name)}
-                      className="cu-agent-mcp-option"
-                      label={
-                        <span className="cu-agent-mcp-option__label">
-                          <span className="cu-agent-mcp-option__name">{name}</span>
-                          <span className="cu-agent-mcp-option__meta">MCP server</span>
-                        </span>
-                      }
-                      onChange={() => toggleMcp(name)}
-                    />
-                  ))}
-                  {availableMcp.length === 0 ? (
-                    <span className="cu-agent-empty-note">No MCP servers available.</span>
-                  ) : null}
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {step === 2 && (
-          <div className="cu-form-stack cu-agent-form-stack">
             <div className="cu-agent-access-section">
-              <strong>Credentials</strong>
+              <strong>LLM credentials</strong>
               <span className="cu-muted cu-agent-access-hint">
-                Store this agent&apos;s own LLM credentials, or use a shared Kubernetes Secret.
+                Link an existing LLM Secret or create one for this agent.
               </span>
               <div className="cu-agent-radio-group">
                 <label className="cu-agent-radio cu-agent-radio--card">
@@ -968,9 +891,9 @@ export function HostWizard({
                     onChange={() => setSecretMode('existing')}
                   />
                   <span className="cu-agent-radio__copy">
-                    <span className="cu-agent-radio__title">Use an existing Secret</span>
+                    <span className="cu-agent-radio__title">Use an existing LLM Secret</span>
                     <span className="cu-agent-radio__description">
-                      Select a saved Kubernetes Secret that already contains LLM API keys.
+                      Link a saved LLM Secret that already contains provider credentials.
                     </span>
                   </span>
                 </label>
@@ -978,30 +901,54 @@ export function HostWizard({
                   <input
                     type="radio"
                     checked={secretMode === 'new'}
-                    onChange={() => setSecretMode('new')}
+                    onChange={() => {
+                      setSecretMode('new')
+                      if (provider === 'codex-subscription' && !llmPolicy?.fallbacks.length) {
+                        setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
+                        setCodexModels([])
+                        setExistingSecret('')
+                        setExistingLlmSecret('')
+                        setProvider('openai')
+                        setModelName(
+                          resolveDefaultModel('openai', getModelOptions(allowedCatalog, 'openai'))
+                        )
+                      }
+                    }}
                   />
                   <span className="cu-agent-radio__copy">
-                    <span className="cu-agent-radio__title">New credential</span>
+                    <span className="cu-agent-radio__title">Create a new LLM Secret</span>
                     <span className="cu-agent-radio__description">
-                      Create a new Secret for this agent. Its name is derived from the agent name.
+                      Create a private LLM Secret for this agent. Its internal name is derived from
+                      the agent name.
                     </span>
                   </span>
                 </label>
               </div>
               {secretMode === 'existing' ? (
                 <div className="cu-agent-access-section">
-                  <strong>Credential</strong>
-                  <WizardSelect
+                  <strong>LLM Secret</strong>
+                  <LlmSecretSelect
                     value={existingSecret}
-                    placeholder="Select secret..."
+                    placeholder="Select LLM Secret..."
                     options={secretOptions}
                     onChange={handleExistingSecretChange}
                   />
+                  {provider === 'codex-subscription' && chainRequiresSecret ? (
+                    <>
+                      <strong>LLM secret</strong>
+                      <LlmSecretSelect
+                        value={existingLlmSecret}
+                        placeholder="Select secret..."
+                        options={apiKeyOptions}
+                        onChange={setExistingLlmSecret}
+                      />
+                    </>
+                  ) : null}
                 </div>
               ) : (
                 <Field
-                  description="Auto-named from the agent — edit if you prefer a different name."
-                  label="Secret name"
+                  description="Auto-named from the agent — edit the internal name if you prefer a different one."
+                  label="LLM Secret name"
                 >
                   <span className="cu-agent-input-shell">
                     <TextInput
@@ -1010,7 +957,7 @@ export function HostWizard({
                         setSecretNameTouched(true)
                         setNewSecretName(toKebabInput(e.target.value))
                       }}
-                      placeholder="secret-name"
+                      placeholder="llm-secret-name"
                     />
                     <span
                       className={cn(
@@ -1018,7 +965,9 @@ export function HostWizard({
                         !toKebabCase(newSecretName) && 'cu-agent-input-shell__status--empty'
                       )}
                       aria-label={
-                        toKebabCase(newSecretName) ? 'Valid secret name' : 'Secret name empty'
+                        toKebabCase(newSecretName)
+                          ? 'Valid LLM Secret name'
+                          : 'LLM Secret name empty'
                       }
                     >
                       {toKebabCase(newSecretName) ? <IconCheck width={16} height={16} /> : null}
@@ -1033,18 +982,25 @@ export function HostWizard({
               onPrimaryChange={next => {
                 setProvider(next.provider)
                 setModelName(next.model)
+                if (next.provider !== 'codex-subscription') {
+                  setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
+                  setCodexModels([])
+                  if (parseCredentialSelect(existingSecret).kind === 'subscription') {
+                    setExistingSecret('')
+                  }
+                }
               }}
               policy={llmPolicy}
               onPolicyChange={setLlmPolicy}
               allowedModels={allowedModels}
               onAllowedModelsChange={setAllowedModels}
-              catalog={allowedCatalog}
+              catalog={catalogForEditor}
               catalogLoading={modelsLoading}
               catalogError={modelsError}
               modelLabel="Default model"
               showAllowedModels={false}
               credentials={
-                secretMode === 'new'
+                chainRequiresSecret && secretMode === 'new'
                   ? {
                       draft: llmKeyDraft,
                       onChange: (dataKey, value) =>
@@ -1052,14 +1008,14 @@ export function HostWizard({
                     }
                   : undefined
               }
-              secretKeys={secretMode === 'new' ? llmSecretKeys : []}
+              secretKeys={chainRequiresSecret && secretMode === 'new' ? llmSecretKeys : []}
               fallbackProvidersInitiallyCollapsed
               disabled={busy}
             />
           </div>
         )}
 
-        {step === 3 && (
+        {step === 2 && (
           <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
             {directoryLoadError ? (
               <div className="cu-workflow-access__error" role="alert">
@@ -1154,6 +1110,39 @@ export function HostWizard({
                 detail page.
               </p>
             ) : null}
+          </div>
+        )}
+
+        {step === 3 && (
+          <div className="cu-form-stack cu-agent-form-stack">
+            <div className="cu-agent-access-section">
+              <strong>Connectors</strong>
+              <span className="cu-muted cu-agent-access-hint">
+                Choose the connectors this agent can use. You can leave this empty and add
+                connectors later.
+              </span>
+            </div>
+            <div className="cu-agent-section-label">Available connectors (optional)</div>
+            <div className="cu-agent-mcp-grid" role="group" aria-label="Available connectors">
+              {availableMcp.map(name => (
+                <CheckboxField
+                  key={name}
+                  checked={selectedMcp.includes(name)}
+                  className="cu-agent-mcp-option"
+                  label={
+                    <span className="cu-agent-mcp-option__label">
+                      <span className="cu-agent-mcp-option__name">{name}</span>
+                      <span className="cu-agent-mcp-option__meta">Connector</span>
+                    </span>
+                  }
+                  disabled={busy}
+                  onChange={() => toggleMcp(name)}
+                />
+              ))}
+              {availableMcp.length === 0 ? (
+                <span className="cu-agent-empty-note">No connectors available.</span>
+              ) : null}
+            </div>
           </div>
         )}
 

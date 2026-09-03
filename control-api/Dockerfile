@@ -7,6 +7,11 @@ COPY packages/image-policy ./packages/image-policy
 # both the workflow-runtime-core build (it depends on it) and control-api's
 # npm ci (control-api validates the provider set from it, R4).
 COPY packages/llm-providers ./packages/llm-providers
+# Shared prebuilt display-field validation package (no build step). Copied
+# before control-api's npm ci so its file: dependency resolves; resourceFieldValidation
+# imports validateDisplayField from it.
+COPY packages/display-field ./packages/display-field
+COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 
 # Build the shared @clerum/workflow-runtime-core package (TS → dist) BEFORE
 # control-api's npm ci, so its file: dependency on it resolves with the compiled

@@ -8,11 +8,12 @@
  *   - live progress absent    → render from `message.toolSteps`
  *   - neither                 → render nothing
  */
-import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { MessageToolStep } from '../../../../../src/types'
+import { findLoadedChatMessageMatches } from '../../../lib/chatLocalSearch'
+import { buildLoadedChatSemanticModels } from '../../../lib/chatMessageSemantics'
 import type { AgentChatMessage, TaskProgress } from '../../../uiTypes'
 // vi.mock calls are hoisted above this import, so ChatThread binds the mocks.
 import { ChatThread } from '../ChatThread'
@@ -38,6 +39,12 @@ let threadStateValue: {
   hasOlderMessages: boolean
   olderMessagesLoading: boolean
   handleLoadOlderMessages: ReturnType<typeof vi.fn>
+  localSearchQuery: string
+  localSearchCurrentMatch: { messageId: string; occurrence: number } | null
+  semanticModelsByMessageId: ReadonlyMap<
+    string,
+    ReturnType<typeof buildLoadedChatSemanticModels>[number]
+  >
 }
 
 vi.mock('@contexts/NavigationContext', () => ({ useNavigationContext: () => navValue }))
@@ -58,10 +65,6 @@ vi.mock('../InFlightAssistantPlaceholder', () => ({ InFlightAssistantPlaceholder
 vi.mock('../NudgeArea', () => ({ NudgeArea: () => null }))
 vi.mock('../ChatStateBadge', () => ({ ChatStateBadge: () => null }))
 vi.mock('@components/MessageArtifactActions', () => ({ MessageArtifactActions: () => null }))
-vi.mock('react-markdown', () => ({
-  default: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
-}))
-vi.mock('remark-gfm', () => ({ default: () => undefined }))
 
 const actEnvGlobal = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 actEnvGlobal.IS_REACT_ACT_ENVIRONMENT = true
@@ -103,8 +106,125 @@ function setThreadState(
     hasOlderMessages: options.hasOlderMessages ?? false,
     olderMessagesLoading: options.olderMessagesLoading ?? false,
     handleLoadOlderMessages: vi.fn().mockResolvedValue(undefined),
+    localSearchQuery: '',
+    localSearchCurrentMatch: null,
+    semanticModelsByMessageId: new Map(
+      buildLoadedChatSemanticModels(activeMessages).map(model => [model.messageId, model])
+    ),
   }
 }
+
+describe('ChatThread local-search highlighting', () => {
+  it('keeps calculated and rendered matches aligned inside longer Markdown fences', () => {
+    const assistant: AgentChatMessage = {
+      id: 'turn-1-assistant',
+      role: 'assistant',
+      content: ['````typescript', '```needle', 'visible needle', '````'].join('\n'),
+      timestamp: 2,
+    }
+    setThreadState([{ role: 'assistant', items: [assistant] }])
+    threadStateValue.localSearchQuery = 'needle'
+    threadStateValue.localSearchCurrentMatch = {
+      messageId: assistant.id,
+      occurrence: 0,
+    }
+
+    render(<ChatThread />)
+
+    const renderedMatches = document.querySelectorAll('.chat-search-match')
+    expect(renderedMatches).toHaveLength(2)
+    expect(
+      findLoadedChatMessageMatches(buildLoadedChatSemanticModels([assistant]), 'needle')
+    ).toHaveLength(renderedMatches.length)
+  })
+
+  it('renders every plain and Markdown match and distinguishes the selected occurrence', () => {
+    const messages: AgentChatMessage[] = [
+      { ...userMsg, content: 'Needle then needle' },
+      {
+        id: 'turn-1-assistant',
+        role: 'assistant',
+        content: 'A **needle** in a [needle link](https://needle.example/needle).',
+        timestamp: 2,
+      },
+    ]
+    setThreadState([
+      {
+        role: 'user',
+        items: [messages[0]!],
+      },
+      {
+        role: 'assistant',
+        items: [messages[1]!],
+      },
+    ])
+    threadStateValue.localSearchQuery = 'needle'
+    threadStateValue.localSearchCurrentMatch = {
+      messageId: 'turn-1-assistant',
+      occurrence: 1,
+    }
+
+    const { rerender } = render(<ChatThread />)
+
+    const renderedMatches = document.querySelectorAll('.chat-search-match')
+    expect(renderedMatches).toHaveLength(4)
+    expect(
+      findLoadedChatMessageMatches(buildLoadedChatSemanticModels(messages), 'needle')
+    ).toHaveLength(renderedMatches.length)
+    const active = screen.getByTestId('chat-search-current-match')
+    expect(active.textContent).toBe('needle')
+    expect(active.closest('a')?.getAttribute('href')).toBe('https://needle.example/needle')
+
+    threadStateValue.localSearchCurrentMatch = { messageId: 'turn-1-user', occurrence: 1 }
+    rerender(<ChatThread />)
+    expect(screen.getByTestId('chat-search-current-match').textContent).toBe('needle')
+
+    threadStateValue.localSearchQuery = 'missing'
+    threadStateValue.localSearchCurrentMatch = null
+    rerender(<ChatThread />)
+    expect(document.querySelector('.chat-search-match')).toBeNull()
+  })
+
+  it('renders one logical match across inline nodes with shared mark identity', () => {
+    const assistant: AgentChatMessage = {
+      id: 'cross-inline',
+      role: 'assistant',
+      content: 'A cross **node** remains one result.',
+      timestamp: 2,
+    }
+    setThreadState([{ role: 'assistant', items: [assistant] }])
+    threadStateValue.localSearchQuery = 'cross node'
+    threadStateValue.localSearchCurrentMatch = { messageId: assistant.id, occurrence: 0 }
+
+    render(<ChatThread />)
+
+    const marks = [...document.querySelectorAll<HTMLElement>('.chat-search-match')]
+    expect(
+      findLoadedChatMessageMatches(
+        [...threadStateValue.semanticModelsByMessageId.values()],
+        'cross node'
+      )
+    ).toHaveLength(1)
+    expect(marks).toHaveLength(2)
+    expect(new Set(marks.map(mark => mark.dataset.chatSearchMatchId))).toHaveProperty('size', 1)
+  })
+
+  it('keeps raw HTML inert and unsafe Markdown URLs sanitized', () => {
+    const assistant: AgentChatMessage = {
+      id: 'safe-markdown',
+      role: 'assistant',
+      content: '[unsafe](javascript:alert(1)) <button onclick="evil()">literal</button>',
+      timestamp: 2,
+    }
+    setThreadState([{ role: 'assistant', items: [assistant] }])
+
+    render(<ChatThread />)
+
+    expect(document.querySelector('a')?.getAttribute('href')).toBe('')
+    expect(document.querySelector('button[onclick]')).toBeNull()
+    expect(screen.getByText(/<button onclick="evil\(\)">literal<\/button>/)).toBeTruthy()
+  })
+})
 
 describe('ChatThread tool-steps fallback (#582)', () => {
   it('renders assistant response-file attachments with a direct download action', () => {

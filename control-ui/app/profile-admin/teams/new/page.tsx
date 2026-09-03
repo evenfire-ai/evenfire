@@ -18,19 +18,18 @@ import {
   addAdminTeamMember,
   createAdminTeam,
   getAdminUsers,
-  getContexts,
   getHosts,
   updateAdminTeamAgents,
   updateAdminTeamContexts,
 } from '@lib/api'
-import type { AdminUser, ContextResource, HostResource } from '@lib/api'
+import type { AdminUser, HostResource } from '@lib/api'
 import { permissionsForTeamRole, setDeletePermission, setInvitePermission } from '@lib/teamRoles'
 
 type Role = 'admin' | 'inviter' | 'member'
 
-type TeamCreateStep = 0 | 1 | 2 | 3
+type TeamCreateStep = 0 | 1 | 2
 
-const STEPS = ['Team', 'Members', 'Contexts', 'Agents'] as const
+const STEPS = ['Team', 'Members', 'Agents'] as const
 
 const STEP_DETAILS = [
   {
@@ -44,23 +43,11 @@ const STEP_DETAILS = [
     subtitle: 'Choose initial team members and roles.',
   },
   {
-    description: 'Map context access',
-    title: 'Contexts',
-    subtitle: 'Select the contexts this team can access.',
-  },
-  {
     description: 'Map agent access',
     title: 'Agents',
-    subtitle: 'Select the agents this team can use.',
+    subtitle: 'Choose the agents this team can use — their connectors come along.',
   },
 ] as const
-
-function contextIdFromResource(item: {
-  metadata?: { name?: string }
-  spec?: { contextId?: string }
-}) {
-  return String(item.spec?.contextId || item.metadata?.name || '').trim()
-}
 
 function hostNameFromResource(item: HostResource) {
   return String(item.metadata?.name || '').trim()
@@ -72,12 +59,10 @@ export default function CreateTeamPage() {
 
   const [loadingReferenceData, setLoadingReferenceData] = useState(true)
   const [users, setUsers] = useState<AdminUser[]>([])
-  const [availableContextIds, setAvailableContextIds] = useState<string[]>([])
   const [hosts, setHosts] = useState<HostResource[]>([])
   const [teamName, setTeamName] = useState('')
   const [step, setStep] = useState<TeamCreateStep>(0)
   const [memberRoleDrafts, setMemberRoleDrafts] = useState<Record<string, Role>>({})
-  const [selectedContextIds, setSelectedContextIds] = useState<string[]>([])
   const [selectedAgentNames, setSelectedAgentNames] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -90,18 +75,8 @@ export default function CreateTeamPage() {
       setLoadingReferenceData(true)
       setError('')
       try {
-        const [usersResponse, contextsResponse, hostsResponse] = await Promise.all([
-          getAdminUsers(''),
-          getContexts(),
-          getHosts(),
-        ])
+        const [usersResponse, hostsResponse] = await Promise.all([getAdminUsers(''), getHosts()])
         setUsers(Array.isArray(usersResponse.items) ? usersResponse.items : [])
-        setAvailableContextIds(
-          (contextsResponse.items || [])
-            .map((item: ContextResource) => contextIdFromResource(item))
-            .filter(Boolean)
-            .sort((a, b) => a.localeCompare(b))
-        )
         setHosts(Array.isArray(hostsResponse.items) ? hostsResponse.items : [])
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : 'Failed to load team options')
@@ -130,17 +105,13 @@ export default function CreateTeamPage() {
       })),
     [users]
   )
-  const contextOptions = useMemo(
-    () => availableContextIds.map(contextId => ({ value: contextId, label: contextId })),
-    [availableContextIds]
-  )
   const agentOptions = useMemo(
     () =>
       Array.from(new Set(hosts.map(host => hostNameFromResource(host)).filter(Boolean)))
         .sort((a, b) => a.localeCompare(b))
         .map(agentName => ({
           value: agentName,
-          label: getAgentDisplayName(agentName),
+          label: getAgentDisplayName(agentName, hosts),
           description: agentName,
         })),
     [hosts]
@@ -200,18 +171,12 @@ export default function CreateTeamPage() {
       return
     }
     if (step === 2) {
-      setSelectedContextIds([])
-      goNext()
-      return
-    }
-    if (step === 3) {
       void handleCreateTeam({ agentNames: [] })
     }
   }
 
   async function handleCreateTeam(overrides?: {
     agentNames?: string[]
-    contextIds?: string[]
     memberRoles?: Record<string, Role>
   }) {
     if (!canCreate) {
@@ -227,8 +192,16 @@ export default function CreateTeamPage() {
       createdTeamId = createdTeam.id
       const teamId = createdTeamId
       const selectedMemberRoles = overrides?.memberRoles ?? memberRoleDrafts
-      const selectedContextValues = overrides?.contextIds ?? selectedContextIds
       const selectedAgentValues = overrides?.agentNames ?? selectedAgentNames
+      // D8 composite: the wizard's Access step picks AGENTS; both mappings are
+      // written so scope-based and agent-based enforcement agree.
+      const agentRefs = selectedAgentValues
+        .map(agentName => hosts.find(host => host.metadata?.name === agentName))
+        .map(host =>
+          String((host?.spec as { contextRef?: string } | undefined)?.contextRef || '').trim()
+        )
+        .filter(Boolean)
+      const selectedContextValues = Array.from(new Set([...agentRefs]))
 
       await Promise.all(
         Object.entries(selectedMemberRoles).map(([userId, role]) =>
@@ -407,31 +380,6 @@ export default function CreateTeamPage() {
             {step === 2 ? (
               <div className="cu-form-stack cu-agent-form-stack--wide">
                 {loadingReferenceData ? (
-                  <div className="cu-muted cu-muted-note--compact">Loading contexts...</div>
-                ) : contextOptions.length > 0 ? (
-                  <Field htmlFor="new-team-context-picker" label="Contexts">
-                    <SelectionDropdown
-                      id="new-team-context-picker"
-                      options={contextOptions}
-                      value={selectedContextIds}
-                      onChange={setSelectedContextIds}
-                      placeholder="Select contexts"
-                      searchPlaceholder="Search contexts..."
-                      selectionLabel="Selected contexts"
-                      emptyLabel="No contexts match your search."
-                      disabled={saving}
-                      showSelectedChips={false}
-                    />
-                  </Field>
-                ) : (
-                  <div className="cu-muted cu-muted-note--compact">No contexts available.</div>
-                )}
-              </div>
-            ) : null}
-
-            {step === 3 ? (
-              <div className="cu-form-stack cu-agent-form-stack--wide">
-                {loadingReferenceData ? (
                   <div className="cu-muted cu-muted-note--compact">Loading agents...</div>
                 ) : agentOptions.length > 0 ? (
                   <Field htmlFor="new-team-agent-picker" label="Agents">
@@ -449,7 +397,9 @@ export default function CreateTeamPage() {
                     />
                   </Field>
                 ) : (
-                  <div className="cu-muted cu-muted-note--compact">No agents available.</div>
+                  <div className="cu-muted cu-muted-note--compact">
+                    No access available to grant.
+                  </div>
                 )}
               </div>
             ) : null}

@@ -1,6 +1,6 @@
 {
   "name": "clerum-control-api",
-  "version": "0.1.441",
+  "version": "0.1.547",
   "description": "Internal Clerum control plane REST API + UI for managing CRDs and secrets",
   "main": "dist/main.js",
   "engines": {
@@ -16,7 +16,9 @@
     "test:run": "vitest run --no-file-parallelism"
   },
   "dependencies": {
+    "@clerum/display-field": "file:../packages/display-field",
     "@clerum/image-policy": "file:../packages/image-policy",
+    "@clerum/llm-provider-attempt-contract": "file:../packages/llm-provider-attempt-contract",
     "@clerum/llm-providers": "file:../packages/llm-providers",
     "@clerum/workflow-recipe-capability-policy": "file:../packages/workflow-recipe-capability-policy",
     "@clerum/workflow-runtime-core": "file:../packages/workflow-runtime-core",
@@ -39,6 +41,7 @@
     "@types/node": "^24.3.0",
     "@types/pg": "^8.11.10",
     "@types/supertest": "^7.2.0",
+    "fast-check": "^4.9.0",
     "supertest": "^7.2.2",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.2",

@@ -221,7 +221,13 @@ export function sessionFsmReducer(
       }
       // GAP-N3: notify only on a genuine stream-driven transition, deduped by
       // (taskId, requestId). A sticky re-emit or a repeat suspended is swallowed.
-      if (!alreadyNotified) {
+      // U5: a `connect_required` suspension is NOT a tool approval — emitting the
+      // generic "approve" notification would let its decide-action resume the task
+      // WITHOUT a grant (401 → re-suspend loop). The in-chat "Connect <server>"
+      // prompt is its surface; the badge still flips to awaiting_approval below,
+      // and the connect completion resumes it via the same approval RPC.
+      const isConnectRequired = event.approval.reason === 'connect_required'
+      if (!alreadyNotified && !isConnectRequired) {
         effects.push({
           type: 'emit_approval_notification',
           taskId: event.taskId,

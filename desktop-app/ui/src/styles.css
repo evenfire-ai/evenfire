@@ -100,25 +100,63 @@ h3 {
 
 .global-search {
   position: relative;
-  width: min(480px, 44vw);
-  min-width: 220px;
-  max-width: 480px;
+  /* Collapsed to just the magnifier until focused, then expands to the full
+     search width. The expanded size is carried in custom props so each
+     breakpoint retunes it without re-declaring the collapsed state. Collapsed
+     width matches the 40px input height so the icon sits in a square. */
+  --global-search-expanded: var(--app-notification-drawer-width);
+  --global-search-expanded-min: 220px;
+  width: 40px;
+  min-width: 40px;
+  max-width: 100%;
+  /* Collapsed, the 40px pill sits one gap from the notification bell, whose
+     hover fill would otherwise crowd it — add a gap's worth of separation,
+     dropped back to 0 once expanded (the wide field already reads clear of it). */
+  margin-right: var(--space-2);
+  transition:
+    width var(--motion-medium),
+    min-width var(--motion-medium),
+    margin-right var(--motion-medium);
 }
 
+/* Stay expanded whenever the field is focused OR the results are open, so the
+   collapse is tied to "closed", not merely "unfocused": tabbing out while the
+   dropdown is still open must not hide the typed query behind the 40px box. */
+.global-search:focus-within,
+.global-search.is-open {
+  width: var(--global-search-expanded);
+  min-width: var(--global-search-expanded-min);
+  margin-right: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .global-search {
+    transition: none;
+  }
+}
+
+/* Collapsed: the glyph fills the square and is centered both axes, so it reads
+   as a balanced icon button instead of a small mark with dead space beside it. */
 .global-search::before {
   content: '⌕';
   position: absolute;
-  left: 12px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 16px;
-  height: 16px;
+  inset: 0;
+  display: grid;
+  place-items: center;
   background-image: none;
   color: var(--text-dim);
-  font-size: var(--font-size-lg);
+  font-size: var(--font-size-xl);
   font-weight: 600;
   line-height: 1;
   pointer-events: none;
+}
+
+/* Expanded: pin the glyph to the left edge (ahead of the input's 40px left pad)
+   and drop back to the in-field size so it aligns with the typed text. */
+.global-search:focus-within::before,
+.global-search.is-open::before {
+  inset: 0 auto 0 12px;
+  font-size: var(--font-size-lg);
 }
 
 .search-input {
@@ -477,11 +515,13 @@ h3 {
   padding: var(--space-1-5);
   display: grid;
   gap: var(--space-2-5);
+  align-content: start;
 }
 
 .notification-menu-section {
   display: grid;
   gap: var(--space-1-5);
+  align-content: start;
 }
 
 .notification-menu-section + .notification-menu-section {
@@ -557,6 +597,7 @@ h3 {
 .notification-menu-list {
   display: grid;
   gap: var(--space-1-5);
+  align-content: start;
 }
 
 .notification-menu-item {
@@ -1031,7 +1072,7 @@ h3 {
   width: 328px;
   min-width: 328px;
   max-width: 328px;
-  padding: var(--space-2);
+  padding: 0 var(--space-2) var(--space-2);
   display: flex;
   flex-direction: column;
   background: var(--sidebar-gradient);
@@ -1127,7 +1168,7 @@ h3 {
   align-items: center;
   gap: var(--space-2-5);
   padding: var(--sidebar-logo-pad-top) var(--space-1) var(--space-2);
-  margin-bottom: var(--space-2);
+  margin-bottom: var(--space-1);
   min-height: 56px;
 }
 
@@ -1661,29 +1702,6 @@ h3 {
   white-space: nowrap;
 }
 
-.sidebar-data-submenu {
-  position: absolute;
-  left: calc(100% - 1px);
-  top: auto;
-  bottom: 0;
-  width: 220px;
-  display: none;
-  gap: var(--space-0-5);
-  border: 1px solid rgba(var(--edge-rgb), 0.4);
-  border-radius: var(--radius-lg);
-  background: var(--panel);
-  box-shadow: 0 16px 28px rgba(var(--overlay-rgb), 0.4);
-  backdrop-filter: none;
-  padding: var(--space-1-5);
-  z-index: calc(var(--sidebar-flyout-layer) + 30);
-}
-
-.sidebar-settings-menu-item-wrapper--data:hover .sidebar-data-submenu,
-.sidebar-settings-menu-item-wrapper--data:focus-within .sidebar-data-submenu,
-.sidebar-settings-menu-item-wrapper--data.is-open .sidebar-data-submenu {
-  display: grid;
-}
-
 .sidebar-footer-row {
   display: flex;
   align-items: center;
@@ -2098,11 +2116,6 @@ h3 {
   z-index: calc(var(--sidebar-flyout-layer) + 60);
 }
 
-.left-nav.collapsed .sidebar-data-submenu {
-  top: auto;
-  bottom: 0;
-}
-
 .left-nav.collapsed .sidebar-profile-menu-wrapper {
   flex: 0 0 auto;
 }
@@ -2155,6 +2168,12 @@ h3 {
 
 .content-panel {
   --app-notification-drawer-width: clamp(280px, 42vw, 420px);
+  --app-header-utilities-width: calc(var(--app-notification-drawer-width) + var(--space-2) + 36px);
+  /* Chat drawer owns its own width, decoupled from the notification drawer.
+     React sets `--chat-drawer-width` inline (session-only, drag-resizable); this
+     clamp is only the pre-mount / closed-state fallback. Floor 340px == the
+     drawer's min-width (see useChatDrawerResize). */
+  --chat-drawer-width: clamp(340px, 32vw, 420px);
 
   height: 100vh;
   min-height: 0;
@@ -2198,8 +2217,18 @@ h3 {
   overflow: hidden;
   min-height: 0;
   height: 100vh;
-  padding: var(--space-4) var(--space-4) 0;
+  /* Top pad clears the absolute top-bar: its space-2 top offset + the header's
+     own height + a bit of gap below it. space-2 * 5 is the smallest step of the
+     spacing scale that covers that stack; the other three sides are just space-2. */
+  padding: calc(var(--space-2) * 5) var(--space-2) var(--space-2) var(--space-2);
   gap: 0;
+}
+
+/* The absolute top-bar aligns to the panel's own space-2 edges here (the panel
+   owns the extra top breathing room via its padding, not the header). */
+.content-panel.content-panel--agent-chat > .top-bar {
+  top: var(--space-2);
+  right: var(--space-2);
 }
 
 .content-panel.content-panel--agent-chat > .agent-page {
@@ -3563,7 +3592,7 @@ h3 {
 
 /* Interactive hover/focus mirrors the ghost trigger's affordance — background,
  * border, text-color and shadow only, never transform/scale/filter (control
- * rules, desktop-app/ui/CLAUDE.md). */
+ * rules, docs/agents/frontend-style-rules.md). */
 .composer-actions-right .model-selector-chip.ui-pill--interactive:hover,
 .composer-actions-right .model-selector-chip.ui-pill--interactive:focus-visible {
   background: var(--surface-hover);
@@ -5779,6 +5808,113 @@ h3 {
   background: rgba(var(--overlay-rgb), 0.42);
 }
 
+.command-palette-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2300;
+  display: grid;
+  place-items: start center;
+  padding: min(18vh, calc(var(--space-5) + var(--space-5) + var(--space-5))) var(--space-4)
+    var(--space-4);
+  background: rgba(var(--overlay-rgb), 0.58);
+  backdrop-filter: blur(10px);
+}
+
+.command-palette {
+  width: min(680px, 100%);
+  max-height: min(640px, 72vh);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid rgba(var(--accent-rgb), 0.34);
+  border-radius: var(--radius-xl);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-hard);
+}
+
+.command-palette__header {
+  padding: var(--space-3);
+  border-bottom: 1px solid rgba(var(--edge-rgb), 0.3);
+}
+
+.command-palette__header .ui-control {
+  width: 100%;
+}
+
+.command-palette__list {
+  display: grid;
+  align-content: start;
+  gap: var(--space-1);
+  min-height: 0;
+  padding: var(--space-2);
+  overflow-y: auto;
+}
+
+.command-palette__item.ui-button {
+  width: 100%;
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+}
+
+.command-palette__item.ui-button:hover:enabled,
+.command-palette__item.ui-button.is-selected {
+  transform: none;
+  filter: none;
+  background: rgba(var(--accent-rgb), 0.16);
+}
+
+.command-palette__item-copy,
+.settings-shortcuts-action {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-0-5);
+}
+
+.command-palette__item-copy strong,
+.settings-shortcuts-action strong {
+  color: var(--text);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-tight);
+}
+
+.command-palette__item-copy span,
+.settings-shortcuts-action span {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+}
+
+.command-palette kbd,
+.settings-shortcuts-grid kbd {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  min-height: var(--space-4);
+  padding: var(--space-0-5) var(--space-1-5);
+  border: 1px solid rgba(var(--edge-rgb), 0.44);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+  color: var(--text-muted);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+}
+
+.command-palette__empty {
+  margin: 0;
+  padding: var(--space-5) var(--space-3);
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.settings-shortcuts-grid {
+  max-width: 760px;
+}
+
 .confirm-dialog {
   width: min(360px, 100%);
   border-radius: var(--radius-md);
@@ -7539,17 +7675,14 @@ h3 {
   grid-template-columns: minmax(280px, 0.9fr) minmax(360px, 1.1fr);
 }
 
-/* `.contexts-fleet-page` / `.mcp-servers-page` were legacy layout hooks.
-   They were removed from list-page JSX in favor of `.page`, so the only
-   remaining page-specific hooks are `context-detail-page` / `team-detail-page`
-   (used for scoped token overrides). */
-
+/* Card that frames the connectors `da-table` (which renders frameless + full
+   bleed): the page-card supplies the single frame; the table lays out inside
+   it. */
 .mcp-servers-board-card {
   min-height: 0;
   min-width: 0;
   display: grid;
   align-content: start;
-  gap: var(--space-2-5);
 }
 
 .mcp-servers-board-header {
@@ -7738,46 +7871,6 @@ h3 {
   box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.16);
 }
 
-.contexts-board-card,
-.contexts-details-section {
-  min-height: 0;
-  min-width: 0;
-  display: grid;
-  align-content: start;
-}
-
-/* `.workflows-list-card` is a standalone-grid card — the da-grid itself owns
-   the visual frame (border/radius/bg). Remove the redundant page-card frame
-   so there is only one border around the table. */
-.workflows-list-card {
-  border: none;
-  background: transparent;
-  box-shadow: none;
-  padding: 0;
-  gap: var(--space-2);
-}
-
-/* Subtler `--list-item-*` palette so multiple board listings share the same
-   understated visual instead of the stronger default `--grid-card-*` look. */
-.contexts-board-card .da-grid,
-.context-detail-page .da-grid,
-.team-detail-page .da-grid,
-.workflows-list-card .da-grid {
-  --grid-card-bg: var(--list-item-bg);
-  --grid-card-border: rgba(var(--edge-rgb), 0.14);
-  --grid-card-bg-hover: var(--list-item-hover-bg);
-  --grid-card-border-hover: rgba(var(--accent-rgb), 0.34);
-  --grid-card-bg-selected: var(--list-item-selected-bg);
-  --grid-card-border-selected: var(--list-item-selected-border);
-}
-
-.contexts-board-card .da-grid__row,
-.context-detail-page .da-grid__row,
-.team-detail-page .da-grid__row,
-.workflows-list-card .da-grid__row {
-  border-radius: var(--radius-lg); /* 12px — matches legacy `.context-table-row` */
-}
-
 /* `.context-id-cell` is the first column in the contexts/agents/workflows
    listings — large title with overflow handling. */
 .context-id-cell {
@@ -7801,50 +7894,27 @@ h3 {
   flex: 0 0 auto;
 }
 
-.workflows-list-card .workflow-row--expanded {
-  border-bottom-right-radius: 0;
-  border-bottom-left-radius: 0;
-}
-
-.workflows-detail-extension {
-  display: grid;
-  gap: var(--space-3);
-  margin-top: calc(-1 * var(--grid-row-gap));
-  padding: var(--space-3) var(--space-4) var(--space-4);
-  border: 1px solid var(--grid-card-border-selected);
-  border-top: 0;
-  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
-  background: rgba(var(--accent-rgb), 0.06);
-}
-
-.workflows-detail-extension__header {
+/* Compact "Recent Runs" cell for the flat Plugins table (spec 12 §5.F):
+   latest run summary on one line, its artifact download buttons wrapping below.
+   Replaces the old inline accordion detail panel. */
+.workflow-recent-runs {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-.workflows-detail-extension__title {
-  margin: 0;
-  color: var(--text);
-  font-size: var(--font-size-lg);
-  line-height: var(--line-height-tight);
-}
-
-.workflows-detail-extension__title-group {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
+  flex-direction: column;
+  gap: var(--space-1-5);
   min-width: 0;
 }
 
-.workflows-detail-extension__section {
-  display: grid;
-  gap: var(--space-2);
+.workflow-recent-runs__summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1-5);
 }
 
-.workflows-detail-extension__section h4 {
-  margin: 0;
+.workflow-recent-runs__artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
 }
 
 /* When `.context-id-cell` is the first cell of a `.da-grid__row`, every
@@ -7967,16 +8037,6 @@ h3 {
   gap: var(--space-2);
 }
 
-.workflow-run-row {
-  align-items: flex-start;
-}
-
-.workflow-run-main {
-  min-width: 0;
-  display: grid;
-  gap: var(--space-1-5);
-}
-
 .workflow-run-artifacts {
   display: flex;
   flex-wrap: wrap;
@@ -7996,12 +8056,6 @@ h3 {
   word-break: break-word;
 }
 
-.context-mcp-url code {
-  font-size: var(--font-size-xs);
-  color: var(--text-muted);
-  word-break: break-all;
-}
-
 .context-mcp-count {
   justify-self: center;
   min-width: 26px;
@@ -8013,11 +8067,6 @@ h3 {
   color: var(--text-muted);
   font-size: var(--font-size-sm);
   word-break: break-word;
-}
-
-.context-mcp-source {
-  color: var(--text-dim);
-  font-size: var(--font-size-sm);
 }
 
 .context-members-name {
@@ -8036,19 +8085,6 @@ h3 {
 
 .contexts-footnote {
   font-size: var(--font-size-sm);
-}
-
-/* `.teams-page` was a legacy layout hook; removed from list-page JSX. */
-
-.team-detail-page {
-  grid-template-rows: auto minmax(0, 1fr);
-}
-
-.context-detail-page {
-  min-height: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  gap: var(--space-2-5);
 }
 
 .teams-detail-page-card {
@@ -9884,43 +9920,15 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   animation: boot-screen-out var(--boot-exit-duration) ease forwards;
 }
 
+/* The splash carries the same lockup as the auth cards, one step larger since
+   it stands alone on a full-screen backdrop rather than above a form. */
 .boot-brand {
+  --brand-lockup-height: 34px;
+
   display: inline-flex;
   align-items: center;
-  gap: var(--space-2-5);
   opacity: 0;
   animation: boot-brand-in 600ms cubic-bezier(0.2, 0.8, 0.25, 1) both;
-}
-
-.boot-brand-mark {
-  width: 44px;
-  height: 44px;
-  flex: 0 0 auto;
-  object-fit: contain;
-}
-
-.boot-brand-copy {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-  text-align: left;
-}
-
-.boot-brand-title {
-  font-size: var(--font-size-xl);
-  font-weight: var(--font-weight-bold);
-  line-height: var(--line-height-tight);
-  color: var(--text);
-}
-
-.boot-brand-subtitle {
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-bold);
-  line-height: 1.15;
-  color: var(--text-muted);
-  letter-spacing: var(--letter-spacing-caps);
-  text-transform: uppercase;
-  white-space: nowrap;
 }
 
 .boot-progress {
@@ -10018,42 +10026,54 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 .auth-card__header {
   display: grid;
   gap: var(--space-2);
+  justify-items: center;
 }
 
+/* Hairline separating the brand from the form or wizard step below. Its own
+   element rather than a border on the header, so the space above and below is
+   the rule's own margin and can be tuned without touching header padding.
+   Uses the edge token so it tracks the theme instead of pinning one grey. */
+.auth-card__divider {
+  width: 70%;
+  height: 1px;
+  /* No margin — the card's grid gap already spaces this. `justify-self` does
+     the centering instead, so the two never compound. */
+  justify-self: center;
+  background: rgba(var(--edge-rgb), 0.3);
+}
+
+/* One logotype asset carrying mark and wordmark together, the same lockup
+   Control UI's login card and this app's SidebarNav use — not the square mark
+   beside hand-typed text. Shared by every brand surface (auth, onboarding, the
+   boot splash) so they cannot drift apart. The two theme files are swapped by
+   CSS rather than by reading the theme in JS, so the right one paints on the
+   first frame. Height is a variable so a surface can scale the lockup without
+   forking the rule. */
 .auth-brand {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-2);
+  margin: var(--space-2) 0;
 }
 
-.auth-brand-mark {
-  width: 42px;
-  height: 42px;
-  flex: 0 0 auto;
+.brand-lockup {
+  display: block;
+  width: 100%;
+  max-width: 200px;
+  max-height: var(--brand-lockup-height, 28px);
   object-fit: contain;
+  background: transparent;
 }
 
-.auth-brand-copy {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
+.brand-lockup--dark {
+  display: none;
 }
 
-.auth-brand-title {
-  font-size: var(--font-size-xl);
-  font-weight: 700;
-  line-height: 1.1;
-  color: var(--text);
+:root[data-theme='dark'] .brand-lockup--light {
+  display: none;
 }
 
-.auth-brand-subtitle {
-  font-size: var(--font-size-xs);
-  font-weight: 700;
-  line-height: 1.15;
-  color: var(--text-muted);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  white-space: nowrap;
+:root[data-theme='dark'] .brand-lockup--dark {
+  display: block;
 }
 
 .auth-flow-card {
@@ -10141,6 +10161,143 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 
 .auth-form-stack .ui-button--block {
   margin-top: 2px;
+}
+
+.auth-backend-hint {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  align-items: stretch;
+}
+
+/* First-run onboarding (spec §5.2). The wizard reuses the auth card shell and
+   the auth form/link primitives; only the answer list is new. */
+
+/* Hold one height across every step so the card stops growing and shrinking as
+   the user moves through the wizard. The body takes the slack and scrolls if a
+   step ever outgrows it, and the footer keeps Back pinned to the bottom so it
+   does not travel with the content above it. Capped against the viewport so a
+   short window scrolls instead of overflowing. */
+/* One card shape shared by every pre-authentication screen — the onboarding
+   wizard and sign-in alike — so the card never resizes as the user moves
+   between steps, or when onboarding hands off to sign-in.
+
+   Sized to the tallest content: the manual environment form with the Localhost
+   option showing, which needs ~500px (two fields, a 72px option, and the brand
+   header). Shorter screens carry the slack as empty space; that is the trade
+   for a card that holds still. Capped against the viewport so a short window
+   scrolls the body instead of overflowing. */
+.auth-card--flow {
+  /* 20% wider than the base auth card (420px): the wizard carries option rows
+     and the run-style comparison, which read cramped at sign-in's width. */
+  width: min(504px, 94vw);
+  height: min(540px, 86vh);
+  /* header, divider, body, footer — the body takes the slack. */
+  grid-template-rows: auto auto 1fr auto;
+}
+
+.auth-card__body {
+  display: grid;
+  gap: var(--space-3);
+  align-content: start;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.auth-card__footer {
+  display: flex;
+  align-items: end;
+  min-height: var(--space-5);
+}
+
+/* A bare h1 falls back to the browser's 2em — 32px, which is off the type
+   scale entirely and oversized inside a 420px card. Pull it onto the scale,
+   above the 18px brand title so the step heading still leads. */
+.auth-card--flow h1 {
+  font-size: var(--font-size-2xl);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.onboarding-options {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.onboarding-option {
+  display: grid;
+  gap: var(--space-1);
+  justify-items: start;
+  text-align: left;
+  white-space: normal;
+}
+
+.onboarding-option__title {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  color: var(--text);
+}
+
+.onboarding-option__hint {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-regular);
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+/* Q2's "I have no idea" branch: the two run styles compared. Stacked rather
+   than side-by-side columns, which would be unreadable at the card's width. */
+.onboarding-compare {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.onboarding-compare__group {
+  display: grid;
+  gap: var(--space-1-5);
+}
+
+.onboarding-compare__title {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  color: var(--text);
+}
+
+.onboarding-compare__lead {
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.onboarding-compare__list {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.onboarding-compare__item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1-5);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.onboarding-compare__mark {
+  font-weight: var(--font-weight-semibold);
+}
+
+.onboarding-compare__mark--pro {
+  color: var(--success);
+}
+
+.onboarding-compare__mark--con {
+  color: var(--warning);
 }
 
 .auth-button-loading {
@@ -10556,6 +10713,12 @@ pre {
     grid-template-rows: auto minmax(0, 1fr);
   }
 
+  /* Sidebar is gone and the aside spans the full top, so the extra top
+     breathing room (space-2 * 5) is no longer needed — drop it to space-2. */
+  .content-panel.content-panel--agent-chat {
+    padding-top: var(--space-2);
+  }
+
   .left-nav {
     position: sticky;
     top: 0;
@@ -10565,6 +10728,7 @@ pre {
     height: auto;
     min-height: 0;
     max-height: none;
+    padding-top: var(--space-2);
     border-right: 0;
     border-bottom: 1px solid rgba(var(--edge-rgb), 0.38);
     overflow: visible;
@@ -10617,7 +10781,11 @@ pre {
     transform: rotate(180deg);
   }
 
-  .sidebar-collapse-toggle {
+  /* Match the base rule's `.sidebar-collapse-toggle.ui-icon-button` specificity:
+     media queries don't add specificity, so a bare `.sidebar-collapse-toggle`
+     loses to it and the toggle would stay visible. In this viewport the sidebar
+     is an overlay menu with no persistent rail, so collapsing it is meaningless. */
+  .sidebar-collapse-toggle.ui-icon-button {
     display: none;
   }
 
@@ -10658,7 +10826,19 @@ pre {
     display: none;
   }
 
-  .left-nav.collapsed .sidebar-logo-lockup {
+  /* Reveal the wordmark in the collapsed mobile bar, but keep the light/dark
+     toggle. Targeting the shared `.sidebar-logo-lockup` (0,3,0) would outrank
+     `.sidebar-logo-lockup--dark { display: none }` (0,1,0) and paint both
+     variants at once (double logo), so drive the variants directly. */
+  .left-nav.collapsed .sidebar-logo-lockup--light {
+    display: block;
+  }
+
+  :root[data-theme='dark'] .left-nav.collapsed .sidebar-logo-lockup--light {
+    display: none;
+  }
+
+  :root[data-theme='dark'] .left-nav.collapsed .sidebar-logo-lockup--dark {
     display: block;
   }
 
@@ -10702,21 +10882,6 @@ pre {
     box-shadow: none;
   }
 
-  .sidebar-data-submenu {
-    position: static;
-    width: auto;
-    margin-top: var(--space-1);
-    box-shadow: none;
-  }
-
-  .sidebar-settings-menu-item-wrapper--data:not(.is-open) .sidebar-data-submenu {
-    display: none;
-  }
-
-  .sidebar-settings-menu-item-wrapper--data.is-open .sidebar-data-submenu {
-    display: grid;
-  }
-
   .nav-tooltip {
     display: none;
   }
@@ -10737,9 +10902,21 @@ pre {
   }
 
   .global-search {
+    /* Header is a full-width row here — the search fills it and never
+       collapses; expanded props match so :focus-within keeps it at 100%. */
     width: 100%;
     min-width: 0;
     max-width: none;
+    margin-right: 0;
+    --global-search-expanded: 100%;
+    --global-search-expanded-min: 0;
+  }
+
+  /* Never collapses here, so the icon stays left-pinned even when unfocused —
+     without this the centered collapsed-state glyph floats mid-bar. */
+  .global-search::before {
+    inset: 0 auto 0 12px;
+    font-size: var(--font-size-lg);
   }
 
   .page-header,
@@ -10754,17 +10931,6 @@ pre {
   .search-result-tag {
     white-space: normal;
     text-align: right;
-  }
-
-  /* Responsive: tighten 4-col contexts/agents/teams-tab listings. Workflows
-     is excluded (3 columns). */
-  .contexts-board-card .da-grid__head,
-  .contexts-board-card .da-grid__row,
-  .context-detail-page .da-grid__head,
-  .context-detail-page .da-grid__row,
-  .team-detail-page .da-grid__head,
-  .team-detail-page .da-grid__row {
-    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.9fr) minmax(0, 0.9fr);
   }
 
   /* Responsive behavior now comes from `.page-card__header`. */
@@ -11283,7 +11449,7 @@ pre {
 }
 
 .mcp-servers-data-table {
-  min-width: 860px;
+  min-width: 680px;
 }
 
 .context-agents-data-table,
@@ -11468,7 +11634,7 @@ pre {
   display: grid;
   gap: var(--space-2);
   justify-items: start;
-  padding-right: 360px;
+  padding-right: var(--app-header-utilities-width);
 }
 
 .apps-page-header-text h2 {
@@ -12344,10 +12510,12 @@ pre {
   display: flex;
   align-items: center;
   justify-content: flex-start;
+  flex-wrap: wrap;
+  align-content: flex-start;
   gap: var(--space-2);
   min-width: 0;
   padding-top: var(--space-4);
-  padding-right: 360px;
+  padding-right: var(--app-header-utilities-width);
 }
 
 .sandbox-ui-conversation-btn,
@@ -12365,7 +12533,7 @@ pre {
 
 .sandbox-ui-conversation-btn {
   min-width: 0;
-  max-width: min(360px, 45vw);
+  max-width: min(280px, 40vw);
 }
 
 .sandbox-ui-conversation-btn span {
@@ -12396,7 +12564,7 @@ pre {
 }
 
 .content-panel:has(.sandbox-ui-mounted-header) {
-  padding: var(--space-4) 0 0;
+  padding: var(--space-2) 0 0;
   align-content: stretch;
 }
 
@@ -12405,7 +12573,7 @@ pre {
 }
 
 .content-panel.content-panel--app-notification-drawer-open > .page:has(.sandbox-ui-mounted-header) {
-  padding-right: calc(var(--app-notification-drawer-width) + var(--space-2));
+  padding-right: var(--app-header-utilities-width);
 }
 
 .content-panel.content-panel--app-notification-drawer-open .sandbox-ui-mounted-header {
@@ -12416,7 +12584,315 @@ pre {
   padding-left: var(--space-4);
 }
 
-@media (max-width: 1220px) {
+/* Chat drawer — Cursor-style chat column beside the live app embed. It shrinks
+   the embed with the same `--app-header-utilities-width` gutter the notification
+   drawer uses, but derives that gutter from its OWN width (`--chat-drawer-width`)
+   so resizing the chat drawer never disturbs the notification drawer. The two
+   drawer-open states are mutually exclusive (see App.tsx notificationTrayUsesDrawer),
+   so this higher-specificity override is unambiguous. */
+.content-panel.content-panel--chat-drawer-open {
+  --app-header-utilities-width: calc(var(--chat-drawer-width) + var(--space-2) + 16px);
+}
+
+.content-panel.content-panel--chat-drawer-open > .page:has(.sandbox-ui-mounted-header) {
+  padding-right: var(--app-header-utilities-width);
+}
+
+.content-panel.content-panel--chat-drawer-open .sandbox-ui-mounted-header {
+  padding-right: 0;
+}
+
+/* The chat drawer occupies the right rail at --layer-chat-overlay, above the
+   header (`.top-bar` at --layer-header) within the shared content-panel stacking
+   context — so the header's transient dropdowns (the notification Inbox popover,
+   global search) would paint BEHIND the drawer and never surface. While the chat
+   drawer is open, lift the header to the dropdown layer so those overlays surface
+   over it, exactly as they do over chat content in full-screen. Toasts
+   (z-index: 4000) still sit above the header; the drawer's own z is unchanged. */
+.content-panel.content-panel--chat-drawer-open .top-bar {
+  z-index: var(--layer-dropdown);
+}
+
+.chat-drawer {
+  position: fixed;
+  /* Follow the measured top of the embed slot (`--chat-drawer-top`, published by
+     App from useEmbedBounds) so the drawer stays aligned when the sandbox-ui
+     header wraps in a narrow window. The fallback keeps the pre-measure/test
+     behavior: a single-row header at space-4 + 36px + space-2 = 64px. */
+  top: var(--chat-drawer-top, calc(var(--space-4) + 36px + var(--space-2)));
+  right: var(--space-4);
+  bottom: var(--space-4);
+  width: var(--chat-drawer-width);
+  z-index: var(--layer-chat-overlay);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid rgba(var(--edge-rgb), 0.32);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: var(--shadow-hard);
+  overflow: hidden;
+  /* Anti-flash: reveal only after the embed acknowledges its shrunk bounds,
+     mirroring the notification drawer's bounds-ack gate. */
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chat-drawer.is-ready {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Drag handle on the drawer's LEFT edge. A comfortable ~8px grab strip with a
+   slim accent rule that surfaces on hover / during a drag. Sits inside the
+   drawer (which clips overflow), above the header/surface content. */
+.chat-drawer__resize-handle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 8px;
+  height: 100%;
+  z-index: 2;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+
+.chat-drawer__resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 2px;
+  height: 100%;
+  background: transparent;
+  transition: background var(--motion-fast);
+}
+
+.chat-drawer__resize-handle:hover::after,
+.chat-drawer.is-resizing .chat-drawer__resize-handle::after {
+  background: rgba(var(--accent-rgb), 0.55);
+}
+
+/* Compact chrome — narrow-column only. Scoped entirely under `.chat-drawer`, so
+   the full-screen chat route (which renders the same <ChatPage> OUTSIDE this
+   ancestor) is untouched. Trims the padding/margins that read as "loose" in the
+   slim column and neutralizes the full-height grid the workspace uses in
+   full-screen (which would overflow this fixed rail and leave odd gaps). */
+.chat-drawer .agent-page {
+  height: 100%;
+}
+
+.chat-drawer .agent-workspace-shell .chat-thread {
+  padding: var(--space-2);
+}
+
+.chat-drawer .agent-workspace-shell .chat-empty-state {
+  padding: var(--space-4) 0 var(--space-2);
+}
+
+.chat-drawer .agent-workspace-shell .agent-workspace-top {
+  padding: var(--space-1) var(--space-2);
+}
+
+/* The workspace head (session breadcrumb + token/context indicators) lives in
+   the nav-stack, which — unlike the thread, top and tabs below — had no
+   drawer-scoped inset, so its title and token pills sat flush against the slim
+   column's top-left edge. Give it the same horizontal rhythm the other sections
+   use so the breadcrumb aligns with the thread text; full-screen gets this inset
+   from `.content-panel--agent-chat` instead, which the drawer's <ChatPage>
+   renders outside of. Keep the nav-stack's sticky `padding-bottom` intact. */
+.chat-drawer .agent-workspace-shell .agent-chat-nav-stack {
+  padding: var(--space-2) var(--space-2) var(--space-1);
+}
+
+.chat-drawer .agent-workspace-shell .agent-workspace-tabs {
+  padding: 0 var(--space-2);
+}
+
+/* New-chat greeting ("New chat with [agent ▾]"). Like the nav-stack head above,
+   this row has zero horizontal padding by design — full-screen chat insets it
+   via `.content-panel--agent-chat` (which the drawer's <ChatPage> renders
+   outside of) and its 1120px max-width + `margin: 0 auto` centers it there. In
+   the slim column neither applies, so the title sat flush against the left
+   edge. Give it the same `var(--space-2)` horizontal rhythm the thread and head
+   use; keep the base rule's hero top offset and bottom padding intact. */
+.chat-drawer .agent-workspace-shell .agent-workspace-greeting-row {
+  padding-inline: var(--space-2);
+}
+
+.chat-drawer .composer {
+  margin-top: var(--space-1);
+  padding: var(--space-2);
+}
+
+/* Tighter table cells so the data table breathes in the slim column; the
+   `.da-table__scroll` horizontal overflow still handles anything too wide. */
+.chat-drawer .da-table {
+  --table-cell-padding-x: var(--space-1-5);
+  --table-cell-padding-y: var(--space-1);
+}
+
+.chat-drawer__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  border-bottom: 1px solid rgba(var(--edge-rgb), 0.24);
+  flex: 0 0 auto;
+}
+
+.chat-drawer__header-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.chat-drawer__header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+}
+
+/* The base .ui-icon-button sizes the button but never the glyph — each call
+   site sets its own svg size. Match the app's standard 16px icon inside a 30px
+   (sm) icon button so the new-chat / close controls line up with the rest of
+   the app instead of rendering the raw 24-viewbox artwork oversized. */
+.chat-drawer__header-actions .ui-icon-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.chat-drawer__title {
+  display: block;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-drawer__surface {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Open-chats selector in the drawer header — a thin dropdown over chatViewTabs.
+   The narrow drawer column can't host a horizontal tab strip, so the switcher
+   lists chats vertically with their status badge. */
+.chat-switcher {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.chat-switcher__trigger {
+  min-width: 0;
+}
+
+.chat-switcher__trigger-main {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.chat-switcher__chevron {
+  flex: 0 0 auto;
+  margin-left: var(--space-1);
+  color: var(--text-dim);
+}
+
+.chat-switcher__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-switcher__menu {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  left: 0;
+  right: 0;
+  z-index: calc(var(--layer-dropdown) + 10);
+  border: 1px solid rgba(var(--edge-rgb), 0.32);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: var(--shadow-hard);
+  padding: var(--space-1);
+  display: grid;
+  gap: var(--space-1);
+}
+
+.chat-switcher__options {
+  display: grid;
+  gap: var(--space-0-5);
+  max-height: min(360px, 50vh);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.chat-switcher__option {
+  min-width: 0;
+  gap: var(--space-1-5);
+}
+
+.chat-switcher__option.is-active {
+  background: rgba(var(--accent-rgb), 0.14);
+}
+
+.chat-switcher__footer {
+  border-top: 1px solid rgba(var(--edge-rgb), 0.24);
+  padding-top: var(--space-1);
+}
+
+/* Overlay confinement (spec §6). The native app view paints above ALL DOM, so
+   any chat overlay that crosses the embed's rect is hidden behind it. The drawer
+   is RIGHT-docked, so the embed sits to its LEFT. The composer reference menu is
+   anchored at the composer's left edge and its submenu flies RIGHT
+   (`left: calc(100% + …)`) — i.e. INTO the drawer, away from the embed — so it is
+   already off the app rect. Pin that rightward direction inside the drawer so a
+   future global LEFT flip can't leak the submenu over the embed and be occluded.
+   (The spec's suggested LEFT flip is inverted for a right-docked drawer: leftward
+   pushes the submenu over the embed, not off it. See report.) */
+.chat-drawer .composer-reference-submenu {
+  left: calc(100% + var(--space-1));
+  right: auto;
+}
+
+.chat-drawer .composer-reference-menu-panel {
+  left: 0;
+  right: auto;
+}
+
+@media (min-width: 901px) and (max-width: 1220px) {
+  .content-panel {
+    --app-header-utilities-width: calc(
+      clamp(160px, 32vw, var(--app-notification-drawer-width)) + var(--space-2) + 36px
+    );
+  }
+
+  .content-panel.content-panel--app-notification-drawer-open {
+    --app-header-utilities-width: calc(
+      var(--app-notification-drawer-width) + var(--space-2) + 36px
+    );
+  }
+
+  .global-search {
+    --global-search-expanded: clamp(160px, 32vw, var(--app-notification-drawer-width));
+    --global-search-expanded-min: 160px;
+  }
+
+  .apps-page-header {
+    padding-right: 0;
+  }
+}
+
+@media (max-width: 900px) {
   .apps-page-header,
   .sandbox-ui-mounted-header {
     padding-right: 0;
@@ -13425,16 +13901,15 @@ pre {
 .da-gfs-list__icon {
   display: grid;
   place-items: center;
-  width: calc(var(--space-5) + var(--space-1));
-  height: calc(var(--space-5) + var(--space-1));
-  border-radius: var(--radius-sm);
-  background: var(--surface-soft);
+  width: var(--space-5);
+  height: var(--space-5);
   color: var(--text-muted);
+  overflow: hidden;
 }
 
 .da-gfs-list__icon svg {
-  width: var(--space-4);
-  height: var(--space-4);
+  width: 100%;
+  height: 100%;
 }
 
 .da-gfs-list__identity {
@@ -13448,14 +13923,6 @@ pre {
   min-width: 0;
   color: var(--text);
   font-weight: 700;
-}
-
-.da-gfs-list__meta {
-  color: var(--text-muted);
-  font-size: var(--font-size-xs);
-  font-weight: 700;
-  letter-spacing: 0;
-  text-transform: uppercase;
 }
 
 .da-gfs-list__actions {
@@ -13705,6 +14172,16 @@ pre {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
+  justify-content: flex-end;
+  margin-left: auto;
+}
+
+.da-gfs-delegation__scope-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 
 .da-gfs-footer-actions {
@@ -13749,6 +14226,13 @@ pre {
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
   border-bottom: 0;
+}
+
+.da-gfs-drive__title-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-0-5);
 }
 
 .da-gfs-drive__breadcrumbs {
@@ -13796,6 +14280,44 @@ pre {
   align-items: center;
   gap: var(--space-1);
   flex: 0 0 auto;
+}
+
+.da-gfs-upload-status {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-3) var(--space-4) 0;
+  padding: var(--space-3);
+  border: 1px solid rgba(var(--accent-rgb), 0.28);
+  border-radius: var(--radius-md);
+  background: rgba(var(--accent-rgb), 0.06);
+}
+
+.da-gfs-upload-status__head,
+.da-gfs-upload-status__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.da-gfs-upload-status__head {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.da-gfs-upload-status__head strong {
+  color: var(--text);
+}
+
+.da-gfs-upload-status progress {
+  width: 100%;
+  height: 0.5rem;
+  accent-color: var(--accent-strong);
+}
+
+.da-gfs-upload-status__actions {
+  justify-content: flex-end;
 }
 
 .da-gfs-drive > .status-banner,
@@ -13859,12 +14381,35 @@ pre {
   flex: 1 1 auto;
   width: auto;
   align-content: start;
-  margin: var(--space-2) var(--space-3) var(--space-3);
+  gap: 0;
+  margin: var(--space-2) 0 var(--space-3);
   overflow: visible;
 }
 
 .da-gfs-drive__grid .da-grid__head {
   padding-inline: calc(var(--table-cell-padding-x) + var(--grid-row-gap));
+  border-radius: 0;
+  border-bottom: 1px solid var(--grid-card-border);
+  background: var(--table-header-bg);
+}
+
+.da-gfs-drive__grid .da-grid__row {
+  width: 100%;
+  font-size: var(--font-size-md);
+  border-radius: 0;
+  border: 0;
+  border-bottom: 1px solid var(--grid-card-border);
+  background: transparent;
+  transition: background-color var(--motion-fast);
+}
+
+.da-gfs-drive__grid .da-grid__row:last-child {
+  border-bottom: 0;
+}
+
+.da-gfs-drive__grid .da-grid__row--clickable:hover:enabled {
+  background: var(--grid-card-bg-hover);
+  border-color: var(--grid-card-border);
 }
 
 .da-gfs-current-file {
@@ -13928,12 +14473,12 @@ pre {
   font-size: var(--font-size-sm);
 }
 
-.da-gfs-drive__type,
-.da-gfs-drive__source {
+.da-gfs-drive__size {
   min-width: 0;
   overflow: hidden;
   color: var(--text-muted);
   font-size: var(--font-size-sm);
+  text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -14070,7 +14615,8 @@ pre {
 }
 
 .da-gfs-image-preview-modal,
-.da-gfs-markdown-preview-modal {
+.da-gfs-markdown-preview-modal,
+.da-gfs-video-preview-modal {
   position: fixed;
   inset: 0;
   z-index: calc(var(--layer-chat-overlay) + 3);
@@ -14082,7 +14628,8 @@ pre {
 }
 
 .da-gfs-image-preview-dialog,
-.da-gfs-markdown-preview-dialog {
+.da-gfs-markdown-preview-dialog,
+.da-gfs-video-preview-dialog {
   width: min(960px, 96vw);
   height: min(760px, 92vh);
   display: grid;
@@ -14095,7 +14642,8 @@ pre {
 }
 
 .da-gfs-image-preview-dialog__header,
-.da-gfs-markdown-preview-dialog__header {
+.da-gfs-markdown-preview-dialog__header,
+.da-gfs-video-preview-dialog__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -14105,8 +14653,39 @@ pre {
   background: rgba(var(--panel-rgb), 0.48);
 }
 
+.da-gfs-image-preview-dialog__header-actions,
+.da-gfs-markdown-preview-dialog__header-actions,
+.da-gfs-video-preview-dialog__header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.da-gfs-text-preview__content {
+  min-width: 0;
+  min-height: 0;
+  padding: var(--space-5);
+}
+
+.da-gfs-text-preview__body {
+  max-width: 60rem;
+  margin: 0;
+  padding: var(--space-4);
+  border: 1px solid rgba(var(--edge-rgb), 0.24);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .da-gfs-image-preview-dialog__header h3,
-.da-gfs-markdown-preview-dialog__header h3 {
+.da-gfs-markdown-preview-dialog__header h3,
+.da-gfs-video-preview-dialog__header h3 {
   min-width: 0;
   overflow: hidden;
   margin: 0;
@@ -14118,7 +14697,8 @@ pre {
   white-space: nowrap;
 }
 
-.da-gfs-image-preview-dialog__body {
+.da-gfs-image-preview-dialog__body,
+.da-gfs-video-preview-dialog__body {
   min-width: 0;
   min-height: 0;
   display: grid;
@@ -14141,12 +14721,26 @@ pre {
   object-fit: contain;
 }
 
+.da-gfs-video-preview-dialog__loading {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.da-gfs-video-preview-dialog__video {
+  width: 100%;
+  max-width: min(920px, calc(96vw - var(--space-5) * 2));
+  max-height: 100%;
+  display: block;
+  border-radius: var(--radius-sm);
+  background: var(--media-surface);
+}
+
 .da-gfs-markdown-preview-dialog__body {
   min-width: 0;
   min-height: 0;
   overflow: auto;
   padding: var(--space-5);
-  background: rgba(var(--overlay-rgb), 0.32);
+  background: var(--panel);
 }
 
 .da-gfs-markdown-preview-dialog__loading {
@@ -14246,7 +14840,7 @@ pre {
 }
 
 .da-gfs-manage-dialog__icon--folder {
-  color: var(--warning);
+  color: var(--text-muted);
 }
 
 .da-gfs-manage-dialog__icon svg {
@@ -14480,6 +15074,62 @@ pre {
   background: var(--surface-soft);
 }
 
+/* Page-level rename confirmation (row/header menus): a narrow dialog over the
+   manage-modal overlay, so a row rename never needs the manage dialog. */
+.da-gfs-manage-dialog--confirm {
+  width: min(440px, 94vw);
+  max-height: none;
+  padding: var(--space-4) var(--space-5);
+}
+
+.da-gfs-manage-dialog--confirm .da-gfs-manage-dialog__body {
+  padding: 0;
+}
+
+/* Move-to-folder picker: full-width dialog with a scrollable folder list. */
+.da-gfs-move-dialog__list {
+  min-height: var(--space-8);
+  max-height: min(320px, 40vh);
+  display: grid;
+  align-content: start;
+  gap: var(--space-1);
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  background: var(--surface-soft);
+}
+
+.da-gfs-move-dialog__row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.da-gfs-move-dialog__more {
+  display: flex;
+  justify-content: center;
+  padding-top: var(--space-1);
+}
+
+.da-gfs-move-dialog__row-icon {
+  display: grid;
+  place-items: center;
+  color: var(--warning);
+}
+
+.da-gfs-move-dialog__row-icon svg {
+  width: var(--font-size-lg);
+  height: var(--font-size-lg);
+}
+
+.da-gfs-move-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
 .da-gfs-manage-section--actions .da-gfs-inline-form__field {
   min-width: 0;
 }
@@ -14539,9 +15189,12 @@ pre {
 .da-gfs-grant-list {
   display: grid;
   gap: var(--space-1);
+  max-height: calc(((var(--space-5) + var(--space-4) + var(--space-2)) * 3) + (var(--space-1) * 2));
   margin: 0;
+  overflow-y: auto;
   padding: 0;
   list-style: none;
+  scrollbar-width: thin;
 }
 
 .da-gfs-grant-list__row {
@@ -14590,6 +15243,21 @@ pre {
   gap: var(--space-1);
 }
 
+.da-gfs-grant-list__revoke.ui-icon-button {
+  color: var(--danger);
+  border-color: transparent;
+  background: transparent;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.da-gfs-grant-list__revoke.ui-icon-button:hover:enabled,
+.da-gfs-grant-list__revoke.ui-icon-button:focus-visible {
+  border-color: transparent;
+  background: transparent;
+  color: var(--danger);
+}
+
 @media (max-width: 940px) {
   .da-gfs-manage-dialog__body {
     padding: var(--space-4);
@@ -14635,10 +15303,8 @@ pre {
     grid-template-columns: calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) 4.5rem;
   }
 
-  .da-gfs-drive__type-column,
-  .da-gfs-drive__source-column,
-  .da-gfs-drive__type,
-  .da-gfs-drive__source {
+  .da-gfs-drive__size-column,
+  .da-gfs-drive__size {
     display: none;
   }
 
@@ -14654,18 +15320,21 @@ pre {
 
 @media (max-width: 560px) {
   .da-gfs-image-preview-modal,
-  .da-gfs-markdown-preview-modal {
+  .da-gfs-markdown-preview-modal,
+  .da-gfs-video-preview-modal {
     padding: var(--space-2);
   }
 
   .da-gfs-image-preview-dialog,
-  .da-gfs-markdown-preview-dialog {
+  .da-gfs-markdown-preview-dialog,
+  .da-gfs-video-preview-dialog {
     width: 100%;
     height: 96vh;
   }
 
   .da-gfs-image-preview-dialog__body,
-  .da-gfs-markdown-preview-dialog__body {
+  .da-gfs-markdown-preview-dialog__body,
+  .da-gfs-video-preview-dialog__body {
     padding: var(--space-2);
   }
 
@@ -14761,4 +15430,206 @@ pre {
 .da-plugin-consent__footer {
   margin: 0 0 var(--space-2);
   font-size: var(--font-size-sm);
+}
+/* Keyboard-first chat view tabs */
+.chat-view-tabs {
+  flex: 0 0 auto;
+  display: flex;
+  min-width: 0;
+  padding: var(--space-2) 0 0;
+  position: relative;
+  width: 100%;
+  z-index: 1;
+}
+
+/* Bottom shelf of the tab strip. It lives on the non-scrolling container (not
+   the scroller/list) so it stays under the whole visible strip when the tabs
+   overflow and scroll — a shelf on the scrolling list only spans the initial
+   viewport and slides away on scroll. z-index:-1 keeps it below the opaque
+   tabs (so it only shows through the gaps between them); each inactive tab
+   draws its own matching bottom border, and the active tab omits it to notch
+   through and merge with the surface below. */
+.chat-view-tabs::after {
+  background: var(--chat-view-selected-border);
+  bottom: 0;
+  content: '';
+  height: 1px;
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
+  z-index: -1;
+}
+
+.chat-view-tabs__scroller {
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  transform: rotateX(180deg);
+  width: 100%;
+}
+
+.chat-view-tabs__list {
+  display: flex;
+  gap: var(--space-1);
+  min-width: 100%;
+  position: relative;
+  transform: rotateX(180deg);
+  width: 100%;
+}
+
+.chat-view-tab {
+  align-items: center;
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  display: flex;
+  flex: 1 1 var(--chat-tab-max);
+  min-width: var(--chat-tab-min);
+  max-width: var(--chat-tab-max);
+  transition: background var(--motion-fast);
+}
+
+.chat-view-tab:not(.is-active) {
+  border-bottom: 1px solid var(--chat-view-selected-border);
+  border-left-color: color-mix(in srgb, var(--border-soft) 25%, transparent);
+  border-right-color: color-mix(in srgb, var(--border-soft) 25%, transparent);
+  border-top-color: color-mix(in srgb, var(--border-soft) 25%, transparent);
+}
+
+.chat-view-tab.is-active {
+  background: linear-gradient(var(--surface-strong), var(--surface-strong)), var(--panel);
+  border-color: var(--chat-view-selected-border);
+  border-bottom: 0;
+  flex-shrink: 0.4;
+  position: relative;
+  z-index: 1;
+}
+
+.chat-view-tab:hover {
+  background: var(--surface-hover);
+}
+
+.chat-view-tab.is-active:hover {
+  background: linear-gradient(var(--surface-hover), var(--surface-hover)), var(--panel);
+}
+
+.chat-view-tab .chat-view-tab__select.ui-button:hover:enabled,
+.chat-view-tab .chat-view-tab__close.ui-button:hover:enabled {
+  background: transparent;
+  border-color: transparent;
+}
+
+.chat-view-tab__select {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-view-tab__label {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.chat-view-tab__close {
+  flex: 0 0 auto;
+}
+
+.chat-view-workspace {
+  --chat-view-selected-border: rgba(var(--accent-rgb), 0.25);
+
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+}
+
+.chat-view-surface {
+  background: var(--surface-strong);
+  border-color: var(--chat-view-selected-border);
+  border-style: solid;
+  border-width: 0 1px 1px;
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  padding-left: var(--space-3);
+  width: 100%;
+}
+
+.chat-view-surface__content {
+  display: flex;
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+}
+
+.content-panel:has(.agent-page) > .chat-view-workspace,
+.content-panel.content-panel--agent-chat > .chat-view-workspace,
+.chat-view-surface__content > .agent-page {
+  flex: 1 1 0;
+  height: auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.chat-view-surface__content > .page {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: auto;
+  width: 100%;
+}
+
+/* Contextual find surfaces remain in trusted Desktop chrome. */
+.current-content-search {
+  align-items: center;
+  align-self: flex-end;
+  background: var(--surface-strong);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  display: flex;
+  gap: var(--space-1);
+  margin: var(--space-2) var(--space-3) 0;
+  padding: var(--space-1);
+  position: relative;
+  z-index: var(--layer-header);
+}
+
+.current-content-search__input {
+  min-width: 220px;
+}
+
+.current-content-search__count {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  min-width: 44px;
+  text-align: center;
+}
+
+.chat-search-match {
+  background: var(--search-match-bg);
+  border-radius: 2px;
+  color: var(--search-match-text);
+}
+
+.chat-search-match--active {
+  background: var(--search-match-current-bg);
+}
+
+@media (forced-colors: active) {
+  .chat-search-match,
+  .chat-search-match--active {
+    background: Highlight;
+    color: HighlightText;
+    forced-color-adjust: none;
+  }
 }

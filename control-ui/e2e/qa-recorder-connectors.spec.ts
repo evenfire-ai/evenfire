@@ -26,7 +26,7 @@ test.describe('optional QA recorder: Control UI connectors journey', () => {
     const credentials = adminCredentials()
     await loginThroughUi(page, credentials)
 
-    await page.getByRole('link', { name: 'Connectors', exact: true }).click()
+    await page.getByRole('link', { name: 'Installed Connectors', exact: true }).click()
 
     // The rewrite keeps the URL on /connectors; assert it landed.
     await expect(page).toHaveURL(/\/connectors\/?$/, { timeout: 20_000 })
@@ -34,7 +34,7 @@ test.describe('optional QA recorder: Control UI connectors journey', () => {
     // Shell proof: the TablePanelHeader subtitle is unique and renders regardless of
     // whether the inventory is loading, populated, or empty.
     await expect(
-      page.getByText('Browse connector deployments and context bindings.', { exact: true })
+      page.getByText('Browse connector deployments and agent access.', { exact: true })
     ).toBeVisible({ timeout: 20_000 })
 
     // Panel title is "Connectors" while loading/empty, or "Connectors (N)" once populated.

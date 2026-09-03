@@ -4,11 +4,9 @@ export const HOST_TABS = [
   'details',
   'identity',
   'model',
-  'contexts',
-  'users',
-  'teams',
-  'approvals',
-  'env',
+  'connectors',
+  'access',
+  'advanced',
 ] as const
 
 export type HostTab = (typeof HOST_TABS)[number]

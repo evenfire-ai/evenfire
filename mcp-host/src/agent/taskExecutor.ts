@@ -9,6 +9,7 @@ import { snapshotTaskTokenBaseline } from '../budget/taskBrake'
 import type { TaskTokenBaseline } from '../budget/taskBrake'
 import { config as appConfig } from '../config'
 import { maybeWrapFailover } from '../core/adapters/failoverLlmPort'
+import { maybeWrapHookedLlmPort } from '../core/adapters/hookedLlmPort'
 import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAdapter'
 import { CompositeToolRegistry, McpToolRegistryAdapter } from '../core/adapters/toolRegistryAdapter'
 import { compactConversation } from '../core/conversation/compaction'
@@ -17,7 +18,12 @@ import { LlmError, LlmErrorCode } from '../core/errors'
 import { ApprovalController } from '../core/extensions/approvalController'
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import { PressureContextManager } from '../core/extensions/contextManager'
-import { UnifiedApprovalGateController } from '../core/extensions/mcpApprovalGateController'
+import {
+  UnifiedApprovalGateController,
+  buildConnectRequiredApproval,
+  extractConnectRequiredMarker,
+} from '../core/extensions/mcpApprovalGateController'
+import { type GuardrailsConfig, buildToolLaneGuardrail } from '../core/guardrails'
 import type { AgentEventEmitter, LlmPort, LoopController, ToolRegistry } from '../core/interfaces'
 import { DeferrableToolController } from '../core/orchestration/deferrableToolController'
 import type { SimpleEventEmitter } from '../core/orchestration/eventEmitter'
@@ -84,7 +90,7 @@ import {
   ensureReporter,
   progressReporterRegistry,
 } from '../progress/sseProgressReporter.js'
-import type { Task, TaskError } from '../queue/types'
+import type { Task, TaskError, TaskSource } from '../queue/types'
 import { resolveCronTaskSessionKey, serializeSessionKey } from '../session'
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
@@ -122,6 +128,24 @@ export function resolveTaskSessionKey(task: Task): string {
   )
 }
 
+/**
+ * §6.3 — is there a human who can answer a guardrail `ask` in this run?
+ *
+ * Only `channel` tasks have one: a person is on the other end of the message that
+ * started them (including channelType `rpc`, the Desktop App). `cron` fires on a
+ * schedule and `internal` is a system-generated task with no requester, so an
+ * `ask` there would suspend into `pending_approval` with nobody able to respond —
+ * the task hangs. Unattended turns that into the fail-safe deny instead.
+ *
+ * Deliberately an allowlist of the attended source, not a denylist of the
+ * autonomous ones: a source added later defaults to "assume nobody is watching",
+ * which fails closed. The previous `source === 'cron' ? ... : 'interactive'` had
+ * the opposite default and already mislabelled `internal`.
+ */
+export function executionModeForSource(source: TaskSource): 'interactive' | 'unattended' {
+  return source === 'channel' ? 'interactive' : 'unattended'
+}
+
 export interface TaskExecutorDeps {
   conversationManager: ConversationManager
   llmProvider: SingleTurnProvider
@@ -137,6 +161,7 @@ export interface TaskExecutorDeps {
    */
   contextWindowTokens?: number
   approvalConfig: ApprovalConfig | undefined
+  guardrailsConfig?: GuardrailsConfig
   coreEvents: SimpleEventEmitter
   cronScheduler: CronScheduler | null
   taskLifecycle: TaskLifecycle
@@ -591,6 +616,39 @@ export class TaskExecutor {
         })
       }
 
+      // U5 — the re-executed tool surfaced a 401 on an oauth mcp-server. Suspend
+      // durably for reactive OAuth consent INSTEAD of feeding the auth error to
+      // the LLM. The connect suspension inherits the SAME tool coordinates
+      // (via `suspendedCall`) + the frozen `context_snapshot`/`completed_results`
+      // so the NEXT resume (after the user connects) re-executes the SAME tool.
+      // The failed connect `toolResult` is intentionally dropped — it never
+      // enters the reconstructed message history. No machine loop: each resume is
+      // human-gated (approve/connect), and the client already exhausted its
+      // single 401 refresh-retry before throwing (McpAuthError).
+      const connectMarker = extractConnectRequiredMarker(toolResult.metadata)
+      if (connectMarker) {
+        const connectApproval = buildConnectRequiredApproval(suspendedCall, connectMarker)
+        connectApproval.context_snapshot = approval.context_snapshot
+        connectApproval.completed_results = approval.completed_results
+        connectApproval.intent_summary = approval.intent_summary
+        connectApproval.attachments = approval.attachments
+        connectApproval.traceContext = approval.traceContext ?? this.task.traceContext ?? null
+        await this.handleLoopResult({ type: 'need_approval', approval: connectApproval })
+        if (
+          (this.state as ExecutorState) !== 'waiting_approval' &&
+          !this.abortController.signal.aborted
+        ) {
+          this.state = 'completed'
+          this.turnTiming?.emit(this.taskId)
+          this.deps.onComplete(this.task)
+          this.resolveCompletion?.()
+        } else if (this.abortController.signal.aborted) {
+          console.log(`[TaskExecutor:${this.taskId}] Cancelled`)
+          this.resolveCompletion?.()
+        }
+        return
+      }
+
       // Reconstruct messages using the resolved completed_results.
       // `resolvedCompletedResults` is `approval.completed_results` with any
       // spillover refs swapped in for their blob bodies (invariant #2).
@@ -672,6 +730,8 @@ export class TaskExecutor {
         message: error.message,
         retryable: error.retryable,
         provider: error.provider,
+        httpStatus: error.httpStatus,
+        providerCode: error.providerCode,
       }
     }
     return {
@@ -918,9 +978,16 @@ export class TaskExecutor {
         }
         const reporter = progressReporterRegistry.get(this.taskId)
         if (reporter) {
+          // U5 — carry the reason (+ mcpServerName for connect_required)
+          // so the desktop distinguishes an OAuth-consent suspension from the
+          // default HITL gate. Absent reason → 'approval_required' (back-compat).
           reporter.emitSuspended(
             getDisplayName(result.approval.tool_name),
-            result.approval.request_id
+            result.approval.request_id,
+            {
+              reason: result.approval.reason ?? 'approval_required',
+              mcpServerName: result.approval.mcpServerName,
+            }
           )
         }
         this.state = 'waiting_approval'
@@ -1099,6 +1166,10 @@ export class TaskExecutor {
     // usage sink + a per-pair token counter) so `usage_events` records the pair
     // really served. No policy → returns `llmPort` unchanged (byte-identical).
     const effectiveLlmPort = this.wrapFailoverPort(llmPort, conversation)
+    // LLM-lane guardrails (spec §7): wrap ABOVE failover so built-in request
+    // shaping fires once per logical request, not per fallback attempt. Inert
+    // (returns the port unchanged) when no built-ins are configured (§5).
+    const hookedLlmPort = maybeWrapHookedLlmPort(effectiveLlmPort, this.deps.guardrailsConfig)
 
     const metadata: Record<string, unknown> = {}
     if (this.task.sourceMessage) {
@@ -1118,7 +1189,7 @@ export class TaskExecutor {
     // out-of-band through `ReasoningPort`. Otherwise fall back to the legacy
     // single-string identity built by `buildSystemIdentity`.
     const reasoningFactory = new DefaultReasoningFactory(
-      effectiveLlmPort,
+      hookedLlmPort,
       undefined,
       metadata,
       // F1.4 — wire the send-time context-window-breakdown capture. The sink is
@@ -1136,7 +1207,7 @@ export class TaskExecutor {
     const contextManager = new PressureContextManager(
       this.contextMaxTokens(),
       this.deps.workspaceService,
-      effectiveLlmPort,
+      hookedLlmPort,
       tokenCounter,
       {
         dryRun: appConfig.tokenizerDryrun,
@@ -1187,6 +1258,12 @@ export class TaskExecutor {
       toolProgressInterval: appConfig.nativeTool.toolProgressInterval,
     })
     loopConfig.abortSignal = this.abortController.signal
+    // Guardrails (spec §6) — build the tool-lane guardrail from the Host block.
+    // Undefined when no rules are configured (no-config compatibility, §5); a
+    // malformed set throws here (fail-closed admission, §3/§5).
+    loopConfig.guardrails = buildToolLaneGuardrail(this.deps.guardrailsConfig)
+    // §6.3: a run with no human to answer an approval must fail safe to deny.
+    loopConfig.executionMode = executionModeForSource(this.task.source)
     loopConfig.skipContextManager =
       opts?.skipContextManager ?? this.conversation?.pending_approval !== undefined
     // T1.5 — pass the storage + taskId down so `executeSingleTool` can persist
@@ -1627,7 +1704,13 @@ export class TaskExecutor {
     )
     await registerDesktopTools(nativeRegistry)
     const mcpRegistry = this.deps.mcpManager
-      ? new McpToolRegistryAdapter(this.deps.mcpManager)
+      ? // Thread the authenticated caller identity so oauth grantScope='user'
+        // tools dispatch to the caller's per-user partition (fail-closed when
+        // absent). buildToolRegistry runs per turn, so one userId per adapter.
+        new McpToolRegistryAdapter(
+          this.deps.mcpManager,
+          this.task.sourceMessage?.sender ?? undefined
+        )
       : nativeRegistry
     const compositeRegistry = this.deps.mcpManager
       ? new CompositeToolRegistry(nativeRegistry, mcpRegistry)

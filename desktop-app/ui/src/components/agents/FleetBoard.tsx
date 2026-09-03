@@ -48,7 +48,6 @@ export function FleetBoard() {
     useMcpServersDataController()
   const {
     handleOpenAgentWorkspace: onOpenAgentWorkspace,
-    handleOpenTeamDetails: onOpenTeamDetails,
     handleSelectChatAgent: onSelectAgent,
     selectedAgent,
   } = useNavigationContext()
@@ -250,8 +249,8 @@ export function FleetBoard() {
                     <tr
                       key={row.agent}
                       className="da-table__row--clickable agents-table-row-clickable"
-                      {...clickableRowProps(() => onOpenAgentWorkspace(row.agent, 'details'), {
-                        ariaLabel: `Open details for ${row.agent}`,
+                      {...clickableRowProps(() => onOpenAgentWorkspace(row.agent, 'mcp-servers'), {
+                        ariaLabel: `Open agent ${row.agent}`,
                       })}
                     >
                       <td className="da-table__cell">
@@ -277,12 +276,7 @@ export function FleetBoard() {
                             <ReferenceTag
                               key={`${row.agent}:${team.id}`}
                               kind="team"
-                              onClick={event => {
-                                event.stopPropagation()
-                                onOpenTeamDetails(team.id)
-                              }}
                               title={team.name}
-                              aria-label={`Open team ${team.name}`}
                             >
                               {team.name}
                             </ReferenceTag>

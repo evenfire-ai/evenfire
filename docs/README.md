@@ -49,6 +49,7 @@ Use this index for long-form docs.
 | ----------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | [Connect Telegram](how-to/connect-telegram.md)                                | Minikube env or CRD channel path                           |
 | [Connect Slack](how-to/connect-slack.md)                                      | Slack app scopes, request URL, conversation verification   |
+| [Connect Microsoft Teams](how-to/connect-teams.md)                            | Teams CLI bot registration, endpoint, conversation verify  |
 | [Configure approvals](how-to/configure-approvals.md)                          | Human-in-the-loop tool gates                               |
 | [Add an MCP server](how-to/add-mcp-server.md)                                 | Dev-mode JSON or CRD allowlist path                        |
 | [LLM providers overview](llm-providers/README.md)                             | Which providers are supported and how they fit together    |
@@ -83,11 +84,14 @@ Use this index for long-form docs.
 
 ## For coding agents
 
-| Doc                                                             | Description                                                |
-| --------------------------------------------------------------- | ---------------------------------------------------------- |
-| [WorkflowRecipe guide](agents/CLERUM_WORKFLOW_RECIPE_GUIDE.md)  | Authoring recipes, for agents                              |
-| [Frontend style rules](agents/frontend-style-rules.md)          | CSS tokens, page shells, component rules for the three UIs |
-| [WorkflowRecipe naming](architecture/workflow-recipe-naming.md) | Generated resource-name rules                              |
+| Doc                                                             | Description                                     |
+| --------------------------------------------------------------- | ----------------------------------------------- |
+| [WorkflowRecipe guide](agents/CLERUM_WORKFLOW_RECIPE_GUIDE.md)  | Authoring recipes, for agents                   |
+| [Shared frontend rules](agents/frontend-style-rules.md)         | Cross-app rules for the three frontend surfaces |
+| [Control UI rules](agents/control-ui-rules.md)                  | Control UI application-specific guidance        |
+| [Profile UI rules](agents/profile-ui-rules.md)                  | Profile UI application-specific guidance        |
+| [Desktop renderer rules](agents/desktop-ui-rules.md)            | Desktop renderer application guidance           |
+| [WorkflowRecipe naming](architecture/workflow-recipe-naming.md) | Generated resource-name rules                   |
 
 ## Community & trust
 

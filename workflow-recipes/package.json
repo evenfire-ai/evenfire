@@ -1,6 +1,6 @@
 {
   "name": "workload-recipes-controller",
-  "version": "0.1.286",
+  "version": "0.1.339",
   "description": "Workload Recipes Controller (WRC) - WorkloadRecipe lifecycle management and MCP server interface",
   "main": "dist/main.js",
   "engines": {
@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "build:docker": "tsc -p tsconfig.json",
+    "build:docker": "tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
     "dev": "ts-node src/main.ts",
     "test": "vitest run",
@@ -28,6 +28,8 @@
   "license": "SEE LICENSE IN LICENSE",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1009.0",
+    "@clerum/codex-catalog-projection": "file:../packages/codex-catalog-projection",
+    "@clerum/llm-provider-attempt-contract": "file:../packages/llm-provider-attempt-contract",
     "@clerum/image-policy": "file:../packages/image-policy",
     "@clerum/llm-providers": "file:../packages/llm-providers",
     "@clerum/network-policy-core": "file:../packages/network-policy-core",

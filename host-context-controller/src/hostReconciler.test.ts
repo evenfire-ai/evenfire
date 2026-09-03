@@ -33,6 +33,17 @@ function deferred<T = void>(): {
   return { promise, resolve, reject }
 }
 
+async function readLabeledCounter(name: string, labels: Record<string, string>): Promise<number> {
+  const metric = registry.getSingleMetric(name)
+  if (!metric) throw new Error(`${name} is not registered`)
+  const snapshot = await metric.get()
+  return (
+    snapshot.values.find(entry =>
+      Object.entries(labels).every(([key, value]) => entry.labels[key] === value)
+    )?.value ?? 0
+  )
+}
+
 vi.mock('./config', () => ({
   config: {
     hostNamespace: 'mcp-host',
@@ -943,6 +954,42 @@ describe('HostReconciler cleanup authority gate', () => {
     expect(del).not.toHaveBeenCalled()
   })
 
+  it('defers orphan deletion when authority changes before serializer admission', async () => {
+    const getObj = vi.fn().mockRejectedValue({ code: 404 })
+    const reconciler = makeCleanupReconciler({ getNamespacedCustomObject: getObj })
+    const authority = { known: true, generation: 3 }
+    reconciler.setHostWatchAuthority(() => ({ ...authority }))
+    reconciler.setResolveCurrentHost(() => undefined)
+    const internals = reconciler as unknown as {
+      lifecycle: {
+        serializeByHost(name: string, task: () => Promise<void>): Promise<void>
+      }
+      listManagedHostDeployments(): Promise<k8s.V1Deployment[]>
+      deleteHostRuntimeResources(name: string, namespace: string): Promise<void>
+    }
+    vi.spyOn(internals, 'listManagedHostDeployments').mockResolvedValue([
+      orphanDeployment('authority-race-host'),
+    ])
+    const del = vi.spyOn(internals, 'deleteHostRuntimeResources').mockResolvedValue(undefined)
+    const blockerStarted = deferred()
+    const releaseBlocker = deferred()
+    const occupied = internals.lifecycle.serializeByHost('authority-race-host', async () => {
+      blockerStarted.resolve(undefined)
+      await releaseBlocker.promise
+    })
+    await blockerStarted.promise
+
+    const cleanup = reconciler.fullReconcile([])
+    await vi.waitFor(() => expect(getObj).toHaveBeenCalledOnce())
+    authority.known = false
+    authority.generation = 4
+    releaseBlocker.resolve(undefined)
+    await occupied
+    await cleanup
+
+    expect(del).not.toHaveBeenCalled()
+  })
+
   it('defers an orphan whose fresh authoritative read fails', async () => {
     const getObj = vi.fn().mockRejectedValue({ code: 503 })
     const reconciler = makeCleanupReconciler({ getNamespacedCustomObject: getObj })
@@ -994,5 +1041,700 @@ describe('HostReconciler cleanup authority gate', () => {
 
     expect(getObj).not.toHaveBeenCalled()
     expect(del).not.toHaveBeenCalled()
+  })
+})
+
+describe('HostReconciler Host inventory mutation authority', () => {
+  function wireAuthoritativeHost(
+    reconciler: HostReconciler,
+    host: HostCRD,
+    authorityRef: { current: { known: boolean; generation: number } }
+  ): void {
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostWatchAuthority(() => authorityRef.current)
+  }
+
+  function stubPreDeploymentReconcileEffects(reconciler: HostReconciler): void {
+    vi.spyOn(reconciler as any, 'validateHostSecret').mockResolvedValue({ ok: true })
+    for (const method of [
+      'ensureHostServiceAccount',
+      'ensureHostRole',
+      'ensureHostRoleBinding',
+      'ensurePvc',
+      'ensureService',
+      'ensureMcpHostIngressNetworkPolicy',
+      'ensureMcpHostGfsEgressNetworkPolicy',
+      'ensureWorkflowApprovalReaderMcpHostIngressNetworkPolicy',
+      'ensureRpcProxyMcpHostIngressNetworkPolicy',
+      'ensureRpcProxyHostEgressNetworkPolicy',
+      'ensureDesktopNetworkPolicy',
+      'ensureChannelReaderEgressNetworkPolicy',
+      'ensureWorkflowApprovalReaderHostEgressNetworkPolicy',
+    ]) {
+      vi.spyOn(reconciler as any, method).mockResolvedValue(undefined)
+    }
+  }
+
+  function runtimeTokenScopeWithoutChannels(host: HostCRD): string {
+    return (
+      HostReconciler as unknown as {
+        runtimeTokenScopeHash(selected: HostCRD, hasChannelIngress: boolean): string
+      }
+    ).runtimeTokenScopeHash(host, false)
+  }
+
+  it('rejects a queued reconcile when Host authority changes before admission', async () => {
+    const reconciler = makeBasicReconciler()
+    const host = makeHost({ name: 'authority-race' })
+    const authority = { current: { known: true, generation: 7 } }
+    wireAuthoritativeHost(reconciler, host, authority)
+    const reconcileCore = vi.spyOn(reconciler as any, 'reconcileCore').mockResolvedValue(undefined)
+    const blockerStarted = deferred()
+    const releaseBlocker = deferred()
+    const occupied = (reconciler as any).lifecycle.serializeByHost(host.name, async () => {
+      blockerStarted.resolve(undefined)
+      await releaseBlocker.promise
+    }) as Promise<void>
+    await blockerStarted.promise
+
+    const pending = reconciler.reconcile(host)
+    authority.current = { known: false, generation: 8 }
+    releaseBlocker.resolve(undefined)
+    await occupied
+
+    await expect(pending).rejects.toThrow(/Host inventory authority/)
+    expect(reconcileCore).not.toHaveBeenCalled()
+  })
+
+  it('withdraws a queued fleet worker after Context authority retires and recovers', async () => {
+    const reconciler = makeBasicReconciler()
+    const hostA = makeHost({ name: 'context-authority-a' })
+    const hostB = makeHost({ name: 'context-authority-b' })
+    const hosts = new Map([
+      [hostA.name, hostA],
+      [hostB.name, hostB],
+    ])
+    reconciler.setResolveCurrentHost(name => hosts.get(name))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 7 }))
+    const mutationAuthority = {
+      current: {
+        known: true,
+        hostRevision: 7,
+        contextRevision: 11,
+      },
+    }
+    ;(reconciler as any).setHostMutationAuthority(() => mutationAuthority.current)
+    const reconcileCore = vi.spyOn(reconciler as any, 'reconcileCore').mockResolvedValue(undefined)
+    vi.spyOn(reconciler as any, 'collectHostCleanupFailures').mockResolvedValue([])
+    const blockerStarted = deferred()
+    const releaseBlocker = deferred()
+    const occupied = (reconciler as any).lifecycle.serializeByHost(hostB.name, async () => {
+      blockerStarted.resolve(undefined)
+      await releaseBlocker.promise
+    }) as Promise<void>
+    await blockerStarted.promise
+
+    const fleet = reconciler.fullReconcile([hostA, hostB])
+    await vi.waitFor(() => expect(reconcileCore).toHaveBeenCalledWith(hostA, expect.any(Function)))
+
+    // Context desired state changed (its content revision advanced) while Host
+    // authority remained continuously known: a host-only lease would miss this
+    // transition and admit Host B with stale derived mounts. A pure watch
+    // reconnect with identical content would NOT advance the revision and is
+    // correctly admitted — that is the point of the content-identity fence.
+    // After #490 the fence still retires Host B; the fleet aggregator withdraws
+    // HostInventoryAuthorityUnavailableError instead of failing the pass.
+    mutationAuthority.current = {
+      known: true,
+      hostRevision: 7,
+      contextRevision: 13,
+    }
+    const before = await readLabeledCounter('clerum_hcc_host_fleet_benign_supersessions_total', {
+      error: 'HostInventoryAuthorityUnavailableError',
+    })
+    releaseBlocker.resolve(undefined)
+    await occupied
+    await expect(fleet).resolves.toBeUndefined()
+    expect(reconcileCore).toHaveBeenCalledTimes(1)
+    expect(reconcileCore).not.toHaveBeenCalledWith(hostB, expect.any(Function))
+    expect(
+      await readLabeledCounter('clerum_hcc_host_fleet_benign_supersessions_total', {
+        error: 'HostInventoryAuthorityUnavailableError',
+      })
+    ).toBe(before + 1)
+  })
+
+  it('retires a Host reconcile when its Context is superseded within the same watch', async () => {
+    const reconciler = makeBasicReconciler()
+    const host = {
+      ...makeHost({ name: 'context-revision-race', contextRef: 'context-a' }),
+      uid: 'context-revision-race-uid',
+      generation: 5,
+    }
+    const contextV1 = { name: 'context-a', spec: { sharedFileSystems: [] } }
+    const contextV2 = {
+      name: 'context-a',
+      spec: {
+        sharedFileSystems: [{ name: 'documents', mountPath: '/contexts/documents' }],
+      },
+    }
+    let selectedContext: unknown = contextV1
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostMutationAuthority(() => ({
+      known: true,
+      hostRevision: 7,
+      contextRevision: 11,
+    }))
+    reconciler.setResolveHostMutationDependencies(() => [selectedContext])
+
+    const secretReadStarted = deferred()
+    const releaseSecretRead = deferred()
+    vi.spyOn(reconciler as any, 'validateHostSecret').mockImplementation(async () => {
+      secretReadStarted.resolve(undefined)
+      await releaseSecretRead.promise
+      return { ok: true }
+    })
+    const ensureServiceAccount = vi
+      .spyOn(reconciler as any, 'ensureHostServiceAccount')
+      .mockResolvedValue(undefined)
+
+    // R1-M2: a benign mid-pass supersession must NOT be reported as a hard
+    // reconcile failure. The single reconcile() catch used to fire
+    // enqueueControllerError('reconcile_exception') → controller_error telemetry
+    // (status:'failed') AND an administrative 'failed' outcome to control-api for
+    // these retirements. Spy (observe-only) to prove the benign branch emits
+    // neither, while still re-throwing so callers treat it as a retire.
+    const enqueueControllerError = vi.spyOn(reconciler as any, 'enqueueControllerError')
+    const enqueueAdministrativeOutcome = vi.spyOn(reconciler as any, 'enqueueAdministrativeOutcome')
+
+    const pending = reconciler.reconcile(host)
+    await secretReadStarted.promise
+    selectedContext = contextV2
+    releaseSecretRead.resolve(undefined)
+
+    await expect(pending).rejects.toThrow(/Host mutation dependency changed/)
+    expect(ensureServiceAccount).not.toHaveBeenCalled()
+    expect(enqueueControllerError).not.toHaveBeenCalled()
+    expect(enqueueAdministrativeOutcome).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'failed',
+      expect.anything()
+    )
+  })
+
+  it('keeps a Host reconcile admitted when a watch replaces dependencies with deep-equal values', async () => {
+    const reconciler = makeBasicReconciler()
+    const host = {
+      ...makeHost({ name: 'deep-equal-dependency', contextRef: 'context-a' }),
+      uid: 'deep-equal-dependency-uid',
+      generation: 5,
+    }
+    let selectedContext: unknown = {
+      name: 'context-a',
+      spec: {
+        sharedFileSystems: [{ name: 'documents', mountPath: '/contexts/documents' }],
+      },
+    }
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostMutationAuthority(() => ({
+      known: true,
+      hostRevision: 7,
+      contextRevision: 11,
+    }))
+    reconciler.setResolveHostMutationDependencies(() => [selectedContext])
+
+    const secretReadStarted = deferred()
+    const releaseSecretRead = deferred()
+    vi.spyOn(reconciler as any, 'validateHostSecret').mockImplementation(async () => {
+      secretReadStarted.resolve(undefined)
+      await releaseSecretRead.promise
+      return { ok: true }
+    })
+    const admitted = new Error('deep-equal dependency admitted')
+    const ensureServiceAccount = vi
+      .spyOn(reconciler as any, 'ensureHostServiceAccount')
+      .mockRejectedValue(admitted)
+
+    const pending = reconciler.reconcile(host)
+    await secretReadStarted.promise
+    selectedContext = structuredClone(selectedContext)
+    releaseSecretRead.resolve(undefined)
+
+    await expect(pending).rejects.toBe(admitted)
+    expect(ensureServiceAccount).toHaveBeenCalled()
+  })
+
+  it.each([
+    [
+      'referenced SharedFileSystem revision',
+      { name: 'documents', spec: { storageClassName: 'fast-v1' } },
+      { name: 'documents', spec: { storageClassName: 'fast-v2' } },
+    ],
+    ['referenced SharedFileSystem mountability', true, false],
+    [
+      'Host-scoped CommunicationChannel revision',
+      { name: 'telegram', spec: { hostRef: 'dependency-race' } },
+      {
+        name: 'telegram',
+        spec: {
+          hostRef: 'dependency-race',
+          credentialsSecretRef: { name: 'telegram-v2' },
+        },
+      },
+    ],
+  ])('retires a Host reconcile when its %s changes', async (_label, original, replacement) => {
+    const reconciler = makeBasicReconciler()
+    const host = {
+      ...makeHost({ name: 'dependency-race', contextRef: 'context-a' }),
+      uid: 'dependency-race-uid',
+      generation: 5,
+    }
+    const context = { name: 'context-a', spec: { sharedFileSystems: [] } }
+    let selectedDependency: unknown = original
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostMutationAuthority(() => ({
+      known: true,
+      hostRevision: 7,
+      contextRevision: 11,
+    }))
+    reconciler.setResolveHostMutationDependencies(() => [context, selectedDependency])
+
+    const secretReadStarted = deferred()
+    const releaseSecretRead = deferred()
+    vi.spyOn(reconciler as any, 'validateHostSecret').mockImplementation(async () => {
+      secretReadStarted.resolve(undefined)
+      await releaseSecretRead.promise
+      return { ok: true }
+    })
+    const ensureServiceAccount = vi
+      .spyOn(reconciler as any, 'ensureHostServiceAccount')
+      .mockResolvedValue(undefined)
+
+    const pending = reconciler.reconcile(host)
+    await secretReadStarted.promise
+    selectedDependency = replacement
+    releaseSecretRead.resolve(undefined)
+
+    await expect(pending).rejects.toThrow(/Host mutation dependency changed/)
+    expect(ensureServiceAccount).not.toHaveBeenCalled()
+  })
+
+  it('does not delete runtime after a Secret rejection when Host authority changes in flight', async () => {
+    const reconciler = makeBasicReconciler()
+    const host = { ...makeHost({ name: 'secret-authority-race' }), uid: 'host-uid', generation: 3 }
+    const authority = { current: { known: true, generation: 7 } }
+    wireAuthoritativeHost(reconciler, host, authority)
+    const secretReadStarted = deferred()
+    const releaseSecretRead = deferred()
+    vi.spyOn(reconciler as any, 'validateHostSecret').mockImplementation(async () => {
+      secretReadStarted.resolve(undefined)
+      await releaseSecretRead.promise
+      return {
+        ok: false,
+        reason: 'SecretNotFound',
+        message: 'secret missing in stale spec',
+      }
+    })
+    const deleteRuntime = vi
+      .spyOn(reconciler as any, 'deleteHostRuntimeResources')
+      .mockResolvedValue(undefined)
+
+    const pending = reconciler.reconcile(host)
+    await secretReadStarted.promise
+    authority.current = { known: false, generation: 8 }
+    releaseSecretRead.resolve(undefined)
+
+    await expect(pending).rejects.toThrow(/Host inventory authority/)
+    expect(deleteRuntime).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [
+      'UID',
+      (host: HostCRD) => ({ ...host, uid: 'replacement-host-uid', generation: 1 }),
+      /Host identity/,
+    ],
+    [
+      'spec generation',
+      (host: HostCRD) => ({
+        ...host,
+        generation: (host.generation ?? 0) + 1,
+        spec: { ...host.spec, secretRef: 'replacement-secret' },
+      }),
+      /Host spec generation/,
+    ],
+  ] as const)(
+    'does not delete runtime after a Secret rejection when the Host %s changes in flight',
+    async (_, replaceCurrent, expectedError) => {
+      const reconciler = makeBasicReconciler()
+      const host = {
+        ...makeHost({ name: 'secret-identity-race' }),
+        uid: 'host-uid',
+        generation: 3,
+      }
+      let current: HostCRD = host
+      const authority = { current: { known: true, generation: 7 } }
+      reconciler.setResolveCurrentHost(name => (name === host.name ? current : undefined))
+      reconciler.setHostWatchAuthority(() => authority.current)
+      const secretReadStarted = deferred()
+      const releaseSecretRead = deferred()
+      vi.spyOn(reconciler as any, 'validateHostSecret').mockImplementation(async () => {
+        secretReadStarted.resolve(undefined)
+        await releaseSecretRead.promise
+        return {
+          ok: false,
+          reason: 'SecretNotFound',
+          message: 'secret missing in stale spec',
+        }
+      })
+      const deleteRuntime = vi
+        .spyOn(reconciler as any, 'deleteHostRuntimeResources')
+        .mockResolvedValue(undefined)
+
+      const pending = reconciler.reconcile(host)
+      await secretReadStarted.promise
+      current = replaceCurrent(host)
+      releaseSecretRead.resolve(undefined)
+
+      await expect(pending).rejects.toThrow(expectedError)
+      expect(deleteRuntime).not.toHaveBeenCalled()
+    }
+  )
+
+  it('revalidates the Host spec after token provisioning and before Deployment mutation', async () => {
+    const reconciler = makeBasicReconciler()
+    const host = {
+      ...makeHost({ name: 'deployment-generation-race' }),
+      uid: 'host-uid',
+      generation: 3,
+    }
+    let current = host
+    const authority = { current: { known: true, generation: 11 } }
+    reconciler.setResolveCurrentHost(name => (name === host.name ? current : undefined))
+    reconciler.setHostWatchAuthority(() => authority.current)
+    stubPreDeploymentReconcileEffects(reconciler)
+    const tokenProvisionStarted = deferred()
+    const releaseTokenProvision = deferred()
+    vi.spyOn(reconciler as any, 'provisionRuntimeTokenRevision').mockImplementation(async () => {
+      tokenProvisionStarted.resolve(undefined)
+      await releaseTokenProvision.promise
+      return { revision: 'stale-revision', scopeHash: 'stale-scope' }
+    })
+    const ensureDeployment = vi
+      .spyOn(reconciler as any, 'ensureDeployment')
+      .mockResolvedValue(undefined)
+
+    const pending = reconciler.reconcile(host)
+    await tokenProvisionStarted.promise
+    current = {
+      ...host,
+      generation: 4,
+      spec: { ...host.spec, contextRef: 'replacement-context' },
+    }
+    releaseTokenProvision.resolve(undefined)
+
+    await expect(pending).rejects.toThrow(/Host spec generation/)
+    expect(ensureDeployment).not.toHaveBeenCalled()
+  })
+
+  it('revalidates the Host spec at the final Deployment create-state boundary', async () => {
+    const appsApi = createMockAppsApi()
+    const reconciler = new HostReconciler({} as k8s.KubeConfig, {
+      appsApi: asAppsApi(appsApi),
+      coreApi: asCoreApi(createMockCoreApi()),
+      networkingApi: asNetworkingApi(createMockNetworkingApi()),
+      rbacApi: asRbacApi(createMockRbacApi()),
+    })
+    const host = {
+      ...makeHost({ name: 'deployment-create-race' }),
+      uid: 'host-uid',
+      generation: 3,
+    }
+    let current = host
+    reconciler.setResolveCurrentHost(name => (name === host.name ? current : undefined))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 12 }))
+    stubPreDeploymentReconcileEffects(reconciler)
+    vi.spyOn(reconciler as any, 'provisionRuntimeTokenRevision').mockResolvedValue({
+      revision: 'runtime-revision',
+      scopeHash: runtimeTokenScopeWithoutChannels(host),
+    })
+    let channelIngressReads = 0
+    vi.spyOn(reconciler as any, 'hasChannelIngress').mockImplementation(() => {
+      channelIngressReads += 1
+      if (channelIngressReads === 2) {
+        current = {
+          ...host,
+          generation: 4,
+          spec: { ...host.spec, contextRef: 'replacement-context' },
+        }
+      }
+      return false
+    })
+
+    await expect(reconciler.reconcile(host)).rejects.toThrow(/Host spec generation/)
+
+    expect(channelIngressReads).toBe(2)
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+  })
+
+  it('revalidates the Host spec after a Deployment create conflict and before replace', async () => {
+    const appsApi = createMockAppsApi()
+    const reconciler = new HostReconciler({} as k8s.KubeConfig, {
+      appsApi: asAppsApi(appsApi),
+      coreApi: asCoreApi(createMockCoreApi()),
+      networkingApi: asNetworkingApi(createMockNetworkingApi()),
+      rbacApi: asRbacApi(createMockRbacApi()),
+    })
+    const host = {
+      ...makeHost({ name: 'deployment-replace-race' }),
+      uid: 'host-uid',
+      generation: 3,
+    }
+    let current = host
+    reconciler.setResolveCurrentHost(name => (name === host.name ? current : undefined))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 13 }))
+    stubPreDeploymentReconcileEffects(reconciler)
+    vi.spyOn(reconciler as any, 'provisionRuntimeTokenRevision').mockResolvedValue({
+      revision: 'runtime-revision',
+      scopeHash: runtimeTokenScopeWithoutChannels(host),
+    })
+    vi.spyOn(reconciler as any, 'hasChannelIngress').mockReturnValue(false)
+    appsApi.createNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
+    appsApi.readNamespacedDeployment.mockImplementationOnce(async () => {
+      current = {
+        ...host,
+        generation: 4,
+        spec: { ...host.spec, contextRef: 'replacement-context' },
+      }
+      return { metadata: { resourceVersion: 'rv-existing' } }
+    })
+
+    await expect(reconciler.reconcile(host)).rejects.toThrow(/Host spec generation/)
+
+    expect(appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+  })
+
+  it('revalidates the Host spec before retrying a conflicted Deployment replace', async () => {
+    const appsApi = createMockAppsApi()
+    const reconciler = new HostReconciler({} as k8s.KubeConfig, {
+      appsApi: asAppsApi(appsApi),
+      coreApi: asCoreApi(createMockCoreApi()),
+      networkingApi: asNetworkingApi(createMockNetworkingApi()),
+      rbacApi: asRbacApi(createMockRbacApi()),
+    })
+    const host = {
+      ...makeHost({ name: 'deployment-retry-race' }),
+      uid: 'host-uid',
+      generation: 3,
+    }
+    let current = host
+    let deploymentReads = 0
+    reconciler.setResolveCurrentHost(name => (name === host.name ? current : undefined))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 14 }))
+    stubPreDeploymentReconcileEffects(reconciler)
+    vi.spyOn(reconciler as any, 'provisionRuntimeTokenRevision').mockResolvedValue({
+      revision: 'runtime-revision',
+      scopeHash: runtimeTokenScopeWithoutChannels(host),
+    })
+    vi.spyOn(reconciler as any, 'hasChannelIngress').mockReturnValue(false)
+    appsApi.createNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
+    appsApi.readNamespacedDeployment.mockImplementation(async () => {
+      deploymentReads += 1
+      if (deploymentReads === 2) {
+        current = {
+          ...host,
+          generation: 4,
+          spec: { ...host.spec, contextRef: 'replacement-context' },
+        }
+      }
+      return { metadata: { resourceVersion: `rv-existing-${deploymentReads}` } }
+    })
+    appsApi.replaceNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0)
+
+    try {
+      await expect(reconciler.reconcile(host)).rejects.toThrow(/Host spec generation/)
+    } finally {
+      random.mockRestore()
+    }
+
+    expect(appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(2)
+    expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
+  })
+
+  it('resolves the latest authoritative Host object at reconcile admission', async () => {
+    const reconciler = makeBasicReconciler()
+    const stale = { ...makeHost({ name: 'latest-host' }), generation: 1 }
+    const current = {
+      ...stale,
+      generation: 2,
+      spec: { ...stale.spec, contextRef: 'current-context' },
+    }
+    const authority = { current: { known: true, generation: 7 } }
+    wireAuthoritativeHost(reconciler, current, authority)
+    const reconcileCore = vi.spyOn(reconciler as any, 'reconcileCore').mockResolvedValue(undefined)
+
+    await reconciler.reconcile(stale)
+
+    expect(reconcileCore).toHaveBeenCalledOnce()
+    expect(reconcileCore).toHaveBeenCalledWith(
+      expect.objectContaining({
+        generation: 2,
+        spec: expect.objectContaining({ contextRef: 'current-context' }),
+      }),
+      expect.any(Function)
+    )
+  })
+
+  it('does not patch channel-reader after Host authority changes during revision resolution', async () => {
+    const reconciler = makeBasicReconciler()
+    const host = {
+      ...makeHost({ name: 'channel-authority-race' }),
+      uid: 'channel-authority-race-uid',
+      generation: 3,
+    }
+    const authority = { current: { known: true, generation: 9 } }
+    wireAuthoritativeHost(reconciler, host, authority)
+    const revisionStarted = deferred()
+    const releaseRevision = deferred<string>()
+    vi.spyOn(reconciler as any, 'computeChannelReaderRevisionForHost').mockImplementation(
+      async () => {
+        revisionStarted.resolve(undefined)
+        return releaseRevision.promise
+      }
+    )
+    const patchDeployment = vi
+      .spyOn((reconciler as any).appsApi, 'patchNamespacedDeployment')
+      .mockResolvedValue(undefined)
+
+    const pending = reconciler.patchChannelReaderRevisionAnnotation(host.name)
+    await revisionStarted.promise
+    authority.current = { known: false, generation: 10 }
+    releaseRevision.resolve('resolved-revision')
+    await pending
+
+    expect(patchDeployment).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['UID', (host: HostCRD) => ({ ...host, uid: 'replacement-channel-reader-uid' })],
+    [
+      'spec generation',
+      (host: HostCRD) => ({
+        ...host,
+        generation: (host.generation ?? 0) + 1,
+        spec: { ...host.spec, contextRef: 'replacement-context' },
+      }),
+    ],
+  ] as const)(
+    'does not patch channel-reader when the Host %s changes during revision resolution',
+    async (_, replaceCurrent) => {
+      const reconciler = makeBasicReconciler()
+      const host = {
+        ...makeHost({ name: 'channel-host-race' }),
+        uid: 'channel-host-race-uid',
+        generation: 3,
+      }
+      let current: HostCRD = host
+      reconciler.setResolveCurrentHost(name => (name === host.name ? current : undefined))
+      reconciler.setHostWatchAuthority(() => ({ known: true, generation: 9 }))
+      const revisionStarted = deferred()
+      const releaseRevision = deferred<string>()
+      vi.spyOn(reconciler as any, 'computeChannelReaderRevisionForHost').mockImplementation(
+        async () => {
+          revisionStarted.resolve(undefined)
+          return releaseRevision.promise
+        }
+      )
+      const patchDeployment = vi
+        .spyOn((reconciler as any).appsApi, 'patchNamespacedDeployment')
+        .mockResolvedValue(undefined)
+
+      const pending = reconciler.patchChannelReaderRevisionAnnotation(host.name)
+      await revisionStarted.promise
+      current = replaceCurrent(host)
+      releaseRevision.resolve('resolved-revision')
+      await pending
+
+      expect(patchDeployment).not.toHaveBeenCalled()
+    }
+  )
+
+  it('serializes a fresh channel-reader revision behind an older in-flight Host reconcile', async () => {
+    const reconciler = makeBasicReconciler()
+    const host = {
+      ...makeHost({ name: 'channel-revision-order' }),
+      uid: 'channel-revision-order-uid',
+      generation: 4,
+    }
+    const authority = { current: { known: true, generation: 9 } }
+    wireAuthoritativeHost(reconciler, host, authority)
+    const staleReconcileStarted = deferred()
+    const releaseStaleReconcile = deferred()
+    const order: string[] = []
+    let liveRevision = ''
+
+    vi.spyOn(reconciler as any, 'reconcileCore').mockImplementation(async () => {
+      order.push('reconcile-a:start')
+      staleReconcileStarted.resolve(undefined)
+      await releaseStaleReconcile.promise
+      liveRevision = 'revision-a'
+      order.push('reconcile-a:write')
+    })
+    vi.spyOn(reconciler as any, 'computeChannelReaderRevisionForHost').mockResolvedValue(
+      'revision-b'
+    )
+    const patchDeployment = vi
+      .spyOn((reconciler as any).appsApi, 'patchNamespacedDeployment')
+      .mockImplementation(async (request: any) => {
+        const { body } = request
+        liveRevision = body.spec.template.metadata.annotations['clerum.io/credentials-revision']
+        order.push('revision-b:patch')
+      })
+
+    const staleReconcile = reconciler.reconcile(host)
+    await staleReconcileStarted.promise
+    const freshRevision = reconciler.patchChannelReaderRevisionAnnotation(host.name)
+
+    // Give B the opportunity to patch before A is released. Without a shared
+    // Host lane, B writes first and A deterministically overwrites it.
+    await Promise.resolve()
+    await Promise.resolve()
+    releaseStaleReconcile.resolve(undefined)
+    await Promise.all([staleReconcile, freshRevision])
+
+    expect(liveRevision).toBe('revision-b')
+    expect(patchDeployment).toHaveBeenCalledOnce()
+    expect(order).toEqual(['reconcile-a:start', 'reconcile-a:write', 'revision-b:patch'])
+  })
+
+  it('rejects a queued delete when Host authority changes before admission', async () => {
+    const reconciler = makeBasicReconciler()
+    const host = makeHost({ name: 'delete-authority-race' })
+    const authority = { current: { known: true, generation: 11 } }
+    reconciler.setResolveCurrentHost(() => undefined)
+    reconciler.setHostWatchAuthority(() => authority.current)
+    const deleteRuntime = vi
+      .spyOn(reconciler as any, 'deleteHostRuntimeResources')
+      .mockResolvedValue(undefined)
+    const blockerStarted = deferred()
+    const releaseBlocker = deferred()
+    const occupied = (reconciler as any).lifecycle.serializeByHost(host.name, async () => {
+      blockerStarted.resolve(undefined)
+      await releaseBlocker.promise
+    }) as Promise<void>
+    await blockerStarted.promise
+
+    const pending = reconciler.reconcileDelete(host.name, host.namespace)
+    authority.current = { known: false, generation: 12 }
+    releaseBlocker.resolve(undefined)
+    await occupied
+
+    await expect(pending).rejects.toThrow(/Host inventory authority/)
+    expect(deleteRuntime).not.toHaveBeenCalled()
   })
 })

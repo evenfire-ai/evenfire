@@ -2,11 +2,15 @@ import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { IconButton, StatusBanner } from '@components/Common'
-import { IconClose } from '@components/SidebarNav/icons'
+import { IconClose, IconCopy } from '@components/SidebarNav/icons'
 import { assertGfsMarkdownPreviewSize } from '@lib/gfsMarkdownPreview'
 import { parseVanillaMarkdown } from '@lib/vanillaMarkdown'
 import type { MarkdownBlock, MarkdownInlineNode } from '@lib/vanillaMarkdown.types'
 import type { GfsMarkdownPreviewProps } from './types'
+
+function isPlainTextName(fileName: string): boolean {
+  return fileName.toLowerCase().endsWith('.txt')
+}
 
 function renderInlineNodes(nodes: MarkdownInlineNode[]): ReactNode[] {
   return nodes.map(node => {
@@ -61,12 +65,30 @@ export function GfsMarkdownPreview({
   fileName,
   gfsUri,
   onClose,
+  onDownloadError,
 }: GfsMarkdownPreviewProps) {
   const titleId = useId()
   const closeButtonRef = useRef<HTMLButtonElement | null>(null)
   const [source, setSource] = useState<string | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
+  const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const mountedRef = useRef(true)
+  const onDownloadErrorRef = useRef(onDownloadError)
   const blocks = useMemo(() => (source === null ? [] : parseVanillaMarkdown(source)), [source])
+  const isPlainText = isPlainTextName(fileName)
+
+  useEffect(() => {
+    onDownloadErrorRef.current = onDownloadError
+  }, [onDownloadError])
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
+    }
+  }, [])
 
   useEffect(() => {
     closeButtonRef.current?.focus()
@@ -89,6 +111,7 @@ export function GfsMarkdownPreview({
         if (active) setSource(markdown)
       } catch (error) {
         if (!active) return
+        onDownloadErrorRef.current?.(error)
         setPreviewError(
           error instanceof Error ? error.message : 'Could not load the Markdown preview'
         )
@@ -100,6 +123,31 @@ export function GfsMarkdownPreview({
       active = false
     }
   }, [byteLength, gfsUri])
+
+  function markCopyState(state: 'copied' | 'error'): boolean {
+    if (!mountedRef.current) return false
+    setCopyState(state)
+    if (copyResetTimeoutRef.current) clearTimeout(copyResetTimeoutRef.current)
+    copyResetTimeoutRef.current = setTimeout(() => {
+      if (mountedRef.current) setCopyState('idle')
+    }, 2000)
+    return true
+  }
+
+  async function copySourceToClipboard(): Promise<void> {
+    if (source === null || !mountedRef.current) return
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(source)
+        if (!mountedRef.current) return
+        markCopyState('copied')
+      } else {
+        markCopyState('error')
+      }
+    } catch {
+      markCopyState('error')
+    }
+  }
 
   return createPortal(
     <div
@@ -117,34 +165,62 @@ export function GfsMarkdownPreview({
       >
         <header className="da-gfs-markdown-preview-dialog__header">
           <h3 id={titleId}>{fileName}</h3>
-          <IconButton
-            ref={closeButtonRef}
-            label="Close Markdown preview"
-            onClick={onClose}
-            size="sm"
-            variant="ghost"
-          >
-            <IconClose />
-          </IconButton>
+          <div className="da-gfs-markdown-preview-dialog__header-actions">
+            <IconButton
+              label={
+                copyState === 'copied'
+                  ? 'Copied preview contents to clipboard'
+                  : 'Copy preview contents to clipboard'
+              }
+              disabled={source === null}
+              onClick={() => void copySourceToClipboard()}
+              size="sm"
+              variant="ghost"
+            >
+              <IconCopy />
+            </IconButton>
+            <IconButton
+              ref={closeButtonRef}
+              label="Close preview"
+              onClick={onClose}
+              size="sm"
+              variant="ghost"
+            >
+              <IconClose />
+            </IconButton>
+          </div>
         </header>
         <div className="da-gfs-markdown-preview-dialog__body">
           {previewError ? <StatusBanner tone="error" text={previewError} /> : null}
           {!previewError && source === null ? (
             <div className="da-gfs-markdown-preview-dialog__loading" role="status">
-              Loading Markdown preview…
+              Loading preview…
             </div>
           ) : null}
           {source !== null && !previewError ? (
-            <article
-              aria-label={`Markdown preview of ${fileName}`}
-              className="da-gfs-markdown-preview__content markdown-content"
-            >
-              {blocks.length > 0 ? (
-                blocks.map(renderBlock)
-              ) : (
-                <p className="da-gfs-markdown-preview__empty">This Markdown file is empty.</p>
-              )}
-            </article>
+            isPlainText ? (
+              <article
+                aria-label={`Text preview of ${fileName}`}
+                className="da-gfs-text-preview__content"
+              >
+                {source.length > 0 ? (
+                  <pre className="da-gfs-text-preview__body">{source}</pre>
+                ) : (
+                  <p className="da-gfs-markdown-preview__empty">This text file is empty.</p>
+                )}
+              </article>
+            ) : (
+              <article
+                aria-label={`Markdown preview of ${fileName}`}
+                className="da-gfs-markdown-preview__content markdown-content"
+              >
+                {blocks.length > 0 ? (
+                  blocks.map(renderBlock)
+                ) : (
+                  <p className="da-gfs-markdown-preview__empty">This Markdown file is empty.</p>
+                )}
+              </article>
+            )
           ) : null}
         </div>
       </section>

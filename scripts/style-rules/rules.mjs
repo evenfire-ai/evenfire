@@ -7,9 +7,9 @@
  *   - applies(file): predicate — does this rule apply to this file path?
  *   - check({ file, content, lines }): returns array of { line, message }
  *
- * Rules are intentionally kept narrow and project-scoped. The canonical doc
- * is `docs/agents/frontend-style-rules.md`; per-app pattern docs live
- * inside each app (e.g. `desktop-app/ui/docs/STYLE_STANDARDIZATION.md`).
+ * Rules are intentionally kept narrow and project-scoped. Provider-neutral
+ * shared and application guidance lives under `docs/agents/`; Desktop visual
+ * patterns live in `desktop-app/ui/docs/STYLE_STANDARDIZATION.md`.
  */
 
 const HEX_LITERAL = /#[0-9a-fA-F]{3,8}\b/

@@ -14,7 +14,7 @@
 import * as k8s from '@kubernetes/client-node'
 import type { Pool } from 'pg'
 import { loadConfig } from './config'
-import { getPool, initDb } from './db'
+import { createGrantUpdateListenerPool, getPool, initDb } from './db'
 import {
   type GovernedTraceReporter,
   type WorkflowInfrastructureTelemetryProjection,
@@ -29,6 +29,10 @@ import {
   type DbRunRow,
   createDbRunProcessor,
 } from './reconciler/dbRunProcessor'
+import {
+  type GrantUpdateListener,
+  createGrantUpdateListener,
+} from './reconciler/grantUpdateListener'
 import { getErrorCode } from './reconciler/k8sErrors'
 import { RecipeEventQueue } from './reconciler/recipeEventQueue'
 import {
@@ -39,6 +43,7 @@ import { SecretReverseIndex } from './reconciler/secretReverseIndex'
 import { SecretWatcher } from './reconciler/secretWatcher'
 import {
   type ReconcileResult,
+  TRANSIENT_REQUEUE_BASE_MS,
   WorkflowRecipeReconciler,
 } from './reconciler/workflowRecipeReconciler'
 import {
@@ -49,12 +54,20 @@ import {
 } from './types'
 import { createDbRunChildRecipe } from './workflow/dbRunChildRecipeCreator'
 import type { JwtTokenFactory } from './workflow/jwtTokenFactory'
+import { CODEX_CONNECTION_REF_ANNOTATION } from './workflow/llmAllowedModelsSnapshot'
 
 const PLURAL = 'workflowrecipes'
 const MIN_RUNTIME_CREDENTIAL_REFRESH_INTERVAL_MS = 5_000
 const MAX_RUNTIME_CREDENTIAL_REFRESH_INTERVAL_MS = 30_000
 const WORKLOAD_STATUS_REFRESH_INTERVAL_MS = 30_000
 const WORKFLOW_RUN_ID_LABEL = 'clerum.io/workflow-run-id'
+// issue #375: how long a published Plugin Workload SDK `verifiedAt` may age
+// before a steady-state reconcile refreshes it, even when every semantic field
+// is unchanged. `verifiedAt` is recomputed on every bootstrap-proof parse, so
+// without a throttle a fresh timestamp each pass would patch on every reconcile
+// (≤30s) and spin a MODIFIED→reconcile loop. 5 min keeps the liveness signal
+// current while capping steady-state churn at ≤1 patch / 5 min per recipe.
+const VERIFIED_AT_REFRESH_MS = 5 * 60_000
 // Bound the fan-out of the periodic external-egress requeue: the per-recipe
 // eventQueue already serializes each recipe, but without a global cap a refresh
 // pass over N recipes would enqueue N reconciles at once. This caps the number of
@@ -117,6 +130,12 @@ export function shouldPatchRecipeStatus(
   // `state=validated` + `message=bootstrap not ready` record behind.
   if (pluginWorkloadSdkStatusMessageChanged(recipe)) return true
 
+  // issue #375: publish a computed Plugin Workload SDK capability transition
+  // (e.g. awaiting_policy→validated) even when nothing else observable changed.
+  // Without this the reconciler computes the new state but no patch is emitted
+  // and the CRD keeps proclaiming the stale state until an incidental diff.
+  if (pluginWorkloadSdkProjectionChanged(recipe, result)) return true
+
   if (
     ownedConditionsChanged(recipe.status?.conditions, result.internalDependencyConditions, [
       'InternalDependenciesReady',
@@ -130,6 +149,94 @@ export function shouldPatchRecipeStatus(
   if (result.clearWorkflowExecution && recipe.status?.workflowExecution) return true
 
   return false
+}
+
+/**
+ * issue #375: decide whether the freshly-computed Plugin Workload SDK capability
+ * projection (carried on `result.pluginWorkloadSdkProjection`, built once by the
+ * watcher via the reconciler) differs from what is currently persisted in
+ * `status.pluginWorkloadSdk` in a way that must be published.
+ *
+ * Semantic fields are compared explicitly (NEVER a deep-equal that would drag in
+ * timestamps): `state`, `message`, `policyRevision`, `policyHash`,
+ * `defaultTargetRef`, `bootstrapPodUid`, `bootstrapContractVersion`,
+ * `bootstrapProvider`, `bootstrapModel`, and the `promptBridge`/
+ * `clientNotifications` family flags. A change in any of them (e.g.
+ * awaiting_policy→validated on grant creation, validated→awaiting_policy on
+ * revocation, or an in-place re-bootstrap against a corrected model/provider
+ * with the same pod) forces a patch immediately — `bootstrapProvider`/
+ * `bootstrapModel`/`bootstrapContractVersion` are persisted values control-api
+ * reads at runtime, NOT timestamps, so they must not hide behind the
+ * `verifiedAt` throttle.
+ *
+ * `verifiedAt` and `validatedAt` are timestamp-derived and EXCLUDED from
+ * semantic equality — otherwise every reconcile would look "changed". Instead,
+ * when the projection is otherwise identical, `verifiedAt` is refreshed on a
+ * throttle: patch only when the newly-computed `verifiedAt` is strictly NEWER
+ * than the persisted one AND the persisted one is older than
+ * `VERIFIED_AT_REFRESH_MS` (see the inline INVARIANT). The WINDOW clause is the
+ * primary loop-stopper: `verifiedAt` is recomputed fresh on essentially every
+ * proof parse (so the projected timestamp is normally NEWER, not equal), but
+ * right after a refresh `persisted ≈ now`, so `now - persisted` is under the
+ * threshold and no patch fires until the 5-min window reopens — bounding steady
+ * state to ≤1 patch / 5 min. The `projected > persisted` guard is NOT that
+ * bound; it only defends the edge where a future projection carries a STALE
+ * (equal-or-older) timestamp, which must never trigger a patch.
+ *
+ * A `undefined` projection (paths that do not run the SDK lane, e.g. the
+ * workload-status-only refresh) short-circuits to false — that pass has no SDK
+ * opinion and must not force a patch.
+ */
+function pluginWorkloadSdkProjectionChanged(
+  recipe: WorkflowRecipeCRD,
+  result: ReconcileResult,
+  nowMs: number = Date.now()
+): boolean {
+  const projected = result.pluginWorkloadSdkProjection?.capability
+  if (projected === undefined) return false
+  const current = recipe.status?.pluginWorkloadSdk
+  // `null` means the projection wants to CLEAR status.pluginWorkloadSdk
+  // (capability removed from spec). Patch only if something is still persisted.
+  if (projected === null) return current !== undefined
+  if (!current) return true
+
+  const nullable = (value: string | number | null | undefined): string | number | null =>
+    value ?? null
+  if (current.state !== projected.state) return true
+  if (nullable(current.message) !== nullable(projected.message)) return true
+  if (nullable(current.policyRevision) !== nullable(projected.policyRevision)) return true
+  if (nullable(current.policyHash) !== nullable(projected.policyHash)) return true
+  if (nullable(current.defaultTargetRef) !== nullable(projected.defaultTargetRef)) return true
+  if (nullable(current.bootstrapPodUid) !== nullable(projected.bootstrapPodUid)) return true
+  if (nullable(current.bootstrapContractVersion) !== nullable(projected.bootstrapContractVersion))
+    return true
+  if (nullable(current.bootstrapProvider) !== nullable(projected.bootstrapProvider)) return true
+  if (nullable(current.bootstrapModel) !== nullable(projected.bootstrapModel)) return true
+  if (current.promptBridge !== projected.promptBridge) return true
+  if (current.clientNotifications !== projected.clientNotifications) return true
+
+  // Semantic equality holds. Refresh verifiedAt on a throttle so the liveness
+  // signal stays current without a per-reconcile patch loop. INVARIANT: only
+  // refresh when the newly-computed verifiedAt is strictly NEWER than the
+  // persisted one AND the persisted one is older than VERIFIED_AT_REFRESH_MS.
+  // The WINDOW clause (nowMs - persistedMs > VERIFIED_AT_REFRESH_MS) is the
+  // PRIMARY loop-stopper: verifiedAt is recomputed fresh on essentially every
+  // proof parse, so the projected timestamp is normally NEWER — the loop is not
+  // stopped by the two eventually becoming equal. It is stopped because right
+  // after a refresh persistedMs ≈ nowMs, so (nowMs - persistedMs) is under the
+  // threshold and no patch fires until the 5-min window reopens (≤1 patch/5min).
+  // The projectedMs > persistedMs guard is NOT that bound; it only defends the
+  // edge where a future projection carries a STALE (equal-or-older) timestamp,
+  // which must never trigger a patch.
+  if (!projected.verifiedAt) return false
+  if (!current.verifiedAt) return true
+  const projectedMs = Date.parse(projected.verifiedAt)
+  // Cannot reason about an unparseable projected timestamp — do not patch.
+  if (Number.isNaN(projectedMs)) return false
+  const persistedMs = Date.parse(current.verifiedAt)
+  // A corrupt persisted timestamp is refreshed once from a valid projection.
+  if (Number.isNaN(persistedMs)) return true
+  return projectedMs > persistedMs && nowMs - persistedMs > VERIFIED_AT_REFRESH_MS
 }
 
 function pluginWorkloadSdkStatusMessageChanged(recipe: WorkflowRecipeCRD): boolean {
@@ -509,6 +616,16 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
   private recipes: Map<string, WorkflowRecipeCRD> = new Map()
   private reconciler: WorkflowRecipeReconciler
   private dbRunProcessor: DbRunProcessor | null = null
+  // issue #375 (P3): event-driven grant→WRC nudge. Started only when the WRC has
+  // a DB (same gate as dbRunProcessor); without a DB the listener never starts
+  // and the level-triggered reconcile remains the sole convergence path.
+  private grantUpdateListener: GrantUpdateListener | null = null
+  // issue #375 (M4, jozer review): the LISTEN session pins its client for the
+  // process lifetime, so it gets its OWN single-connection pool and consumes
+  // zero slots of the shared `poolMax` (default 4) pool that dbRunProcessor,
+  // leader election, and run-sync all contend for. Owned (and ended) by this
+  // watcher because it exists solely for the grant-update listener.
+  private grantUpdateListenerPool: Pool | null = null
   private config = loadConfig()
   private stopped = false
   private runtimeCredentialRefreshTimer: ReturnType<typeof setInterval> | null = null
@@ -573,7 +690,55 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
           })
         },
       })
+      // issue #375 (P3): on a grant-update NOTIFY, force-reconcile the affected
+      // recipe through the SAME path the 30s watchdog uses. The dispatch body is
+      // a named method so it is unit-testable without standing up a DB.
+      // issue #375 (M4): the listener LISTENs on a DEDICATED single-connection
+      // pool, never the shared one — a lifetime-pinned LISTEN checkout would
+      // permanently burn one of the shared pool's 4 slots (dbRunProcessor
+      // already pins another).
+      this.grantUpdateListenerPool = createGrantUpdateListenerPool(this.config.db)
+      this.grantUpdateListener = createGrantUpdateListener({
+        pool: this.grantUpdateListenerPool,
+        // `capabilityFamily` is accepted for forward-compat and intentionally
+        // unused: the dispatch force-reconciles the whole recipe from the DB
+        // source of truth (all families recomputed), and authorization is
+        // per-invocation in control-api, never derived from the notification.
+        onGrantUpdate: ({ recipeNamespace, recipeName }) =>
+          this.handleGrantUpdateNotification(recipeNamespace, recipeName),
+      })
     }
+  }
+
+  /**
+   * issue #375 (P3): dispatch a grant-update NOTIFY into a forced reconcile of
+   * the affected recipe — the SAME path the 30s watchdog uses. Kept as a named
+   * method (not an inline closure) so it is unit-testable without a live DB.
+   */
+  private handleGrantUpdateNotification(recipeNamespace: string, recipeName: string): void {
+    const known = this.recipes.get(recipeName)
+    if (!known || known.metadata.namespace !== recipeNamespace) {
+      // issue #375 (H4): make the discard diagnosable. control-api's emitted
+      // recipeNamespace and the WRC's watched sandboxNamespace come from
+      // independent env vars; if they ever diverge, 100% of NOTIFYs would be
+      // dropped and the feature would silently degrade to 30s polling. Log names
+      // only — no secrets.
+      console.warn(
+        `[WR-K8s] Discarding grant-update NOTIFY for "${recipeNamespace}/${recipeName}": ` +
+          (known ? `namespace mismatch (watching "${known.metadata.namespace}")` : 'unknown recipe')
+      )
+      return
+    }
+    void this.eventQueue.enqueue(recipeName, () => {
+      // issue #375 (H5): reconcile the CURRENT recipe. A newer MODIFIED may have
+      // landed between NOTIFY receipt and this queued job running
+      // (handleRecipeEvent updates this.recipes), so re-read the cache instead of
+      // closing over the stale snapshot. Re-check the guard on the fresh read —
+      // the recipe may have been deleted, or its namespace changed, while queued.
+      const cached = this.recipes.get(recipeName)
+      if (!cached || cached.metadata.namespace !== recipeNamespace) return Promise.resolve()
+      return this.handleRecipeEvent('MODIFIED', cached, { forceReconcile: true })
+    })
   }
 
   getAllRecipes(): WorkflowRecipeCRD[] {
@@ -638,6 +803,9 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
 
     if (this.dbRunProcessor) {
       await this.dbRunProcessor.start()
+    }
+    if (this.grantUpdateListener) {
+      await this.grantUpdateListener.start()
     }
   }
 
@@ -870,7 +1038,26 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         const result = await this.reconciler.reconcile(recipe)
         // Patch only when observable status changes. This avoids reconcile loops
         // while still allowing active parent recipes to clear stale execution state.
-        if (shouldPatchRecipeStatus(recipe, result)) {
+        const willPatch = shouldPatchRecipeStatus(recipe, result)
+        // issue #375 (P4): surface a computed-vs-published Plugin Workload SDK
+        // state divergence — old→new plus whether a patch was emitted. With P1
+        // this is rare; its value is forensic (it would have discriminated
+        // "transition computed but not published" from "never computed" in
+        // minutes) and it verifies P1 in the field. Only states are logged — no
+        // tokens/secrets (sec-003).
+        const projectedSdkState = result.pluginWorkloadSdkProjection?.capability?.state
+        const persistedSdkState = recipe.status?.pluginWorkloadSdk?.state
+        // The `validated → capability:null` cleanup case is intentionally NOT
+        // forensically logged here (projectedSdkState is undefined for a cleared
+        // capability); its clearing PATCH is still emitted via
+        // `pluginWorkloadSdkProjectionChanged`, so the publish is covered.
+        if (projectedSdkState !== undefined && projectedSdkState !== persistedSdkState) {
+          console.log(
+            `[WR-K8s] Plugin Workload SDK state for "${recipe.metadata.name}": ` +
+              `${persistedSdkState ?? 'none'} -> ${projectedSdkState} (patchEmitted=${willPatch})`
+          )
+        }
+        if (willPatch) {
           await this.reconciler.patchStatus(recipe, result)
           enqueueInfrastructureTelemetryBestEffort(
             this.traceReporter,
@@ -902,6 +1089,16 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
           this.traceReporter,
           controllerErrorTelemetryProjection(recipe, error)
         )
+        // issue #375 (P2): a transient (non-404) failure used to return here
+        // WITHOUT re-arming the retry chain, so a thrown reconcile killed the 5s
+        // self-heal and only the 30s watchdog could recover. Re-schedule the
+        // bounded exponential backoff retry so the recipe re-reconciles on its
+        // own; persistent failure still backs off toward TRANSIENT_RETRY_MAX_MS,
+        // with the watchdog as the second net. The 404 branch above already
+        // cleared and returned, so it never reaches here.
+        if (!this.stopped) {
+          this.scheduleTransientRetry(recipe.metadata.name, TRANSIENT_REQUEUE_BASE_MS, false)
+        }
       }
     } else if (type === 'DELETED') {
       // Resource is gone (finalizer already removed) — just clean cache.
@@ -914,11 +1111,18 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     const cached = this.recipes.get(recipe.metadata.name)
     const cachedGeneration = cached?.metadata.generation
     const nextGeneration = recipe.metadata.generation
-    return (
-      cachedGeneration !== undefined &&
-      nextGeneration !== undefined &&
-      cachedGeneration === nextGeneration
-    )
+    if (
+      cachedGeneration === undefined ||
+      nextGeneration === undefined ||
+      cachedGeneration !== nextGeneration
+    ) {
+      return false
+    }
+    // Grant identity is a metadata annotation and does not bump generation.
+    // Treat it as a real reconcile, not a status-only skip.
+    const cachedRef = cached?.metadata.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
+    const nextRef = recipe.metadata.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
+    return cachedRef === nextRef
   }
 
   /**
@@ -1086,6 +1290,12 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     })
 
     // Counts and duration only — never the resolved FQDNs/IPs or any Secret.
+    // This line summarises a FLEET-WIDE sweep: naming every host of every recipe
+    // here would dump the whole fleet's egress onto one line, every pass, with no
+    // way to attribute an address back to a policy. The per-host record lives
+    // where the set is decided and written instead — `logResolvedEgressSet` in
+    // workflowRecipeReconciler.ts, one entry per FQDN, only when the set changed
+    // and only once the policy has landed (#299). Secrets stay out of both.
     console.log(
       `[WR-K8s] External egress refresh: re-enqueued ${enqueued}/${selected.length} recipe(s) in ${Date.now() - started}ms`
     )
@@ -1208,6 +1418,15 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     }
     if (this.dbRunProcessor) {
       await this.dbRunProcessor.stop()
+    }
+    if (this.grantUpdateListener) {
+      await this.grantUpdateListener.stop()
+    }
+    if (this.grantUpdateListenerPool) {
+      // issue #375 (M4): the watcher owns the dedicated LISTEN pool — end it on
+      // shutdown so its single connection is closed with the process.
+      await this.grantUpdateListenerPool.end()
+      this.grantUpdateListenerPool = null
     }
     if (this.traceReporter) {
       const result = await this.traceReporter.stopAndDrain()

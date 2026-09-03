@@ -122,7 +122,11 @@ follow the fail-closed migration and rollout order in
 before enabling the feature flag.
 
 When deployable code changed and the E2E runner will manage port-forwards
-itself, force the sync and skip the short-lived background port-forward refresh:
+itself, force the sync and skip the short-lived background port-forward refresh.
+Inner `pre-gate-sync` may use `--skip-port-forwards`; never pass that globally
+into `make minikube-t2`. Do not kill this lane's `branch-profile-pf`.
+`make minikube-pf-all-bg` is a gate refresh only; it must not replace
+`branch-profile-pf`.
 
 ```bash
 make minikube-pre-gate-sync GATE=<gate-name> ARGS="--force-cluster-sync --skip-port-forwards"
@@ -157,6 +161,25 @@ open http://localhost:3000
 ```
 
 `make minikube-setup` seeds the default test user and agent/context access. `npm run ui` keeps the required API port-forwards open while it runs the local frontends.
+
+For a branch-owned profile, the host-side hold for Control UI / Desktop is
+the first-hand entry point (gitignored helper at repo root — do not search
+for it). Implementation: `.local-notes/minikube-profiles/branch-profile.sh`.
+HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
+Profile-owned random ports only (never shared `:3000`/`:8090`).
+`make minikube-pf-all-bg` is a gate refresh only; it must not replace
+`branch-profile-pf`. Do not start UI PFs from a sandboxed agent shell. Run
+the make target on the host. Do not kill this lane's `branch-profile-pf`.
+`branch-profile-pf-health` starts PFs then STOPS them on EXIT — do not use
+it as the lasting hold.
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+```
 
 `make test-e2e-vitest` and `make test-e2e-all` install `tests/e2e`
 dependencies when missing and hold the minikube port-forwards for the Vitest
@@ -221,6 +244,11 @@ single-node as the default, adds `--nodes=<n>` only when
 `MINIKUBE_MULTI_NODE=true` or `MINIKUBE_NODES>1`, enables
 `default-storageclass` and `storage-provisioner`, and fails if native minikube
 status or required node/storage readiness checks do not pass.
+After the cluster is ready, startup performs an explicit MCP-only auth-key
+bootstrap for the documented shared profile. It passes
+`--shared-profile-bootstrap --skip-gfs --require-mcp`, so it does not mutate
+the GFS plane or claim a branch-owned T2 lease. Standalone auth-key sync and
+all T2/GFS mutations remain behind the branch-profile lease.
 If `full-setup.sh` detects a broken profile, it refuses destructive recreation
 unless `MINIKUBE_RECREATE_PROFILE=true` and `CONFIRM_PROFILE=<profile>` are both
 set for that exact profile.
@@ -230,9 +258,9 @@ using them.
 
 > **NOTE**: `make minikube-gen-keys` applies the key Secrets and then chains
 > `make minikube-sync-auth-key` itself (Makefile, `minikube-gen-keys`), so the JWT public
-> key lands in mcp-host-config without a separate command. Re-running
+> key lands in `mcp-host-config` and `gfs-config` without a separate command. Re-running
 > `make minikube-sync-auth-key` later is harmless — `scripts/minikube/sync-auth-key.sh`
-> only writes the ConfigMap when it detects drift.
+> only writes each ConfigMap when it detects drift.
 
 > **`minikube-gen-keys` does NOT regenerate keys on an existing cluster.**
 > `scripts/minikube/generate-keys.sh` has an anti-pattern guard: if the Secret
@@ -278,12 +306,50 @@ Desktop App
 
 ### Critical Invariants
 
-| Invariant                    | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Same RSA key**             | `rpc-proxy-secrets.RPC_PROXY_JWT_PUBLIC_KEY` == `mcp-host-config.CLERUM_AUTH_JWT_PUBLIC_KEY` == public pair of `control-api-secrets.CONTROL_API_RPC_JWT_PRIVATE_KEY`. `scripts/minikube/generate-keys.sh` writes the two Secrets into `deploy/minikube/secrets/jwt-signing-keys.yaml`; the ConfigMap value is **not** in that manifest — `scripts/minikube/sync-auth-key.sh` copies the public key from the live `rpc-proxy-secrets` Secret into the live `mcp-host-config` ConfigMap. |
-| **Token stops at rpc-proxy** | The RPC token (`aud: "rpc-proxy"`) is validated by rpc-proxy and is NOT forwarded. `/v1/runtime/*` routes on mcp-host are wrapped in `runtimeEdgeGuard`, which returns `401 Authorization is not accepted on this direct mcp-host runtime route` if an `Authorization` header is present.                                                                                                                                                                                              |
-| **Issuer**                   | All RPC tokens have `iss: "control-api"`. mcp-host must have `CLERUM_AUTH_JWT_ISSUER=control-api`                                                                                                                                                                                                                                                                                                                                                                                      |
-| **Edge headers**             | `rpc-proxy/src/services/controlApiRestService.ts` returns `headers: {}` on purpose; `mcpProxyService.ts` then adds `x-clerum-edge-caller: rpc-proxy`, `x-clerum-edge-host-ref`, `x-clerum-edge-user-id`. Adding an `Authorization` header here would make every mcp-host call fail 401.                                                                                                                                                                                                |
+| Invariant                    | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Same RSA key**             | `rpc-proxy-secrets.RPC_PROXY_JWT_PUBLIC_KEY` == `mcp-host-config.CLERUM_AUTH_JWT_PUBLIC_KEY` == `gfs-config.jwt-public-key` == public pair of `control-api-secrets.CONTROL_API_RPC_JWT_PRIVATE_KEY`. `scripts/minikube/generate-keys.sh` writes the two Secrets into `deploy/minikube/secrets/jwt-signing-keys.yaml`; the ConfigMap values are **not** in that manifest — `scripts/minikube/sync-auth-key.sh` copies the public key from the live `rpc-proxy-secrets` Secret into both live consumer ConfigMaps. |
+| **Token stops at rpc-proxy** | The RPC token (`aud: "rpc-proxy"`) is validated by rpc-proxy and is NOT forwarded. `/v1/runtime/*` routes on mcp-host are wrapped in `runtimeEdgeGuard`, which returns `401 Authorization is not accepted on this direct mcp-host runtime route` if an `Authorization` header is present.                                                                                                                                                                                                                        |
+| **Issuer**                   | All RPC tokens have `iss: "control-api"`. mcp-host must have `CLERUM_AUTH_JWT_ISSUER=control-api`                                                                                                                                                                                                                                                                                                                                                                                                                |
+| **Edge headers**             | `rpc-proxy/src/services/controlApiRestService.ts` returns `headers: {}` on purpose; `mcpProxyService.ts` then adds `x-clerum-edge-caller: rpc-proxy`, `x-clerum-edge-host-ref`, `x-clerum-edge-user-id`. Adding an `Authorization` header here would make every mcp-host call fail 401.                                                                                                                                                                                                                          |
+
+### GFS Upload v2 local/T2 profile
+
+The committed Minikube overlay enables GFS Upload v2 through
+`patches/gfs-upload-v2.yaml`. It patches the host-context-controller, which is
+the owner of generated GFSC workload configuration, with the release defaults:
+a 200 MiB product file limit, preferred 8 MiB / maximum 16 MiB parts, four parts
+per session, sixteen global part streams, and the documented TTL, admission,
+and free-space limits. Operators may set
+`CONTEXT_MAPPER_GFSC_UPLOAD_PRODUCT_MAX_FILE_BYTES` from one byte through the
+compiled 1 GiB protocol maximum. HCC forwards the value as
+`GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES`; GFSC advertises and enforces that exact
+value for new sessions. Invalid, non-integer, or above-protocol values make
+GFSC fail startup rather than being clamped. The deprecated
+`CONTEXT_MAPPER_GFSC_UPLOAD_MAX_FILE_BYTES` alias may remain during rollout,
+but when both names are present they must carry the same value. `minikube-ghcr`,
+`minikube-no-uis`, and
+`minikube-no-uis-ghcr` inherit the same patch from the base Minikube overlay.
+
+The `GlobalFileSystem` resource intentionally does not carry
+`uploadV2Enabled`. Feature activation and product limits are operator-owned HCC
+configuration; editing an HCC-generated `gfsc-writer` Deployment would be
+overwritten by reconciliation. The public deployment base remains disabled,
+and this local activation does not authorize enabling a production overlay.
+
+Validate the committed profile without touching a cluster:
+
+```bash
+bash scripts/tests/test-minikube-gfs-upload-v2-profile.sh
+```
+
+The opt-in packaged runtime journeys use the same built Desktop and deployed
+Control UI bundle while changing the owned HCC setting from 100 MiB to 300 MiB.
+They verify exact-cap acceptance, cap-plus-one rejection, and a 250 MiB upload
+after the increase. Set `GFS_UPLOAD_V2_RUNTIME_LIMIT_E2E=1` only after the
+branch-owned profile has passed pre-gate sync. The harness refuses an unowned,
+dirty, stale, or production-like context and restores the prior product limit
+in a `finally` block.
 
 ### Required Configuration Per Service
 
@@ -435,6 +501,26 @@ kubectl rollout restart deployment/rpc-proxy -n rpc-proxy --context clerum-test
 ---
 
 ## Port Forwards for the Desktop App
+
+On a branch-owned profile, do not use the shared `:3000`/`:8090` mapping
+below. First-hand entry point (gitignored helper at repo root — do not
+search for it):
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+```
+
+Implementation: `.local-notes/minikube-profiles/branch-profile.sh`.
+HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
+`make minikube-pf-all-bg` is a gate refresh only; it must not replace
+`branch-profile-pf`. `branch-profile-pf-health` starts PFs then STOPS them
+on EXIT — do not use it as the lasting hold.
+
+The shared `clerum-test` Desktop mapping remains:
 
 ```bash
 make minikube-pf-desktop
@@ -999,8 +1085,13 @@ kubectl rollout restart deployment/control-api -n control-plane
 kubectl rollout restart deployment/external-rest-api -n profiles
 ```
 
+The chained auth-key sync restarts the GFSC writer and reader itself when their
+database credential is populated and the GFS ConfigMap changed, so they are not
+duplicated in the manual restart list above.
+
 > **Note**: you do not edit the public key by hand.
 > `scripts/minikube/sync-auth-key.sh` copies `RPC_PROXY_JWT_PUBLIC_KEY` from the
 > `rpc-proxy-secrets` Secret into the live `mcp-host-config` ConfigMap (as
-> `CLERUM_AUTH_JWT_PUBLIC_KEY`), and it is already invoked by
+> `CLERUM_AUTH_JWT_PUBLIC_KEY`) and the live `gfs-config` ConfigMap (as
+> `jwt-public-key`), and it is already invoked by
 > `make minikube-gen-keys` and `make minikube-deploy-all`.

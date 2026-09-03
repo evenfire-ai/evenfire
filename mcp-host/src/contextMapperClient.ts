@@ -9,16 +9,177 @@ import { McpServerInfo } from './types'
 
 export interface McpServersResponse {
   servers: McpServerInfo[]
-  contextRef: string
   timestamp: string
 }
 
 export interface AuthTokenResponse {
   token: string | null
-  message?: string
+  credentialRevision: string
 }
 
 const DEFAULT_CONTEXT_MAPPER_REQUEST_TIMEOUT_MS = 10_000
+const MCP_SERVER_NAME_PATTERN = /^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$/
+
+export type ContextMapperRequestKind = 'inventory' | 'credential'
+
+export class ContextMapperRequestError extends Error {
+  constructor(
+    readonly status: number,
+    readonly kind: ContextMapperRequestKind,
+    readonly authorizationFailure: boolean
+  ) {
+    super(
+      authorizationFailure
+        ? 'HCC caller authority was rejected'
+        : `HCC ${kind} request failed with status ${status}`
+    )
+    this.name = 'ContextMapperRequestError'
+  }
+}
+
+export class ContextMapperCredentialRevisionError extends Error {
+  constructor() {
+    super('HCC credential authority changed during retrieval')
+    this.name = 'ContextMapperCredentialRevisionError'
+  }
+}
+
+export function isContextMapperAuthorityRevocation(error: unknown): boolean {
+  return (
+    error instanceof ContextMapperCredentialRevisionError ||
+    (error instanceof ContextMapperRequestError &&
+      (error.authorizationFailure || (error.kind === 'credential' && error.status === 404)))
+  )
+}
+
+/**
+ * An inventory 404 means HCC could not resolve the authenticated Host's live
+ * Context authority. Unlike a credential 404 (which retires one target), this
+ * invalidates the complete locally-published MCP fleet.
+ */
+export function isContextMapperInventoryAuthorityRevocation(error: unknown): boolean {
+  return (
+    error instanceof ContextMapperRequestError && error.kind === 'inventory' && error.status === 404
+  )
+}
+
+export interface ContextMapperAuthentication {
+  getAccessToken(): string
+  refreshOnUnauthorized(): Promise<void>
+  /** Required so every authenticated client has a synchronous revocation hook. */
+  onCallerAuthorizationFailure(status: 401 | 403): void
+}
+
+export interface ContextMapperClientOptions {
+  requestTimeoutMs?: number
+  authentication?: ContextMapperAuthentication
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function decodeMcpServer(value: unknown): McpServerInfo {
+  if (!isRecord(value)) throw new Error('HCC inventory response is malformed')
+  if ('contextRef' in value || 'auth' in value || 'secretRef' in value || 'secretKey' in value) {
+    throw new Error('HCC inventory response contains forbidden authority metadata')
+  }
+  if (typeof value.name !== 'string' || !MCP_SERVER_NAME_PATTERN.test(value.name)) {
+    throw new Error('HCC inventory response contains an invalid server selector')
+  }
+  if (!isRecord(value.transport)) throw new Error('HCC inventory response is malformed')
+  const transportType = value.transport.type
+  if (!['sse', 'streamableHttp', 'stdio'].includes(String(transportType))) {
+    throw new Error('HCC inventory response contains an invalid transport')
+  }
+  const transportUrl = value.transport.url
+  if (transportUrl !== undefined && typeof transportUrl !== 'string') {
+    throw new Error('HCC inventory response contains an invalid transport')
+  }
+  const transportPort = value.transport.port
+  if (
+    transportPort !== undefined &&
+    (!Number.isSafeInteger(transportPort) ||
+      (transportPort as number) < 1 ||
+      (transportPort as number) > 65_535)
+  ) {
+    throw new Error('HCC inventory response contains an invalid transport port')
+  }
+  if (typeof value.enabled !== 'boolean' || typeof value.authRequired !== 'boolean') {
+    throw new Error('HCC inventory response is malformed')
+  }
+  if (!isRecord(value.status)) throw new Error('HCC inventory response is malformed')
+  if (typeof value.status.deployed !== 'boolean' || typeof value.status.ready !== 'boolean') {
+    throw new Error('HCC inventory response is malformed')
+  }
+  if (
+    value.credentialRevision !== undefined &&
+    (typeof value.credentialRevision !== 'string' || !value.credentialRevision)
+  ) {
+    throw new Error('HCC inventory response contains an invalid credential revision')
+  }
+  if (value.authRequired && typeof value.credentialRevision !== 'string') {
+    throw new Error('HCC authenticated server is missing its credential revision')
+  }
+  // authKind is non-secret policy (mini-spec §3.3): an absent value degrades to
+  // `static` at dispatch (fail-closed); a present-but-unknown value is rejected,
+  // consistent with the strictness of the rest of the decoder. authKind is NOT
+  // on the forbidden-metadata denylist, so accepting it leaves that guard intact.
+  if (
+    value.authKind !== undefined &&
+    !['static', 'oauth-user', 'oauth-context'].includes(String(value.authKind))
+  ) {
+    throw new Error('HCC inventory response contains an invalid authKind')
+  }
+
+  return {
+    name: value.name,
+    ...(typeof value.description === 'string' ? { description: value.description } : {}),
+    transport: {
+      type: transportType as McpServerInfo['transport']['type'],
+      ...(typeof transportUrl === 'string' ? { url: transportUrl } : {}),
+      ...(typeof transportPort === 'number' ? { port: transportPort } : {}),
+    },
+    enabled: value.enabled,
+    authRequired: value.authRequired,
+    ...(typeof value.credentialRevision === 'string'
+      ? { credentialRevision: value.credentialRevision }
+      : {}),
+    ...(typeof value.authKind === 'string'
+      ? { authKind: value.authKind as McpServerInfo['authKind'] }
+      : {}),
+    status: {
+      deployed: value.status.deployed,
+      ready: value.status.ready,
+      ...(typeof value.status.authoritative === 'boolean'
+        ? { authoritative: value.status.authoritative }
+        : {}),
+    },
+  }
+}
+
+function decodeInventoryResponse(value: unknown): McpServersResponse {
+  if (!isRecord(value) || !Array.isArray(value.servers) || typeof value.timestamp !== 'string') {
+    throw new Error('HCC inventory response is malformed')
+  }
+  return { servers: value.servers.map(decodeMcpServer), timestamp: value.timestamp }
+}
+
+function decodeCredentialResponse(value: unknown): AuthTokenResponse {
+  if (!isRecord(value)) throw new Error('HCC credential response is malformed')
+  const keys = Object.keys(value).sort()
+  if (
+    keys.length !== 2 ||
+    keys[0] !== 'credentialRevision' ||
+    keys[1] !== 'token' ||
+    (value.token !== null && typeof value.token !== 'string') ||
+    typeof value.credentialRevision !== 'string' ||
+    !value.credentialRevision
+  ) {
+    throw new Error('HCC credential response is malformed')
+  }
+  return { token: value.token as string | null, credentialRevision: value.credentialRevision }
+}
 
 /**
  * Context Mapper client.
@@ -26,16 +187,78 @@ const DEFAULT_CONTEXT_MAPPER_REQUEST_TIMEOUT_MS = 10_000
 export class ContextMapperClient {
   private baseUrl: string
   private requestTimeoutMs: number
+  private authentication?: ContextMapperAuthentication
 
-  constructor(baseUrl: string, requestTimeoutMs = DEFAULT_CONTEXT_MAPPER_REQUEST_TIMEOUT_MS) {
+  constructor(
+    baseUrl: string,
+    options: number | ContextMapperClientOptions = DEFAULT_CONTEXT_MAPPER_REQUEST_TIMEOUT_MS
+  ) {
     this.baseUrl = baseUrl.replace(/\/$/, '') // Remove trailing slash
-    this.requestTimeoutMs = requestTimeoutMs
+    this.requestTimeoutMs =
+      typeof options === 'number'
+        ? options
+        : (options.requestTimeoutMs ?? DEFAULT_CONTEXT_MAPPER_REQUEST_TIMEOUT_MS)
+    this.authentication = typeof options === 'number' ? undefined : options.authentication
   }
 
-  private fetch(input: string): Promise<Response> {
+  private fetch(input: string, init: RequestInit = {}): Promise<Response> {
     return fetch(input, {
+      ...init,
       signal: AbortSignal.timeout(this.requestTimeoutMs),
     })
+  }
+
+  private accessToken(kind: ContextMapperRequestKind): string {
+    let token = ''
+    try {
+      token = this.authentication?.getAccessToken().trim() ?? ''
+    } catch {
+      // Treat an unreadable local credential exactly like an HCC rejection:
+      // revoke any already-published fleet before returning to the caller.
+    }
+    if (!token) {
+      this.authentication?.onCallerAuthorizationFailure(401)
+      throw new ContextMapperRequestError(401, kind, true)
+    }
+    return token
+  }
+
+  private async protectedFetch(
+    path: string,
+    kind: ContextMapperRequestKind,
+    init: RequestInit = {}
+  ): Promise<Response> {
+    let retriedAfterRefresh = false
+    for (;;) {
+      const response = await this.fetch(`${this.baseUrl}${path}`, {
+        ...init,
+        headers: {
+          Accept: 'application/json',
+          ...init.headers,
+          Authorization: `Bearer ${this.accessToken(kind)}`,
+        },
+      })
+
+      if (response.status === 401 && !retriedAfterRefresh && this.authentication) {
+        retriedAfterRefresh = true
+        try {
+          await this.authentication.refreshOnUnauthorized()
+        } catch {
+          this.authentication.onCallerAuthorizationFailure(401)
+          throw new ContextMapperRequestError(401, kind, true)
+        }
+        continue
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        this.authentication?.onCallerAuthorizationFailure(response.status)
+        throw new ContextMapperRequestError(response.status, kind, true)
+      }
+      if (!response.ok) {
+        throw new ContextMapperRequestError(response.status, kind, false)
+      }
+      return response
+    }
   }
 
   /**
@@ -45,78 +268,48 @@ export class ContextMapperClient {
     try {
       const response = await this.fetch(`${this.baseUrl}/ready`)
       return response.ok
-    } catch (error) {
-      console.error('[ContextMapper] Health check failed:', error)
+    } catch {
+      console.error('[ContextMapper] Health check failed (reason=transport)')
       return false
     }
   }
 
   /**
-   * List all McpServers.
-   * Rejects transport and HTTP failures so a future caller cannot confuse an
-   * unavailable controller with an authoritative empty fleet.
+   * List only the McpServers authorized for the authenticated Host. The old
+   * global/context-selecting v1 routes are intentionally not represented by
+   * this client.
    */
-  async listAllServers(): Promise<McpServerInfo[]> {
-    console.log('[ContextMapper] Fetching all McpServers')
-
-    const response = await this.fetch(`${this.baseUrl}/api/v1/mcpservers`)
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-    }
-
-    const data = (await response.json()) as McpServersResponse
-    console.log(`[ContextMapper] Found ${data.servers.length} McpServer(s)`)
-    return data.servers
-  }
-
-  /**
-   * List McpServers by contextRef.
-   * Rejects unavailable or invalid responses so callers cannot confuse a
-   * failed discovery request with an authoritative empty inventory.
-   */
-  async listServersByContext(contextRef: string): Promise<McpServerInfo[]> {
-    console.log(`[ContextMapper] Fetching McpServers for context: ${contextRef}`)
-
-    const response = await this.fetch(
-      `${this.baseUrl}/api/v1/mcpservers/context/${encodeURIComponent(contextRef)}`
-    )
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-    }
-
-    const data = (await response.json()) as McpServersResponse
-    console.log(
-      `[ContextMapper] Found ${data.servers.length} McpServer(s) for context ${contextRef}`
-    )
-    console.log(`[ContextMapper] Response:`, JSON.stringify(data, null, 2))
+  async listServersForHost(): Promise<McpServerInfo[]> {
+    const response = await this.protectedFetch('/api/v2/hosts/self/mcpservers', 'inventory')
+    const data = decodeInventoryResponse(await response.json())
+    console.log(`[ContextMapper] Received ${data.servers.length} authorized MCP server(s)`)
     return data.servers
   }
 
   /**
    * Get auth token for an McpServer.
    */
-  async getAuthToken(serverName: string): Promise<string | undefined> {
-    console.log(`[ContextMapper] Fetching auth token for server: ${serverName}`)
-
-    const response = await this.fetch(
-      `${this.baseUrl}/api/v1/mcpservers/${encodeURIComponent(serverName)}/auth`
+  async getAuthToken(
+    serverName: string,
+    expectedCredentialRevision?: string
+  ): Promise<string | undefined> {
+    if (!expectedCredentialRevision) {
+      throw new ContextMapperCredentialRevisionError()
+    }
+    const response = await this.protectedFetch(
+      '/api/v2/hosts/self/mcpservers/credential',
+      'credential',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ serverName }),
+      }
     )
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+    const data = decodeCredentialResponse(await response.json())
+    if (data.credentialRevision !== expectedCredentialRevision) {
+      throw new ContextMapperCredentialRevisionError()
     }
-
-    const data = (await response.json()) as AuthTokenResponse
-
-    if (data.token) {
-      console.log(`[ContextMapper] Found auth token for server: ${serverName}`)
-      return data.token
-    }
-
-    console.log(`[ContextMapper] No auth token for server: ${serverName}`)
-    return undefined
+    return data.token ?? undefined
   }
 
   /**
@@ -125,16 +318,9 @@ export class ContextMapperClient {
    * so callers preserve their last known fleet instead of treating an
    * unavailable controller as an authoritative empty inventory.
    */
-  async pollServers(contextRef: string): Promise<{ servers: McpServerInfo[]; timestamp: string }> {
-    const response = await this.fetch(
-      `${this.baseUrl}/api/v1/mcpservers/context/${encodeURIComponent(contextRef)}`
-    )
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-    }
-
-    const data = (await response.json()) as McpServersResponse
+  async pollServers(): Promise<{ servers: McpServerInfo[]; timestamp: string }> {
+    const response = await this.protectedFetch('/api/v2/hosts/self/mcpservers', 'inventory')
+    const data = decodeInventoryResponse(await response.json())
     return { servers: data.servers, timestamp: data.timestamp }
   }
 }
@@ -142,9 +328,11 @@ export class ContextMapperClient {
 // Default client instance (configured from environment)
 let defaultClient: ContextMapperClient | null = null
 
-export function getContextMapperClient(): ContextMapperClient {
+export function getContextMapperClient(
+  authentication: ContextMapperAuthentication
+): ContextMapperClient {
   if (!defaultClient) {
-    defaultClient = new ContextMapperClient(config.contextMapperUrl)
+    defaultClient = new ContextMapperClient(config.contextMapperUrl, { authentication })
   }
   return defaultClient
 }

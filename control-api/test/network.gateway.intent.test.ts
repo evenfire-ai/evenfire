@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import {
+  boundedEnvBytesFromSource,
+  staticExportedBytesFromSource,
+} from './helpers/staticSourceAuthority.js'
+import { assertUploadV2TransportBounds } from './helpers/uploadV2TransportBounds.js'
 
 /** Paths are relative to this file: control-api/test/ → repo root is ../.. */
 const BASE = '../../deploy/base'
@@ -81,6 +86,18 @@ function locationBlock(config: string, marker: string): string {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function staticBytes(relPath: string, symbol: string): number {
+  return staticExportedBytesFromSource(read(relPath), symbol, relPath)
+}
+
+function boundedEnvBytes(
+  relPath: string,
+  property: string,
+  envName: string
+): { fallback: number; ceiling: number } {
+  return boundedEnvBytesFromSource(read(relPath), 'config', property, envName, relPath)
 }
 
 function expectCanonicalPublicEgressExceptions(): void {
@@ -318,15 +335,34 @@ describe('network/gateway intent (manifest-level)', () => {
     const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
     const gatewayConf = docContaining(yamlDocs(configmaps), 'name: control-api-rpc-gateway')
     expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-servers$')
+    // spec 11 U1: the proactive connectors read-model is gated by an rpc access
+    // token (requireRpcTokenUserMatch), not requireInternalService('rpc-proxy'),
+    // so the derived guard below does not cover it — assert its location here or
+    // rpc-proxy's GET /rpc/connectors 403s at the edge (the shipped regression).
+    expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-connectors$')
+    // Scope the method assertion to THIS block: `[^}]*?` cannot cross the block's
+    // closing brace, so deleting the connectors' own `limit_except GET {` makes
+    // this fail instead of silently matching a later location's limit_except
+    // (the vacuous-match defect the old `[\s\S]*?` had).
+    expect(gatewayConf).toMatch(
+      /location ~ \^\/api\/v1\/rpc\/access\/users\/\[\^\/\]\+\/mcp-connectors\$ \{[^}]*?limit_except GET \{/
+    )
+    // nginx resolves regex locations by first match in file order, so the
+    // default-deny `location /` MUST come after this allowlisted block.
+    const connectorsIdx = gatewayConf.indexOf('/mcp-connectors$ {')
+    const defaultDenyIdx = gatewayConf.indexOf('location / {')
+    expect(connectorsIdx).toBeGreaterThan(-1)
+    expect(defaultDenyIdx).toBeGreaterThan(-1)
+    expect(connectorsIdx).toBeLessThan(defaultDenyIdx)
     expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-hosts/[^/]+$')
     expect(gatewayConf).toMatch(
-      /location ~ \^\/api\/v1\/rpc\/access\/users\/\[\^\/\]\+\/mcp-hosts\/\[\^\/\]\+\$ \{[\s\S]*?limit_except GET POST/
+      /location ~ \^\/api\/v1\/rpc\/access\/users\/\[\^\/\]\+\/mcp-hosts\/\[\^\/\]\+\$ \{[^}]*?limit_except GET POST/
     )
     expect(gatewayConf).not.toContain('/api/v1/internal/tracing/direct-run-bindings')
     expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/hosts/[^/]+/wake$')
     expect(gatewayConf).toContain('limit_except GET')
     expect(gatewayConf).toMatch(
-      /location ~ \^\/api\/v1\/rpc\/hosts\/\[\^\/\]\+\/wake\$ \{[\s\S]*?limit_except POST/
+      /location ~ \^\/api\/v1\/rpc\/hosts\/\[\^\/\]\+\/wake\$ \{[^}]*?limit_except POST/
     )
     expect(gatewayConf).toContain('location / {')
     expect(gatewayConf).toContain('return 403;')
@@ -343,41 +379,86 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(funnelConf).toContain('client_max_body_size 25165824;')
   })
 
-  it('keeps the whole GFS upload cap chain homologous (client × 4/3 ≤ gfsc write cap)', () => {
-    // The 16 MB upload feature rests on an invariant spread across 5 files and 2
-    // repos, but only the funnel literal was machine-checked. This asserts the rest
-    // of the chain so deleting the HCC env or drifting a client cap fails loud in CI
-    // instead of silently 413-ing a 16 MB file the client said would fit.
-    const GFSC_WRITE_CAP = 25165824 // 24 MiB — the funnel + gfsc authoritative cap
-
-    // 1. gfsc's write cap is actually plumbed to the pod. Without this env gfsc
-    //    falls back to its 16 MiB in-code default and a 16 MB file (22.4 MB body)
-    //    hard-413s while the client-side cap says it should have worked.
+  it('keeps the GFS v2 part cap chain below the gateway request cap', () => {
+    // Upload v2 is indexed binary streaming: product policy is writer-advertised
+    // session metadata, while protocol and per-request safety remain compiled.
+    // Do not compare the runtime product policy with a single-request body cap.
+    // The legacy JSON/base64 path still requires the HCC-owned gfsc body cap to
+    // agree with the profile funnel. It is not the Upload v2 product authority.
     const hccDeployment = read(`${BASE}/control-plane/host-context-controller.yaml`)
     const gfscCapMatch = hccDeployment.match(
-      /GFS_MAX_WRITE_BODY_BYTES[\s\S]{0,80}?value:\s*"?(\d+)"?/
+      /GFS_MAX_WRITE_BODY_BYTES[\s\S]{0,80}?value:\s*(["']?)(\d+)\1/
     )
     expect(
       gfscCapMatch,
       'GFS_MAX_WRITE_BODY_BYTES env must be set on the HCC deployment'
     ).not.toBeNull()
-    expect(Number(gfscCapMatch![1])).toBe(GFSC_WRITE_CAP)
+    const legacyGfscWriteCap = Number(gfscCapMatch![2])
+    const funnelConf = docContaining(
+      yamlDocs(read(`${BASE}/profiles/configmaps.yaml`)),
+      'name: profile-control-funnel-nginx'
+    )
+    const funnelCapMatch = funnelConf.match(/client_max_body_size\s+(\d+);/)
+    expect(funnelCapMatch, 'profile-control-funnel body cap not found').not.toBeNull()
+    const profileFunnelCap = Number(funnelCapMatch![1])
+    expect(profileFunnelCap).toBe(legacyGfscWriteCap)
 
-    // 2. Both client caps are equal (web and desktop advertise the same limit).
-    const parseClientCap = (relPath: string): number => {
-      const src = read(relPath)
-      const m = src.match(/GFS_FILE_UPLOAD_MAX_BYTES\s*=\s*([0-9*\s]+)/)
-      expect(m, `GFS_FILE_UPLOAD_MAX_BYTES not found in ${relPath}`).not.toBeNull()
-      // Only digits/`*`/spaces are matched, so evaluating the arithmetic is safe.
-      return Number(m![1].split('*').reduce((acc, n) => acc * Number(n.trim()), 1))
-    }
-    const webCap = parseClientCap('../../control-ui/app/constants/gfsFileUpload.ts')
-    const desktopCap = parseClientCap('../../desktop-app/ui/src/constants/gfsFileUpload.ts')
-    expect(webCap).toBe(desktopCap)
-
-    // 3. The base64-inflated client cap (× 4/3) fits under the gfsc write cap, with
-    //    headroom for the JSON envelope.
-    expect(Math.ceil((webCap * 4) / 3)).toBeLessThan(GFSC_WRITE_CAP)
+    // The writer defines the absolute protocol and part bounds. Both packaged
+    // Desktop layers and Control UI mirror those wire limits, not product policy.
+    const writerProtocol = staticBytes(
+      '../../gfs-controller/src/upload/protocol.ts',
+      'GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES'
+    )
+    const writerPart = staticBytes(
+      '../../gfs-controller/src/upload/protocol.ts',
+      'GFS_UPLOAD_V2_MAX_PART_BYTES'
+    )
+    const protocolMirrors = [
+      staticBytes(
+        '../../control-ui/app/constants/gfsFileUpload.ts',
+        'GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES'
+      ),
+      staticBytes(
+        '../../desktop-app/ui/src/constants/gfsFileUpload.ts',
+        'GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES'
+      ),
+      staticBytes('../../desktop-app/src/gfs/upload.ts', 'GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES'),
+    ]
+    const partMirrors = [
+      staticBytes(
+        '../../control-ui/app/constants/gfsFileUpload.ts',
+        'GFS_FILE_UPLOAD_MAX_PART_BYTES'
+      ),
+      staticBytes(
+        '../../desktop-app/ui/src/constants/gfsFileUpload.ts',
+        'GFS_FILE_UPLOAD_MAX_PART_BYTES'
+      ),
+      staticBytes('../../desktop-app/src/gfs/upload.ts', 'GFS_UPLOAD_V2_MAX_PART_BYTES'),
+      staticBytes(
+        '../../control-ui/app/control-api/[...path]/route.ts',
+        'GFS_UPLOAD_MAX_PART_BYTES'
+      ),
+    ]
+    // Every relay defaults to the writer part maximum and refuses configuration
+    // above it. A part must also fit through the profile gateway with headroom.
+    const controlApiRelay = boundedEnvBytes(
+      '../src/config.ts',
+      'gfsUploadMaxPartBytes',
+      'CONTROL_API_GFS_UPLOAD_MAX_PART_BYTES'
+    )
+    const externalRestRelay = boundedEnvBytes(
+      '../../external-rest-api/src/config.ts',
+      'gfsUploadMaxPartBytes',
+      'EXTERNAL_REST_API_GFS_UPLOAD_MAX_PART_BYTES'
+    )
+    assertUploadV2TransportBounds({
+      writerProtocol,
+      writerPart,
+      protocolMirrors,
+      partMirrors,
+      relayBounds: [controlApiRelay, externalRestRelay],
+      gatewayBytes: profileFunnelCap,
+    })
   })
 
   it('keeps control-api memory at >=768Mi in base AND the minikube overlay (RC3 OOM guard)', () => {
@@ -415,7 +496,7 @@ describe('network/gateway intent (manifest-level)', () => {
 
     expect(gatewayConf).toContain('location = /api/v1/mcp-host/hosts/heartbeat')
     expect(gatewayConf).toMatch(
-      /location = \/api\/v1\/mcp-host\/hosts\/heartbeat \{[\s\S]*?limit_except POST/
+      /location = \/api\/v1\/mcp-host\/hosts\/heartbeat \{[^}]*?limit_except POST/
     )
   })
 
@@ -490,7 +571,7 @@ describe('network/gateway intent (manifest-level)', () => {
 
     expect(gatewayConf).toContain('location = /api/v1/internal/tracing/agent-run-events')
     expect(gatewayConf).toMatch(
-      /location = \/api\/v1\/internal\/tracing\/agent-run-events \{[\s\S]*?limit_except POST/
+      /location = \/api\/v1\/internal\/tracing\/agent-run-events \{[^}]*?limit_except POST/
     )
     expect(gatewayConf).toMatch(
       /location = \/api\/v1\/internal\/tracing\/agent-run-events \{[\s\S]*?proxy_set_header Authorization \$http_authorization;/
@@ -503,7 +584,7 @@ describe('network/gateway intent (manifest-level)', () => {
 
     expect(gatewayConf).toContain('location = /api/v1/internal/tracing/approval-prompt-history')
     expect(gatewayConf).toMatch(
-      /location = \/api\/v1\/internal\/tracing\/approval-prompt-history \{[\s\S]*?limit_except POST/
+      /location = \/api\/v1\/internal\/tracing\/approval-prompt-history \{[^}]*?limit_except POST/
     )
     expect(gatewayConf).toMatch(
       /location = \/api\/v1\/internal\/tracing\/approval-prompt-history \{[\s\S]*?proxy_set_header Authorization \$http_authorization;/

@@ -215,6 +215,34 @@ export async function listAllowedModels(db: DbClient = pool): Promise<LlmAllowed
   return (result.rows as Record<string, unknown>[]).map(rowToModel)
 }
 
+/**
+ * Stale AND enabled rows — models the Fase 4 sync flagged as vanished from the
+ * external catalog (`stale=true`) while leaving `enabled` intact, so they still
+ * ship in the runtime allowlist ConfigMap and keep working. The operator-
+ * attention feed (Fase 5) is the sole consumer: it enumerates these and reports
+ * the ones still referenced as `stale_model_referenced` — an ACTIONABLE item
+ * whose remedy is the impact-gated PUT that disables the model.
+ *
+ * The `AND enabled` filter is load-bearing for that contract. A `stale` model
+ * that is ALREADY disabled but still referenced (a dangling reference left after
+ * a force-disable) is NOT actionable through this feed — its suggested action
+ * ("disable it") is already done — so surfacing it would make the feed never
+ * converge to zero after the very action it asked for. That "disabled + still
+ * referenced" state is a distinct, diagnostic-only concern (a future
+ * `dangling_reference` kind, designed separately); it is not lost here — it stays
+ * derivable via `computeModelImpact`. Deterministic ordering keeps the feed
+ * stable across calls.
+ */
+export async function listStaleAllowedModels(db: DbClient = pool): Promise<LlmAllowedModel[]> {
+  const result = await db.query(
+    `SELECT ${MODEL_COLUMNS}
+       FROM llm_allowed_models
+      WHERE stale AND enabled
+      ORDER BY provider ASC, model ASC`
+  )
+  return (result.rows as Record<string, unknown>[]).map(rowToModel)
+}
+
 export async function getAllowedModel(
   id: string,
   db: DbClient = pool
@@ -386,6 +414,53 @@ export async function listEnabledModelNamesForProvider(
 }
 
 /**
+ * Full allowlist state for one `(provider, model)`: `{ enabled, stale }`, or
+ * `null` when no row exists. Fase 6 (soft quarantine of `stale` models) reads
+ * this on the operator write path so the gate can WARN — never block — when an
+ * `enabled` but `stale` model (vanished from the external catalog, Fase 4) is
+ * assigned to something NEW. `isModelAllowed` stays the boolean fail-closed gate
+ * (unchanged callers, unchanged semantics); this is strictly additive.
+ */
+export async function getModelAllowlistState(
+  provider: string,
+  model: string,
+  db: DbClient = pool
+): Promise<{ enabled: boolean; stale: boolean } | null> {
+  const result = await db.query(
+    `SELECT enabled, stale FROM llm_allowed_models
+      WHERE provider = $1 AND model = $2
+      LIMIT 1`,
+    [provider, model]
+  )
+  const row = result.rows[0] as Record<string, unknown> | undefined
+  if (!row) return null
+  return { enabled: Boolean(row.enabled), stale: Boolean(row.stale) }
+}
+
+/**
+ * Enabled model names for one provider WITH their `stale` flag (Fase 6 grant
+ * gate). Same `enabled`-only filter as `listEnabledModelNamesForProvider`; adds
+ * `stale` so the grant write gate can warn on a NEW assignment of an enabled-but-
+ * stale model without a second round-trip. A `stale` model is still `enabled`, so
+ * it still appears here — quarantine is a warning, not a de-listing (R3.7).
+ */
+export async function listEnabledModelsWithStaleForProvider(
+  provider: string,
+  db: DbClient = pool
+): Promise<Array<{ model: string; stale: boolean }>> {
+  const result = await db.query(
+    `SELECT model, stale FROM llm_allowed_models
+      WHERE provider = $1 AND enabled
+      ORDER BY model ASC`,
+    [provider]
+  )
+  return (result.rows as Record<string, unknown>[]).map(row => ({
+    model: String(row.model),
+    stale: Boolean(row.stale),
+  }))
+}
+
+/**
  * Enabled rows grouped by provider, shaped for the ConfigMap materializer.
  * Only providers with at least one enabled row appear. Deterministic ordering
  * (provider then model) keeps the materialized content hash stable.
@@ -397,6 +472,7 @@ export async function listEnabledGroupedByProvider(
     `SELECT provider, model, vendor, display_name, context_window_tokens
        FROM llm_allowed_models
       WHERE enabled
+        AND NOT (provider = 'codex-subscription' AND stale)
       ORDER BY provider ASC, model ASC`
   )
   // Null-prototype map so a stray/legacy `provider` value equal to an

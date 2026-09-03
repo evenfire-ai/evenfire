@@ -15,6 +15,8 @@ type DesktopConfig = Omit<DesktopRuntimeConfig, 'appName' | 'rpcProxyBaseUrl'> &
   memberRegistrationServiceBaseUrl: string
   desktopProfileUiBaseUrl: string
   desktopProfileUiBaseUrlExplicit: boolean
+  deploymentDocsUrl: string
+  hostedSignupUrl: string
   requestTimeoutMs: number
   gfsUploadTimeoutMs: number
   appName: string
@@ -47,7 +49,39 @@ const DEFAULT_APP_NAME = 'Evenfire'
 const LOCALHOST_OPTION_ID = '__localhost__'
 const LOCALHOST_EXTERNAL_REST_API_BASE_URL = 'http://127.0.0.1:8091'
 const LOCALHOST_RPC_PROXY_BASE_URL = 'http://127.0.0.1:8094'
+// Where onboarding's self-hosted path sends the user. Self-hosting
+// means any cluster the user controls — remote or local — so this must land on
+// documentation that covers both shapes, never on the minikube quickstart
+// alone. A build-time constant, overridable only where the dev env config gate
+// already allows overrides, so a packaged build cannot be pointed elsewhere.
+const DEFAULT_DEPLOYMENT_DOCS_URL =
+  'https://github.com/evenfire-ai/evenfire#deploying-to-a-remote-cluster'
+// Where onboarding's hosted path sends the user. Today this is the
+// marketing site, not a signup endpoint: there is no tenant provisioning and no
+// evenfire://desktop-environment handoff yet, so the hosted step links out and
+// offers the manual-address fallback for when the user returns with a server.
+// Same build-time-constant rule as the docs URL.
+const DEFAULT_HOSTED_SIGNUP_URL = 'https://evenfire.ai'
 const RUNTIME_CONFIG_DIR_NAME = 'runtime-configs'
+/**
+ * Dev switch for previewing the first-run onboarding flow on a
+ * machine that already has environments configured. Defaults to false; only
+ * the exact string "true" enables it.
+ *
+ * Onboarding is by definition the zero-environment state, so a developer whose
+ * app is already configured — including anyone launched by `make local-app`,
+ * which exports EXTERNAL_REST_API_BASE_URL and RPC_PROXY_BASE_URL — can never
+ * reach it. Rather than fake the view, this makes the app genuinely start cold:
+ * it reads and writes runtime config in a SEPARATE directory and ignores the
+ * env-var runtime config. The wizard is real, saving an environment works, and
+ * the developer's actual environments are neither read nor modified — unset the
+ * variable and they are all still there.
+ */
+const ONBOARDING_PREVIEW = process.env.EVENFIRE_ONBOARDING_PREVIEW?.trim().toLowerCase() === 'true'
+const ONBOARDING_PREVIEW_DIR_NAME = 'runtime-configs-onboarding-preview'
+const activeRuntimeConfigDirName = ONBOARDING_PREVIEW
+  ? ONBOARDING_PREVIEW_DIR_NAME
+  : RUNTIME_CONFIG_DIR_NAME
 const RUNTIME_CONFIG_INDEX_FILE = 'index.json'
 const PACKAGED_ENV_FILE = '.env.prod'
 const MAX_PROFILE_FILE_ATTEMPTS = 1000
@@ -135,6 +169,9 @@ loadPackagedEnv()
 
 function explicitRuntimeConfigPath(): string {
   if (app?.isPackaged) return ''
+  // The onboarding preview owns its own directory; an explicit config file
+  // would hand it a configured environment and defeat the point.
+  if (ONBOARDING_PREVIEW) return ''
   return process.env.CLERUM_DESKTOP_CONFIG_PATH?.trim() || ''
 }
 
@@ -190,11 +227,11 @@ function runtimeConfigDirectoryPath(): string {
   if (explicit) return path.dirname(explicit)
 
   if (app?.isReady()) {
-    return path.join(app.getPath('userData'), RUNTIME_CONFIG_DIR_NAME)
+    return path.join(app.getPath('userData'), activeRuntimeConfigDirName)
   }
 
   // Keep a deterministic fallback before Electron is ready.
-  return path.join(defaultUserDataDirectoryPath(), RUNTIME_CONFIG_DIR_NAME)
+  return path.join(defaultUserDataDirectoryPath(), activeRuntimeConfigDirName)
 }
 
 function runtimeConfigIndexPath(): string {
@@ -299,6 +336,14 @@ function loadStoredProfilesSync(): {
   profiles: StoredRuntimeProfile[]
   activeProfileId: string | null
 } {
+  // The onboarding preview starts cold on EVERY launch. Selecting Localhost or
+  // saving an environment writes to the preview directory, which would leave
+  // the next launch configured — the switch would show onboarding once and
+  // then silently stop, which is exactly the confusion it exists to prevent.
+  // Reads are dropped rather than the directory deleted: writes still work, so
+  // the wizard can be completed and used for the rest of the session.
+  if (ONBOARDING_PREVIEW) return { profiles: [], activeProfileId: null }
+
   const explicitPath = explicitRuntimeConfigPath()
   if (explicitPath) {
     const configFromFile = readRuntimeConfigFileSync(explicitPath)
@@ -508,6 +553,9 @@ const desktopDevPackageRuntimeConfigEnabled =
   runtimeEndpointsMatch(envRuntimeConfig, localhostRuntimeConfig)
 const canUseEnvRuntimeConfig = !app?.isPackaged || desktopDevPackageRuntimeConfigEnabled
 const envRuntimeConfigured = Boolean(
+  // `make local-app` exports both of these, which would mark the app
+  // configured and skip the wizard the preview exists to show.
+  !ONBOARDING_PREVIEW &&
   canUseEnvRuntimeConfig &&
   process.env.EXTERNAL_REST_API_BASE_URL?.trim() &&
   process.env.RPC_PROXY_BASE_URL?.trim()
@@ -542,6 +590,33 @@ let desktopRuntimeConfigured = Boolean(
   activeStoredProfile || envRuntimeConfigured || activeRuntimeOptionId === LOCALHOST_OPTION_ID
 )
 
+/**
+ * Diagnostic for "why did the app open on this screen?".
+ *
+ * `configured` decides sign-in vs. the first-run onboarding wizard, and it is
+ * resolved twice: once at module load, then again by
+ * `hydrateDesktopRuntimeConfig` once Electron is ready. Only the second value
+ * reaches the renderer, so this is logged from there — logging the module-load
+ * value instead reports a screen the user never sees. No URLs, tokens or paths
+ * beyond the config directory name; nothing secret.
+ */
+function logRuntimeConfigResolution(): void {
+  if (process.env.VITEST) return
+  console.log(
+    '[evenfire] runtime config:',
+    JSON.stringify({
+      configured: desktopRuntimeConfigured,
+      screen: desktopRuntimeConfigured ? 'sign-in' : 'onboarding',
+      onboardingPreview: ONBOARDING_PREVIEW,
+      onboardingPreviewRaw: process.env.EVENFIRE_ONBOARDING_PREVIEW ?? '(unset)',
+      activeOptionId: activeRuntimeOptionId,
+      configDir: activeRuntimeConfigDirName,
+      isPackaged: Boolean(app?.isPackaged),
+      devPackageLaunch: desktopDevPackageRuntimeConfigEnabled,
+    })
+  )
+}
+
 const initialRuntimeConfig =
   activeRuntimeOptionId === LOCALHOST_OPTION_ID
     ? localhostRuntimeConfig
@@ -556,11 +631,18 @@ export const config: DesktopConfig = {
   ),
   desktopProfileUiBaseUrl: deriveProfileUiBaseUrl(initialRuntimeConfig.externalRestApiBaseUrl),
   desktopProfileUiBaseUrlExplicit: hasExplicitProfileUiBaseUrl(),
+  deploymentDocsUrl: canUseEnvRuntimeConfig
+    ? requiredOrDefault('DEPLOYMENT_DOCS_URL', DEFAULT_DEPLOYMENT_DOCS_URL)
+    : DEFAULT_DEPLOYMENT_DOCS_URL,
+  hostedSignupUrl: canUseEnvRuntimeConfig
+    ? requiredOrDefault('HOSTED_SIGNUP_URL', DEFAULT_HOSTED_SIGNUP_URL)
+    : DEFAULT_HOSTED_SIGNUP_URL,
   requestTimeoutMs: Number(requiredOrDefault('REQUEST_TIMEOUT_MS', '60000')),
-  // Generous per-call deadline for GFS uploads: a 16 MB file is a ~22.4 MB
-  // base64 body, ~60s alone on a slow uplink — the 60s REQUEST_TIMEOUT_MS would
-  // abort it while every downstream hop still waits 300s. Parity with control-ui
-  // GFS_UPLOAD_TIMEOUT_MS.
+  // Generous deadline for legacy JSON GFS uploads: a 16 MiB file is a ~22.4 MiB
+  // base64 body, ~60s alone on a slow uplink. v2 streams binary indexed parts and
+  // has its own per-part/finalization deadlines.
+  // Keep legacy parity with control-ui GFS_UPLOAD_TIMEOUT_MS while each v2 part
+  // remains bounded by the upload protocol timeout.
   gfsUploadTimeoutMs: Number(requiredOrDefault('GFS_UPLOAD_TIMEOUT_MS', '300000')),
   appName: initialRuntimeConfig.appName?.trim() || DEFAULT_APP_NAME,
 }
@@ -590,14 +672,24 @@ export function hydrateDesktopRuntimeConfig(): void {
   if (runtimeConfigHydrated) return
   if (!app?.isReady()) return
   runtimeConfigHydrated = true
+  resolveHydratedRuntimeConfig()
+  logRuntimeConfigResolution()
+}
 
+function resolveHydratedRuntimeConfig(): void {
   const loaded = loadStoredProfilesSync()
   storedProfiles = loaded.profiles
   const preserveLocalhostRuntime =
-    preferLocalhostRuntimeByDefault ||
-    (desktopDevPackageRuntimeConfigEnabled &&
-      envMatchesLocalhostOption &&
-      isLocalhostRuntimeConfig(currentRuntimeConfig()))
+    // The onboarding preview must not be pulled back onto the Localhost
+    // option here. `make local-app` satisfies every condition below — it
+    // passes --evenfire-desktop-dev-package and points the env endpoints at
+    // 127.0.0.1 — which would re-mark the app configured after boot and land
+    // the developer on sign-in, the exact screen the preview exists to bypass.
+    !ONBOARDING_PREVIEW &&
+    (preferLocalhostRuntimeByDefault ||
+      (desktopDevPackageRuntimeConfigEnabled &&
+        envMatchesLocalhostOption &&
+        isLocalhostRuntimeConfig(currentRuntimeConfig())))
   activeRuntimeOptionId = preserveLocalhostRuntime ? LOCALHOST_OPTION_ID : loaded.activeProfileId
 
   const selectedProfile = resolveActiveProfile(storedProfiles, activeRuntimeOptionId)
@@ -699,7 +791,7 @@ export async function saveDesktopRuntimeConfig(next: DesktopRuntimeConfig): Prom
 
 /**
  * Derive the environment namespacing key from a runtime config's external-rest-api
- * and rpc-proxy base origins (spec §5.1, D1). Same REST origin + different RPC
+ * and rpc-proxy base origins. Same REST origin + different RPC
  * origin is a different runtime boundary because desktop session tokens are
  * accepted by the RPC proxy, not by external-rest-api alone.
  *

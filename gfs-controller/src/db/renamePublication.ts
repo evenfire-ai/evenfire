@@ -11,6 +11,9 @@ export interface RenameInput {
   requestId: string;
   subject: string;
   audit: AuditSink;
+  actorOnBehalfOf?: string | null;
+  desktopUserId?: string;
+  authoritySource?: "user-session" | "linked-admin";
   drive: string;
   resourceId: string;
   newName: string;
@@ -73,9 +76,11 @@ function row(value: Record<string, unknown>): Row {
 }
 
 function resource(value: Row): GfsResource {
+  if (!value.updatedAt) throw new Error("rename returned a resource without updatedAt");
   return { resourceId: value.resourceId, drive: value.drive, parentResourceId: value.parentResourceId,
     name: value.name, kind: value.kind, pathCache: value.pathCache, version: value.version,
-    bytes: value.bytes, blobKey: value.blobKey, contentSha256: value.contentSha256, deletedAt: value.deletedAt };
+    bytes: value.bytes, blobKey: value.blobKey, contentSha256: value.contentSha256, deletedAt: value.deletedAt,
+    updatedAt: value.updatedAt };
 }
 
 function same(a: readonly Row[], b: readonly Row[]): boolean {
@@ -172,6 +177,9 @@ function buildPaths(tree: readonly Row[], root: Row, parentPath: string, newName
 function auditEvent(input: RenameInput, outcome: "succeeded" | "failed", reason?: string) {
   return {
     recordType: "mutation_outcome" as const, subject: input.subject, op: "rename",
+    actorOnBehalfOf: input.actorOnBehalfOf ?? null,
+    desktopUserId: input.desktopUserId,
+    authoritySource: input.authoritySource,
     resourceId: normalizeResourceId(input.resourceId), drive: input.drive,
     outcome: outcome === "succeeded" ? "allow" as const : "error" as const,
     reason, requestId: input.requestId, matchedSubject: null,

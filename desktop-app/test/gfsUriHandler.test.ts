@@ -145,10 +145,21 @@ describe('GfsClient.listChildren', () => {
     )
     expect(opts).toEqual({ token: 'tok' })
   })
+
+  it('forwards updatedAt when present and keeps the field optional when omitted', async () => {
+    const withStamp = { ...CHILD, updatedAt: '2026-06-01T12:00:00.000Z' }
+    const requestJson = vi.fn(async () => ({
+      ok: true,
+      data: { items: [withStamp, CHILD], nextCursor: null },
+    })) as GfsTransport['requestJson']
+    const out = await new GfsClient(transport({ requestJson })).listChildren(RID, 'tok')
+    expect(out.items[0]?.updatedAt).toBe('2026-06-01T12:00:00.000Z')
+    expect(out.items[1]?.updatedAt).toBeUndefined()
+  })
 })
 
 describe('GfsClient.listAccessible', () => {
-  it('lists readable GFS resources for the current user session', async () => {
+  it('lists readable GFS resources for the current ordinary user session', async () => {
     const requestJson = vi.fn(async () => ({
       ok: true,
       data: {
@@ -170,6 +181,38 @@ describe('GfsClient.listAccessible', () => {
       'https://api.example/api/v1/me/gfs/resources?drive=main&cursor=cur1',
       { token: 'tok' }
     )
+  })
+
+  it('preserves linked-operator root metadata and root-child shape', async () => {
+    const rootResourceId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const operatorChild = {
+      resourceId: RID,
+      rid: RID,
+      gfsUri: `gfs://main/${RID}`,
+      name: 'Projects',
+      kind: 'directory' as const,
+      path: '/Projects',
+      version: 1,
+      bytes: 0,
+    }
+    const requestJson = vi.fn(async () => ({
+      ok: true,
+      data: {
+        items: [operatorChild],
+        nextCursor: null,
+        rootResourceId,
+        view: 'operator',
+      },
+    })) as GfsTransport['requestJson']
+
+    const out = await new GfsClient(transport({ requestJson })).listAccessible('tok')
+
+    expect(out).toEqual({
+      items: [operatorChild],
+      nextCursor: null,
+      rootResourceId,
+      view: 'operator',
+    })
   })
 })
 
@@ -290,6 +333,7 @@ describe('GfsClient.grant', () => {
 })
 
 const GRANT_ID = '11111111-2222-3333-4444-555555555555'
+const SHARE_ID = '66666666-7777-4888-8999-aaaaaaaaaaaa'
 
 const GRANT_ITEM = {
   id: GRANT_ID,
@@ -373,6 +417,63 @@ describe('GfsClient.revokeGrant', () => {
   })
 })
 
+const SHARE_ITEM = {
+  id: SHARE_ID,
+  drive: 'main',
+  resourceId: RID,
+  subject: { type: 'team', id: 'team-1' },
+  permissions: ['read'],
+  includeDescendants: true,
+}
+
+describe('GfsClient.listShares', () => {
+  it('GETs the exact shares route and unwraps its direct items array', async () => {
+    const requestJson = vi.fn(async () => ({ items: [SHARE_ITEM] })) as GfsTransport['requestJson']
+    const out = await new GfsClient(transport({ requestJson })).listShares(
+      { resourceId: RID, drive: 'main' },
+      'tok'
+    )
+
+    expect(out).toEqual([SHARE_ITEM])
+    expect(requestJson).toHaveBeenCalledWith(
+      'GET',
+      `https://api.example/api/v1/me/gfs/shares?drive=main&resourceId=${RID}`,
+      { token: 'tok' }
+    )
+  })
+
+  it('fails loud when the response carries no items array', async () => {
+    const requestJson = vi.fn(async () => ({ ok: true })) as GfsTransport['requestJson']
+
+    await expect(
+      new GfsClient(transport({ requestJson })).listShares({ resourceId: RID }, 'tok')
+    ).rejects.toThrow('unexpected gfs shares response: missing items array')
+  })
+})
+
+describe('GfsClient.revokeShare', () => {
+  it('DELETEs the exact share route with the bearer token', async () => {
+    const requestJson = vi.fn(async () => ({ ok: true })) as GfsTransport['requestJson']
+
+    await new GfsClient(transport({ requestJson })).revokeShare(SHARE_ID, 'tok')
+
+    expect(requestJson).toHaveBeenCalledWith(
+      'DELETE',
+      `https://api.example/api/v1/me/gfs/shares/${SHARE_ID}`,
+      { token: 'tok' }
+    )
+  })
+
+  it('rejects a non-UUID share id before any round-trip', async () => {
+    const t = transport()
+
+    await expect(new GfsClient(t).revokeShare('../shares', 'tok')).rejects.toThrow(
+      /share id must be a UUID/
+    )
+    expect(t.requestJson).not.toHaveBeenCalled()
+  })
+})
+
 describe('GfsClient.createShare', () => {
   it('POSTs ONE bulk read share for the subjects[] array', async () => {
     const requestJson = vi.fn(async () => ({ ok: true })) as GfsTransport['requestJson']
@@ -441,7 +542,7 @@ describe('GfsClient resource mutations', () => {
     )
   })
 
-  it('replaces, renames, and deletes with If-Match through the user plane', async () => {
+  it('replaces, renames, deletes, and moves with If-Match through the user plane', async () => {
     const requestJson = vi.fn(async () => ({
       ok: true,
       data: CHILD,
@@ -450,6 +551,10 @@ describe('GfsClient resource mutations', () => {
     await client.replaceFile({ resourceId: RID, encodedData: 'aGVsbG8=', ifMatch: 1 }, 'tok')
     await client.renameResource({ resourceId: RID, newName: 'renamed.md', ifMatch: 2 }, 'tok')
     await client.deleteResource({ resourceId: RID, ifMatch: 3 }, 'tok')
+    await client.moveResource(
+      { resourceId: RID, destinationId: '22222222-2222-2222-2222-222222222222', ifMatch: 4 },
+      'tok'
+    )
     expect(requestJson).toHaveBeenNthCalledWith(
       1,
       'PUT',
@@ -471,6 +576,15 @@ describe('GfsClient resource mutations', () => {
       'DELETE',
       `https://api.example/api/v1/me/gfs/resources/${RID}?drive=main`,
       { token: 'tok', body: { ifMatch: 3 } }
+    )
+    expect(requestJson).toHaveBeenNthCalledWith(
+      4,
+      'PATCH',
+      `https://api.example/api/v1/me/gfs/resources/${RID}?drive=main`,
+      {
+        token: 'tok',
+        body: { newParentId: '22222222-2222-2222-2222-222222222222', ifMatch: 4 },
+      }
     )
   })
 })

@@ -10,9 +10,11 @@ import {
 } from '../../core/tools/workflowEffectiveTargets'
 import type { Attachment, ChatMessage, MessageContentPart, TraceContextV1 } from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
-import type { Task, TaskError } from '../../queue/types'
+import { anthropicApiError } from '../../llm/__tests__/sdkErrorFixtures'
+import { ClaudeProvider } from '../../llm/claude'
+import type { Task, TaskError, TaskSource } from '../../queue/types'
 import { resolveProviderWorkflowCallerContext } from '../../workflow/providerWorkflowCallerContextClient'
-import { TaskExecutor, type TaskExecutorDeps } from '../taskExecutor'
+import { TaskExecutor, type TaskExecutorDeps, executionModeForSource } from '../taskExecutor'
 
 vi.mock('../../config', () => ({
   config: {
@@ -261,6 +263,45 @@ describe('TaskExecutor', () => {
         message: 'LLM down',
         retryable: true,
         provider: 'openai',
+      })
+    )
+  })
+
+  it('surfaces a provider 404 as a non-retryable LLM_MODEL_NOT_AVAILABLE TaskError', async () => {
+    // Derive the LlmError from the real Claude classifier fed a real
+    // Anthropic.APIError (not a hand-built shape), then wrap it exactly as
+    // LlmPortAdapter.handleProviderError does, so the observable TaskError
+    // carries the classified code + additive fields (incl. the correctly-nested
+    // providerCode='not_found_error', not the envelope's 'error').
+    const provider = new ClaudeProvider('fake-key', 'claude-sonnet-4-6')
+    const err404 = anthropicApiError(404, 'not_found_error', 'model: x not found')
+    const c = provider.classifyError(err404)
+    const llmError = new LlmError(
+      c.message,
+      'claude',
+      c.code,
+      c.retryable,
+      undefined,
+      c.httpStatus,
+      c.providerCode
+    )
+    ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockRejectedValueOnce(llmError)
+
+    const deps = createDeps()
+    const task = createTask('Hello')
+    const executor = new TaskExecutor(task, deps)
+
+    await executor.run()
+
+    expect(executor.executorState).toBe('failed')
+    expect(deps.onFail).toHaveBeenCalledWith(
+      task,
+      expect.objectContaining({
+        code: 'LLM_MODEL_NOT_AVAILABLE',
+        retryable: false,
+        provider: 'claude',
+        httpStatus: 404,
+        providerCode: 'not_found_error',
       })
     )
   })
@@ -858,6 +899,78 @@ describe('TaskExecutor', () => {
 
     expect(registerDesktopTools).toHaveBeenCalledTimes(1)
     expect(executeSingleTool).toHaveBeenCalledTimes(1)
+    expect(runToolUseLoop).toHaveBeenCalledTimes(2)
+    expect(executor.executorState).toBe('completed')
+    expect(deps.onComplete).toHaveBeenCalledTimes(1)
+  })
+
+  it('U5: a 401 on resume re-suspends as connect_required, then re-executes on connect (no double approval)', async () => {
+    vi.mocked(runToolUseLoop)
+      // Round A — the LLM calls an oauth MCP tool → approval_required.
+      .mockResolvedValueOnce({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-approve',
+          tool_name: 'monday__list_boards',
+          parameters: { limit: 5 },
+          description: 'MCP tool',
+          tool_call_id: 'tc_1',
+          context_snapshot: [
+            { role: 'user', content: 'list boards' },
+            {
+              role: 'assistant',
+              content: '',
+              tool_calls: [{ id: 'tc_1', name: 'monday__list_boards', arguments: { limit: 5 } }],
+            },
+          ],
+        },
+      } as any)
+      // Round C — after connect, the re-executed tool feeds the loop, which responds.
+      .mockResolvedValueOnce({ type: 'response', content: 'Boards: A, B' } as any)
+
+    vi.mocked(executeSingleTool)
+      // First resume (user approved) → the live tool call 401s on the oauth server.
+      .mockResolvedValueOnce({
+        tool_call_id: 'tc_1',
+        name: 'monday__list_boards',
+        content: 'MCP server monday auth failed (401)',
+        is_error: true,
+        metadata: { connect_required: { mcpServerName: 'monday' } },
+      })
+      // Second resume (user connected) → the SAME tool now succeeds.
+      .mockResolvedValueOnce({
+        tool_call_id: 'tc_1',
+        name: 'monday__list_boards',
+        content: 'ok',
+        is_error: false,
+      })
+
+    const deps = createDeps()
+    const task = createTask('list boards')
+    const executor = new TaskExecutor(task, deps)
+
+    await executor.run()
+    expect(executor.executorState).toBe('waiting_approval')
+
+    // Round B — approve. The tool executes and 401s → durable re-suspension as
+    // connect_required. The auth error is NOT fed back to the LLM.
+    await executor.resumeAfterApproval(false)
+    expect(executor.executorState).toBe('waiting_approval')
+    const connectCall = vi.mocked(deps.onApprovalNeeded).mock.calls.at(-1)
+    expect(connectCall?.[2]).toMatchObject({
+      reason: 'connect_required',
+      mcpServerName: 'monday',
+      tool_name: 'monday__list_boards',
+      tool_call_id: 'tc_1',
+    })
+    // No 2nd loop yet — round B suspended instead of continuing.
+    expect(runToolUseLoop).toHaveBeenCalledTimes(1)
+    expect(executeSingleTool).toHaveBeenCalledTimes(1)
+
+    // Round C — connect. The SAME tool re-executes directly (no fresh approval
+    // gate — resumeAfterApproval bypasses beforeTool), then the loop completes.
+    await executor.resumeAfterApproval(false)
+    expect(executeSingleTool).toHaveBeenCalledTimes(2)
     expect(runToolUseLoop).toHaveBeenCalledTimes(2)
     expect(executor.executorState).toBe('completed')
     expect(deps.onComplete).toHaveBeenCalledTimes(1)
@@ -1468,5 +1581,27 @@ describe('D3 durability barrier — a turn is never ACKed when the persist fails
     expect(runToolUseLoop).not.toHaveBeenCalled()
     expect(task.responseCallback).not.toHaveBeenCalled()
     expect(deps.onFail).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('executionModeForSource (§6.3)', () => {
+  it('treats channel tasks as interactive — a person sent the message', () => {
+    expect(executionModeForSource('channel')).toBe('interactive')
+  })
+
+  it.each(['cron', 'internal'] as const)(
+    'treats %s tasks as unattended so a guardrail ask fails safe to deny',
+    source => {
+      expect(executionModeForSource(source)).toBe('unattended')
+    }
+  )
+
+  // The regression: `internal` fell through to 'interactive', so an `ask` took the
+  // suspension path and parked in pending_approval with no responder — the task
+  // hung. Not reachable today (createInternalTask has no production caller), which
+  // is exactly why the mapping needs pinning rather than the behaviour.
+  it('never labels an autonomous source interactive', () => {
+    const autonomous: TaskSource[] = ['cron', 'internal']
+    expect(autonomous.map(executionModeForSource)).not.toContain('interactive')
   })
 })

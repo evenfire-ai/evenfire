@@ -36,6 +36,7 @@ const R6_COMPAT = [
   'moonshot',
   'nebius',
   'novita',
+  'minimax',
 ] as const
 
 function createMockOpenAIClient() {
@@ -56,7 +57,7 @@ describe('R6 OpenAI-compatible providers — data-driven baseURL arm', () => {
     const desc = descriptorFor(provider)
     const result = createLLMProvider(
       { [provider]: { [`${provider}-api-key`]: 'sk-test' } },
-      { provider, name: desc.defaultModel }
+      { provider, name: desc.defaultModel ?? provider }
     )
     expect(result, `createLLMProvider returned null for ${provider}`).not.toBeNull()
     expect(result?.getProviderType()).toBe(provider)

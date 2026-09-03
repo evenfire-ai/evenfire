@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button, StatusBanner } from '@components/Common'
+import SandboxCurrentContentSearch from '../components/SandboxCurrentContentSearch'
+import type { AppFindState } from '../components/SandboxCurrentContentSearch/types'
 import {
   IconChat,
   IconClose,
@@ -110,8 +112,13 @@ function useEmbedBounds(
   enabled: boolean,
   parked: boolean,
   refreshKey: string | number,
-  onBoundsApplied?: () => void
+  onBoundsApplied?: () => void,
+  onSlotTopChange?: (topPx: number) => void
 ): void {
+  // Dedupe the emitted slot-top across pushes AND across effect re-runs, so a
+  // resize/scroll storm (or a dep change) never churns the parent's state when
+  // the measured top is unchanged.
+  const lastEmittedTopRef = useRef<number | null>(null)
   useLayoutEffect(() => {
     if (!enabled) return
     const target = ref.current
@@ -122,6 +129,13 @@ function useEmbedBounds(
       cancelAnimationFrame(raf)
       raf = requestAnimationFrame(() => {
         const rect = target.getBoundingClientRect()
+        if (onSlotTopChange) {
+          const top = Math.round(rect.top)
+          if (lastEmittedTopRef.current !== top) {
+            lastEmittedTopRef.current = top
+            onSlotTopChange(top)
+          }
+        }
         void window.clerum.sandboxUi
           .setBounds(boundsFromRect(rect))
           .then(() => onBoundsApplied?.())
@@ -139,26 +153,34 @@ function useEmbedBounds(
       window.removeEventListener('resize', push)
       window.removeEventListener('scroll', push, true)
     }
-  }, [parked, ref, enabled, onBoundsApplied, refreshKey])
+  }, [parked, ref, enabled, onBoundsApplied, onSlotTopChange, refreshKey])
 }
 
 const APP_PAGE_SIZE = 6
 let pendingSandboxUiUnmountCleanup: number | null = null
+let nextSandboxFindClientRequestId = 0
 
 export function SandboxUiPage({
+  actionRequest = null,
   boundsRefreshKey = 0,
   conversationOrigin = null,
   currentTeamId = '',
   headerShellOverlayOpen = false,
   sidebarShellOverlayOpen = false,
   toastShellOverlayOpen = false,
+  deepLinkShellOverlayOpen = false,
   shortcutApp = null,
   shortcutOpenRequestId = 0,
+  localSearchRequestId = 0,
+  chatDrawerOpen = false,
+  onToggleChatDrawer,
   onBackToConversation,
   onEmbeddedAppOpening,
+  onEmbeddedAppMounted,
   onEmbeddedAppBack,
   onEmbeddedAppRemoved,
   onEmbedBoundsApplied,
+  onEmbedSlotTopChange,
   onNotify,
   onShortcutOpenResult,
 }: SandboxUiPageProps = {}) {
@@ -168,10 +190,24 @@ export function SandboxUiPage({
   const [refreshError, setRefreshError] = useState<{ appRef: string; message: string } | null>(null)
   const [appsPage, setAppsPage] = useState(0)
   const [embedPreviewDataUrl, setEmbedPreviewDataUrl] = useState<string | null>(null)
+  const [localSearchOpen, setLocalSearchOpen] = useState(false)
+  const [localSearchQuery, setLocalSearchQuery] = useState('')
+  const [localSearchState, setLocalSearchState] = useState<AppFindState>({ status: 'idle' })
   const embedSlotRef = useRef<HTMLDivElement>(null)
+  const activeFindClientRequestIdRef = useRef<number | null>(null)
+  const localSearchStateRef = useRef<AppFindState>({ status: 'idle' })
+  const lastLocalSearchRequestIdRef = useRef(shortcutApp ? localSearchRequestId : 0)
+  const localSearchPreviousFocusRef = useRef<HTMLElement | null>(null)
   const lastShortcutOpenRequestIdRef = useRef(0)
+  const lastActionRequestIdRef = useRef(0)
+  // The deep-link confirm/error dialogs render as renderer DOM at the App
+  // shell level; like the other shell overlays they must hide the native
+  // WebContentsView, which always paints above the DOM, to be visible at all.
   const shellOverlayOpen =
-    headerShellOverlayOpen || sidebarShellOverlayOpen || toastShellOverlayOpen
+    headerShellOverlayOpen ||
+    sidebarShellOverlayOpen ||
+    toastShellOverlayOpen ||
+    deepLinkShellOverlayOpen
 
   const reload = useCallback(async () => {
     setError(null)
@@ -212,6 +248,101 @@ export function SandboxUiPage({
   useEffect(() => {
     return window.clerum.sandboxUi.onRefreshError(args => setRefreshError(args))
   }, [])
+
+  useEffect(() => {
+    return window.clerum.sandboxUi.onFindResult(result => {
+      if (result.clientRequestId !== activeFindClientRequestIdRef.current) return
+      if (!result.finalUpdate) return
+      const next: AppFindState =
+        result.matches > 0
+          ? { status: 'results', current: result.activeMatchOrdinal, total: result.matches }
+          : { status: 'empty' }
+      localSearchStateRef.current = next
+      setLocalSearchState(next)
+    })
+  }, [])
+
+  const stopLocalSearch = useCallback(() => {
+    const previous = localSearchPreviousFocusRef.current
+    activeFindClientRequestIdRef.current = null
+    setLocalSearchOpen(false)
+    setLocalSearchQuery('')
+    localSearchStateRef.current = { status: 'idle' }
+    setLocalSearchState({ status: 'idle' })
+    void window.clerum.sandboxUi
+      .stopFindInPage()
+      .then(() => window.clerum.sandboxUi.focusActive())
+      .then(focused => {
+        if (!focused) {
+          requestAnimationFrame(() => {
+            if (previous?.isConnected) previous.focus()
+          })
+        }
+      })
+      .catch(() => undefined)
+  }, [])
+
+  const runLocalSearch = useCallback(
+    async (query: string, operation: 'start' | 'next' | 'previous') => {
+      if (!query.trim()) {
+        activeFindClientRequestIdRef.current = null
+        localSearchStateRef.current = { status: 'idle' }
+        setLocalSearchState({ status: 'idle' })
+        await window.clerum.sandboxUi.stopFindInPage()
+        return
+      }
+      if (operation !== 'start' && localSearchStateRef.current.status !== 'results') return
+      const clientRequestId =
+        operation === 'start'
+          ? ++nextSandboxFindClientRequestId
+          : activeFindClientRequestIdRef.current
+      if (clientRequestId === null) return
+      activeFindClientRequestIdRef.current = clientRequestId
+      localSearchStateRef.current = { status: 'pending' }
+      setLocalSearchState({ status: 'pending' })
+      try {
+        const response = await window.clerum.sandboxUi.findInPage(query, {
+          operation,
+          clientRequestId,
+        })
+        if (clientRequestId !== activeFindClientRequestIdRef.current) return
+        if (response.status === 'unavailable') {
+          const next: AppFindState = {
+            status: 'unavailable',
+            reason:
+              response.reason === 'document-loading'
+                ? 'App is still loading'
+                : 'Search is not available',
+          }
+          localSearchStateRef.current = next
+          setLocalSearchState(next)
+        }
+      } catch (error) {
+        if (clientRequestId !== activeFindClientRequestIdRef.current) return
+        const next: AppFindState = {
+          status: 'error',
+          message: error instanceof Error ? error.message : 'Search failed',
+        }
+        localSearchStateRef.current = next
+        setLocalSearchState(next)
+      }
+    },
+    []
+  )
+
+  useEffect(() => {
+    if (localSearchRequestId <= lastLocalSearchRequestIdRef.current || launch.kind !== 'mounted') {
+      return
+    }
+    lastLocalSearchRequestIdRef.current = localSearchRequestId
+    localSearchPreviousFocusRef.current = document.activeElement as HTMLElement | null
+    setLocalSearchOpen(true)
+  }, [launch.kind, localSearchRequestId])
+
+  useEffect(() => {
+    if (launch.kind === 'mounted' || !localSearchOpen) return
+    stopLocalSearch()
+  }, [launch.kind, localSearchOpen, stopLocalSearch])
 
   // Tear down the embed when this page unmounts (user navigates away).
   useLayoutEffect(() => {
@@ -267,6 +398,7 @@ export function SandboxUiPage({
           bounds,
         })
         setLaunch({ kind: 'mounted', appRef: app.appRef })
+        onEmbeddedAppMounted?.()
         return { status: 'mounted' }
       } catch (err) {
         const { status, message } = statusFromError(err)
@@ -283,7 +415,7 @@ export function SandboxUiPage({
         return { status: 'failed', message: userFacing }
       }
     },
-    [onEmbeddedAppOpening, onEmbeddedAppRemoved]
+    [onEmbeddedAppMounted, onEmbeddedAppOpening, onEmbeddedAppRemoved]
   )
 
   const onOpen = useCallback(
@@ -333,6 +465,19 @@ export function SandboxUiPage({
     void window.clerum.sandboxUi.reload()
   }, [])
 
+  useEffect(() => {
+    if (!actionRequest || actionRequest.id <= lastActionRequestIdRef.current) return
+    lastActionRequestIdRef.current = actionRequest.id
+    if (launch.kind !== 'mounted') return
+    if (actionRequest.action === 'refresh') {
+      onRefresh()
+    } else if (actionRequest.action === 'back-to-apps') {
+      void onBackToApps()
+    } else {
+      void handleBackToConversation()
+    }
+  }, [actionRequest, handleBackToConversation, launch.kind, onBackToApps, onRefresh])
+
   const onCopyDeepLink = useCallback(async () => {
     try {
       await window.clerum.sandboxUi.copyDeepLink(currentTeamId || undefined)
@@ -364,7 +509,8 @@ export function SandboxUiPage({
     launch.kind === 'mounted' || launch.kind === 'minting',
     shellOverlayOpen,
     boundsRefreshKey,
-    onEmbedBoundsApplied
+    onEmbedBoundsApplied,
+    onEmbedSlotTopChange
   )
 
   // Native WebContentsView content always paints above renderer DOM. Capture
@@ -425,15 +571,24 @@ export function SandboxUiPage({
     return (
       <section className="page">
         <div className="sandbox-ui-mounted-header">
-          {conversationOrigin && onBackToConversation ? (
+          {conversationOrigin && (onToggleChatDrawer || onBackToConversation) ? (
+            // The originating conversation lives in the drawer beside the live
+            // embed now, so "Back to {title}" toggles the drawer instead of
+            // destroying the embed and reconstructing the chat full-screen. When
+            // no drawer toggle is wired it falls back to the destroy-and-
+            // reconstitute path (also reachable via the app.backToConversation
+            // command).
             <Button
               color="neutral"
-              variant="soft"
+              variant={onToggleChatDrawer && chatDrawerOpen ? 'solid' : 'soft'}
               size="sm"
               className="sandbox-ui-conversation-btn"
               aria-label={`Back to ${conversationOrigin.title}`}
+              aria-pressed={onToggleChatDrawer ? chatDrawerOpen : undefined}
               title={`Back to ${conversationOrigin.title}`}
-              onClick={() => void handleBackToConversation()}
+              onClick={
+                onToggleChatDrawer ? onToggleChatDrawer : () => void handleBackToConversation()
+              }
             >
               <IconChat />
               <span>Back to {conversationOrigin.title}</span>
@@ -451,6 +606,22 @@ export function SandboxUiPage({
             <IconClose />
             <span>Back to apps</span>
           </Button>
+          {launch.kind === 'mounted' && onToggleChatDrawer && !conversationOrigin && (
+            // No originating conversation to return to — a plain drawer toggle.
+            <Button
+              color="neutral"
+              variant={chatDrawerOpen ? 'solid' : 'soft'}
+              size="sm"
+              className="sandbox-ui-chat-drawer-btn"
+              aria-label="Toggle chat drawer"
+              aria-pressed={chatDrawerOpen}
+              title="Toggle chat drawer"
+              onClick={onToggleChatDrawer}
+            >
+              <IconChat />
+              <span>Chat</span>
+            </Button>
+          )}
           {launch.kind === 'mounted' && (
             <>
               <Button
@@ -486,6 +657,19 @@ export function SandboxUiPage({
             text={`Session refresh failed: ${refreshError.message}. Close and re-open the app to continue.`}
           />
         )}
+        {localSearchOpen ? (
+          <SandboxCurrentContentSearch
+            focusRequestId={localSearchRequestId}
+            onClose={stopLocalSearch}
+            onMove={operation => void runLocalSearch(localSearchQuery, operation)}
+            onQueryChange={query => {
+              setLocalSearchQuery(query)
+              void runLocalSearch(query, 'start')
+            }}
+            query={localSearchQuery}
+            state={localSearchState}
+          />
+        ) : null}
         {/* The slot div is the rectangle the WebContentsView floats above
             after the selected app completes its initial load. */}
         <div ref={embedSlotRef} className="sandbox-ui-embed-slot">

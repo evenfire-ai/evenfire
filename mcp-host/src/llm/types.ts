@@ -35,6 +35,28 @@ export interface ClassifiedError {
   code: LlmErrorCode
   retryable: boolean
   message: string
+  /**
+   * Additive diagnostics (spec 02, Pieza A). The provider's HTTP status and the
+   * provider-native error code/type (e.g. `not_found_error`, `1211`,
+   * `Model.AccessDenied`) when the classifier recovered them. Threaded verbatim
+   * through `LlmError` → `TaskError` so downstream (desktop) can distinguish a
+   * retired-model 404 from an ambiguous failure without re-parsing the raw SDK
+   * error. Optional: transport/unknown errors leave them undefined.
+   */
+  httpStatus?: number
+  providerCode?: string
+  /**
+   * Execution-phase signal. `false` means the classifier PROVED that no call
+   * left this process (the attempt died before authorize or before the proxy
+   * stream), so the physical attempt cannot have billed. `true` means a call
+   * left the process or may have. `undefined` means the classifier does not
+   * know — consumers must assume the expensive direction (dispatched).
+   *
+   * Only a classifier that can prove the negative may set `false`: marking a
+   * dispatched attempt as `false` would leave the idempotency key revivable
+   * and permit a second billable call.
+   */
+  providerDispatched?: boolean
 }
 
 /**

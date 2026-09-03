@@ -23,9 +23,15 @@
   --success: #66b88f;
   --danger: #ec7c72;
   --warning: #d19452;
+  --search-match-bg: #ffff00;
+  --search-match-current-bg: #ff9632;
+  --search-match-text: #000000;
   --unknown: #e2dfef;
   --info: #0072c0;
   --text-inverse: #ffffff;
+
+  /* Media surfaces (full-bleed dark background for video/image previews). */
+  --media-surface: #000000;
 
   --accent-rgb: 67, 119, 250;
   --accent-soft-rgb: 67, 119, 250;
@@ -145,6 +151,10 @@
   /* Layout */
   --search-bar-min-width: 320px;
   --avatar-size: 40px;
+
+  /* chat-view session tabs (Chrome-style: shrink to a floor, cap at a ceiling) */
+  --chat-tab-max: 220px;
+  --chat-tab-min: 96px;
   --control-bg: var(--surface-soft);
   --control-bg-strong: rgba(var(--panel-rgb), 0.78);
   --control-border: rgba(var(--edge-rgb), 0.56);
@@ -189,9 +199,15 @@
   --success: #2f8a66;
   --danger: #bf4d47;
   --warning: #a16b2b;
+  --search-match-bg: #ffff00;
+  --search-match-current-bg: #ff9632;
+  --search-match-text: #000000;
   --unknown: #6b5f8a;
   --info: #0072c0;
   --text-inverse: #ffffff;
+
+  /* Media surfaces (full-bleed dark background for video/image previews). */
+  --media-surface: #000000;
 
   --accent-rgb: 67, 119, 250;
   --accent-soft-rgb: 67, 119, 250;

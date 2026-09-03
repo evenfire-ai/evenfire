@@ -30,6 +30,7 @@ import { type TokenBudget, listBudgets, toNumber } from './definitions.js'
 import { type BudgetScopeDimension, scopeMatches } from './dimensions.js'
 import {
   type ReservationConnector,
+  type ReservationTxClient,
   releaseReservation,
   reserveInDangerZone,
 } from './reservations.js'
@@ -92,6 +93,13 @@ export type BudgetCheckMatched = {
   remaining: number
   limit: number
   enforcement: string
+}
+
+export type BudgetCheckOptions = {
+  /** Codex attempts may only consume token budgets; a matching cost cap denies. */
+  requiredUnit?: 'tokens'
+  /** When set, danger-zone reservations join this already-open transaction. */
+  transactionClient?: ReservationTxClient
 }
 
 export type BudgetCheckResult = {
@@ -210,7 +218,8 @@ function normalize(value: string | null | undefined): string | null {
 export async function evaluateBudgetCheck(
   req: BudgetCheckRequest,
   db: DbClient = pool,
-  connector: ReservationConnector = pool
+  connector: ReservationConnector = pool,
+  options: BudgetCheckOptions = {}
 ): Promise<BudgetCheckResult> {
   // 1. Resolve identity — team_id binding (SECURITY, §4.1).
   //
@@ -308,6 +317,13 @@ export async function evaluateBudgetCheck(
   const unpricedByKey = new Map<string, UnpricedModel>()
 
   for (const budget of matching) {
+    if (options.requiredUnit === 'tokens' && budget.unit !== 'tokens') {
+      if (budget.enforcement === 'block' && budget.unit === 'cost') {
+        allowed = false
+        if (!reason) reason = 'cost_unit_rejected'
+      }
+      continue
+    }
     let spent: number
     let remaining: number
     try {
@@ -398,7 +414,8 @@ export async function evaluateBudgetCheck(
               // above and bound to claims.hostRefs[0] by the route's claim-binding.
               hostRef: dimensions.host_ref ?? null,
             },
-            connector
+            connector,
+            options.transactionClient
           )
           if (r.decision === 'deny') {
             // effective_remaining (incl. concurrent pending) < min_start → the
