@@ -255,6 +255,16 @@ export function IconMoreHorizontal(props: IconProps) {
   )
 }
 
+export function IconMoreVertical(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
+      <circle cx="12" cy="5" r="1" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="19" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
 export function IconGrid(props: IconProps) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>

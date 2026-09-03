@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { IconButton, MenuItem } from '@components/Common'
-import { IconMoreHorizontal } from '@components/SidebarNav/icons'
+import { IconMoreVertical } from '@components/SidebarNav/icons'
 import { useClickOutside } from '@hooks/useClickOutside'
 import type { GfsResourceMenuProps } from './types'
 
@@ -98,10 +98,10 @@ export function GfsResourceMenu({
         size="sm"
         variant="ghost"
       >
-        <IconMoreHorizontal />
+        <IconMoreVertical />
       </IconButton>
       {open ? (
-        <span className="da-gfs-resource-menu__panel" role="menu">
+        <div className="da-gfs-resource-menu__panel" role="menu">
           {onManage ? (
             <MenuItem role="menuitem" onClick={() => runAction(onManage)}>
               Manage
@@ -152,7 +152,7 @@ export function GfsResourceMenu({
               Delete
             </MenuItem>
           ) : null}
-        </span>
+        </div>
       ) : null}
     </span>
   )

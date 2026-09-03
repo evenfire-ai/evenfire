@@ -14747,14 +14747,46 @@ pre {
   right: 0;
   z-index: calc(var(--layer-dropdown) + 30);
   width: max-content;
-  min-width: 180px;
+  min-width: 184px;
+  max-width: min(260px, calc(100vw - var(--space-4)));
   display: grid;
   gap: var(--space-0-5);
   padding: var(--space-1);
-  border: 1px solid rgba(var(--edge-rgb), 0.38);
-  border-radius: var(--radius-md);
+  border: 1px solid rgba(var(--edge-rgb), 0.46);
+  border-radius: var(--radius-sm);
   background: var(--bg-elev-2);
   box-shadow: var(--shadow-hard);
+}
+
+.da-gfs-resource-menu__panel .ui-menu-item {
+  min-height: 34px;
+  padding: var(--space-1-5) var(--space-2-5);
+  border-radius: calc(var(--radius-sm) - 2px);
+  color: var(--text);
+  font-size: var(--font-size-md);
+  line-height: var(--line-height-tight);
+}
+
+.da-gfs-resource-menu__panel .ui-menu-item:hover:enabled,
+.da-gfs-resource-menu__panel .ui-menu-item:focus-visible {
+  border-color: transparent;
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.da-gfs-resource-menu__panel .ui-menu-item--danger {
+  color: var(--danger);
+}
+
+.da-gfs-resource-menu__panel .ui-menu-item--danger:hover:enabled,
+.da-gfs-resource-menu__panel .ui-menu-item--danger:focus-visible {
+  background: rgba(var(--danger-rgb), 0.12);
+  color: var(--danger);
+}
+
+.da-gfs-drive__grid .da-gfs-resource-menu__panel {
+  top: auto;
+  bottom: calc(100% + var(--space-1));
 }
 
 .da-gfs-link-modal {
