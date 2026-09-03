@@ -25,8 +25,8 @@ import {
 import { CONTROL_ROUTES } from '@constants/routes'
 import { getAgentDisplayName } from '@lib/agentName'
 import {
-  getContextTeams,
-  getContextUsers,
+  getAgentTeams,
+  getAgentUsers,
   getContexts,
   getHosts,
   getMcpServer,
@@ -37,10 +37,11 @@ import type {
   EgressBinding,
   EnvSecret,
   EnvSecretKeyMapping,
+  HostResource,
   McpServerResource,
 } from '@lib/api'
 import {
-  contextNamesForConnector,
+  hostOwnedContextNamesForConnector,
   mergeAccessSummaries,
   sortAccessPrincipals,
 } from '@lib/connectorAccess'
@@ -118,6 +119,7 @@ export default function EditMcpServerPage() {
   const [egressStatus, setEgressStatus] = useState<EgressEditorStatus | null>(null)
   const [contextAccess, setContextAccess] = useState<ContextAccess>(EMPTY_CONTEXT_ACCESS)
   const [contextNames, setContextNames] = useState<string[]>([])
+  const [owningAgents, setOwningAgents] = useState<ContextAccess['agents']>([])
   const [loadingContexts, setLoadingContexts] = useState(true)
   const [contextListError, setContextListError] = useState('')
   const [contextAccessError, setContextAccessError] = useState('')
@@ -173,13 +175,26 @@ export default function EditMcpServerPage() {
       setLoadingContexts(true)
       setContextListError('')
       try {
-        const result = await getContexts()
+        const [contextsResult, hostsResult] = await Promise.all([getContexts(), getHosts()])
         if (cancelled) return
-        setContextNames(contextNamesForConnector((result.items ?? []) as ContextResource[], name))
+        const contexts = (contextsResult.items ?? []) as ContextResource[]
+        const hosts = (hostsResult.items ?? []) as HostResource[]
+        const nextContextNames = hostOwnedContextNamesForConnector(contexts, hosts, name)
+        const contextNameSet = new Set(nextContextNames)
+        const agentsById = new Map<string, ContextAccess['agents'][number]>()
+        for (const host of hosts) {
+          const contextRef = String(host.spec?.contextRef ?? '').trim()
+          const id = String(host.metadata?.name ?? '').trim()
+          if (!contextNameSet.has(contextRef) || !id) continue
+          agentsById.set(id, { id, label: getAgentDisplayName(id, hosts) })
+        }
+        setContextNames(nextContextNames)
+        setOwningAgents(sortAccessPrincipals([...agentsById.values()]))
       } catch {
         if (!cancelled) {
           setContextNames([])
-          setContextListError('Context access data is unavailable. Try again later.')
+          setOwningAgents([])
+          setContextListError('Agent access data is unavailable. Try again later.')
         }
       } finally {
         if (!cancelled) setLoadingContexts(false)
@@ -204,31 +219,27 @@ export default function EditMcpServerPage() {
     setContextAccessError('')
 
     void (async () => {
-      const [hostsResults, contextResults] = await Promise.all([
-        Promise.allSettled([getHosts()]),
-        Promise.all(
-          contextNames.map(async contextName => {
-            const [usersResult, teamsResult] = await Promise.allSettled([
-              getContextUsers(contextName),
-              getContextTeams(contextName),
-            ])
-            return { contextName, usersResult, teamsResult }
-          })
-        ),
-      ])
+      // Resolve the AGENTS whose scopes carry this connector, then read their
+      // user/team grants — the same mappings operators manage in Users &
+      // Teams — instead of the legacy scope-centric context sub-resources.
+      const agentResults = await Promise.all(
+        owningAgents.map(async agent => {
+          const [usersResult, teamsResult] = await Promise.allSettled([
+            getAgentUsers(agent.id),
+            getAgentTeams(agent.id),
+          ])
+          return { agent, usersResult, teamsResult }
+        })
+      )
       if (cancelled) return
 
-      const hostsResult = hostsResults[0]
-      const failed =
-        hostsResult.status === 'rejected' ||
-        contextResults.some(
-          result =>
-            result.usersResult.status === 'rejected' || result.teamsResult.status === 'rejected'
-        )
-      const hosts = hostsResult.status === 'fulfilled' ? (hostsResult.value.items ?? []) : []
+      const failed = agentResults.some(
+        result =>
+          result.usersResult.status === 'rejected' || result.teamsResult.status === 'rejected'
+      )
       setContextAccess(
         mergeAccessSummaries(
-          contextResults.map(({ contextName, usersResult, teamsResult }) => ({
+          agentResults.map(({ agent, usersResult, teamsResult }) => ({
             users:
               usersResult.status === 'fulfilled'
                 ? sortAccessPrincipals(
@@ -247,14 +258,7 @@ export default function EditMcpServerPage() {
                     }))
                   )
                 : [],
-            agents: sortAccessPrincipals(
-              hosts
-                .filter(host => String(host.spec?.contextRef ?? '').trim() === contextName)
-                .map(host => {
-                  const agentName = host.metadata?.name || 'unknown'
-                  return { id: agentName, label: getAgentDisplayName(agentName) || agentName }
-                })
-            ),
+            agents: [agent],
           }))
         )
       )
@@ -269,7 +273,7 @@ export default function EditMcpServerPage() {
     return () => {
       cancelled = true
     }
-  }, [contextNames])
+  }, [contextNames, owningAgents])
 
   async function handleSave(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -309,7 +313,7 @@ export default function EditMcpServerPage() {
             <CreatePageHeader
               icon={<IconCable />}
               title={`Edit Connector: ${name}`}
-              subtitle="Review context access, rotate credentials, and update external egress for this connector."
+              subtitle="Review agent access, rotate credentials, and update external egress for this connector."
               backLabel="Back to connectors"
               onBack={backToList}
             />
@@ -373,38 +377,35 @@ export default function EditMcpServerPage() {
                   recipeOwned={isRecipeOwned(server.spec as { managed?: boolean } | undefined)}
                 />
               </div>
-            ) : activeTab === 'context' ? (
+            ) : activeTab === 'access' ? (
               <div className="cu-connector-edit-form cu-connector-edit-content">
-                <section className="cu-form-section" aria-labelledby="connector-context-title">
+                <section className="cu-form-section" aria-labelledby="connector-access-title">
                   <div className="cu-form-section__header">
-                    <h2 id="connector-context-title" className="cu-form-section__title">
-                      Context access
+                    <h2 id="connector-access-title" className="cu-form-section__title">
+                      Agent access
                     </h2>
                     <p className="cu-form-section__description">
-                      This connector is available in the contexts shown below. Context assignments
-                      are derived from the current Context allowlists and cannot be changed here
-                      yet.
+                      This connector is available to the agents, teams, and users shown below.
+                      Assignments are derived from the current access setup and cannot be changed
+                      here yet.
                     </p>
                   </div>
 
                   {loadingContexts ? (
                     <p className="cu-muted" role="status">
-                      Loading contexts…
+                      Loading agent access…
                     </p>
                   ) : contextListError ? (
                     <div className="cu-banner cu-banner--warn" role="alert">
                       {contextListError}
                     </div>
-                  ) : (
-                    <p className="cu-connector-edit-context-name" aria-label="Connector contexts">
-                      Contexts:{' '}
-                      <strong>{contextNames.length > 0 ? contextNames.join(', ') : 'None'}</strong>
-                    </p>
-                  )}
+                  ) : contextNames.length === 0 ? (
+                    <p className="cu-muted">No agents have access to this connector yet.</p>
+                  ) : null}
 
                   {!loadingContexts && !contextListError && contextNames.length > 0 ? (
                     loadingContextAccess ? (
-                      <p className="cu-muted">Loading context access…</p>
+                      <p className="cu-muted">Loading agent access…</p>
                     ) : (
                       <>
                         {contextAccessError ? (
@@ -412,19 +413,19 @@ export default function EditMcpServerPage() {
                             {contextAccessError}
                           </p>
                         ) : null}
-                        <section className="cu-registry-context-access" aria-label="Context access">
+                        <section className="cu-entity-access" aria-label="Agent access">
                           {CONTEXT_ACCESS_GROUPS.map(group => (
                             <section
-                              className="cu-registry-context-access__group"
+                              className="cu-entity-access__group"
                               data-kind={group.key}
                               key={group.key}
                             >
-                              <div className="cu-registry-context-access__heading">
+                              <div className="cu-entity-access__heading">
                                 <h4>{group.title}</h4>
                                 <span>{contextAccess[group.key].length}</span>
                               </div>
                               {contextAccess[group.key].length > 0 ? (
-                                <ul className="cu-registry-context-access__list">
+                                <ul className="cu-entity-access__list">
                                   {contextAccess[group.key].map(principal => (
                                     <li key={principal.id}>
                                       <span>{principal.label}</span>
@@ -453,16 +454,6 @@ export default function EditMcpServerPage() {
                   <div>
                     <strong>Image:</strong>{' '}
                     <code>{typeof server.spec?.image === 'string' ? server.spec.image : '-'}</code>
-                  </div>
-                  <div>
-                    <strong>Contexts:</strong>{' '}
-                    <code>
-                      {loadingContexts
-                        ? 'Loading…'
-                        : contextListError
-                          ? 'Unavailable'
-                          : contextNames.join(', ') || '-'}
-                    </code>
                   </div>
                 </div>
 
