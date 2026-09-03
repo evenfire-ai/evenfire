@@ -6,6 +6,7 @@ import { resolve } from 'node:path'
 import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '@clerum/workflow-runtime-core'
 import { loadConfig } from '../config'
 import { shouldPatchRecipeStatus } from '../k8sClient'
+import { networkPolicyReapDeniedTotal } from '../metrics'
 import { CronJobDef, WorkflowRecipeCRD, WorkflowRecipeGfsIntentSpec, WorkloadDef } from '../types'
 import { INHERITED_PARENT_RESOURCES_ANNOTATION } from '../workflow/childRecipeFactory'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
@@ -4731,6 +4732,12 @@ describe('WorkflowRecipeReconciler', () => {
     const UI_EGRESS_INLINE_DELETE = 'ui-egress-test-recipe'
     const reapedNames = () => allDeletedNames().filter(n => n !== UI_EGRESS_INLINE_DELETE)
 
+    /** Current value of the reap-denied counter for one family. */
+    const readReapDeniedCount = async (family: string): Promise<number> => {
+      const metric = await networkPolicyReapDeniedTotal.get()
+      return metric.values.find(v => v.labels.family === family)?.value ?? 0
+    }
+
     const recipeWithEgress = (bindings: unknown[]) =>
       makeRecipe({
         spec: {
@@ -4897,6 +4904,170 @@ describe('WorkflowRecipeReconciler', () => {
       } finally {
         logSpy.mockRestore()
       }
+    })
+
+    it('T7 reports a denied delete on three channels and does NOT touch the phase', async () => {
+      // A 403 is an enforcement leak, not a fault: the policy is no longer
+      // desired and stays enforced. It needs a durable signal — but NOT the
+      // recipe phase. `failed` here would be invisible (nothing outside kubectl
+      // renders a recipe phase) and sticky (self-heal requires the message to
+      // match isRetryableInfraError, which a 403 does not), and the caller's
+      // default arm sets workflowPhase failed too.
+      liveIn('sandbox-recipes', 'wl-egress-test-recipe-worker')
+      // Only the policy under test fails; the ui-egress inline delete must not
+      // absorb the rejection.
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(
+        ({ name }: { name: string }) =>
+          name === 'wl-egress-test-recipe-worker'
+            ? Promise.reject({ code: 403 })
+            : Promise.resolve({})
+      )
+      const before = await readReapDeniedCount('wl-egress')
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+      try {
+        const result = await reconciler.reconcile(makeRecipe())
+
+        // Channel 1 — the log operators actually read.
+        const logged = errSpy.mock.calls.flat().join(' ')
+        expect(logged).toContain('FORBIDDEN deleting stale wl-egress NetworkPolicy')
+        expect(logged).toContain('wl-egress-test-recipe-worker')
+        // Channel 2 — the condition on the object itself.
+        expect(result.networkPolicyReapConditions?.[0]).toMatchObject({
+          type: 'NetworkPolicyReapFailed',
+          status: 'True',
+          reason: 'DeleteForbidden',
+        })
+        expect(result.networkPolicyReapConditions?.[0].message).toContain(
+          'wl-egress-test-recipe-worker'
+        )
+        // Channel 3 — the alertable counter.
+        expect(await readReapDeniedCount('wl-egress')).toBe(before + 1)
+        // And the recipe keeps working.
+        expect(result.phase).toBe('active')
+      } finally {
+        errSpy.mockRestore()
+      }
+    })
+
+    it('T7b clears the condition on the next clean pass', async () => {
+      // A condition written only on failure latches True forever and stops
+      // meaning anything.
+      liveIn('sandbox-recipes', 'wl-egress-test-recipe-worker')
+      // Reject by NAME, not with `Once`: reconcileUiEgressPolicy's own inline
+      // delete runs before the prune and would otherwise consume it.
+      let denyReap = true
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(
+        ({ name }: { name: string }) =>
+          denyReap && name === 'wl-egress-test-recipe-worker'
+            ? Promise.reject({ code: 403 })
+            : Promise.resolve({})
+      )
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+      try {
+        const denied = await reconciler.reconcile(makeRecipe())
+        expect(denied.networkPolicyReapConditions?.[0]).toMatchObject({ status: 'True' })
+
+        // Pass 2: RBAC restored, the delete succeeds.
+        denyReap = false
+        const recovered = await reconciler.reconcile(makeRecipe())
+
+        // Liveness witness: the prune ran again and did delete it.
+        expect(reapedNames()).toContain('wl-egress-test-recipe-worker')
+        expect(recovered.networkPolicyReapConditions?.[0]).toMatchObject({
+          type: 'NetworkPolicyReapFailed',
+          status: 'False',
+          reason: 'Reaped',
+        })
+      } finally {
+        errSpy.mockRestore()
+      }
+    })
+
+    it('T7c degrades and retries on a transient delete failure', async () => {
+      // A 5xx must reach the caller as RetryableReconcileError specifically. A
+      // bare Error lands in the default arm, which sets phase failed PLUS
+      // workflowPhase failed — the outcome a transient blip must never produce.
+      liveIn('sandbox-recipes', 'wl-egress-test-recipe-worker')
+      // Only the policy under test fails; the ui-egress inline delete must not
+      // absorb the rejection.
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(
+        ({ name }: { name: string }) =>
+          name === 'wl-egress-test-recipe-worker'
+            ? Promise.reject({ code: 503 })
+            : Promise.resolve({})
+      )
+
+      const result = await reconciler.reconcile(makeRecipe())
+
+      // Liveness witness: the prune ran and attempted this exact delete.
+      expect(allDeletedNames()).toContain('wl-egress-test-recipe-worker')
+      // The EXACT phase, not merely "not active". A bare Error carrying the same
+      // message falls through to the terminal arm and yields `failed`, whose
+      // `String(error)` also contains "failed transiently" — so a looser
+      // assertion passes for both and the mutation survives (it did, once).
+      expect(result.phase).toBe('degraded')
+      expect(result.message).toContain('failed transiently')
+    })
+
+    it('T10 keeps the finalizer scoped to internal-dependency policies', async () => {
+      // PR 1 leaves reconcileDelete's blast radius exactly where it was.
+      // Widening it to all six families is what closes the 47 orphan policies of
+      // deleted recipes, and it needs its own failure contract — a finalizer
+      // that throws can wedge a recipe in Terminating. Separate PR.
+      liveIn(
+        'sandbox-recipes',
+        'wr-intdep-egress-test-recipe-app',
+        'wl-egress-test-recipe-worker',
+        'ui-ingress-test-recipe-app'
+      )
+
+      await reconciler.reconcileDelete(makeRecipe())
+
+      // Liveness witness: the finalizer's prune ran over the same LIST …
+      expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        namespace: 'sandbox-recipes',
+        labelSelector: OWNER_SELECTOR,
+      })
+      // … and took only its own family from it.
+      expect(allDeletedNames()).toContain('wr-intdep-egress-test-recipe-app')
+      expect(allDeletedNames()).not.toContain('wl-egress-test-recipe-worker')
+      expect(allDeletedNames()).not.toContain('ui-ingress-test-recipe-app')
+    })
+
+    it('T11 does not reap wl-* of a workload that carries a transport', async () => {
+      // Explicit carve-out (#583). Those policies ARE stale and nothing writes
+      // them, but the producer is a spec edit rather than the reconcile loop,
+      // they contribute nothing to the storm, and reaping them would widen this
+      // change into a family it does not own.
+      const withTransport = makeRecipe({
+        spec: {
+          workloads: [
+            { id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 },
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'nginx:1.30.1-alpine',
+              port: 9090,
+              transport: { type: 'streamableHttp' },
+            },
+          ],
+        },
+      } as Partial<WorkflowRecipeCRD>)
+      liveIn('sandbox-recipes', 'wl-egress-test-recipe-worker', 'wl-egress-test-recipe-gone')
+
+      await reconciler.reconcile(withTransport)
+
+      // Liveness witness: the prune ran and had BOTH names in hand …
+      expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        namespace: 'sandbox-recipes',
+        labelSelector: OWNER_SELECTOR,
+      })
+      // … reaped the one belonging to no workload …
+      expect(reapedNames()).toContain('wl-egress-test-recipe-gone')
+      // … and left the transport workload's alone.
+      expect(reapedNames()).not.toContain('wl-egress-test-recipe-worker')
     })
   })
 
