@@ -105,6 +105,43 @@ describe('GfsMoveDialog pagination', () => {
     expect(onMove).toHaveBeenCalledWith('deep-9', 'Deep Storage')
   })
 
+  it('keeps the hierarchy visible while expanding and selecting a nested destination', async () => {
+    const onMove = vi.fn(async () => undefined)
+    const listAccessible = vi.fn(async () => ({
+      items: [folder('folder-1', 'Product')],
+      nextCursor: null,
+    }))
+    const listChildren = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folder-1') {
+        return { items: [folder('folder-2', 'Assets')], nextCursor: null }
+      }
+      return { items: [folder('folder-3', 'Reports')], nextCursor: null }
+    })
+
+    renderDialog({ listAccessible, listChildren }, { onMove })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    const tree = within(dialog).getByRole('tree', { name: 'GFS destination folders' })
+    expect(await within(tree).findByRole('button', { name: 'Product' })).toBeTruthy()
+
+    await fireEvent.click(within(tree).getByRole('button', { name: 'Expand Product' }))
+    expect(await within(tree).findByRole('button', { name: 'Assets' })).toBeTruthy()
+    expect(within(tree).getByRole('button', { name: 'Product' })).toBeTruthy()
+
+    // Selecting a folder also opens it, so the next level is available without
+    // leaving the current tree view.
+    await fireEvent.click(within(tree).getByRole('button', { name: 'Assets' }))
+    expect(await within(tree).findByRole('button', { name: 'Reports' })).toBeTruthy()
+
+    await fireEvent.click(within(tree).getByRole('button', { name: 'Reports' }))
+    expect(
+      within(tree).getByRole('button', { name: 'Reports' }).getAttribute('aria-selected')
+    ).toBe('true')
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Reports)' }))
+
+    expect(onMove).toHaveBeenCalledWith('folder-3', 'Reports')
+  })
+
   it('loads page two inside a child folder listing and keeps cycle prevention', async () => {
     const directoryTarget = { resourceId: 'moved-folder', name: 'Docs', kind: 'directory' as const }
     const onMove = vi.fn(async () => undefined)
@@ -120,7 +157,13 @@ describe('GfsMoveDialog pagination', () => {
     })
 
     renderDialog(
-      { listChildren },
+      {
+        listAccessible: vi.fn(async () => ({
+          items: [folder(parentCrumb.resourceId, parentCrumb.name)],
+          nextCursor: null,
+        })),
+        listChildren,
+      },
       { target: directoryTarget, initialCrumbs: [parentCrumb], onMove }
     )
 

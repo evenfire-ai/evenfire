@@ -14614,6 +14614,28 @@ pre {
   border-bottom: 0;
 }
 
+.da-gfs-drive__grid .da-grid__row[data-dragging='true'] {
+  opacity: 0.55;
+}
+
+.da-gfs-drive__grid .da-grid__row[data-drop-target='true'] {
+  outline: 2px solid rgba(var(--accent-rgb), 0.72);
+  outline-offset: -2px;
+  background: rgba(var(--accent-rgb), 0.14);
+}
+
+.da-gfs-drive__grid .da-grid__row[data-drop-target='true']:hover {
+  background: rgba(var(--accent-rgb), 0.18);
+}
+
+.da-gfs-drive__grid .da-grid__row[draggable='true'] {
+  cursor: grab;
+}
+
+.da-gfs-drive__grid .da-grid__row[draggable='true']:active {
+  cursor: grabbing;
+}
+
 .da-gfs-drive__grid .da-grid__row--clickable:hover:enabled {
   background: var(--grid-card-bg-hover);
   border-color: var(--grid-card-border);
@@ -15325,47 +15347,226 @@ pre {
   border-top: 1px solid rgba(var(--edge-rgb), 0.2);
 }
 
-/* Move-to-folder picker: full-width dialog with a scrollable folder list. */
-.da-gfs-move-dialog__list {
-  min-height: var(--space-8);
-  max-height: min(320px, 40vh);
+/* Move-to-folder picker: an inline tree that keeps the GFS hierarchy visible. */
+.da-gfs-move-dialog {
+  width: min(780px, 96vw);
+}
+
+.da-gfs-move-dialog__tree-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.da-gfs-move-dialog__tree-heading-copy {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-0-5);
+}
+
+.da-gfs-move-dialog__tree-heading-copy strong {
+  color: var(--text);
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.da-gfs-move-dialog__tree-eyebrow {
+  color: var(--accent-strong);
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-caps);
+  text-transform: uppercase;
+}
+
+.da-gfs-move-dialog__tree-heading > .muted {
+  flex: 0 1 auto;
+  font-size: var(--font-size-sm);
+  text-align: right;
+}
+
+.da-gfs-move-dialog__tree {
+  min-height: 220px;
+  max-height: min(460px, 52vh);
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: var(--space-2);
+  background: var(--surface-soft);
+  scrollbar-width: thin;
+}
+
+.da-gfs-move-dialog__tree-root,
+.da-gfs-move-dialog__tree-group {
   display: grid;
   align-content: start;
   gap: var(--space-1);
-  overflow-y: auto;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  padding: var(--space-2);
-  background: var(--surface-soft);
 }
 
-.da-gfs-move-dialog__row {
+.da-gfs-move-dialog__tree-group {
+  margin-left: calc(32px + var(--space-1));
+  padding: var(--space-1) 0 var(--space-1) var(--space-2);
+  border-left: 1px solid rgba(var(--edge-rgb), 0.24);
+}
+
+.da-gfs-move-dialog__tree-item {
   min-width: 0;
+}
+
+.da-gfs-move-dialog__tree-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.da-gfs-move-dialog__tree-toggle.ui-icon-button {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.da-gfs-move-dialog__tree-toggle.ui-icon-button:hover:enabled,
+.da-gfs-move-dialog__tree-toggle.ui-icon-button:focus-visible {
+  border-color: rgba(var(--accent-rgb), 0.28);
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--accent-strong);
+}
+
+.da-gfs-move-dialog__tree-toggle svg {
+  width: 16px;
+  height: 16px;
+  transition: transform var(--motion-fast);
+}
+
+.da-gfs-move-dialog__tree-toggle.is-expanded svg {
+  transform: rotate(90deg);
+}
+
+.da-gfs-move-dialog__tree-toggle-placeholder {
+  width: 32px;
+  height: 32px;
+}
+
+.da-gfs-move-dialog__tree-select.ui-button {
+  min-width: 0;
+  min-height: 46px;
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid rgba(var(--edge-rgb), 0.22);
+  border-radius: var(--radius-md);
+  background: rgba(var(--edge-rgb), 0.07);
+  color: var(--text);
+  text-align: left;
+  transition:
+    background var(--motion-fast),
+    border-color var(--motion-fast),
+    box-shadow var(--motion-fast);
 }
 
-.da-gfs-move-dialog__more {
-  display: flex;
-  justify-content: center;
-  padding-top: var(--space-1);
+.da-gfs-move-dialog__tree-select.ui-button:hover:enabled,
+.da-gfs-move-dialog__tree-select.ui-button:focus-visible {
+  border-color: rgba(var(--accent-rgb), 0.38);
+  background: rgba(var(--accent-rgb), 0.1);
+  box-shadow: inset 3px 0 0 rgba(var(--accent-rgb), 0.55);
 }
 
-.da-gfs-move-dialog__row-icon {
+.da-gfs-move-dialog__tree-select.ui-button[aria-selected='true'] {
+  border-color: rgba(var(--accent-rgb), 0.52);
+  background: rgba(var(--accent-rgb), 0.14);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.da-gfs-move-dialog__tree-folder-icon {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
   display: grid;
   place-items: center;
+  border: 1px solid rgba(var(--warning-rgb), 0.28);
+  border-radius: var(--radius-sm);
+  background: rgba(var(--warning-rgb), 0.1);
   color: var(--warning);
 }
 
-.da-gfs-move-dialog__row-icon svg {
-  width: var(--font-size-lg);
-  height: var(--font-size-lg);
+.da-gfs-move-dialog__tree-folder-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.da-gfs-move-dialog__tree-folder-name {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.da-gfs-move-dialog__tree-selected-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  display: grid;
+  place-items: center;
+  color: var(--accent-strong);
+}
+
+.da-gfs-move-dialog__tree-selected-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.da-gfs-move-dialog__tree-group > .muted,
+.da-gfs-move-dialog__tree > .muted {
+  margin: var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.da-gfs-move-dialog__tree-more {
+  display: flex;
+  justify-content: flex-start;
+  padding: var(--space-1) 0 0;
 }
 
 .da-gfs-move-dialog__actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid rgba(var(--edge-rgb), 0.2);
+}
+
+.da-gfs-move-dialog__selection {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.da-gfs-move-dialog__selection strong {
+  color: var(--text);
+  font-weight: var(--font-weight-semibold);
+}
+
+.da-gfs-move-dialog__action-buttons {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
   gap: var(--space-2);
 }
 
@@ -15611,6 +15812,25 @@ pre {
 
   .da-gfs-manage-dialog__body {
     padding: var(--space-2);
+  }
+
+  .da-gfs-move-dialog__tree-heading {
+    align-items: start;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .da-gfs-move-dialog__tree-heading > .muted {
+    text-align: left;
+  }
+
+  .da-gfs-move-dialog__actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .da-gfs-move-dialog__action-buttons {
+    justify-content: flex-end;
   }
 
   .da-gfs-manage-section--actions .da-gfs-inline-form {
