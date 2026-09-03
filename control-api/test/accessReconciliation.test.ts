@@ -7,6 +7,7 @@ import {
   buildAgentDirectoryEntry,
   filterAccessValues,
   listActiveAgentNames,
+  listActiveContextIds,
   mergeActiveAgentUpdateWithDeletedHistory,
   mergeActiveUpdateWithDeletedHistory,
   normalizeUnique,
@@ -132,6 +133,21 @@ describe('access reconciliation helpers', () => {
     await expect(listActiveAgentNames(gateway)).resolves.toEqual(['active-b', 'active-a'])
     expect(listResource).toHaveBeenCalledOnce()
     expect(listResource).toHaveBeenCalledWith('hosts', 'mcp-host')
+  })
+
+  it('lists both Context resource-name and wire-id aliases as active', async () => {
+    const listResource = vi.fn().mockResolvedValue([
+      { metadata: { name: 'ctx-resource' }, spec: { contextId: 'ctx-wire' } },
+      { metadata: { name: 'ctx-same' }, spec: { contextId: 'ctx-same' } },
+    ])
+    const gateway = { listResource } as unknown as K8sGateway
+
+    await expect(listActiveContextIds(gateway)).resolves.toEqual([
+      'ctx-resource',
+      'ctx-wire',
+      'ctx-same',
+    ])
+    expect(listResource).toHaveBeenCalledWith('contexts', expect.any(String))
   })
 
   it('preserves every deleted agent at the limit and rejects overflow without truncation', () => {

@@ -1,50 +1,87 @@
 /**
- * Control UI — Contexts tab tests
+ * Control UI — Contexts section removal tests
  *
- * Validates the Contexts table and navigation to context detail page.
+ * The /contexts section is gone from the UI; legacy deep links resolve
+ * client-side to user-facing destinations instead of dead-ending.
  */
+import { controlApi } from '../helpers/api-client'
 import { expect, test } from '../helpers/auth-fixture'
-import { CUI_CONTEXTS, CUI_DASHBOARD } from '../helpers/selectors'
+import { CUI_DASHBOARD } from '../helpers/selectors'
 
-test.describe('Control UI — Contexts', () => {
+const CONTROL_UI_URL = process.env.CONTROL_UI_URL ?? 'http://127.0.0.1:3000'
+
+test.describe('Control UI — Contexts removal', () => {
   test.beforeEach(async ({ authedPage }) => {
     await expect(authedPage.locator(CUI_DASHBOARD.HEADING)).toBeVisible()
-    await authedPage.click(CUI_DASHBOARD.TAB_CONTEXTS)
   })
 
-  test('Contexts tab shows table with correct columns', async ({ authedPage }) => {
-    const table = authedPage.locator(CUI_CONTEXTS.TABLE)
-    await expect(table).toBeVisible({ timeout: 15_000 })
-    await expect(authedPage.locator(CUI_CONTEXTS.TABLE_HEADER_NAME)).toBeVisible()
-    await expect(authedPage.locator(CUI_CONTEXTS.TABLE_HEADER_MCP_SERVERS)).toBeVisible()
+  test('sidebar has no Contexts item', async ({ authedPage }) => {
+    await expect(authedPage.locator('.cu-sidebar__item', { hasText: 'Contexts' })).toHaveCount(0)
   })
 
-  test('shows context1 from cluster', async ({ authedPage }) => {
-    await expect(authedPage.locator('table')).toBeVisible({ timeout: 15_000 })
-    const contextRow = authedPage.locator('tbody tr').filter({ hasText: 'context1' }).first()
-    await expect(contextRow).toBeVisible({ timeout: 15_000 })
-    await expect(contextRow.getByRole('button', { name: /^context1$/ })).toBeVisible()
+  test('/contexts redirects to the Agents list', async ({ authedPage }) => {
+    // authedPage runs in a manual browser context without baseURL, so
+    // navigation needs the absolute URL (see helpers/auth-fixture.ts).
+    await authedPage.goto(`${CONTROL_UI_URL}/contexts`)
+    await authedPage.waitForURL('**/agents', { timeout: 15_000 })
+    expect(authedPage.url()).toContain('/agents')
+    await expect(
+      authedPage
+        .locator('main')
+        .getByText(/^Agents( \(\d+\))?$/)
+        .first()
+    ).toBeVisible({ timeout: 15_000 })
   })
 
-  test('Create Context button is visible on Contexts tab', async ({ authedPage }) => {
-    await expect(authedPage.locator(CUI_DASHBOARD.CREATE_CONTEXT_BUTTON)).toBeVisible()
+  test('/contexts/<unknown-slug> redirects to the Agents list', async ({ authedPage }) => {
+    await authedPage.goto(`${CONTROL_UI_URL}/contexts/nonexistent-slug-xyz`)
+    await authedPage.waitForURL('**/agents', { timeout: 15_000 })
+    expect(authedPage.url()).toContain('/agents')
+    await expect(
+      authedPage
+        .locator('main')
+        .getByText(/^Agents( \(\d+\))?$/)
+        .first()
+    ).toBeVisible({ timeout: 15_000 })
   })
 
-  test('clicking Create Context navigates to /contexts/new', async ({ authedPage }) => {
-    await authedPage.click(CUI_DASHBOARD.CREATE_CONTEXT_BUTTON)
-    await authedPage.waitForURL('**/contexts/new', { timeout: 10_000 })
-    expect(authedPage.url()).toContain('/contexts/new')
-  })
+  test('/contexts/<private-slug> resolves to the owning agent Connectors tab', async ({
+    authedPage,
+  }) => {
+    const runId = Date.now()
+    const ctxName = `e2e-pw-resolver-ctx-${runId}`
+    const hostName = `e2e-pw-resolver-host-${runId}`
+    try {
+      await controlApi.ensureContextDeleted(ctxName)
+      await controlApi.createContext({
+        metadata: { name: ctxName },
+        spec: {
+          contextId: ctxName,
+          description: 'contexts.spec.ts redirect fixture',
+          mcpServers: [],
+        },
+      })
+      await controlApi.ensureHostDeleted(hostName)
+      await controlApi.createHost({
+        metadata: { name: hostName },
+        spec: {
+          host: hostName,
+          contextRef: ctxName,
+          secretRef: '',
+          channels: [],
+        },
+      })
 
-  test('clicking a context name navigates to context detail', async ({ authedPage }) => {
-    await expect(authedPage.locator('table')).toBeVisible({ timeout: 15_000 })
-    const firstLink = authedPage.locator('tbody tr:first-child td:first-child .cu-link')
-    if ((await firstLink.count()) > 0) {
-      await firstLink.first().click()
-      await authedPage.waitForURL('**/contexts/**', { timeout: 10_000 })
-      expect(authedPage.url()).toMatch(/\/contexts\/.+/)
-    } else {
-      test.skip() // No contexts in cluster yet
+      await authedPage.goto(`${CONTROL_UI_URL}/contexts/${encodeURIComponent(ctxName)}`)
+      await authedPage.waitForURL(`**/agents/${hostName}/connectors`, { timeout: 15_000 })
+      expect(authedPage.url()).toContain(`/agents/${hostName}/connectors`)
+
+      // Deep link carrying a tab suffix resolves to the same destination.
+      await authedPage.goto(`${CONTROL_UI_URL}/contexts/${encodeURIComponent(ctxName)}/connectors`)
+      await authedPage.waitForURL(`**/agents/${hostName}/connectors`, { timeout: 15_000 })
+    } finally {
+      await controlApi.ensureHostDeleted(hostName)
+      await controlApi.ensureContextDeleted(ctxName)
     }
   })
 })
