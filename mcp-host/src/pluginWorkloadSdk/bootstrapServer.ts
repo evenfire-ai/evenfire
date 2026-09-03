@@ -85,6 +85,10 @@ export class PluginWorkloadSdkBootstrapServer {
           capabilityFamily: raw?.capabilityFamily,
           provider: raw?.provider,
           model: raw?.model,
+          ...(raw?.contractVersion === 2 || raw?.contractVersion === 3
+            ? { contractVersion: raw.contractVersion }
+            : {}),
+          ...(raw?.codexBinding ? { codexBinding: raw.codexBinding } : {}),
         }
         try {
           const result = await this.opts.configure(request)

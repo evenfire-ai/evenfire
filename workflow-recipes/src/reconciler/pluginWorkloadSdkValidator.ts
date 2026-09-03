@@ -184,8 +184,15 @@ export interface PluginWorkloadSdkStatusProjection {
 
 export interface PluginWorkloadSdkBootstrapProofInput {
   ready: true
-  contractVersion: 2
+  contractVersion: 2 | 3
   podUid: string
+  codexBinding?: {
+    connectionKey: string
+    catalogRevision: number
+    credentialRevision: number
+    model: string
+    bindingHash: string
+  }
   provider?: string
   model?: string
   policyReady?: boolean
@@ -200,6 +207,21 @@ export interface PluginWorkloadSdkBootstrapProofInput {
   clientNotificationsPolicyState?: string
   clientNotificationsPolicyReason?: string
   verifiedAt: string
+}
+
+/**
+ * parseEagerSdkBootstrapProof always sets policyState (default `unknown`).
+ * A stale v2 Codex image or a missing binding must not render as `(active)`.
+ */
+function promptBridgePolicyPendingReason(
+  bootstrapProof: PluginWorkloadSdkBootstrapProofInput | undefined,
+  codexBindingPending: boolean
+): string {
+  if (codexBindingPending) {
+    if (bootstrapProof?.contractVersion !== 3) return 'codex_bootstrap_contract_stale'
+    return bootstrapProof.policyReason ?? 'codex_execution_binding_missing'
+  }
+  return bootstrapProof?.policyReason ?? bootstrapProof?.policyState ?? 'unknown'
 }
 
 /**
@@ -338,14 +360,23 @@ export function buildPluginWorkloadSdkStatus(args: {
     clientNotifications &&
     bootstrapProof?.ready === true &&
     bootstrapProof.clientNotificationsPolicyReady !== true
-  if (policyPending || clientNotificationsPolicyPending) {
-    const family = promptBridge && policyPending ? 'promptBridge' : 'clientNotifications'
+  const codexBindingPending =
+    promptBridge &&
+    bootstrapProof?.provider === 'codex-subscription' &&
+    (bootstrapProof.policyReason === 'codex_execution_binding_missing' ||
+      bootstrapProof.contractVersion !== 3 ||
+      !bootstrapProof.codexBinding)
+  if (policyPending || clientNotificationsPolicyPending || codexBindingPending) {
+    const family =
+      promptBridge && (policyPending || codexBindingPending)
+        ? 'promptBridge'
+        : 'clientNotifications'
     const policyReason =
       family === 'clientNotifications'
         ? (bootstrapProof?.clientNotificationsPolicyReason ??
           bootstrapProof?.clientNotificationsPolicyState ??
           'unknown')
-        : (bootstrapProof?.policyReason ?? bootstrapProof?.policyState ?? 'unknown')
+        : promptBridgePolicyPendingReason(bootstrapProof, codexBindingPending)
     const message =
       policyReason === 'grant_missing'
         ? `Plugin Workload SDK ${family} is awaiting an operator grant`
