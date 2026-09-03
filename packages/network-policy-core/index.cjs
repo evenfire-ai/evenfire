@@ -104,8 +104,34 @@ const NO_RECORDS_DNS_CODES = Object.freeze(['ENODATA', 'ENOTFOUND'])
  */
 const PERMANENT_DNS_CODES = Object.freeze([...NO_RECORDS_DNS_CODES, 'EBADNAME'])
 
+/**
+ * True only for a code in PERMANENT_DNS_CODES. Takes a CODE, not an Error —
+ * `isPermanentDnsCode(err)` is always false, which would silently route every
+ * permanent DNS answer into the caller's fault branch. Pair it with `dnsCodeOf`.
+ */
 function isPermanentDnsCode(code) {
   return typeof code === 'string' && PERMANENT_DNS_CODES.includes(code)
+}
+
+/**
+ * The one extraction of `.code` off a rejection value (issue #567 review, R1-M2).
+ * Both egress gates need "what code did this rejection carry", and a hand-written
+ * unwrap in each process is the drift surface this package exists to remove;
+ * `classifyDnsError` reads through here too, so there is a single answer.
+ *
+ * Deliberately narrower than `classifyDnsError`, which ALSO accepts a bare code
+ * string: this returns undefined for a string input. A rejection whose value IS
+ * the string 'ENOTFOUND' therefore yields no code and lands in the caller's fault
+ * branch rather than being classified. `node:dns` rejects with Error objects, so
+ * that shape does not occur; the asymmetry is kept because widening it would
+ * invent a string-rejection path no caller reaches.
+ *
+ * Non-string `.code` values return undefined rather than propagating: the
+ * declared type is `string | undefined` and every caller string-checks anyway.
+ */
+function dnsCodeOf(err) {
+  if (typeof err !== 'object' || err === null) return undefined
+  return typeof err.code === 'string' ? err.code : undefined
 }
 
 /** True for the two genuine no-records answers, false for every other code. */
@@ -133,12 +159,7 @@ function isNoRecordsDnsCode(code) {
  * freezes the accumulated set.
  */
 function classifyDnsError(errOrCode) {
-  const code =
-    typeof errOrCode === 'string'
-      ? errOrCode
-      : errOrCode && typeof errOrCode === 'object'
-        ? errOrCode.code
-        : undefined
+  const code = typeof errOrCode === 'string' ? errOrCode : dnsCodeOf(errOrCode)
   return typeof code === 'string' && TRANSIENT_DNS_CODES.has(code) ? 'transient' : 'permanent'
 }
 
@@ -479,4 +500,5 @@ module.exports = {
   PERMANENT_DNS_CODES,
   isPermanentDnsCode,
   isNoRecordsDnsCode,
+  dnsCodeOf,
 }

@@ -155,7 +155,24 @@ export declare function classifyDnsError(
  */
 export declare const PERMANENT_DNS_CODES: readonly string[]
 
+/**
+ * True only for a code in PERMANENT_DNS_CODES. Takes a *code*, not an Error:
+ * `isPermanentDnsCode(err)` is always false, which would silently route every
+ * permanent DNS answer into the caller's fault branch. Pair it with `dnsCodeOf`.
+ */
 export declare function isPermanentDnsCode(code: unknown): boolean
+
+/**
+ * Extract the DNS `.code` off a rejection value — the single implementation both
+ * egress gates share instead of hand-writing the unwrap. Returns undefined for a
+ * non-object, for a missing code, and for a non-string code.
+ *
+ * Narrower than `classifyDnsError` on purpose: a bare code STRING yields
+ * undefined here, so a rejection whose value is the string 'ENOTFOUND' is not
+ * classified as a DNS answer. `node:dns` rejects with Error objects, so that
+ * shape does not occur in production.
+ */
+export declare function dnsCodeOf(err: unknown): string | undefined
 
 /**
  * True for the two genuine no-records answers (ENODATA, ENOTFOUND) and false for

@@ -245,6 +245,27 @@ describe('defaultFqdnLookup classification', () => {
       await expect(defaultFqdnLookup('h.example.com')).rejects.toMatchObject({
         cause: expect.objectContaining({ code }),
       })
+
+      // #567 review, R1-M4. The message must NOT contain the substring
+      // `egress resolution failed`: workflowRecipeReconciler keys on it to
+      // exclude a message from the infra-retry reclassification, and this throw
+      // is a raw fault that has not been classified by egressResolutionError()
+      // at all, so it must stay eligible for the normal routing. The invariant
+      // lived only in a comment above the throw until now.
+      //
+      // Captured rather than asserted with `.rejects.not.toThrow(...)`: that
+      // form passes just as well when the promise never rejects, which would
+      // mean this whole branch stopped throwing and the test still went green.
+      // The positive assertions on the captured message are the liveness
+      // witness that the throw really happened.
+      const thrown = await defaultFqdnLookup('h.example.com').then(
+        result => {
+          throw new Error(`expected a throw, got ${JSON.stringify(result)}`)
+        },
+        (e: unknown) => e as Error
+      )
+      expect(thrown.message).toContain(code)
+      expect(thrown.message).not.toContain('egress resolution failed')
     }
   )
 

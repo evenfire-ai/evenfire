@@ -9,6 +9,7 @@ import { shouldPatchRecipeStatus } from '../k8sClient'
 import { CronJobDef, WorkflowRecipeCRD, WorkflowRecipeGfsIntentSpec, WorkloadDef } from '../types'
 import { INHERITED_PARENT_RESOURCES_ANNOTATION } from '../workflow/childRecipeFactory'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
+import { defaultFqdnLookup } from './fqdnResolver'
 import { isRetryableInfraError } from './k8sErrors'
 import * as brokerIssuer from './oauthBrokerTokenIssuerClient'
 import { PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE } from './pluginWorkloadSdkValidator'
@@ -106,6 +107,31 @@ const mockNetworkingApi = {
 }
 
 const mockVerifyWorkflowRunProvenance = vi.fn().mockResolvedValue('verified')
+
+// Lets the #513 tests below drive the REAL `defaultFqdnLookup` instead of
+// fabricating the Error it produces (#567 review, R1-M3). The default
+// implementation rejects loudly rather than returning something plausible: every
+// other test in this file injects its own `fqdnLookup`, so a call arriving here
+// means a test reached for real DNS by accident, and that should fail the test
+// rather than resolve against the network or hang.
+const { resolve4Mock, resolve6Mock } = vi.hoisted(() => ({
+  resolve4Mock: vi.fn(),
+  resolve6Mock: vi.fn(),
+}))
+vi.mock('node:dns/promises', () => ({
+  resolve4: resolve4Mock,
+  resolve6: resolve6Mock,
+}))
+// `vi.clearAllMocks()` in beforeEach clears CALLS, not implementations, so this
+// default stands for the whole file; the #513 tests override it with
+// `mockRejectedValueOnce` so the loud default is back on the next test.
+const unexpectedDnsCall = (family: string) => async (host: string) => {
+  throw new Error(
+    `unexpected real DNS ${family} lookup for "${host}" — inject fqdnLookup in this test`
+  )
+}
+resolve4Mock.mockImplementation(unexpectedDnsCall('A'))
+resolve6Mock.mockImplementation(unexpectedDnsCall('AAAA'))
 
 vi.mock('@kubernetes/client-node', () => ({
   KubeConfig: vi.fn().mockImplementation(() => ({
@@ -2452,13 +2478,21 @@ describe('WorkflowRecipeReconciler', () => {
         ],
       },
     })
+    // The throw comes from the real producer, not from a fixture that imitates
+    // it (#567 review, R1-M3). A hand-written Error pins only this test's own
+    // guess at the message and `cause` shape, so a drift in `defaultFqdnLookup`
+    // — different wording, a restructured cause, a change in describeRejection —
+    // would leave this green while production routing broke. Mocking node:dns
+    // one layer lower makes the producer emit the shape, so the two move
+    // together or this test fails.
+    resolve4Mock.mockRejectedValueOnce(
+      Object.assign(new Error('queryA EBADFAMILY'), { code: 'EBADFAMILY' })
+    )
+    resolve6Mock.mockRejectedValueOnce(
+      Object.assign(new Error('queryAaaa EBADFAMILY'), { code: 'EBADFAMILY' })
+    )
     const reconcilerWithLookup = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
-      fqdnLookup: async () => {
-        throw new Error(
-          'DNS lookup for "api.example.com" failed with a non-DNS error (EBADFAMILY): queryA EBADFAMILY',
-          { cause: Object.assign(new Error('queryA EBADFAMILY'), { code: 'EBADFAMILY' }) }
-        )
-      },
+      fqdnLookup: host => defaultFqdnLookup(host),
     })
 
     const result = await reconcilerWithLookup.reconcile(recipe)
@@ -2467,6 +2501,14 @@ describe('WorkflowRecipeReconciler', () => {
     expect(result.message).toContain('EBADFAMILY')
     // Not laundered into the operator-facing no-records wording.
     expect(result.message).not.toContain('no A or AAAA records')
+    // And it arrived as a RAW FAULT, not as a classified egress-resolution
+    // failure. This is the assertion that distinguishes the two routes: a
+    // `kind: 'error'` result travels through egressResolutionError(), which
+    // stamps `egress resolution failed` into the message, while a throw bypasses
+    // that classification entirely. Without this, restoring the #513 defect —
+    // returning an error instead of throwing — leaves the test green, because
+    // both routes end in `failed` with the code somewhere in the message.
+    expect(result.message).not.toContain('egress resolution failed')
 
     const egressPolicy = expect.objectContaining({
       body: expect.objectContaining({
@@ -3985,14 +4027,18 @@ describe('WorkflowRecipeReconciler', () => {
     // records", and that only helps if BOTH call sites land somewhere honest:
     // the terminal `failed` phase carrying the real code, reached before any
     // write or delete, so a live `ui-egress-*` policy is left as it was.
+    // Driven through the real `defaultFqdnLookup` for the same reason as the
+    // workload-lane test above (#567 review, R1-M3): the throw must be the one
+    // production emits, not a copy of it maintained by hand in the test.
+    resolve4Mock.mockRejectedValueOnce(
+      Object.assign(new Error('queryA EBADFAMILY'), { code: 'EBADFAMILY' })
+    )
+    resolve6Mock.mockRejectedValueOnce(
+      Object.assign(new Error('queryAaaa EBADFAMILY'), { code: 'EBADFAMILY' })
+    )
     const kc = new k8s.KubeConfig()
     const rec = new WorkflowRecipeReconciler(kc, undefined, {
-      fqdnLookup: async () => {
-        throw new Error(
-          'DNS lookup for "api.stripe.com" failed with a non-DNS error (EBADFAMILY): queryA EBADFAMILY',
-          { cause: Object.assign(new Error('queryA EBADFAMILY'), { code: 'EBADFAMILY' }) }
-        )
-      },
+      fqdnLookup: host => defaultFqdnLookup(host),
     })
 
     const result = await rec.reconcile(
@@ -4003,6 +4049,14 @@ describe('WorkflowRecipeReconciler', () => {
     expect(result.message).toContain('EBADFAMILY')
     // Not laundered into the operator-facing no-records wording.
     expect(result.message).not.toContain('no A or AAAA records')
+    // And it arrived as a RAW FAULT, not as a classified egress-resolution
+    // failure. This is the assertion that distinguishes the two routes: a
+    // `kind: 'error'` result travels through egressResolutionError(), which
+    // stamps `egress resolution failed` into the message, while a throw bypasses
+    // that classification entirely. Without this, restoring the #513 defect —
+    // returning an error instead of throwing — leaves the test green, because
+    // both routes end in `failed` with the code somewhere in the message.
+    expect(result.message).not.toContain('egress resolution failed')
 
     expect(createdPolicy('ui-egress-test-recipe')).toBeUndefined()
     expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalledWith(

@@ -16,7 +16,12 @@
 import * as k8s from '@kubernetes/client-node'
 import * as dns from 'node:dns/promises'
 import { isIP } from 'node:net'
-import { STATE_ANNOTATION, classifyDnsError, isPermanentDnsCode } from '@clerum/network-policy-core'
+import {
+  STATE_ANNOTATION,
+  classifyDnsError,
+  dnsCodeOf,
+  isPermanentDnsCode,
+} from '@clerum/network-policy-core'
 import { config } from './config'
 import {
   EXTERNAL_EGRESS_POLICY_TYPE,
@@ -2067,7 +2072,12 @@ export class NetworkPolicyReconciler {
     // Issue #513: faults that are NOT a DNS condition. Kept separate from
     // `failures` because those are rejected INPUT (the operator's) while these are
     // OUR bug, and the two earn different reasons and different messages.
-    const reconcileFaults: Array<{ dns: string; err: unknown; blocking: boolean }> = []
+    const reconcileFaults: Array<{
+      dns: string
+      err: unknown
+      blocking: boolean
+      revoked: boolean
+    }> = []
     const resolvedAtMs = Date.now()
     const resolvedAt = new Date(resolvedAtMs).toISOString()
 
@@ -2254,20 +2264,18 @@ export class NetworkPolicyReconciler {
           // operator's misconfiguration, and it must keep pruning and reporting
           // ExternalEgressRejected rather than blame the controller.
           //
-          // `code` is read off any object, so a rejection that is not an Error
-          // instance is still classified by its code rather than by how it was
-          // thrown. Not full parity with classifyDnsError, which also accepts a
-          // bare code string: a rejection whose value IS the string 'ENOTFOUND'
-          // classifies permanent there and yields no code here, so it lands in
-          // the fault branch. `node:dns` rejects with Error objects, so that
-          // shape does not occur in production; it is left explicit rather than
-          // handled, because inventing a string-rejection path would be code no
-          // caller reaches.
+          // `dnsCodeOf` reads the code off any object, so a rejection that is not
+          // an Error instance is still classified by its code rather than by how
+          // it was thrown. It is deliberately not full parity with
+          // classifyDnsError, which also accepts a bare code string: a rejection
+          // whose value IS the string 'ENOTFOUND' classifies permanent there and
+          // yields no code here, so it lands in the fault branch. `node:dns`
+          // rejects with Error objects, so that shape does not occur in
+          // production. Shared with WRC rather than unwrapped by hand in each
+          // process — two hand-written extractions of the same field is the drift
+          // surface network-policy-core exists to remove (#567 review, R1-M2).
           const kind = classifyDnsError(err)
-          const code =
-            typeof err === 'object' && err !== null
-              ? (err as NodeJS.ErrnoException).code
-              : undefined
+          const code = dnsCodeOf(err)
           if (kind !== 'transient' && !isPermanentDnsCode(code)) {
             // Log before anything that can throw. writeExternalEgressStatus fails
             // on a stale uid/generation or a rejected patch, and the isCurrent
@@ -2283,12 +2291,7 @@ export class NetworkPolicyReconciler {
             // desiredPolicyNames is only complete once the loop ends. Throwing
             // here would leave a de-authorized destination allowed for as long as
             // the fault persists — fail-loud paid for with fail-open.
-            // Still DESIRED: the binding is declared, we simply could not
-            // reconcile it this pass. Without this the cleanup below would read
-            // the omission as "the operator removed it" and delete the very
-            // policy this branch promises to leave untouched.
-            desiredPolicyNames.add(name)
-
+            //
             // D4 fail-static, applied to a fault exactly as the transient branch
             // applies it to a resolver outage: when there is a live policy, its
             // rules are what is enforced right now, so report them and let the
@@ -2311,6 +2314,36 @@ export class NetworkPolicyReconciler {
             // known-good, so none of it is served and the fault blocks.
             const allowed = enforced.filter(cidr => isAllowedExternalEgressCidr(cidr))
             const trustworthy = allowed.length === enforced.length
+
+            // Still DESIRED, but only while the live object is one we would keep.
+            // The cleanup below deletes every external-egress policy NOT in this
+            // set, so membership is the difference between "left untouched" and
+            // "revoked", and the choice has to be made after the trustworthy
+            // verdict, not before it (review of #567, R1-L1).
+            //
+            // Trustworthy — including the bootstrap case, where there is no live
+            // policy at all and `enforced` is empty, so the filter is vacuously
+            // total: the binding is declared, we simply could not reconcile it
+            // this pass. Without the add, cleanup would read the omission as "the
+            // operator removed it" and delete the very policy this branch
+            // promises to leave untouched.
+            //
+            // Untrustworthy: the live policy carries a CIDR outside the allowed
+            // ranges. Nothing else in the system repairs that — the safety lane
+            // retains DNS policies modulo cidr and the orphan list is by label
+            // without an ownership read — and this branch cannot rewrite it,
+            // because rebuilding means recomputing and recomputing is what
+            // faulted. Leaving it in the desired set is what kept a private range
+            // enforced on every resync for as long as the fault lasted, which the
+            // merge-base did not do: there the fault was laundered into the
+            // permanent branch, which rewrote the policy from the annotation
+            // window and dropped the drift. Omitting it hands the object to
+            // cleanup, which runs BEFORE the deferred throw below, so the
+            // revocation actually happens rather than being skipped by the
+            // fail-loud exit. Revoking an allow policy under the namespace L0
+            // deny-all closes that destination; it cannot open one.
+            if (trustworthy) desiredPolicyNames.add(name)
+
             if (trustworthy && enforced.length > 0) {
               // Without this the binding vanishes from status.resolvedEgressIPs —
               // the audit record an operator reads to learn what is allowed —
@@ -2332,6 +2365,11 @@ export class NetworkPolicyReconciler {
               // so completing the pass would publish a server as reconciled while
               // one of its declared destinations was never enforced at all.
               blocking: !trustworthy || enforced.length === 0,
+              // The message below otherwise tells the operator the accumulated
+              // egress was left untouched. On an untrustworthy live policy it is
+              // revoked instead, and a status that describes the opposite of what
+              // the pass did is the same defect class this branch exists to close.
+              revoked: !trustworthy,
             })
             continue
           }
@@ -2436,7 +2474,11 @@ export class NetworkPolicyReconciler {
       const first = blocking ?? reconcileFaults[0]
       const parts = [
         `External egress reconciliation failed on binding "${first.dns}" with a non-DNS error ` +
-          `(not a resolver condition, accumulated egress left untouched): ${this.errorMessage(first.err)}`,
+          `(not a resolver condition, ${
+            first.revoked
+              ? 'live policy REVOKED: it enforced an address outside the allowed ranges'
+              : 'accumulated egress left untouched'
+          }): ${this.errorMessage(first.err)}`,
       ]
       if (reconcileFaults.length > 1) {
         parts.push(`and ${reconcileFaults.length - 1} more binding(s) faulted`)

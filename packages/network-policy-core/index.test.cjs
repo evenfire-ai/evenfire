@@ -368,6 +368,52 @@ test('#513: isPermanentDnsCode rejects what classifyDnsError merely defaults', (
   }
 })
 
+// `isNoRecordsDnsCode` was reachable only through WRC before (#567 review nit).
+// It splits PERMANENT_DNS_CODES in two so the operator gets the right words: a
+// name with no records is a different event from one the resolver refused to
+// query, and the two must not collapse back into "no A or AAAA records".
+test('#567: isNoRecordsDnsCode is the empty-answer subset, EBADNAME excluded', () => {
+  for (const code of ['ENODATA', 'ENOTFOUND']) {
+    assert.equal(core.isNoRecordsDnsCode(code), true, `${code} is an empty answer`)
+    assert.equal(core.isPermanentDnsCode(code), true, `${code} is also a permanent verdict`)
+  }
+  // The member that separates the two sets. If this ever returns true, WRC's
+  // "the resolver refused to query it" branch goes unreachable and a malformed
+  // name is reported as a name with no records.
+  assert.equal(core.isNoRecordsDnsCode('EBADNAME'), false)
+  assert.equal(core.isPermanentDnsCode('EBADNAME'), true)
+
+  for (const code of [undefined, null, '', 'ESERVFAIL', 'EBADFAMILY', 123]) {
+    assert.equal(core.isNoRecordsDnsCode(code), false, `${String(code)} is not an empty answer`)
+  }
+})
+
+// ─── #567 R1-M2: one extraction of `.code`, shared by both egress gates ────────
+// Each lane used to unwrap the rejection by hand — HCC with a typeof dance, WRC
+// by reading `.code` straight off a value typed as an ErrnoException. Same field,
+// two implementations, in two processes: the drift surface this package exists to
+// remove. classifyDnsError reads through it too, so there is one answer.
+test('#567: dnsCodeOf extracts the code off any object rejection', () => {
+  assert.equal(core.dnsCodeOf(Object.assign(new Error('x'), { code: 'ENOTFOUND' })), 'ENOTFOUND')
+  // Not an Error instance: classified by its code, not by how it was thrown.
+  assert.equal(core.dnsCodeOf({ code: 'ESERVFAIL' }), 'ESERVFAIL')
+})
+
+test('#567: dnsCodeOf reports absence rather than inventing a code', () => {
+  for (const value of [undefined, null, 42, new Error('no code'), {}, { code: 7 }, { code: null }]) {
+    assert.equal(core.dnsCodeOf(value), undefined, `${String(value)} carries no string code`)
+  }
+})
+
+test('#567: dnsCodeOf does NOT accept a bare code string, unlike classifyDnsError', () => {
+  // The asymmetry is deliberate and load-bearing: a rejection whose VALUE is the
+  // string 'ENOTFOUND' must not be treated as a DNS answer by the gates, so it
+  // yields no code here and lands in the caller's fault branch. classifyDnsError
+  // keeps its string form because callers pass it a code directly.
+  assert.equal(core.dnsCodeOf('ENOTFOUND'), undefined)
+  assert.equal(core.classifyDnsError('ENOTFOUND'), 'permanent')
+  assert.equal(core.isPermanentDnsCode(core.dnsCodeOf('ENOTFOUND')), false)
+})
 
 // ─── H-A: revocation/freeze keyed by (fqdn,port,protocol), not fqdn alone ──────
 // The state map is keyed by (fqdn,ip,port,protocol) but classification used to be

@@ -383,6 +383,69 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     expect(reported).not.toContain('10.0.0.5')
   })
 
+  it('T11 revokes the drifted policy instead of leaving the blocked range enforced', async () => {
+    // Review of #567, R1-L1. T10 pins that a drifted policy is not SERVED and not
+    // REPORTED. Neither of those stops it being ENFORCED: the fault branch adds
+    // the binding to `desiredPolicyNames` before it knows whether the live object
+    // is trustworthy, so `cleanupExternalEgress` reads it as still-desired and
+    // keeps it, while the `continue` skips the rewrite. The private range then
+    // stays in the dataplane for as long as the fault repeats — every 30s,
+    // forever, for a deterministic fault.
+    //
+    // At the merge-base this same input self-healed: the fault was laundered into
+    // the permanent branch, which rebuilt the policy from the annotation window
+    // and wrote 1.2.3.4/32 back over the drift. So #567 made this input strictly
+    // worse, and that is what this test exists to stop.
+    //
+    // The invariant both revisions share is that 10.0.0.5/32 does not survive the
+    // pass. They reach it differently, and this test pins the mechanism THIS
+    // branch can actually use: revocation. Rewriting — what the merge-base did —
+    // is not available here, because rebuilding the policy means recomputing, and
+    // recomputing is exactly what faulted. Revoking is fail-CLOSED: these are pure
+    // allow policies (`policyTypes: ['Egress']` over an ipBlock list) under the
+    // namespace L0 deny-all, so removing one closes that destination rather than
+    // opening it, and none of them is a deny whose removal would open traffic.
+    await seedAccumulatedPolicy({ lapsed: false })
+    const items = (await mockApi.listNamespacedNetworkPolicy({ namespace: 'mcp-server' })) as {
+      items: Array<{ metadata?: { name?: string }; spec?: k8s.V1NetworkPolicySpec }>
+    }
+    const drifted = JSON.parse(JSON.stringify(items)) as typeof items
+    drifted.items[0].spec!.egress![0]!.to![0]!.ipBlock!.cidr = '10.0.0.5/32'
+    const policyName = drifted.items[0].metadata!.name!
+    mockApi.listNamespacedNetworkPolicy.mockResolvedValue(drifted)
+    injectPostResolutionTypeError()
+
+    // Liveness witness for the negative assertions below: the fault branch really
+    // ran and really blocked. Without this, "the blocked range is not enforced"
+    // would be satisfied just as well by a pass that never reached the branch.
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(TypeError)
+
+    // The revocation must happen BEFORE the throw. `cleanupExternalEgress` runs
+    // after the binding loop and before the deferred fault is rethrown; a fix that
+    // moved the throw earlier would restore the fail-loud-paid-with-fail-open
+    // defect a previous round closed, and this assertion is what would catch it.
+    expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ name: policyName })
+    )
+
+    // Nothing rewrote it with the drift still in place, either.
+    const rewritten = mockApi.replaceNamespacedNetworkPolicy.mock.calls
+      .map(call => JSON.stringify((call[0] as { body?: unknown }).body))
+      .join(' ')
+    expect(rewritten).not.toContain('10.0.0.5')
+
+    // And the operator is told what actually happened. The generic fault message
+    // says "accumulated egress left untouched", which on this path would describe
+    // the opposite of the pass — a status disagreeing with the dataplane is the
+    // defect T7's sibling assertion was added to stop.
+    const egress = statusConditions().filter(c => c.type === 'ExternalEgressReady')
+    expect(egress.at(-1)?.reason).toBe('ExternalEgressReconcileFailed')
+    expect(egress.at(-1)?.message).toContain('REVOKED')
+    expect(egress.at(-1)?.message).not.toContain('left untouched')
+  })
+
   it('T8 still throws on a fault with nothing to serve (bootstrap)', async () => {
     // The other half of the same decision, pinned so it cannot be lost: with no
     // live policy there is no frozen set, so serving is not an option and the
@@ -467,6 +530,20 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     // right — PERMANENT_DNS_CODES is shared with WRC, whose ui lane does reach
     // c-ares on the CRD pattern alone, and a validator is a weaker guarantee than
     // a gate that classifies correctly whatever arrives.
+    //
+    // NOT a RED-first test, and the PR body no longer claims it is (#567 review,
+    // R1-M1): copy this file onto the merge-base and T4 passes, because there
+    // `classifyDnsError` already defaults EBADNAME to 'permanent' and reaches the
+    // same prune-and-reject outcome by the accident this PR exists to remove. No
+    // assertion about EBADNAME can be red at the merge-base, since base and head
+    // are observationally identical for this input; making it red would mean
+    // changing what EBADNAME does, which is production code bent to a test.
+    //
+    // It is still live coverage, verified by mutation rather than asserted:
+    // dropping `!isPermanentDnsCode(code)` from the gate kills it (along with
+    // T3), and dropping 'EBADNAME' from PERMANENT_DNS_CODES kills T4 ALONE — no
+    // other test in the HCC suite notices. That second mutation is what T4 is
+    // here for.
     await seedAccumulatedPolicy({ lapsed: true })
     resolve4Mock.mockRejectedValueOnce(
       Object.assign(new Error('queryA EBADNAME api.example.com'), { code: 'EBADNAME' })

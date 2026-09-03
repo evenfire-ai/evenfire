@@ -2,6 +2,7 @@ import type { RecordWithTtl } from 'node:dns'
 import { resolve4, resolve6 } from 'node:dns/promises'
 import {
   classifyDnsError,
+  dnsCodeOf,
   isNoRecordsDnsCode,
   isPermanentDnsCode,
 } from '@clerum/network-policy-core'
@@ -189,11 +190,18 @@ export const defaultFqdnLookup: FqdnLookup = async host => {
   // message (walking `.cause` for socket codes), and this throw happens before
   // any policy write or delete, so the live NetworkPolicy is left untouched. The
   // message deliberately avoids the 'egress resolution failed' marker that catch
-  // matches on: a raw fault is not a DNS classification worth protecting.
-  const unclassified = rejections.find(e => !isPermanentDnsCode(e.code))
+  // matches on: a raw fault is not a DNS classification worth protecting. That
+  // absence is asserted in fqdnResolver.test.ts rather than left as prose.
+  //
+  // The code is read through the package's `dnsCodeOf` rather than off `.code`
+  // directly, so both egress gates unwrap a rejection the same way (#567 review,
+  // R1-M2). It also makes the read total: `rejections` is typed as
+  // ErrnoException[] because the settle wrappers say so, not because anything
+  // checked, so a non-object rejection would have thrown on the property access.
+  const unclassified = rejections.find(e => !isPermanentDnsCode(dnsCodeOf(e)))
   if (unclassified) {
     throw new Error(
-      `DNS lookup for "${host}" failed with a non-DNS error (${unclassified.code ?? 'no code'}): ${describeRejection(unclassified)}`,
+      `DNS lookup for "${host}" failed with a non-DNS error (${dnsCodeOf(unclassified) ?? 'no code'}): ${describeRejection(unclassified)}`,
       { cause: unclassified }
     )
   }
@@ -203,11 +211,11 @@ export const defaultFqdnLookup: FqdnLookup = async host => {
   // code rather than testing for it: hardcoding 'EBADNAME' here would drift the
   // moment PERMANENT_DNS_CODES gains another member, and the message would fall
   // back to "no A or AAAA records" — the same lie this branch exists to remove.
-  const refused = rejections.find(e => !isNoRecordsDnsCode(e.code))
+  const refused = rejections.find(e => !isNoRecordsDnsCode(dnsCodeOf(e)))
   if (refused) {
     return {
       kind: 'error',
-      error: `malformed hostname "${host}" (${refused.code}) — the resolver refused to query it`,
+      error: `malformed hostname "${host}" (${dnsCodeOf(refused)}) — the resolver refused to query it`,
     }
   }
 
@@ -238,12 +246,13 @@ export interface ResolveResult {
  * apply a stale or partial NetworkPolicy off the back of one. Each failure
  * carries a `retryable` flag: transient resolver failures (SERVFAIL/timeout)
  * are retryable, while a genuine no-records answer or a blocked-address
- * rejection fails closed permanently. A lookup that cannot produce a DNS verdict
- * at all throws instead of returning a failure, so the reconciler's existing
- * error routing reports the real fault (issue #513).
- * If any A record for a hostname resolves
- * to a blocked range, the entire hostname fails closed and no public siblings
- * are emitted.
+ * rejection fails closed permanently. If any A record for a hostname resolves to
+ * a blocked range, the entire hostname fails closed and no public siblings are
+ * emitted.
+ *
+ * A lookup that cannot produce a DNS verdict at all throws instead of returning
+ * a failure, so the reconciler's existing error routing reports the real fault
+ * (issue #513).
  */
 export async function resolveExternalEgress(
   externals: SandboxUiExternalEgress[],
