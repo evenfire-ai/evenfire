@@ -100,11 +100,15 @@ function resolveMaxInflightBodyBytes(): number {
   )
 }
 
-// While a body is being read, the chunk list AND the contiguous copy it is flattened
-// into are both live, so a buffering request costs ~2x its byte length. After the
-// read the chunk list is garbage and only the copy survives into the fetch. Charge
-// the peak during the read, then settle down to the true resident size.
-const READ_PHASE_CHARGE_MULTIPLIER = 2
+// A buffered body is never resident as a single copy. During the read the chunk
+// list and the contiguous copy it is flattened into are both live; once it is handed
+// to fetch(), undici holds its own send-side copy alongside ours. So the charge is
+// kept at 2x the body for the WHOLE lifetime — admission through the upstream
+// response — rather than settled down to 1x after the read. It briefly dips below
+// 2x between flatten and undici's copy, so 2x is a conservative steady bound, not a
+// hard ceiling on transport internals: those can transiently exceed it, which is
+// exactly why the budget is sized well under the pod limit rather than up against it.
+const BODY_CHARGE_MULTIPLIER = 2
 
 // Budget sizing, written down so it can be re-derived instead of guessed at:
 //
@@ -112,9 +116,10 @@ const READ_PHASE_CHARGE_MULTIPLIER = 2
 //   - ~150MiB Next.js baseline
 //   = ~360MiB available, of which 192MiB is charged and ~170MiB stays headroom.
 //
-// 192MiB also clears a full upload wave with room to spare: 4 concurrent 16MiB
-// parts peak at 4 x 16MiB x 2 = 128MiB, leaving 64MiB for the ordinary mutations
-// that must keep working while someone uploads a large file.
+// The headroom is deliberate slack for the transport copies the 2x charge does not
+// model exactly. 192MiB also clears a full upload wave: 4 concurrent 16MiB parts are
+// charged 4 x 16MiB x 2 = 128MiB, leaving 64MiB for the ordinary mutations that must
+// keep working while someone uploads a large file.
 
 // Idle, not total. A total read deadline would have to be generous enough for a
 // 16MiB part on a domestic uplink (minutes), which is also long enough to be worth
@@ -166,43 +171,50 @@ async function readBodyCapped(
   const reader = stream.getReader()
   const chunks: Uint8Array[] = []
   let total = 0
-  try {
-    for (;;) {
-      let idleTimer: ReturnType<typeof setTimeout> | undefined
-      let result: ReadableStreamReadResult<Uint8Array> | 'idle'
-      try {
-        result = await Promise.race([
-          reader.read(),
-          new Promise<'idle'>(resolve => {
-            idleTimer = setTimeout(() => resolve('idle'), idleTimeoutMs)
-          }),
-        ])
-      } finally {
-        if (idleTimer) clearTimeout(idleTimer)
-      }
-      // cancel() settles the read() this race abandoned, so releaseLock() below
-      // never runs against a pending read.
-      if (result === 'idle') {
-        await reader.cancel()
-        return 'idle-timeout'
-      }
-      const { done, value } = result
-      if (done) break
-      if (!value) continue
-      total += value.byteLength
-      if (total > cap) {
-        await reader.cancel()
-        return 'too-large'
-      }
-      if (!charge(value.byteLength * READ_PHASE_CHARGE_MULTIPLIER)) {
-        await reader.cancel()
-        return 'budget-exhausted'
-      }
-      chunks.push(value)
-    }
-  } finally {
-    reader.releaseLock()
+
+  // Abort WITHOUT waiting for the client. In the built Next server the request-body
+  // stream's cancel() does not settle until the peer sends more (or the socket
+  // closes), so `await reader.cancel()` would pin the charge for exactly as long as
+  // the idle deadline is meant to bound it — the whole point of the deadline is to
+  // reclaim capacity from a stalled client, which cannot then be gated on that client
+  // making progress. Fire cancellation and return so the caller's finally releases
+  // the charge immediately. `pending` is the read() this abort abandoned, caught so
+  // its eventual settlement is not an unhandled rejection; the lock is deliberately
+  // left held because the reader and stream go out of scope on return and are GC'd.
+  const abort = (pending: Promise<unknown> | undefined, outcome: BodyReadFailure) => {
+    pending?.catch(() => {})
+    void reader.cancel().catch(() => {})
+    return outcome
   }
+
+  for (;;) {
+    let idleTimer: ReturnType<typeof setTimeout> | undefined
+    const readPromise = reader.read()
+    let result: ReadableStreamReadResult<Uint8Array> | 'idle'
+    try {
+      result = await Promise.race([
+        readPromise,
+        new Promise<'idle'>(resolve => {
+          idleTimer = setTimeout(() => resolve('idle'), idleTimeoutMs)
+        }),
+      ])
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer)
+    }
+    // Only the idle branch leaves readPromise pending; the size/budget aborts below
+    // already hold its resolved chunk, so nothing is left dangling there.
+    if (result === 'idle') return abort(readPromise, 'idle-timeout')
+    const { done, value } = result
+    if (done) break
+    if (!value) continue
+    total += value.byteLength
+    if (total > cap) return abort(undefined, 'too-large')
+    if (!charge(value.byteLength * BODY_CHARGE_MULTIPLIER)) {
+      return abort(undefined, 'budget-exhausted')
+    }
+    chunks.push(value)
+  }
+  reader.releaseLock()
   if (total === 0) return null
   const out = new Uint8Array(total)
   let offset = 0
@@ -380,7 +392,7 @@ async function proxyControlApi(
       // a 200-byte one. The per-chunk charge below is the real bound; this check
       // only saves the work of buffering a request already known not to fit.
       const forecast =
-        Number.isFinite(declared) && declared > 0 ? declared * READ_PHASE_CHARGE_MULTIPLIER : 0
+        Number.isFinite(declared) && declared > 0 ? declared * BODY_CHARGE_MULTIPLIER : 0
       if (forecast > 0 && inFlightBodyBytes + forecast > budget) {
         return shedRequest(req, upstreamUrl, forecast, budget)
       }
@@ -410,11 +422,12 @@ async function proxyControlApi(
       }
       body = read ?? undefined
 
-      // The chunk list is unreachable now that it has been flattened, so drop the
-      // read-phase multiplier and carry only the resident copy across the fetch.
-      const resident = body?.byteLength ?? 0
-      inFlightBodyBytes -= chargedBytes - resident
-      chargedBytes = resident
+      // The charge is intentionally NOT settled down to the resident copy here.
+      // `body` stays referenced by fetchInit for the whole upstream round trip, and
+      // undici holds its own send-side copy of it while the request is in flight, so
+      // real memory during the awaiting-headers window is ~2x the body, not 1x. The
+      // outer finally releases the full charge once fetch() resolves — the point at
+      // which the request body has been sent and its transport copies are freed.
     }
     // Only body-bearing methods (uploads/mutations) get the proxy timeout. GET/HEAD —
     // including long-lived SSE notification streams — rely solely on the client's own

@@ -308,33 +308,62 @@ describe('control-ui control-api proxy route', () => {
     const CAP_KEY = 'CONTROL_UI_PROXY_MAX_BODY_BYTES'
     const path = ['api', 'v1', 'admin', 'x']
     const saved: Record<string, string | undefined> = {}
+    // Every parked stream registers its release here so afterEach can dispose it
+    // BEFORE resetting the counter. Without that, a test that fails before its own
+    // release leaves a request mid-read; the reset drops the counter to 0, and the
+    // request's later finally then underflows it (8 -> 0 -> -8). Draining first
+    // keeps the reset from racing an in-flight charge.
+    let activeParks: Array<() => void> = []
 
     beforeEach(() => {
       for (const key of [BUDGET_KEY, IDLE_KEY, CAP_KEY]) saved[key] = process.env[key]
+      activeParks = []
       // Module state is shared across tests in this file; a test that throws
       // mid-read would otherwise leak its charge into every later test.
       __resetInFlightBodyBytesForTest()
     })
 
-    afterEach(() => {
-      for (const key of [BUDGET_KEY, IDLE_KEY, CAP_KEY]) {
-        if (saved[key] === undefined) delete process.env[key]
-        else process.env[key] = saved[key] as string
+    afterEach(async () => {
+      try {
+        for (const release of activeParks) release()
+        // Let each drained request run its finally and release its charge before
+        // the reset, so disposal is awaited rather than raced.
+        await new Promise(resolve => setTimeout(resolve, 0))
+      } finally {
+        // The reset must run even if a drain throws, or a leaked charge would bleed
+        // into the next describe block (which has no reset of its own).
+        for (const key of [BUDGET_KEY, IDLE_KEY, CAP_KEY]) {
+          if (saved[key] === undefined) delete process.env[key]
+          else process.env[key] = saved[key] as string
+        }
+        __resetInFlightBodyBytesForTest()
       }
-      __resetInFlightBodyBytesForTest()
     })
 
     // A request whose body stream stays open until the test releases it, so one
     // reader can be parked mid-read while another request is issued against it.
-    // `bytes` is charged at 2x while it is parked (chunk list + pending copy).
+    // `bytes` is charged at 2x while it is parked (its chunk plus undici's copy).
     function parkedBodyRequest(bytes = 8, declaredLength?: number) {
+      let closed = false
       let close!: () => void
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
           controller.enqueue(new Uint8Array(bytes))
-          close = () => controller.close()
+          // Idempotent and safe: the test and the afterEach drain may both call it,
+          // and an abort's reader.cancel() may have already closed the controller —
+          // closing a closed controller throws.
+          close = () => {
+            if (closed) return
+            closed = true
+            try {
+              controller.close()
+            } catch {
+              // already closed (e.g. by an abort's cancel); nothing to do.
+            }
+          }
         },
       })
+      activeParks.push(() => close())
       const headers = new Headers()
       if (declaredLength !== undefined) headers.set('content-length', String(declaredLength))
       const req = new NextRequest('http://localhost:3000/control-api/api/v1/admin/x', {
@@ -383,9 +412,9 @@ describe('control-ui control-api proxy route', () => {
     // Releasing when the read finishes bounds the rate buffers are created at,
     // not how many are alive.
     it('holds the charge across the upstream fetch, not just the body read', async () => {
-      // 16 = the 8-byte chunk's resident charge (8) plus headroom below the
-      // 22 bytes the JSON mutation needs, so the shed below can only come from
-      // the in-flight request still holding its buffer.
+      // 16 = the 8-byte chunk's charge (8 x the 2x body multiplier), which the
+      // parked request holds for the whole round trip. The mutation needs 22, so
+      // the shed below can only come from the in-flight request still holding it.
       process.env[BUDGET_KEY] = '16'
       let releaseUpstream!: () => void
       const upstreamGate = new Promise<void>(resolve => {
@@ -404,9 +433,10 @@ describe('control-ui control-api proxy route', () => {
       await settle()
 
       // The read is finished — a reader-count budget would have freed its slot
-      // here — but the buffer is still referenced by fetchInit.
+      // here — but the 2x charge is still held: `body` is referenced by fetchInit
+      // and undici holds its own copy while awaiting headers.
       expect(fetchMock).toHaveBeenCalledTimes(1)
-      expect(__inFlightBodyBytesForTest()).toBe(8)
+      expect(__inFlightBodyBytesForTest()).toBe(16)
 
       const shed = await POST(jsonRequest(), { params: { path } })
       expect(shed.status).toBe(429)
@@ -415,6 +445,49 @@ describe('control-ui control-api proxy route', () => {
       releaseUpstream()
       await inFlight
       expect(__inFlightBodyBytesForTest()).toBe(0)
+    })
+
+    // H1 regression (review of 427cc8cb). The idle deadline must reclaim capacity
+    // WITHOUT the client finishing the read. `parkedBodyRequest` cancels instantly
+    // under jsdom, which hid the defect: in the built server the request-body
+    // stream's cancel() does not settle until the peer sends more, so an
+    // `await reader.cancel()` on the idle path pinned the charge for as long as the
+    // stalled client chose. This models that — cancel() never resolves — and proves
+    // the charge is released and a later request admitted at the deadline anyway.
+    it('reclaims the charge at the idle deadline even when cancel never resolves', async () => {
+      // 32 leaves room for the 22-byte follow-up ONLY once the stalled request's
+      // 16 (8 bytes x 2) is released; while it is held, 16 + 22 = 38 > 32.
+      process.env[BUDGET_KEY] = '32'
+      process.env[IDLE_KEY] = '20'
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }))
+
+      // Enqueue one byte, then never send again AND never let cancel() settle.
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(8))
+        },
+        cancel() {
+          return new Promise<void>(() => {}) // models a socket that never releases
+        },
+      })
+      const stalled = new NextRequest('http://localhost:3000/control-api/api/v1/admin/x', {
+        method: 'POST',
+        body: stream,
+        duplex: 'half',
+      } as RequestInit & { duplex: 'half' })
+
+      const res = await POST(stalled, { params: { path } })
+
+      expect(res.status).toBe(408)
+      await expect(res.json()).resolves.toEqual({ error: 'request_body_timeout' })
+      expect(fetchMock).not.toHaveBeenCalled()
+      // The stalled reader is abandoned, not awaited, so its charge is gone and the
+      // next caller is admitted rather than shed behind it.
+      expect(__inFlightBodyBytesForTest()).toBe(0)
+      const admitted = await POST(jsonRequest(), { params: { path } })
+      expect(admitted.status).toBe(200)
     })
 
     it('releases the charge once the upstream fetch resolves', async () => {
@@ -458,6 +531,39 @@ describe('control-ui control-api proxy route', () => {
 
       parked.release()
       await parkedResponse
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+
+    // Aggregate-admission counterexample (review of 427cc8cb). The other shed tests
+    // use a contender that overflows the budget on its own, so a per-request check
+    // would pass them too. This one proves the SUM matters: the contender is
+    // individually admissible (22 <= 24) yet rejected because the incumbent's 8 is
+    // already charged (8 + 22 = 30 > 24), then admitted once that 8 is released.
+    it('sheds a contender that only overflows once the incumbent charge is added', async () => {
+      process.env[BUDGET_KEY] = '24'
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }))
+
+      // Incumbent: a parked 4-byte chunk -> 8 charged, held open across the test.
+      const incumbent = parkedBodyRequest(4)
+      const incumbentResponse = POST(incumbent.req, { params: { path } })
+      await settle()
+      expect(__inFlightBodyBytesForTest()).toBe(8)
+
+      // Contender: jsonRequest is 11 bytes -> 22 charged. 22 <= 24 alone, but
+      // 8 + 22 = 30 > 24, so it is shed only because of the overlap.
+      const shed = await POST(jsonRequest(), { params: { path } })
+      expect(shed.status).toBe(429)
+      expect(fetchMock).not.toHaveBeenCalled()
+
+      // Release the incumbent; the identical contender now fits (22 <= 24).
+      incumbent.release()
+      await incumbentResponse
+      expect(__inFlightBodyBytesForTest()).toBe(0)
+
+      const admitted = await POST(jsonRequest(), { params: { path } })
+      expect(admitted.status).toBe(200)
       expect(fetchMock).toHaveBeenCalledTimes(2)
     })
 
@@ -558,25 +664,34 @@ describe('control-ui control-api proxy route', () => {
 
     it('falls back to the default when the env value is absent, NaN, non-positive, or out-of-range', async () => {
       process.env[CAP_KEY] = String(512 * 1024 * 1024)
-      const fetchMock = vi
-        .spyOn(globalThis, 'fetch')
-        .mockResolvedValue(new Response('{}', { status: 200 }))
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }))
 
-      // Every one of these must resolve to the 192MiB default, so a forecast just
-      // above it is shed. Asserting a bare 200 instead would prove nothing — a
-      // budget parsed as NaN admits everything, which is the mutant this kills.
-      // 1GiB is above MAX_INFLIGHT_BODY_BYTES_CEILING and must not be honoured.
+      // Assert BOTH sides of the 192MiB boundary for every invalid value, not just
+      // the shed side. The shed alone survives a fractional-budget mutant (any
+      // budget < 192MiB + 1 still sheds 96MiB + 1); pairing it with the admit pins
+      // the resolved value at exactly 192MiB. 1GiB is above the ceiling and 1.5 is
+      // non-integer, so both must fall back rather than be honoured.
       for (const value of [undefined, 'abc', '0', '-1', '1.5', String(1024 ** 3)]) {
         if (value === undefined) delete process.env[BUDGET_KEY]
         else process.env[BUDGET_KEY] = value
-        const res = await POST(declaredLengthRequest(96 * 1024 * 1024 + 1), { params: { path } })
-        expect(res.status).toBe(429)
+        __resetInFlightBodyBytesForTest()
+        expect(
+          (await POST(declaredLengthRequest(96 * 1024 * 1024 + 1), { params: { path } })).status
+        ).toBe(429)
+        __resetInFlightBodyBytesForTest()
+        expect(
+          (await POST(declaredLengthRequest(96 * 1024 * 1024), { params: { path } })).status
+        ).toBe(200)
       }
-      expect(fetchMock).not.toHaveBeenCalled()
     })
   })
 
   describe('raw GFS part bodies are counted before forwarding', () => {
+    // Isolate the shared byte counter from whatever ran before, so a leak in the
+    // in-flight-budget block above cannot turn a 413 here into a 429.
+    beforeEach(() => __resetInFlightBodyBytesForTest())
+    afterEach(() => __resetInFlightBodyBytesForTest())
+
     const path = [
       'api',
       'v1',
