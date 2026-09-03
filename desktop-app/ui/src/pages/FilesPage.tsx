@@ -40,7 +40,7 @@ import {
 } from '@/gfs/delegation'
 import { GfsFilePicker } from '@/gfs/filePicker'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
-import { normalizeGfsResourceName } from '@/gfs/resourceName'
+import { nextAvailableGfsResourceName, normalizeGfsResourceName } from '@/gfs/resourceName'
 import type { TeamDirectoryResult } from '../../../src/types'
 import type {
   FilesPageProps,
@@ -112,6 +112,37 @@ function mergeErrorMessages(...errors: unknown[]): string | null {
   return messages.length > 0 ? messages.join(' · ') : null
 }
 
+function isGfsNameConflict(error: unknown): boolean {
+  const details =
+    error && typeof error === 'object'
+      ? (error as {
+          status?: unknown
+          bodyText?: unknown
+          message?: unknown
+          response?: { status?: unknown }
+        })
+      : null
+  const status = details?.status ?? details?.response?.status
+  if (status === 409 || status === '409') return true
+
+  const messageParts = details
+    ? [details.message, details.bodyText].filter(value => value != null).map(String)
+    : []
+  const message =
+    error instanceof Error
+      ? error.message
+      : messageParts.length > 0
+        ? messageParts.join(' ')
+        : String(error)
+  return (
+    /\b409\b[\s\S]*\bconflict\b/i.test(message) ||
+    /\bconflict\b[\s\S]*\b409\b/i.test(message) ||
+    /\b(?:already exists|duplicate|name[_ ]?conflict|resource[_ ]?exists)\b/i.test(message)
+  )
+}
+
+const GFS_UPLOAD_NAME_RETRY_LIMIT = 100
+
 /** Any row/header action target — a listing row (GfsDriveResource) or the
  *  current breadcrumb (GfsCrumb); both carry the identity fields the delete /
  *  rename / move calls need (kind also powers dialog titles + the move cycle
@@ -136,6 +167,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const [dragActive, setDragActive] = useState(false)
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
   const replaceInputRef = useRef<HTMLInputElement | null>(null)
+  const uploadNameReservationsRef = useRef(new Map<string, Set<string>>())
   const queryClient = useQueryClient()
   const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen })
   const {
@@ -447,19 +479,47 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
 
   const handleUploadFile = async (
     file: File | null | undefined,
-    parentResourceId = current?.resourceId
+    parentResourceId = current?.resourceId,
+    occupiedNames = new Set(items.map(item => item.name))
   ) => {
     if (!file || !parentResourceId) return
+    const attemptedNames = new Set<string>()
     try {
       assertGfsFileUploadSize(file.size)
-      const name = await normalizeGfsResourceName(file.name)
+      const normalizedName = await normalizeGfsResourceName(file.name)
       const filePath = window.clerum.gfs.getPathForFile(file)
       if (!filePath) throw new Error('Could not resolve the selected local file')
-      await ctrl.createFileFromPath(parentResourceId, name, filePath)
-      pushToast?.(`Uploaded ${name}`, 'success')
+
+      for (let attempt = 0; attempt < GFS_UPLOAD_NAME_RETRY_LIMIT; attempt += 1) {
+        const reservations =
+          uploadNameReservationsRef.current.get(parentResourceId) ?? new Set<string>()
+        uploadNameReservationsRef.current.set(parentResourceId, reservations)
+        const name = nextAvailableGfsResourceName(normalizedName, [
+          ...occupiedNames,
+          ...reservations,
+        ])
+        reservations.add(name)
+        attemptedNames.add(name)
+
+        try {
+          await ctrl.createFileFromPath(parentResourceId, name, filePath)
+          occupiedNames.add(name)
+          pushToast?.(`Uploaded ${name}`, 'success')
+          return
+        } catch (uploadError) {
+          if (!isGfsNameConflict(uploadError)) throw uploadError
+          occupiedNames.add(name)
+        }
+      }
+
+      throw new Error('Could not create a unique GFS resource name.')
     } catch (uploadError) {
       if (failClosedOnAuthorizationError(uploadError)) return
       pushToast?.(uploadError instanceof Error ? uploadError.message : String(uploadError), 'error')
+    } finally {
+      const reservations = uploadNameReservationsRef.current.get(parentResourceId)
+      for (const name of attemptedNames) reservations?.delete(name)
+      if (reservations?.size === 0) uploadNameReservationsRef.current.delete(parentResourceId)
     }
   }
 
@@ -503,9 +563,10 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     }
 
     setDroppedUploadCount(droppedFiles.length)
+    const occupiedNames = new Set(items.map(item => item.name))
     try {
       for (const file of droppedFiles) {
-        await handleUploadFile(file, destinationResourceId)
+        await handleUploadFile(file, destinationResourceId, occupiedNames)
       }
     } finally {
       setDroppedUploadCount(0)

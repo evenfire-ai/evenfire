@@ -479,6 +479,158 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith('Uploaded clip.mov', 'success')
   })
 
+  it('adds numbered suffixes for duplicate names in one dropped batch', async () => {
+    const createFileFromPath = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Team folder',
+        kind: 'directory',
+        version: 7,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'report.txt',
+          kind: 'file',
+          path: '/report.txt',
+          version: 1,
+          bytes: 12,
+        },
+      ],
+      affordances: {
+        held: ['read', 'write'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      },
+      createFileFromPath,
+    })
+
+    renderFilesPage(pushToast)
+    fireEvent.drop(screen.getByRole('region', { name: 'Global File System browser' }), {
+      dataTransfer: {
+        dropEffect: 'none',
+        files: [
+          new File(['first'], 'report.txt', { type: 'text/plain' }),
+          new File(['second'], 'report.txt', { type: 'text/plain' }),
+        ],
+        types: ['Files'],
+      },
+    })
+
+    await waitFor(() => expect(createFileFromPath).toHaveBeenCalledTimes(2))
+    expect(createFileFromPath.mock.calls.map(call => call[1])).toEqual([
+      'report (1).txt',
+      'report (2).txt',
+    ])
+    expect(pushToast).toHaveBeenCalledWith('Uploaded report (1).txt', 'success')
+    expect(pushToast).toHaveBeenCalledWith('Uploaded report (2).txt', 'success')
+  })
+
+  it('adds a numbered suffix when a duplicate is selected with the upload picker', async () => {
+    const createFileFromPath = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Team folder',
+        kind: 'directory',
+        version: 7,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'report.txt',
+          kind: 'file',
+          path: '/report.txt',
+          version: 1,
+          bytes: 12,
+        },
+      ],
+      affordances: {
+        held: ['read', 'write'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      },
+      createFileFromPath,
+    })
+
+    renderFilesPage(pushToast)
+    fireEvent.change(screen.getByLabelText('Upload file'), {
+      target: { files: [new File(['report'], 'report.txt', { type: 'text/plain' })] },
+    })
+
+    await waitFor(() =>
+      expect(createFileFromPath).toHaveBeenCalledWith(
+        'folder-1',
+        'report (1).txt',
+        '/tmp/report.txt'
+      )
+    )
+    expect(pushToast).toHaveBeenCalledWith('Uploaded report (1).txt', 'success')
+  })
+
+  it('retries a stale duplicate conflict with the next available name', async () => {
+    const createFileFromPath = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new Error(
+          "Error invoking remote method 'gfs:createFileFromPath': Error: 409 Conflict: [object Object]"
+        )
+      )
+      .mockResolvedValueOnce(undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Team folder',
+        kind: 'directory',
+        version: 7,
+      },
+      affordances: {
+        held: ['read', 'write'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      },
+      createFileFromPath,
+    })
+
+    renderFilesPage(pushToast)
+    fireEvent.drop(screen.getByRole('region', { name: 'Global File System browser' }), {
+      dataTransfer: {
+        dropEffect: 'none',
+        files: [new File(['report'], 'report.txt', { type: 'text/plain' })],
+        types: ['Files'],
+      },
+    })
+
+    await waitFor(() => expect(createFileFromPath).toHaveBeenCalledTimes(2))
+    expect(createFileFromPath.mock.calls.map(call => call[1])).toEqual([
+      'report.txt',
+      'report (1).txt',
+    ])
+    expect(pushToast).toHaveBeenCalledWith('Uploaded report (1).txt', 'success')
+    expect(pushToast).not.toHaveBeenCalledWith(expect.stringContaining('409 Conflict'), 'error')
+  })
+
   it('allows a Markdown drop to retry immediately after an upload failure', async () => {
     const createFileFromPath = vi
       .fn()
