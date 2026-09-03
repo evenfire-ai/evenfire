@@ -135,10 +135,10 @@ describe('AgentTitleSelector', () => {
     const dots = findDotsItem('Beta')
 
     fireEvent.click(dots)
-    expect(screen.queryByRole('menuitem', { name: 'Details' })).not.toBeNull()
+    expect(screen.queryByRole('menuitem', { name: 'Connectors' })).not.toBeNull()
 
     fireEvent.click(dots)
-    expect(screen.queryByRole('menuitem', { name: 'Details' })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: 'Connectors' })).toBeNull()
   })
 
   it('shows the empty label when there are no options', () => {

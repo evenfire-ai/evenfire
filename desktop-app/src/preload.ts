@@ -37,8 +37,6 @@ const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
   'navigate.agents',
   'notifications.open',
   'navigate.plugins',
-  'navigate.contexts',
-  'navigate.teams',
   'navigate.connectors',
   'navigate.files',
   'sidebar.toggle',

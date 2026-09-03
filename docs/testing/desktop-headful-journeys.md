@@ -25,7 +25,6 @@ test under `.local-notes/qa-recorder/runs/desktop-app/` (git-ignored).
 | Agents | `qa-recorder-agents.spec.ts` | 3 — fleet, chat workspace, workspace routes | — | ✅ |
 | Connectors | `qa-recorder-connectors.spec.ts` | 1 — MCP/connector health inventory | — | ✅ |
 | Shared files | `qa-recorder-shared-files.spec.ts` | 1 — filesystem + directory browser | — | ✅ |
-| Teams & members | `qa-recorder-teams.spec.ts` | 1 — directory + detail tabs | — | ✅ |
 | Plugins & workflows | `qa-recorder-plugins.spec.ts` | 1 — inventory, detail, runs/artifacts (+optional trigger) | `QA_RECORDER_CONFIRM_MUTATIONS` (trigger only) | ✅ |
 | Apps | `qa-recorder-apps.spec.ts` | 1 — catalog + embedded session | — | ✅ |
 | Settings | `qa-recorder-settings.spec.ts` | 2 — appearance/notifications, information/configuration (+optional endpoint switch) | `QA_RECORDER_CONFIRM_MUTATIONS` (switch only) | ✅ |
