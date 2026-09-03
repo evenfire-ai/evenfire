@@ -486,9 +486,7 @@ export const AppHeader = React.memo(function AppHeader({
                 </div>
 
                 {teamDirectoryLoading && !teamDirectoryHydrated && (
-                  <p className="search-results-loading">
-                    Loading members and agents from your other teams...
-                  </p>
+                  <p className="search-results-loading">Loading agents from your other teams...</p>
                 )}
 
                 {pluginsAppsLoading && !searchPlugins.length && !searchApps.length && (
