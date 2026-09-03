@@ -3772,16 +3772,25 @@ export class WorkflowRecipeReconciler {
       const existing = await idempotency.readExisting()
       return specHashUnchanged(idempotency.manifest, existing ?? null)
     } catch (error) {
-      // Falling through to the replace is correct — never skip an update we cannot
-      // prove unnecessary — but discarding the error left no trace of WHY: revoked
-      // RBAC or a persistently failing apiserver looked exactly like a healthy
-      // cache miss, and the gate silently stopped saving anything. The write still
-      // happens, so this is a diagnostic line, not a failure path; a genuine veto
-      // reaches the caller through `replaceFn`, loud.
-      console.warn(
-        `[WR-Reconciler] ${label}: idempotency pre-read failed, falling through to update:`,
-        error
-      )
+      // An ownership veto is NOT a read failure, and saying so here would be
+      // actively misleading: the read succeeded, and what threw was the caller's
+      // assertion on what it read. Stay quiet — `replaceFn` re-reads, re-asserts
+      // and raises the conflict with its own message a moment later, so the
+      // accurate line follows immediately and this one would only precede it with
+      // a wrong diagnosis. Nothing is swallowed; the veto still reaches the
+      // caller, loud (T4).
+      if (!(error instanceof NetworkPolicyOwnershipConflictError)) {
+        // Everything else IS a read failure. Falling through to the replace is
+        // correct — never skip an update we cannot prove unnecessary — but
+        // discarding the error left no trace of WHY: revoked RBAC or a
+        // persistently failing apiserver looked exactly like a healthy cache
+        // miss, and the gate silently stopped saving anything. The write still
+        // happens, so this is a diagnostic line, not a failure path.
+        console.warn(
+          `[WR-Reconciler] ${label}: idempotency pre-read failed, falling through to update:`,
+          error
+        )
+      }
       return false
     }
   }

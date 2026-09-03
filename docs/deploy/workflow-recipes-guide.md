@@ -337,8 +337,11 @@ and a downstream HCC NetworkPolicy no-op write storm).
 - **For a NetworkPolicy it is not visible by any path.** There is no replica health to
   degrade: the recipe stays `active` while the enforcement object diverges from the
   desired one, and nothing sweeps for it — `pruneStaleInternalDependencyPolicies`
-  compares names, not content, and `deploy/scripts/verify-networkpolicies.sh` only checks
-  that the overlay's policies exist. An edit that preserves the `clerum.io/spec-hash`
+  compares names, not content, and `deploy/scripts/verify-networkpolicies.sh` **does**
+  detect content drift but only over policies an overlay renders. Recipe-derived
+  policies (`ui-ingress-*`, `wl-ingress-*`, `wr-intdep-*`, the gateway trio) are authored
+  by the reconciler and live in no overlay, so the script never evaluates them at all —
+  neither their existence nor their content. An edit that preserves the `clerum.io/spec-hash`
   annotation while changing the `spec` (widening `ingress`/`egress`, emptying
   `podSelector`, dropping a `policyTypes` entry) is **permanent and silent**. Treat any
   `kubectl edit` on a `ui-ingress-*`, `wl-ingress-*`, `wr-intdep-*` or gateway policy as

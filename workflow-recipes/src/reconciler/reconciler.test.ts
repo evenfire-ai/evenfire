@@ -922,6 +922,7 @@ describe('WorkflowRecipeReconciler', () => {
         },
       })
 
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
       const rejection = await apply(desired).then(
         () => {
           throw new Error('expected the ownership assertion to reject')
@@ -943,6 +944,19 @@ describe('WorkflowRecipeReconciler', () => {
       // in the replace path: there, a matching hash would make the gate skip and
       // this call would resolve instead of rejecting.
       expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+
+      // Review of #580, R1-L1. A veto is not a read failure, and `applyIsNoop`
+      // must not announce it as one: the read SUCCEEDED and the caller's
+      // assertion on the result is what threw. The accurate message arrives a
+      // moment later from `replaceFn`, so a "pre-read failed" line here would only
+      // precede the truth with a wrong diagnosis.
+      //
+      // Scoped to that one line rather than asserting console.warn was never
+      // called: other warnings on this path are legitimate, and a blanket
+      // assertion would break on any of them for reasons unrelated to the veto.
+      const warned = warnSpy.mock.calls.flat().join(' ')
+      expect(warned).not.toContain('idempotency pre-read failed')
+      warnSpy.mockRestore()
     })
 
     it('T4b lets an internal-dependency policy WRC already owns through the gate', async () => {
