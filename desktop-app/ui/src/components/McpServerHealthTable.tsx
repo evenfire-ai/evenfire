@@ -7,7 +7,11 @@ import {
   mergeAgentHealth,
 } from '../../../src/mcpServerHealth'
 import type { AgentWithMcpServers, HostRuntimeStatus } from '../../../src/types'
-import type { McpServerHealthTableProps } from './McpServerHealthTable.types'
+import type { ConnectorActionInput } from '../hooks/domain/useConnectorsController'
+import type {
+  McpServerConnectorAction,
+  McpServerHealthTableProps,
+} from './McpServerHealthTable.types'
 
 const LABEL_TEXT: Record<McpServerUiLabel, string> = {
   running: 'Running',
@@ -42,7 +46,11 @@ export function McpServerHealthTable({
   refreshing,
   defaultExpanded = false,
   alwaysExpanded = false,
+  connectorActions,
+  onAuthorize,
+  onDisconnect,
 }: McpServerHealthTableProps) {
+  const showActions = connectorActions !== undefined
   const [expanded, setExpanded] = useState(defaultExpanded)
   const isExpanded = alwaysExpanded || expanded
 
@@ -187,14 +195,29 @@ export function McpServerHealthTable({
                 <th className="da-table__col-header" scope="col">
                   MCP Server Name
                 </th>
-                <th className="da-table__col-header da-table__col-header--right" scope="col">
+                <th
+                  className={`da-table__col-header${showActions ? '' : ' da-table__col-header--right'}`}
+                  scope="col"
+                >
                   Status
                 </th>
+                {showActions ? (
+                  <th className="da-table__col-header da-table__col-header--right" scope="col">
+                    Actions
+                  </th>
+                ) : null}
               </tr>
             </thead>
             <tbody>
               {table.rows.map(row => (
-                <McpServerHealthRow key={row.name} row={row} />
+                <McpServerHealthRow
+                  key={row.name}
+                  row={row}
+                  showActions={showActions}
+                  action={connectorActions?.get(row.name)}
+                  onAuthorize={onAuthorize}
+                  onDisconnect={onDisconnect}
+                />
               ))}
             </tbody>
           </DataTable>
@@ -204,7 +227,19 @@ export function McpServerHealthTable({
   )
 }
 
-function McpServerHealthRow({ row }: { row: MergedMcpServerRow }) {
+function McpServerHealthRow({
+  row,
+  showActions,
+  action,
+  onAuthorize,
+  onDisconnect,
+}: {
+  row: MergedMcpServerRow
+  showActions: boolean
+  action: McpServerConnectorAction | undefined
+  onAuthorize?: (input: ConnectorActionInput) => void
+  onDisconnect?: (input: ConnectorActionInput) => void
+}) {
   const label = row.label
   const hint = row.reason ? (REASON_HINT[row.reason] ?? '') : row.message || ''
   const needsAttention = ATTENTION_LABELS.has(label)
@@ -226,7 +261,7 @@ function McpServerHealthRow({ row }: { row: MergedMcpServerRow }) {
           ) : null}
         </span>
       </td>
-      <td className="da-table__cell da-table__cell--right">
+      <td className={`da-table__cell${showActions ? '' : ' da-table__cell--right'}`}>
         <span className="mcp-health-status">
           <span
             className={`mcp-health-chip mcp-health-chip--${label}`}
@@ -236,6 +271,43 @@ function McpServerHealthRow({ row }: { row: MergedMcpServerRow }) {
           </span>
         </span>
       </td>
+      {showActions ? (
+        <td className="da-table__cell da-table__cell--right">
+          {action ? (
+            action.authorized ? (
+              <Button
+                color="danger"
+                disabled={action.busy}
+                loading={action.busy}
+                onClick={event => {
+                  event.stopPropagation()
+                  onDisconnect?.(action.actionInput)
+                }}
+                onKeyDown={event => event.stopPropagation()}
+                size="sm"
+                variant="ghost"
+              >
+                Disconnect
+              </Button>
+            ) : (
+              <Button
+                color="primary"
+                disabled={action.busy}
+                loading={action.busy}
+                onClick={event => {
+                  event.stopPropagation()
+                  onAuthorize?.(action.actionInput)
+                }}
+                onKeyDown={event => event.stopPropagation()}
+                size="sm"
+                variant="soft"
+              >
+                Authorize
+              </Button>
+            )
+          ) : null}
+        </td>
+      ) : null}
     </tr>
   )
 }
