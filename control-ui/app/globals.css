@@ -13000,7 +13000,7 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-grant__composer {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(9.375rem, 0.32fr);
-  align-items: start;
+  align-items: stretch;
   gap: var(--cu-space-2);
 }
 
@@ -13008,6 +13008,12 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-permission-dropdown {
   position: relative;
   min-width: 0;
+  display: flex;
+}
+
+.cu-gfs-subject-picker__field,
+.cu-gfs-permission-dropdown__trigger.cu-btn {
+  flex: 1;
 }
 
 .cu-gfs-subject-picker__field {

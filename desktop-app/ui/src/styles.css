@@ -14104,13 +14104,19 @@ pre {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(150px, 0.32fr);
   gap: var(--space-2);
-  align-items: start;
+  align-items: stretch;
 }
 
 .da-gfs-subject-picker,
 .da-gfs-permission-dropdown {
   position: relative;
   min-width: 0;
+  display: flex;
+}
+
+.da-gfs-subject-picker__field,
+.da-gfs-permission-dropdown__trigger.ui-button {
+  flex: 1;
 }
 
 .da-gfs-subject-picker__field {
