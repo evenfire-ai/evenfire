@@ -4,11 +4,11 @@ vi.mock('../src/config.js', () => ({
   config: { databaseUrl: 'postgresql://test' },
 }))
 
-describe('0109 catalog UTF-8 ordering migration', () => {
+describe('010b catalog UTF-8 ordering migration', () => {
   it('installs the immutable byte function and complete supporting index class', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0109_catalog_utf8_ordering'
+      candidate => candidate.version === '010b_catalog_utf8_ordering'
     )
     expect(migration).toBeDefined()
 
