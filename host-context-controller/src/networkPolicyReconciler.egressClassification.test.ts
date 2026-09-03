@@ -277,6 +277,48 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     expect(egress.at(-1)?.reason).toBe('ExternalEgressRejected')
   })
 
+  it("T6 still deletes a de-authorized binding's policy when a sibling binding faults", async () => {
+    // Fail-loud must not cost fail-closed. `cleanupExternalEgress` runs AFTER the
+    // binding loop and is the only place that deletes policies for bindings no
+    // longer in the spec, so throwing from inside the loop skips it: a
+    // destination the operator explicitly removed keeps its /32 allowed for as
+    // long as an unrelated sibling keeps faulting — and the fault path retries
+    // every 30s, so "as long as" means indefinitely.
+    //
+    // The file already has the right shape for this: `failures[]` accumulates,
+    // the loop finishes, the cleanup runs, and only then does it write status and
+    // throw. The fault path must follow that contract rather than invent a
+    // parallel exit.
+    const bindings = (dns: string[]): McpServerCRD => ({
+      ...server,
+      spec: { ...server.spec, egressBindings: dns.map(d => ({ dns: d, port: 443 })) },
+    })
+
+    await reconciler.reconcileExternalEgress(bindings(['a.example.com', 'b.example.com']), {
+      isCurrent: () => true,
+    })
+    const written = mockApi.createNamespacedNetworkPolicy.mock.calls.map(
+      call => (call[0] as { body: k8s.V1NetworkPolicy }).body
+    )
+    expect(written).toHaveLength(2)
+
+    mockApi.listNamespacedNetworkPolicy.mockResolvedValue({
+      items: written.map(body => ({ metadata: { ...body.metadata }, spec: body.spec })),
+    })
+    mockApi.createNamespacedNetworkPolicy.mockClear()
+    mockApi.deleteNamespacedNetworkPolicy.mockClear()
+
+    // The operator removes a.example.com; b.example.com faults after resolution.
+    injectPostResolutionTypeError()
+    await expect(
+      reconciler.reconcileExternalEgress(bindings(['b.example.com']), { isCurrent: () => true })
+    ).rejects.toThrow(TypeError)
+
+    expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'ext-egress-classify-mcp-a.example.com-443' })
+    )
+  })
+
   it('T5 keeps freezing the lapsed window on a real transient resolver code', async () => {
     // The gate has two exemptions and this pins the one the other tests do not
     // touch. Deleting `kind !== 'transient'` from the condition turns every
@@ -306,11 +348,16 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
 
   it("T4 treats EBADNAME as the operator's malformed name, not as a controller fault", async () => {
     // EBADNAME is a POSITIVE verdict about the name: c-ares refused to send the
-    // query at all. It is reachable from user input — the CRD pattern for
-    // `egressBindings[].dns` admits consecutive dots and labels over 63 octets —
-    // so it belongs with NXDOMAIN: prune and reject. Blaming the controller with
-    // ExternalEgressReconcileFailed would send the operator hunting through our
-    // logs for their own typo.
+    // query at all, so it belongs with NXDOMAIN — prune and reject. Blaming the
+    // controller with ExternalEgressReconcileFailed would send the operator
+    // hunting through our logs for their own typo.
+    //
+    // This controller cannot currently produce EBADNAME from its own CRD field:
+    // isPublicDnsHostname rejects `..` and 64-octet labels before we resolve, so
+    // the injection here is synthetic. The classification is still HCC's to get
+    // right — PERMANENT_DNS_CODES is shared with WRC, whose ui lane does reach
+    // c-ares on the CRD pattern alone, and a validator is a weaker guarantee than
+    // a gate that classifies correctly whatever arrives.
     await seedAccumulatedPolicy({ lapsed: true })
     resolve4Mock.mockRejectedValueOnce(
       Object.assign(new Error('queryA EBADNAME api.example.com'), { code: 'EBADNAME' })

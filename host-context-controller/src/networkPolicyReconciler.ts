@@ -2064,6 +2064,10 @@ export class NetworkPolicyReconciler {
     const desiredPolicyNames = new Set<string>()
     const resolvedEgressIPs: McpServerResolvedEgressIP[] = []
     const failures: string[] = []
+    // Issue #513: faults that are NOT a DNS condition. Kept separate from
+    // `failures` because those are rejected INPUT (the operator's) while these are
+    // OUR bug, and the two earn different reasons and different messages.
+    const reconcileFaults: Array<{ dns: string; err: unknown }> = []
     const resolvedAtMs = Date.now()
     const resolvedAt = new Date(resolvedAtMs).toISOString()
 
@@ -2243,23 +2247,43 @@ export class NetworkPolicyReconciler {
           // at the resolver while the fault is here. Transient codes are positive
           // by construction (TRANSIENT_DNS_CODES); 'permanent' is positive only for
           // PERMANENT_DNS_CODES — the two no-records answers plus EBADNAME, a name
-          // c-ares refuses to query. EBADNAME passes the CRD pattern (`..`,
-          // 64-octet labels) and is the operator's misconfiguration, so it must
-          // keep pruning and reporting ExternalEgressRejected rather than blame
-          // the controller.
+          // c-ares refuses to query. EBADNAME cannot arrive from this controller's
+          // own CRD field (isPublicDnsHostname rejects `..` and 64-octet labels
+          // before we resolve), but the set is shared with WRC, whose ui lane
+          // validates the fqdn with the CRD pattern alone; there it IS the
+          // operator's misconfiguration, and it must keep pruning and reporting
+          // ExternalEgressRejected rather than blame the controller.
+          //
+          // `code` is read off any object, exactly as classifyDnsError does: a
+          // rejection that is not an Error instance must not be reclassified as a
+          // controller fault just because of how it was thrown.
           const kind = classifyDnsError(err)
-          const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined
+          const code =
+            typeof err === 'object' && err !== null
+              ? (err as NodeJS.ErrnoException).code
+              : undefined
           if (kind !== 'transient' && !isPermanentDnsCode(code)) {
-            if (!isCurrent()) return
-            await this.writeExternalEgressStatus(
-              server,
-              resolvedEgressIPs,
-              'False',
-              'ExternalEgressReconcileFailed',
-              `External egress reconciliation failed on binding "${binding.dns}" with a non-DNS error (not a resolver condition, accumulated egress left untouched): ${this.errorMessage(err)}`,
-              isCurrent
+            // Log before anything that can throw. writeExternalEgressStatus fails
+            // on a stale uid/generation or a rejected patch, and the isCurrent
+            // fence below returns without a word — either would swallow the very
+            // fault this branch exists to surface.
+            console.error(
+              `[NetPol] External egress reconcile fault on binding "${binding.dns}" for "${server.name}" (not a DNS condition):`,
+              err
             )
-            throw err
+            // Recorded, not thrown: the throw is deferred to after the loop so
+            // cleanupExternalEgress still runs. It is the only place that deletes
+            // policies for bindings the operator removed from the spec, and
+            // desiredPolicyNames is only complete once the loop ends. Throwing
+            // here would leave a de-authorized destination allowed for as long as
+            // the fault persists — fail-loud paid for with fail-open.
+            // Still DESIRED: the binding is declared, we simply could not
+            // reconcile it this pass. Without this the cleanup below would read
+            // the omission as "the operator removed it" and delete the very
+            // policy this branch promises to leave untouched.
+            desiredPolicyNames.add(name)
+            reconcileFaults.push({ dns: binding.dns ?? '(unnamed binding)', err })
+            continue
           }
           const accumulated = accumulateHostExactHostEgress({
             fqdn: binding.dns,
@@ -2347,6 +2371,29 @@ export class NetworkPolicyReconciler {
       throw error
     }
     if (!isCurrent()) return
+
+    // Issue #513: a controller fault outranks rejected input. `failures` means the
+    // spec asked for something we refuse to enforce; a fault means we cannot trust
+    // what we just enforced at all, so it is the condition the operator must see.
+    // Reported only after cleanupExternalEgress above, so a binding removed from
+    // the spec is still de-authorized on a pass that ends in a fault.
+    if (reconcileFaults.length > 0) {
+      const first = reconcileFaults[0]
+      const message =
+        `External egress reconciliation failed on binding "${first.dns}" with a non-DNS error ` +
+        `(not a resolver condition, accumulated egress left untouched): ${this.errorMessage(first.err)}`
+      await this.writeExternalEgressStatus(
+        server,
+        resolvedEgressIPs,
+        'False',
+        'ExternalEgressReconcileFailed',
+        reconcileFaults.length > 1
+          ? `${message} (and ${reconcileFaults.length - 1} more binding(s) faulted)`
+          : message,
+        isCurrent
+      )
+      throw first.err
+    }
 
     if (failures.length > 0) {
       const message = failures.join('; ')

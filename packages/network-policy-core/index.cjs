@@ -71,10 +71,13 @@ const TRANSIENT_DNS_CODES = new Set([
  * DNS codes that are a POSITIVE permanent verdict about the NAME (issue #513):
  * the two genuine no-records answers, plus EBADNAME — c-ares refused to send
  * the query because the name is malformed. EBADNAME is reachable from user
- * input: the CRD pattern for `egressBindings[].dns` admits consecutive dots and
- * labels over 63 octets, so a typo in a manifest lands here. A malformed name is
- * the operator's misconfiguration — not a resolver outage, not a controller
- * fault — so it prunes and is reported as rejected exactly like NXDOMAIN.
+ * input through exactly one field today: `spec.ui.egress.external[].fqdn`, whose
+ * CRD pattern admits labels over 63 octets and which no controller validates
+ * further. (The other two hostname fields do not reach it: HCC's
+ * `isPublicDnsHostname` and WRC's workload-binding validator both apply a
+ * per-label regex before resolving.) A malformed name is the operator's
+ * misconfiguration — not a resolver outage, not a controller fault — so it
+ * prunes and is reported as rejected exactly like NXDOMAIN.
  *
  * Every other non-transient code stays OUT on purpose: EBADFAMILY, EBADFLAGS,
  * EBADHINTS, ENONAME, EBADQUERY and EBADSTR describe arguments neither
