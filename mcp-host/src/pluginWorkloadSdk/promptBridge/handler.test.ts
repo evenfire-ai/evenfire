@@ -207,7 +207,7 @@ describe('PromptBridgeHandler', () => {
     )
   })
 
-  // R4-H2. J8 dropped the clamp on the premise that nothing enforced the
+  // J8 dropped the clamp on the premise that nothing enforced the
   // ceiling. That held only for codex-subscription, whose ChatGPT wire rejects
   // `max_output_tokens`; every API-key provider does send it, so for them the
   // per-grant cap was a working billing control that the removal silenced.
@@ -557,7 +557,7 @@ describe('PromptBridgeHandler', () => {
       code: 'provider_unavailable',
       reason: 'outcome_unknown',
     })
-    // One attempt on the complete path, then one on the error path (N-11).
+    // One attempt on the complete path, then one on the error path.
     // Neither retries: the error is retryable but carries no `reason`.
     expect(finalize).toHaveBeenCalledTimes(2)
     expect(finalize).toHaveBeenNthCalledWith(
@@ -611,7 +611,7 @@ describe('PromptBridgeHandler', () => {
       vi.useRealTimers()
     }
     // Four attempts per finalize path, never five. The complete path exhausts
-    // its budget, then the error path (N-11) settles the same receipt with a
+    // its budget, then the error path settles the same receipt with a
     // budget of its own — the documented worst case of two bounded deadlines.
     expect(finalize).toHaveBeenCalledTimes((FINALIZE_LEDGER_RETRY_DELAYS_MS.length + 1) * 2)
   })

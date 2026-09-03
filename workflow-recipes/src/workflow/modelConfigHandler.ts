@@ -314,7 +314,7 @@ export class ModelConfigHandler {
       // Shape alone is not proof: re-derive the policy hash and pin the model
       // so a host cannot echo a well-formed binding for another model or with
       // a hash that does not match its own five fields.
-      // R4-L1: without a model there is no pin to apply, and an unpinned
+      // Without a model there is no pin to apply, and an unpinned
       // binding could be for another model. Refuse it rather than accept it
       // blind — the pin is the point of this call.
       const verifiedCodexBinding = model

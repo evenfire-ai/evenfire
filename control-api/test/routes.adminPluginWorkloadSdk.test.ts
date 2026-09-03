@@ -536,7 +536,7 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     // (malformed still 400s, pinned above) but are dropped on write, while the
     // active per-minute keys persist untouched.
     //
-    // R4-H2: maxOutputTokens is NOT stripped. It briefly was, on the premise
+    // `maxOutputTokens` is NOT stripped. It briefly was, on the premise
     // that nothing enforced it — true only for codex-subscription. Every
     // API-key provider sends max_tokens, so for them it is a live per-grant
     // billing ceiling and it must reach the grant.

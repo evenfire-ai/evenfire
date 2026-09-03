@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { CodexConfigMapView } from '@clerum/codex-catalog-projection'
 import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import type { WorkflowRecipeSpec } from '../types'
 import {
@@ -6,15 +7,21 @@ import {
   type CodexReconcileContext,
   projectCodexRecipeVerdict,
 } from './codexRecipeVerdict'
+import { parseAllowedModelsSnapshot, snapshotFromConfigMapError } from './llmAllowedModelsSnapshot'
 
 /*
- * R5-B1. The Codex seam was fixed four times and each fix converged one more
+ * The Codex seam was fixed four times and each fix converged one more
  * dimension: `readOk`, then `snapshotError`, while `provenance` stayed free to
  * diverge. These tests pin the verdict as a whole, so a future dimension
  * cannot be added on only one side.
  *
  * The last case in the file is the invariant sweep: it quantifies over every
  * row rather than trusting that someone remembered to assert it per case.
+ *
+ * Views are built by the SAME producers the reconciler uses — a hand-written
+ * snapshot would let a ConfigMap-shape change break parsing in production
+ * while these stayed green, because the verdict only falls back to
+ * `view.snapshot` when it cannot re-derive from `view.configMap`.
  */
 
 const MODEL = 'gpt-5.6-luna'
@@ -28,7 +35,7 @@ const codexSpec = (): WorkflowRecipeSpec =>
 function eligibleConfigMap(overrides?: {
   annotations?: Record<string, string>
   models?: string[]
-}) {
+}): CodexConfigMapView {
   return {
     metadata: {
       annotations: {
@@ -47,14 +54,16 @@ function eligibleConfigMap(overrides?: {
   }
 }
 
-const viewFrom = (
-  configMap: ReturnType<typeof eligibleConfigMap> | undefined
-): CodexAllowlistView =>
-  ({ configMap, snapshot: { flagEnabled: true } }) as unknown as CodexAllowlistView
+/** Exactly how `refreshCodexSnapshot` assembles the view it hands every consumer. */
+const viewFrom = (configMap: CodexConfigMapView | undefined): CodexAllowlistView => ({
+  configMap,
+  snapshot: parseAllowedModelsSnapshot(configMap),
+})
 
 /** A view whose ConfigMap never arrived — the snapshot-error dimension. */
-const unreadableView = (): CodexAllowlistView =>
-  ({ snapshot: { flagEnabled: false, snapshotError: 'missing' } }) as unknown as CodexAllowlistView
+const unreadableView = (): CodexAllowlistView => ({
+  snapshot: snapshotFromConfigMapError('missing'),
+})
 
 function context(overrides?: Partial<CodexReconcileContext>): CodexReconcileContext {
   return {
@@ -91,7 +100,7 @@ describe('projectCodexRecipeVerdict', () => {
     expect(v.hostBinding).toBeNull()
   })
 
-  // R5-B1 proper: the two provenance-uncertain states. Both were `ineligible`
+  // The two provenance-uncertain states. Both were `ineligible`
   // on the configure path while the scope path already called them uncertain,
   // so a binding-less v3 configure wiped a live host binding over a transient
   // condition.

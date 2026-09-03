@@ -507,7 +507,7 @@ export interface OAuthClientDef {
 export interface PluginWorkloadSdkSpec {
   promptBridge?: {
     allowedModels?: string[]
-    /** Per-grant output ceiling. Enforced as `max_tokens` on API-key providers; codex-subscription cannot bind it on the ChatGPT wire and is bounded there by the contract limit of 16384 instead (R4-H2). */
+    /** Per-grant output ceiling. Enforced as `max_tokens` on API-key providers; codex-subscription cannot bind it on the ChatGPT wire and is bounded there by the contract limit of 16384 instead. */
     maxOutputTokens?: number
     /** @deprecated Accepted for compatibility; no longer enforced (issue #348). Platform per-minute rate limits apply. */
     maxRequestsPerRun?: number
@@ -549,7 +549,7 @@ export interface PluginWorkloadSdkSpec {
 export interface PluginWorkloadSdkSnippetConfig {
   promptBridge?: {
     allowedModels?: string[]
-    /** Per-grant output ceiling. Enforced as `max_tokens` on API-key providers; codex-subscription cannot bind it on the ChatGPT wire and is bounded there by the contract limit of 16384 instead (R4-H2). */
+    /** Per-grant output ceiling. Enforced as `max_tokens` on API-key providers; codex-subscription cannot bind it on the ChatGPT wire and is bounded there by the contract limit of 16384 instead. */
     maxOutputTokens?: number
   }
   clientNotifications?: {

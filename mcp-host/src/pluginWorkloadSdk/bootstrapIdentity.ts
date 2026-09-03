@@ -110,7 +110,20 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
   } else {
     replaceSdkOnlyCodexBinding(null)
   }
-  const proof = deps.verify ? await deps.verify(req.provider, model) : null
+  // The binding must be installed BEFORE this call — `deps.verify` reads the
+  // live global to build its capabilities request. That ordering means a throw
+  // here (a transport failure, a control-api 5xx) would otherwise leave the
+  // global populated with a binding this bootstrap never confirmed, and the
+  // next prompt would execute against it. Clear it and rethrow: an unverified
+  // binding must not survive the attempt that failed to verify it. The error
+  // itself is not swallowed — the caller still sees the failure.
+  let proof: Awaited<ReturnType<NonNullable<typeof deps.verify>>> | null = null
+  try {
+    proof = deps.verify ? await deps.verify(req.provider, model) : null
+  } catch (err) {
+    if (req.provider === 'codex-subscription') replaceSdkOnlyCodexBinding(null)
+    throw err
+  }
   if (deps.verify && !proof) {
     if (req.provider === 'codex-subscription') replaceSdkOnlyCodexBinding(null)
     return {

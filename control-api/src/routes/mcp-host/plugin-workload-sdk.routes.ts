@@ -747,7 +747,7 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
       // readiness gap, never an unfenced spend: llmProviderAttemptAuthorizer
       // and llmProviderAttemptRedemption already reject a stale revision.
       //
-      // R4-M4: `codexBindingRevisions` is a STATIC capability of this binary —
+      // `codexBindingRevisions` is a STATIC capability of this binary —
       // "I know how to publish the revisions" — not a statement about any one
       // connection. Emitting it only alongside the numbers made a revoked or
       // missing connection look like an older control-api, so the host skipped

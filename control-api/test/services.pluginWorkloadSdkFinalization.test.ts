@@ -805,7 +805,7 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
       'provider_completed',
       null,
       null,
-      // N-17: Codex spend is ingested by the proxy finalize, not here, so no
+      // Codex spend is ingested by the proxy finalize, not here, so no
       // usage_events row exists for this attempt and the FK-shaped column must
       // stay NULL rather than point at a row that was never written.
       null,
@@ -1172,7 +1172,7 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
         ) as never
       )
     ).rejects.toMatchObject({
-      // N-19: the persisted `openai` attempt still governs, so the missing
+      // The persisted `openai` attempt still governs, so the missing
       // credentialSlot is a malformed body (400), not a binding mismatch (403).
       // `replayExistingOutcome` already classified this exact body as 400; the
       // fresh path used to answer 403 only because the binding comparison ran
@@ -1182,7 +1182,7 @@ describe('Plugin Workload SDK promptBridge finalization', () => {
     })
   })
 
-  it('classifies the same malformed body identically on the replay path (N-19)', async () => {
+  it('classifies the same malformed body identically on the replay path', async () => {
     await expect(
       finalizePromptBridgeInTransaction(
         {
@@ -1361,7 +1361,7 @@ describe('spend floor writers (Addendum A.4 "best-floor")', () => {
     expect(updateParams(db, 'plugin_workload_sdk_invocations')?.[1]).toBe('failed')
   })
 
-  // R4-H1. The ledger_pending gate was keyed on `input.status === 'complete'`,
+  // The ledger_pending gate was keyed on `input.status === 'complete'`,
   // so a host closing `failed` walked past a Codex call still inside its usage
   // grace. `failed` is what reviveFailedInvocation reopens, so the same
   // idempotency key could launch a second billable Codex call while the first
@@ -1486,7 +1486,7 @@ describe('spend replay is read-only and judged against the floor', () => {
               },
             }
           : {}
-      // N-05: the third identical `failed` call used to 409 because the second
+      // The third identical `failed` call used to 409 because the second
       // had rewritten the row to `exact`. The floor never moves, so the verdict
       // is stable and the reported outcome still catches up.
       await expect(
@@ -1536,7 +1536,7 @@ describe('spend replay is read-only and judged against the floor', () => {
   ] as const)(
     'answers conflict, not the %s ledger state, when the JWT binding does not match the floor',
     async (_label, linkedOverrides) => {
-      // N-07: the binding check runs before any state oracle, so a foreign
+      // The binding check runs before any state oracle, so a foreign
       // recipe cannot distinguish ledger_pending from exact from unknown.
       await expect(
         finalizePromptBridgeInTransaction(
@@ -1649,7 +1649,7 @@ describe('deriveEffectiveSpend', () => {
   })
 })
 
-describe('prior provider attempt settlement (RP-539-003)', () => {
+describe('prior provider attempt settlement', () => {
   const PRIOR_ATTEMPT_ID = '44444444-4444-4444-8444-444444444444'
 
   function priorAttemptRow(status: string) {
@@ -1789,7 +1789,7 @@ describe('prior provider attempt settlement (RP-539-003)', () => {
   })
 
   it('freezes unknown for a displaced Codex attempt whose linked row carries no usage yet', async () => {
-    // R4-M1. `not_executed` is terminal — deriveEffectiveSpend only lifts
+    // `not_executed` is terminal — deriveEffectiveSpend only lifts
     // `unknown` to `exact` — so freezing it over a linked row that can still
     // bill loses that spend permanently. A linked row exists only if
     // authorize-link ran, which is already "asked the broker for a ticket".

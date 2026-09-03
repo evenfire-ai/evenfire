@@ -153,7 +153,7 @@ async function resolvePriorAttemptSpend(
     const linked = await loadLlmProviderAttemptBySdkAttemptId(db, attemptId)
     const exact = linkedCodexExactUsage(linked)
     if (exact) return { outcome: 'exact', ...exact }
-    // R4-M1: a linked row exists only if authorize-link ran, which means the
+    // A linked row exists only if authorize-link ran, which means the
     // host already asked the broker for a ticket — that call may still bill.
     // `not_executed` is terminal (deriveEffectiveSpend only lifts unknown to
     // exact), so freezing it here would lose that spend permanently. Same rule
@@ -164,7 +164,7 @@ async function resolvePriorAttemptSpend(
 }
 
 /**
- * RP-539-003: on a successful failover only the winning attempt reaches
+ * On a successful failover only the winning attempt reaches
  * `finalize`, so every attempt it displaced would stay terminal without a
  * spend row — the legacy status endpoint does not touch the ledger and the
  * sweeper only visits `in_progress` invocations. Discover those attempts from

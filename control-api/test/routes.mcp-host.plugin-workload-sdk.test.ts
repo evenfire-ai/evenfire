@@ -406,7 +406,7 @@ describe('GET /mcp-host/plugin-workload-sdk/capabilities', () => {
   })
 
   it('advertises the revision flag without numbers when the Codex connection does not resolve', async () => {
-    // R4-M4. The flag states what this binary can publish, not what this
+    // The flag states what this binary can publish, not what this
     // connection has. Dropping it alongside the numbers made a revoked
     // connection indistinguishable from an older control-api, so the host
     // skipped the freshness check precisely when no live connection could back
@@ -427,7 +427,7 @@ describe('GET /mcp-host/plugin-workload-sdk/capabilities', () => {
   })
 
   it('publishes catalog revision 0 for a connected but never-synced connection', async () => {
-    // R4-H3 contract pin. 0 is the schema DEFAULT for catalog_revision, so it
+    // Contract pin: 0 is the schema DEFAULT for catalog_revision, so it
     // must survive the wire untouched; the host decides readiness from it.
     vi.mocked(sdkDb.findGrant).mockResolvedValue(codexGrant())
     vi.mocked(codexConnection.getSafeCodexSubscriptionConnection).mockResolvedValue({

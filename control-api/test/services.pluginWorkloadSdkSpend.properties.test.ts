@@ -4,9 +4,9 @@ import { deriveEffectiveSpend } from '../src/services/pluginWorkloadSdkFinalizat
 import { isOauthBrokerProvider } from '../src/services/pluginWorkloadSdkSpendLedger.js'
 
 /**
- * R4-M2. `deriveEffectiveSpend` is a pure `(floor, linkedCodex) -> spend` merge
+ * `deriveEffectiveSpend` is a pure `(floor, linkedCodex) -> spend` merge
  * with precedence rules, and it was covered only by hand-enumerated cases.
- * R4-H1 and R4-M1 were both sibling cases that enumeration missed — the shape
+ * Two sibling defects in that merge were both cases enumeration missed — the shape
  * of that miss is what these properties close: they quantify over the whole
  * input space instead of the examples someone thought of.
  */

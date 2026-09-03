@@ -55,7 +55,7 @@ export interface AuthorizePromptBridgeResponse {
    * Per-grant output ceiling, or null when the grant sets none. Enforced as
    * `max_tokens` on API-key providers; codex-subscription cannot bind it on
    * the ChatGPT wire, where the contract's LIMITS.maxOutputTokens is the only
-   * bound (R4-H2).
+   * bound.
    */
   maxOutputTokens: number | null
 }
@@ -201,7 +201,7 @@ function isAuthorizePromptBridgeResponse(v: unknown): v is AuthorizePromptBridge
     (r.policyRevision as number) >= 1 &&
     typeof r.policyHash === 'string' &&
     /^[a-f0-9]{64}$/.test(r.policyHash) &&
-    // R4-H2: a grant cap of 0 is not "no cap" — it would clamp every response
+    // A grant cap of 0 is not "no cap" — it would clamp every response
     // to nothing. Reject it here rather than let Math.min silently zero the
     // request.
     (r.maxOutputTokens === null ||
@@ -232,7 +232,7 @@ function isPluginWorkloadSdkCapabilities(v: unknown): v is PluginWorkloadSdkCapa
     typeof value.v2Ready === 'boolean' &&
     (value.reservationOnlyOauthBroker === undefined || value.reservationOnlyOauthBroker === true) &&
     (value.codexBindingRevisions === undefined || value.codexBindingRevisions === true) &&
-    // R4-H3: bounds mirror the codex_subscription_connections CHECKs —
+    // Bounds mirror the codex_subscription_connections CHECKs —
     // `catalog_revision BIGINT NOT NULL DEFAULT 0 CHECK (>= 0)` and
     // `credential_revision BIGINT NOT NULL DEFAULT 1 CHECK (>= 1)`. These were
     // inverted, so a connection whose catalog was never synced (revision 0,

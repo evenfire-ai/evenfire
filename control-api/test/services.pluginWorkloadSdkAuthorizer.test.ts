@@ -602,7 +602,7 @@ describe('authorizePromptBridge', () => {
       value: { invocationId: 'inv-1', replay: false },
     })
     if (!result.ok) throw new Error('expected the authorization to succeed')
-    // R4-H2: the grant's output ceiling travels on the authorization again.
+    // The grant's output ceiling travels on the authorization again.
     // J8 removed it on the premise that nothing enforced it, which held only
     // for codex-subscription; every API-key provider sends it as `max_tokens`,
     // so for them it was a working per-grant billing control.
@@ -889,7 +889,7 @@ describe('reissuePromptBridgeCredentialTicket', () => {
     expect(sdkDb.markPluginWorkloadSdkProviderAttemptStatus).not.toHaveBeenCalled()
   })
 
-  it('denies an oauth-broker fallback that is not the default target (RP-539-009)', async () => {
+  it('denies an oauth-broker fallback that is not the default target', async () => {
     // The WRC installs the broker binding for the grant's default target only.
     // A non-default Codex fallback is authorizable but not executable: without
     // this guard it reserved an attempt, burned budget, and died in execution.

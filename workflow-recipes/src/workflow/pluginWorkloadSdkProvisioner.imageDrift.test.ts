@@ -711,7 +711,7 @@ describe('ensureEagerSdkMcpHost ConfigMap snapshot skip', () => {
         RUNTIME,
         {
           mcpHostPhase: 'Running',
-          // R5-B1: undecidable is now a field of the one verdict.
+          // Undecidable is now a field of the one verdict.
           codexVerdict: {
             provenance: 'uncertain',
             provenanceReason: 'parent_spec_unavailable',

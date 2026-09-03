@@ -13,7 +13,7 @@ const HASH = computeCodexPolicyHash({
 
 describe('readVerifiedSdkOnlyCodexBinding', () => {
   // The derive/resolve suite moved to codexRecipeVerdict.test.ts along with
-  // the functions themselves (R5-B1): those entry points were blind to
+  // the functions themselves: those entry points were blind to
   // provenance and are deleted, not deprecated.
   it('rebuilds a five-field proof and drops extra keys', () => {
     const proof = {
@@ -24,7 +24,7 @@ describe('readVerifiedSdkOnlyCodexBinding', () => {
       bindingHash: HASH,
       extra: true,
     }
-    // R4-L1: the model is a required argument now. This call used to omit it,
+    // The model is a required argument now. This call used to omit it,
     // which silently skipped the pin — the very gap the change closes.
     expect(readVerifiedSdkOnlyCodexBinding(proof, MODEL)).toEqual({
       connectionKey: 'team-plus',

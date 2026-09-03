@@ -683,7 +683,7 @@ describe('SQL contracts that a silent edit would otherwise break', () => {
     vi.mocked(pool.query).mockResolvedValue({ rows: [], rowCount: 1 } as never)
   })
 
-  it('refuses to promote a reserved attempt that already carries a credential jti (N-22)', async () => {
+  it('refuses to promote a reserved attempt that already carries a credential jti', async () => {
     // The JTI-free authorize-link path must never adopt an attempt that the
     // secret-ticket path already claimed. Dropping this predicate leaves the
     // whole suite green, so assert the clause itself.

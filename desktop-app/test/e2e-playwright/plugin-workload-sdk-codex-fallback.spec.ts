@@ -126,7 +126,7 @@ test('Desktop Apps falls back to the authorized non-Codex target when Codex is u
     'This journey stops codex-llm-proxy, performs one paid promptBridge call served by the fallback provider, and restores the proxy.'
   )
   const fixture = grantedFixture()
-  // Hard preconditions, never branches. RP-539-002 was exactly this shape: the
+  // Hard preconditions, never branches. An earlier defect was exactly this shape: the
   // happy path kept its only Codex assertions behind a guard, so an OpenAI
   // recipe passed it green without touching Codex, and the static auditor
   // reported PASS because it validates form and cannot reach semantics.

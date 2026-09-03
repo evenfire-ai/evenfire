@@ -115,7 +115,7 @@ export interface AuthorizedPromptBridge {
   /**
    * Per-grant output ceiling. Enforced as `max_tokens` on API-key providers;
    * codex-subscription cannot bind it on the ChatGPT wire and is bounded by
-   * the contract's structural LIMITS.maxOutputTokens instead (R4-H2).
+   * the contract's structural LIMITS.maxOutputTokens instead.
    */
   maxOutputTokens: number | null
   invocationId: string
@@ -606,7 +606,7 @@ export async function reissuePromptBridgeCredentialTicket(
 
   const reservationOnly =
     isLlmProviderId(target.provider) && PROVIDER_AUTH_MODE[target.provider] === 'oauth-broker'
-  // RP-539-009: an oauth-broker target is redeemable only through the broker
+  // An oauth-broker target is redeemable only through the broker
   // binding the WRC installs for the grant's default target. Any other broker
   // target would be reserved here and then die in execution with no credential
   // to redeem, after the reservation already charged the attempt budget. Deny

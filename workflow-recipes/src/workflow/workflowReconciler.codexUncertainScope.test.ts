@@ -29,8 +29,19 @@ const runtimeTokenIssuerMocks = vi.hoisted(() => ({
   issueMcpHostWorkflowControlToken: vi.fn().mockResolvedValue('mcp-host-control-token'),
 }))
 
+/**
+ * Pass-through spy: the real projection still runs, so no behaviour changes.
+ * It exists only to count how many verdicts one reconcile derives.
+ */
+const codexVerdictMocks = vi.hoisted(() => ({ project: vi.fn() }))
+
 vi.mock('./crashRecovery', () => crashRecoveryMocks)
 vi.mock('./mcpHostRuntimeTokenIssuerClient', () => runtimeTokenIssuerMocks)
+vi.mock('./codexRecipeVerdict', async importOriginal => {
+  const actual = await importOriginal<typeof import('./codexRecipeVerdict')>()
+  codexVerdictMocks.project.mockImplementation(actual.projectCodexRecipeVerdict)
+  return { ...actual, projectCodexRecipeVerdict: codexVerdictMocks.project }
+})
 vi.mock('../gfsBinding', () => ({
   mintRecipeHostGfsToken: vi.fn().mockResolvedValue({
     ['to'.concat('ken')]: 'gfs-runtime-value',
@@ -274,7 +285,7 @@ describe('Codex scope under an undecidable catalog', () => {
   })
 
   it('does not remint or roll when the allowlist read fails and the JWT already holds the scope', async () => {
-    // N-04. An unreadable ConfigMap yields an empty derivedScopes, which is
+    // An unreadable ConfigMap yields an empty derivedScopes, which is
     // indistinguishable from a revocation. Treating it as one remints with
     // reason 'scope', which rolls the eager pod and drops its bootstrap proof —
     // then rolls it a SECOND time when the ConfigMap comes back. No policy
@@ -304,7 +315,7 @@ describe('Codex scope under an undecidable catalog', () => {
 
   it('still withdraws the scope and rolls the pod when a readable catalog revokes the grant', async () => {
     // The other half of the same rule: `uncertain` preserves, but a decision
-    // decides. If this ever stops rolling, N-04's fix has swallowed the
+    // decides. If this ever stops rolling, the preserve-on-unreadable fix has swallowed the
     // revocation path it was explicitly required not to mask.
     //
     // The steady-state pass in the middle is the control: it runs against the
@@ -409,7 +420,7 @@ describe('Codex allowlist view across interleaved recipes', () => {
   })
 
   it('configures with its OWN binding when another recipe wipes the shared view mid-reconcile', async () => {
-    // N-08. Recipe B captured a readable catalog; while B is inside
+    // Recipe B captured a readable catalog; while B is inside
     // ensureEagerSdkMcpHost, recipe A's refresh fails and clears the shared
     // state. Resolving the binding from that shared state after the awaits gave
     // B a null binding while `codexBindingUndecidable` still said false — a
@@ -455,7 +466,7 @@ describe('Codex allowlist view across interleaved recipes', () => {
     })
   })
 
-  // ── R5-M1 / R5-B1 ───────────────────────────────────────────────────────
+  // ── Reconciler-level wiring, not just its two ends ──────────────────────
   // The previous round fixed the wiring but tested only its two ends: the
   // helper (malformed -> uncertain) and the provisioner (given the flag as an
   // input). Nothing drove the reconciler, so forcing the flag to `false` at
@@ -480,7 +491,7 @@ describe('Codex allowlist view across interleaved recipes', () => {
     })
 
     it('withholds configure when the runtime-scope parent spec is unavailable', async () => {
-      // R5-B1 proper. The scope path already called this uncertain and kept the
+      // The scope path already called this uncertain and kept the
       // live JWT scope; the configure path called it `ineligible` and shipped a
       // null binding, wiping the live execution binding over a transient read.
       const { reconciler, coreApi, configure } = createHarness()
@@ -573,7 +584,7 @@ describe('Codex allowlist view across interleaved recipes', () => {
     })
 
     it('agrees on binding and scope in the eligible case', async () => {
-      // R5-B1's real invariant, asserted as a biconditional rather than as two
+      // The real invariant, asserted as a biconditional rather than as two
       // independent facts: a configure that carries a binding must come with
       // the scope, and vice versa.
       const { reconciler, coreApi, configure } = createHarness()
@@ -587,6 +598,26 @@ describe('Codex allowlist view across interleaved recipes', () => {
       // and this case exists to prove agreement in the eligible direction.
       expect(carriedBinding).toBe(true)
       expect(carriedBinding).toBe(issuedScopes().includes(CODEX_SCOPE))
+    })
+
+    it('derives exactly one verdict per pass, including the eager configure', async () => {
+      // The structural half of the invariant. Every earlier fix converged one
+      // more dimension between two derivations; this asserts there is only one
+      // derivation to converge. A second call with today's arguments cannot
+      // disagree, but it is the seam each previous round grew back from — and
+      // it emitted the uncertain-provenance warning twice.
+      const { reconciler, coreApi, configure } = createHarness()
+      bindGrant(reconciler)
+      codexVerdictMocks.project.mockClear()
+
+      await reconcileRecipe(reconciler, codexSdkSpec())
+
+      // Positive evidence that the pass really reached eager provisioning —
+      // otherwise a count of one would be the count of a reconcile that
+      // never got far enough to derive a second verdict.
+      expect(builtMcpHostPodFrom(coreApi)).toBeDefined()
+      expect(configure).toHaveBeenCalled()
+      expect(codexVerdictMocks.project).toHaveBeenCalledTimes(1)
     })
   })
 })

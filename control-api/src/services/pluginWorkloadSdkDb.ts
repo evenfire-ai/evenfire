@@ -177,10 +177,10 @@ export interface PluginWorkloadSdkQuotaLimits {
    * Per-grant output ceiling. PERSISTED and enforced: it lands as `max_tokens`
    * on API-key providers; codex-subscription cannot bind it on the ChatGPT
    * wire and is bounded there by the contract limit instead. See
-   * `AuthorizedPromptBridge.maxOutputTokens` (R4-H2).
+   * `AuthorizedPromptBridge.maxOutputTokens`.
    *
-   * R5-M2: this said "never persisted" after R4-H2 had already reactivated the
-   * key. A reader trusting that comment would drop the persistence or the read
+   * This said "never persisted" after the per-grant ceiling had already been
+   * reactivated. A reader trusting that comment would drop the persistence or the read
    * and hand the regression straight back.
    */
   maxOutputTokens?: number

@@ -20,7 +20,7 @@ import {
 /*
  * ONE Codex verdict per reconcile pass.
  *
- * This seam has been fixed four times — J4, N-08, R4-B1, R5-B1 — and every
+ * This seam has been fixed four times across four reviews, and every
  * fix converged one more dimension while leaving another live. The shape of
  * the bug never changed: two consumers answered the same question along
  * different paths, so `readOk` disagreed with `eligibility`, and then
@@ -59,7 +59,7 @@ export type CodexReconcileContext = {
 /**
  * The allowlist refresh, captured once by the caller. Passing the view rather
  * than reading `this.codexView` inside is what keeps a concurrently-refreshed
- * snapshot from splitting one pass across two views (N-08, scope dimension).
+ * snapshot from splitting one pass across two views (scope dimension).
  */
 export type CodexAllowlistView = {
   configMap?: CodexConfigMapView
@@ -118,7 +118,7 @@ export function projectCodexRecipeVerdict(input: {
   } as const
 
   if (projection.eligibility !== 'eligible') {
-    // R5-B1 audit (R4): warn ONLY for a recipe that actually targets Codex, and
+    // Warn ONLY for a recipe that actually targets Codex, and
     // only when the doubt is about provenance. An unreadable ConfigMap already
     // produces three warns in `refreshCodexSnapshot`, and it makes EVERY recipe
     // uncertain — including those with no Codex target — because the shared

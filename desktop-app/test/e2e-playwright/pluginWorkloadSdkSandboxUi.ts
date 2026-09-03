@@ -575,7 +575,7 @@ export function promptBridgeLedgerForRun(
 /**
  * The run anchor, read from PostgreSQL rather than the runner.
  *
- * R2-L4: the ledger queries filter on `inv.created_at >= startedAt`, and
+ * The ledger queries filter on `inv.created_at >= startedAt`, and
  * `created_at` is written by the database. Anchoring with the runner's clock
  * compares two unsynchronised clocks, so a few seconds of skew either drops
  * the run's own rows or picks up an earlier one. Same clock, both sides.

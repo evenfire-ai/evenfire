@@ -129,7 +129,7 @@ describe('linked Codex usage predicates', () => {
   })
 
   it('fails loudly instead of pinning an attempt in flight forever when created_at is unreadable', () => {
-    // N-15: the old default returned true, which wedges the invocation behind
+    // The old default returned true, which wedges the invocation behind
     // ledger_pending for good and hides the corrupt timestamp.
     for (const createdAt of [null, undefined, 'not-a-timestamp']) {
       expect(() =>

@@ -249,7 +249,7 @@ export function validatePromptBridgeRequest(raw: unknown): PromptBridgeRequest {
     body.maxTokens !== undefined &&
     (typeof body.maxTokens !== 'number' || !Number.isInteger(body.maxTokens) || body.maxTokens < 1)
   ) {
-    // R4-H2: `typeof number` alone let 0, -1 and 1.5 through to the provider
+    // `typeof number` alone let 0, -1 and 1.5 through to the provider
     // and made the grant clamp's Math.min ill-defined.
     throw new PluginWorkloadError('invalid_request', 'maxTokens must be a positive integer')
   }
@@ -434,7 +434,7 @@ export class PromptBridgeHandler {
         acknowledgementMode: this.deps.finalizePromptBridge
           ? 'atomic_terminal_finalization'
           : 'per_attempt',
-        // R4-H2: the per-grant ceiling is enforced here, before the request
+        // The per-grant ceiling is enforced here, before the request
         // reaches any provider. On API-key providers it lands as `max_tokens`
         // on the wire; on codex-subscription it bounds the hashed request
         // identity while the proxy omits it from the ChatGPT wire, which also
@@ -596,7 +596,7 @@ export class PromptBridgeHandler {
             err instanceof PluginWorkloadError && err.providerMayHaveExecuted
               ? 'provider_unavailable'
               : 'failed'
-          // N-11: the error path settles the same ledger row as the complete
+          // The error path settles the same ledger row as the complete
           // path, so it needs the same `ledger_pending` patience and the same
           // bounded deadline. Losing this attempt to a millisecond commit race
           // would silently drop the spend for an attempt that already ran.
@@ -664,7 +664,7 @@ function unexpectedAuthorizationResponse(): PluginWorkloadError {
 /**
  * Bound a workload's requested output against the grant's ceiling.
  *
- * Scope, stated honestly (R4-H2): on API-key providers this is the real cap —
+ * Scope, stated honestly: on API-key providers this is the real cap —
  * `max_tokens` reaches the provider. On codex-subscription the ChatGPT wire
  * rejects `max_output_tokens` and the proxy omits it, so there the clamp bounds
  * the hashed request identity rather than the response, and the enforced bound

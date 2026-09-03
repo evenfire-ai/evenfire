@@ -352,7 +352,7 @@ export async function authorizeLlmProviderAttempt(
     // before budget reservation work so concurrent Codex + fallback cannot
     // deadlock (budget rows then advisory vs advisory then spend/invocation).
     //
-    // R4-M3: only an SDK-linked authorize goes on to take plugin_workload_sdk_*
+    // Only an SDK-linked authorize goes on to take plugin_workload_sdk_*
     // rows FOR UPDATE, which is the order finalize follows after this advisory.
     // The workflow lane touches neither, so taking it for every recipe caller
     // serialized that lane per recipe for no ordering benefit.

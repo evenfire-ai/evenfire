@@ -750,7 +750,7 @@ describeRealPostgres('Plugin Workload SDK finalization on real PostgreSQL', () =
     }
   })
 
-  it('resolves three identical failed calls while Codex usage lands between them (N-05)', async () => {
+  it('resolves three identical failed calls while Codex usage lands between them', async () => {
     const client = await dbPool.connect()
     try {
       await begin(client)
@@ -808,7 +808,7 @@ describeRealPostgres('Plugin Workload SDK finalization on real PostgreSQL', () =
     }
   })
 
-  it('settles the attempts a successful failover displaced (RP-539-003)', async () => {
+  it('settles the attempts a successful failover displaced', async () => {
     const client = await dbPool.connect()
     try {
       await begin(client)

@@ -154,7 +154,7 @@ function makeHarness(configureResult: unknown) {
   } as unknown as PluginWorkloadSdkProvisionerDeps
   const provisioner = new PluginWorkloadSdkProvisioner(deps)
 
-  // R5-B1: the provisioner now takes ONE verdict instead of a binding plus a
+  // The provisioner now takes ONE verdict instead of a binding plus a
   // derived boolean. These helpers keep each existing case's semantics: a
   // minted binding means eligible+authoritative, and "undecidable" means the
   // projection itself could not decide.
@@ -211,7 +211,7 @@ describe('eager Codex policy gate', () => {
   })
 
   it('discards a cached proof whose pod was replaced instead of reporting ready', async () => {
-    // N-06: the proof is the pod's, not the recipe's. A replacement pod has
+    // The proof is the pod's, not the recipe's. A replacement pod has
     // never been configured, so a snapshot outage must not let its predecessor's
     // proof stand in for it.
     const harness = makeHarness(readyBootstrapBody(MINTED))
@@ -230,7 +230,7 @@ describe('eager Codex policy gate', () => {
   })
 
   it('rejects a bootstrap that echoes a Codex binding other than the minted one', async () => {
-    // N-14: a host answering with a different policy than the one WRC minted is
+    // A host answering with a different policy than the one WRC minted is
     // a broken host, not a pending policy. Three consecutive rounds exhaust the
     // configure budget and surface provider_unavailable.
     const harness = makeHarness(

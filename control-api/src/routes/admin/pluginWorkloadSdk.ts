@@ -148,7 +148,7 @@ function parseModelArray(value: unknown, field: string, res: Response): string[]
 // wire for compatibility and are validated with the same shape rules, but they
 // are stripped before persistence — only per-minute/platform limits are stored.
 //
-// R4-H2: `maxOutputTokens` was briefly moved here on the premise that nothing
+// `maxOutputTokens` was briefly moved here on the premise that nothing
 // enforced it. That premise held only for codex-subscription, whose ChatGPT
 // wire rejects `max_output_tokens` and whose proxy therefore omits it. Every
 // API-key provider does send it (`openai.ts`, `bedrockConverse.ts`,

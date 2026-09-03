@@ -224,7 +224,7 @@ describe('authorizeLlmProviderAttempt', () => {
   })
 
   it('does not take the recipe advisory lock for a recipe caller without an SDK attempt link', async () => {
-    // R4-M3. Only an SDK-linked authorize goes on to take plugin_workload_sdk_*
+    // Only an SDK-linked authorize goes on to take plugin_workload_sdk_*
     // rows FOR UPDATE, which is the order finalize follows after this advisory.
     // Taking it for every recipe caller serialized the workflow lane per recipe
     // for no ordering benefit.

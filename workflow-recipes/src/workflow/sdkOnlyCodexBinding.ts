@@ -66,7 +66,7 @@ export function sanitizePluginWorkloadSdkCodexBindingProof(
 }
 
 /**
- * R4-L1: `model` is REQUIRED. It used to be optional and the model pin was
+ * `model` is REQUIRED. It used to be optional and the model pin was
  * skipped when omitted, so a caller that forgot it would accept a binding for
  * another model. mcp-host's twin has always required it; the two now agree.
  */
@@ -86,7 +86,7 @@ export function readVerifiedSdkOnlyCodexBinding(
  * Deliberately NOT exported alongside a "derive from a ConfigMap" helper any
  * more. Those helpers (`deriveSdkOnlyCodexBinding` / `resolveSdkOnlyCodexBinding`)
  * were blind to provenance, so a caller could obtain a binding for a recipe
- * whose Codex authority could not be established — the R5-B1 wipe. The only
+ * whose Codex authority could not be established — the live-binding wipe. The only
  * caller is `projectCodexRecipeVerdict`, which gates on provenance and
  * eligibility first. Removed rather than deprecated, for the same reason
  * `readOk` was removed: a reachable blind path invites the sibling back.

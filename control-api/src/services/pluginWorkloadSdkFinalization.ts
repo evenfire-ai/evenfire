@@ -300,7 +300,7 @@ function replayExistingOutcome(
 ): PromptBridgeFinalizationResult {
   const { persisted, linked } = view
   assertPersistedAuthModeCredentialRules(persisted.provider, input)
-  // N-07: re-anchoring to the JWT's recipe binding runs BEFORE any state
+  // Re-anchoring to the JWT's recipe binding runs BEFORE any state
   // oracle, so a foreign caller cannot learn ledger_pending/exact/unknown.
   if (!spendBindingMatches(persisted, input)) {
     throw new PromptBridgeFinalizationError(
@@ -319,7 +319,7 @@ function replayExistingOutcome(
       true
     )
   }
-  // N-05: judged against the immutable floor, so the verdict cannot change
+  // Judged against the immutable floor, so the verdict cannot change
   // between two replays of the same request.
   if (!replayOutcomeCompatible(input, persisted)) {
     throw new PromptBridgeFinalizationError(
@@ -421,7 +421,7 @@ export async function finalizePromptBridgeInTransaction(
   if (!providerAttempt) {
     throw new PromptBridgeFinalizationError('not_found', 'provider attempt not found', 404)
   }
-  // N-19: shape before binding, matching `replayExistingOutcome`. A non-oauth
+  // Shape before binding, matching `replayExistingOutcome`. A non-oauth
   // finalization that omits `target.credentialSlot` is a malformed request, and
   // both paths must classify it as 400 `invalid_request`. Running the binding
   // comparison first would report the same body as 403 `binding_mismatch` here
@@ -478,7 +478,7 @@ export async function finalizePromptBridgeInTransaction(
   const linkedCodex = oauthBroker
     ? await loadLlmProviderAttemptBySdkAttemptId(db, input.providerAttemptId)
     : null
-  // R4-H1: decided from the linked Codex row, never from the caller-chosen
+  // Decided from the linked Codex row, never from the caller-chosen
   // status. Gating this on `complete` let a `failed` close through while the
   // Codex call was still inside its usage grace and could bill afterwards.
   // The replay path (`:314`) and the sweeper already read the linked row
@@ -492,7 +492,7 @@ export async function finalizePromptBridgeInTransaction(
     )
   }
   const spend = resolvePersistableSpend(input.status, oauthBroker, linkedCodex, input.usage)
-  // N-17: only point a usage_request_id at a usage_events row that is really
+  // Only point a usage_request_id at a usage_events row that is really
   // written. Codex spend is ingested by the proxy finalize, not here.
   const willIngestUsage = input.status === 'complete' && !oauthBroker
   // Closing the invocation `failed` leaves it revivable (reviveFailedInvocation
@@ -500,7 +500,7 @@ export async function finalizePromptBridgeInTransaction(
   // a second billable Codex call. Only a spend proved `not_executed` — no
   // linked Codex row at all — is safe to leave revivable. `exact` obviously
   // billed; `unknown` means we cannot prove it did not, which is the same
-  // hazard (R4-H1, and the invariant pluginWorkloadSdkDb.ts:2118-2122 states).
+  // hazard — the invariant stated at pluginWorkloadSdkDb.ts:2118-2122.
   // provider_unavailable is the non-revivable terminal state for both. The
   // RESULT still echoes input.status: mcp-host's controlApiClient requires
   // result.status === body.status.
@@ -616,7 +616,7 @@ export async function finalizePromptBridgeInTransaction(
     spend
   )
 
-  // RP-539-003: a successful failover finalizes only its winner, so the
+  // A successful failover finalizes only its winner, so the
   // attempts it displaced would never reach this endpoint. They are terminal
   // and immutable by the reservation fence, so they can be discovered and
   // settled here without trusting the host to declare them.

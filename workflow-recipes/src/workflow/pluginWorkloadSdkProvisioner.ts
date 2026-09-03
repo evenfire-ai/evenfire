@@ -215,7 +215,7 @@ export class PluginWorkloadSdkProvisioner {
     opts: {
       mcpHostPhase: string | undefined
       /**
-       * The caller's ONE Codex verdict for this pass (R5-B1). Required, and
+       * The caller's ONE Codex verdict for this pass. Required, and
        * deliberately not a pair of optional derived fields: an optional
        * `codexBindingUndecidable` defaulting to false is a flag a future
        * caller can silently omit, which is precisely how a binding-less v3
@@ -422,7 +422,7 @@ export class PluginWorkloadSdkProvisioner {
     }
     // Both the skip decision above and this binding are fields of the SAME
     // verdict the caller computed once for this pass. The provisioner never
-    // re-derives either after its own awaits (R5-B1).
+    // re-derives either after its own awaits.
     const resolvedCodexBinding = opts.codexVerdict.hostBinding
     const capabilityFamily = promptBridge ? 'promptBridge' : 'clientNotifications'
     const configureKey = `${readiness.uid}:${capabilityFamily}:${mcpHostAgent?.provider ?? 'none'}:${mcpHostAgent?.model ?? 'none'}:${resolvedCodexBinding?.bindingHash ?? 'none'}`

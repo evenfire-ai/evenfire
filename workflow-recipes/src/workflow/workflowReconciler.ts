@@ -898,7 +898,7 @@ export class WorkflowReconciler {
    * binding-less v3 configure that wipes a live mcp-host binding.
    * Readers capture `this.codexView` once and use only that snapshot.
    *
-   * There is deliberately NO derived boolean here (R4-B1, R5-B1). Every
+   * There is deliberately NO derived boolean here. Every
    * consumer reads a field of the ONE `CodexRecipeVerdict` a pass computes
    * with `projectCodexRecipeVerdict`. Converging one dimension at a time —
    * first `readOk`, then `snapshotError` — always left the next one free to
@@ -996,7 +996,7 @@ export class WorkflowReconciler {
    * the caller must capture the allowlist refresh once and hand the same
    * object to every consumer. Reading the live field here is exactly how the
    * scope path and the configure path ended up on two different snapshots
-   * within one pass (N-08, scope dimension).
+   * within one pass (scope dimension).
    */
   private codexVerdictFor(
     spec: WorkflowRecipeSpec,
@@ -1453,7 +1453,7 @@ export class WorkflowReconciler {
   ): Promise<WorkflowReconcileResult> {
     const preflightError = this.validateWorkflowSpec(spec)
     if (preflightError) return { phase: 'failed', message: preflightError, workflowPhase: 'failed' }
-    // R5-B1 audit (R3): capture the allowlist refresh ONCE for this pass and
+    // Capture the allowlist refresh ONCE for this pass and
     // compute the verdict from it. Every consumer below — eager configure, the
     // run path's secrets, and the NetworkPolicy decision — reads this object
     // instead of `this.codexView`, which a concurrent recipe can replace
@@ -1634,18 +1634,15 @@ export class WorkflowReconciler {
           // (that PVC is provisioned by the triggered-run path). Mounting it
           // here would wedge the pod in Pending — the PVC does not exist until a
           // run starts. The triggered run later recreates the pod with the mount.
-          // R5-N1: one verdict, computed from the view this pass captured.
+          // Reuse the verdict this pass already computed rather than deriving a
+          // second one from the same view. Two derivations cannot disagree here
+          // (identical arguments, `codexView` is const), but a second one is a
+          // seam waiting to drift the moment either call site's arguments move —
+          // and it emits the uncertain-provenance warning twice per pass.
           // Resolving the binding inside the provisioner (after its own awaits)
           // let a concurrently-reconciled recipe's failed refresh hand over a
           // null binding that read as decidable — a binding-less v3 configure
           // that wipes the live host binding.
-          const eagerCodexVerdict = this.codexVerdictFor(
-            spec,
-            recipeUid,
-            recipeName,
-            runtimeScopeRecipeName,
-            codexView
-          )
           const eagerStatus = await this.pluginWorkloadSdkProvisioner.ensureEagerSdkMcpHost(
             recipeName,
             recipeUid,
@@ -1653,7 +1650,7 @@ export class WorkflowReconciler {
             runtimeScopeRecipeName,
             spec,
             runtime,
-            { mcpHostPhase, codexVerdict: eagerCodexVerdict }
+            { mcpHostPhase, codexVerdict }
           )
           const eagerBootstrapProof =
             this.pluginWorkloadSdkProvisioner.getBootstrapProof(recipeName)
@@ -2908,7 +2905,7 @@ export class WorkflowReconciler {
     runtime: WorkflowRuntimePlan,
     awaitsTriggeredRun: boolean,
     /**
-     * The pass's Codex projection. R5-B1 audit: recomputing it here read the
+     * The pass's Codex projection. Recomputing it here read the
      * live allowlist view after this method's own awaits, so a NetworkPolicy
      * decision could rest on a different snapshot than the binding did.
      */
@@ -3764,7 +3761,7 @@ export class WorkflowReconciler {
     runtimeScopeRecipeName: string,
     spec: WorkflowRecipeSpec,
     recipeUid: string | undefined,
-    // R5-B1: the SAME verdict the caller used for the configure decision.
+    // The SAME verdict the caller used for the configure decision.
     // Recomputing it here read `this.codexView` live, so a concurrent refresh
     // could give the binding one snapshot and the scopes another.
     codexVerdict: CodexRecipeVerdict

@@ -85,7 +85,7 @@ export function isLinkedCodexInFlightWithoutUsage(
         ? Date.parse(String(row.createdAt))
         : Number.NaN
   if (!Number.isFinite(created)) {
-    // N-15: an unreadable created_at used to default to "still in flight",
+    // An unreadable created_at used to default to "still in flight",
     // which wedges the invocation behind ledger_pending forever and silently
     // hides a corrupt/absent timestamp. The grace window is undecidable here,
     // so fail loudly instead of guessing.

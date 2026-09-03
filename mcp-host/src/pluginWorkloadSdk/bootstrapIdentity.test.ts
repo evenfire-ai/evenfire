@@ -212,6 +212,39 @@ describe('Plugin Workload SDK bootstrap identity', () => {
     replaceSdkOnlyCodexBinding(null)
   })
 
+  it('clears the stored Codex binding when identity verification throws', async () => {
+    const binding = {
+      connectionKey: 'team-plus',
+      catalogRevision: 4,
+      credentialRevision: 1,
+      model: 'gpt-5.6-luna',
+      bindingHash: computeCodexPolicyHash({
+        model: 'gpt-5.6-luna',
+        catalogRevision: 4,
+        credentialRevision: 1,
+        connectionKey: 'team-plus',
+      }),
+    }
+    // The binding is installed BEFORE verification because `verify` reads the
+    // live global to build its capabilities request. A transport failure there
+    // must not leave an unconfirmed binding behind for the next prompt to
+    // execute against — and must still surface as the original error.
+    const verify = vi.fn().mockRejectedValue(new Error('control-api unreachable'))
+    await expect(
+      configurePluginWorkloadSdkBootstrapIdentity(
+        {
+          capabilityFamily: 'promptBridge',
+          provider: 'codex-subscription',
+          model: 'gpt-5.6-luna',
+          contractVersion: 3,
+          codexBinding: binding,
+        },
+        { capabilityFamily: 'promptBridge', verify }
+      )
+    ).rejects.toThrow('control-api unreachable')
+    expect(readSdkOnlyCodexBinding()).toBeNull()
+  })
+
   it('integrity-checks a supplied Codex binding even when the request provider is not Codex', async () => {
     replaceSdkOnlyCodexBinding(null)
     const verifyBinding = vi.spyOn(sdkOnlyCodexBinding, 'readVerifiedSdkOnlyCodexBinding')

@@ -3725,7 +3725,7 @@ export type PluginWorkloadSdkGrantInput = {
   // Input type omits the deprecated per-run keys (issue #348): this UI never
   // sends them and the server strips them on write. The response
   // PluginWorkloadSdkQuotaLimits still carries them for legacy grants.
-  // `maxOutputTokens` is NOT among them (R4-H2) — it is a live per-grant
+  // `maxOutputTokens` is NOT among them — it is a live per-grant
   // ceiling on API-key providers.
   quotaLimits?: Omit<PluginWorkloadSdkQuotaLimits, 'maxRequestsPerRun' | 'maxNotificationsPerRun'>
   modelPolicies?: Record<string, PluginWorkloadSdkModelPolicy>

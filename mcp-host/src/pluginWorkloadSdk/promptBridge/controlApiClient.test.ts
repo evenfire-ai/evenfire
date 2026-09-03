@@ -34,7 +34,7 @@ function authorizedBody(invocationId: string) {
     attemptGeneration: 1,
     policyRevision: 2,
     policyHash: 'a'.repeat(64),
-    // R4-H2: the field is required on the wire again. `null` is "this grant
+    // The field is required on the wire again. `null` is "this grant
     // sets no ceiling", which is the default these fixtures describe.
     maxOutputTokens: null,
   }
@@ -341,7 +341,7 @@ describe('PluginWorkloadSdkControlApiClient', () => {
     ).resolves.toMatchObject({ policyReady: true, codexBindingReady: true })
   })
 
-  // R4-H3 / R4-M5: the hand-built fixtures only ever used catalog revisions
+  // The hand-built fixtures only ever used catalog revisions
   // {4,5,7,999} and never 0 — which is the schema DEFAULT for a never-synced
   // catalog and exactly the value the inverted bounds rejected. These pin the
   // real CHECK constraints of codex_subscription_connections:
@@ -390,7 +390,7 @@ describe('PluginWorkloadSdkControlApiClient', () => {
   })
 
   it('refuses the binding when the peer claims revisions but omits both', async () => {
-    // R4-M4: a revoked or absent connection now keeps the flag and drops only
+    // A revoked or absent connection now keeps the flag and drops only
     // the numbers, so this is the branch a live control-api takes for a
     // connection that cannot back any binding.
     installCodexBinding()
