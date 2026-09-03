@@ -173,7 +173,11 @@ export const defaultFqdnLookup: FqdnLookup = async host => {
   if (transient) {
     return {
       kind: 'error',
-      error: `DNS resolution for "${host}" failed (${transient.code}) — resolver or upstream unavailable`,
+      // Read through `dnsCodeOf` like every other consumer below. A `transient`
+      // verdict already guarantees a string code, so this is display-only — but
+      // it is the last hand-rolled `.code` read left in the consumers, and the
+      // point of the shared helper is that there is exactly one way to ask.
+      error: `DNS resolution for "${host}" failed (${dnsCodeOf(transient) ?? 'unknown'}) — resolver or upstream unavailable`,
       retryable: true,
     }
   }

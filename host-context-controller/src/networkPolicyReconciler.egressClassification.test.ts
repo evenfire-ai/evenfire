@@ -139,8 +139,11 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
   })
 
   /** Bootstrap a written policy, then re-serve it with the window optionally lapsed. */
-  async function seedAccumulatedPolicy(opts: { lapsed: boolean }): Promise<void> {
-    await reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+  async function seedAccumulatedPolicy(opts: {
+    lapsed: boolean
+    srv?: McpServerCRD
+  }): Promise<void> {
+    await reconciler.reconcileExternalEgress(opts.srv ?? server, { isCurrent: () => true })
     const written = (
       mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as { body: k8s.V1NetworkPolicy }
     ).body
@@ -556,6 +559,211 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     expect(served).toContain('1.2.3.4')
   })
 
+  /** The live policy the fixture seeded, cloned and handed to a drift mutation. */
+  async function driftLivePolicy(mutate: (spec: k8s.V1NetworkPolicySpec) => void): Promise<string> {
+    const items = (await mockApi.listNamespacedNetworkPolicy({ namespace: 'mcp-server' })) as {
+      items: Array<{ metadata?: { name?: string }; spec?: k8s.V1NetworkPolicySpec }>
+    }
+    const drifted = JSON.parse(JSON.stringify(items)) as typeof items
+    mutate(drifted.items[0].spec!)
+    mockApi.listNamespacedNetworkPolicy.mockResolvedValue(drifted)
+    return drifted.items[0].metadata!.name!
+  }
+
+  /** Everything the status wrote, as one string — what the operator ends up seeing. */
+  function servedPayload(): string {
+    return JSON.stringify(
+      mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.map(
+        (call: unknown[]) => (call[0] as { body?: unknown } | undefined)?.body
+      )
+    )
+  }
+
+  it('T11d revokes a policy that grew an egress rule with no `to` (allow-all)', async () => {
+    // Review of #567 round 2, R2-H1. The same defect as #590, one level up.
+    //
+    // #590 fixed the PEER projection: a `to[]` entry that was not an ipBlock
+    // stopped vanishing before the comparison. This is the RULE projection.
+    // `flatMap(rule => rule.to ?? [])` gives a rule with NO `to` exactly zero
+    // peers, so it contributes nothing to `enforced`, nothing to `every`, and the
+    // length comparison went back to being 0 === 0 — a number compared with
+    // itself, which is the shape of all three findings in this class.
+    //
+    // And it was the worst member of the class to miss. An egress rule with no
+    // `to` means allow-all destinations. Under the namespace L0 deny-all the
+    // served pod kept egress to EVERY destination on that port for as long as the
+    // fault repeated, and the `continue` skips the rewrite, so nothing healed it.
+    await seedAccumulatedPolicy({ lapsed: false })
+    const policyName = await driftLivePolicy(spec => {
+      spec.egress!.push({ ports: [{ port: 53, protocol: 'UDP' }] })
+    })
+    injectPostResolutionTypeError()
+
+    // Liveness witness: the fault branch ran and blocked. Without it, "the
+    // allow-all is not enforced" is satisfied by a pass that never got here.
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(TypeError)
+
+    expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ name: policyName })
+    )
+    const egress = statusConditions().filter(c => c.type === 'ExternalEgressReady')
+    expect(egress.at(-1)?.reason).toBe('ExternalEgressReconcileFailed')
+    // The CIDRs were all fine; it is the SHAPE that is not one we write, and the
+    // operator message has to say which of the two it was.
+    expect(egress.at(-1)?.message).toContain('REVOKED')
+    expect(egress.at(-1)?.message).toContain('shape')
+    expect(egress.at(-1)?.message).not.toContain('left untouched')
+    // Nothing untrustworthy is published as the resolution of the hostname.
+    expect(servedPayload()).not.toContain('1.2.3.4')
+  })
+
+  it('T11e revokes a policy whose `ports` were widened out-of-band', async () => {
+    // R2-M1, same root as T11d and the same fix. Dropping the `ports` block from
+    // a rule means every port, not just the one the binding declared. The old
+    // verdict never looked at `ports` at all, so a policy whose `to` was still the
+    // correct /32 stayed enforced with the widened ports while the fault repeated.
+    //
+    // On the merge-base this same input self-healed: the fault was laundered into
+    // the permanent branch, which rebuilt from `binding.port` and rewrote it. So,
+    // like T11, this is an input #567 made strictly worse.
+    await seedAccumulatedPolicy({ lapsed: false })
+    const policyName = await driftLivePolicy(spec => {
+      delete spec.egress![0]!.ports
+    })
+    injectPostResolutionTypeError()
+
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(TypeError)
+
+    expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ name: policyName })
+    )
+    const egress = statusConditions().filter(c => c.type === 'ExternalEgressReady')
+    expect(egress.at(-1)?.message).toContain('REVOKED')
+    expect(servedPayload()).not.toContain('1.2.3.4')
+  })
+
+  // Every remaining dimension of the shape, in one table. The point of judging by
+  // rebuild-and-compare rather than by predicate is that no dimension needs its
+  // own arm — so the table is the evidence for that claim, not decoration. Each
+  // row dies to replacing `sameNetworkPolicySpec(...)` with `true`; the
+  // podSelector, policyTypes and ingress rows additionally die to a verdict that
+  // compares only `spec.egress`.
+  const shapeDrifts: Array<[string, (spec: k8s.V1NetworkPolicySpec) => void]> = [
+    ['a changed port', spec => void (spec.egress![0]!.ports = [{ port: 80, protocol: 'TCP' }])],
+    [
+      'an added endPort range',
+      spec => void (spec.egress![0]!.ports = [{ port: 443, protocol: 'TCP', endPort: 8443 }]),
+    ],
+    [
+      'a changed protocol',
+      spec => void (spec.egress![0]!.ports = [{ port: 443, protocol: 'UDP' }]),
+    ],
+    ['a widened policyTypes', spec => void (spec.policyTypes = ['Egress', 'Ingress'])],
+    ['an emptied podSelector', spec => void (spec.podSelector = {})],
+    [
+      'a podSelector pointing at another server',
+      spec => void (spec.podSelector = { matchLabels: { 'clerum.io/mcpserver': 'other-mcp' } }),
+    ],
+    [
+      'an ipBlock.except carve-out',
+      spec => void (spec.egress![0]!.to![0]!.ipBlock!.except = ['1.2.3.0/30']),
+    ],
+    [
+      'two ipBlocks folded into one rule',
+      spec => void spec.egress![0]!.to!.push({ ipBlock: { cidr: '5.6.7.8/32' } }),
+    ],
+    ['an added ingress rule', spec => void (spec.ingress = [{}])],
+  ]
+
+  it.each(shapeDrifts)('T11f revokes a policy with %s', async (_label, mutate) => {
+    await seedAccumulatedPolicy({ lapsed: false })
+    const policyName = await driftLivePolicy(mutate)
+    injectPostResolutionTypeError()
+
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(TypeError)
+
+    expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ name: policyName })
+    )
+    expect(
+      statusConditions()
+        .filter(c => c.type === 'ExternalEgressReady')
+        .at(-1)?.message
+    ).toContain('REVOKED')
+  })
+
+  it('T11g still serves a clean multi-CIDR UDP binding — the shape check reads the binding', async () => {
+    // Anti-over-correction, the half T11c cannot cover. T11c serves ONE /32 on the
+    // default TCP/443 binding, so a verdict that rebuilt the shape with a
+    // hardcoded TCP, a hardcoded port, or only the first CIDR would still satisfy
+    // it. This binding is UDP and resolves to two addresses, so the rebuild has to
+    // read `binding.protocol`, `binding.port` and the whole live CIDR list to
+    // agree with what the controller actually wrote.
+    //
+    // Over-correction is the real risk of this change: a comparator stricter than
+    // what the controller writes revokes legitimate policies, which is an egress
+    // outage — worse than the bug it closes.
+    const udpServer: McpServerCRD = {
+      ...server,
+      spec: {
+        ...server.spec,
+        egressBindings: [{ dns: 'api.example.com', port: 53, protocol: 'UDP' }],
+      },
+    }
+    resolve4Mock.mockResolvedValue(rec('1.2.3.4', '9.9.9.9'))
+    await seedAccumulatedPolicy({ lapsed: false, srv: udpServer })
+    injectPostResolutionTypeError()
+
+    // Fail-static in one assertion: a fault WITH something trustworthy to serve
+    // completes instead of throwing. It is also the liveness witness — the pass
+    // reached the fault branch and chose to serve, rather than never faulting.
+    await expect(
+      reconciler.reconcileExternalEgress(udpServer, { isCurrent: () => true })
+    ).resolves.toBeUndefined()
+
+    // Both accumulated addresses are still served, so a rebuild that kept only the
+    // first CIDR fails here rather than passing quietly.
+    const served = servedPayload()
+    expect(served).toContain('1.2.3.4')
+    expect(served).toContain('9.9.9.9')
+    expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(
+      statusConditions()
+        .filter(c => c.type === 'ExternalEgressReady')
+        .at(-1)?.message
+    ).toContain('left untouched')
+  })
+
+  it('T11h revokes a live policy with no egress rules — a deny disguised as an allow', async () => {
+    // The emptiness trap, and the reason the verdict gates on `cidrs.length > 0`
+    // before comparing. A rebuild from an empty CIDR list produces an empty
+    // `egress`, which compares EQUAL to a live policy that has no rules — so the
+    // shape test alone would call the drift intact, report zero addresses as "what
+    // is enforced right now", and mark the pass non-blocking on the strength of a
+    // policy that allows nothing. The safety lane refuses the same shape for the
+    // same reason.
+    await seedAccumulatedPolicy({ lapsed: false })
+    const policyName = await driftLivePolicy(spec => {
+      spec.egress = []
+    })
+    injectPostResolutionTypeError()
+
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(TypeError)
+
+    expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ name: policyName })
+    )
+    expect(servedPayload()).not.toContain('1.2.3.4')
+  })
+
   it('T8 still throws on a fault with nothing to serve (bootstrap)', async () => {
     // The other half of the same decision, pinned so it cannot be lost: with no
     // live policy there is no frozen set, so serving is not an option and the
@@ -566,6 +774,19 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     await expect(
       reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
     ).rejects.toThrow(TypeError)
+
+    // Bootstrap is its own verdict, not a revocation, and the status has to say
+    // so. The old boolean made this case indistinguishable from "we served the
+    // accumulated set": with nothing live, `trustworthy` came out true by
+    // vacuity and the message claimed the accumulated egress was left untouched —
+    // describing an accumulation that never existed. Collapsing bootstrap back
+    // into either of the other two states is caught here rather than by the
+    // throw, which all three states share.
+    const egress = statusConditions().filter(c => c.type === 'ExternalEgressReady')
+    expect(egress.at(-1)?.reason).toBe('ExternalEgressReconcileFailed')
+    expect(egress.at(-1)?.message).toContain('no live policy to serve')
+    expect(egress.at(-1)?.message).not.toContain('REVOKED')
+    expect(egress.at(-1)?.message).not.toContain('left untouched')
   })
 
   it('T9 reports the rejected binding alongside the fault instead of dropping it', async () => {

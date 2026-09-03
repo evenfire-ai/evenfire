@@ -140,6 +140,31 @@ function sameNetworkPolicySpec(
   )
 }
 
+/**
+ * The verdict on a live exact-host egress policy during a non-DNS fault.
+ * `drifted-*` is split because the operator message names the diagnosis, and
+ * "it enforced a CIDR we do not write" and "its shape is not one we write" send
+ * an operator to two different places.
+ */
+type LiveEgressVerdict =
+  | { state: 'none' }
+  | { state: 'intact'; cidrs: string[] }
+  | { state: 'drifted-shape' }
+  | { state: 'drifted-cidr' }
+
+/**
+ * What the ExternalEgressReady message says about the live policy on a non-DNS
+ * fault. One entry per verdict state so a new state cannot be added without
+ * deciding what the operator is told.
+ */
+const LIVE_EGRESS_FAULT_TEXT: Record<LiveEgressVerdict['state'], string> = {
+  none: 'no live policy to serve',
+  intact: 'accumulated egress left untouched',
+  'drifted-cidr':
+    'live policy REVOKED: it enforced a CIDR outside the /32 allowlist this controller writes',
+  'drifted-shape': 'live policy REVOKED: its egress shape is not one this controller writes',
+}
+
 function hasExpectedPolicyOwnership(policy: k8s.V1NetworkPolicy, policyType: string): boolean {
   const labels = policy.metadata?.labels ?? {}
   return labels[MANAGED_BY_LABEL] === MANAGED_BY_VALUE && labels[POLICY_TYPE_LABEL] === policyType
@@ -1815,6 +1840,70 @@ export class NetworkPolicyReconciler {
     }
   }
 
+  /**
+   * Judge a live exact-host egress policy WITHOUT resolving anything.
+   *
+   * The controller writes exactly ONE shape (buildExactHostEgressPolicy above):
+   * a podSelector on this McpServer, `policyTypes: ['Egress']`, and one rule per
+   * CIDR carrying `to: [{ipBlock:{cidr}}]` plus this binding's port/protocol. So
+   * the live object is trustworthy only if it IS that shape rebuilt with its own
+   * CIDRs — the safety lane's "modulo cidr" comparison (see the DNS arm of
+   * collectSafetyInventory) — and every one of those CIDRs is the allowed /32
+   * this controller is the only writer of.
+   *
+   * Judging the SHAPE rather than a projection of it is the point. Reviews of
+   * #567 found the same defect three times at three depths, because each fix
+   * projected the policy down to the dimension that had just failed and compared
+   * the projection with itself:
+   *
+   *   - #590 R1-L1: mapping peers to `ipBlock.cidr` and filtering out the
+   *     undefineds dropped a `namespaceSelector` peer BEFORE the comparison.
+   *   - #590: an over-broad but non-blocked prefix (1.0.0.0/8) passed the
+   *     allowlist, which only rejects overlaps with the blocked ranges.
+   *   - R2-H1: `flatMap(rule => rule.to ?? [])` drops a whole RULE that has no
+   *     `to`. In NetworkPolicy a rule without `to` is allow-all, so the most
+   *     dangerous drift of all contributed zero peers and every peer-level
+   *     predicate over it was vacuously true.
+   *   - R2-M1: `ports` was never looked at, so a widened port set read as clean.
+   *
+   * A rebuild-and-compare has no dimension to miss: anything the controller does
+   * not write differs from the rebuild, whatever it happens to allow.
+   */
+  private judgeLiveExactHostEgress(
+    server: McpServerCRD,
+    name: string,
+    binding: EgressBinding,
+    existingPolicy: k8s.V1NetworkPolicy | null
+  ): LiveEgressVerdict {
+    // Bootstrap: nothing live to judge, and nothing to serve.
+    if (existingPolicy === null) return { state: 'none' }
+
+    const cidrs = (existingPolicy.spec?.egress ?? [])
+      .flatMap(rule => rule.to ?? [])
+      .map(peer => peer.ipBlock?.cidr)
+      .filter((cidr): cidr is string => typeof cidr === 'string')
+
+    // A policy with no ipBlock peers is a deny disguised as an allow, and the
+    // rebuild from an empty CIDR list would compare equal to it. Gate first, the
+    // way the safety lane does, so emptiness is never mistaken for agreement.
+    const shapeIntact =
+      cidrs.length > 0 &&
+      sameNetworkPolicySpec(
+        existingPolicy,
+        this.buildExactHostEgressPolicy(server, name, binding, cidrs)
+      )
+    // The one condition the shape cannot carry: the rebuild uses the live CIDRs,
+    // so they compare against themselves and are never validated by it.
+    const cidrsIntact = cidrs.every(
+      cidr => cidr.endsWith('/32') && isAllowedExternalEgressCidr(cidr)
+    )
+
+    if (shapeIntact && cidrsIntact) return { state: 'intact', cidrs }
+    // A bad CIDR is the more specific diagnosis and the one an operator acts on
+    // first, so it wins when a policy drifted on both axes.
+    return { state: cidrsIntact ? 'drifted-shape' : 'drifted-cidr' }
+  }
+
   private async resolveExternalEgressDns(
     hostname: string
   ): Promise<{ address: string; ttl: number }[]> {
@@ -2076,7 +2165,7 @@ export class NetworkPolicyReconciler {
       dns: string
       err: unknown
       blocking: boolean
-      revoked: boolean
+      live: LiveEgressVerdict['state']
     }> = []
     const resolvedAtMs = Date.now()
     const resolvedAt = new Date(resolvedAtMs).toISOString()
@@ -2299,77 +2388,36 @@ export class NetworkPolicyReconciler {
             // from the live object, not recomputed — recomputing is what faulted.
             // Only HCC: consumers of ExternalEgressReady treat any False as
             // terminal, so a dependent WRC recipe still fails (#577).
-            const peers = (existingPolicy?.spec?.egress ?? []).flatMap(rule => rule.to ?? [])
-            const enforced = peers
-              .map(to => to.ipBlock?.cidr)
-              .filter((cidr): cidr is string => typeof cidr === 'string')
-            // "What is enforced right now" is only worth serving if it is also
-            // allowed. This is the one path that neither re-validates nor
-            // self-heals the live policy — the safety lane retains DNS policies
-            // modulo cidr, and the orphan list is by label without an ownership
-            // read — so a policy edited out-of-band into a private range would be
-            // published as the resolution of a public hostname AND counted as
-            // something to serve, keeping the pass non-blocking and the range
-            // enforced on every resync. A set containing anything blocked is not
-            // known-good, so none of it is served and the fault blocks.
-            //
-            // The verdict has to judge the policy's SHAPE, not only the CIDRs it
-            // happens to expose. Projecting to `ipBlock` and filtering out
-            // everything else made two drift shapes invisible, because a
-            // `namespaceSelector` peer maps to `undefined` and is dropped before
-            // the comparison — leaving `enforced.length` compared against itself:
-            //
-            //   1. an added non-ipBlock egress rule beside a valid /32
-            //   2. an over-broad but non-blocked public prefix, e.g. 1.0.0.0/8
-            //
-            // Both read as clean, were served, and were published in
-            // `status.resolvedEgressIPs` as the resolution of the hostname. So:
-            // every peer must BE an ipBlock, and every CIDR must be the /32 this
-            // controller is the only thing that ever writes. Anything else is
-            // drift by definition, whatever it happens to allow.
-            const allIpBlocks = peers.every(to => typeof to.ipBlock?.cidr === 'string')
-            const allowed = enforced.filter(
-              cidr => isAllowedExternalEgressCidr(cidr) && cidr.endsWith('/32')
-            )
-            const trustworthy = allIpBlocks && allowed.length === enforced.length
+            const verdict = this.judgeLiveExactHostEgress(server, name, binding, existingPolicy)
 
-            // Still DESIRED, but only while the live object is one we would keep.
-            // The cleanup below deletes every external-egress policy NOT in this
-            // set, so membership is the difference between "left untouched" and
-            // "revoked", and the choice has to be made after the trustworthy
-            // verdict, not before it (review of #567, R1-L1).
-            //
-            // Trustworthy — including the bootstrap case, where there is no live
-            // policy at all and `enforced` is empty, so the filter is vacuously
-            // total: the binding is declared, we simply could not reconcile it
-            // this pass. Without the add, cleanup would read the omission as "the
-            // operator removed it" and delete the very policy this branch
-            // promises to leave untouched.
-            //
-            // Untrustworthy: the live policy carries a CIDR outside the allowed
-            // ranges. Nothing else in the system repairs that — the safety lane
-            // retains DNS policies modulo cidr and the orphan list is by label
-            // without an ownership read — and this branch cannot rewrite it,
-            // because rebuilding means recomputing and recomputing is what
-            // faulted. Leaving it in the desired set is what kept a private range
-            // enforced on every resync for as long as the fault lasted, which the
-            // merge-base did not do: there the fault was laundered into the
-            // permanent branch, which rewrote the policy from the annotation
-            // window and dropped the drift. Omitting it hands the object to
-            // cleanup, which runs BEFORE the deferred throw below, so the
+            // Membership in `desiredPolicyNames` is the difference between "left
+            // untouched" and "revoked": cleanup deletes every external-egress
+            // policy NOT in this set, and it runs BEFORE the deferred throw, so a
             // revocation actually happens rather than being skipped by the
-            // fail-loud exit. Revoking an allow policy under the namespace L0
-            // deny-all closes that destination; it cannot open one.
-            if (trustworthy) desiredPolicyNames.add(name)
+            // fail-loud exit. Revoking is fail-CLOSED — these are pure allow
+            // policies under the namespace L0 deny-all, so removing one closes
+            // that destination and cannot open one.
+            //
+            // Nothing here can rewrite a drifted policy instead: rebuilding means
+            // recomputing the CIDR set, and recomputing is what faulted.
+            //
+            // `none` is bootstrap, and there the add is dataplane-NEUTRAL: the
+            // policy came from `existingPolicies.find(...)`, cleanup filters that
+            // same list by name, and a name that was not found has no live object
+            // to delete. It stays explicit because the status has to tell "nothing
+            // was live" apart from "what was live got revoked" — an earlier
+            // revision of this branch asserted the opposite in a comment.
+            const revoked = verdict.state === 'drifted-shape' || verdict.state === 'drifted-cidr'
+            if (!revoked) desiredPolicyNames.add(name)
 
-            if (trustworthy && enforced.length > 0) {
+            if (verdict.state === 'intact') {
               // Without this the binding vanishes from status.resolvedEgressIPs —
               // the audit record an operator reads to learn what is allowed —
               // while its /32s stay enforced. The status message would claim
               // "accumulated egress left untouched" and the record would disagree.
               resolvedEgressIPs.push({
                 dns: binding.dns,
-                ips: enforced.map(cidr => cidr.replace(/\/32$/, '')),
+                ips: verdict.cidrs.map(cidr => cidr.replace(/\/32$/, '')),
                 resolvedAt,
               })
             }
@@ -2378,16 +2426,15 @@ export class NetworkPolicyReconciler {
               // a `??` fallback would be an unreachable branch pretending to be a guard.
               dns: binding.dns,
               err,
-              // Blocking only when there is nothing to serve. A fault on a
-              // binding that has never been written has no frozen set behind it,
-              // so completing the pass would publish a server as reconciled while
-              // one of its declared destinations was never enforced at all.
-              blocking: !trustworthy || enforced.length === 0,
-              // The message below otherwise tells the operator the accumulated
-              // egress was left untouched. On an untrustworthy live policy it is
-              // revoked instead, and a status that describes the opposite of what
-              // the pass did is the same defect class this branch exists to close.
-              revoked: !trustworthy,
+              // Blocking unless there is a trustworthy live set to serve. A fault
+              // on a binding that has never been written has no frozen set behind
+              // it, so completing the pass would publish a server as reconciled
+              // while one of its declared destinations was never enforced at all.
+              blocking: verdict.state !== 'intact',
+              // The operator message reads off this. A status that describes the
+              // opposite of what the pass did is the same defect class this branch
+              // exists to close.
+              live: verdict.state,
             })
             continue
           }
@@ -2492,11 +2539,9 @@ export class NetworkPolicyReconciler {
       const first = blocking ?? reconcileFaults[0]
       const parts = [
         `External egress reconciliation failed on binding "${first.dns}" with a non-DNS error ` +
-          `(not a resolver condition, ${
-            first.revoked
-              ? 'live policy REVOKED: it enforced an address outside the allowed ranges'
-              : 'accumulated egress left untouched'
-          }): ${this.errorMessage(first.err)}`,
+          `(not a resolver condition, ${LIVE_EGRESS_FAULT_TEXT[first.live]}): ${this.errorMessage(
+            first.err
+          )}`,
       ]
       if (reconcileFaults.length > 1) {
         parts.push(`and ${reconcileFaults.length - 1} more binding(s) faulted`)
