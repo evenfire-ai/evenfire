@@ -2067,7 +2067,7 @@ export class NetworkPolicyReconciler {
     // Issue #513: faults that are NOT a DNS condition. Kept separate from
     // `failures` because those are rejected INPUT (the operator's) while these are
     // OUR bug, and the two earn different reasons and different messages.
-    const reconcileFaults: Array<{ dns: string; err: unknown }> = []
+    const reconcileFaults: Array<{ dns: string; err: unknown; blocking: boolean }> = []
     const resolvedAtMs = Date.now()
     const resolvedAt = new Date(resolvedAtMs).toISOString()
 
@@ -2282,7 +2282,36 @@ export class NetworkPolicyReconciler {
             // the omission as "the operator removed it" and delete the very
             // policy this branch promises to leave untouched.
             desiredPolicyNames.add(name)
-            reconcileFaults.push({ dns: binding.dns ?? '(unnamed binding)', err })
+
+            // D4 fail-static, applied to a fault exactly as the transient branch
+            // applies it to a resolver outage: when there is a live policy, its
+            // rules are what is enforced right now, so report them and let the
+            // workload run on the last known-good egress. Read from the live
+            // object, not recomputed — recomputing is what faulted.
+            const enforced = (existingPolicy?.spec?.egress ?? [])
+              .flatMap(rule => rule.to ?? [])
+              .map(to => to.ipBlock?.cidr)
+              .filter((cidr): cidr is string => typeof cidr === 'string')
+            if (enforced.length > 0) {
+              // Without this the binding vanishes from status.resolvedEgressIPs —
+              // the audit record an operator reads to learn what is allowed —
+              // while its /32s stay enforced. The status message would claim
+              // "accumulated egress left untouched" and the record would disagree.
+              resolvedEgressIPs.push({
+                dns: binding.dns,
+                ips: enforced.map(cidr => cidr.replace(/\/32$/, '')),
+                resolvedAt,
+              })
+            }
+            reconcileFaults.push({
+              dns: binding.dns ?? '(unnamed binding)',
+              err,
+              // Blocking only when there is nothing to serve. A fault on a
+              // binding that has never been written has no frozen set behind it,
+              // so completing the pass would publish a server as reconciled while
+              // one of its declared destinations was never enforced at all.
+              blocking: enforced.length === 0,
+            })
             continue
           }
           const accumulated = accumulateHostExactHostEgress({
@@ -2379,20 +2408,42 @@ export class NetworkPolicyReconciler {
     // the spec is still de-authorized on a pass that ends in a fault.
     if (reconcileFaults.length > 0) {
       const first = reconcileFaults[0]
-      const message =
+      const parts = [
         `External egress reconciliation failed on binding "${first.dns}" with a non-DNS error ` +
-        `(not a resolver condition, accumulated egress left untouched): ${this.errorMessage(first.err)}`
+          `(not a resolver condition, accumulated egress left untouched): ${this.errorMessage(first.err)}`,
+      ]
+      if (reconcileFaults.length > 1) {
+        parts.push(`and ${reconcileFaults.length - 1} more binding(s) faulted`)
+      }
+      // `failures` has exactly one sink — the ExternalEgressRejected message
+      // below — which this branch used to make unreachable. A pass carrying both
+      // then lost the operator's own config error completely, while cleanup had
+      // already deleted that binding's policy: a de-authorized destination, a
+      // status naming an unrelated binding, and no trace of the real cause.
+      if (failures.length > 0) parts.push(`rejected binding(s): ${failures.join('; ')}`)
       await this.writeExternalEgressStatus(
         server,
-        resolvedEgressIPs,
+        this.sortResolvedEgressIPs(resolvedEgressIPs),
         'False',
         'ExternalEgressReconcileFailed',
-        reconcileFaults.length > 1
-          ? `${message} (and ${reconcileFaults.length - 1} more binding(s) faulted)`
-          : message,
+        parts.join('. '),
         isCurrent
       )
-      throw first.err
+      // Fail-static, not fail-stop. The throw reaches k8sClient's catch, which
+      // returns before the managed Deployment is created — so throwing for a
+      // fault that HAS a frozen set to serve takes a whole server's pod down over
+      // one binding, healthy siblings included, on a retry ladder that cannot fix
+      // a deterministic fault. Throw only when nothing could be served.
+      const blocking = reconcileFaults.find(fault => fault.blocking)
+      if (blocking) throw blocking.err
+      // Rejected input stays blocking as it always was, now that it has been said
+      // out loud in the message above.
+      if (failures.length > 0) {
+        throw new Error(
+          `External egress reconciliation failed for "${server.name}": ${failures.join('; ')}`
+        )
+      }
+      return
     }
 
     if (failures.length > 0) {

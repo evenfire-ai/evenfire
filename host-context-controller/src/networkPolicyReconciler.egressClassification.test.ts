@@ -223,9 +223,9 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     injectPostResolutionTypeError()
 
-    await expect(
-      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
-    ).rejects.toThrow(TypeError)
+    // No throw: there is a live policy, so the fault is served fail-static (T7).
+    // Everything else this test pins is unchanged.
+    await reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
 
     // The operator must not be pointed at DNS for a fault in the reconciler.
     expect(warn.mock.calls.flat().join('\n')).not.toContain('permanent DNS failure')
@@ -247,9 +247,9 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     await seedAccumulatedPolicy({ lapsed: true })
     injectPostResolutionTypeError()
 
-    await expect(
-      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
-    ).rejects.toThrow(TypeError)
+    // No throw: the policy is live (its window lapsed, the object did not), so
+    // the fault is served fail-static (T7). The prune assertion is the point.
+    await reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
 
     // Pre-fix this prunes the lapsed set to zero, hits the `continue`, and the
     // policy is swept as undesired. D4 fail-static must hold for a fault that is
@@ -310,9 +310,11 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
 
     // The operator removes a.example.com; b.example.com faults after resolution.
     injectPostResolutionTypeError()
-    await expect(
-      reconciler.reconcileExternalEgress(bindings(['b.example.com']), { isCurrent: () => true })
-    ).rejects.toThrow(TypeError)
+    // No throw: b.example.com has a live policy, so the fault is served
+    // fail-static (T7). What this test pins is that the cleanup still ran.
+    await reconciler.reconcileExternalEgress(bindings(['b.example.com']), {
+      isCurrent: () => true,
+    })
 
     // Exactly one delete, and it is A's. `toHaveBeenCalledWith` alone is a
     // membership check, not an exclusivity one: it stays green when the cleanup
@@ -326,6 +328,73 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
       expect.objectContaining({ name: 'ext-egress-classify-mcp-b.example.com-443' })
     )
+  })
+
+  it('T7 serves the frozen set and does NOT block the workload when a fault has a live policy', async () => {
+    // Review of #567, major 3. The throw reaches k8sClient's catch, which logs
+    // "runtime reconciliation blocked" and returns BEFORE the managed Deployment
+    // is created — so a fault in ONE binding kept a whole server's pod down,
+    // healthy siblings included. #513 never asked for that: its acceptance is "no
+    // permanent DNS failure line, no prune". D4 fail-static is the house rule for
+    // a condition we cannot resolve this pass, and the transient branch already
+    // obeys it. When there is a live policy to serve, serve it, report the fault,
+    // and let the workload run on the last known-good egress.
+    await seedAccumulatedPolicy({ lapsed: false })
+    injectPostResolutionTypeError()
+
+    await reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+
+    expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+
+    const egress = statusConditions().filter(c => c.type === 'ExternalEgressReady')
+    expect(egress.at(-1)?.status).toBe('False')
+    expect(egress.at(-1)?.reason).toBe('ExternalEgressReconcileFailed')
+  })
+
+  it('T8 still throws on a fault with nothing to serve (bootstrap)', async () => {
+    // The other half of the same decision, pinned so it cannot be lost: with no
+    // live policy there is no frozen set, so serving is not an option and the
+    // reconcile must fail loud. Without this test, "stop throwing" could be
+    // satisfied by never throwing at all.
+    injectPostResolutionTypeError()
+
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(TypeError)
+  })
+
+  it('T9 reports the rejected binding alongside the fault instead of dropping it', async () => {
+    // Review of #567, blocker 1. `failures` has exactly one sink — the message at
+    // the end — and the fault branch throws before reaching it. A pass carrying
+    // both loses the operator's own config error entirely: not in the status, not
+    // in a log. Meanwhile cleanup has already deleted that binding's policy,
+    // because a `failures.push(...); continue` never reaches
+    // desiredPolicyNames.add. The operator is left with a de-authorized
+    // destination, a status blaming an unrelated binding, and no trace of why.
+    const twoBindings: McpServerCRD = {
+      ...server,
+      spec: {
+        ...server.spec,
+        egressBindings: [
+          { dns: 'api.example.com', port: 443 },
+          { dns: '*.wildcard.example.com', port: 443 },
+        ],
+      },
+    }
+    resolve4Mock.mockResolvedValue(rec('1.2.3.4'))
+    await reconciler.reconcileExternalEgress(twoBindings, { isCurrent: () => true }).catch(() => {})
+    mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+    injectPostResolutionTypeError()
+
+    await reconciler
+      .reconcileExternalEgress(twoBindings, { isCurrent: () => true })
+      .catch(() => undefined)
+
+    const egress = statusConditions().filter(c => c.type === 'ExternalEgressReady')
+    const message = egress.at(-1)?.message ?? ''
+    expect(message).toContain('api.example.com')
+    expect(message).toMatch(/wildcard/)
   })
 
   it('T5 keeps freezing the lapsed window on a real transient resolver code', async () => {
