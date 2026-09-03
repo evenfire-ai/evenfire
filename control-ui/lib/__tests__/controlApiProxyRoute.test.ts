@@ -452,8 +452,13 @@ describe('control-ui control-api proxy route', () => {
       const mutation = await POST(jsonRequest(), { params: { path } })
 
       expect(mutation.status).toBe(200)
+      // Exactly one upstream call: the mutation's. The upload is still mid-read,
+      // so this also pins that a buffering upload does not reach control-api early.
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+
       parked.release()
       await parkedResponse
+      expect(fetchMock).toHaveBeenCalledTimes(2)
     })
 
     // B2 regression. readBodyCapped took no deadline and the AbortSignal.timeout
