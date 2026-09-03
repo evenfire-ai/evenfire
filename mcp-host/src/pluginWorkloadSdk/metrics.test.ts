@@ -39,7 +39,6 @@ function makeHandler(recipeName: string, complete?: ReturnType<typeof vi.fn>) {
       attemptGeneration: 1,
       policyRevision: 1,
       policyHash: 'a'.repeat(64),
-      maxOutputTokens: null,
     }),
     reportProviderAttemptStatus: vi.fn().mockResolvedValue(undefined),
     reportInvocationStatus: vi.fn().mockResolvedValue(undefined),

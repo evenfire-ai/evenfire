@@ -50,7 +50,9 @@ export function resolveCodexAttemptPolicy(input: {
     !Number.isInteger(binding.catalogRevision) ||
     binding.catalogRevision < 1 ||
     !Number.isInteger(binding.credentialRevision) ||
-    binding.credentialRevision < 0
+    // CHECK (credential_revision >= 1) in codex_subscription_connections.
+    // catalogRevision >= 1 above is a binding invariant, not a row one.
+    binding.credentialRevision < 1
   ) {
     return null
   }

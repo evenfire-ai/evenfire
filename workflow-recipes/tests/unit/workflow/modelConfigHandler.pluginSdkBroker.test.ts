@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import {
   type K8sSecretReader,
   type McpHostClient,
@@ -150,7 +151,7 @@ describe('ModelConfigHandler Plugin SDK per-attempt credential broker', () => {
     expect(mcpHost.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledWith(
       'http://mcp-host:8090',
       'wrc-token',
-      { provider: 'openai', model: 'gpt-5.4-mini' }
+      { provider: 'openai', model: 'gpt-5.4-mini', contractVersion: 2 }
     )
     expect(k8s.readConfigMapWithPresence).not.toHaveBeenCalled()
     expect(k8s.readSecret).not.toHaveBeenCalled()
@@ -199,5 +200,222 @@ describe('ModelConfigHandler Plugin SDK per-attempt credential broker', () => {
     })
     expect(k8s.readConfigMapWithPresence).not.toHaveBeenCalled()
     expect(k8s.readSecret).not.toHaveBeenCalled()
+  })
+
+  it('publishes Codex SDK bootstrap as v3 without reading ConfigMaps or Secrets', async () => {
+    // The hash is re-derived from the five fields on the way back, so a
+    // placeholder digest is not a valid echo — it must be the real one.
+    const binding = {
+      connectionKey: 'team-plus',
+      catalogRevision: 4,
+      credentialRevision: 1,
+      model: 'gpt-5.1',
+      bindingHash: computeCodexPolicyHash({
+        model: 'gpt-5.1',
+        catalogRevision: 4,
+        credentialRevision: 1,
+        connectionKey: 'team-plus',
+      }),
+    }
+    const mcpHost: McpHostClient = {
+      configure: vi.fn(async () => ({ status: 500, body: {} })),
+      configurePluginWorkloadSdkBootstrap: vi.fn(async () => ({
+        status: 200,
+        body: {
+          configured: true,
+          ready: true,
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          contractVersion: 3,
+          policyReady: true,
+          policyState: 'active',
+          codexBinding: { ...binding, leaked: 'drop-me' },
+        },
+      })),
+    }
+    const k8s = reader()
+    const handler = new ModelConfigHandler(k8s, mcpHost)
+    const result = await handler.configurePluginWorkloadSdkBootstrap(
+      'codex-subscription',
+      'gpt-5.1',
+      'http://mcp-host:8090',
+      'wrc-token',
+      'promptBridge',
+      binding
+    )
+
+    expect(result.status).toBe(202)
+    expect(result.body).toMatchObject({
+      contractVersion: 3,
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+      codexBinding: binding,
+    })
+    expect(result.body.codexBinding).not.toHaveProperty('leaked')
+    expect(mcpHost.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledWith(
+      'http://mcp-host:8090',
+      'wrc-token',
+      {
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+        contractVersion: 3,
+        codexBinding: binding,
+      }
+    )
+    expect(k8s.readConfigMapWithPresence).not.toHaveBeenCalled()
+    expect(k8s.readSecret).not.toHaveBeenCalled()
+  })
+
+  it('drops an echoed Codex binding whose hash does not verify', async () => {
+    // Shape validation alone would republish this binding to WRC. The hash is
+    // the only thing tying the five fields to the policy WRC minted, so an
+    // unverifiable digest must not survive the broker.
+    const minted = {
+      connectionKey: 'team-plus',
+      catalogRevision: 4,
+      credentialRevision: 1,
+      model: 'gpt-5.1',
+      bindingHash: computeCodexPolicyHash({
+        model: 'gpt-5.1',
+        catalogRevision: 4,
+        credentialRevision: 1,
+        connectionKey: 'team-plus',
+      }),
+    }
+    const mcpHost: McpHostClient = {
+      configure: vi.fn(async () => ({ status: 500, body: {} })),
+      configurePluginWorkloadSdkBootstrap: vi.fn(async () => ({
+        status: 200,
+        body: {
+          configured: true,
+          ready: true,
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          contractVersion: 3,
+          policyReady: true,
+          policyState: 'active',
+          // Same shape, tampered revision: the digest no longer matches.
+          codexBinding: { ...minted, credentialRevision: 99 },
+        },
+      })),
+    }
+    const handler = new ModelConfigHandler(reader(), mcpHost)
+
+    const result = await handler.configurePluginWorkloadSdkBootstrap(
+      'codex-subscription',
+      'gpt-5.1',
+      'http://mcp-host:8090',
+      'wrc-token',
+      'promptBridge',
+      minted
+    )
+
+    expect(result.status).toBe(202)
+    expect(result.body).not.toHaveProperty('codexBinding')
+  })
+
+  it('drops an echoed Codex binding minted for another model', async () => {
+    const otherModel = {
+      connectionKey: 'team-plus',
+      catalogRevision: 4,
+      credentialRevision: 1,
+      model: 'gpt-5.3-codex',
+      bindingHash: computeCodexPolicyHash({
+        model: 'gpt-5.3-codex',
+        catalogRevision: 4,
+        credentialRevision: 1,
+        connectionKey: 'team-plus',
+      }),
+    }
+    const mcpHost: McpHostClient = {
+      configure: vi.fn(async () => ({ status: 500, body: {} })),
+      configurePluginWorkloadSdkBootstrap: vi.fn(async () => ({
+        status: 200,
+        body: {
+          configured: true,
+          ready: true,
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          contractVersion: 3,
+          policyReady: true,
+          policyState: 'active',
+          codexBinding: otherModel,
+        },
+      })),
+    }
+    const handler = new ModelConfigHandler(reader(), mcpHost)
+
+    const result = await handler.configurePluginWorkloadSdkBootstrap(
+      'codex-subscription',
+      'gpt-5.1',
+      'http://mcp-host:8090',
+      'wrc-token',
+      'promptBridge'
+    )
+
+    expect(result.status).toBe(202)
+    expect(result.body).not.toHaveProperty('codexBinding')
+  })
+
+  it('tags a pre-v3 Codex bootstrap answer as a stale contract, not a generic failure', async () => {
+    // A host running an old image answers the v3 Codex bootstrap with a v2
+    // identity. WRC needs to tell that apart from a broker outage, otherwise
+    // the CR reports "the configured provider is unavailable" for what is
+    // really a stale workload image.
+    const mcpHost: McpHostClient = {
+      configure: vi.fn(async () => ({ status: 500, body: {} })),
+      configurePluginWorkloadSdkBootstrap: vi.fn(async () => ({
+        status: 200,
+        body: {
+          configured: true,
+          ready: true,
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          contractVersion: 2,
+          policyReady: true,
+          policyState: 'active',
+        },
+      })),
+    }
+    const handler = new ModelConfigHandler(reader(), mcpHost)
+
+    const result = await handler.configurePluginWorkloadSdkBootstrap(
+      'codex-subscription',
+      'gpt-5.1',
+      'http://mcp-host:8090',
+      'wrc-token',
+      'promptBridge'
+    )
+
+    expect(result.status).toBe(502)
+    expect(result.body.policyReason).toBe('codex_bootstrap_contract_stale')
+  })
+
+  it('does not tag an unrelated v3 bootstrap rejection as a stale contract', async () => {
+    const mcpHost: McpHostClient = {
+      configure: vi.fn(async () => ({ status: 500, body: {} })),
+      configurePluginWorkloadSdkBootstrap: vi.fn(async () => ({
+        status: 200,
+        body: {
+          configured: true,
+          ready: false,
+          provider: 'codex-subscription',
+          model: 'gpt-5.1',
+          contractVersion: 3,
+        },
+      })),
+    }
+    const handler = new ModelConfigHandler(reader(), mcpHost)
+
+    const result = await handler.configurePluginWorkloadSdkBootstrap(
+      'codex-subscription',
+      'gpt-5.1',
+      'http://mcp-host:8090',
+      'wrc-token',
+      'promptBridge'
+    )
+
+    expect(result.status).toBe(502)
+    expect(result.body).not.toHaveProperty('policyReason')
   })
 })

@@ -1397,6 +1397,60 @@ describe('workload status refresh loop helpers', () => {
     expect(reconcile).not.toHaveBeenCalled()
   })
 
+  it('reconciles when Codex connection-ref changes without a generation bump', async () => {
+    const cached = makeWorkloadRecipe({
+      metadata: { name: 'active-recipe', namespace: 'sandbox-recipes', generation: 7 },
+      status: { phase: 'active', message: 'All workloads deployed' },
+    })
+    const granted = makeWorkloadRecipe({
+      metadata: {
+        name: 'active-recipe',
+        namespace: 'sandbox-recipes',
+        generation: 7,
+        resourceVersion: 'next',
+        annotations: { 'clerum.io/codex-connection-ref': 'codex-ba832480dffd9095' },
+      },
+      status: { phase: 'active', message: 'All workloads deployed' },
+    })
+    const reconcile = vi.fn().mockResolvedValue({
+      phase: 'active',
+      message: 'All workloads deployed',
+      workloadStatuses: [],
+    })
+
+    type InternalWatcher = {
+      recipes: Map<string, WorkflowRecipeCRD>
+      transientRetries: Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>
+      stopped: boolean
+      reconciler: {
+        reconcile: typeof reconcile
+        isRecipeStillActive: ReturnType<typeof vi.fn>
+        ensureFinalizer: ReturnType<typeof vi.fn>
+        patchStatus: ReturnType<typeof vi.fn>
+      }
+      handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
+      scheduleTransientRetry: ReturnType<typeof vi.fn>
+      clearTransientRetry: ReturnType<typeof vi.fn>
+    }
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    internal.recipes = new Map([[cached.metadata.name, cached]])
+    internal.transientRetries = new Map()
+    internal.stopped = false
+    internal.reconciler = {
+      reconcile,
+      isRecipeStillActive: vi.fn().mockResolvedValue(true),
+      ensureFinalizer: vi.fn().mockResolvedValue(undefined),
+      patchStatus: vi.fn().mockResolvedValue(undefined),
+    }
+    internal.scheduleTransientRetry = vi.fn()
+    internal.clearTransientRetry = vi.fn()
+
+    await internal.handleRecipeEvent('MODIFIED', granted)
+
+    expect(internal.recipes.get(granted.metadata.name)).toBe(granted)
+    expect(reconcile).toHaveBeenCalledWith(granted)
+  })
+
   it('forces a full reconcile when status-only refresh observes workload drift', async () => {
     const recipe = makeWorkloadRecipe({
       metadata: { name: 'active-recipe', namespace: 'sandbox-recipes', generation: 7 },

@@ -1,3 +1,4 @@
+import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import { pluginWorkloadSdkAuthDecisionsTotal } from '../observability/metrics.js'
 import type { McpHostAccessClaims } from '../utils/auth/mcpHostJwtToken.js'
 import {
@@ -111,6 +112,12 @@ export interface AuthorizePromptBridgeParams {
 }
 
 export interface AuthorizedPromptBridge {
+  /**
+   * Per-grant output ceiling. Enforced as `max_tokens` on API-key providers;
+   * codex-subscription cannot bind it on the ChatGPT wire and is bounded by
+   * the contract's structural LIMITS.maxOutputTokens instead.
+   */
+  maxOutputTokens: number | null
   invocationId: string
   /** True when this idempotency key already produced an invocation. */
   replay: boolean
@@ -127,7 +134,6 @@ export interface AuthorizedPromptBridge {
   attemptGeneration: number
   policyRevision: number
   policyHash: string
-  maxOutputTokens: number | null
 }
 
 type PromptTargetResolution =
@@ -514,6 +520,7 @@ export type ReissuedPromptBridgeCredentialTicket = {
   providerAttemptId: string
   providerAttemptIndex: number
   credentialTicket: string
+  reservationOnly?: true
   policyRevision: number
   policyHash: string
   expiresInSeconds: number
@@ -597,6 +604,20 @@ export async function reissuePromptBridgeCredentialTicket(
     return deny('target_not_allowed', 'target is not in the current promptBridge policy')
   }
 
+  const reservationOnly =
+    isLlmProviderId(target.provider) && PROVIDER_AUTH_MODE[target.provider] === 'oauth-broker'
+  // An oauth-broker target is redeemable only through the broker
+  // binding the WRC installs for the grant's default target. Any other broker
+  // target would be reserved here and then die in execution with no credential
+  // to redeem, after the reservation already charged the attempt budget. Deny
+  // before reserving, and fail closed when the grant has no default target.
+  if (reservationOnly && target.targetRef !== grant.defaultTargetRef) {
+    return deny(
+      'target_not_allowed',
+      'oauth-broker fallback is authorized only for the default target of this grant'
+    )
+  }
+
   const providerAttempt = await reservePluginWorkloadSdkProviderAttempt({
     invocationId: invocation.id,
     recipeNamespace: params.claims.recipeNamespace,
@@ -609,6 +630,24 @@ export async function reissuePromptBridgeCredentialTicket(
       'provider_policy_denied',
       'promptBridge attempt is stale, fenced, or exceeds the physical-attempt budget'
     )
+  }
+
+  if (reservationOnly) {
+    return {
+      ok: true,
+      value: {
+        invocationId: invocation.id,
+        targetRef: target.targetRef,
+        attemptGeneration: invocation.attemptGeneration,
+        providerAttemptId: providerAttempt.id,
+        providerAttemptIndex: providerAttempt.attemptIndex,
+        credentialTicket: '',
+        reservationOnly: true,
+        policyRevision: grant.policyRevision,
+        policyHash,
+        expiresInSeconds: PLUGIN_SDK_CREDENTIAL_TICKET_TTL_SECONDS,
+      },
+    }
   }
 
   const issued = issuePluginWorkloadSdkCredentialTicketWithClaims({
