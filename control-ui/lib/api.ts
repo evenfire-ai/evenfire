@@ -1438,6 +1438,13 @@ export async function createMcpServer(payload: {
   return apiSend('POST', '/api/v1/admin/mcp-servers', payload) as Promise<McpServerResource>
 }
 
+export async function deleteMcpServer(name: string) {
+  return apiSend('DELETE', `/api/v1/admin/mcp-servers/${encodeURIComponent(name)}`) as Promise<{
+    name: string
+    namespace?: string
+  }>
+}
+
 export async function getMcpServer(name: string) {
   return apiGet(
     `/api/v1/admin/mcp-servers/${encodeURIComponent(name)}`
@@ -3658,6 +3665,11 @@ export type PluginWorkloadSdkQuotaLimits = {
   maxNotificationsPerRun?: number
   maxInvocationsPerMinute?: number
   maxNotificationsPerMinute?: number
+  /**
+   * @deprecated No longer enforced; the Codex ChatGPT wire discards
+   * max_output_tokens, so no layer capped the response by token count. Still
+   * returned on legacy grants; never sent by this UI.
+   */
   maxOutputTokens?: number
 }
 
@@ -3720,6 +3732,8 @@ export type PluginWorkloadSdkGrantInput = {
   // Input type omits the deprecated per-run keys (issue #348): this UI never
   // sends them and the server strips them on write. The response
   // PluginWorkloadSdkQuotaLimits still carries them for legacy grants.
+  // `maxOutputTokens` is NOT among them — it is a live per-grant
+  // ceiling on API-key providers.
   quotaLimits?: Omit<PluginWorkloadSdkQuotaLimits, 'maxRequestsPerRun' | 'maxNotificationsPerRun'>
   modelPolicies?: Record<string, PluginWorkloadSdkModelPolicy>
   promptTargets?: PluginWorkloadSdkPromptTarget[]

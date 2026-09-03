@@ -225,7 +225,8 @@ jobs:
             services.llmProviderAttemptAuthorization.realPostgres.integration \
             services.llmProviderAttemptStore.realPostgres.integration \
             services.llmProviderAttemptRedemption.realPostgres.integration \
-            services.llmProviderAttemptFinalization.realPostgres.integration
+            services.llmProviderAttemptFinalization.realPostgres.integration \
+            pluginWorkloadSdkCodexDualLedger.realPostgres.integration
           do
             grep -Fq "$suite" "$normalized_log" || {
               echo "real-Postgres control-api lane omitted Codex suite ${suite}" >&2
