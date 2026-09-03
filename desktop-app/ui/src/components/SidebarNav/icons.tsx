@@ -296,6 +296,14 @@ export function IconClose(props: IconProps) {
   )
 }
 
+export function IconCheck(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
+      <path d="m5 12 4 4L19 6" />
+    </svg>
+  )
+}
+
 export function IconRefresh(props: IconProps) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>

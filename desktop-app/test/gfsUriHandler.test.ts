@@ -246,7 +246,9 @@ describe('GfsClient.grant', () => {
           { type: 'team', id: 't1' },
         ],
         permissions: ['read', 'write'],
-        inherit: false,
+        // Omitted inherit defaults to true: a folder grant that silently skips
+        // the folder's contents is the "403 on every file inside" trap.
+        inherit: true,
       },
     })
   })

@@ -12,6 +12,7 @@ export function GfsResourceMenu({
   onCreateFolder,
   onDelete,
   onOpen,
+  onOpenGfsLink,
   onOpenChange,
   onPreview,
   onDownload,
@@ -111,6 +112,11 @@ export function GfsResourceMenu({
               Open folder
             </MenuItem>
           ) : null}
+          {onOpenGfsLink ? (
+            <MenuItem role="menuitem" onClick={() => runAction(onOpenGfsLink)}>
+              Open GFS link
+            </MenuItem>
+          ) : null}
           {onPreview ? (
             <MenuItem role="menuitem" onClick={() => runAction(onPreview)}>
               Preview
@@ -136,9 +142,11 @@ export function GfsResourceMenu({
               Download
             </MenuItem>
           ) : null}
-          <MenuItem role="menuitem" onClick={() => runAction(onCopyLink)}>
-            Copy GFS link
-          </MenuItem>
+          {onCopyLink ? (
+            <MenuItem role="menuitem" onClick={() => runAction(onCopyLink)}>
+              Copy GFS link
+            </MenuItem>
+          ) : null}
           {onDelete ? (
             <MenuItem color="danger" role="menuitem" onClick={() => runAction(onDelete)}>
               Delete

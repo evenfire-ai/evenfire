@@ -34,6 +34,12 @@ export interface GfsBrowserChild {
   path: string | null
   version: number
   bytes: number
+  /**
+   * Server-computed read decision for the listing caller. Absent on older
+   * servers (treat as unknown); `false` means the row is visible but cannot
+   * be opened or downloaded — a folder grant without inheritance.
+   */
+  readable?: boolean
 }
 
 interface GfsAccessibleResource extends GfsBrowserChild {
@@ -623,6 +629,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     setCrumbs(prev => prev.slice(0, index + 1))
   }, [])
 
+  /** Restore an exact browser location after a transient resource selection
+   *  (for example, opening a row's Manage dialog). */
+  const restoreCrumbs = useCallback((nextCrumbs: GfsCrumb[]) => {
+    setCrumbs(nextCrumbs)
+    setOpenError(null)
+  }, [])
+
   const reset = useCallback(() => {
     setCrumbs([])
     setOpenError(null)
@@ -630,9 +643,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   }, [queryClient])
 
   // Delegation actions throw on server rejection (e.g. 403 escalation_rejected);
-  // the caller surfaces that — never swallow it. `inherit` is only sent when a
-  // caller passes it explicitly (the agent section, directories only); the
-  // user/team panel keeps today's inherit:false behavior by omitting it.
+  // the caller surfaces that — never swallow it. `inherit` omitted defaults to
+  // `true` on the wire (uriHandler), so user/team panel grants cover folder
+  // contents; callers that need a contents-excluding grant pass `false`.
   const grant = useCallback(
     (subjectKeys: string[], bits: string[], inherit?: boolean): Promise<void> => {
       if (!current) return Promise.reject(new Error('No resource selected'))
@@ -704,6 +717,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     openResource,
     openChild,
     goToCrumb,
+    restoreCrumbs,
     reset,
     refreshAffordances,
     grant,

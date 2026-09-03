@@ -109,8 +109,19 @@ export interface GfsResourceView {
   bytes: number
 }
 
+/**
+ * Children-listing item: the resource view plus the server-computed `read`
+ * decision for the listing caller. Listing authorizes the directory only, so
+ * a child can be listed yet unreadable (e.g. a non-inheriting folder grant);
+ * `readable` is absent on older servers and must be treated as unknown, not
+ * as true.
+ */
+export interface GfsChildView extends GfsResourceView {
+  readable?: boolean
+}
+
 export interface GfsChildrenPage {
-  items: GfsResourceView[]
+  items: GfsChildView[]
   nextCursor: string | null
 }
 
@@ -151,6 +162,13 @@ export interface GfsGrantInput {
    */
   subjects: GfsSubject[]
   permissions: string[]
+  /**
+   * Whether the grant also covers the resource's descendants. Omitted
+   * defaults to `true`: a folder grant that silently skips the folder's
+   * contents (the historical default) leaves children unreadable while the
+   * folder itself still opens — the exact "403 on every file inside" trap.
+   * The flag is meaningless for files, which have no descendants.
+   */
   inherit?: boolean
 }
 
@@ -495,7 +513,7 @@ export class GfsClient {
             resourceId: input.resourceId,
             subjects: input.subjects,
             permissions: input.permissions,
-            inherit: input.inherit ?? false,
+            inherit: input.inherit ?? true,
           },
         }
       )

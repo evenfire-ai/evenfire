@@ -14070,6 +14070,60 @@ pre {
   font-weight: 700;
 }
 
+.da-gfs-inline-rename {
+  min-width: 0;
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin: 0;
+}
+
+.da-gfs-inline-rename__input.ui-control {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.da-gfs-inline-rename__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-0-5);
+  flex: 0 0 auto;
+}
+
+.da-gfs-inline-rename__actions .ui-icon-button {
+  flex: 0 0 auto;
+}
+
+.da-gfs-inline-rename__actions svg {
+  width: calc(var(--space-3) + var(--space-0-5));
+  height: calc(var(--space-3) + var(--space-0-5));
+}
+
+.da-gfs-inline-rename__confirm.ui-icon-button {
+  border-color: rgba(var(--success-rgb), 0.34);
+  color: var(--success);
+}
+
+.da-gfs-inline-rename__confirm.ui-icon-button:hover:enabled,
+.da-gfs-inline-rename__confirm.ui-icon-button:focus-visible {
+  border-color: rgba(var(--success-rgb), 0.58);
+  background: rgba(var(--success-rgb), 0.24);
+  color: var(--success);
+}
+
+.da-gfs-inline-rename__cancel.ui-icon-button {
+  color: var(--text-muted);
+}
+
+.da-gfs-drive__inline-rename {
+  width: min(20rem, 100%);
+}
+
+.da-gfs-current-file__inline-rename {
+  flex: 1 1 auto;
+}
+
 .da-gfs-list__actions {
   display: flex;
   align-items: center;
@@ -14429,6 +14483,8 @@ pre {
 .da-gfs-drive__header-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: var(--space-1);
   flex: 0 0 auto;
 }
@@ -14781,7 +14837,7 @@ pre {
 .da-gfs-image-preview-dialog,
 .da-gfs-markdown-preview-dialog,
 .da-gfs-video-preview-dialog {
-  width: min(960px, 96vw);
+  width: min(960px, 100%);
   height: min(760px, 92vh);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -15225,16 +15281,48 @@ pre {
   background: var(--surface-soft);
 }
 
-/* Page-level rename confirmation (row/header menus): a narrow dialog over the
-   manage-modal overlay, so a row rename never needs the manage dialog. */
-.da-gfs-manage-dialog--confirm {
-  width: min(440px, 94vw);
-  max-height: none;
-  padding: var(--space-4) var(--space-5);
+.da-gfs-manage-dialog__body > .da-gfs-inline-form.da-gfs-create-folder-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  gap: var(--space-3);
+  border: 1px solid rgba(var(--accent-rgb), 0.24);
+  border-radius: var(--radius-md);
+  background: rgba(var(--accent-rgb), 0.06);
 }
 
-.da-gfs-manage-dialog--confirm .da-gfs-manage-dialog__body {
-  padding: 0;
+.da-gfs-create-folder-form__heading {
+  display: grid;
+  gap: var(--space-0-5);
+}
+
+.da-gfs-create-folder-form__heading h4,
+.da-gfs-create-folder-form__heading p {
+  margin: 0;
+}
+
+.da-gfs-create-folder-form__heading h4 {
+  color: var(--text);
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.da-gfs-create-folder-form__heading p {
+  font-size: var(--font-size-sm);
+}
+
+.da-gfs-create-folder-form__field {
+  min-width: 0;
+}
+
+.da-gfs-create-folder-form__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid rgba(var(--edge-rgb), 0.2);
 }
 
 /* Move-to-folder picker: full-width dialog with a scrollable folder list. */
@@ -15442,7 +15530,7 @@ pre {
   }
 
   .da-gfs-drive__header-actions {
-    justify-content: space-between;
+    justify-content: flex-end;
   }
 
   .da-gfs-drive__grid {
