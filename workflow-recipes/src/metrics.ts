@@ -73,8 +73,11 @@ export const reconciliationsTotal = counter({
  */
 export const networkPolicyReapDeniedTotal = counter({
   name: 'clerum_wrc_networkpolicy_reap_denied_total',
-  help: 'Stale WRC NetworkPolicies whose deletion was denied (HTTP 403); they remain enforced',
-  labelNames: ['family'] as const,
+  help: 'NetworkPolicy reap operations denied by RBAC (401/403); stale policies remain enforced',
+  // `operation` matters more than `family` for triage: `delete` leaks one policy,
+  // `list` means the controller is blind to a whole namespace and reaped nothing
+  // there. A denied list carries `family: 'all'` because no policy was examined.
+  labelNames: ['family', 'operation'] as const,
 })
 
 export const mcpSessionsActive = gauge({

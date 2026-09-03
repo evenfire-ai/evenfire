@@ -1657,12 +1657,32 @@ export function resolveClusterLocalBinding(
  * stripped so we never produce `foo--egress`.
  */
 function composePolicyName(prefix: string, recipeName: string, workloadId: string): string {
-  // prefix-<recipe>-<workload> shape. Suffix budget: prefix + 2 separators + workloadId.
-  const reserved = prefix.length + 1 + 1 + workloadId.length
-  const maxRecipe = Math.max(1, 63 - reserved)
+  // `prefix-<recipe>-<workload>`, clamped to the DNS-1123 63-char limit.
+  //
+  // The workload segment used to be exempt from truncation, so `maxRecipe` could
+  // clamp to its floor of 1 and the result still overflowed — a 60-char workload
+  // id produced a 70+ char name that the apiserver rejects with
+  // `422 metadata.name: Invalid value`. Measured worst case before this fix: 223
+  // characters. Truncating only the recipe cannot fix that, because the overflow
+  // comes from the segment that was never being cut.
+  //
+  // Nothing is orphaned by the change: every name it alters is one that exceeded
+  // 63 characters, which means the apply always failed and no such object exists
+  // in a cluster. Names already within budget are byte-identical.
+  //
+  // This shortens; it does NOT disambiguate. Two recipes whose names differ only
+  // past the cut still collide on one policy name — see #582's follow-up issue.
+  // The internal-dependency lane solves that with a hash suffix; this one does
+  // not, and changing it here would rename every live policy.
+  const separators = 2
+  const budget = 63 - prefix.length - separators
+  const workload =
+    workloadId.length > budget ? workloadId.slice(0, budget).replace(/-+$/g, '') : workloadId
+  const workloadStem = workload || 'workload'
+  const maxRecipe = Math.max(1, budget - workloadStem.length)
   const stem =
     recipeName.length > maxRecipe ? recipeName.slice(0, maxRecipe).replace(/-+$/g, '') : recipeName
-  return `${prefix}-${stem || 'recipe'}-${workloadId}`
+  return `${prefix}-${stem || 'recipe'}-${workloadStem}`
 }
 
 export function workloadEgressPolicyName(recipeName: string, workloadId: string): string {
@@ -1681,14 +1701,20 @@ export function workloadIngressPolicyName(recipeName: string, workloadId: string
 // distinguishing label (#524 — only wr-intdep-* has `policy-type`).
 //
 // Name parsing is safe here for one specific reason: NEITHER `composePolicyName`
-// implementation can touch the prefix. This file's version truncates only the
-// recipe segment; the internal-dependency lane's version shortens both segments
-// and appends a hash. Both interpolate the prefix whole. T9 pins that with a
-// round-trip over every builder, including names long enough to force truncation.
+// implementation can touch the prefix. This file's version truncates the recipe
+// and workload segments; the internal-dependency lane's shortens both and appends
+// a hash. Both interpolate the prefix whole. `resourceBuilder.test.ts` pins it
+// with a round-trip over every builder, including names long enough to force
+// truncation in each segment.
 //
-// Anything unrecognised classifies as `null` and is NEVER deleted: the webhook
-// gateway's policies, the run lane's, the coordinator-GFS one, and anything a
-// human created by hand.
+// Anything unrecognised classifies as `null` and is NEVER deleted: the run lane's
+// policies, the coordinator-GFS one, and anything a human created by hand.
+//
+// The webhook gateway's three policies are excluded by the SELECTOR, not by the
+// classifier: they do carry `clerum.io/managed-by: workflow-recipes`, but stamp
+// the recipe under `clerum.io/recipe-name`, so the AND-selector never returns
+// them. Their names also classify `null`, which is belt and braces rather than
+// the primary defence — worth knowing before anyone "harmonises" that label.
 
 const UI_INGRESS_PREFIX = 'ui-ingress'
 const UI_EGRESS_PREFIX = 'ui-egress'

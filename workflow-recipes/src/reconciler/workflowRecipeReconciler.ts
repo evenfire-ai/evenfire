@@ -521,12 +521,23 @@ class ImmutableStatefulSetDriftError extends Error {
  * it on every pass. That is the one mistake in this change that causes an
  * enforcement outage rather than a wasted request.
  */
-/** A stale NetworkPolicy the reap was forbidden to delete (issue #582). */
-type ReapDenial = {
-  name: string
-  namespace: string
-  family: rb.RecipeNetworkPolicyFamily
-}
+/**
+ * An authorization failure that left the reap unable to do its job (issue #582).
+ *
+ * Two shapes, because the blast radius differs by an order of magnitude:
+ * `delete` names the one policy that stays enforced; `list` means NOTHING in that
+ * namespace could be examined, so every stale policy of all six families survives
+ * the pass. The condition message distinguishes them so an operator can tell a
+ * single leaked allow from a namespace the controller has gone blind to.
+ */
+type ReapDenial =
+  | {
+      operation: 'delete'
+      name: string
+      namespace: string
+      family: rb.RecipeNetworkPolicyFamily
+    }
+  | { operation: 'list'; namespace: string }
 
 class DesiredNetworkPolicyLedger {
   private readonly byNamespace = new Map<string, Set<string>>()
@@ -3462,8 +3473,8 @@ export class WorkflowRecipeReconciler {
 
     // Step 9e (#582): reap what is live but no longer desired, once every lane
     // has recorded what it wants. A RetryableReconcileError from here reaches
-    // the caller's catch at :1901, which maps it to `degraded` + retry rather
-    // than the default `failed` + `workflowPhase: failed`.
+    // `deployWorkflowWorkloads`' only caller, whose catch maps it to `degraded` +
+    // retry rather than the default `failed` + `workflowPhase: failed`.
     const reap = await this.pruneStaleRecipeNetworkPolicies(
       recipe,
       desiredNetworkPolicies,
@@ -4321,13 +4332,15 @@ export class WorkflowRecipeReconciler {
       stateAnnotations
     )
 
-    if (!policy) {
-      await this.safeDelete(
-        () => this.networkingApi.deleteNamespacedNetworkPolicy({ name: policyName, namespace: ns }),
-        `NetworkPolicy "${policyName}" in ${ns}`
-      )
-      return
-    }
+    // No `spec.ui` → no policy wanted. The unconditional delete that used to live
+    // here was the last blind one in this file, and it was redundant: `ui-egress`
+    // is in RECIPE_NETWORK_POLICY_FAMILIES, sandboxUiNamespace is always in the
+    // prune's namespace set, and this branch records nothing in the ledger — so
+    // the prune already removes it, and did so on the same pass, targeting the
+    // object twice. The rate was never the "2/hour" an earlier note claimed: that
+    // was a measurement of one cluster, not a property of the code, which fires
+    // once per pass for every recipe without `spec.ui`.
+    if (!policy) return
 
     // #582: record BEFORE the no-op gate. The gate returns without writing while
     // the policy is live and desired; recording only at the apply below would
@@ -4441,12 +4454,21 @@ export class WorkflowRecipeReconciler {
         message: 'No stale WRC NetworkPolicy deletions were denied',
       }
     }
-    const listed = reapDenied.map(d => `"${d.name}" in ${d.namespace} (${d.family})`).join('; ')
+    const listed = reapDenied
+      .map(d =>
+        d.operation === 'list'
+          ? `every family in ${d.namespace} (LIST denied — nothing could be examined)`
+          : `"${d.name}" in ${d.namespace} (${d.family})`
+      )
+      .join('; ')
+    const blind = reapDenied.some(d => d.operation === 'list')
     return {
       ...base,
       status: 'True',
-      reason: 'DeleteForbidden',
-      message: `RBAC denied deleting ${reapDenied.length} stale NetworkPolicy(ies), which remain enforced: ${listed}`,
+      // A denied LIST is the wider failure: the controller cannot see the
+      // namespace at all, so the reason names that rather than a single delete.
+      reason: blind ? 'ListForbidden' : 'DeleteForbidden',
+      message: `RBAC denied the NetworkPolicy reap in ${reapDenied.length} place(s); stale policies remain enforced: ${listed}`,
     }
   }
 
@@ -4696,10 +4718,41 @@ export class WorkflowRecipeReconciler {
     const reapDenied: ReapDenial[] = []
 
     for (const namespace of namespaces) {
-      const list = (await this.networkingApi.listNamespacedNetworkPolicy({
-        namespace,
-        labelSelector,
-      })) as k8s.V1NetworkPolicyList
+      let list: k8s.V1NetworkPolicyList
+      try {
+        list = (await this.networkingApi.listNamespacedNetworkPolicy({
+          namespace,
+          labelSelector,
+        })) as k8s.V1NetworkPolicyList
+      } catch (error) {
+        const code = getErrorCode(error)
+        // The LIST gets the SAME three-class treatment as the DELETE, because a
+        // failure here is worse than one there: without it we do not know what is
+        // live, so NOTHING in this namespace is reaped — for all six families,
+        // not just one policy. Before this change the per-workload deletes still
+        // ran when the (intdep-only) LIST failed; now the prune is the only
+        // reaper, so the blast radius of a failed LIST grew.
+        //
+        // Unreachable with the current manifests — `workflow-recipes` holds `list`
+        // on networkpolicies in all three namespaces (`deploy/base/{sandbox-recipes,
+        // sandbox-ui,mcp-server}/rbac.yaml`) and this method queries no others,
+        // since `resolveWorkloadNamespace` can return only those three. Handled
+        // anyway so that adding a fourth namespace, or tightening a Role, fails
+        // visibly instead of latching every recipe in it.
+        if (code === 401 || code === 403) {
+          console.error(
+            `[WR-Reconciler] FORBIDDEN listing NetworkPolicies in ${namespace} — nothing can be reaped there this pass:`,
+            error
+          )
+          networkPolicyReapDeniedTotal.inc({ family: 'all', operation: 'list' })
+          reapDenied.push({ namespace, operation: 'list' })
+          continue
+        }
+        throw new RetryableReconcileError(
+          `Listing NetworkPolicies in ${namespace} failed transiently`,
+          { cause: error }
+        )
+      }
       for (const policy of list.items ?? []) {
         const name = policy.metadata?.name
         if (!name) continue
@@ -4719,26 +4772,42 @@ export class WorkflowRecipeReconciler {
           )
         } catch (error) {
           const code = getErrorCode(error)
-          // The normal case: something else already removed it.
+          // The normal case, and the reason this whole change exists: the object
+          // is already gone. Something else removed it, or the ui-egress inline
+          // delete got there first. Not a fault, no signal.
           if (code === 404) continue
-          if (code === 403) {
+          // 401 and 403 are both PERMANENT authorization failures, and both leave
+          // a stale allow policy enforced. Neither is retryable: a rotated or
+          // expired ServiceAccount token (401) and a revoked Role (403) stay
+          // broken until an operator acts. Treating them as transient would
+          // degrade the recipe forever under a message claiming otherwise — and
+          // `degraded` is the one phase `POST /recipes/:name/retry` refuses, so
+          // there would be no recovery path short of deleting the CR.
+          if (code === 401 || code === 403) {
             // An enforcement leak, not a transient fault: the policy is no longer
             // desired and stays enforced. Report on three channels and keep going
             // — deliberately NOT a throw, because the caller's default arm maps an
             // unrecognised error to `phase: failed` + `workflowPhase: failed`, and
-            // a latched recipe is both invisible (nothing outside kubectl renders
-            // a recipe phase) and sticky (self-heal at :1536 requires the message
-            // to match isRetryableInfraError, which a 403 does not).
+            // a latched recipe is sticky: the transient-latch self-heal requires
+            // `status.message` to match `isRetryableInfraError`, which an auth
+            // failure never does. And it is NOT cosmetic — `control-api` gates
+            // Sandbox UI access and workflow invocation on `phase === 'active'`,
+            // so failing here takes a working recipe out of service over a
+            // residual object. `POST /recipes/:name/retry` recovers `failed` but
+            // rejects `degraded`, which is why neither is used.
             console.error(
               `[WR-Reconciler] FORBIDDEN deleting stale ${family} NetworkPolicy "${name}" in ${namespace} — it remains enforced:`,
               error
             )
-            networkPolicyReapDeniedTotal.inc({ family })
-            reapDenied.push({ name, namespace, family })
+            networkPolicyReapDeniedTotal.inc({ family, operation: 'delete' })
+            reapDenied.push({ operation: 'delete', name, namespace, family })
             continue
           }
           // 5xx, timeouts, transport faults: hand the caller the type its own
-          // catch already maps to `degraded` + retry next pass (see :1907).
+          // catch already maps to `degraded` + retry next pass — the
+          // `instanceof RetryableReconcileError` arms in `reconcile`'s workflow
+          // branch and in `reconcileInternal`'s catch. Named rather than
+          // line-numbered: the earlier `:1907` reference was already stale.
           throw new RetryableReconcileError(
             `Pruning stale ${family} NetworkPolicy "${name}" in ${namespace} failed transiently`,
             { cause: error }
@@ -6620,6 +6689,7 @@ export class WorkflowRecipeReconciler {
     )
     const workloadReconcileMergedConditions = mergeWorkloadReconcileConditions(
       secretOwnershipMergedConditions ??
+        networkPolicyReapMergedConditions ??
         internalDependencyMergedConditions ??
         workflowOutputMergedConditions ??
         webhookMergedConditions ??
@@ -6639,6 +6709,7 @@ export class WorkflowRecipeReconciler {
     const pluginSdkMergedConditions = mergePluginWorkloadSdkConditions(
       workloadReconcileMergedConditions ??
         secretOwnershipMergedConditions ??
+        networkPolicyReapMergedConditions ??
         internalDependencyMergedConditions ??
         workflowOutputMergedConditions ??
         webhookMergedConditions ??
@@ -6649,6 +6720,7 @@ export class WorkflowRecipeReconciler {
       pluginSdkMergedConditions ??
       workloadReconcileMergedConditions ??
       secretOwnershipMergedConditions ??
+      networkPolicyReapMergedConditions ??
       internalDependencyMergedConditions ??
       workflowOutputMergedConditions ??
       webhookMergedConditions

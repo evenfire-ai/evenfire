@@ -332,8 +332,12 @@ on every pass forever — **15 115 `DELETE`/hour on clerum-dev, 100 % `NOT_FOUND
 It now reaps from the live set instead. Once every lane has recorded what it wants, one
 `LIST` per namespace selects by ownership —
 `clerum.io/managed-by=workflow-recipes,clerum.io/recipe=<name>` — and deletes only what
-is live, belongs to a recipe family, and is not wanted. The `LIST` costs nothing new:
-the internal-dependency prune already issued exactly these.
+is live, belongs to a recipe family, and is not wanted.
+
+**The `LIST` adds no request**: the internal-dependency prune already issued one per
+namespace, over the same three namespaces. What changed is the *result set*, not the
+count — dropping the `policy-type` term from the selector makes the query return all six
+families instead of one, and the family check then re-narrows what may be deleted.
 
 **Six families are reaped**: `ui-ingress-*`, `ui-egress-*`, `wl-egress-*`,
 `wl-ingress-*`, `wr-intdep-egress/ingress-*`, and `wf-*-oauth-broker-egress`. Family is
@@ -351,23 +355,41 @@ policies (they carry no `clerum.io/recipe` label), the workflow run lane's, the
   policies are stale and nothing writes them, but the producer is a spec edit rather
   than the reconcile loop, so reaping them here would widen this change into a family it
   does not own. Carved out explicitly (issue #583).
-- **`reconcileUiEgressPolicy`'s own delete** when `spec.ui` is unset is still
-  unconditional. Measured at 2/hour.
+(An earlier draft also excluded `reconcileUiEgressPolicy`'s own unconditional delete.
+That is gone: it was redundant — `ui-egress` is a reaped family and `sandbox-ui` is
+always scanned, so the prune already removed the same object on the same pass.)
 
 **Operational consequences:**
 
 - **Logs:** `Deleted stale <family> NetworkPolicy "<name>" in <ns> (not in desired set)`
   appears only on an actual deletion. There is deliberately no per-pass line — at three
   namespaces × 19 recipes × ~206 passes/hour that would be ~12 k lines/hour.
-- **A denied delete does not fail the recipe.** An RBAC `403` leaves the policy
-  **enforced** and is reported three ways: an error log naming the policy, the
-  `NetworkPolicyReapFailed` condition on the recipe (cleared on the next clean pass),
-  and the `clerum_wrc_networkpolicy_reap_denied_total` counter, labelled by family.
-  **Alert on any sustained non-zero value** — it means a policy that should be gone is
-  still filtering traffic. The recipe `phase` is untouched on purpose: a latched `failed`
-  is invisible outside `kubectl` and self-heals only for transient-infra messages.
-- **A transient failure (5xx, timeout) degrades and retries** on the next pass, using the
-  same contract as any other transient infrastructure fault.
+- **A denied reap does not fail the recipe.** RBAC `401`/`403` — both permanent — leave
+  stale policies **enforced** and are reported three ways: an error log naming what could
+  not be removed, the `NetworkPolicyReapFailed` condition on the recipe (written in both
+  directions, so it clears on the next clean pass), and the
+  `clerum_wrc_networkpolicy_reap_denied_total` counter, labelled by `family` and by
+  `operation`. **Alert on any sustained non-zero value** — it means a policy that should
+  be gone is still filtering traffic.
+
+  The `operation` label matters for triage: `delete` means one named policy survived;
+  `list` means the controller could not examine that namespace **at all**, so nothing of
+  any family was reaped there. A denied `LIST` skips that namespace and continues with
+  the others rather than failing the pass.
+
+  The recipe `phase` is deliberately untouched. Failing it would take a working recipe
+  out of service — `control-api` gates Sandbox UI access and workflow invocation on
+  `phase === 'active'` — over a residual object, and the transient-latch self-heal only
+  clears messages that look like infrastructure faults, which an authorization failure
+  does not.
+- **A transient failure (5xx, timeout, transport fault) degrades and retries** on the next
+  pass, using the same contract as any other transient infrastructure fault. This applies
+  to both the `LIST` and the `DELETE`.
+- **RBAC invariant.** The prune queries exactly `sandbox-recipes`, `mcp-server` and
+  `sandbox-ui`, because `resolveWorkloadNamespace` can return no others. The
+  `workflow-recipes` ServiceAccount holds `list` and `delete` on `networkpolicies` in all
+  three (`deploy/base/*/rbac.yaml`). Adding a fourth namespace requires a Role there, or
+  its policies are never reaped.
 - **Reaping still happens on real changes.** Dropping `egressBindings` from a workload
   still deletes its policy on the next pass — the reap became conditional, not optional.
 
