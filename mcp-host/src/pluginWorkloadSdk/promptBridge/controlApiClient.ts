@@ -5,6 +5,7 @@ import {
   isKnownPluginWorkloadErrorReason,
 } from '../domain/errors'
 import type { PromptBridgeTarget } from '../domain/types'
+import { readSdkOnlyCodexBinding } from '../sdkOnlyCodexBinding'
 
 /**
  * Anti-corruption layer (plan §3.4): encapsulates the HTTP call to
@@ -50,11 +51,17 @@ export interface AuthorizePromptBridgeResponse {
   attemptGeneration: number
   policyRevision: number
   policyHash: string
+  /**
+   * Per-grant output ceiling, or null when the grant sets none. Enforced as
+   * `max_tokens` on API-key providers; codex-subscription cannot bind it on
+   * the ChatGPT wire, where the contract's LIMITS.maxOutputTokens is the only
+   * bound.
+   */
   maxOutputTokens: number | null
 }
 
 export interface PluginWorkloadSdkCapabilities {
-  contractVersion: 2
+  contractVersion: 2 | 3
   supportedContractVersions: number[]
   targetAwarePromptBridge: true
   attemptLedger: true
@@ -65,14 +72,25 @@ export interface PluginWorkloadSdkCapabilities {
   defaultTargetRef: string | null
   defaultProvider: string | null
   defaultModel: string | null
+  defaultConnectionRef: string | null
   v2Ready: boolean
+  /** Present only when the grant default is oauth-broker (reservation-only Codex). */
+  reservationOnlyOauthBroker?: true
+  /**
+   * Present only when this control-api can publish the authoritative Codex
+   * catalog/credential revisions. Absent means the peer predates them, not
+   * that the binding is stale — see `codexBindingReady`.
+   */
+  codexBindingRevisions?: true
+  defaultCatalogRevision?: number
+  defaultCredentialRevision?: number
   clientNotificationsPolicyState: string
   clientNotificationsReady: boolean
 }
 
 export interface PluginWorkloadSdkBootstrapProof {
   ready: true
-  contractVersion: 2
+  contractVersion: 2 | 3
   provider: string
   model: string
   policyReady: boolean
@@ -84,6 +102,9 @@ export interface PluginWorkloadSdkBootstrapProof {
     | 'policy_disabled'
     | 'bootstrap_target_mismatch'
     | 'policy_not_ready'
+    | 'codex_execution_binding_missing'
+  /** Control API attested the live Codex connection against the v3 binding. */
+  codexBindingReady?: boolean
   /**
    * Policy metadata is deliberately optional at identity bootstrap. A recipe
    * may be installed and publish an awaiting-policy SDK runtime before an
@@ -121,6 +142,7 @@ export interface ReissuedPromptBridgeCredentialTicket {
   providerAttemptIndex: number
   targetRef: string
   credentialTicket: string
+  reservationOnly?: true
   policyRevision: number
   policyHash: string
   expiresInSeconds: number
@@ -179,7 +201,11 @@ function isAuthorizePromptBridgeResponse(v: unknown): v is AuthorizePromptBridge
     (r.policyRevision as number) >= 1 &&
     typeof r.policyHash === 'string' &&
     /^[a-f0-9]{64}$/.test(r.policyHash) &&
-    (r.maxOutputTokens === null || typeof r.maxOutputTokens === 'number')
+    // A grant cap of 0 is not "no cap" — it would clamp every response
+    // to nothing. Reject it here rather than let Math.min silently zero the
+    // request.
+    (r.maxOutputTokens === null ||
+      (Number.isInteger(r.maxOutputTokens) && Number(r.maxOutputTokens) >= 1))
   )
 }
 
@@ -187,7 +213,7 @@ function isPluginWorkloadSdkCapabilities(v: unknown): v is PluginWorkloadSdkCapa
   if (typeof v !== 'object' || v === null) return false
   const value = v as Record<string, unknown>
   return (
-    value.contractVersion === 2 &&
+    (value.contractVersion === 2 || value.contractVersion === 3) &&
     Array.isArray(value.supportedContractVersions) &&
     value.supportedContractVersions.includes(2) &&
     value.targetAwarePromptBridge === true &&
@@ -200,7 +226,24 @@ function isPluginWorkloadSdkCapabilities(v: unknown): v is PluginWorkloadSdkCapa
     (value.defaultTargetRef === null || typeof value.defaultTargetRef === 'string') &&
     (value.defaultProvider === null || typeof value.defaultProvider === 'string') &&
     (value.defaultModel === null || typeof value.defaultModel === 'string') &&
+    (value.defaultConnectionRef === undefined ||
+      value.defaultConnectionRef === null ||
+      typeof value.defaultConnectionRef === 'string') &&
     typeof value.v2Ready === 'boolean' &&
+    (value.reservationOnlyOauthBroker === undefined || value.reservationOnlyOauthBroker === true) &&
+    (value.codexBindingRevisions === undefined || value.codexBindingRevisions === true) &&
+    // Bounds mirror the codex_subscription_connections CHECKs —
+    // `catalog_revision BIGINT NOT NULL DEFAULT 0 CHECK (>= 0)` and
+    // `credential_revision BIGINT NOT NULL DEFAULT 1 CHECK (>= 1)`. These were
+    // inverted, so a connection whose catalog was never synced (revision 0,
+    // the DEFAULT) failed the whole capabilities contract with
+    // protocol_mismatch instead of resolving to codexBindingReady: false.
+    (value.defaultCatalogRevision === undefined ||
+      (Number.isInteger(value.defaultCatalogRevision) &&
+        Number(value.defaultCatalogRevision) >= 0)) &&
+    (value.defaultCredentialRevision === undefined ||
+      (Number.isInteger(value.defaultCredentialRevision) &&
+        Number(value.defaultCredentialRevision) >= 1)) &&
     typeof value.clientNotificationsPolicyState === 'string' &&
     typeof value.clientNotificationsReady === 'boolean'
   )
@@ -221,7 +264,7 @@ function isReissuedPromptBridgeCredentialTicket(
     (ticket.providerAttemptIndex as number) >= 1 &&
     typeof ticket.targetRef === 'string' &&
     typeof ticket.credentialTicket === 'string' &&
-    ticket.credentialTicket.length > 0 &&
+    (ticket.credentialTicket.length > 0 || ticket.reservationOnly === true) &&
     Number.isInteger(ticket.policyRevision) &&
     (ticket.policyRevision as number) >= 1 &&
     typeof ticket.policyHash === 'string' &&
@@ -307,9 +350,9 @@ export class PluginWorkloadSdkControlApiClient {
    * no refresh hook) propagates the error so a genuinely bad credential still
    * surfaces instead of looping.
    */
-  private async post(path: string, body: unknown): Promise<unknown> {
+  private async post(path: string, body: unknown, signal?: AbortSignal): Promise<unknown> {
     try {
-      return await this.postOnce(path, body)
+      return await this.postOnce(path, body, signal)
     } catch (err) {
       if (
         err instanceof PluginWorkloadError &&
@@ -317,7 +360,7 @@ export class PluginWorkloadSdkControlApiClient {
         this.opts.refreshOnUnauthorized
       ) {
         await this.triggerRefresh()
-        return this.postOnce(path, body)
+        return this.postOnce(path, body, signal)
       }
       throw err
     }
@@ -351,7 +394,7 @@ export class PluginWorkloadSdkControlApiClient {
     }
   }
 
-  private async postOnce(path: string, body: unknown): Promise<unknown> {
+  private async postOnce(path: string, body: unknown, signal?: AbortSignal): Promise<unknown> {
     if (!this.breaker.allow()) {
       throw new PluginWorkloadError(
         'provider_unavailable',
@@ -367,6 +410,10 @@ export class PluginWorkloadSdkControlApiClient {
 
     let lastError: unknown = null
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      // An aborted caller deadline is not a transient network failure: without
+      // this the `catch` below would swallow every AbortError as retryable and
+      // burn the remaining attempts after the operation was already over.
+      if (signal?.aborted) break
       if (attempt > 0) await sleep(baseDelay * 2 ** (attempt - 1))
       let response: Response
       try {
@@ -377,7 +424,12 @@ export class PluginWorkloadSdkControlApiClient {
             Authorization: `Bearer ${this.opts.getAccessToken()}`,
           },
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(15_000),
+          // The per-request timeout still bounds one hop; a caller-supplied
+          // signal additionally bounds the whole operation across retries, so
+          // a finalize deadline cannot be outlived by this loop.
+          signal: signal
+            ? AbortSignal.any([AbortSignal.timeout(15_000), signal])
+            : AbortSignal.timeout(15_000),
         })
       } catch (err) {
         // Network failure — retryable.
@@ -522,7 +574,10 @@ export class PluginWorkloadSdkControlApiClient {
             true
           )
         }
-        return result
+        return {
+          ...result,
+          defaultConnectionRef: result.defaultConnectionRef ?? null,
+        }
       })
       .finally(() => {
         if (this.capabilitiesInFlight === request) this.capabilitiesInFlight = null
@@ -561,7 +616,7 @@ export class PluginWorkloadSdkControlApiClient {
   ): Promise<PluginWorkloadSdkBootstrapProof> {
     const capabilities = await this.getPromptBridgeCapabilities()
     if (
-      capabilities.contractVersion !== 2 ||
+      (capabilities.contractVersion !== 2 && capabilities.contractVersion !== 3) ||
       !capabilities.supportedContractVersions.includes(2) ||
       capabilities.targetAwarePromptBridge !== true ||
       capabilities.attemptLedger !== true ||
@@ -577,6 +632,38 @@ export class PluginWorkloadSdkControlApiClient {
         true
       )
     }
+    const binding = expectedProvider === 'codex-subscription' ? readSdkOnlyCodexBinding() : null
+    const reservationOnlyReady = capabilities.reservationOnlyOauthBroker === true
+    const contractReady =
+      capabilities.contractVersion === 3 && capabilities.supportedContractVersions.includes(3)
+    // #533 acceptance criterion 2: the binding must be tied to the catalog and
+    // credential revisions too, not only to the connection and model. Those
+    // revisions are authoritative on control-api's connection row, so this can
+    // only be compared when the peer publishes them. `codexBindingRevisions`
+    // is that discriminator, and it must be read as "can this API send them",
+    // never as "is this binding fresh": an older control-api omits the flag,
+    // and demanding a field it cannot emit would fail closed across a
+    // mixed-binary window (the #540 shape). When the flag IS present, both
+    // values are required and must match — a missing or divergent revision is
+    // a stale binding, and it fails closed here at reconcile rather than at
+    // the first prompt.
+    const revisionsPublished = capabilities.codexBindingRevisions === true
+    const codexRevisionsReady =
+      !revisionsPublished ||
+      (binding !== null &&
+        capabilities.defaultCatalogRevision === binding.catalogRevision &&
+        capabilities.defaultCredentialRevision === binding.credentialRevision)
+    const codexBindingReady =
+      expectedProvider !== 'codex-subscription' ||
+      (reservationOnlyReady &&
+        contractReady &&
+        binding !== null &&
+        capabilities.defaultProvider === expectedProvider &&
+        capabilities.defaultModel === expectedModel &&
+        binding.model === expectedModel &&
+        typeof capabilities.defaultConnectionRef === 'string' &&
+        capabilities.defaultConnectionRef === binding.connectionKey &&
+        codexRevisionsReady)
     const policyReady =
       capabilities.v2Ready &&
       capabilities.policyRevision >= 1 &&
@@ -584,7 +671,8 @@ export class PluginWorkloadSdkControlApiClient {
       /^[a-f0-9]{64}$/.test(capabilities.policyHash) &&
       !!capabilities.defaultTargetRef &&
       capabilities.defaultProvider === expectedProvider &&
-      capabilities.defaultModel === expectedModel
+      capabilities.defaultModel === expectedModel &&
+      codexBindingReady
     const policyReason = policyReady
       ? undefined
       : capabilities.policyState === 'missing'
@@ -595,16 +683,19 @@ export class PluginWorkloadSdkControlApiClient {
             ? 'policy_revoking'
             : capabilities.policyState === 'disabled'
               ? 'policy_disabled'
-              : capabilities.v2Ready
-                ? 'bootstrap_target_mismatch'
-                : 'policy_not_ready'
+              : expectedProvider === 'codex-subscription' && !codexBindingReady
+                ? 'codex_execution_binding_missing'
+                : capabilities.v2Ready
+                  ? 'bootstrap_target_mismatch'
+                  : 'policy_not_ready'
     return {
       ready: true,
-      contractVersion: 2,
+      contractVersion: expectedProvider === 'codex-subscription' ? 3 : 2,
       provider: expectedProvider,
       model: expectedModel,
       policyReady,
       policyState: capabilities.policyState,
+      ...(expectedProvider === 'codex-subscription' ? { codexBindingReady } : {}),
       ...(policyReason ? { policyReason } : {}),
       ...(capabilities.v2Ready &&
       capabilities.policyRevision >= 1 &&
@@ -785,25 +876,28 @@ export class PluginWorkloadSdkControlApiClient {
    * unknown spend. This replaces separate status + usage calls for the
    * stepless runtime; the route is idempotent on providerAttemptId.
    */
-  async finalizePromptBridge(body: {
-    recipeNamespace: string
-    recipeName: string
-    invocationId: string
-    attemptGeneration: number
-    providerAttemptId: string
-    providerAttemptIndex: number
-    status: 'complete' | 'failed' | 'provider_unavailable'
-    reason: string
-    target: PromptBridgeTarget
-    usage?: {
-      llmSecretName: string
-      callerRef: string
-      fallbackUsed: boolean
-      attemptCount: number
-      inputTokens: number
-      outputTokens: number
-    }
-  }): Promise<FinalizePromptBridgeResponse> {
+  async finalizePromptBridge(
+    body: {
+      recipeNamespace: string
+      recipeName: string
+      invocationId: string
+      attemptGeneration: number
+      providerAttemptId: string
+      providerAttemptIndex: number
+      status: 'complete' | 'failed' | 'provider_unavailable'
+      reason: string
+      target: PromptBridgeTarget
+      usage?: {
+        llmSecretName: string
+        callerRef: string
+        fallbackUsed: boolean
+        attemptCount: number
+        inputTokens: number
+        outputTokens: number
+      }
+    },
+    options?: { signal?: AbortSignal }
+  ): Promise<FinalizePromptBridgeResponse> {
     const result = await this.post(
       `/api/v1/mcp-host/plugin-workload-sdk/invocations/${encodeURIComponent(body.invocationId)}/finalize`,
       {
@@ -817,7 +911,8 @@ export class PluginWorkloadSdkControlApiClient {
         reason: body.reason,
         target: body.target,
         ...(body.usage ? { usage: body.usage } : {}),
-      }
+      },
+      options?.signal
     )
     if (!isFinalizePromptBridgeResponse(result)) {
       throw new PluginWorkloadError(

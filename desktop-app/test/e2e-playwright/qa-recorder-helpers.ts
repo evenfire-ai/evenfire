@@ -2,8 +2,8 @@
 //
 // Shared primitives for the optional Desktop App QA recorder journeys.
 //
-// Contract: see docs/testing/optional-playwright-qa-recorder.md ("Extending the
-// recorder"). Every recorder journey is self-contained: it launches the real
+// Contract: see docs/testing/desktop-headful-journeys.md. Every recorder
+// journey is self-contained: it launches the real
 // Electron app headfully with video, signs in with the exact identity from
 // .env.qa-recorder, guards non-local targets, and requires an explicit opt-in
 // confirmation variable for any write, message, or paid provider call.

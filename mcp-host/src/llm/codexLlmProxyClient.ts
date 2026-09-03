@@ -1,9 +1,16 @@
 export const CODEX_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/codex/completions'
 
 export class CodexProxyError extends Error {
+  /**
+   * `dispatched` records whether a request had already left this process when
+   * the error was raised. It defaults to `true` because every construction
+   * site except the pre-stream abort happens after the fetch was issued, and
+   * the safe default is the one that keeps the attempt fenced.
+   */
   constructor(
     readonly code: string,
-    message: string
+    message: string,
+    readonly dispatched: boolean = true
   ) {
     super(message)
     this.name = 'CodexProxyError'
@@ -50,7 +57,7 @@ export class CodexLlmProxyClient {
     signal?: AbortSignal
   }): Promise<CodexProxyStreamResult> {
     if (input.signal?.aborted) {
-      throw new CodexProxyError('canceled', 'aborted before proxy stream')
+      throw new CodexProxyError('canceled', 'aborted before proxy stream', false)
     }
     return this.streamOnce(input, Boolean(this.options.refreshOnUnauthorized))
   }

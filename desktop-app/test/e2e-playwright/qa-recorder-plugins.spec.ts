@@ -17,7 +17,7 @@ import {
 // Read-only inventory assertions always run. The trigger step is gated behind
 // QA_RECORDER_CONFIRM_MUTATIONS=1 (it creates a real workflow run and may incur
 // provider cost) and only fires when a triggerable recipe is present.
-// Contract: docs/testing/optional-playwright-qa-recorder.md.
+// Contract: docs/testing/desktop-headful-journeys.md.
 //
 // Note on selectors (spec 12 §5.F — flat DataTable, no accordion): WorkflowsPage
 // renders a `.da-table` with the columns `Name` / `Status` / `Recent Runs` /

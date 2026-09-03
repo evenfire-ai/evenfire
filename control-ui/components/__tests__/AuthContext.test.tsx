@@ -370,7 +370,7 @@ describe('AuthProvider session expiry handling', () => {
   })
 
   it('clears legacy storage without a toast when no cookie session exists on mount', async () => {
-    window.history.pushState({}, '', '/contexts/context1')
+    window.history.pushState({}, '', '/agents/context1')
     window.localStorage.setItem('controlUiAdminToken', 'expired-token')
     const fetchMock = vi.fn().mockResolvedValue(response(401, { error: 'expired' }))
     vi.stubGlobal('fetch', fetchMock)
