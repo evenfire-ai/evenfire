@@ -116,6 +116,38 @@ describe('planContextReplacement invariants', () => {
     )
   })
 
+  it('no false skip: whenever the written set would differ, the plan is NOT null', () => {
+    // The property the other four could not have: they all assert the
+    // CONVERGENCE direction — "after applying a plan the next pass is null", so
+    // no infinite writes. The `sameMcpServerSet` defect lives in the opposite
+    // direction: a FALSE SKIP, where the plan is null while a real change is
+    // due. Every other property bails on `plan === null`, which is exactly the
+    // state that bug produces, so they passed vacuously on it. (@claude audit of
+    // #568; the instance is pinned by an example test in mcpDelegation.test.ts,
+    // this closes the class.)
+    //
+    // The oracle MUST NOT reuse `sameMcpServerSet`, or it inherits the same
+    // dup-collapsing blind spot and masks the defect identically — the trap that
+    // made the other four vacuous in the first place. So it is structural:
+    // a duplicate in the live list, or a different unique set, means a write is
+    // owed. One direction only — this says nothing about when a plan is ALLOWED
+    // to be null, which is what the convergence property covers.
+    const sortedUnique = (names: readonly string[]): string => [...new Set(names)].sort().join(',')
+
+    fc.assert(
+      fc.property(fc.boolean(), serverList, serverList, (explicit, existing, desired) => {
+        const expected = explicit ? sortedUnique([...existing, ...desired]) : sortedUnique(desired)
+        const liveHasDuplicate = existing.length !== new Set(existing).size
+        const writeIsOwed = liveHasDuplicate || sortedUnique(existing) !== expected
+        if (!writeIsOwed) return
+
+        const plan = planContextReplacement(liveContext(existing), planArgs(explicit, desired))
+        expect(plan).not.toBeNull()
+        expect(sortedUnique(plan!.mergedServers)).toBe(expected)
+      })
+    )
+  })
+
   it('a non-empty legacy contextId is preserved verbatim; an empty one is repaired once', () => {
     fc.assert(
       fc.property(

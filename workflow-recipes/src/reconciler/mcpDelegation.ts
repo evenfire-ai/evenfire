@@ -228,6 +228,28 @@ function ownerReferenceKey(ref: ContextOwnerReference): string {
   ].join('\0')
 }
 
+/**
+ * Same length + set membership — the shape that, in `sameMcpServerSet`, let a
+ * duplicate hide a real change: `([A,A], [A,B])` passes the length check, and
+ * every member of `{A}` is in `{A,B}`. There it needed a second guard on the
+ * SET sizes. Here it does not, and the reason is an invariant of the only
+ * caller rather than of this function:
+ *
+ *   `right` is always `desiredOwnerReferences(left, …)` — `left` filtered by
+ *   `!isThisRecipeOwner`, plus at most one appended `recipeOwner`.
+ *
+ * So `right` is a filtered submultiset of `left` plus one known element, and
+ * filter-plus-append cannot both drop a duplicate and introduce a distinct new
+ * ref at equal length: if the duplicate matches the recipe, BOTH copies are
+ * filtered and the lengths differ; if it does not, both survive into `right`
+ * and the multisets agree.
+ *
+ * A defensive size guard is deliberately NOT added, for the same reason
+ * `hasExpectedPolicyOwnership` was left out of the egress fault verdict in
+ * #567: an unreachable branch pretending to be a guard reads as protection that
+ * is not there. The invariant is stated here instead, so a refactor that breaks
+ * it has something to break (#568 review, @claude audit).
+ */
 function sameOwnerReferences(
   left: readonly ContextOwnerReference[],
   right: readonly ContextOwnerReference[]
