@@ -1030,7 +1030,7 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith('Access granted to 1 subject', 'success')
   })
 
-  it('creates a share from the manage dialog resource menu', async () => {
+  it('does not offer Create share from the manage dialog resource menu', async () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
@@ -1058,7 +1058,6 @@ describe('FilesPage', () => {
         },
       },
     })
-    const createShare = vi.fn(async () => undefined)
     const pushToast = vi.fn()
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
@@ -1074,7 +1073,6 @@ describe('FilesPage', () => {
         grantableBits: ['read', 'share'],
         canCreateShare: true,
       },
-      createShare,
     })
 
     renderFilesPage(pushToast)
@@ -1085,29 +1083,7 @@ describe('FilesPage', () => {
     await act(async () => {
       fireEvent.click(menuTrigger)
     })
-    expect(within(dialog).getByRole('menuitem', { name: 'Create share' })).toHaveProperty(
-      'disabled',
-      true
-    )
-    await act(async () => {
-      fireEvent.click(menuTrigger)
-    })
-
-    const picker = await screen.findByRole('combobox', { name: 'Add people, teams, or agents' })
-    fireEvent.focus(picker)
-    fireEvent.click(await screen.findByRole('option', { name: /Test Two/ }))
-
-    await act(async () => {
-      fireEvent.click(menuTrigger)
-    })
-    const createShareItem = within(dialog).getByRole('menuitem', { name: 'Create share' })
-    expect(createShareItem).toHaveProperty('disabled', false)
-    await act(async () => {
-      fireEvent.click(createShareItem)
-    })
-
-    await waitFor(() => expect(createShare).toHaveBeenCalledWith(['user:user-2']))
-    expect(pushToast).toHaveBeenCalledWith('1 share created', 'success')
+    expect(within(dialog).queryByRole('menuitem', { name: 'Create share' })).toBeNull()
   })
 
   it('issues ONE atomic bulk grant and does not refetch or toast when it is rejected', async () => {

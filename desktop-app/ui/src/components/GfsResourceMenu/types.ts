@@ -1,9 +1,7 @@
 export type GfsResourceMenuProps = {
-  createShareDisabled?: boolean
   resourceName: string
   onManage?: () => void
   onCopyLink: () => void
-  onCreateShare?: () => void
   onCreateFolder?: () => void
   onDelete?: () => void
   onOpen?: () => void

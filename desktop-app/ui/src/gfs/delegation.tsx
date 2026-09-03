@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { Button, StatusBanner } from '@components/Common'
 import { describeGfsGrantError } from '@lib/gfsGrantErrors'
 import { GfsPermissionDropdown } from '@/gfs/GfsPermissionDropdown'
@@ -24,8 +24,7 @@ const HOST_SUBJECT_KEY_PREFIX = 'host:'
  * Subjects are unified — people, teams, and the caller's own agents appear in a
  * single picker, mirroring Control UI. A bulk grant is atomic (all or none), so
  * when a host is part of the selection the whole grant is capped to the host
- * permission set (read/write) and stripped of anything else. Hosts cannot be
- * share recipients, so Create share is disabled while a host is selected.
+ * permission set (read/write) and stripped of anything else.
  *
  * Composes the shared Common primitives through the GFS picker controls per the
  * desktop-app/ui frontend rules — no raw inputs/buttons.
@@ -38,8 +37,6 @@ export function GfsDelegationPanel({
   subjectOptionsError = null,
   isDirectory,
   onGrant,
-  onCreateShare,
-  onCreateShareActionChange,
 }: GfsDelegationPanelProps) {
   const [subjectKeys, setSubjectKeys] = useState<string[]>([])
   const [bits, setBits] = useState<string[]>(() =>
@@ -48,7 +45,6 @@ export function GfsDelegationPanel({
   const [inherit, setInherit] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const createShareActionRef = useRef<() => void>(() => undefined)
 
   const grantableBits = affordances.grantableBits
   const hasHost = subjectKeys.some(key => key.startsWith(HOST_SUBJECT_KEY_PREFIX))
@@ -58,12 +54,6 @@ export function GfsDelegationPanel({
   const visiblePermissionBits = hasHost
     ? HOST_PERMISSION_BITS.filter(bit => grantableBits.includes(bit))
     : grantableBits
-  const canCreateShare =
-    Boolean(onCreateShare && affordances.canCreateShare) &&
-    !busy &&
-    !hasHost &&
-    subjectKeys.length > 0
-
   function changeSubjects(nextKeys: string[]) {
     setSubjectKeys(nextKeys)
     const nextHasHost = nextKeys.some(key => key.startsWith(HOST_SUBJECT_KEY_PREFIX))
@@ -83,8 +73,8 @@ export function GfsDelegationPanel({
       await action()
       setSubjectKeys([])
     } catch (e) {
-      // The bulk grant/share is atomic — a failure means NONE of the subjects
-      // landed, so keep the whole selection for a retry. Surface the server's
+      // The bulk grant is atomic — a failure means NONE of the subjects landed,
+      // so keep the whole selection for a retry. Surface the server's
       // verdict (escalation_rejected, subjects_invalid with 1-based positions, a
       // rate-limit retry, …) via the shared presentation map — never swallow it.
       setError(describeGfsGrantError(e).message)
@@ -92,17 +82,6 @@ export function GfsDelegationPanel({
       setBusy(false)
     }
   }
-
-  createShareActionRef.current = () => {
-    if (!onCreateShare || !canCreateShare) return
-    void run(() => onCreateShare(subjectKeys))
-  }
-
-  useEffect(() => {
-    if (!onCreateShareActionChange) return
-    onCreateShareActionChange(() => createShareActionRef.current(), !canCreateShare)
-    return () => onCreateShareActionChange(null, true)
-  }, [canCreateShare, onCreateShareActionChange])
 
   // A Leader without manage_acl (canDelegate=false) sees no controls.
   if (!affordances.canDelegate) {
@@ -167,7 +146,6 @@ export function GfsDelegationPanel({
 
 export type {
   DelegationAffordances,
-  GfsCreateShareActionChange,
   GfsAgentSubjectOption,
   GfsDelegationPanelProps,
   GfsDelegationSubjectOption,

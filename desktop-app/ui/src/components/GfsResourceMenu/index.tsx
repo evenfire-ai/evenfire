@@ -6,11 +6,9 @@ import { useClickOutside } from '@hooks/useClickOutside'
 import type { GfsResourceMenuProps } from './types'
 
 export function GfsResourceMenu({
-  createShareDisabled = false,
   resourceName,
   onManage,
   onCopyLink,
-  onCreateShare,
   onCreateFolder,
   onDelete,
   onOpen,
@@ -106,15 +104,6 @@ export function GfsResourceMenu({
           {onManage ? (
             <MenuItem role="menuitem" onClick={() => runAction(onManage)}>
               Manage
-            </MenuItem>
-          ) : null}
-          {onCreateShare ? (
-            <MenuItem
-              disabled={createShareDisabled}
-              role="menuitem"
-              onClick={() => runAction(onCreateShare)}
-            >
-              Create share
             </MenuItem>
           ) : null}
           {onOpen ? (
