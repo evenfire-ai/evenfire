@@ -13467,7 +13467,7 @@ button.cu-gfs-tree__button:focus-visible,
 
 .cu-gfs-grant__composer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(9.375rem, 0.32fr);
+  grid-template-columns: minmax(0, 1fr) 12.75rem;
   align-items: stretch;
   gap: var(--cu-space-2);
 }
@@ -13477,7 +13477,8 @@ button.cu-gfs-tree__button:focus-visible,
 }
 
 .cu-gfs-role-select {
-  min-width: 8.5rem;
+  width: 100%;
+  min-width: 0;
 }
 
 .cu-gfs-role-select .cu-selection-dropdown__button {
