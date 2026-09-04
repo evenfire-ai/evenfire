@@ -125,7 +125,8 @@ if grep -Fq 'CONTEXT_MAPPER_NETPOL_RESYNC_SEC=${RESYNC_SECONDS}' "$RUNTIME_GATE"
    grep -Fq '[ "$connectivity_rc" = 42 ]' "$RUNTIME_GATE" &&
    grep -Fq 'probe_mcp_business_signal "$SECOND_MCP_NAME"' "$RUNTIME_GATE" &&
    grep -Fq 'mcp_runtime_still_ready' "$RUNTIME_GATE" &&
-   grep -Fq 'PROBE_BASELINE_IDENTITY="$(selector_runtime_identity' "$RUNTIME_GATE" &&
+   grep -Fq 'PROBE_BASELINE_IDENTITY="$(' "$RUNTIME_GATE" &&
+   grep -Fq 'selector_runtime_identity "$HOST_NS" "app=${PROBE_NAME}" "$PROBE_NAME"' "$RUNTIME_GATE" &&
    grep -Fq 'PRIMARY_MCP_BASELINE_IDENTITY="$(selector_runtime_identity' "$RUNTIME_GATE" &&
    grep -Fq 'SECOND_MCP_BASELINE_IDENTITY="$(selector_runtime_identity' "$RUNTIME_GATE" &&
    grep -Fq 'mcp_data_plane_is_policy_blocked' "$RUNTIME_GATE" &&

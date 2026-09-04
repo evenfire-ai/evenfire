@@ -231,14 +231,17 @@ mcp_runtime_still_ready() {
 }
 
 selector_runtime_identity() {
-  local namespace=$1 selector=$2 deployments deployment pods
-  deployments="$(kctl get deployments -n "$namespace" -l "$selector" -o json 2>/dev/null)" ||
-    return 1
-  deployment="$(jq -ce '
-    if (.items | length) == 1 then
-      .items[0] | [.metadata.uid, .metadata.generation, .spec.replicas, .spec.selector, .spec.template]
-    else empty end
-  ' <<<"$deployments")" || return 1
+  local namespace=$1 selector=$2 deployment_name=${3:-} deployment_object deployment pods
+  if [ -n "$deployment_name" ]; then
+    deployment_object="$(kctl get deployment "$deployment_name" -n "$namespace" -o json 2>/dev/null)" ||
+      return 1
+  else
+    deployment_object="$(kctl get deployments -n "$namespace" -l "$selector" -o json 2>/dev/null |
+      jq -ce 'if (.items | length) == 1 then .items[0] else empty end')" || return 1
+  fi
+  deployment="$(jq -ce \
+    '[.metadata.uid, .metadata.generation, .spec.replicas, .spec.selector, .spec.template]' \
+    <<<"$deployment_object")" || return 1
   pods="$(kctl get pods -n "$namespace" -l "$selector" -o json 2>/dev/null |
     jq -ceS '[.items[] |
       select(.status.phase == "Running" and .metadata.deletionTimestamp == null) |
@@ -351,7 +354,7 @@ host_runtime_ready() {
 
 host_deployment_identity() {
   selector_runtime_identity "$HOST_NS" \
-    "clerum.io/managed-by=host-context-controller,clerum.io/host=${HOST_NAME}"
+    "clerum.io/managed-by=host-context-controller,clerum.io/host=${HOST_NAME}" "$HOST_NAME"
 }
 
 probe_host_runtime_health() {
@@ -644,7 +647,7 @@ mcp_data_plane_is_policy_blocked() {
   local connectivity_rc
   resource_absent networkpolicy "$CONTEXT_POLICY" "$MCP_NS" || return 1
   mcp_runtime_still_ready || return 1
-  [ "$(selector_runtime_identity "$HOST_NS" "app=${PROBE_NAME}")" = \
+  [ "$(selector_runtime_identity "$HOST_NS" "app=${PROBE_NAME}" "$PROBE_NAME")" = \
     "$PROBE_BASELINE_IDENTITY" ] || return 1
   [ "$(selector_runtime_identity "$MCP_NS" "$WORKLOAD_SELECTOR")" = \
     "$PRIMARY_MCP_BASELINE_IDENTITY" ] || return 1
@@ -1254,7 +1257,9 @@ ORIGINAL_POLICY_SNAPSHOT="$(context_policy_snapshot)" ||
   die "could not capture the canonical Context ingress policy"
 [ -n "$ORIGINAL_POLICY_UID" ] && [ -n "$ORIGINAL_POLICY_SNAPSHOT" ] ||
   die "Context ingress policy baseline was empty"
-PROBE_BASELINE_IDENTITY="$(selector_runtime_identity "$HOST_NS" "app=${PROBE_NAME}")" ||
+PROBE_BASELINE_IDENTITY="$(
+  selector_runtime_identity "$HOST_NS" "app=${PROBE_NAME}" "$PROBE_NAME"
+)" ||
   die "could not freeze the probe runtime identity before policy fault injection"
 PRIMARY_MCP_BASELINE_IDENTITY="$(selector_runtime_identity "$MCP_NS" "$WORKLOAD_SELECTOR")" ||
   die "could not freeze the primary MCP runtime identity before policy fault injection"
@@ -1339,7 +1344,7 @@ mcp_generation_is_original ||
   die "McpServer desired state changed while waiting for periodic policy recovery"
 hcc_identity_is_stable ||
   die "HCC restarted instead of healing the deleted policy in process"
-[ "$(selector_runtime_identity "$HOST_NS" "app=${PROBE_NAME}")" = \
+[ "$(selector_runtime_identity "$HOST_NS" "app=${PROBE_NAME}" "$PROBE_NAME")" = \
   "$PROBE_BASELINE_IDENTITY" ] || die "the probe changed identity during policy recovery"
 [ "$(selector_runtime_identity "$MCP_NS" "$WORKLOAD_SELECTOR")" = \
   "$PRIMARY_MCP_BASELINE_IDENTITY" ] || die "the MCP runtime changed during policy recovery"
