@@ -153,11 +153,8 @@ describe('WorkflowAccessPanel', () => {
     const section = screen.getByTestId('workflow-access-trigger-users')
     await waitFor(() => expect(within(section).getByText(/alice@example\.com/)).toBeInTheDocument())
 
-    fireEvent.click(
-      within(section).getByRole('button', {
-        name: 'Remove member trigger access: alice@example.com',
-      })
-    )
+    fireEvent.click(within(section).getByRole('button', { name: 'Actions for Alice' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove member trigger access' }))
     expect(setWorkflowGrants).not.toHaveBeenCalled()
     expect(
       await screen.findByRole('alertdialog', { name: 'Remove Member Trigger Access' })
@@ -168,6 +165,18 @@ describe('WorkflowAccessPanel', () => {
     await waitFor(() =>
       expect(setWorkflowGrants).toHaveBeenCalledWith('sandbox-recipes', 'installed-recipe', ['u-2'])
     )
+  })
+
+  it('sorts visible access records by human identity with a stable id tie-break', async () => {
+    vi.mocked(listWorkflowGrants).mockResolvedValue({ items: [bobGrant, aliceGrant] })
+
+    render(<EditHarness />)
+
+    const section = screen.getByTestId('workflow-access-trigger-users')
+    await waitFor(() => expect(within(section).getByText('Alice')).toBeInTheDocument())
+    const rows = section.querySelectorAll('.cu-workflow-access__row-title')
+    expect([...rows].map(row => row.textContent)).toEqual(['Alice', 'Bob'])
+    expect(section.querySelector('.cu-workflow-access__rows')).toHaveAttribute('role', 'list')
   })
 
   it('blocks live grant writes until the current edit-mode grants are loaded', async () => {

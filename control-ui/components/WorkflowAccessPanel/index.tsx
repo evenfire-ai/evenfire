@@ -1,11 +1,11 @@
 'use client'
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
-import { IconX } from '@components/icons'
 import {
   allowWorkflowApprovalTeam,
   getAdminTeams,
@@ -72,6 +72,10 @@ function userLabel(user: AccessUserRow): string {
 
 function teamLabel(team: AccessTeamRow): string {
   return team.name || team.id
+}
+
+function compareIdentity(left: string, right: string): number {
+  return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
 }
 
 function sectionCount(mode: 'create' | 'edit', loadedCount: number | null, selectedCount: number) {
@@ -217,18 +221,39 @@ export function WorkflowAccessPanel(props: WorkflowAccessPanelProps): React.JSX.
     [selectedApprovalTeamIds]
   )
 
-  const displayUsers =
-    mode === 'edit'
-      ? (userGrants ?? [])
-      : (allUsers ?? []).filter(user => selectedUserSet.has(user.id))
-  const displayTeams =
-    mode === 'edit'
-      ? (teamGrants ?? [])
-      : (allTeams ?? []).filter(team => selectedTeamSet.has(team.id))
-  const displayApprovalTeams =
-    mode === 'edit'
-      ? (approvalTeams ?? [])
-      : (allTeams ?? []).filter(team => selectedApprovalTeamSet.has(team.id))
+  const displayUsers = useMemo(
+    () =>
+      (mode === 'edit'
+        ? (userGrants ?? [])
+        : (allUsers ?? []).filter(user => selectedUserSet.has(user.id))
+      ).toSorted(
+        (left, right) =>
+          compareIdentity(userLabel(left), userLabel(right)) || compareIdentity(left.id, right.id)
+      ),
+    [allUsers, mode, selectedUserSet, userGrants]
+  )
+  const displayTeams = useMemo(
+    () =>
+      (mode === 'edit'
+        ? (teamGrants ?? [])
+        : (allTeams ?? []).filter(team => selectedTeamSet.has(team.id))
+      ).toSorted(
+        (left, right) =>
+          compareIdentity(teamLabel(left), teamLabel(right)) || compareIdentity(left.id, right.id)
+      ),
+    [allTeams, mode, selectedTeamSet, teamGrants]
+  )
+  const displayApprovalTeams = useMemo(
+    () =>
+      (mode === 'edit'
+        ? (approvalTeams ?? [])
+        : (allTeams ?? []).filter(team => selectedApprovalTeamSet.has(team.id))
+      ).toSorted(
+        (left, right) =>
+          compareIdentity(teamLabel(left), teamLabel(right)) || compareIdentity(left.id, right.id)
+      ),
+    [allTeams, approvalTeams, mode, selectedApprovalTeamSet]
+  )
 
   const ungrantedUsers = (allUsers ?? []).filter(user => !selectedUserSet.has(user.id))
   const ungrantedTeams = (allTeams ?? []).filter(team => !selectedTeamSet.has(team.id))
@@ -655,28 +680,30 @@ function AccessUserSection({
       ) : rows.length === 0 ? (
         <div className="cu-workflow-access__empty">{emptyText}</div>
       ) : (
-        <div className="cu-workflow-access__rows">
+        <RecordList className="cu-workflow-access__rows">
           {rows.map(user => (
-            <div className="cu-workflow-access__row" key={user.id}>
+            <RecordListRow className="cu-workflow-access__row" key={user.id}>
               <div className="cu-workflow-access__row-main">
                 <span className="cu-workflow-access__row-title">{userLabel(user)}</span>
                 {(user.displayName || user.name) && (
                   <span className="cu-workflow-access__row-meta">{user.email}</span>
                 )}
               </div>
-              <button
-                className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                type="button"
-                disabled={busy}
-                aria-label={`${definition.revokeLabel}: ${user.email}`}
-                title={`${definition.revokeLabel}: ${user.email}`}
-                onClick={() => void onRevoke(user.id)}
-              >
-                <IconX width={16} height={16} />
-              </button>
-            </div>
+              <RowActionMenu
+                actions={[
+                  {
+                    key: 'remove',
+                    label: definition.revokeLabel,
+                    danger: true,
+                    disabled: busy,
+                    onSelect: () => void onRevoke(user.id),
+                  },
+                ]}
+                ariaLabel={`Actions for ${userLabel(user)}`}
+              />
+            </RecordListRow>
           ))}
-        </div>
+        </RecordList>
       )}
       <div className="cu-workflow-access__picker cu-workflow-access__picker--inline">
         <SelectionDropdown
@@ -750,25 +777,27 @@ function AccessTeamSection({
       ) : rows.length === 0 ? (
         <div className="cu-workflow-access__empty">{emptyText}</div>
       ) : (
-        <div className="cu-workflow-access__rows">
+        <RecordList className="cu-workflow-access__rows">
           {rows.map(team => (
-            <div className="cu-workflow-access__row" key={team.id}>
+            <RecordListRow className="cu-workflow-access__row" key={team.id}>
               <div className="cu-workflow-access__row-main">
                 <span className="cu-workflow-access__row-title">{teamLabel(team)}</span>
               </div>
-              <button
-                className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                type="button"
-                disabled={busy}
-                aria-label={`${definition.revokeLabel}: ${teamLabel(team)}`}
-                title={`${definition.revokeLabel}: ${teamLabel(team)}`}
-                onClick={() => void onRevoke(team.id)}
-              >
-                <IconX width={16} height={16} />
-              </button>
-            </div>
+              <RowActionMenu
+                actions={[
+                  {
+                    key: 'remove',
+                    label: definition.revokeLabel,
+                    danger: true,
+                    disabled: busy,
+                    onSelect: () => void onRevoke(team.id),
+                  },
+                ]}
+                ariaLabel={`Actions for ${teamLabel(team)}`}
+              />
+            </RecordListRow>
           ))}
-        </div>
+        </RecordList>
       )}
       <div className="cu-workflow-access__picker cu-workflow-access__picker--inline">
         <SelectionDropdown
