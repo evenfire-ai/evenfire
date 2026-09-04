@@ -4,6 +4,8 @@
 
 set -euo pipefail
 
+WRC_NP_LAST_RECONCILE_SINCE_TIME=""
+
 wrc_np_spec_hash() {
   local namespace=$1 name=$2
   kctl get networkpolicy "$name" -n "$namespace" -o json |
@@ -13,6 +15,11 @@ wrc_np_spec_hash() {
 wrc_np_resource_version() {
   local namespace=$1 name=$2
   kctl get networkpolicy "$name" -n "$namespace" -o jsonpath='{.metadata.resourceVersion}'
+}
+
+wrc_np_uid() {
+  local namespace=$1 name=$2
+  kctl get networkpolicy "$name" -n "$namespace" -o jsonpath='{.metadata.uid}'
 }
 
 wrc_wait_for_np() {
@@ -39,6 +46,28 @@ wrc_wait_for_np_spec_hash() {
     elapsed=$((elapsed + POLL_INTERVAL))
   done
   fail "NetworkPolicy ${namespace}/${name} did not restore its baseline spec"
+  return 1
+}
+
+wrc_wait_for_np_recreated() {
+  local namespace=$1 name=$2 previous_uid=$3 expected_hash=$4 timeout=${5:-120} elapsed=0
+  local current_uid deletion_timestamp current_hash
+  while [ "$elapsed" -lt "$timeout" ]; do
+    current_uid="$(wrc_np_uid "$namespace" "$name" 2>/dev/null || true)"
+    deletion_timestamp="$(
+      kctl get networkpolicy "$name" -n "$namespace" \
+        -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true
+    )"
+    current_hash="$(wrc_np_spec_hash "$namespace" "$name" 2>/dev/null || true)"
+    if [ -n "$current_uid" ] && [ "$current_uid" != "$previous_uid" ] &&
+       [ -z "$deletion_timestamp" ] && [ "$current_hash" = "$expected_hash" ]; then
+      ok "NetworkPolicy ${namespace}/${name} was recreated by the scheduled retry"
+      return 0
+    fi
+    sleep "$POLL_INTERVAL"
+    elapsed=$((elapsed + POLL_INTERVAL))
+  done
+  fail "NetworkPolicy ${namespace}/${name} was not recreated after its terminating race"
   return 1
 }
 
@@ -71,6 +100,7 @@ wrc_trigger_recipe_reconcile() {
   since_time="$(
     python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))'
   )"
+  WRC_NP_LAST_RECONCILE_SINCE_TIME="$since_time"
 
   kctl patch workflowrecipe "$name" -n "$namespace" --type=merge -p "$patch" >/dev/null
   after_generation="$(
@@ -92,6 +122,49 @@ wrc_trigger_recipe_reconcile() {
   done
 
   fail "Timed out waiting for WRC to reconcile WorkflowRecipe ${namespace}/${name} generation ${after_generation}"
+  return 1
+}
+
+wrc_wait_for_np_noop_witness() {
+  local namespace=$1 name=$2 family=$3 mode=${4:-apply} timeout=${5:-120} elapsed=0
+  local controller_namespace=${WRC_CONTROLLER_NAMESPACE:-control-plane}
+  local controller_deployment=${WRC_CONTROLLER_DEPLOYMENT:-workflow-recipes}
+  local message='network policy unchanged; skipping update'
+
+  [ -n "$WRC_NP_LAST_RECONCILE_SINCE_TIME" ] || {
+    fail "No parent reconcile timestamp is available for NetworkPolicy ${namespace}/${name}"
+    return 1
+  }
+  if [ "$mode" = "workload-egress-prefilter" ]; then
+    message='network policy egress set unchanged; skipping live apply'
+  elif [ "$mode" != "apply" ]; then
+    fail "Unknown NetworkPolicy no-op witness mode: ${mode}"
+    return 1
+  fi
+
+  while [ "$elapsed" -lt "$timeout" ]; do
+    if kctl logs -n "$controller_namespace" "deployment/${controller_deployment}" \
+      --since-time="$WRC_NP_LAST_RECONCILE_SINCE_TIME" 2>/dev/null |
+      jq -Rse --arg message "$message" --arg policy "$name" --arg namespace "$namespace" \
+        --arg family "$family" '
+          split("\n")
+          | map(try fromjson catch null)
+          | any(
+              . != null and
+              .msg == $message and
+              .policy == $policy and
+              .namespace == $namespace and
+              .family == $family
+            )
+        ' >/dev/null; then
+      ok "NetworkPolicy ${namespace}/${name} emitted its ${family} no-op witness"
+      return 0
+    fi
+    sleep "$POLL_INTERVAL"
+    elapsed=$((elapsed + POLL_INTERVAL))
+  done
+
+  fail "NetworkPolicy ${namespace}/${name} emitted no ${family} no-op witness after the parent reconcile"
   return 1
 }
 

@@ -334,6 +334,10 @@ it cannot hide later drift.
   owner forces one optimistic-concurrency replace using the `resourceVersion` from the
   same validated read on the next parent recipe reconcile. NetworkPolicy-only changes do
   not emit a WorkflowRecipe event. The following reconcile is read-only.
+- **Retryable races schedule their own recovery.** A terminating object, create conflict
+  whose winner disappears, missing live `resourceVersion`, replace 404/409 or transient
+  API failure re-enqueues the parent with bounded backoff. A status-only update is not
+  treated as the retry trigger.
 - **Other spec-hash-managed objects retain their existing drift contract.** For example,
   a manually scaled recipe Deployment is not reverted until the desired manifest changes;
   its replica-health drift remains visible in recipe status.
@@ -360,7 +364,9 @@ NetworkPolicy family routed through the live-convergence helper:
 
 - `ui-ingress`, `workload-ingress` and `workload-egress`: correctly configured UI→API
   and API→sibling traffic, unlabelled negative controls, forced live-spec drift, a real
-  parent recipe reconcile, repair, and a post-repair resourceVersion stability window;
+  parent recipe reconcile, repair, a terminating-policy race that self-heals through the
+  scheduled retry without a second parent event, and a post-repair no-op witness plus
+  resourceVersion stability window;
 - `internal-dependency`: inferred source→backend traffic, an unlabelled denied pod,
   two-sided policy repair and no-churn;
 - `oauth-broker-egress`: opted-in workload→Control API reachability, an unlabelled
@@ -368,10 +374,13 @@ NetworkPolicy family routed through the live-convergence helper:
 - `webhook-gateway`: all three policies, a signed public webhook business signal,
   spec drift, stale/missing owner repair, route recovery and no-churn.
 
-The public CI runner cannot provide this Calico-backed cluster. It therefore runs the
-fail-loud composition/syntax contract, while the real dataplane result is recorded by
-the exact-head local T2/pre-merge evidence lane. Missing prerequisites, a missing family
-suite, incomplete cleanup or zero executed suites are failures, never skips.
+Every no-churn assertion requires both a policy/family-bound structured WRC no-op log and
+an unchanged `resourceVersion`; observing only the generic parent-reconcile log is not
+sufficient. The public CI runner cannot provide this Calico-backed cluster. It therefore
+runs the fail-loud composition/syntax contract, while the real dataplane result is
+recorded by the exact-head local T2/pre-merge evidence lane. Missing prerequisites, a
+missing family suite, incomplete cleanup or zero executed suites are failures, never
+skips.
 
 ### Unit tests (vitest + @testing-library/react)
 

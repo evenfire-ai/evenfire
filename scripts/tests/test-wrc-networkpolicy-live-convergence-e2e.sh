@@ -49,6 +49,16 @@ else
   fail "reconcile trigger does not prove a parent recipe reconcile"
 fi
 
+if grep -Fq 'network policy unchanged; skipping update' "$HELPER" &&
+   grep -Fq 'network policy egress set unchanged; skipping live apply' "$HELPER" &&
+   grep -Fq '.policy == $policy' "$HELPER" &&
+   grep -Fq '.namespace == $namespace' "$HELPER" &&
+   grep -Fq '.family == $family' "$HELPER"; then
+  pass "no-churn witness binds structured WRC output to one policy and family"
+else
+  fail "no-churn witness can pass without proving the named policy reached its no-op path"
+fi
+
 for entry in \
   "$ROUTES:service-route" \
   "$INTDEP:internal-dependency" \
@@ -64,14 +74,46 @@ for entry in \
   fi
 done
 
+for entry in \
+  "$ROUTES:3:service-route" \
+  "$INTDEP:2:internal-dependency" \
+  "$OAUTH:1:OAuth broker" \
+  "$WEBHOOK:3:webhook"; do
+  script=${entry%%:*}
+  remainder=${entry#*:}
+  minimum=${remainder%%:*}
+  label=${remainder#*:}
+  witness_count=$(grep -Fc 'wrc_wait_for_np_noop_witness' "$script" || true)
+  if [ "$witness_count" -ge "$minimum" ]; then
+    pass "${label} E2E requires a no-op witness for every in-scope policy"
+  else
+    fail "${label} E2E has ${witness_count}/${minimum} required no-op witnesses"
+  fi
+done
+
+for entry in "$OAUTH:OAuth broker" "$WEBHOOK:webhook"; do
+  script=${entry%%:*}
+  label=${entry#*:}
+  if grep -Fq 'cleanup_status=1' "$script" &&
+     grep -Fq 'cleanup also failed' "$script" &&
+     grep -Fq 'status=1' "$script"; then
+    pass "${label} E2E makes cleanup failure fail the aggregate"
+  else
+    fail "${label} E2E cleanup can be silently ignored"
+  fi
+done
+
 for family in UI_INGRESS_POLICY WL_EGRESS_POLICY WL_INGRESS_POLICY; do
   grep -Fq "$family" "$ROUTES" || fail "service-route E2E omits $family"
 done
 if grep -Fq 'correctly configured positive routes' "$ROUTES" &&
    grep -Fq 'negative controls' "$ROUTES" &&
    grep -Fq 'live drift repair' "$ROUTES" &&
+   grep -Fq 'terminating race self-heals' "$ROUTES" &&
+   grep -Fq 'wrc_wait_for_np_recreated' "$ROUTES" &&
+   grep -Fq 'unexpected second parent spec event' "$ROUTES" &&
    grep -Fq 'steady-state no-churn' "$ROUTES"; then
-  pass "UI/workload route E2E proves positive, negative, repair, and no-churn signals"
+  pass "UI/workload route E2E proves positive, negative, repair, scheduled retry, and no-churn signals"
 else
   fail "UI/workload route E2E is missing a required signal"
 fi

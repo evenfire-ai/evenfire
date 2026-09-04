@@ -304,6 +304,8 @@ printf "%s" "$repaired_output" | grep -Fq "issue485-ok" && \
 egress_rv="$(wrc_np_resource_version "$egress_ns" "$egress_name")"
 ingress_rv="$(wrc_np_resource_version "$ingress_ns" "$ingress_name")"
 wrc_trigger_recipe_reconcile "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" 120
+wrc_wait_for_np_noop_witness "$egress_ns" "$egress_name" internal-dependency apply 120
+wrc_wait_for_np_noop_witness "$ingress_ns" "$ingress_name" internal-dependency apply 120
 sleep "$STABILITY_SECONDS"
 [ "$(wrc_np_resource_version "$egress_ns" "$egress_name")" = "$egress_rv" ] || {
   fail "${egress_ref} churned after convergence"

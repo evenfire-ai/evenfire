@@ -44,8 +44,10 @@ BACKGROUND_PROBE_POD="e2e-wrc-oauth-unlabelled"
 STABILITY_SECONDS="${E2E_NP_STABILITY_SECONDS:-20}"
 TIMEOUT_RECIPE_ACTIVE="${TIMEOUT_RECIPE_ACTIVE:-180}"
 UI_DEPLOYMENT=""
+BACKGROUND_DEPLOYMENT=""
 UI_PORT_FWD_PORT="${E2E_OAUTH_UI_PORT:-18096}"
 UI_PORT_FWD_PID=""
+CREATED=0
 
 wait_for_recipe_phase() {
   local name=$1 ns=$2 want=$3 timeout=$4 elapsed=0
@@ -112,60 +114,86 @@ YAML
 }
 
 cleanup() {
+  local cleanup_status=0
   header "Cleanup"
   if [ -n "$UI_PORT_FWD_PID" ]; then
-    kill "$UI_PORT_FWD_PID" 2>/dev/null || true
+    if kill -0 "$UI_PORT_FWD_PID" 2>/dev/null; then
+      kill "$UI_PORT_FWD_PID" 2>/dev/null || cleanup_status=1
+    fi
     wait "$UI_PORT_FWD_PID" 2>/dev/null || true
     UI_PORT_FWD_PID=""
   fi
-  kctl delete pod "$BACKGROUND_PROBE_POD" -n "$WORKFLOW_RECIPE_NS" --ignore-not-found --wait=false 2>/dev/null || true
-  kctl delete workflowrecipe "$BACKGROUND_RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" --ignore-not-found --wait=false 2>/dev/null || true
+  kctl delete pod "$BACKGROUND_PROBE_POD" -n "$WORKFLOW_RECIPE_NS" --ignore-not-found \
+    --wait=true --timeout=60s >/dev/null 2>&1 || cleanup_status=1
+  kctl delete workflowrecipe "$BACKGROUND_RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" \
+    --ignore-not-found --wait=false >/dev/null 2>&1 || cleanup_status=1
   kctl delete workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" \
-    --ignore-not-found --wait=false 2>/dev/null || true
+    --ignore-not-found --wait=false >/dev/null 2>&1 || cleanup_status=1
+  wait_for_workflowrecipe_deleted "$WORKFLOW_RECIPE_NS" "$BACKGROUND_RECIPE_NAME" \
+    "$TIMEOUT_DELETE" >/dev/null 2>&1 || cleanup_status=1
+  wait_for_workflowrecipe_deleted "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" \
+    "$TIMEOUT_DELETE" >/dev/null 2>&1 || cleanup_status=1
   # WRC GC follows ownerReferences inside the recipe namespace, but UI
   # workloads are reconciled cross-namespace (sandbox-recipes →
   # sandbox-ui) so K8s GC can't follow the link. Force-delete leftovers.
   if [ -n "$UI_DEPLOYMENT" ]; then
-    kctl delete deployment "$UI_DEPLOYMENT" -n "$SANDBOX_UI_NS" --ignore-not-found 2>/dev/null || true
-    kctl delete svc "$UI_DEPLOYMENT" -n "$SANDBOX_UI_NS" --ignore-not-found 2>/dev/null || true
+    kctl delete deployment "$UI_DEPLOYMENT" -n "$SANDBOX_UI_NS" \
+      --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
+    kctl delete svc "$UI_DEPLOYMENT" -n "$SANDBOX_UI_NS" \
+      --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
   fi
   kctl delete deployment,service -n "$SANDBOX_UI_NS" -l "clerum.io/recipe=${RECIPE_NAME}" \
-    --ignore-not-found 2>/dev/null || true
+    --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
+  kctl delete deployment,service,networkpolicy -n "$WORKFLOW_RECIPE_NS" \
+    -l "clerum.io/recipe=${BACKGROUND_RECIPE_NAME}" --ignore-not-found \
+    >/dev/null 2>&1 || cleanup_status=1
   kctl delete networkpolicy "ui-egress-${RECIPE_NAME}" -n "$SANDBOX_UI_NS" \
-    --ignore-not-found 2>/dev/null || true
-  kctl delete networkpolicy "$BACKGROUND_POLICY_NAME" -n "$WORKFLOW_RECIPE_NS" --ignore-not-found 2>/dev/null || true
+    --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
+  kctl delete networkpolicy "$BACKGROUND_POLICY_NAME" -n "$WORKFLOW_RECIPE_NS" \
+    --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
   kctl delete secret "$OAUTH_SECRET_NAME" -n "$WORKFLOW_RECIPE_NS" \
-    --ignore-not-found 2>/dev/null || true
+    --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
+
+  return "$cleanup_status"
 }
 
 on_exit() {
-  local status=$?
-  if [ -n "$UI_PORT_FWD_PID" ]; then
-    kill "$UI_PORT_FWD_PID" 2>/dev/null || true
-    wait "$UI_PORT_FWD_PID" 2>/dev/null || true
-    UI_PORT_FWD_PID=""
-  fi
+  local status=$? cleanup_status=0
+  trap - EXIT INT TERM
   if [ "${E2E_KEEP_RESOURCES:-0}" = "1" ]; then
     warn "E2E_KEEP_RESOURCES=1; preserving OAuth fixtures for inspection"
-    return "$status"
+    exit "$status"
   fi
-  cleanup
-  return "$status"
+  if [ "$CREATED" = "1" ]; then
+    cleanup || cleanup_status=$?
+  fi
+  if [ "$cleanup_status" -ne 0 ]; then
+    if [ "$status" -eq 0 ]; then
+      fail "OAuth E2E cleanup left resources or processes behind"
+      status=1
+    else
+      warn "OAuth E2E cleanup also failed while preserving the original test failure"
+    fi
+  fi
+  exit "$status"
 }
 
 if [[ "${1:-}" == "--cleanup-only" ]]; then
   cleanup
-  exit 0
+  exit $?
 fi
 
 trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ─── Phase 0: Prerequisites ──────────────────────────────────────────
 check_prerequisites
 
 # ─── Phase 1: Clean Slate ────────────────────────────────────────────
 header "Phase 1 — Clean Slate"
-cleanup
+cleanup >/dev/null 2>&1 || true
+CREATED=1
 
 # ─── Phase 2: Create dummy OAuth credentials Secret ──────────────────
 header "Phase 2 — Create dummy slack-oauth-creds Secret"
@@ -237,14 +265,14 @@ if ! wait_for_recipe_phase "$BACKGROUND_RECIPE_NAME" "$WORKFLOW_RECIPE_NS" "acti
   exit 1
 fi
 
-background_deployment="$(
+BACKGROUND_DEPLOYMENT="$(
   wait_for_workload_instance "$BACKGROUND_RECIPE_NAME" "$BACKGROUND_WORKLOAD_ID" 120
 )"
-[ -n "$background_deployment" ] || {
+[ -n "$BACKGROUND_DEPLOYMENT" ] || {
   fail "Background OAuth workload instance was not assigned"
   exit 1
 }
-wait_for_deployment "$WORKFLOW_RECIPE_NS" "$background_deployment" "$TIMEOUT_POD"
+wait_for_deployment "$WORKFLOW_RECIPE_NS" "$BACKGROUND_DEPLOYMENT" "$TIMEOUT_POD"
 wrc_wait_for_np "$WORKFLOW_RECIPE_NS" "$BACKGROUND_POLICY_NAME" 120
 
 control_api_ip="$(kctl get service control-api -n "$CONTROL_NS" -o jsonpath='{.spec.clusterIP}')"
@@ -253,7 +281,7 @@ control_api_ip="$(kctl get service control-api -n "$CONTROL_NS" -o jsonpath='{.s
   exit 1
 }
 
-response="$(http_response_from_target "deploy/${background_deployment}" "$control_api_ip" 8090)"
+response="$(http_response_from_target "deploy/${BACKGROUND_DEPLOYMENT}" "$control_api_ip" 8090)"
 if printf '%s' "$response" | grep -Eq 'HTTP/1\.[01] [2345][0-9][0-9]'; then
   ok "Opted-in background workload reaches the OAuth broker network boundary"
 else
@@ -273,7 +301,7 @@ oauth_policy_hash="$(wrc_np_spec_hash "$WORKFLOW_RECIPE_NS" "$BACKGROUND_POLICY_
 wrc_inject_selector_drift "$WORKFLOW_RECIPE_NS" "$BACKGROUND_POLICY_NAME"
 wrc_trigger_recipe_reconcile "$WORKFLOW_RECIPE_NS" "$BACKGROUND_RECIPE_NAME" 120
 wrc_wait_for_np_spec_hash "$WORKFLOW_RECIPE_NS" "$BACKGROUND_POLICY_NAME" "$oauth_policy_hash" 120
-response="$(http_response_from_target "deploy/${background_deployment}" "$control_api_ip" 8090)"
+response="$(http_response_from_target "deploy/${BACKGROUND_DEPLOYMENT}" "$control_api_ip" 8090)"
 if printf '%s' "$response" | grep -Eq 'HTTP/1\.[01] [2345][0-9][0-9]'; then
   ok "OAuth broker route recovered after live NetworkPolicy repair"
 else
@@ -281,6 +309,7 @@ else
     exit 1
 fi
 wrc_trigger_recipe_reconcile "$WORKFLOW_RECIPE_NS" "$BACKGROUND_RECIPE_NAME" 120
+wrc_wait_for_np_noop_witness "$WORKFLOW_RECIPE_NS" "$BACKGROUND_POLICY_NAME" oauth-broker-egress apply 120
 wrc_assert_np_stable "$WORKFLOW_RECIPE_NS" "$BACKGROUND_POLICY_NAME" "$STABILITY_SECONDS"
 
 # ─── Phase 5: spec.oauthClients[] survives the round-trip ────────────

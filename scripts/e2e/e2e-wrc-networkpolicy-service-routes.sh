@@ -24,6 +24,7 @@ STABILITY_SECONDS="${E2E_NP_STABILITY_SECONDS:-20}"
 ROGUE_UI_POD="${RECIPE_NAME}-rogue-ui"
 ROGUE_WORKLOAD_POD="${RECIPE_NAME}-rogue-wl"
 CREATED=0
+HELD_POLICY_FINALIZER=0
 
 UI_DEPLOYMENT=""
 API_DEPLOYMENT=""
@@ -37,6 +38,12 @@ cleanup() {
   local status=0 namespace
   kctl delete pod "$ROGUE_UI_POD" -n "$SANDBOX_UI_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || status=1
   kctl delete pod "$ROGUE_WORKLOAD_POD" -n "$SANDBOX_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || status=1
+  if [ "$HELD_POLICY_FINALIZER" = "1" ] &&
+     kctl get networkpolicy "$WL_INGRESS_POLICY" -n "$SANDBOX_NS" >/dev/null 2>&1; then
+    kctl patch networkpolicy "$WL_INGRESS_POLICY" -n "$SANDBOX_NS" --type=merge \
+      -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || status=1
+    HELD_POLICY_FINALIZER=0
+  fi
   kctl delete workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || status=1
   wait_for_workflowrecipe_deleted "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" "$TIMEOUT_DELETE" >/dev/null 2>&1 || status=1
   for namespace in "$SANDBOX_NS" "$SANDBOX_UI_NS"; do
@@ -86,6 +93,21 @@ wait_for_recipe_active() {
     elapsed=$((elapsed + POLL_INTERVAL))
   done
   fail "WorkflowRecipe did not reach active"
+  return 1
+}
+
+wait_for_recipe_message() {
+  local expected=$1 timeout=${2:-120} elapsed=0 message
+  while [ "$elapsed" -lt "$timeout" ]; do
+    message="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" \
+      -o jsonpath='{.status.message}' 2>/dev/null || true)"
+    if [[ "$message" == *"$expected"* ]]; then
+      return 0
+    fi
+    sleep "$POLL_INTERVAL"
+    elapsed=$((elapsed + POLL_INTERVAL))
+  done
+  fail "WorkflowRecipe did not report retryable state containing: ${expected}"
   return 1
 }
 
@@ -273,11 +295,34 @@ ok "WRC repaired live spec drift for all three families"
 assert_http_body "sandbox UI route recovered after NetworkPolicy repair" "$SANDBOX_UI_NS" "$UI_DEPLOYMENT" "$API_CLUSTER_IP" 8080 "api-ok"
 assert_http_body "workload sibling route recovered after NetworkPolicy repair" "$SANDBOX_NS" "$API_DEPLOYMENT" "$DB_CLUSTER_IP" "$DB_PORT" "db-ok"
 
-header "Phase 5 — steady-state no-churn"
+header "Phase 5 — terminating race self-heals without another parent event"
+terminating_uid="$(wrc_np_uid "$SANDBOX_NS" "$WL_INGRESS_POLICY")"
+terminating_generation="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" -o jsonpath='{.metadata.generation}')"
+kctl patch networkpolicy "$WL_INGRESS_POLICY" -n "$SANDBOX_NS" --type=merge \
+  -p '{"metadata":{"finalizers":["e2e.evenfire.ai/hold-deletion"]}}' >/dev/null
+HELD_POLICY_FINALIZER=1
+kctl delete networkpolicy "$WL_INGRESS_POLICY" -n "$SANDBOX_NS" --wait=false >/dev/null
 wrc_trigger_recipe_reconcile "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" 120
+wait_for_recipe_message 'is terminating; retrying after deletion' 120
+kctl patch networkpolicy "$WL_INGRESS_POLICY" -n "$SANDBOX_NS" --type=merge \
+  -p '{"metadata":{"finalizers":[]}}' >/dev/null
+HELD_POLICY_FINALIZER=0
+wrc_wait_for_np_recreated "$SANDBOX_NS" "$WL_INGRESS_POLICY" "$terminating_uid" "$wl_ingress_hash" 120
+[ "$(kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" -o jsonpath='{.metadata.generation}')" = "$((terminating_generation + 1))" ] || {
+  fail "NetworkPolicy recovery depended on an unexpected second parent spec event"
+  exit 1
+}
+wait_for_recipe_active 120
+assert_http_body "workload sibling route recovered after scheduled NetworkPolicy retry" "$SANDBOX_NS" "$API_DEPLOYMENT" "$DB_CLUSTER_IP" "$DB_PORT" "db-ok"
+
+header "Phase 6 — steady-state no-churn"
+wrc_trigger_recipe_reconcile "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" 120
+wrc_wait_for_np_noop_witness "$SANDBOX_NS" "$UI_INGRESS_POLICY" ui-ingress apply 120
+wrc_wait_for_np_noop_witness "$SANDBOX_NS" "$WL_EGRESS_POLICY" workload-egress workload-egress-prefilter 120
+wrc_wait_for_np_noop_witness "$SANDBOX_NS" "$WL_INGRESS_POLICY" workload-ingress apply 120
 assert_all_stable
 
-header "Phase 6 — cleanup"
+header "Phase 7 — cleanup"
 cleanup
 CREATED=0
 for policy in "$UI_INGRESS_POLICY" "$WL_EGRESS_POLICY" "$WL_INGRESS_POLICY"; do

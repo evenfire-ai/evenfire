@@ -1938,15 +1938,18 @@ export class WorkflowRecipeReconciler {
               error instanceof RetryableReconcileError
                 ? message
                 : `Workflow workload infrastructure temporarily unavailable (${safe.errorCode ?? safe.errorName})`
-            // Transient infra failure (e.g. DNS SERVFAIL on egress). Degrade
-            // instead of failing so the next reconcile retries before the
-            // workflow runs — don't mark workflowPhase failed.
+            // Transient infra failure (e.g. DNS SERVFAIL or a NetworkPolicy
+            // optimistic-concurrency race). Degrade instead of failing and
+            // schedule a deterministic retry before the workflow runs — a
+            // status patch alone only emits a status-only MODIFIED event and
+            // cannot be relied on to enter the full reconcile path again.
             return {
               phase: 'degraded' as RecipePhase,
               message: retryableMessage,
               workloadStatuses: [],
               internalDependencyConditions,
               workloadConditions,
+              requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
             }
           }
           return {
@@ -2704,8 +2707,8 @@ export class WorkflowRecipeReconciler {
       //
       // (1) RetryableReconcileError — explicitly thrown for a transient step
       //     (e.g. DNS SERVFAIL/timeout on egress resolution). Degrade so the
-      //     periodic reconcile retries and the recipe self-heals once the
-      //     dependency recovers. egressResolutionError() raises this ONLY when
+      //     watcher schedules a deterministic retry and the recipe self-heals
+      //     once the dependency recovers. egressResolutionError() raises this ONLY when
       //     every failure was transient; a permanent failure yields a plain
       //     Error that must stay terminal (fail-closed) below.
       if (error instanceof RetryableReconcileError) {
@@ -2716,6 +2719,7 @@ export class WorkflowRecipeReconciler {
           phase: 'degraded',
           message: error.message,
           workloadStatuses: [],
+          requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
         }
       }
       // (2) A raw retryable infra error (connect ETIMEDOUT/ECONNRESET, 5xx,

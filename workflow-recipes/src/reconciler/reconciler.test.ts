@@ -2280,6 +2280,7 @@ describe('WorkflowRecipeReconciler', () => {
 
     expect(result.phase).toBe('degraded')
     expect(result.message).toMatch(/is terminating; retrying after deletion/)
+    expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
     expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
   })
 
@@ -2322,6 +2323,7 @@ describe('WorkflowRecipeReconciler', () => {
 
     expect(result.phase).toBe('degraded')
     expect(result.message).toMatch(/disappeared during replace/)
+    expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
   })
 
   it.each([{ code: 500 }, new Error('network timeout')])(
@@ -2396,6 +2398,7 @@ describe('WorkflowRecipeReconciler', () => {
     expect(result.phase).toBe('degraded')
     expect(result.workflowPhase).toBeUndefined()
     expect(result.message).toBe('Workflow workload infrastructure temporarily unavailable (500)')
+    expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
     expect(workflowReconcile).not.toHaveBeenCalled()
   })
 
@@ -6345,6 +6348,7 @@ describe('WorkflowRecipeReconciler', () => {
     // ownership backstop (workflowNeedsOwnershipBackstop) retries the revocation.
     expect(r.phase).toBe('degraded')
     expect(r.message).toMatch(/teardown of denied workflow workload .* failed/)
+    expect(r.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
     // The workflow infrastructure reconcile must NOT have run — we degraded first.
     expect(workflowReconcile).not.toHaveBeenCalled()
 
@@ -6412,6 +6416,7 @@ describe('WorkflowRecipeReconciler', () => {
     // throwOnError makes this red (safeDelete swallows → workflow proceeds, phase 'deploying').
     expect(r.phase).toBe('degraded')
     expect(r.message).toMatch(/teardown of denied workflow workload .* failed/)
+    expect(r.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
     expect(workflowReconcile).not.toHaveBeenCalled()
 
     // Restore the shared delete mock (the suite clears calls, not mock implementations).

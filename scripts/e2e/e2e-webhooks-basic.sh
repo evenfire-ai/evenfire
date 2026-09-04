@@ -54,6 +54,8 @@ HANDLER_INGRESS_POLICY="allow-gateway-ingress-to-handler-wf-${RECIPE_NAME}"
 
 PORT_FWD_PORT=18095
 PORT_FWD_PID=""
+HANDLER_DEPLOYMENT=""
+CREATED=0
 
 wait_for_workload_instance() {
   local workload_id=$1 timeout=${2:-120} elapsed=0 instance
@@ -87,22 +89,75 @@ wait_for_recipe_active() {
   return 1
 }
 
-# shellcheck disable=SC2329
 cleanup() {
-  local rc=$?
-  set +e
-  [ -n "$PORT_FWD_PID" ] && kill "$PORT_FWD_PID" 2>/dev/null
-  kctl -n "$GATEWAY_NS" delete -f "${SCRIPT_DIR}/../../${RECIPE_FILE}" --ignore-not-found --wait=false >/dev/null 2>&1
-  kctl -n "$GATEWAY_NS" delete secret "$SECRET_NAME" --ignore-not-found >/dev/null 2>&1
-  exit "$rc"
+  local cleanup_status=0
+  if [ -n "$PORT_FWD_PID" ]; then
+    if kill -0 "$PORT_FWD_PID" 2>/dev/null; then
+      kill "$PORT_FWD_PID" 2>/dev/null || cleanup_status=1
+    fi
+    wait "$PORT_FWD_PID" 2>/dev/null || true
+    PORT_FWD_PID=""
+  fi
+  kctl -n "$GATEWAY_NS" delete workflowrecipe "$RECIPE_NAME" \
+    --ignore-not-found --wait=false >/dev/null 2>&1 || cleanup_status=1
+  wait_for_workflowrecipe_deleted "$GATEWAY_NS" "$RECIPE_NAME" "$TIMEOUT_DELETE" \
+    >/dev/null 2>&1 || cleanup_status=1
+  if [ -n "$HANDLER_DEPLOYMENT" ]; then
+    kctl -n "$GATEWAY_NS" delete deployment "$HANDLER_DEPLOYMENT" \
+      --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
+    kctl -n "$GATEWAY_NS" delete service "$HANDLER_DEPLOYMENT" \
+      --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
+  fi
+  kctl -n "$GATEWAY_NS" delete deployment,service -l "clerum.io/recipe=${RECIPE_NAME}" \
+    --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
+  kctl -n "$GATEWAY_NS" delete deployment "$GATEWAY_NAME" \
+    --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
+  kctl -n "$GATEWAY_NS" delete service "$GATEWAY_NAME" \
+    --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
+  kctl -n "$GATEWAY_NS" delete configmap "wf-${RECIPE_NAME}-webhook-gateway-config" \
+    --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
+  kctl -n "$GATEWAY_NS" delete networkpolicy "$PROXY_INGRESS_POLICY" \
+    "$HANDLER_EGRESS_POLICY" "$HANDLER_INGRESS_POLICY" --ignore-not-found \
+    >/dev/null 2>&1 || cleanup_status=1
+  kctl -n "$GATEWAY_NS" delete secret "$SECRET_NAME" --ignore-not-found \
+    >/dev/null 2>&1 || cleanup_status=1
+  return "$cleanup_status"
 }
-trap cleanup EXIT INT TERM
+
+on_exit() {
+  local status=$? cleanup_status=0
+  trap - EXIT INT TERM
+  if [ "${E2E_KEEP_RESOURCES:-0}" = "1" ]; then
+    warn "E2E_KEEP_RESOURCES=1; preserving webhook fixtures for inspection"
+    exit "$status"
+  fi
+  if [ "$CREATED" = "1" ]; then
+    cleanup || cleanup_status=$?
+  fi
+  if [ "$cleanup_status" -ne 0 ]; then
+    if [ "$status" -eq 0 ]; then
+      fail "Webhook E2E cleanup left resources or processes behind"
+      status=1
+    else
+      warn "Webhook E2E cleanup also failed while preserving the original test failure"
+    fi
+  fi
+  exit "$status"
+}
+
+if [ "${1:-}" = "--cleanup-only" ]; then
+  cleanup
+  exit $?
+fi
+
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ─── Phase 1: clean slate ───────────────────────────────────────────
 header "Phase 1 — clean slate"
-kctl -n "$GATEWAY_NS" delete workflowrecipe "$RECIPE_NAME" --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
-kctl -n "$GATEWAY_NS" delete deployment "$GATEWAY_NAME" --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
-kctl -n "$GATEWAY_NS" delete secret "$SECRET_NAME" --ignore-not-found >/dev/null 2>&1 || true
+cleanup >/dev/null 2>&1 || true
+CREATED=1
 log "leftover state cleared"
 
 # ─── Phase 2: create signing-secret ─────────────────────────────────
@@ -329,6 +384,9 @@ proxy_rv="$(wrc_np_resource_version "$GATEWAY_NS" "$PROXY_INGRESS_POLICY")"
 handler_egress_rv="$(wrc_np_resource_version "$GATEWAY_NS" "$HANDLER_EGRESS_POLICY")"
 handler_ingress_rv="$(wrc_np_resource_version "$GATEWAY_NS" "$HANDLER_INGRESS_POLICY")"
 wrc_trigger_recipe_reconcile "$GATEWAY_NS" "$RECIPE_NAME" 120
+wrc_wait_for_np_noop_witness "$GATEWAY_NS" "$PROXY_INGRESS_POLICY" webhook-gateway apply 120
+wrc_wait_for_np_noop_witness "$GATEWAY_NS" "$HANDLER_EGRESS_POLICY" webhook-gateway apply 120
+wrc_wait_for_np_noop_witness "$GATEWAY_NS" "$HANDLER_INGRESS_POLICY" webhook-gateway apply 120
 sleep "$STABILITY_SECONDS"
 [ "$(wrc_np_resource_version "$GATEWAY_NS" "$PROXY_INGRESS_POLICY")" = "$proxy_rv" ] || fail "${PROXY_INGRESS_POLICY} churned"
 [ "$(wrc_np_resource_version "$GATEWAY_NS" "$HANDLER_EGRESS_POLICY")" = "$handler_egress_rv" ] || fail "${HANDLER_EGRESS_POLICY} churned"

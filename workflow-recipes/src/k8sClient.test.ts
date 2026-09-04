@@ -1397,6 +1397,75 @@ describe('workload status refresh loop helpers', () => {
     expect(reconcile).not.toHaveBeenCalled()
   })
 
+  it('retries a transient degraded result even when the first pass patches status', async () => {
+    vi.useFakeTimers()
+    try {
+      const recipe = makeWorkloadRecipe({
+        metadata: { name: 'policy-race', namespace: 'sandbox-recipes', generation: 1 },
+        status: { phase: 'candidate' },
+      })
+      const reconcile = vi
+        .fn()
+        .mockResolvedValueOnce({
+          phase: 'degraded',
+          message: 'NetworkPolicy changed during replace',
+          workloadStatuses: [],
+          requeueAfterMs: 5_000,
+        })
+        .mockResolvedValueOnce({
+          phase: 'active',
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+        })
+      const patchStatus = vi.fn().mockResolvedValue(undefined)
+      const enqueue = vi.fn((_key: string, task: () => Promise<void>) => task())
+
+      type InternalWatcher = {
+        recipes: Map<string, WorkflowRecipeCRD>
+        transientRetries: Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>
+        eventQueue: { enqueue: typeof enqueue }
+        stopped: boolean
+        traceReporter: null
+        dbRunProcessor: null
+        reconciler: {
+          reconcile: typeof reconcile
+          isRecipeStillActive: ReturnType<typeof vi.fn>
+          ensureFinalizer: ReturnType<typeof vi.fn>
+          patchStatus: typeof patchStatus
+        }
+        handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
+      }
+
+      const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+      internal.recipes = new Map([[recipe.metadata.name, recipe]])
+      internal.transientRetries = new Map()
+      internal.eventQueue = { enqueue }
+      internal.stopped = false
+      internal.traceReporter = null
+      internal.dbRunProcessor = null
+      internal.reconciler = {
+        reconcile,
+        isRecipeStillActive: vi.fn().mockResolvedValue(true),
+        ensureFinalizer: vi.fn().mockResolvedValue(undefined),
+        patchStatus,
+      }
+
+      await internal.handleRecipeEvent('ADDED', recipe)
+
+      expect(patchStatus).toHaveBeenCalledTimes(1)
+      expect(internal.transientRetries.has(recipe.metadata.name)).toBe(true)
+
+      await vi.advanceTimersByTimeAsync(5_000)
+      await Promise.resolve()
+
+      expect(enqueue).toHaveBeenCalledWith(recipe.metadata.name, expect.any(Function))
+      expect(reconcile).toHaveBeenCalledTimes(2)
+      expect(internal.transientRetries.has(recipe.metadata.name)).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('reconciles when Codex connection-ref changes without a generation bump', async () => {
     const cached = makeWorkloadRecipe({
       metadata: { name: 'active-recipe', namespace: 'sandbox-recipes', generation: 7 },
