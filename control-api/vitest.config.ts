@@ -10,14 +10,18 @@ export default defineConfig({
     fileParallelism: false,
     maxWorkers: 1,
     pool: 'threads',
-    // Real-Postgres tests mutate shared database state and cannot be retried safely
-    // after a timeout because the abandoned async work may still commit.
-    retry: process.env.CONTROL_API_REAL_PG_ADMIN_URL ? 0 : 2,
-    testTimeout: 10_000,
+    // Deterministic failures must remain visible in ordinary and Real-Postgres
+    // lanes. Retrying can also overlap abandoned database work after a timeout.
+    retry: 0,
+    // A single retry-free pass can spend more than ten seconds inside a
+    // Supertest request while this 5k-test suite is under full worker load.
+    // Give the request its execution budget without rerunning assertions or
+    // hiding deterministic failures behind retry state.
+    testTimeout: 30_000,
     // Real-Postgres beforeAll runs initDb across the full migration list.
-    // Default hookTimeout follows testTimeout (10s) and turns a slow CREATE
+    // A bounded extra allowance prevents a slow CREATE
     // DATABASE into skipped tests with an empty JSON reporter message.
-    hookTimeout: process.env.CONTROL_API_REAL_PG_ADMIN_URL ? 60_000 : 10_000,
+    hookTimeout: process.env.CONTROL_API_REAL_PG_ADMIN_URL ? 60_000 : 30_000,
     sequence: {
       hooks: 'list',
     },

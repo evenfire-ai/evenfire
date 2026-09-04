@@ -90,16 +90,43 @@ async function parseJsonResponse(res: Response): Promise<unknown> {
   return JSON.parse(text)
 }
 
-export function formatApiError(res: Response, text: string): Error {
-  let detail: string
-  let parsedBody: Record<string, unknown> | null = null
+function parseApiErrorPayload(text: string): {
+  body?: Record<string, unknown>
+  code?: string
+  message?: string
+} {
   try {
-    const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
-    if (parsed && typeof parsed === 'object') parsedBody = parsed as Record<string, unknown>
-    detail = String(parsed.message || parsed.error || text)
+    const parsed = JSON.parse(text) as unknown
+    if (!parsed || typeof parsed !== 'object') return {}
+    const body = parsed as Record<string, unknown>
+    const envelope =
+      body.error && typeof body.error === 'object'
+        ? (body.error as Record<string, unknown>)
+        : undefined
+    return {
+      body,
+      code:
+        typeof envelope?.code === 'string'
+          ? envelope.code
+          : typeof body.error === 'string'
+            ? body.error
+            : undefined,
+      message:
+        typeof envelope?.message === 'string'
+          ? envelope.message
+          : typeof body.message === 'string'
+            ? body.message
+            : undefined,
+    }
   } catch {
-    detail = text
+    return {}
   }
+}
+
+export function formatApiError(res: Response, text: string): Error {
+  const parsed = parseApiErrorPayload(text)
+  const parsedBody = parsed.body ?? null
+  const detail = parsed.message || parsed.code || (parsedBody ? res.statusText : text)
   const friendlyDetail =
     detail === 'duplicate_username'
       ? 'That username is already taken.'
@@ -117,11 +144,9 @@ export function formatApiError(res: Response, text: string): Error {
                   ? 'Agent access could not be updated because the page did not include its current access state. Reload the page and try again.'
                   : detail === 'deleted_agent_history_limit_exceeded'
                     ? 'Agent access was not updated because the deleted-agent history limit was reached. No existing history was removed. Reload the page, review the current access, and try again.'
-                    : // Exact match is correct HERE: control-ui calls control-api directly,
-                      // so a member-registration 503 arrives as the bare { error: '<code>' }
-                      // body. profile-ui reaches these same codes through external-rest-api,
-                      // whose error middleware wraps any 5xx into { message: '...: <code>' },
-                      // so it must use .includes() instead — the two matchers differ on purpose.
+                    : // Control UI calls Control API directly, so the legacy bare string remains
+                      // its member-registration code source. Profile UI consumes the same safe
+                      // codes from External REST's canonical nested public envelope.
                       detail === 'member_registration_unavailable'
                       ? "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
                       : detail === 'member_registration_misconfigured'
@@ -133,8 +158,7 @@ export function formatApiError(res: Response, text: string): Error {
   // render structured, actionable errors (e.g. unpriced_models, price_in_use_by_budget)
   // instead of the generic message string.
   if (parsedBody) {
-    ;(error as Error & { code?: string }).code =
-      typeof parsedBody.error === 'string' ? (parsedBody.error as string) : undefined
+    ;(error as Error & { code?: string }).code = parsed.code
     ;(error as Error & { body?: Record<string, unknown> }).body = parsedBody
   }
   return error
@@ -231,18 +255,10 @@ export async function apiGet(
       let message = `${res.status} ${res.statusText}`
       let code: string | undefined
       let body: Record<string, unknown> | undefined
-      try {
-        const parsed = JSON.parse(text) as unknown
-        if (parsed && typeof parsed === 'object') {
-          body = parsed as Record<string, unknown>
-          if (typeof body.message === 'string' && body.message.trim()) {
-            message = body.message
-          }
-          if (typeof body.error === 'string') code = body.error
-        }
-      } catch {
-        /* non-JSON error body: keep the status-text message */
-      }
+      const parsed = parseApiErrorPayload(text)
+      body = parsed.body
+      if (parsed.message?.trim()) message = parsed.message
+      code = parsed.code
       const error = new Error(message) as Error & {
         status?: number
         code?: string

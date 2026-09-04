@@ -17,6 +17,7 @@ import { useToast } from '@components/Toast'
 import { IconTrash } from '@components/icons'
 import { PROFILE_ROUTES } from '@constants/routes'
 import { inviteManagedMember } from '@lib/api'
+import { MAX_INVITATION_EMAIL_LENGTH, isInvitationEmailFormatValid } from '@lib/invitationEmail'
 import {
   formatTeamRole,
   permissionsForTeamRole,
@@ -25,7 +26,6 @@ import {
 } from '@lib/teamRoles'
 import type { ManageableTeam, Role } from '@/app/types/profile'
 
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const STEPS = ['Member', 'Team'] as const
 const STEP_DETAILS = [
   {
@@ -55,7 +55,7 @@ export default function InviteMemberPage() {
   const [inviteRoles, setInviteRoles] = useState<Record<string, Role>>({})
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
-  const emailValid = EMAIL_PATTERN.test(email.trim())
+  const emailValid = isInvitationEmailFormatValid(email)
   const nameValid = Boolean(name.trim())
   const selectedTeamIds = useMemo(() => Object.keys(inviteRoles), [inviteRoles])
   const selectedTeams = useMemo(
@@ -173,6 +173,7 @@ export default function InviteMemberPage() {
                       type="email"
                       value={email}
                       onChange={event => setEmail(event.target.value)}
+                      maxLength={MAX_INVITATION_EMAIL_LENGTH}
                       placeholder="user@example.com"
                       disabled={saving}
                       autoComplete="email"

@@ -95,6 +95,12 @@ jobs:
         working-directory: packages/workflow-runtime-core
         run: npm run build
 
+      # keytar is a native Desktop dependency. When its prebuild is unavailable,
+      # node-gyp requires libsecret development metadata on Linux.
+      - name: Install Desktop native build prerequisite
+        if: matrix.service == 'desktop-app' && runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes libsecret-1-dev
+
       - name: Install dependencies
         working-directory: ${{ matrix.service }}
         run: npm ci
@@ -215,21 +221,41 @@ jobs:
             echo 'real-Postgres control-api lane reported skipped tests' >&2
             exit 1
           fi
-          # Codex subscription suites must stay inside the real-Postgres filter.
-          # A rename or move that drops them from `*realPostgres*` would otherwise
-          # still pass the aggregate counts above.
+          # Critical suites must stay inside the real-Postgres filter. A rename or
+          # move that drops one from `*realPostgres*` would otherwise still pass
+          # the aggregate counts above.
           for suite in \
+            accessCatalogCoordinator.realPostgres.integration \
+            accessCatalogFamilies.realPostgres.integration \
+            accessCatalogPerformance.realPostgres.integration \
+            accessCatalogShadow.realPostgres.integration \
+            accessDatabaseCancellation.realPostgres.integration \
+            catalogDistinctPagination.realPostgres.integration \
+            catalogProducers.realPostgres.integration \
+            catalogRevisionComponents.realPostgres.integration \
             db.codexSubscriptionConnection.realPostgres.integration \
+            externalSessionSingleTouch.realPostgres.integration \
+            finalAuthorityLifecycle.realPostgres.integration \
+            gfsRevisionLockOrder.realPostgres.integration \
+            invitationAcceptedOnboarding.realPostgres.integration \
+            legacyPasswordEpochBackfill.realPostgres.integration \
+            legacySessionExchangeRace.realPostgres.integration \
+            migrationExecutionPolicy.realPostgres.integration \
+            migrationPreviousImageCompatibility.realPostgres.integration \
+            routes.externalTeamsFinalAuthority.realPostgres.integration \
+            routes.externalTeamsLegacyAdminRevocation.realPostgres.integration \
             services.codexSubscriptionOAuth.realPostgres.integration \
             services.codexSubscriptionCatalog.realPostgres.integration \
             services.llmProviderAttemptAuthorization.realPostgres.integration \
             services.llmProviderAttemptStore.realPostgres.integration \
             services.llmProviderAttemptRedemption.realPostgres.integration \
             services.llmProviderAttemptFinalization.realPostgres.integration \
+            userAccessRuntimeContract.realPostgres.integration \
+            userSessionDatabaseClock.realPostgres.integration \
             pluginWorkloadSdkCodexDualLedger.realPostgres.integration
           do
             grep -Fq "$suite" "$normalized_log" || {
-              echo "real-Postgres control-api lane omitted Codex suite ${suite}" >&2
+              echo "real-Postgres control-api lane omitted critical suite ${suite}" >&2
               exit 1
             }
           done

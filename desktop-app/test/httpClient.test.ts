@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ControlApiError } from '../../external-rest-api/src/controlApiClient.js'
+import { sanitizeControlApiPublicError } from '../../external-rest-api/src/http/publicApiError.js'
 import { ApiError, requestJson } from '../src/httpClient.js'
 
 vi.mock('../src/config.js', () => ({
@@ -91,6 +93,24 @@ describe('requestJson — transient retry', () => {
     ).rejects.toBeInstanceOf(ApiError)
 
     expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('parses the real External REST typed envelope without object stringification', async () => {
+    const produced = sanitizeControlApiPublicError(
+      new ControlApiError('raw', 403, { error: 'escalation_rejected' }),
+      new Set([403])
+    )
+    expect(produced).not.toBeNull()
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      errorResponse(403, JSON.stringify(produced!.body))
+    )
+
+    await expect(requestJson('PUT', 'http://localhost/test')).rejects.toThrow(
+      /forbidden - escalation_rejected - The requested operation is not allowed\./
+    )
+    await expect(Promise.resolve(JSON.stringify(produced!.body))).resolves.not.toContain(
+      '[object Object]'
+    )
   })
 
   it('preserves Retry-After on HTTP errors for bounded upload lifecycle retries', async () => {

@@ -62,22 +62,56 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Initialize CodeQL
+        id: codeql-init
         uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4
         with:
           languages: javascript-typescript
           build-mode: none
-          queries: security-and-quality
-          # mcp-host LLM adapters must forward operator soul/system text to
-          # the model. CodeQL traces that from the WRC-JWT configure/execute
-          # body and labels it js/system-prompt-injection. That HTTP source
-          # is not an open prompt sink; do not concatenate untrusted input
-          # into tool descriptions. Keep js/missing-rate-limiting enabled.
-          config: |
-            query-filters:
-              - exclude:
-                  id: js/system-prompt-injection
+          config-file: ./.github/codeql/codeql-config.yml
+          db-location: ${{ runner.temp }}/codeql-databases
+
+      - name: Test repository CodeQL queries
+        env:
+          CODEQL: ${{ steps.codeql-init.outputs.codeql-path }}
+        run: |
+          "$CODEQL" pack install .github/codeql/queries
+          "$CODEQL" pack install \
+            --additional-packs=.github/codeql/queries \
+            .github/codeql/queries/test
+          .github/codeql/queries/test/verify-security-and-quality-suite.sh "$CODEQL"
+          "$CODEQL" test run \
+            --additional-packs=.github/codeql/queries \
+            .github/codeql/queries/test
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4
         with:
           category: '/language:javascript-typescript'
+
+      - name: Verify production CodeQL source scope
+        env:
+          CODEQL_DATABASE_ROOT: ${{ runner.temp }}/codeql-databases
+        run: |
+          source_archive="$(find "$CODEQL_DATABASE_ROOT" -type f -name src.zip -print -quit)"
+          if [[ -z "$source_archive" ]]; then
+            echo '::error::CodeQL source archive was not found'
+            exit 1
+          fi
+
+          source_listing="$RUNNER_TEMP/codeql-production-sources.txt"
+          unzip -Z1 "$source_archive" > "$source_listing"
+          if grep -Fq '/.github/codeql/queries/test/' "$source_listing"; then
+            echo '::error::Synthetic CodeQL query fixtures entered production analysis'
+            exit 1
+          fi
+
+          for expected_source in \
+            '/control-api/src/main.ts' \
+            '/external-rest-api/src/main.ts' \
+            '/desktop-app/src/main.ts'
+          do
+            if ! grep -Fq "$expected_source" "$source_listing"; then
+              echo "::error::Expected application source is missing: $expected_source"
+              exit 1
+            fi
+          done

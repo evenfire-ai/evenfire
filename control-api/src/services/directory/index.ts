@@ -28,12 +28,14 @@ export {
   listAllTeams,
   listTeams,
   renameTeam,
+  renameTeamForUser,
 } from './teams.js'
 
 export {
   acceptInvitation,
   acceptInvitationById,
   acceptInvitationForEmail,
+  acceptInvitationForEmailInTransaction,
   getInvitationByToken,
   addMemberToTeam,
   createPasswordSetupInvitationForUser,
@@ -41,6 +43,7 @@ export {
   createInvitationForTeams,
   createSilentInvitationForTeams,
   createManagedInvitationForUser,
+  externalManagedInvitationResponse,
   deleteManagedMemberForUser,
   deleteManagedUserForUser,
   findMemberRole,
@@ -62,6 +65,8 @@ export {
   setInvitationPasswordForUser,
   setInvitationPasswordForEmail,
   searchDirectory,
+  DirectorySearchCursorError,
+  DIRECTORY_SEARCH_MAX_QUERY_LENGTH,
   softDeleteMember,
   startDraftInvitationCleanup,
   stopDraftInvitationCleanup,

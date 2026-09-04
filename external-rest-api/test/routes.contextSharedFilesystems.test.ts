@@ -10,11 +10,6 @@ const authTokenMock = vi.hoisted(() => ({
 const controlApiClientMock = vi.hoisted(() => ({
   controlApiRequest: vi.fn(),
   controlApiStreamRequest: vi.fn(),
-}))
-
-vi.mock('../src/authToken.js', () => authTokenMock)
-vi.mock('../src/controlApiClient.js', () => ({
-  ...controlApiClientMock,
   ControlApiError: class ControlApiError extends Error {
     status: number
     body: unknown
@@ -24,6 +19,11 @@ vi.mock('../src/controlApiClient.js', () => ({
       this.body = body
     }
   },
+}))
+
+vi.mock('../src/authToken.js', () => authTokenMock)
+vi.mock('../src/controlApiClient.js', () => ({
+  ...controlApiClientMock,
 }))
 
 const claims = {
@@ -79,6 +79,23 @@ describe('GET /me/contexts/:contextId/shared-filesystems', () => {
     const res = await request(buildApp()).get('/me/contexts/ctx-a/shared-filesystems')
     expect(res.status).toBe(401)
     expect(controlApiClientMock.controlApiRequest).not.toHaveBeenCalled()
+  })
+
+  it('uses the request correlation when a sanitized upstream error has none', async () => {
+    authTokenMock.verifyToken.mockReturnValue(claims)
+    controlApiClientMock.controlApiRequest.mockRejectedValueOnce(
+      new controlApiClientMock.ControlApiError('private upstream detail', 403, {
+        error: { code: 'forbidden' },
+      })
+    )
+
+    const response = await request(buildApp())
+      .get('/me/contexts/ctx-a/shared-filesystems')
+      .set('authorization', 'Bearer good-token')
+      .set('x-correlation-id', 'shared_filesystems_ID-42')
+      .expect(403)
+
+    expect(response.body.error.correlationId).toBe('shared_filesystems_ID-42')
   })
 })
 

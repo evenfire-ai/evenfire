@@ -59,6 +59,39 @@ describe('controlApiClient error headers', () => {
     expect(error.headers).not.toHaveProperty('server')
     expect(error.headers).not.toHaveProperty('x-internal-debug')
   })
+
+  it.each([
+    [413, '209715200', '209715200'],
+    [413, '0007', '7'],
+    [413, '-1', undefined],
+    [413, '9007199254740992', undefined],
+    [413, 'not-a-number', undefined],
+    [409, '209715200', undefined],
+  ] as const)(
+    'for status %s forwards only a bounded 413 upload-length value %s',
+    async (status, uploadLength, expected) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          new Response(JSON.stringify({ error: 'upstream' }), {
+            status,
+            headers: {
+              'content-type': 'application/json',
+              'upload-length': uploadLength,
+              'x-internal-secret': 'must-not-leak',
+            },
+          })
+        )
+      )
+
+      const error = await captureError(() =>
+        controlApiRequestWithStatus('PUT', '/external/gfs/resources/id/content')
+      )
+
+      expect(error.responseHeaders['upload-length']).toBe(expected)
+      expect(error.responseHeaders).not.toHaveProperty('x-internal-secret')
+    }
+  )
 })
 
 describe('controlApiClient request identity', () => {
