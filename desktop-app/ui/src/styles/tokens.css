@@ -49,6 +49,10 @@
   --info-rgb: 0, 114, 192;
   --overlay-rgb: 6, 7, 8;
   --panel-rgb: 20, 21, 24;
+  /* Plate behind the onboarding tour's supplied artwork, whose PNGs carry an
+     opaque near-white background. Deliberately the same in both themes so the
+     illustration sits on its own panel rather than a white hole in the card. */
+  --tour-art-plate: #fdfdfe;
 
   --surface-soft: rgba(var(--panel-rgb), 0.66);
   --surface-strong: rgba(var(--panel-rgb), 0.9);

@@ -22,6 +22,7 @@ import { GfsImagePreview } from '@components/GfsImagePreview'
 import { PluginConsentModal } from '@components/PluginConsentModal'
 import type { PluginConsentRequest } from '@components/PluginConsentModal/types'
 import { SidebarNav } from '@components/SidebarNav'
+import { TourModal } from '@components/TourModal'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
@@ -2202,6 +2203,17 @@ export function App() {
                           <PluginConsentModal
                             request={pluginConsentPrompt}
                             onResolve={resolvePluginConsent}
+                          />
+                        ) : null}
+                        {/* Last of the modals, and it yields to every one of
+                            them: each is a user action or a security decision,
+                            and the tour is neither. */}
+                        {vm.tour.visible &&
+                        !pluginConsentPrompt &&
+                        !pendingSandboxUiConfirmation ? (
+                          <TourModal
+                            context={{ appName: vm.tourAppName, agentLabels: vm.tourAgentLabels }}
+                            onDismiss={vm.tour.dismiss}
                           />
                         ) : null}
                         {pluginGfsPreview ? (

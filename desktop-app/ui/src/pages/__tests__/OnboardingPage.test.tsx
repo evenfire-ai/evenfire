@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { LOCALHOST_RUNTIME_CONFIG_OPTION_ID } from '../../constants/runtimeConfig'
 import { AuthContext } from '../../contexts/AuthContext'
@@ -155,6 +155,32 @@ describe('OnboardingPage', () => {
 
     const hosted = screen.getByRole('button', { name: /Evenfire hosts it for me/ })
     expect(hosted.textContent).not.toMatch(/free|trial|week|\d+\s*day/i)
+  })
+
+  it('steps back with the left arrow key', async () => {
+    const user = userEvent.setup()
+
+    renderOnboarding()
+    await user.click(screen.getByRole('button', { name: /I have a server address/ }))
+    expect(screen.getByLabelText('Environment name')).toBeTruthy()
+
+    fireEvent.keyDown(window, { key: 'ArrowLeft' })
+
+    expect(screen.getByText('Do you already have an Evenfire server?')).toBeTruthy()
+  })
+
+  it('leaves the arrow key alone while the user is typing an address', async () => {
+    const user = userEvent.setup()
+
+    renderOnboarding()
+    await user.click(screen.getByRole('button', { name: /I have a server address/ }))
+
+    const input = await screen.findByLabelText('External REST API')
+    input.focus()
+    fireEvent.keyDown(input, { key: 'ArrowLeft' })
+
+    // Moving the caret must not throw the user out of the form.
+    expect(screen.getByLabelText('External REST API')).toBeTruthy()
   })
 
   it('offers an undecided answer that compares the two run styles', async () => {

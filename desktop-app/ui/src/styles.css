@@ -15633,3 +15633,175 @@ pre {
     forced-color-adjust: none;
   }
 }
+
+/* First-run tour. A self-contained centered modal: it anchors to no live DOM
+   geometry, so it survives sidebar refactors and reads the same whether a
+   surface is populated, empty, or still loading. */
+.tour-backdrop {
+  position: fixed;
+  inset: 0;
+  /* Below the confirm-dialog layer (2300): the tour must never paint over a
+     consent prompt or an environment-setup confirmation. */
+  z-index: 2200;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: rgba(var(--overlay-rgb), 0.42);
+}
+
+/* One height across every step, so the card holds still as the user advances
+   rather than resizing around each step's copy. Rows are illustration, title,
+   body, position, dots, actions — the body takes the slack and scrolls if a
+   step ever outgrows it, which keeps the actions pinned where they were. */
+.tour-card {
+  position: relative;
+  width: min(560px, 94vw);
+  height: min(500px, 86vh);
+  display: grid;
+  /* content, position, dots, actions — the content block takes the slack and
+     centres itself in it, so the card holds one height while short steps stay
+     optically centred instead of top-heavy. */
+  grid-template-rows: 1fr auto auto auto;
+  justify-items: center;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-4) 0;
+  text-align: center;
+}
+
+/* Absolutely positioned, so it stays out of the card's row assignment and the
+   grid template keeps describing only the four content rows. */
+.tour-close {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+}
+
+/* IconButton has no global svg rule — each usage paints its own icon, and an
+   unstyled stroke path renders as a zero-area fill, i.e. nothing at all. */
+.tour-close svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tour-content {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.tour-illustration {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  padding: var(--space-2) 0;
+  color: var(--accent);
+}
+
+/* The product mark, smaller than the artwork it sits alongside but in the same
+   optical space, so the card does not jump when the user advances. */
+.tour-logo {
+  width: 84px;
+  height: 84px;
+  object-fit: contain;
+}
+
+/* Supplied artwork ships on an opaque near-white background rather than
+   transparent. In light theme that already matches the card, so the image sits
+   directly on it with no plate. */
+.tour-art {
+  width: 100%;
+  max-width: 300px;
+  max-height: 150px;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+}
+
+/* In dark theme the same opaque background would read as a white rectangle
+   punched into the card, so it gets a plate that makes it a deliberate
+   illustration panel instead. Remove this once the artwork ships transparent. */
+:root[data-theme='dark'] .tour-art {
+  background: var(--tour-art-plate);
+}
+
+.tour-title {
+  font-size: var(--font-size-3xl);
+  font-weight: var(--font-weight-bold);
+  line-height: var(--line-height-tight);
+  color: var(--text);
+}
+
+.tour-body {
+  max-width: 46ch;
+  font-size: var(--font-size-lg);
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* A clause that deserves its own line: the agent's name, or the invitation to
+   send a first message. Kept in the same block as the prose above it so the
+   body stays one described region for assistive tech. */
+.tour-body-line {
+  display: block;
+  margin-top: var(--space-2);
+}
+
+.tour-list li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1-5);
+}
+
+.tour-list li::before {
+  content: '•';
+  color: var(--accent);
+}
+
+.tour-position {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.tour-dots {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.tour-dot {
+  width: 9px;
+  height: 9px;
+  border: 1px solid rgba(var(--edge-rgb), 0.7);
+  border-radius: 50%;
+  transition: background var(--motion-fast);
+}
+
+.tour-dot.is-current {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.tour-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  /* Pulled out to the card's edges so the rule spans it fully. */
+  width: calc(100% + 2 * var(--space-4));
+  margin: 0 calc(-1 * var(--space-4));
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid rgba(var(--edge-rgb), 0.3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tour-dot {
+    transition: none;
+  }
+}
