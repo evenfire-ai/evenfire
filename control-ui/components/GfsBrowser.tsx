@@ -1182,9 +1182,10 @@ export function GfsBrowser(): React.JSX.Element {
             <div className="cu-gfs-panel__actions">
               <Button
                 className="cu-gfs-create-action"
-                variant="primary"
                 disabled={!current?.id}
                 onClick={openNewFolder}
+                size="sm"
+                variant="primary"
               >
                 <IconFolder />
                 New folder
@@ -1196,8 +1197,9 @@ export function GfsBrowser(): React.JSX.Element {
                   setUploadCandidate(null)
                   setUploadOpen(true)
                 }}
+                size="sm"
               >
-                <IconUpload width={18} height={18} />
+                <IconUpload width={16} height={16} />
                 Upload file
               </Button>
             </div>

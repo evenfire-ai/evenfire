@@ -12229,17 +12229,20 @@ button.cu-gfs-tree__button:focus-visible,
 }
 
 .cu-gfs-create-action.cu-btn {
-  min-height: 2.125rem;
-  padding-inline: var(--cu-space-4);
+  min-height: 30px;
+  padding: 0 var(--cu-space-2);
   border-radius: var(--cu-radius-sm);
-  font-size: 0.875rem;
-  font-weight: 600;
+  font-size: var(--cu-font-size-xs);
+  font-weight: var(--cu-font-weight-semibold);
+  line-height: var(--cu-line-height-tight);
+  white-space: nowrap;
   box-shadow: 0 6px 16px rgba(var(--cu-edge-rgb), 0.14);
 }
 
 .cu-gfs-create-action svg {
-  width: 1.1rem;
-  height: 1.1rem;
+  width: 1rem;
+  height: 1rem;
+  flex: 0 0 1rem;
 }
 
 .cu-gfs-file-action:has(input:focus-visible) {

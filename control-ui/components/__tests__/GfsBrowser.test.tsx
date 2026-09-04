@@ -367,6 +367,8 @@ describe('GfsBrowser', () => {
     const newFile = screen.getByRole('button', { name: /upload file/i })
     expect(newFolder).not.toBeDisabled()
     expect(newFile).not.toBeDisabled()
+    expect(newFolder).toHaveClass('cu-gfs-create-action', 'cu-btn--sm')
+    expect(newFile).toHaveClass('cu-gfs-create-action', 'cu-btn--sm')
     expect(screen.queryByText(/files around 110 MB/i)).toBeNull()
 
     fireEvent.click(newFile)
