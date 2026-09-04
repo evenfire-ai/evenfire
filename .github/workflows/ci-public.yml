@@ -461,6 +461,9 @@ jobs:
       - name: Test WRC internal dependency NetworkPolicy contracts
         run: bash scripts/tests/test-wrc-internal-dependency-networkpolicy-gate.sh
 
+      - name: Test WRC external-egress degradation gate contract
+        run: bash scripts/tests/test-wrc-egress-degradation-gate.sh
+
       - name: Test minikube sandbox-ui NetworkPolicy lint (static-policy ownership + DNS)
         run: bash scripts/tests/test-lint-networkpolicies.sh
 

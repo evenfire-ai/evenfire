@@ -1,6 +1,6 @@
 {
   "name": "@clerum/e2e-test-fixtures",
-  "version": "1.0.68",
+  "version": "1.0.69",
   "description": "E2E test fixtures and utilities for Clerum testing",
   "type": "module",
   "main": "index.ts",

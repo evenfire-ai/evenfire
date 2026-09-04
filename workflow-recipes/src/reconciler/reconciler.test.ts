@@ -2927,6 +2927,127 @@ describe('WorkflowRecipeReconciler', () => {
     })
   })
 
+  it.each([
+    {
+      resolverLabel: 'controller fault',
+      resolverResult: 'throw' as const,
+      label: 'retryable API outage',
+      contractionError: () =>
+        Object.assign(new Error('workload re-contraction unavailable'), { code: 503 }),
+      expectedPhase: 'active' as const,
+      retryable: true,
+    },
+    {
+      resolverLabel: 'controller fault',
+      resolverResult: 'throw' as const,
+      label: 'non-retryable identity conflict',
+      contractionError: () =>
+        Object.assign(new Error('workload re-contraction conflict'), { code: 409 }),
+      expectedPhase: 'failed' as const,
+      retryable: false,
+    },
+    {
+      resolverLabel: 'transient DNS result',
+      resolverResult: 'transient' as const,
+      label: 'retryable API outage',
+      contractionError: () =>
+        Object.assign(new Error('workload re-contraction unavailable'), { code: 503 }),
+      expectedPhase: 'active' as const,
+      retryable: true,
+    },
+    {
+      resolverLabel: 'transient DNS result',
+      resolverResult: 'transient' as const,
+      label: 'non-retryable identity conflict',
+      contractionError: () =>
+        Object.assign(new Error('workload re-contraction conflict'), { code: 409 }),
+      expectedPhase: 'failed' as const,
+      retryable: false,
+    },
+  ])(
+    '#567 remediation: workload $resolverLabel plus $label preserves fail-closed service semantics',
+    async ({ contractionError, expectedPhase, resolverResult, retryable }) => {
+      const policyName = 'wl-egress-test-recipe-worker'
+      let resolverFault = false
+      const rec = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+        fqdnLookup: async () => {
+          if (resolverFault) {
+            if (resolverResult === 'transient') {
+              return { kind: 'error', error: 'ESERVFAIL', retryable: true }
+            }
+            throw Object.assign(new Error('queryA EBADFAMILY'), { code: 'EBADFAMILY' })
+          }
+          return { kind: 'ok', ipv4: ['93.184.216.20'], ipv6: [], ttlSeconds: 300 }
+        },
+      })
+      const recipe = makeRecipe({
+        spec: {
+          workloads: [
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'worker:1',
+              port: 8080,
+              egressBindings: [{ dns: 'current.example.com', port: 443 }],
+            },
+          ],
+        },
+      })
+      await rec.reconcile(recipe)
+      const written = mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls
+        .map(call => call[0]?.body as k8s.V1NetworkPolicy)
+        .find(body => body.metadata?.name === policyName)
+      expect(written).toBeDefined()
+      const live: k8s.V1NetworkPolicy = {
+        ...structuredClone(written!),
+        metadata: {
+          ...written!.metadata,
+          name: policyName,
+          namespace: 'sandbox-recipes',
+          uid: 'uid-workload-double-fault',
+          resourceVersion: '70',
+        },
+      }
+      let targetReads = 0
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+        ({ name }: { name: string }) => {
+          if (name !== policyName) return Promise.reject({ code: 404 })
+          targetReads++
+          return targetReads === 1 ? Promise.resolve(live) : Promise.reject(contractionError())
+        }
+      )
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockClear()
+      resolverFault = true
+
+      const result = await rec.reconcile({ ...recipe, status: { phase: 'active' } })
+
+      expect(targetReads).toBe(2)
+      expect(result.phase).toBe(expectedPhase)
+      if (retryable) {
+        expect(result.skipStatusPatch).toBe(true)
+        expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      } else {
+        expect(result.skipStatusPatch).not.toBe(true)
+        expect(result.message).toContain('workload re-contraction conflict')
+      }
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: expect.objectContaining({
+            metadata: expect.objectContaining({ name: policyName }),
+          }),
+        })
+      )
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ name: policyName })
+      )
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ name: policyName })
+      )
+    }
+  )
+
   it('returns failed phase when a workload egress binding uses wildcard DNS', async () => {
     const recipe = makeRecipe({
       spec: {
@@ -4662,6 +4783,111 @@ describe('WorkflowRecipeReconciler', () => {
       for (const replacement of replacements) {
         expect(JSON.stringify(replacement.spec?.egress)).not.toContain('8.8.8.8')
       }
+    }
+  )
+
+  it.each([
+    {
+      resolverLabel: 'controller fault',
+      resolverResult: 'throw' as const,
+      label: 'retryable API outage',
+      contractionError: () =>
+        Object.assign(new Error('UI re-contraction unavailable'), { code: 503 }),
+      expectedPhase: 'active' as const,
+      retryable: true,
+    },
+    {
+      resolverLabel: 'controller fault',
+      resolverResult: 'throw' as const,
+      label: 'non-retryable identity conflict',
+      contractionError: () => Object.assign(new Error('UI re-contraction conflict'), { code: 409 }),
+      expectedPhase: 'failed' as const,
+      retryable: false,
+    },
+    {
+      resolverLabel: 'transient DNS result',
+      resolverResult: 'transient' as const,
+      label: 'retryable API outage',
+      contractionError: () =>
+        Object.assign(new Error('UI re-contraction unavailable'), { code: 503 }),
+      expectedPhase: 'active' as const,
+      retryable: true,
+    },
+    {
+      resolverLabel: 'transient DNS result',
+      resolverResult: 'transient' as const,
+      label: 'non-retryable identity conflict',
+      contractionError: () => Object.assign(new Error('UI re-contraction conflict'), { code: 409 }),
+      expectedPhase: 'failed' as const,
+      retryable: false,
+    },
+  ])(
+    '#567 remediation: UI $resolverLabel plus $label preserves fail-closed service semantics',
+    async ({ contractionError, expectedPhase, resolverResult, retryable }) => {
+      const policyName = 'ui-egress-test-recipe'
+      let resolverFault = false
+      const rec = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+        fqdnLookup: async () => {
+          if (resolverFault) {
+            if (resolverResult === 'transient') {
+              return { kind: 'error', error: 'ESERVFAIL', retryable: true }
+            }
+            throw Object.assign(new Error('queryA EBADFAMILY'), { code: 'EBADFAMILY' })
+          }
+          return { kind: 'ok', ipv4: ['93.184.216.20'], ipv6: [], ttlSeconds: 300 }
+        },
+      })
+      const recipe = uiRecipeWithExternals([{ fqdn: 'current.example.com', port: 443 }])
+      await rec.reconcile(recipe)
+      const written = createdPolicy(policyName)
+      expect(written).toBeDefined()
+      const live: k8s.V1NetworkPolicy = {
+        ...structuredClone(written!),
+        metadata: {
+          ...written!.metadata,
+          name: policyName,
+          namespace: 'sandbox-ui',
+          uid: 'uid-ui-double-fault',
+          resourceVersion: '80',
+        },
+      }
+      let targetReads = 0
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+        ({ name }: { name: string }) => {
+          if (name !== policyName) return Promise.reject({ code: 404 })
+          targetReads++
+          return targetReads === 1 ? Promise.resolve(live) : Promise.reject(contractionError())
+        }
+      )
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockClear()
+      resolverFault = true
+
+      const result = await rec.reconcile({ ...recipe, status: { phase: 'active' } })
+
+      expect(targetReads).toBe(2)
+      expect(result.phase).toBe(expectedPhase)
+      if (retryable) {
+        expect(result.skipStatusPatch).toBe(true)
+        expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      } else {
+        expect(result.skipStatusPatch).not.toBe(true)
+        expect(result.message).toContain('UI re-contraction conflict')
+      }
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: expect.objectContaining({
+            metadata: expect.objectContaining({ name: policyName }),
+          }),
+        })
+      )
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ name: policyName })
+      )
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ name: policyName })
+      )
     }
   )
 
