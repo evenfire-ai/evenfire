@@ -339,10 +339,11 @@ namespace, over the same three namespaces. What changed is the _result set_, not
 count — dropping the `policy-type` term from the selector makes the query return all six
 families instead of one, and the family check then re-narrows what may be deleted.
 
-The hardened destructive path does add one metadata `GET` of the WorkflowRecipe
-immediately before prune. That freshness fence is the cost of proving the UID/generation
-still matches the plan during a rolling update; it replaces thousands of write-shaped
-404s with a bounded read and prevents an obsolete pass from deleting newer state.
+The hardened path adds two metadata `GET`s of the WorkflowRecipe: one before any
+NetworkPolicy-family mutation and one after the complete live inventory, immediately
+before deletes. Those freshness fences are the cost of proving the UID/generation still
+matches the plan during a rolling update; they replace thousands of write-shaped 404s
+with bounded reads and prevent an obsolete pass from deleting newer state.
 
 **Six families are reaped**: `ui-ingress-*`, `ui-egress-*`, `wl-egress-*`,
 `wl-ingress-*`, `wr-intdep-egress/ingress-*`, and `wf-*-oauth-broker-egress`. Family is
@@ -354,7 +355,7 @@ same reason — requiring that label would make the reap blind to five families.
 policies (they carry no `clerum.io/recipe` label), the workflow run lane's, the
 `coordinator-to-gfs` policy, and anything created by hand.
 
-**Two deliberate exclusions**, each with its own issue:
+**One deliberate exclusion**, tracked separately:
 
 - **`wl-*` of a workload that gained `transport` or became the UI workload** — those
   policies are stale and nothing writes them, but the producer is a spec edit rather
@@ -397,8 +398,11 @@ policies (they carry no `clerum.io/recipe` label), the workflow run lane's, the
   than being mislabeled transient. It remains visible through
   `NetworkPolicyReapFailed` and is rechecked at a slow operator cadence.
 - **Destructive freshness:** immediately before pruning, WRC rechecks the recipe UID and
-  generation. Every DELETE carries the listed policy UID/resourceVersion as Kubernetes
-  preconditions, so an obsolete reconcile or changed object cannot be deleted blindly.
+  generation after the complete LIST. Every DELETE carries the listed policy
+  UID/resourceVersion as Kubernetes preconditions. The `ui-egress`/`wl-egress` no-op gate
+  also advances `clerum.io/recipe-generation` (and therefore resourceVersion) once per
+  recipe generation even when the enforced rules are unchanged. Together these prevent
+  an obsolete reconcile or changed object from being deleted blindly.
 - **RBAC invariant.** The prune queries exactly `sandbox-recipes`, `mcp-server` and
   `sandbox-ui`, because `resolveWorkloadNamespace` can return no others. The
   `workflow-recipes` ServiceAccount holds `list` and `delete` on `networkpolicies` in all
