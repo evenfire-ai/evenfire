@@ -122,8 +122,6 @@ vi.mock('@components/SidebarNav', () => ({
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
 vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
 vi.mock('@pages/ChatPage', () => ({ ChatPage: () => null }))
-vi.mock('@pages/ContextDetailsPage', () => ({ ContextDetailsPage: () => null }))
-vi.mock('@pages/ContextsPage', () => ({ ContextsPage: () => null }))
 vi.mock('@pages/FilesPage', () => ({ FilesPage: () => null }))
 vi.mock('@pages/McpServersPage', () => ({ McpServersPage: () => null }))
 vi.mock('@pages/SandboxUiPage', () => ({
@@ -141,8 +139,6 @@ vi.mock('@pages/SettingsPage', () => ({
     return null
   },
 }))
-vi.mock('@pages/TeamDetailsPage', () => ({ TeamDetailsPage: () => null }))
-vi.mock('@pages/TeamsPage', () => ({ TeamsPage: () => null }))
 vi.mock('@pages/UnavailablePage', () => ({ UnavailablePage: () => null }))
 vi.mock('@pages/WorkflowsPage', () => ({ WorkflowsPage: () => null }))
 
@@ -184,8 +180,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     navItem: DESKTOP_ROUTES.chat,
     selectedAgent: null,
     selectedAgentRoute: null,
-    selectedContext: null,
-    selectedTeam: null,
     activeChatId: null,
     chatList: [],
     latestChatSessions: [],
@@ -559,8 +553,6 @@ describe('App deep-link orchestration', () => {
 
     for (const [commandId, route] of [
       ['navigate.plugins', DESKTOP_ROUTES.plugins],
-      ['navigate.contexts', DESKTOP_ROUTES.contexts],
-      ['navigate.teams', DESKTOP_ROUTES.teams],
       ['navigate.connectors', DESKTOP_ROUTES.connectors],
       ['navigate.files', DESKTOP_ROUTES.files],
     ] as const) {

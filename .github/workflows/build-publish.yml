@@ -200,9 +200,11 @@ jobs:
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/image-policy/**'
               - 'packages/network-policy-core/**'
+              - 'packages/codex-catalog-projection/**'
             mcp-host:
               - 'mcp-host/**'
               - 'packages/llm-provider-attempt-contract/**'
+              - 'packages/codex-catalog-projection/**'
             mcp-proxy:
               - 'mcp-proxy/**'
             gfs-controller:
@@ -221,6 +223,8 @@ jobs:
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/image-policy/**'
               - 'packages/network-policy-core/**'
+              - 'packages/llm-provider-attempt-contract/**'
+              - 'packages/codex-catalog-projection/**'
               - 'scripts/e2e/**'
               - 'tests/e2e/fixtures/**'
             stdio-bridge:

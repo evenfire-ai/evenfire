@@ -56,7 +56,8 @@
         "host-context-controller/**",
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
-        "packages/network-policy-core/**"
+        "packages/network-policy-core/**",
+        "packages/codex-catalog-projection/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -65,7 +66,11 @@
       "name": "mcp-host",
       "path": "mcp-host",
       "rooted": true,
-      "source_paths": ["mcp-host/**", "packages/llm-provider-attempt-contract/**"],
+      "source_paths": [
+        "mcp-host/**",
+        "packages/llm-provider-attempt-contract/**",
+        "packages/codex-catalog-projection/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -74,7 +79,11 @@
       "path": "mcp-host",
       "dockerfile": "Dockerfile.slim",
       "rooted": true,
-      "source_paths": ["mcp-host/**", "packages/llm-provider-attempt-contract/**"],
+      "source_paths": [
+        "mcp-host/**",
+        "packages/llm-provider-attempt-contract/**",
+        "packages/codex-catalog-projection/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -83,7 +92,11 @@
       "path": "mcp-host",
       "dockerfile": "Dockerfile.full",
       "rooted": true,
-      "source_paths": ["mcp-host/**", "packages/llm-provider-attempt-contract/**"],
+      "source_paths": [
+        "mcp-host/**",
+        "packages/llm-provider-attempt-contract/**",
+        "packages/codex-catalog-projection/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -92,7 +105,11 @@
       "path": "mcp-host",
       "dockerfile": "Dockerfile.desktop",
       "rooted": true,
-      "source_paths": ["mcp-host/**", "packages/llm-provider-attempt-contract/**"],
+      "source_paths": [
+        "mcp-host/**",
+        "packages/llm-provider-attempt-contract/**",
+        "packages/codex-catalog-projection/**"
+      ],
       "published": true,
       "deployed_to_minikube": false
     },
@@ -143,6 +160,8 @@
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
         "packages/network-policy-core/**",
+        "packages/llm-provider-attempt-contract/**",
+        "packages/codex-catalog-projection/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -161,6 +180,8 @@
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
         "packages/network-policy-core/**",
+        "packages/llm-provider-attempt-contract/**",
+        "packages/codex-catalog-projection/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -178,6 +199,8 @@
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
         "packages/network-policy-core/**",
+        "packages/llm-provider-attempt-contract/**",
+        "packages/codex-catalog-projection/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -196,6 +219,8 @@
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
         "packages/network-policy-core/**",
+        "packages/llm-provider-attempt-contract/**",
+        "packages/codex-catalog-projection/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],

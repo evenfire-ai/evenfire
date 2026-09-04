@@ -144,4 +144,60 @@ describe('CodexLlmProxyClient', () => {
       })
     ).rejects.toMatchObject({ code: 'origin_denied' })
   })
+
+  it('marks only the pre-stream abort as never dispatched', async () => {
+    const runtimeUrl = resolveCodexProxyRuntimeUrl(
+      'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+    )
+
+    const abortedClient = new CodexLlmProxyClient({
+      runtimeUrl,
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: vi.fn() as unknown as typeof fetch,
+    })
+    await expect(
+      abortedClient.stream({
+        executionTicket: 'ticket-123456',
+        requestHash: 'a'.repeat(64),
+        request: {},
+        signal: AbortSignal.abort(),
+      })
+    ).rejects.toMatchObject({ code: 'canceled', dispatched: false })
+
+    // The request left the process before control-api answered, so a denial is
+    // not proof that nothing was billed.
+    const deniedClient = new CodexLlmProxyClient({
+      runtimeUrl,
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        json: async () => ({ error: 'origin_denied' }),
+      }) as unknown as typeof fetch,
+    })
+    await expect(
+      deniedClient.stream({
+        executionTicket: 'ticket-123456',
+        requestHash: 'a'.repeat(64),
+        request: {},
+      })
+    ).rejects.toMatchObject({ code: 'origin_denied', dispatched: true })
+
+    // An error frame arrives mid-stream: the upstream call is already running.
+    const framedClient = new CodexLlmProxyClient({
+      runtimeUrl,
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: vi.fn().mockResolvedValue({
+        ok: true,
+        body: sse([{ type: 'error', code: 'rate_limited' }]),
+      }) as unknown as typeof fetch,
+    })
+    await expect(
+      framedClient.stream({
+        executionTicket: 'ticket-123456',
+        requestHash: 'a'.repeat(64),
+        request: {},
+      })
+    ).rejects.toMatchObject({ code: 'rate_limited', dispatched: true })
+  })
 })
