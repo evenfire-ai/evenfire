@@ -12324,8 +12324,9 @@ button.cu-gfs-tree__button:focus-visible,
 }
 
 .cu-gfs-list-frame {
-  --cu-gfs-list-columns: 2.25rem minmax(0, 1fr) minmax(4.5rem, auto) 5rem;
+  --cu-gfs-list-columns: 2.25rem minmax(0, 1fr) minmax(4.5rem, auto) 9.5rem;
 
+  container-type: inline-size;
   display: flex;
   min-width: 0;
   min-height: 0;
@@ -12514,20 +12515,20 @@ button.cu-gfs-tree__button:focus-visible,
   flex-wrap: nowrap;
 }
 
-.cu-gfs-list__row .cu-gfs-list__download.cu-btn {
+.cu-gfs-list__row .cu-gfs-list__row-action.cu-btn {
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--cu-motion-fast);
 }
 
-.cu-gfs-list__row:hover .cu-gfs-list__download.cu-btn,
-.cu-gfs-list__row:focus-within .cu-gfs-list__download.cu-btn,
-.cu-gfs-list__row .cu-gfs-list__download.cu-btn:focus-visible {
+.cu-gfs-list__row:hover .cu-gfs-list__row-action.cu-btn,
+.cu-gfs-list__row:focus-within .cu-gfs-list__row-action.cu-btn,
+.cu-gfs-list__row .cu-gfs-list__row-action.cu-btn:focus-visible {
   opacity: 1;
   pointer-events: auto;
 }
 
-.cu-gfs-list__download.cu-btn {
+.cu-gfs-list__row-action.cu-btn {
   width: 2rem;
   min-width: 2rem;
   height: 2rem;
@@ -12537,7 +12538,7 @@ button.cu-gfs-tree__button:focus-visible,
   color: var(--cu-text-soft);
 }
 
-.cu-gfs-list__download.cu-btn:hover:not(:disabled) {
+.cu-gfs-list__row-action.cu-btn:hover:not(:disabled) {
   border-color: rgba(var(--cu-accent-rgb), 0.26);
   background: rgba(var(--cu-accent-rgb), 0.1);
   color: var(--cu-accent);
@@ -12955,6 +12956,16 @@ button.cu-gfs-tree__button:focus-visible,
 }
 
 .cu-gfs-manage-dialog {
+  /* Share is intentionally monochromatic: remap semantic accents locally so
+     recipients, inherited access, errors, and destructive controls all stay
+     within the blue family without changing those colors elsewhere. */
+  --cu-success: var(--cu-accent);
+  --cu-success-rgb: var(--cu-accent-rgb);
+  --cu-warning: var(--cu-accent-hover);
+  --cu-warning-rgb: var(--cu-accent-rgb);
+  --cu-danger: var(--cu-link);
+  --cu-danger-hover: var(--cu-accent-hover);
+  --cu-danger-rgb: var(--cu-accent-rgb);
   width: min(45rem, 96vw);
   max-height: min(47.5rem, 92vh);
   display: grid;
@@ -13944,7 +13955,7 @@ button.cu-gfs-tree__button:focus-visible,
   }
 
   .cu-gfs-list-frame {
-    --cu-gfs-list-columns: 2.25rem minmax(0, 1fr) 5rem;
+    --cu-gfs-list-columns: 2.25rem minmax(0, 1fr) 9.5rem;
   }
 
   .cu-gfs-list__head > :nth-child(3),
@@ -13989,6 +14000,18 @@ button.cu-gfs-tree__button:focus-visible,
   .cu-gfs-move-dialog__actions {
     width: 100%;
     justify-content: flex-end;
+  }
+}
+
+@container (max-width: 720px) {
+  .cu-gfs-list-frame .cu-gfs-list__head,
+  .cu-gfs-list-frame .cu-gfs-list__row {
+    --cu-gfs-list-columns: 2.25rem minmax(0, 1fr) 9.5rem;
+  }
+
+  .cu-gfs-list-frame .cu-gfs-list__head > :nth-child(3),
+  .cu-gfs-list-frame .cu-gfs-list__row > .cu-gfs-list__value {
+    display: none;
   }
 }
 

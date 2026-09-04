@@ -950,6 +950,31 @@ describe('GfsBrowser', () => {
     await waitFor(() => expect(mockGfsDownload).toHaveBeenCalledWith('r2', 'report.md'))
   })
 
+  it('shows share and rename row actions beside download', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('report.md', 'file', 2)],
+      nextCursor: null,
+    })
+    renderBrowser()
+
+    const currentResources = await screen.findByRole('list', { name: 'Current folder resources' })
+    const reportRow = within(currentResources).getByText('report.md').closest('li')
+    expect(reportRow).toBeTruthy()
+    expect(within(reportRow!).getByRole('button', { name: 'Share report.md' })).toBeTruthy()
+    expect(within(reportRow!).getByRole('button', { name: 'Download report.md' })).toBeTruthy()
+    expect(within(reportRow!).getByRole('button', { name: 'Rename report.md' })).toBeTruthy()
+    expect(
+      Array.from(reportRow!.querySelectorAll('.cu-gfs-list__actions button')).map(button =>
+        button.getAttribute('aria-label')
+      )
+    ).toEqual([
+      'Share report.md',
+      'Download report.md',
+      'Rename report.md',
+      'Actions for report.md',
+    ])
+  })
+
   it('surfaces download failures through the toast stack', async () => {
     mockApiGet.mockResolvedValueOnce({
       items: [child('report.md', 'file', 2)],

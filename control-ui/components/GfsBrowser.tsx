@@ -14,7 +14,15 @@ import {
   IconVideo,
 } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
-import { IconChevronRight, IconDownload, IconPaperclip, IconUpload, IconX } from '@components/icons'
+import {
+  IconChevronRight,
+  IconDownload,
+  IconPaperclip,
+  IconPencil,
+  IconShare,
+  IconUpload,
+  IconX,
+} from '@components/icons'
 import { Button } from '@components/ui'
 import { apiGet, apiSend, gfsDownload, isSilentApiError } from '@lib/api'
 import { isGfsDocumentFile } from '@lib/gfsDocumentFile'
@@ -1342,9 +1350,21 @@ export function GfsBrowser(): React.JSX.Element {
                         {child.kind === 'directory' ? '—' : formatBytes(child.bytes)}
                       </span>
                       <span className="cu-gfs-list__actions">
+                        <Button
+                          className="cu-gfs-list__row-action"
+                          icon
+                          size="sm"
+                          variant="ghost"
+                          title={`Share ${child.name}`}
+                          aria-label={`Share ${child.name}`}
+                          onClick={() => openManage(child)}
+                        >
+                          <IconShare width={16} height={16} />
+                        </Button>
                         {child.kind !== 'directory' ? (
                           <Button
-                            className="cu-gfs-list__download"
+                            className="cu-gfs-list__download cu-gfs-list__row-action"
+                            icon
                             size="sm"
                             variant="ghost"
                             title={`Download ${child.name}`}
@@ -1355,6 +1375,17 @@ export function GfsBrowser(): React.JSX.Element {
                             <IconDownload width={18} height={18} />
                           </Button>
                         ) : null}
+                        <Button
+                          className="cu-gfs-list__row-action"
+                          icon
+                          size="sm"
+                          variant="ghost"
+                          title={`Rename ${child.name}`}
+                          aria-label={`Rename ${child.name}`}
+                          onClick={() => openRowRename(child)}
+                        >
+                          <IconPencil width={16} height={16} />
+                        </Button>
                         <GfsResourceMenu
                           resourceName={child.name}
                           resourceUri={child.gfsUri}

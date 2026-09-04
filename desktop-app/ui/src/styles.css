@@ -14605,6 +14605,7 @@ pre {
 }
 
 .da-gfs-drive__grid {
+  container-type: inline-size;
   min-height: 0;
   flex: 1 1 auto;
   width: auto;
@@ -15171,6 +15172,14 @@ pre {
 }
 
 .da-gfs-manage-dialog {
+  /* Keep every Share-dialog accent in the blue family while preserving the
+     global semantic palette used by the rest of Desktop. */
+  --success: var(--accent);
+  --success-rgb: var(--accent-rgb);
+  --warning: var(--accent-strong);
+  --warning-rgb: var(--accent-rgb);
+  --danger: var(--accent-strong);
+  --danger-rgb: var(--accent-rgb);
   width: min(720px, 96vw);
   max-height: min(760px, 92vh);
   display: grid;
@@ -15946,11 +15955,7 @@ pre {
 
   .da-gfs-drive__grid .da-grid__head,
   .da-gfs-drive__grid .da-grid__row {
-    grid-template-columns: calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) 4.5rem;
-  }
-
-  .da-gfs-list__actions {
-    flex-wrap: wrap;
+    grid-template-columns: calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) 9.5rem;
   }
 
   .da-gfs-drive__size-column,
@@ -15965,6 +15970,18 @@ pre {
   .da-gfs-manage-dialog {
     width: 100%;
     max-height: 96vh;
+  }
+}
+
+@container (max-width: 720px) {
+  .da-gfs-drive__grid .da-grid__head,
+  .da-gfs-drive__grid .da-grid__row {
+    grid-template-columns: calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) 9.5rem;
+  }
+
+  .da-gfs-drive__size-column,
+  .da-gfs-drive__size {
+    display: none;
   }
 }
 
