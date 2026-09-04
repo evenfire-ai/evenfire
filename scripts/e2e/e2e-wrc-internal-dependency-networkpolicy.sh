@@ -21,7 +21,7 @@ DROP_BACKEND_ID="${E2E_DROP_BACKEND_ID:-drop-${RUN_ID}}"
 DENIED_POD="${E2E_DENIED_POD:-deny-${RUN_ID}}"
 BACKEND_PORT="${E2E_BACKEND_PORT:-8080}"
 CONNECT_TIMEOUT="${E2E_CONNECT_TIMEOUT:-4}"
-FINALIZER_HOLD="e2e.evenfire.ai/hold-networkpolicy-delete"
+FINALIZER_HOLD="e2e.clerum.io/hold-networkpolicy-delete"
 OWNER_SELECTOR="clerum.io/managed-by=workflow-recipes,clerum.io/policy-type=internal-dependency,clerum.io/recipe=${RECIPE_NAME}"
 
 SOURCE_DEPLOYMENT="$SOURCE_ID"

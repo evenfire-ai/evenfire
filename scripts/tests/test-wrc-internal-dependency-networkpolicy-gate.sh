@@ -78,7 +78,7 @@ emergency="$(function_body emergency_cleanup)"
 
 # A retained child policy makes cleanup order observable: the recipe must stay
 # Terminating until the held policy is released and disappears.
-if grep -Fq 'FINALIZER_HOLD="e2e.evenfire.ai/hold-networkpolicy-delete"' "$GATE" &&
+if grep -Fq 'FINALIZER_HOLD="e2e.clerum.io/hold-networkpolicy-delete"' "$GATE" &&
    printf '%s\n' "$normal_finalizer" | grep -Fq '${FINALIZER_HOLD}' &&
    printf '%s\n' "$normal_finalizer" | grep -Fq 'go-template={{.metadata.deletionTimestamp}}' &&
    printf '%s\n' "$normal_finalizer" | grep -Fq 'clerum.io/workload-cleanup' &&
