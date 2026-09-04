@@ -10,6 +10,7 @@ import { CronJobDef, WorkflowRecipeCRD, WorkflowRecipeGfsIntentSpec, WorkloadDef
 import { INHERITED_PARENT_RESOURCES_ANNOTATION } from '../workflow/childRecipeFactory'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
 import { isRetryableInfraError } from './k8sErrors'
+import type { NetworkPolicyFamily } from './networkPolicyConvergence'
 import * as brokerIssuer from './oauthBrokerTokenIssuerClient'
 import { PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE } from './pluginWorkloadSdkValidator'
 import {
@@ -18,7 +19,6 @@ import {
   resolveScopedWorkloadResourceName,
   resolveWorkloadRuntimeResourceName,
 } from './resourceBuilder'
-import { computeSpecHash, stampSpecHash } from './specHash'
 import {
   TRANSIENT_REQUEUE_BASE_MS,
   WORKFLOW_PROGRESS_REQUEUE_BASE_MS,
@@ -224,18 +224,21 @@ describe('WorkflowRecipeReconciler', () => {
     mockNetworkingApi.createNamespacedNetworkPolicy.mockReset()
     mockNetworkingApi.createNamespacedNetworkPolicy.mockResolvedValue({})
     mockNetworkingApi.readNamespacedNetworkPolicy.mockReset()
-    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(({ name }: { name: string }) =>
-      Promise.resolve({
-        metadata: {
-          name,
-          uid: `uid-${name}`,
-          resourceVersion: '1',
-          labels: {
-            'clerum.io/managed-by': 'wrc',
-            'clerum.io/recipe': name.replace(/-coordinator-to-gfs$/, ''),
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+      ({ name }: { name: string }) => {
+        if (!name.endsWith('-coordinator-to-gfs')) return Promise.reject({ code: 404 })
+        return Promise.resolve({
+          metadata: {
+            name,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/managed-by': 'wrc',
+              'clerum.io/recipe': name.replace(/-coordinator-to-gfs$/, ''),
+            },
           },
-        },
-      })
+        })
+      }
     )
     mockNetworkingApi.replaceNamespacedNetworkPolicy.mockReset()
     mockNetworkingApi.replaceNamespacedNetworkPolicy.mockResolvedValue({})
@@ -770,28 +773,27 @@ describe('WorkflowRecipeReconciler', () => {
     ])
   })
 
-  // ─── issue #575: the spec-hash gate applyNetworkPolicy never opted into ──────
-  //
-  // `createOrReplace` takes a fourth `idempotency` argument that stamps the
-  // desired manifest with a SHA-256 of its content and compares it against the
-  // annotation on the live object before replacing. Five callers pass it —
-  // Deployment, headless Service, CronJob, Job, DaemonSet. `applyNetworkPolicy`
-  // did not, so every WRC NetworkPolicy funnelling through it was rewritten on
-  // every reconcile pass without comparing anything: ~12 200 PUTs/hour of objects
-  // the apiserver then discarded as unchanged.
-  //
-  // The ownership assertion is why this is not a one-line change. It runs inside
-  // the replace path today; a gate that returns first would skip it, so it moves
-  // into `readExisting` — the very read the gate evaluates — and the result is
-  // cached only AFTER it passes, so the replace path can never inherit a vetoed
-  // object.
-  describe('applyNetworkPolicy spec-hash gate (issue #575)', () => {
+  // ─── issue #575: live NetworkPolicy convergence ────────────────────────
+  describe('applyNetworkPolicy live convergence (issue #575)', () => {
     const SPEC_HASH = 'clerum.io/spec-hash'
     const NS = 'sandbox-recipes'
-    const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T
-    type Priv = { applyNetworkPolicy: (p: k8s.V1NetworkPolicy, ns: string) => Promise<void> }
-    const apply = (p: k8s.V1NetworkPolicy) =>
-      (reconciler as unknown as Priv).applyNetworkPolicy(p, NS)
+    const clone = <T>(value: T): T => structuredClone(value)
+    type Priv = {
+      applyNetworkPolicy: (
+        policy: k8s.V1NetworkPolicy,
+        namespace: string,
+        options: { family: NetworkPolicyFamily; existing?: k8s.V1NetworkPolicy | null }
+      ) => Promise<void>
+    }
+    const apply = (
+      policy: k8s.V1NetworkPolicy,
+      family: NetworkPolicyFamily = 'workload-ingress',
+      existing?: k8s.V1NetworkPolicy | null
+    ) =>
+      (reconciler as unknown as Priv).applyNetworkPolicy(policy, NS, {
+        family,
+        ...(existing === undefined ? {} : { existing }),
+      })
 
     const plainPolicy = (): k8s.V1NetworkPolicy => ({
       apiVersion: 'networking.k8s.io/v1',
@@ -821,57 +823,101 @@ describe('WorkflowRecipeReconciler', () => {
       },
     })
 
-    const ownedExisting = (extra: Record<string, unknown> = {}) => ({
+    const gatewayPolicy = (ownerUid = 'uid-current'): k8s.V1NetworkPolicy => ({
+      ...plainPolicy(),
       metadata: {
-        name: 'wl-ingress-r-w',
-        resourceVersion: '9',
-        labels: plainPolicy().metadata!.labels,
-        ...extra,
+        name: 'allow-webhook-proxy-ingress-r',
+        namespace: NS,
+        labels: {
+          'clerum.io/managed-by': 'workflow-recipes',
+          'clerum.io/recipe-namespace': NS,
+          'clerum.io/recipe-name': 'r',
+          'clerum.io/webhook-gateway': 'true',
+        },
+        ownerReferences: [
+          {
+            apiVersion: 'clerum.io/v1alpha1',
+            kind: 'WorkflowRecipe',
+            name: 'r',
+            uid: ownerUid,
+            controller: true,
+            blockOwnerDeletion: true,
+          },
+        ],
       },
     })
 
-    it('T1 does NOT replace a NetworkPolicy whose spec-hash is unchanged, and says so', async () => {
-      await apply(plainPolicy())
-      const sealed = clone(
-        (
-          mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.at(-1)![0] as {
-            body: k8s.V1NetworkPolicy
-          }
-        ).body
-      )
-      // The exact hash, not merely "some annotation": a stamp that is present but
-      // wrong would still skip the write, and would skip it for the wrong reason.
-      expect(sealed.metadata?.annotations?.[SPEC_HASH]).toBe(computeSpecHash(plainPolicy()))
+    const livePolicy = (
+      desired: k8s.V1NetworkPolicy,
+      metadata: Partial<k8s.V1ObjectMeta> = {}
+    ): k8s.V1NetworkPolicy => ({
+      ...clone(desired),
+      metadata: {
+        ...clone(desired.metadata ?? {}),
+        resourceVersion: '9',
+        ...metadata,
+      },
+    })
 
-      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
-      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
-        ...sealed,
-        metadata: { ...sealed.metadata, resourceVersion: '9' },
-      })
-      mockNetworkingApi.readNamespacedNetworkPolicy.mockClear()
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    function captureNetworkPolicyLogs(): {
+      entries: Array<Record<string, unknown>>
+      restore: () => void
+    } {
+      const previousLevel = process.env.LOG_LEVEL
+      process.env.LOG_LEVEL = 'info'
+      const entries: Array<Record<string, unknown>> = []
+      const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+        const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString()
+        for (const line of text.split('\n')) {
+          if (!line.startsWith('{')) continue
+          const parsed = JSON.parse(line) as Record<string, unknown>
+          if (String(parsed.msg).startsWith('network policy')) entries.push(parsed)
+        }
+        return true
+      }) as unknown as typeof process.stdout.write)
+      return {
+        entries,
+        restore: () => {
+          spy.mockRestore()
+          if (previousLevel === undefined) delete process.env.LOG_LEVEL
+          else process.env.LOG_LEVEL = previousLevel
+        },
+      }
+    }
+
+    it('T1 skips a live-equivalent policy and emits a structured liveness witness', async () => {
+      const desired = plainPolicy()
+      const live = livePolicy(desired, { annotations: { [SPEC_HASH]: 'legacy-seal' } })
+      live.spec!.ingress![0].ports![0].protocol = undefined
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(live)
+      const captured = captureNetworkPolicyLogs()
       try {
-        await apply(plainPolicy())
-        expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+        await apply(desired)
         expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
-        // The skip line is load-bearing, not decoration: it is what keeps the
-        // ~16s reconcile cadence visible once the writes stop. A silent gate
-        // would make the symptom of #460 invisible.
-        expect(logSpy.mock.calls.flat().join(' ')).toContain(
-          'NetworkPolicy "wl-ingress-r-w" in sandbox-recipes unchanged (spec-hash match); skipping update'
+        expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+        expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+        expect(captured.entries).toContainEqual(
+          expect.objectContaining({
+            level: 'info',
+            msg: 'network policy unchanged; skipping update',
+            policy: 'wl-ingress-r-w',
+            namespace: NS,
+            family: 'workload-ingress',
+          })
         )
       } finally {
-        logSpy.mockRestore()
+        captured.restore()
       }
     })
 
-    it('T2 replaces when the spec-hash differs, reading once and using the live resourceVersion', async () => {
-      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
-      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(
-        ownedExisting({ annotations: { [SPEC_HASH]: 'stale' } })
-      )
+    it('T2 repairs live spec drift even when the legacy spec-hash is preserved', async () => {
+      const desired = plainPolicy()
+      const live = livePolicy(desired, { annotations: { [SPEC_HASH]: 'legacy-seal' } })
+      live.spec!.podSelector = {}
+      live.spec!.ingress = [{}]
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(live)
 
-      await apply(plainPolicy())
+      await apply(desired)
 
       expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
       const body = (
@@ -880,155 +926,265 @@ describe('WorkflowRecipeReconciler', () => {
         }
       ).body
       expect(body.metadata?.resourceVersion).toBe('9')
-      expect(body.metadata?.annotations?.[SPEC_HASH]).toBe(computeSpecHash(plainPolicy()))
-      // One read serves both the gate and the replace, so the replace cannot act
-      // on a different resourceVersion than the one the gate evaluated.
+      expect(body.metadata?.annotations?.[SPEC_HASH]).toBeUndefined()
+      expect(body.spec).toEqual(desired.spec)
       expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
     })
 
-    it('T3 writes once to seal a pre-existing policy with no spec-hash, then skips', async () => {
-      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
-      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(ownedExisting())
+    it('does not let a supplied cluster-local wl-egress snapshot veto detected drift', async () => {
+      const desired = plainPolicy()
+      desired.metadata!.name = 'wl-egress-r-w'
+      desired.spec = {
+        podSelector: { matchLabels: { 'clerum.io/workload': 'w' } },
+        policyTypes: ['Egress'],
+        egress: [
+          {
+            to: [{ podSelector: { matchLabels: { 'clerum.io/workload': 'db' } } }],
+            ports: [{ port: 5432, protocol: 'TCP' }],
+          },
+        ],
+      }
+      const live = livePolicy(desired, { annotations: { [SPEC_HASH]: 'legacy-seal' } })
+      live.spec!.podSelector = {}
 
-      await apply(plainPolicy())
+      await apply(desired, 'workload-egress', live)
+
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).not.toHaveBeenCalled()
       expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
-      const sealed = clone(
+      expect(
         (
           mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls[0][0] as {
             body: k8s.V1NetworkPolicy
           }
+        ).body.spec?.podSelector
+      ).toEqual(desired.spec.podSelector)
+    })
+
+    it('routes workload-egress label drift through the live apply prefilter', () => {
+      const desired = plainPolicy()
+      desired.metadata!.name = 'wl-egress-r-w'
+      desired.spec = { podSelector: {}, policyTypes: ['Egress'], egress: [] }
+      const live = livePolicy(desired)
+      live.metadata!.labels = { ...live.metadata!.labels, 'clerum.io/recipe': 'wrong' }
+
+      const writeNeeded = (
+        reconciler as unknown as {
+          egressWriteNeeded: (
+            existing: k8s.V1NetworkPolicy | null,
+            wanted: k8s.V1NetworkPolicy
+          ) => boolean
+        }
+      ).egressWriteNeeded(live, desired)
+
+      expect(writeNeeded).toBe(true)
+
+      live.metadata!.labels = desired.metadata!.labels
+      live.metadata!.ownerReferences = [
+        {
+          apiVersion: 'apps/v1',
+          kind: 'Deployment',
+          name: 'foreign',
+          uid: 'foreign-uid',
+          controller: true,
+        },
+      ]
+      expect(
+        (
+          reconciler as unknown as {
+            egressWriteNeeded: (
+              existing: k8s.V1NetworkPolicy | null,
+              wanted: k8s.V1NetworkPolicy
+            ) => boolean
+          }
+        ).egressWriteNeeded(live, desired)
+      ).toBe(true)
+    })
+
+    it('T3 creates on 404 and the next equivalent reconcile is read-only', async () => {
+      const desired = plainPolicy()
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 404 })
+
+      await apply(desired)
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      const created = clone(
+        (
+          mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls[0][0] as {
+            body: k8s.V1NetworkPolicy
+          }
         ).body
       )
-      expect(sealed.metadata?.annotations?.[SPEC_HASH]).toBe(computeSpecHash(plainPolicy()))
+      expect(created.metadata?.annotations?.[SPEC_HASH]).toBeUndefined()
 
-      mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
-      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(sealed)
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(livePolicy(created))
 
-      await apply(plainPolicy())
+      await apply(desired)
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
       expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
 
-    it('T4 does not let a matching spec-hash shortcut the ownership assertion', async () => {
+    it('T4 propagates a foreign intdep ownership veto after exactly one read', async () => {
       const desired = intdepPolicy()
-      const sameHash = stampSpecHash(clone(desired))
-      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
-      // Foreign owner, carrying a hash the gate would happily match on.
-      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
-        metadata: {
-          name: 'wr-intdep-egress-r-w',
-          resourceVersion: '9',
-          annotations: { [SPEC_HASH]: sameHash },
-          labels: { 'clerum.io/managed-by': 'hcc' },
-        },
-      })
+      mockNetworkingApi.readNamespacedNetworkPolicy
+        .mockResolvedValueOnce({
+          metadata: {
+            name: 'wr-intdep-egress-r-w',
+            resourceVersion: '9',
+            labels: { 'clerum.io/managed-by': 'hcc' },
+          },
+        })
+        .mockRejectedValueOnce({ code: 503 })
 
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-      const rejection = await apply(desired).then(
-        () => {
-          throw new Error('expected the ownership assertion to reject')
-        },
-        (e: unknown) => e as Error
+      const rejection = await apply(desired, 'internal-dependency').then(
+        () => new Error('expected the ownership assertion to reject'),
+        (error: unknown) => error as Error
       )
-      // Pin the CLASS, not just the message. `reconcileInternalDependencyPolicies`
-      // keys the CRD condition `OwnershipConflict` off `instanceof`, so a bare
-      // Error carrying the same text would set the wrong condition while passing a
-      // message-only assertion. The class is module-local — exporting it just for
-      // this test would be production code shaped by a test — so pin its `name`.
       expect(rejection.name).toBe('NetworkPolicyOwnershipConflictError')
       expect(rejection.message).toMatch(/Refusing to replace NetworkPolicy "wr-intdep-egress-r-w"/)
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
       expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
-      // Two reads: the gate's read raises the veto, `applyIsNoop` treats any
-      // throw as "cannot prove this is a no-op" and falls through, and the replace
-      // path re-reads and re-asserts, where the veto propagates. The write never
-      // happens either way. What this test rules out is the assertion living ONLY
-      // in the replace path: there, a matching hash would make the gate skip and
-      // this call would resolve instead of rejecting.
-      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
-
-      // Review of #580, R1-L1. A veto is not a read failure, and `applyIsNoop`
-      // must not announce it as one: the read SUCCEEDED and the caller's
-      // assertion on the result is what threw. The accurate message arrives a
-      // moment later from `replaceFn`, so a "pre-read failed" line here would only
-      // precede the truth with a wrong diagnosis.
-      //
-      // Scoped to that one line rather than asserting console.warn was never
-      // called: other warnings on this path are legitimate, and a blanket
-      // assertion would break on any of them for reasons unrelated to the veto.
-      const warned = warnSpy.mock.calls.flat().join(' ')
-      expect(warned).not.toContain('idempotency pre-read failed')
-      warnSpy.mockRestore()
-    })
-
-    it('T4b lets an internal-dependency policy WRC already owns through the gate', async () => {
-      // T4 pins the veto; nothing pinned the other side. An assertion that rejected
-      // EVERY internal-dependency policy would leave T4 green and silently stop the
-      // whole intdep family from converging — the gate would never be reached and
-      // every pass would set an OwnershipConflict condition. This is the test that
-      // makes T4 mean "vetoes foreign owners" rather than "always vetoes".
-      const desired = intdepPolicy()
-      const ownHash = stampSpecHash(clone(desired))
-      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
-      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
-        metadata: {
-          name: 'wr-intdep-egress-r-w',
-          resourceVersion: '9',
-          annotations: { [SPEC_HASH]: ownHash },
-          labels: desired.metadata!.labels,
-        },
-      })
-
-      await expect(apply(desired)).resolves.toBeUndefined()
-
-      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
-      // One read: the assertion passed inside the gate's own read, so the replace
-      // path is never entered and never re-reads. Contrast T4's two.
       expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
     })
 
-    it('T5 falls through to the replace when the gate read fails with an HTTP status', async () => {
-      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
-      mockNetworkingApi.readNamespacedNetworkPolicy
-        .mockRejectedValueOnce({ code: 500 })
-        .mockResolvedValueOnce(ownedExisting())
+    it('T4b lets an intdep policy WRC owns converge read-only', async () => {
+      const desired = intdepPolicy()
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(livePolicy(desired))
 
-      await apply(plainPolicy())
+      await expect(apply(desired, 'internal-dependency')).resolves.toBeUndefined()
 
-      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
-      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
 
-    it('T5b falls through to the replace on a retryable transport error', async () => {
-      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+    it('T5 retries an HTTP read failure, replaces with the recovered RV, and logs safely', async () => {
+      const desired = plainPolicy()
+      mockNetworkingApi.readNamespacedNetworkPolicy
+        .mockRejectedValueOnce({ code: 500, authorization: 'Bearer must-not-appear' })
+        .mockResolvedValueOnce(livePolicy(desired))
+      const captured = captureNetworkPolicyLogs()
+      try {
+        await apply(desired)
+
+        expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+        expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+        expect(
+          (
+            mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls[0][0] as {
+              body: k8s.V1NetworkPolicy
+            }
+          ).body.metadata?.resourceVersion
+        ).toBe('9')
+        const warning = captured.entries.find(
+          entry => entry.msg === 'network policy read unavailable; retrying once'
+        )
+        expect(warning).toEqual(
+          expect.objectContaining({
+            level: 'warn',
+            errorName: 'UnknownError',
+            errorCode: 500,
+            retryable: true,
+          })
+        )
+        expect(JSON.stringify(warning)).not.toContain('must-not-appear')
+      } finally {
+        captured.restore()
+      }
+    })
+
+    it('T5b retries a transport read failure once and replaces', async () => {
+      const desired = plainPolicy()
       mockNetworkingApi.readNamespacedNetworkPolicy
         .mockRejectedValueOnce({ code: 'ECONNRESET' })
-        .mockResolvedValueOnce(ownedExisting())
+        .mockResolvedValueOnce(livePolicy(desired))
 
-      await apply(plainPolicy())
+      await apply(desired)
 
       expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
       expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
     })
 
-    it('T5c falls through on a codeless read error, the shape `:1354` pins for Deployment', async () => {
-      // The rule cannot key on the shape of the error. A bare Error with no code
-      // is a legitimate read failure — the existing Deployment test injects
-      // exactly `new Error('transient read timeout')` and asserts the write still
-      // happens — so `applyIsNoop` swallows everything and falls open. A version
-      // of this gate that classified errors instead broke that test; this pins the
-      // behaviour for NetworkPolicy so the same idea cannot come back quietly.
-      //
-      // Not redundant with T5b despite the total catch: T5b's error carries a
-      // `code`, and every earlier draft that regressed this did so by keying on
-      // `code`. The codeless shape is the one that broke the Deployment test.
-      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+    it('T5c retries a codeless read failure once and replaces', async () => {
+      const desired = plainPolicy()
       mockNetworkingApi.readNamespacedNetworkPolicy
         .mockRejectedValueOnce(new Error('transient read timeout'))
-        .mockResolvedValueOnce(ownedExisting())
+        .mockResolvedValueOnce(livePolicy(desired))
 
-      await apply(plainPolicy())
+      await apply(desired)
 
       expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
       expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+    })
+
+    it('repairs the gateway owner UID and refuses a foreign controller owner', async () => {
+      const desired = gatewayPolicy('uid-current')
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(
+        livePolicy(gatewayPolicy('uid-old'), { annotations: { [SPEC_HASH]: 'legacy-seal' } })
+      )
+
+      await apply(desired, 'webhook-gateway')
+
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      const body = (
+        mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls[0][0] as {
+          body: k8s.V1NetworkPolicy
+        }
+      ).body
+      expect(body.metadata?.ownerReferences?.[0].uid).toBe('uid-current')
+
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+      const foreign = livePolicy(desired)
+      foreign.metadata!.ownerReferences = [
+        {
+          apiVersion: 'apps/v1',
+          kind: 'Deployment',
+          name: 'foreign',
+          uid: 'foreign-uid',
+          controller: true,
+        },
+      ]
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(foreign)
+
+      await expect(apply(desired, 'webhook-gateway')).rejects.toMatchObject({
+        name: 'NetworkPolicyOwnershipConflictError',
+      })
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('handles a read/create race by re-reading instead of blind replacing', async () => {
+      const desired = plainPolicy()
+      mockNetworkingApi.readNamespacedNetworkPolicy
+        .mockRejectedValueOnce({ code: 404 })
+        .mockResolvedValueOnce(livePolicy(desired))
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 409 })
+
+      await apply(desired)
+
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it.each([404, 409])('classifies replace race status %s as retryable', async code => {
+      const desired = plainPolicy()
+      const live = livePolicy(desired)
+      live.spec!.podSelector = {}
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(live)
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mockRejectedValueOnce({ code })
+
+      await expect(apply(desired)).rejects.toMatchObject({
+        name: 'RetryableReconcileError',
+        cause: { code },
+      })
+    })
+
+    it('refuses to create a gateway policy without a complete desired owner', async () => {
+      const desired = gatewayPolicy('')
+
+      await expect(apply(desired, 'webhook-gateway')).rejects.toMatchObject({
+        name: 'NetworkPolicyOwnershipConflictError',
+      })
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
   })
 
@@ -1919,17 +2075,21 @@ describe('WorkflowRecipeReconciler', () => {
   })
 
   it('fails closed instead of replacing an existing non-WRC internal-dependency policy', async () => {
-    mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 409 })
-    mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValueOnce({
-      metadata: {
-        resourceVersion: 'rv-hcc',
-        labels: {
-          'clerum.io/managed-by': 'host-capability-controller',
-          'clerum.io/policy-type': 'binding-allow',
-          'clerum.io/recipe': 'test-recipe',
-        },
-      },
-    })
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+      ({ name }: { name: string }) => {
+        if (!name.startsWith('wr-intdep-')) return Promise.reject({ code: 404 })
+        return Promise.resolve({
+          metadata: {
+            resourceVersion: 'rv-hcc',
+            labels: {
+              'clerum.io/managed-by': 'host-capability-controller',
+              'clerum.io/policy-type': 'binding-allow',
+              'clerum.io/recipe': 'test-recipe',
+            },
+          },
+        })
+      }
+    )
 
     const result = await reconciler.reconcile(
       makeRecipe({
@@ -1954,6 +2114,163 @@ describe('WorkflowRecipeReconciler', () => {
       reason: 'OwnershipConflict',
     })
     expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+  })
+
+  it('keeps a recipe retryable when an internal-dependency policy is terminating', async () => {
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+      ({ name }: { name: string }) => {
+        if (!name.startsWith('wr-intdep-')) return Promise.reject({ code: 404 })
+        return Promise.resolve({
+          metadata: {
+            name,
+            resourceVersion: 'rv-terminating',
+            deletionTimestamp: new Date('2026-09-04T00:00:00Z'),
+            labels: {
+              'clerum.io/managed-by': 'host-capability-controller',
+              'clerum.io/policy-type': 'binding-allow',
+              'clerum.io/recipe': 'test-recipe',
+            },
+          },
+        })
+      }
+    )
+
+    const result = await reconciler.reconcile(
+      makeRecipe({
+        spec: {
+          workloads: [
+            {
+              id: 'api',
+              type: 'deployment',
+              image: 'api:test',
+              port: 8080,
+              env: [{ name: 'DB_HOST', value: '{{db:host}}' }],
+            },
+            { id: 'db', type: 'deployment', image: 'postgres:16', port: 5432 },
+          ],
+        },
+      })
+    )
+
+    expect(result.phase).toBe('degraded')
+    expect(result.message).toMatch(/is terminating; retrying after deletion/)
+    expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+  })
+
+  it('keeps a recipe retryable when an internal-dependency policy disappears before replace', async () => {
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+      ({ name }: { name: string }) => {
+        if (!name.startsWith('wr-intdep-')) return Promise.reject({ code: 404 })
+        return Promise.resolve({
+          metadata: {
+            name,
+            resourceVersion: 'rv-before-delete',
+            labels: {
+              'clerum.io/managed-by': 'workflow-recipes',
+              'clerum.io/policy-type': 'internal-dependency',
+              'clerum.io/recipe': 'test-recipe',
+            },
+          },
+          spec: { podSelector: {}, policyTypes: ['Ingress'] },
+        })
+      }
+    )
+    mockNetworkingApi.replaceNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 404 })
+
+    const result = await reconciler.reconcile(
+      makeRecipe({
+        spec: {
+          workloads: [
+            {
+              id: 'api',
+              type: 'deployment',
+              image: 'api:test',
+              port: 8080,
+              env: [{ name: 'DB_HOST', value: '{{db:host}}' }],
+            },
+            { id: 'db', type: 'deployment', image: 'postgres:16', port: 5432 },
+          ],
+        },
+      })
+    )
+
+    expect(result.phase).toBe('degraded')
+    expect(result.message).toMatch(/disappeared during replace/)
+  })
+
+  it.each([{ code: 500 }, new Error('network timeout')])(
+    'preserves an active recipe and requeues when internal-dependency reads stay unavailable (%s)',
+    async readError => {
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+        ({ name }: { name: string }) =>
+          name.startsWith('wr-intdep-') ? Promise.reject(readError) : Promise.reject({ code: 404 })
+      )
+
+      const result = await reconciler.reconcile(
+        makeRecipe({
+          status: { phase: 'active', message: 'healthy before API outage', workloads: [] },
+          spec: {
+            workloads: [
+              {
+                id: 'api',
+                type: 'deployment',
+                image: 'api:test',
+                port: 8080,
+                env: [{ name: 'DB_HOST', value: '{{db:host}}' }],
+              },
+              { id: 'db', type: 'deployment', image: 'postgres:16', port: 5432 },
+            ],
+          },
+        })
+      )
+
+      expect(result.phase).toBe('active')
+      expect(result.message).toBe('healthy before API outage')
+      expect(result.skipStatusPatch).toBe(true)
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    }
+  )
+
+  it('keeps a workflow non-terminal when internal-dependency reads stay unavailable', async () => {
+    const workflowReconcile = vi.fn()
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          validateWorkflowSpec: () => undefined
+        }
+      }
+    ).workflowReconciler = { reconcile: workflowReconcile, validateWorkflowSpec: () => undefined }
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+      ({ name }: { name: string }) =>
+        name.startsWith('wr-intdep-')
+          ? Promise.reject({ code: 500 })
+          : Promise.reject({ code: 404 })
+    )
+
+    const result = await reconciler.reconcile(
+      makeRecipe({
+        spec: {
+          workloads: [
+            {
+              id: 'api',
+              type: 'deployment',
+              image: 'api:test',
+              port: 8080,
+              env: [{ name: 'DB_HOST', value: '{{db:host}}' }],
+            },
+            { id: 'db', type: 'deployment', image: 'postgres:16', port: 5432 },
+          ],
+          steps: [{ id: 'run', run: snippetRun() }],
+        },
+      })
+    )
+
+    expect(result.phase).toBe('degraded')
+    expect(result.workflowPhase).toBeUndefined()
+    expect(result.message).toBe('Workflow workload infrastructure temporarily unavailable (500)')
+    expect(workflowReconcile).not.toHaveBeenCalled()
   })
 
   it('fails closed before workflow execution when a workflow StatefulSet hits a foreign PVC', async () => {
@@ -9454,16 +9771,9 @@ describe('WorkflowRecipeReconciler', () => {
       expect(allFalse).toBe(true)
     })
 
-    it('T6 (#575) applies the 3 gateway NetworkPolicies through the spec-hash gate', async () => {
-      // Two jobs. First: the gateway policies used to be written by an inline
-      // create-or-replace with no gate, so they were three no-op PUTs per pass.
-      // Second, and the reason this test is here rather than asserted by
-      // inspection: it proves the gateway builder is DETERMINISTIC. A gate only
-      // closes if the manifest hashes the same on the next pass, and a builder
-      // that iterated a Set or stamped a timestamp would leave the gate open
-      // forever — the failure mode of #413 and #579. If this test goes red, the
-      // builder acquired non-determinism; do not relax the assertion.
+    it('T6 (#575) converges the 3 gateway NetworkPolicies through live reads', async () => {
       mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       await reconciler.reconcile(recipeWithWebhook())
 
       const sealed = new Map<string, unknown>()
@@ -9479,7 +9789,6 @@ describe('WorkflowRecipeReconciler', () => {
         'allow-webhook-proxy-ingress-wf-wh-recipe',
       ])
 
-      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
       mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
         ({ name }: { name: string }) => {
           const previous = sealed.get(name) as k8s.V1NetworkPolicy | undefined
@@ -9491,31 +9800,44 @@ describe('WorkflowRecipeReconciler', () => {
         }
       )
       mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
       mockNetworkingApi.readNamespacedNetworkPolicy.mockClear()
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+      const previousLevel = process.env.LOG_LEVEL
+      process.env.LOG_LEVEL = 'info'
+      const logEntries: Array<Record<string, unknown>> = []
+      const logSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+        const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString()
+        for (const line of text.split('\n')) {
+          if (!line.startsWith('{')) continue
+          const parsed = JSON.parse(line) as Record<string, unknown>
+          if (parsed.msg === 'network policy unchanged; skipping update') logEntries.push(parsed)
+        }
+        return true
+      }) as unknown as typeof process.stdout.write)
 
       try {
         await reconciler.reconcile(recipeWithWebhook())
 
-        const logged = logSpy.mock.calls.flat().join('\n')
         for (const name of sealed.keys()) {
-          // Negative half: the gate closed, no write went out.
           expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
             expect.objectContaining({ name })
           )
-          // Positive half, and the reason this test is not vacuous: prove the second
-          // pass actually REACHED this policy. A negative assertion alone cannot tell
-          // "the gate closed" from "the code never ran" — patching the gateway loop to
-          // run only on the first pass leaves the negative half green. Both halves are
-          // required of any convergence test built on this shape (issue #581).
           expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledWith(
             expect.objectContaining({ name })
           )
-          expect(logged).toContain(`NetworkPolicy "${name}" in`)
-          expect(logged).toContain('unchanged (spec-hash match); skipping update')
+          expect(logEntries).toContainEqual(
+            expect.objectContaining({
+              policy: name,
+              family: 'webhook-gateway',
+              msg: 'network policy unchanged; skipping update',
+            })
+          )
         }
+        expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
       } finally {
         logSpy.mockRestore()
+        if (previousLevel === undefined) delete process.env.LOG_LEVEL
+        else process.env.LOG_LEVEL = previousLevel
       }
     })
 

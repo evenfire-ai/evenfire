@@ -301,53 +301,46 @@ kubectl delete workflowrecipe my-nginx -n sandbox-recipes
 
 ## Reconcile idempotency & drift behavior
 
-WRC reconciles every recipe on a periodic resync. Most managed objects (the recipe
-Deployment, StatefulSet, headless Service, CronJob, Job, DaemonSet, the McpServer CRD,
-and the NetworkPolicies `ui-ingress-*`, `wl-ingress-*`, `wr-intdep-*`,
-`wf-*-oauth-broker-egress` and the three webhook-gateway policies) are applied through a
-**spec-hash idempotency gate**: WRC stamps a `clerum.io/spec-hash` annotation (a hash of
-the _desired_ manifest) and, on the already-exists path, **skips the write entirely when
-the existing object's stamped hash matches**. This keeps `metadata.generation` from
-climbing on no-op reconciles (which previously produced a `degraded↔active` status flap
-and a downstream HCC NetworkPolicy no-op write storm).
+WRC reconciles every recipe on a periodic resync. Deployments, StatefulSets, headless
+Services, CronJobs, Jobs, DaemonSets and the McpServer CRD use the existing
+**spec-hash idempotency gate**. The recipe-derived NetworkPolicies (`ui-ingress-*`,
+`wl-ingress-*`, `wl-egress-*`, `wr-intdep-*`, `wf-*-oauth-broker-egress` and the three
+webhook-gateway policies) use a stronger **live convergence check** instead: WRC reads
+the current object, validates ownership/lifecycle, normalizes Kubernetes defaults and
+skips the write only when the live enforcement plus WRC-authored metadata equal the
+desired policy. A legacy `clerum.io/spec-hash` annotation is ignored for this decision;
+it cannot hide later drift.
 
-**What the gate does _not_ cover.** Do not read the list above as "everything":
+**What this path does _not_ cover.** Do not read the list above as "every policy writer":
 
-- `wl-egress-*` routes through the same method, but its manifest carries a
-  `clerum.io/egress-fqdn-resolved-at` timestamp that is regenerated on every pass, so its
-  desired hash never matches and **the gate never closes for it**. What actually keeps it
-  quiet is the upstream issue #299 check (`egressWriteNeeded`), which compares the
-  enforced egress rules. If that check ever regresses, the spec-hash gate will not catch it.
-- `ui-egress-*` and the `coordinator-to-gfs` policy do not use the spec-hash at all; they
-  have their own ad-hoc comparisons (#299 and #579 respectively).
-- The **webhook gateway's own** ConfigMap, Deployment and Service are still ungated and
-  rewritten on every pass — only its three NetworkPolicies were migrated.
+- `ui-egress-*` and the `coordinator-to-gfs` policy keep their existing dedicated
+  comparisons (#299 and #579 respectively); they do not use the recipe NetworkPolicy
+  helper.
+- `wl-egress-*` still uses the #299 content/renewal prefilter before the live convergence
+  helper. External/mixed egress carries temporal resolution state; a cluster-local-only
+  policy does not. In both cases, once the prefilter requires a write, the downstream
+  helper rechecks the live spec and cannot cancel a real repair because of a stale seal.
+- The **webhook gateway's own** ConfigMap, Deployment and Service remain ungated and are
+  rewritten on every pass — only its three NetworkPolicies use live convergence.
 
 **Operational consequences:**
 
-- **Logs:** expect "unchanged (spec-hash match); skipping update" instead of a per-loop
-  "Updated …". Per-loop write/`Updated` log volume drops sharply by design — re-baseline
-  any alert keyed on it.
-- **Drift is no longer auto-reverted.** If an operator hand-edits a WRC-managed object
-  (e.g. `kubectl edit`/`scale` on a recipe Deployment), WRC will **not** revert it until
-  the recipe spec changes (which flips the hash). To force a re-apply, change the recipe
-  spec (or delete the object and let WRC recreate it).
-- **For a Deployment the drift is still visible**: the recipe `status` reports the
-  workload `degraded` when replica health drops.
-- **For a NetworkPolicy it is not visible by any path.** There is no replica health to
-  degrade: the recipe stays `active` while the enforcement object diverges from the
-  desired one, and nothing sweeps for it — `pruneStaleInternalDependencyPolicies`
-  compares names, not content, and `deploy/scripts/verify-networkpolicies.sh` **does**
-  detect content drift but only over policies an overlay renders. Recipe-derived
-  policies (`ui-ingress-*`, `wl-ingress-*`, `wr-intdep-*`, the gateway trio) are authored
-  by the reconciler and live in no overlay, so the script never evaluates them at all —
-  neither their existence nor their content. An edit that preserves the `clerum.io/spec-hash`
-  annotation while changing the `spec` (widening `ingress`/`egress`, emptying
-  `podSelector`, dropping a `policyTypes` entry) is **permanent and silent**. Treat any
-  `kubectl edit` on a `ui-ingress-*`, `wl-ingress-*`, `wr-intdep-*` or gateway policy as
-  permanent until a bounded resync exists (issue #581).
-- **First deploy after this change** does one stamping write per pre-existing managed
-  object (they have no hash yet), then steady-state is quiet.
+- **Logs:** the live-convergence helper and the `wl-egress-*` prefilter use the structured
+  WRC logger. In steady state expect `network policy unchanged; skipping update` or
+  `network policy egress set unchanged; skipping live apply` with `policy`, `namespace`
+  and `family` fields. Re-baseline alerts keyed on the old `Updated …` console line.
+- **NetworkPolicy drift is auto-reverted.** A live change to `podSelector`,
+  `policyTypes`, `ingress`, `egress`, WRC-authored metadata or the gateway controller
+  owner forces one optimistic-concurrency replace using the `resourceVersion` from the
+  same validated read. The following reconcile is read-only.
+- **Other spec-hash-managed objects retain their existing drift contract.** For example,
+  a manually scaled recipe Deployment is not reverted until the desired manifest changes;
+  its replica-health drift remains visible in recipe status.
+- `deploy/scripts/verify-networkpolicies.sh` still covers only overlay-rendered policies.
+  Recipe-derived policy integrity is owned by the runtime reconciliation described here.
+- **First deploy after this change** does not require a NetworkPolicy stamping wave.
+  Equivalent policies are one GET and zero writes; real spec/metadata/owner drift is
+  repaired once.
 
 ## Automated Tests
 

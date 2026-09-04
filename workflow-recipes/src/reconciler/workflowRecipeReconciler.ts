@@ -89,6 +89,11 @@ import {
   waitForExternalEgressReady,
   waitForNetworkReady,
 } from './mcpDelegation'
+import {
+  type NetworkPolicyFamily,
+  decideNetworkPolicyConvergence,
+  networkPolicyMetadataMatchesDesired,
+} from './networkPolicyConvergence'
 import { issueOAuthBrokerToken } from './oauthBrokerTokenIssuerClient'
 import {
   PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
@@ -470,6 +475,26 @@ class NetworkPolicyOwnershipConflictError extends Error {
     super(message)
     this.name = 'NetworkPolicyOwnershipConflictError'
   }
+}
+
+class NetworkPolicyInfraError extends Error {
+  readonly code?: string | number
+
+  constructor(message: string, cause: unknown, code?: string | number) {
+    super(message, { cause })
+    this.name = 'NetworkPolicyInfraError'
+    this.code = code
+  }
+}
+
+interface NetworkPolicyApplyOptions {
+  family: NetworkPolicyFamily
+  existing?: k8s.V1NetworkPolicy | null
+}
+
+interface NetworkPolicyReadResult {
+  existing: k8s.V1NetworkPolicy | null
+  recoveredFromReadFailure: boolean
 }
 
 class InternalDependencyReconcileError extends Error {
@@ -1904,13 +1929,21 @@ export class WorkflowRecipeReconciler {
             error instanceof InternalDependencyReconcileError ? error.conditions : undefined
           const workloadConditions =
             error instanceof ImmutableStatefulSetDriftError ? [error.condition] : undefined
-          if (error instanceof RetryableReconcileError) {
+          if (
+            error instanceof RetryableReconcileError ||
+            error instanceof NetworkPolicyInfraError
+          ) {
+            const safe = this.safeInfrastructureErrorFields(error)
+            const retryableMessage =
+              error instanceof RetryableReconcileError
+                ? message
+                : `Workflow workload infrastructure temporarily unavailable (${safe.errorCode ?? safe.errorName})`
             // Transient infra failure (e.g. DNS SERVFAIL on egress). Degrade
             // instead of failing so the next reconcile retries before the
             // workflow runs — don't mark workflowPhase failed.
             return {
               phase: 'degraded' as RecipePhase,
-              message,
+              message: retryableMessage,
               workloadStatuses: [],
               internalDependencyConditions,
               workloadConditions,
@@ -2700,7 +2733,10 @@ export class WorkflowRecipeReconciler {
       //     decision and hiding the permanent misconfiguration.
       const isEgressResolutionError =
         error instanceof Error && error.message.includes('egress resolution failed')
-      if (!isEgressResolutionError && isRetryableInfraError(error)) {
+      if (
+        !isEgressResolutionError &&
+        (error instanceof NetworkPolicyInfraError || isRetryableInfraError(error))
+      ) {
         console.warn(
           `[WR-Reconciler] Transient infra error reconciling "${name}" — keeping phase "${currentPhase}", will retry: ${String(error)}`
         )
@@ -3031,19 +3067,16 @@ export class WorkflowRecipeReconciler {
       `WebhookGateway Service "${gatewayServiceName(recipeName)}"`
     )
 
-    // Same spec-hash gate as every other WRC NetworkPolicy (issue #575): these
-    // three are rebuilt verbatim from the recipe on every pass, so the inline
-    // replace was three no-op PUTs per reconcile. The wr-intdep-* ownership
-    // assertion inside applyNetworkPolicy returns immediately for these — their
-    // policy-type label differs — so routing through it changes the write gate and
-    // nothing else. The log label changes from `WebhookGateway NetworkPolicy "x"`
-    // to `NetworkPolicy "x" in <ns>`, which no test, alert or doc consumes.
+    // The gateway policies use the same live convergence path as other
+    // WRC-authored NetworkPolicies (issue #575). Their controller ownerReference
+    // is part of the comparison, so recreating a recipe under the same name repairs
+    // a stale UID instead of accepting the old garbage-collection lineage.
     for (const policy of [
       built.proxyIngressPolicy,
       built.handlerEgressPolicy,
       built.handlerIngressPolicy,
     ]) {
-      await this.applyNetworkPolicy(policy, ns)
+      await this.applyNetworkPolicy(policy, ns, { family: 'webhook-gateway' })
     }
   }
 
@@ -3734,7 +3767,7 @@ export class WorkflowRecipeReconciler {
       console.log(`[WR-Reconciler] Created ${label}`)
     } catch (error: unknown) {
       if (getErrorCode(error) === 409) {
-        if (idempotency && (await this.applyIsNoop(idempotency, label))) {
+        if (idempotency && (await this.applyIsNoop(idempotency))) {
           console.log(`[WR-Reconciler] ${label} unchanged (spec-hash match); skipping update`)
           return
         }
@@ -3754,43 +3787,17 @@ export class WorkflowRecipeReconciler {
 
   /**
    * True when the existing object already carries the desired spec-hash, so the
-   * replace would be a no-op. Anything thrown by `readExisting` — a read failure,
-   * or an invariant the caller asserts on what it just read — returns false and
-   * falls through to the replace: never skip an update we cannot prove is
-   * unnecessary. Callers whose `readExisting` asserts invariants must re-assert on
-   * their own read in `replaceFn`: this catch is total by design (see
-   * `applyNetworkPolicy`).
+   * replace would be a no-op. A read failure returns false (fall through to
+   * replace) — never skip an update we cannot prove is unnecessary.
    */
-  private async applyIsNoop(
-    idempotency: {
-      manifest: { metadata?: { annotations?: { [key: string]: string } } }
-      readExisting: () => Promise<{ metadata?: { annotations?: { [key: string]: string } } } | null>
-    },
-    label: string
-  ): Promise<boolean> {
+  private async applyIsNoop(idempotency: {
+    manifest: { metadata?: { annotations?: { [key: string]: string } } }
+    readExisting: () => Promise<{ metadata?: { annotations?: { [key: string]: string } } } | null>
+  }): Promise<boolean> {
     try {
       const existing = await idempotency.readExisting()
       return specHashUnchanged(idempotency.manifest, existing ?? null)
-    } catch (error) {
-      // An ownership veto is NOT a read failure, and saying so here would be
-      // actively misleading: the read succeeded, and what threw was the caller's
-      // assertion on what it read. Stay quiet — `replaceFn` re-reads, re-asserts
-      // and raises the conflict with its own message a moment later, so the
-      // accurate line follows immediately and this one would only precede it with
-      // a wrong diagnosis. Nothing is swallowed; the veto still reaches the
-      // caller, loud (T4).
-      if (!(error instanceof NetworkPolicyOwnershipConflictError)) {
-        // Everything else IS a read failure. Falling through to the replace is
-        // correct — never skip an update we cannot prove unnecessary — but
-        // discarding the error left no trace of WHY: revoked RBAC or a
-        // persistently failing apiserver looked exactly like a healthy cache
-        // miss, and the gate silently stopped saving anything. The write still
-        // happens, so this is a diagnostic line, not a failure path.
-        console.warn(
-          `[WR-Reconciler] ${label}: idempotency pre-read failed, falling through to update:`,
-          error
-        )
-      }
+    } catch {
       return false
     }
   }
@@ -4297,7 +4304,7 @@ export class WorkflowRecipeReconciler {
         await this.deleteUiIngressIfExists(recipe.metadata.name, w.id, ns)
         continue
       }
-      await this.applyNetworkPolicy(policy, ns)
+      await this.applyNetworkPolicy(policy, ns, { family: 'ui-ingress' })
     }
   }
 
@@ -4447,7 +4454,7 @@ export class WorkflowRecipeReconciler {
         )
         if (!policy) continue
         rememberDesired(policy)
-        await this.applyNetworkPolicy(policy, sourceNamespace)
+        await this.applyNetworkPolicy(policy, sourceNamespace, { family: 'internal-dependency' })
       }
 
       for (const [targetWorkloadId, sources] of sourcesByTarget.entries()) {
@@ -4462,11 +4469,14 @@ export class WorkflowRecipeReconciler {
         )
         if (!policy) continue
         rememberDesired(policy)
-        await this.applyNetworkPolicy(policy, targetNamespace)
+        await this.applyNetworkPolicy(policy, targetNamespace, { family: 'internal-dependency' })
       }
 
       await this.pruneStaleInternalDependencyPolicies(recipe, desiredByNamespace)
     } catch (error) {
+      if (error instanceof RetryableReconcileError || error instanceof NetworkPolicyInfraError) {
+        throw error
+      }
       const reason =
         error instanceof NetworkPolicyOwnershipConflictError
           ? 'OwnershipConflict'
@@ -4669,12 +4679,16 @@ export class WorkflowRecipeReconciler {
         !wlEgressRenewalDue &&
         !wlEgressStateChanged
       ) {
-        console.log(
-          `[WR-Reconciler] NetworkPolicy "${wlPolicyName}" in ${wlNs} egress set unchanged — no-op`
+        createLogger('wrc', recipe.metadata.name).info(
+          'network policy egress set unchanged; skipping live apply',
+          { policy: wlPolicyName, namespace: wlNs, family: 'workload-egress' }
         )
         continue
       }
-      await this.applyNetworkPolicy(policy, wlNs)
+      await this.applyNetworkPolicy(policy, wlNs, {
+        family: 'workload-egress',
+        existing: existingWlPolicy,
+      })
       // #299: the policy has landed — record the set it actually enforces.
       this.logResolvedEgressSet(
         recipe.metadata.name,
@@ -4701,7 +4715,7 @@ export class WorkflowRecipeReconciler {
         await this.deleteWorkloadIngressIfExists(recipe.metadata.name, w.id, wlNs)
         continue
       }
-      await this.applyNetworkPolicy(policy, wlNs)
+      await this.applyNetworkPolicy(policy, wlNs, { family: 'workload-ingress' })
     }
   }
 
@@ -4782,6 +4796,7 @@ export class WorkflowRecipeReconciler {
     desired: k8s.V1NetworkPolicy
   ): boolean {
     if (!existing) return true
+    if (!networkPolicyMetadataMatchesDesired(desired, existing)) return true
     // Decide the write off the ENFORCED rules (the ipBlock set + ports), NOT the
     // raw state annotation: serializeState embeds expiresAt/lastObservedAt, which
     // renew on every OK tick, so comparing the annotation string would rewrite
@@ -4894,59 +4909,213 @@ export class WorkflowRecipeReconciler {
   }
 
   /**
-   * Apply a WRC-authored NetworkPolicy through the spec-hash idempotency gate
-   * (issue #575). Every family funnelling through here — ui-ingress, wl-ingress,
-   * wr-intdep-*, oauth-broker egress, webhook-gateway, and wl-egress once #299 has
-   * decided a write is due — is rebuilt deterministically from the recipe on every
-   * pass, so the unconditional replace was one PUT per policy per ~16s that etcd
-   * never recorded: pure apiserver CPU and priority-and-fairness budget.
-   * Deployment, Service, CronJob, Job and DaemonSet already opted in; this was the
-   * kind whose skip counter stayed at zero.
-   *
-   * The wr-intdep-* ownership assertion runs INSIDE `readExisting`, i.e. on the
-   * very read the gate evaluates, so a spec-hash match can never shortcut it.
-   * `applyIsNoop` swallows EVERY error `readExisting` throws by design — a read
-   * failure must fall open to the replace — so the veto reaches the caller through
-   * `replaceFn`, which re-reads and re-asserts. The read is cached only AFTER the
-   * assertion passed: the replace path can never inherit a vetoed object, and the
-   * PUT carries the resourceVersion of the object that passed, so the apiserver
-   * rejects any change in between.
+   * Reconcile one WRC-authored NetworkPolicy from the live object, not from the
+   * legacy spec-hash seal. NetworkPolicy is an enforcement resource: a stored
+   * annotation can describe what WRC wrote previously while the live spec or
+   * lifecycle ownership has since drifted. One validated live snapshot therefore
+   * owns both the no-op decision and the resourceVersion used by a replace.
    */
-  private async applyNetworkPolicy(policy: k8s.V1NetworkPolicy, namespace: string): Promise<void> {
-    const policyName = policy.metadata!.name!
-    // Set only by a read whose ownership assertion PASSED, which is what makes it
-    // safe to reuse in the replace path. Unset therefore means "no verified object
-    // in hand" — the read failed, or its assertion vetoed.
-    let assertedExisting: k8s.V1NetworkPolicy | undefined
-    const readExistingAndAssertOwnership = async (): Promise<k8s.V1NetworkPolicy> => {
-      const fetched = await this.networkingApi.readNamespacedNetworkPolicy({
+  private async applyNetworkPolicy(
+    policy: k8s.V1NetworkPolicy,
+    namespace: string,
+    options: NetworkPolicyApplyOptions
+  ): Promise<void> {
+    const desired = structuredClone(policy)
+    const policyName = desired.metadata?.name
+    if (!policyName) throw new Error('Cannot apply a NetworkPolicy without metadata.name')
+    desired.metadata = desired.metadata ?? {}
+    desired.metadata.namespace = desired.metadata.namespace ?? namespace
+    this.assertDesiredNetworkPolicyOwner(desired, options.family, namespace)
+
+    const recipeName =
+      desired.metadata?.labels?.['clerum.io/recipe'] ??
+      desired.metadata?.labels?.['clerum.io/recipe-name'] ??
+      policyName
+    const log = createLogger('wrc', recipeName)
+    const fields = { policy: policyName, namespace, family: options.family }
+    const hasSuppliedExisting = Object.prototype.hasOwnProperty.call(options, 'existing')
+    let readResult: NetworkPolicyReadResult = hasSuppliedExisting
+      ? { existing: options.existing ?? null, recoveredFromReadFailure: false }
+      : await this.readNetworkPolicyForApply(policyName, namespace, log, fields)
+    let existing = readResult.existing
+
+    if (!existing) {
+      try {
+        await this.networkingApi.createNamespacedNetworkPolicy({ namespace, body: desired })
+        log.info('network policy created', fields)
+        return
+      } catch (error: unknown) {
+        if (getErrorCode(error) !== 409) {
+          log.error('network policy create failed', {
+            ...fields,
+            ...this.safeInfrastructureErrorFields(error),
+          })
+          if (isRetryableInfraError(error)) {
+            const safe = this.safeInfrastructureErrorFields(error)
+            throw new NetworkPolicyInfraError(
+              `NetworkPolicy "${policyName}" in ${namespace} create temporarily unavailable (${safe.errorCode ?? safe.errorName})`,
+              error,
+              safe.errorCode
+            )
+          }
+          throw error
+        }
+        // A real create race is exceptional in the read-first path. Re-read once
+        // and evaluate the winner from scratch; never blind-replace after 409.
+        readResult = await this.readNetworkPolicyForApply(policyName, namespace, log, fields)
+        existing = readResult.existing
+        if (!existing) {
+          throw new RetryableReconcileError(
+            `NetworkPolicy "${policyName}" in ${namespace} still absent after create conflict`,
+            { cause: error }
+          )
+        }
+      }
+    }
+
+    // Deletion wins over ownership: a terminating object cannot be adopted or
+    // safely classified from partial labels. Wait for 404, then recreate from the
+    // current desired state.
+    if (existing.metadata?.deletionTimestamp) {
+      throw new RetryableReconcileError(
+        `NetworkPolicy "${policyName}" in ${namespace} is terminating; retrying after deletion`
+      )
+    }
+
+    // Domain invariants run outside the read catch. A confirmed veto propagates
+    // immediately and can never be replaced by a second transport error.
+    this.assertInternalDependencyPolicyOwnership(desired, existing, namespace)
+    const decision = decideNetworkPolicyConvergence(options.family, desired, existing)
+    if (decision.action === 'conflict') {
+      throw new NetworkPolicyOwnershipConflictError(
+        `Refusing to replace NetworkPolicy "${policyName}" in ${namespace}: ${decision.reason}`
+      )
+    }
+    if (decision.action === 'retry') {
+      throw new RetryableReconcileError(
+        `NetworkPolicy "${policyName}" in ${namespace} is terminating; retrying after deletion`
+      )
+    }
+    if (decision.action === 'unchanged' && !readResult.recoveredFromReadFailure) {
+      log.info('network policy unchanged; skipping update', fields)
+      return
+    }
+
+    const resourceVersion = existing.metadata?.resourceVersion
+    if (!resourceVersion) {
+      throw new RetryableReconcileError(
+        `NetworkPolicy "${policyName}" in ${namespace} has no resourceVersion`
+      )
+    }
+    desired.metadata.resourceVersion = resourceVersion
+    try {
+      await this.networkingApi.replaceNamespacedNetworkPolicy({
         name: policyName,
         namespace,
+        body: desired,
       })
-      this.assertInternalDependencyPolicyOwnership(policy, fetched, namespace)
-      assertedExisting = fetched
-      return fetched
+      log.info('network policy replaced', {
+        ...fields,
+        reason: decision.action === 'unchanged' ? 'read-recovery' : decision.reason,
+      })
+    } catch (error: unknown) {
+      log.error('network policy replace failed', {
+        ...fields,
+        ...this.safeInfrastructureErrorFields(error),
+      })
+      const errorCode = getErrorCode(error)
+      if (errorCode === 404 || errorCode === 409) {
+        throw new RetryableReconcileError(
+          `NetworkPolicy "${policyName}" in ${namespace} ${errorCode === 404 ? 'disappeared' : 'changed'} during replace`,
+          { cause: error }
+        )
+      }
+      if (isRetryableInfraError(error)) {
+        const safe = this.safeInfrastructureErrorFields(error)
+        throw new NetworkPolicyInfraError(
+          `NetworkPolicy "${policyName}" in ${namespace} replace temporarily unavailable (${safe.errorCode ?? safe.errorName})`,
+          error,
+          safe.errorCode
+        )
+      }
+      throw error
     }
-    await this.createOrReplace(
-      () =>
-        this.networkingApi.createNamespacedNetworkPolicy({
-          namespace,
-          body: policy,
-        }),
-      async () => {
-        // Unset means the gate's read failed OR its assertion vetoed (applyIsNoop
-        // swallows both); re-read so the veto surfaces from here, loud.
-        const current = assertedExisting ?? (await readExistingAndAssertOwnership())
-        policy.metadata!.resourceVersion = current.metadata?.resourceVersion
-        return this.networkingApi.replaceNamespacedNetworkPolicy({
-          name: policyName,
-          namespace,
-          body: policy,
-        })
-      },
-      `NetworkPolicy "${policyName}" in ${namespace}`,
-      { manifest: policy, readExisting: readExistingAndAssertOwnership }
+  }
+
+  private assertDesiredNetworkPolicyOwner(
+    desired: k8s.V1NetworkPolicy,
+    family: NetworkPolicyFamily,
+    namespace: string
+  ): void {
+    const controllerOwners = (desired.metadata?.ownerReferences ?? []).filter(
+      owner => owner.controller === true
     )
+    const invalidControllerOwner =
+      controllerOwners.length > 1 || controllerOwners.some(owner => !owner.uid)
+    const gatewayOwnerMissing = family === 'webhook-gateway' && controllerOwners.length !== 1
+    if (invalidControllerOwner || gatewayOwnerMissing) {
+      throw new NetworkPolicyOwnershipConflictError(
+        `Refusing to apply NetworkPolicy "${desired.metadata?.name ?? '<unknown>'}" in ${namespace}: desired controller owner is incomplete`
+      )
+    }
+  }
+
+  private async readNetworkPolicyForApply(
+    name: string,
+    namespace: string,
+    log: ReturnType<typeof createLogger>,
+    fields: { policy: string; namespace: string; family: NetworkPolicyFamily }
+  ): Promise<NetworkPolicyReadResult> {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        return {
+          existing: await this.networkingApi.readNamespacedNetworkPolicy({ name, namespace }),
+          recoveredFromReadFailure: attempt > 1,
+        }
+      } catch (error: unknown) {
+        if (getErrorCode(error) === 404) {
+          return { existing: null, recoveredFromReadFailure: attempt > 1 }
+        }
+        if (attempt === 2) {
+          if (isRetryableInfraError(error)) {
+            const safe = this.safeInfrastructureErrorFields(error)
+            throw new NetworkPolicyInfraError(
+              `NetworkPolicy "${name}" in ${namespace} read temporarily unavailable (${safe.errorCode ?? safe.errorName})`,
+              error,
+              safe.errorCode
+            )
+          }
+          throw error
+        }
+        log.warn('network policy read unavailable; retrying once', {
+          ...fields,
+          ...this.safeInfrastructureErrorFields(error),
+        })
+      }
+    }
+    return { existing: null, recoveredFromReadFailure: false }
+  }
+
+  private safeInfrastructureErrorFields(error: unknown): {
+    errorName: string
+    errorCode?: string | number
+    retryable: boolean
+  } {
+    const candidateCode = (error as { code?: unknown } | null)?.code
+    const candidateName = error instanceof Error ? error.name : 'UnknownError'
+    const errorCode =
+      typeof candidateCode === 'number'
+        ? candidateCode
+        : typeof candidateCode === 'string' && /^[A-Z0-9_]{1,64}$/.test(candidateCode)
+          ? candidateCode
+          : getErrorCode(error)
+    return {
+      errorName: /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(candidateName)
+        ? candidateName
+        : 'UnknownError',
+      ...(errorCode === undefined ? {} : { errorCode }),
+      retryable: isRetryableInfraError(error),
+    }
   }
 
   private coordinatorGfsNetworkPolicy(recipe: WorkflowRecipeCRD): k8s.V1NetworkPolicy {
@@ -6266,7 +6435,7 @@ export class WorkflowRecipeReconciler {
       )
       return
     }
-    await this.applyNetworkPolicy(policy, ns)
+    await this.applyNetworkPolicy(policy, ns, { family: 'oauth-broker-egress' })
   }
 
   private async ensureConfigMap(
