@@ -19,6 +19,7 @@ export interface GfsResourceView {
   name: string
   kind: string
   path: string | null
+  updatedAt: string
 }
 
 export function toResolveView(resource: ResolvedResource): GfsResourceView {
@@ -31,6 +32,7 @@ export function toResolveView(resource: ResolvedResource): GfsResourceView {
     name: resource.name,
     kind: resource.kind,
     path: resource.pathCache,
+    updatedAt: resource.updatedAt,
   }
 }
 

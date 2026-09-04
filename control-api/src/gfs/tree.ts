@@ -51,6 +51,7 @@ export interface ChildRow {
   pathCache: string | null
   bytes: number
   version: number
+  updatedAt: string
 }
 
 export interface ChildView {
@@ -62,6 +63,16 @@ export interface ChildView {
   path: string | null
   bytes: number
   version: number
+  updatedAt: string
+}
+
+function toIsoTimestamp(value: unknown): string {
+  if (value instanceof Date) return value.toISOString()
+  if (typeof value === 'string' && value.length > 0) {
+    const parsed = new Date(value)
+    return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString()
+  }
+  throw new Error('gfs_resources.updated_at is required')
 }
 
 export function toChildView(drive: string, row: ChildRow): ChildView {
@@ -75,6 +86,7 @@ export function toChildView(drive: string, row: ChildRow): ChildView {
     path: row.pathCache,
     bytes: row.bytes,
     version: row.version,
+    updatedAt: row.updatedAt,
   }
 }
 
@@ -123,7 +135,7 @@ export class DbChildrenStore implements ChildrenStore {
     // page) the cursor predicate is a no-op; otherwise it skips everything up to
     // and including the cursor row.
     const result = await this.db.query(
-      `SELECT resource_id, name, kind, path_cache, bytes, version
+      `SELECT resource_id, name, kind, path_cache, bytes, version, updated_at
          FROM gfs_resources
         WHERE drive = $1 AND parent_resource_id = $2::uuid AND deleted_at IS NULL
           AND ($3::text IS NULL OR (name, resource_id) > ($3, $4::uuid))
@@ -139,6 +151,7 @@ export class DbChildrenStore implements ChildrenStore {
         path_cache: unknown
         bytes: unknown
         version: unknown
+        updated_at: unknown
       }
       return {
         resourceId: String(r.resource_id),
@@ -147,6 +160,7 @@ export class DbChildrenStore implements ChildrenStore {
         pathCache: r.path_cache == null ? null : String(r.path_cache),
         bytes: Number(r.bytes ?? 0),
         version: Number(r.version ?? 0),
+        updatedAt: toIsoTimestamp(r.updated_at),
       }
     })
   }

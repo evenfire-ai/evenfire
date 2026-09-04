@@ -60,9 +60,18 @@ describe('ChatTabs', () => {
     const styles = readFileSync(path.join(process.cwd(), 'ui', 'src', 'styles.css'), 'utf8')
     expect(styles).toMatch(/\.chat-view-tabs\s*\{[^}]*padding:\s*var\(--space-2\) 0 0;/s)
     expect(styles).toMatch(/\.chat-view-tabs__scroller\s*\{[^}]*width:\s*100%;/s)
-    expect(styles).toMatch(/\.chat-view-tabs__list\s*\{[^}]*width:\s*max-content;/s)
-    expect(styles).toMatch(/\.chat-view-tab\s*\{[^}]*flex:\s*0 0 220px;/s)
-    expect(styles).toMatch(/\.chat-view-tab\s*\{[^}]*width:\s*220px;/s)
+    expect(styles).toMatch(/\.chat-view-tabs__list\s*\{[^}]*width:\s*100%;/s)
+    expect(styles).toMatch(/\.chat-view-tab\s*\{[^}]*flex:\s*1 1 var\(--chat-tab-max\);/s)
+    expect(styles).toMatch(/\.chat-view-tab\s*\{[^}]*max-width:\s*var\(--chat-tab-max\);/s)
+    expect(styles).toMatch(/\.chat-view-tab\s*\{[^}]*min-width:\s*var\(--chat-tab-min\);/s)
+    // The active tab shrinks slower than the others so it stays legible when crowded.
+    expect(styles).toMatch(/\.chat-view-tab\.is-active\s*\{[^}]*flex-shrink:\s*0\.4;/s)
+    // The bottom shelf lives on the non-scrolling container so it survives horizontal
+    // scroll of the overflowing tabs (a shelf on the list would slide away).
+    expect(styles).toMatch(/\.chat-view-tabs::after\s*\{[^}]*z-index:\s*-1;/s)
+    expect(styles).toMatch(
+      /\.chat-view-tab:not\(\.is-active\)\s*\{[^}]*border-bottom:\s*1px solid var\(--chat-view-selected-border\);/s
+    )
     expect(styles).toMatch(/\.chat-view-tab__select\s*\{[^}]*flex:\s*1 1 auto;/s)
     expect(styles).toMatch(/\.chat-view-tab__label\s*\{[^}]*text-overflow:\s*ellipsis;/s)
   })

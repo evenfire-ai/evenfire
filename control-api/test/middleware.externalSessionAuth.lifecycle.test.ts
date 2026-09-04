@@ -5,6 +5,7 @@ import request from 'supertest'
 
 const poolQuery = vi.hoisted(() => vi.fn())
 const verifyToken = vi.hoisted(() => vi.fn())
+let authorityRows: Array<Record<string, unknown>> = []
 
 vi.mock('../src/db.js', () => ({
   pool: { query: (...args: unknown[]) => poolQuery(...args) },
@@ -42,34 +43,24 @@ describe('external session lifecycle gate', () => {
   beforeEach(() => {
     poolQuery.mockClear()
     verifyToken.mockClear()
-    poolQuery.mockResolvedValue({
-      rows: [
-        {
-          id: claims.userId,
-          lifecycle_state: 'active',
-          lifecycle_version: '4',
-          valid_after: null,
-          token_revoked: false,
-        },
-      ],
-      rowCount: 1,
-    })
+    authorityRows = [
+      {
+        id: claims.userId,
+        lifecycle_state: 'active',
+        lifecycle_version: '4',
+        valid_after: null,
+        token_revoked: false,
+      },
+    ]
+    poolQuery.mockImplementation(async (sql: string) =>
+      sql.includes('clock_timestamp()')
+        ? { rows: [{ db_now: new Date() }], rowCount: 1 }
+        : { rows: authorityRows, rowCount: authorityRows.length }
+    )
   })
 
   it('accepts an active session whose generation matches the user row', async () => {
     verifyToken.mockReturnValueOnce(claims)
-    poolQuery.mockResolvedValueOnce({
-      rows: [
-        {
-          id: claims.userId,
-          lifecycle_state: 'active',
-          lifecycle_version: '4',
-          valid_after: null,
-          token_revoked: false,
-        },
-      ],
-      rowCount: 1,
-    })
     const response = await request(app()).get('/protected').set('x-user-session-token', 'session')
     expect(response.status).toBe(200)
   })
@@ -80,7 +71,7 @@ describe('external session lifecycle gate', () => {
     [[]],
   ])('denies retired, stale, or missing authoritative rows', async row => {
     verifyToken.mockReturnValueOnce(claims)
-    poolQuery.mockResolvedValueOnce({ rows: row, rowCount: row.length })
+    authorityRows = row
     const response = await request(app()).get('/protected').set('x-user-session-token', 'session')
     expect(response.status).toBe(401)
   })

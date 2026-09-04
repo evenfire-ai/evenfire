@@ -38,13 +38,6 @@ export const CONTROL_ROUTES = {
     edit: (name: string) => `/connectors/${segment(name)}/edit`,
     editTab: (name: string, tab: string) => `/connectors/${segment(name)}/edit/${segment(tab)}`,
   },
-  contexts: {
-    root: '/contexts',
-    new: '/contexts/new',
-    detail: (name: string) => `/contexts/${segment(name)}`,
-    tab: (name: string, tab: string) => `/contexts/${segment(name)}/${segment(tab)}`,
-    connectors: (name: string) => `/contexts/${segment(name)}/connectors`,
-  },
   costAndUsage: {
     base: '/cost-and-usage',
     root: '/cost-and-usage/usage',
@@ -121,8 +114,10 @@ export const CONTROL_ROUTES = {
   secrets: {
     root: '/secrets',
     llm: '/secrets/llm',
+    llmSubscriptions: '/secrets/llm/subscriptions',
     connector: '/secrets/connector',
     recipe: '/secrets/recipe',
+    subscription: '/secrets/llm/subscriptions',
     new: (query?: ControlRouteQuery) => withQuery('/secrets/new', query),
     editRecipe: (name: string, query?: ControlRouteQuery) =>
       withQuery(`/secrets/recipe/${segment(name)}/edit`, query),

@@ -8,6 +8,7 @@ import { pipeline } from 'node:stream/promises'
 import { config } from '../config.js'
 import { controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
 import {
+  publicCorrelationId,
   sanitizeControlApiPublicError,
   sendSanitizedControlApiPublicError,
 } from '../http/publicApiError.js'
@@ -57,15 +58,6 @@ const STREAM_HEADERS = [
   'x-ratelimit-remaining',
   'x-gfs-ratelimit-scope',
 ]
-const CONTROL_API_ERROR_HEADERS = [
-  'retry-after',
-  'ratelimit',
-  'ratelimit-policy',
-  'x-ratelimit-limit',
-  'x-ratelimit-remaining',
-  'x-ratelimit-reset',
-  'x-request-id',
-] as const
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const EXTERNAL_GFS_EDGE_WINDOW_MS = 60_000
 
@@ -151,7 +143,7 @@ function forwardControlApiError(error: unknown, res: Response, next: NextFunctio
     (error as { status: number }).status <= 599
       ? new Set([...PROPAGATED, (error as { status: number }).status])
       : PROPAGATED
-  const sanitized = sanitizeControlApiPublicError(error, statuses)
+  const sanitized = sanitizeControlApiPublicError(error, statuses, publicCorrelationId(res.req))
   if (sanitized) {
     sendSanitizedControlApiPublicError(res, sanitized)
     return

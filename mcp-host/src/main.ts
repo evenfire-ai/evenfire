@@ -28,7 +28,6 @@ import { ConfigStore } from './config/configStore'
 import {
   contextWindowForModel,
   hostSubsetAllowlistView,
-  isModelAllowed,
   projectModels,
   resolveSessionModel,
 } from './config/modelResolution'
@@ -61,15 +60,24 @@ import { TaskLifecycle } from './lifecycle/taskLifecycle'
 import { isTerminal } from './lifecycle/types'
 import type { TransitionEvent } from './lifecycle/types'
 import { SingleTurnProvider, apiKeysFromEnv, createLLMProvider } from './llm'
+import { setCodexPlatformJwtReader, setCodexPlatformJwtRefresh } from './llm/codexPlatformJwt'
+import { setCodexPolicyBindingReader } from './llm/codexPolicyBinding'
 import { FailoverEngine } from './llm/failover/engine'
 import { llmFallbackTotal } from './llm/failover/metrics'
 import { parseLlmPolicy } from './llm/failover/policy'
 import type { FailoverSwitchEvent, FallbackEntry, LlmPolicy } from './llm/failover/types'
+import { hostPrimaryLlmBindingChanged } from './llm/hostLlmBinding'
 import { PromptCache } from './llm/promptCache'
 import { clerumPromptCacheInvalidationsTotal } from './llm/promptCacheMetrics'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import './logger'
-import { McpManager } from './mcp'
+import {
+  McpManager,
+  type McpPrincipal,
+  type McpTokenProvider,
+  type McpTokenProviderFactory,
+  staticTokenProvider,
+} from './mcp'
 import {
   AuthoritativeMcpFleetCoordinator,
   DEFAULT_MCP_FLEET_RECONCILE_MAX_CONCURRENCY,
@@ -85,6 +93,12 @@ import {
   revokeMcpAuthorityState,
 } from './mcp/authorityLifecycle'
 import type { HandleMcpAuthorityPollFailureOptions } from './mcp/authorityLifecycle'
+import { type BrokerTokenProviderDeps, createBrokerTokenProvider } from './mcp/brokerTokenProvider'
+import {
+  buildGrantExistenceQueries,
+  checkGrantExistence,
+  selectRevokedPartitionKeys,
+} from './mcp/grantExistenceClient'
 import { McpStatusHeartbeat } from './mcp/statusHeartbeat'
 import { startMcpInitializationInBackground } from './mcpBackgroundInit'
 import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
@@ -93,11 +107,12 @@ import {
   resolvePluginWorkloadSdkBootstrapCapabilityFamily,
 } from './pluginWorkloadSdk/bootstrapIdentity'
 import { PluginWorkloadSdkBootstrapServer } from './pluginWorkloadSdk/bootstrapServer'
+import { sdkOnlyBindingAsPolicy } from './pluginWorkloadSdk/sdkOnlyCodexBinding'
 import { maybeCreatePluginWorkloadSdkServer } from './pluginWorkloadSdk/server'
 import type { PluginWorkloadSdkServer } from './pluginWorkloadSdk/server/sdkServer'
-import { getDisplayName, sanitizeError } from './progress/intentExtraction'
+import { sanitizeError } from './progress/intentExtraction'
 import { progressReporterRegistry } from './progress/sseProgressReporter'
-import { MessageQueue, Task, TaskResponsePayload } from './queue'
+import { MessageQueue, Task } from './queue'
 import { ResultStore } from './resultStore'
 import { markFileAttachmentsDelivered } from './runtime/fileAttachmentDelivery'
 import { isUndeliveredResult, markResultDelivered } from './runtime/resultDelivery'
@@ -140,6 +155,7 @@ import {
   createGovernedRunReporter,
 } from './usage/usageReporter'
 import { setOutputDirHostAccessor } from './workflow/internalTools'
+import { loadPersistedWorkflowControlToken } from './workflow/mcpHostJwtState'
 import { submitProviderWorkflowApprovalDecision } from './workflow/providerWorkflowApprovalDecisionClient'
 import { confirmProviderWorkflowApprovalMediumEnrollment } from './workflow/providerWorkflowApprovalMediumEnrollmentClient'
 import {
@@ -150,7 +166,10 @@ import { resolvePendingProviderWorkflowApproval } from './workflow/providerWorkf
 import { confirmProviderWorkflowApprovalTelegramVerification } from './workflow/providerWorkflowApprovalTelegramVerificationClient'
 import { resolveProviderWorkflowCallerContext } from './workflow/providerWorkflowCallerContextClient'
 import { wireWorkflowApprovalRuntimeRoutes } from './workflow/runtimeApprovalRouteWiring'
-import { createMcpHostRuntimeAuth } from './workflow/runtimeAuthFactory'
+import {
+  createMcpHostRuntimeAuth,
+  workflowControlTokenFromConfig,
+} from './workflow/runtimeAuthFactory'
 import {
   startRuntimeAuthProactiveRefresh,
   stopRuntimeAuthProactiveRefresh,
@@ -167,6 +186,7 @@ setOutputDirHostAccessor(() => currentHost)
 let currentKeys: ApiKeys = {}
 let currentProvider: SingleTurnProvider | null = null
 let configStore: ConfigStore | null = null
+setCodexPolicyBindingReader(() => configStore?.codexPolicyBinding() ?? null)
 // R5 — provider-fallback. `currentPolicy` is the normalized `spec.llmPolicy`
 // (null = no failover); `failoverEngine` holds the Host-wide sticky state
 // (cooldown + served pair) and is (re)built only when the policy changes.
@@ -186,6 +206,11 @@ let guardrailResolveTimer: ReturnType<typeof setInterval> | null = null
 const GUARDRAIL_RESOLVE_INTERVAL_MS = 300_000
 let contextMapperPollRunner: { trigger(): void; stop(): void } | null = null
 let mcpStatusHeartbeat: McpStatusHeartbeat | null = null
+// Sibling cadence to the status heartbeat: evicts idle oauth grantScope='user'
+// partitions (LRU + TTL, mini-spec §6). McpStatusHeartbeat owns one bounded probe
+// round and exposes no pre-tick hook, so eviction runs on its own timer rather
+// than being folded into a probe round.
+let mcpPartitionEvictionTimer: ReturnType<typeof setInterval> | null = null
 let lastServerState: Map<string, string> = new Map()
 let rpcServer: RPCServer | null = null
 let mcpManager: McpManager | null = null
@@ -214,6 +239,14 @@ let statelessHeartbeat: StatelessHeartbeat | null = null
 // consumer (UsageReporter, WorkflowService) so refresh-on-401 propagates.
 // Null when env is absent (dev mode without HCC/WRC).
 let runtimeAuth: McpHostRuntimeAuth | null = null
+setCodexPlatformJwtReader(() =>
+  (runtimeAuth?.accessToken || config.mcpHostRuntimeAccessToken || '').trim()
+)
+setCodexPlatformJwtRefresh(async () => {
+  if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
+  if (!runtimeAuth) return
+  await refreshWithRecovery(runtimeAuth)
+})
 let pluginWorkloadSdkServer: PluginWorkloadSdkServer | null = null
 let pluginWorkloadSdkBootstrapServer: PluginWorkloadSdkBootstrapServer | null = null
 let usageReporter: UsageReporter | null = null
@@ -620,8 +653,9 @@ async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
   const store = new ConfigStore({
     namespace: config.namespace,
     hostRef: host.name,
-    llmSecretRef: host.spec.secretRef,
+    llmSecretRef: host.spec.secretRef ?? null,
     provider,
+    connectionRef: host.spec.model?.connectionRef ?? null,
     allowlistConfigMapName: config.llmAllowlistConfigMapName,
     // R5 — load the failover policy's referenced credential slots from the same
     // LLM Secret (kept out of the effective env; read via fallbackSlotValue).
@@ -798,6 +832,102 @@ export async function admitDevelopmentMcpServers(
   }
 }
 
+/**
+ * Idle timeout (ms) for oauth grantScope='user' partitions. Bounds revocation
+ * latency for a revoked grant (mini-spec §6): an idle per-user connection is
+ * evicted after this window; a live one keeps its short-lived access token.
+ */
+const OAUTH_USER_PARTITION_IDLE_MS = 15 * 60 * 1000
+/** Hard cap on live oauth-user partitions per manager (LRU eviction beyond it). */
+const OAUTH_USER_PARTITION_MAX = 500
+
+/**
+ * Build the per-connection token-provider factory used by the McpManager for
+ * oauth servers. Static servers do NOT use this (the manager builds their static
+ * provider from the revision-locked getAuthToken route). The sabor is read from
+ * the HCC v2 inventory field `server.authKind` (mini-spec §3.2) — never from
+ * `auth.type`/`oauth.grantScope`/`contextRef`, which the v2 contract no longer
+ * emits:
+ *
+ *  - authKind='oauth-user', principal=userId  → broker (server, {userId})
+ *  - authKind='oauth-user', principal=SHARED   → token-less representative
+ *  - authKind='oauth-context', principal=any    → broker (server, {}); control-api
+ *    resolves the shared grant by server.spec.contextRef server-side, so mcp-host
+ *    transports NO context identity (invariant I1).
+ *  - anything else (static/none/absent)         → token-less; manager owns static.
+ *
+ * The broker is reached via the workflow-approval gateway (decision #6/B): a
+ * POST-only L7 allowlisted location, NOT a new direct egress to control-api.
+ */
+function createMcpTokenProviderFactory(): McpTokenProviderFactory {
+  return (server: McpServerInfo, principal: McpPrincipal): McpTokenProvider => {
+    if (server.authKind === 'oauth-context') {
+      // Shared identity — one broker grant per (server, context). control-api
+      // keys it by server.spec.contextRef (authoritative) and cross-checks the
+      // body, so mcp-host omits the contextId entirely.
+      return createBrokerTokenProvider(server, {}, brokerTokenProviderDeps())
+    }
+    if (server.authKind === 'oauth-user') {
+      if (principal.kind === 'user') {
+        return createBrokerTokenProvider(
+          server,
+          { userId: principal.userId },
+          brokerTokenProviderDeps()
+        )
+      }
+      // SHARED principal on a per-user oauth server = catalog representative.
+      return staticTokenProvider(undefined)
+    }
+    // static / none / absent authKind: static providers are built by the manager.
+    return staticTokenProvider(undefined)
+  }
+}
+
+/**
+ * Broker deps shared by every per-connection token provider: reads the gateway
+ * URL and mcp-host control JWT at call time (so token rotation is picked up).
+ * See mcp/brokerTokenProvider.ts for the fail-closed contract.
+ *
+ * The control JWT has a ~10 min TTL and is rotated in-pod by the workflow-auth
+ * self-refresh, which persists the rotated value to the runtime state file. The
+ * config value (env / mounted Secret file) is only the boot seed and is NOT
+ * rotated at that cadence, so reading it alone yields a 401 from the broker once
+ * the first token expires. Read the live persisted source on every call, exactly
+ * like core/tools/workflowTokenProvider.ts does for the workflow broker tools;
+ * loadPersistedWorkflowControlToken falls back to the config seed when the state
+ * file does not exist yet (early boot, dev mode) or fails its runtime-binding /
+ * freshness checks. An empty result normalizes to undefined so the broker keeps
+ * failing closed instead of sending `Bearer `.
+ */
+export function brokerTokenProviderDeps(): BrokerTokenProviderDeps {
+  return {
+    gatewayUrl: () => config.mcpHostGatewayUrl,
+    controlToken: () => {
+      // No seed at all => fail closed. Calling loadPersistedWorkflowControlToken
+      // with '' reaches its "no fallback binding to compare against" branch,
+      // where ANY persisted token with well-formed binding claims is accepted
+      // without being cross-checked against the pod's mounted identity. The seed
+      // is what makes that cross-check possible, so without it there is nothing
+      // to validate the state file against and the broker must send nothing.
+      const seed = workflowControlTokenFromConfig()?.trim()
+      if (!seed) return undefined
+      return loadPersistedWorkflowControlToken(seed) || undefined
+    },
+    // Reactive recovery on a control-api 401, same as every sibling consumer
+    // (setupUsageReporting wires `refreshOnUnauthorized: () => refreshWithRecovery(auth)`
+    // into UsageReporter / GovernedRunReporter / ApprovalPromptHistoryClient).
+    // Reading `runtimeAuth` at call time — not capturing it — matters: the broker
+    // factory is built during MCP init, which can run before setupUsageReporting
+    // assigns it. Without the shared auth there is nothing to refresh, and the
+    // broker keeps its previous behaviour of throwing on 401.
+    refreshControlToken: async () => {
+      const auth = runtimeAuth
+      if (!auth) return
+      await refreshWithRecovery(auth)
+    },
+  }
+}
+
 function ensureAuthenticatedContextMapperClient(): ContextMapperClient {
   if (contextMapperClient) return contextMapperClient
   if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
@@ -903,7 +1033,12 @@ async function initializeMcpServers(): Promise<void> {
     await replaceAuthoritativeMcpFleet({
       servers,
       previousManager,
-      createManager: () => new McpManager(config.mcpProxyEnabled ? config.mcpProxyUrl : undefined),
+      createManager: () =>
+        new McpManager(
+          config.mcpProxyEnabled ? config.mcpProxyUrl : undefined,
+          undefined,
+          createMcpTokenProviderFactory()
+        ),
       getAuthToken: async (serverName, expectedRevision) => {
         return ensureAuthenticatedContextMapperClient().getAuthToken(serverName, expectedRevision)
       },
@@ -1088,6 +1223,55 @@ export function stopContextMapperPolling(): void {
   contextMapperPollRunner = null
 }
 
+// Guards against a slow grant-existence batch overlapping the next tick: a
+// sweep in flight makes the following tick a no-op rather than stacking a
+// second concurrent batch (the tick cadence < the fetch timeout in the worst
+// case).
+let grantRevocationSweepInFlight = false
+
+/**
+ * Hot-revocation grant-sweep (mini-spec 13 §4.1/§4.2). On the eviction timer's
+ * cadence, ask control-api whether the manager's live OAuth partitions still
+ * have a grant, and evict the ones that no longer do. control-api is the sole
+ * authority (D4): mcp-host asks, never recomputes "connected".
+ *
+ * Fail-OPEN on any transient error (unconfigured gateway/token, 5xx/timeout/403,
+ * network): `checkGrantExistence` throws, we conserve EVERY partition, and the
+ * 15-min idle-evict remains the backstop. Only a definitive `exists:false`
+ * evicts. In-flight is respected inside `evictRevokedPartitions` exactly as in
+ * the idle sweep — a partition with a live tool call is skipped this tick and
+ * re-evaluated next tick, never queued for deferred eviction.
+ */
+async function runGrantRevocationSweep(manager: McpManager): Promise<void> {
+  if (grantRevocationSweepInFlight) return
+  const partitions = manager.listLiveOAuthPartitions()
+  if (partitions.length === 0) return
+  grantRevocationSweepInFlight = true
+  try {
+    const results = await checkGrantExistence(
+      brokerTokenProviderDeps(),
+      buildGrantExistenceQueries(partitions)
+    )
+    // A lifecycle swap (context change / revocation) may have replaced the
+    // manager while the batch was in flight; the successor sweeps its own
+    // partitions next tick. Never mutate a superseded manager.
+    if (mcpManager !== manager) return
+    const evicted = manager.evictRevokedPartitions(selectRevokedPartitionKeys(partitions, results))
+    if (evicted > 0) {
+      console.log(`[Main] Grant-sweep evicted ${evicted} revoked oauth MCP partition(s)`)
+    }
+  } catch (err: unknown) {
+    // Fail-OPEN: a control-api/gateway blip must not tear down live sessions.
+    // The thrown error never carries a token (see grantExistenceClient).
+    console.warn(
+      '[Main] MCP grant-revocation sweep failed; conserving partitions (fail-open):',
+      err instanceof Error ? err.message : String(err)
+    )
+  } finally {
+    grantRevocationSweepInFlight = false
+  }
+}
+
 /**
  * Start periodic MCP status heartbeat. Keeps `observedAt` fresh on every
  * connected server and classifies tools/list failures without interrupting
@@ -1109,6 +1293,26 @@ function startMcpStatusHeartbeat(): void {
     },
   })
   mcpStatusHeartbeat.start()
+  // Evict idle oauth grantScope='user' partitions on the heartbeat's cadence.
+  // SHARED/static/representative partitions are exempt (manager.evictIdleUserPartitions).
+  mcpPartitionEvictionTimer = setInterval(() => {
+    if (!mcpManager) return
+    try {
+      const evicted = mcpManager.evictIdleUserPartitions(
+        OAUTH_USER_PARTITION_IDLE_MS,
+        OAUTH_USER_PARTITION_MAX
+      )
+      if (evicted > 0) {
+        console.log(`[Main] Evicted ${evicted} idle oauth per-user MCP partition(s)`)
+      }
+    } catch (err: unknown) {
+      console.error('[Main] MCP per-user partition eviction failed:', err)
+    }
+    // Then the hot-revocation grant-sweep (mini-spec 13): ask control-api whether
+    // the live OAuth partitions still have a grant and evict the revoked ones.
+    // Async + self-guarded; fails open on any error (see runGrantRevocationSweep).
+    void runGrantRevocationSweep(mcpManager)
+  }, interval)
 }
 
 function stopMcpStatusHeartbeat(): void {
@@ -1116,6 +1320,10 @@ function stopMcpStatusHeartbeat(): void {
     console.log('[Main] Stopping MCP status heartbeat')
     mcpStatusHeartbeat.stop()
     mcpStatusHeartbeat = null
+  }
+  if (mcpPartitionEvictionTimer) {
+    clearInterval(mcpPartitionEvictionTimer)
+    mcpPartitionEvictionTimer = null
   }
 }
 
@@ -1147,9 +1355,23 @@ async function onHostChange(host: HostCRD): Promise<void> {
 
   const contextChanged =
     currentHost !== null && currentHost.spec.contextRef !== host.spec.contextRef
-  const providerChanged = currentHost?.spec.model?.provider !== host.spec.model?.provider
-  const secretRefChanged = currentHost?.spec.secretRef !== host.spec.secretRef
-  const modelChanged = currentHost?.spec.model?.name !== host.spec.model?.name
+  const { providerChanged, secretRefChanged, modelChanged, connectionRefChanged } =
+    hostPrimaryLlmBindingChanged(
+      currentHost
+        ? {
+            provider: currentHost.spec.model?.provider,
+            name: currentHost.spec.model?.name,
+            connectionRef: currentHost.spec.model?.connectionRef,
+            secretRef: currentHost.spec.secretRef,
+          }
+        : null,
+      {
+        provider: host.spec.model?.provider,
+        name: host.spec.model?.name,
+        connectionRef: host.spec.model?.connectionRef,
+        secretRef: host.spec.secretRef,
+      }
+    )
 
   if (contextChanged) {
     // The old Context's authority must disappear before any asynchronous Host
@@ -1170,17 +1392,25 @@ async function onHostChange(host: HostCRD): Promise<void> {
   refreshFailoverPolicy(host)
   const fallbackSlotsChanged =
     JSON.stringify(prevFallbackSlots) !== JSON.stringify(fallbackCredentialSlotsFor(currentPolicy))
-  if (!configStore || providerChanged || secretRefChanged || fallbackSlotsChanged) {
-    console.log('[Main] Rebuilding ConfigStore (provider/secretRef/failover slots changed)')
+  if (
+    !configStore ||
+    providerChanged ||
+    secretRefChanged ||
+    connectionRefChanged ||
+    fallbackSlotsChanged
+  ) {
+    console.log(
+      '[Main] Rebuilding ConfigStore (provider/secretRef/connectionRef/failover slots changed)'
+    )
     await ensureConfigStore(host)
   }
   currentKeys = apiKeysFromConfigStore(configStore!)
-  // R5.10 — only a primary credential-surface change (secretRef/provider) may
-  // clear a sticky runtime cooldown; unrelated CR edits must not (see
+  // R5.10 — only a primary credential-surface change (secretRef/provider/grant)
+  // may clear a sticky runtime cooldown; unrelated CR edits must not (see
   // initializeProvider). A `secretRefChanged` rebuilds the ConfigStore fresh, so
   // the store.onChange clearCooldown path never fires for it — this covers it.
   await initializeProvider(host, currentKeys, {
-    llmConfigChanged: secretRefChanged || providerChanged,
+    llmConfigChanged: secretRefChanged || providerChanged || connectionRefChanged,
   })
 
   // PMC-2 — the cached `stable` tier embeds the model+provider runtime line
@@ -1189,7 +1419,7 @@ async function onHostChange(host: HostCRD): Promise<void> {
   // keeps serving the OLD model:/provider: line until eviction (generation is
   // correct — it uses the live provider — but the system prompt mislabels the
   // model). This is deliberately OUTSIDE the personalization branch below.
-  if (providerChanged || secretRefChanged || modelChanged) {
+  if (providerChanged || secretRefChanged || modelChanged || connectionRefChanged) {
     promptCache?.invalidateAll('model_change')
   }
 
@@ -1875,6 +2105,14 @@ async function handleTaskResult(
           requestId: result.approval.requestId,
           userId: result.approval.userId,
           notification: result.approval.notification,
+          // U5 — surface the connect_required discriminator on the REST poll so a
+          // reconnecting desktop rebuilds a "Connect <server>" suspension, not a
+          // generic approval. Omitted for generic approvals (back-compat).
+          ...(result.approval.reason ? { reason: result.approval.reason } : {}),
+          // mcpServerName rides ONLY connect_required, matching the SSE producer.
+          ...(result.approval.reason === 'connect_required' && result.approval.mcpServerName
+            ? { mcpServerName: result.approval.mcpServerName }
+            : {}),
         },
         model: result.model,
       }
@@ -2788,9 +3026,13 @@ async function startDevMode(): Promise<void> {
     // Safe `!`: the `ALL_PROVIDERS.every(p => !keys[p])` throw-guard above
     // already proved at least one key is present.
     const provider = ALL_PROVIDERS.find(p => keys[p])!
+    const defaultModel = descriptorFor(provider).defaultModel
+    if (!defaultModel) {
+      throw new Error(`[Main] auto-detected provider '${provider}' requires an explicit model`)
+    }
     hostSpec = {
       ...hostSpec,
-      model: { provider, name: descriptorFor(provider).defaultModel },
+      model: { provider, name: defaultModel },
     }
     console.log(`[Main] Auto-detected provider: ${provider} (based on available API key)`)
   }
@@ -2815,7 +3057,11 @@ async function startDevMode(): Promise<void> {
   await initializeProvider(host, keys)
 
   // Initialize MCP manager
-  mcpManager = new McpManager(config.mcpProxyEnabled ? config.mcpProxyUrl : undefined)
+  mcpManager = new McpManager(
+    config.mcpProxyEnabled ? config.mcpProxyUrl : undefined,
+    undefined,
+    createMcpTokenProviderFactory()
+  )
 
   if (config.devMcpServers && config.devMcpServers.length > 0) {
     console.log(`[Main] Adding ${config.devMcpServers.length} dev MCP server(s)`)
@@ -2941,6 +3187,7 @@ async function startPluginWorkloadSdkOnlyMode(): Promise<void> {
   }
 
   console.log(`[Main] Starting in SDK-ONLY MODE (recipe: ${config.workflowRecipeName})`)
+  setCodexPolicyBindingReader(() => sdkOnlyBindingAsPolicy())
 
   if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
   if (!runtimeAuth) {
@@ -3112,7 +3359,7 @@ async function main(): Promise<void> {
       console.log(`[Main] Starting in WORKFLOW MODE (recipe: ${config.workflowRecipeName})`)
 
       const { WorkflowService } = await import('./workflow/workflowService')
-      const { McpClient } = await import('./mcp/client')
+      const { McpClient, staticTokenProvider } = await import('./mcp/client')
 
       rpcServer = new RPCServer(config.serverPort)
 
@@ -3127,7 +3374,7 @@ async function main(): Promise<void> {
           enabled: true,
           status: { deployed: true, ready: true },
         } as McpServerInfo
-        const client = new McpClient(info, server.authToken)
+        const client = new McpClient(info, staticTokenProvider(server.authToken))
         return {
           connect: (options?: { timeoutMs?: number; signal?: AbortSignal }) =>
             client.connect(options),

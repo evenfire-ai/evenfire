@@ -45,6 +45,9 @@ const mockPoolQueryDispatch = vi.fn(async (sql: unknown, params?: unknown[]) => 
   if (/rate_limit_buckets/i.test(text)) {
     return { rows: [{ count: 1 }], rowCount: 1 }
   }
+  if (/clock_timestamp\(\)/i.test(text)) {
+    return { rows: [{ db_now: new Date('2026-09-01T12:00:00.000Z') }], rowCount: 1 }
+  }
   if (
     /external_user_session_security_epochs/i.test(text) &&
     /external_v1_session_revocations/i.test(text)
@@ -70,7 +73,11 @@ const mockPoolQueryDispatch = vi.fn(async (sql: unknown, params?: unknown[]) => 
 vi.mock('../src/db.js', () => ({
   pool: {
     query: (...args: unknown[]) => mockPoolQueryDispatch(args[0], args[1] as unknown[] | undefined),
-    connect: vi.fn(),
+    connect: vi.fn(async () => ({
+      query: (...args: unknown[]) =>
+        mockPoolQueryDispatch(args[0], args[1] as unknown[] | undefined),
+      release: vi.fn(),
+    })),
   },
   withTransaction: vi.fn(),
 }))

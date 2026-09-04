@@ -4,11 +4,15 @@ import { sendPublicApiError } from '../http/publicApiError.js'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
 import type { AccessExecutionBudget } from '../services/access/accessExecutionBudget.js'
 import { getLiveTeamMembership } from '../services/access/liveTeamAuthorization.js'
-import { authenticateExternalUserSession } from '../services/auth/externalSessionAuthentication.js'
+import {
+  authenticateExternalUserSession,
+  authenticateExternalUserSessionIdentity,
+} from '../services/auth/externalSessionAuthentication.js'
 import type {
   ExternalSessionAuthentication,
   ExternalSessionAuthorityContext,
   ExternalSessionClient,
+  ExternalSessionIdentityAuthentication,
   ExternalSessionPurpose,
 } from '../services/auth/externalSessionAuthentication.js'
 import { legacyExternalSessionAuthGeneration } from '../services/auth/legacyV1Generation.js'
@@ -18,6 +22,10 @@ export type ExternalAuthedRequest = Request & {
   externalSessionAuthority?: ExternalSessionAuthorityContext
   externalSessionAuthentication?: Extract<
     ExternalSessionAuthentication,
+    { status: 'authenticated' }
+  >
+  externalSessionLimiterIdentity?: Extract<
+    ExternalSessionIdentityAuthentication,
     { status: 'authenticated' }
   >
   accessExecutionBudget?: AccessExecutionBudget
@@ -189,6 +197,88 @@ async function validateExternalSessionToken(
   }
 }
 
+/**
+ * Establishes the policy-I/O-free live identity needed only for the dedicated
+ * catalog/resolve authenticated limiter. Final policy and contract validation
+ * must run separately after that limiter allows the request.
+ */
+export async function requireExternalSessionLimiterIdentityWithPublicErrors(
+  req: ExternalAuthedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const token = extractUserSessionToken(req)
+  if (!token || token.length > 4096) {
+    sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+    return
+  }
+  try {
+    const identity = await authenticateExternalUserSessionIdentity(token, {
+      budget: req.accessExecutionBudget,
+    })
+    if (identity.status !== 'authenticated') {
+      sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+      return
+    }
+    req.externalAuth = identity.claims
+    req.externalSessionAuthority = identity.authorityContext
+    req.externalSessionLimiterIdentity = identity
+    next()
+  } catch {
+    sendPublicApiError(
+      req,
+      res,
+      503,
+      'authority_unavailable',
+      'Authorization is temporarily unavailable.',
+      true
+    )
+  }
+}
+
+/** Completes canonical current policy/contract authentication after limiter allowance. */
+export async function requireCompletedExternalSessionAuthenticationWithPublicErrors(
+  req: ExternalAuthedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const token = extractUserSessionToken(req)
+  const identity = req.externalSessionLimiterIdentity
+  if (!token || token.length > 4096 || !identity) {
+    sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+    return
+  }
+  try {
+    const authentication = await authenticateExternalUserSession(token, {
+      purpose: 'protected',
+      client: { version: req.header('x-evenfire-client-version') || undefined },
+      budget: req.accessExecutionBudget,
+      identity,
+    })
+    if (authentication.status === 'upgrade_required') {
+      sendPublicApiError(req, res, 426, 'upgrade_required', 'A newer client is required.')
+      return
+    }
+    if (authentication.status !== 'authenticated') {
+      sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+      return
+    }
+    req.externalAuth = authentication.claims
+    req.externalSessionAuthority = authentication.authorityContext
+    req.externalSessionAuthentication = authentication
+    next()
+  } catch {
+    sendPublicApiError(
+      req,
+      res,
+      503,
+      'authority_unavailable',
+      'Authorization is temporarily unavailable.',
+      true
+    )
+  }
+}
+
 export async function requireValidExternalSessionToken(
   req: ExternalAuthedRequest,
   res: Response,
@@ -230,7 +320,9 @@ function externalTeamParamMatcher(paramName: string, publicErrors: boolean) {
       return
     }
     try {
-      const membership = await getLiveTeamMembership(claims.userId, requestedTeamId)
+      const membership = await getLiveTeamMembership(claims.userId, requestedTeamId, {
+        budget: req.accessExecutionBudget,
+      })
       if (!membership) {
         if (publicErrors) {
           sendPublicApiError(req, res, 403, 'forbidden', 'The requested operation is not allowed.')

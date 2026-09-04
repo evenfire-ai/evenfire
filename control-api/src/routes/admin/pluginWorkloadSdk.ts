@@ -3,6 +3,7 @@ import {
   isCredentialSlotOwnedByProvider,
   isLlmProviderId,
   isRunnableLlmModelId,
+  providerDescriptor,
 } from '@clerum/llm-providers'
 import {
   advisoryLockModelNames,
@@ -10,8 +11,15 @@ import {
   withTransaction,
 } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
+import type { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { createPluginWorkloadSdkAdminRateLimit } from '../../middleware/pluginWorkloadSdkRateLimits.js'
+import { rootLogger } from '../../observability/logger.js'
+import { isCodexAssignmentAllowed } from '../../services/codexSubscriptionCatalog.js'
+import {
+  assertCodexConnectionKey,
+  isCodexUnassignedConnectionKey,
+} from '../../services/codexSubscriptionConnection.js'
 import { listEnabledModelsWithStaleForProvider } from '../../services/llmAllowedModels.js'
 import {
   MAX_ALLOWLIST_ENTRY_LENGTH,
@@ -32,6 +40,10 @@ import {
   listInvocations,
   upsertGrant,
 } from '../../services/pluginWorkloadSdkDb.js'
+import {
+  RecipeCodexGrantIdentityError,
+  publishRecipeGrantIdentity,
+} from '../../services/recipeCodexGrantIdentity.js'
 import { isPlainObject } from '../../utils/isPlainObject.js'
 import {
   type EmitHostSpecIncoherenceTolerated,
@@ -135,6 +147,14 @@ function parseModelArray(value: unknown, field: string, res: Response): string[]
 // Issue #348: per-run quota keys are deprecated. They remain accepted on the
 // wire for compatibility and are validated with the same shape rules, but they
 // are stripped before persistence — only per-minute/platform limits are stored.
+//
+// `maxOutputTokens` was briefly moved here on the premise that nothing
+// enforced it. That premise held only for codex-subscription, whose ChatGPT
+// wire rejects `max_output_tokens` and whose proxy therefore omits it. Every
+// API-key provider does send it (`openai.ts`, `bedrockConverse.ts`,
+// `googleGenerative.ts`), so for them it was a working per-grant billing
+// ceiling. The key is active again, with its real scope stated wherever an
+// operator can read it, rather than a ceiling silently ignored everywhere.
 const DEPRECATED_QUOTA_LIMIT_KEYS: ReadonlyArray<keyof PluginWorkloadSdkQuotaLimits> = [
   'maxRequestsPerRun',
   'maxNotificationsPerRun',
@@ -202,6 +222,11 @@ function parseModelPolicies(
   return policies
 }
 
+/** Whether a validated provider id resolves credentials through the OAuth broker. */
+function isBrokerBackedProvider(provider: string): boolean {
+  return isLlmProviderId(provider) && providerDescriptor(provider).authMode === 'oauth-broker'
+}
+
 function credentialSlotBelongsToProvider(provider: string, credentialSlot: string): boolean {
   // This shares the exact slot-ownership rule with the runtime broker. A
   // target only carries the key identity; this route never reads the Secret or
@@ -238,6 +263,7 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
     const provider = typeof raw.provider === 'string' ? raw.provider.trim() : ''
     const model = typeof raw.model === 'string' ? raw.model.trim() : ''
     const credentialSlot = typeof raw.credentialSlot === 'string' ? raw.credentialSlot.trim() : ''
+    let connectionRef = typeof raw.connectionRef === 'string' ? raw.connectionRef.trim() : ''
     if (!targetRef || targetRef.length > MAX_ALLOWLIST_ENTRY_LENGTH || targetRef.includes('*')) {
       res
         .status(400)
@@ -254,16 +280,52 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
         .json({ error: `promptTargets[${index}].model must be a non-wildcard model id` })
       return null
     }
-    if (
-      !credentialSlot ||
-      credentialSlot.length > 253 ||
-      !SECRET_KEY_RE.test(credentialSlot) ||
-      !credentialSlotBelongsToProvider(provider, credentialSlot)
-    ) {
-      res.status(400).json({
-        error: `promptTargets[${index}].credentialSlot must be a valid slot owned by provider "${provider}"`,
-      })
-      return null
+    const brokerBacked = providerDescriptor(provider).authMode === 'oauth-broker'
+    if (brokerBacked) {
+      // oauth-broker targets (Codex) carry no static Secret data key: the
+      // credential is brokered per attempt. An empty slot is the only correct
+      // value — a non-empty slot would pretend a ChatGPT refresh token lives
+      // in an API-key slot, which is exactly the shape this gate forbids.
+      if (credentialSlot) {
+        res.status(400).json({
+          error: `promptTargets[${index}].credentialSlot must be empty for oauth-broker provider "${provider}"`,
+        })
+        return null
+      }
+      // Named keys must be well-formed. Missing or `unassigned` is allowed so
+      // a previously stored Codex target can be edited without inventing a
+      // grant. Spend still fail-closes at authorize until the operator picks
+      // a live connection. Malformed keys stay rejected.
+      if (connectionRef && !isCodexUnassignedConnectionKey(connectionRef)) {
+        try {
+          assertCodexConnectionKey(connectionRef)
+        } catch {
+          res.status(400).json({
+            error: `promptTargets[${index}].connectionRef must name an existing Codex subscription connection`,
+          })
+          return null
+        }
+      } else {
+        connectionRef = ''
+      }
+    } else {
+      if (connectionRef) {
+        res.status(400).json({
+          error: `promptTargets[${index}].connectionRef is only valid for oauth-broker providers`,
+        })
+        return null
+      }
+      if (
+        !credentialSlot ||
+        credentialSlot.length > 253 ||
+        !SECRET_KEY_RE.test(credentialSlot) ||
+        !credentialSlotBelongsToProvider(provider, credentialSlot)
+      ) {
+        res.status(400).json({
+          error: `promptTargets[${index}].credentialSlot must be a valid slot owned by provider "${provider}"`,
+        })
+        return null
+      }
     }
     const providerModel = `${provider}\u0000${model}`
     if (targetRefs.has(targetRef) || providerModels.has(providerModel)) {
@@ -272,7 +334,22 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
     }
     targetRefs.add(targetRef)
     providerModels.add(providerModel)
-    targets.push({ targetRef, provider, model, credentialSlot })
+    targets.push({
+      targetRef,
+      provider,
+      model,
+      credentialSlot,
+      ...(brokerBacked ? { connectionRef } : {}),
+    })
+  }
+  const brokerKeys = new Set(
+    targets
+      .filter(target => isBrokerBackedProvider(target.provider))
+      .map(target => target.connectionRef ?? '')
+  )
+  if (brokerKeys.size > 1) {
+    res.status(400).json({ error: 'codex_connection_ref_conflict' })
+    return null
   }
   return targets
 }
@@ -297,6 +374,58 @@ export interface AdminPluginWorkloadSdkRouterDeps {
    * guarantee is testable through the seam; defaults to the shared emitter.
    */
   emitIncoherenceTolerated?: EmitHostSpecIncoherenceTolerated
+  /**
+   * Publishes `clerum.io/codex-connection-ref` on the WorkflowRecipe when an
+   * SDK Codex choose changes. Authorize attests that annotation.
+   */
+  gateway?: Pick<K8sGateway, 'getResource' | 'updateResource'>
+}
+
+const log = rootLogger.child({ module: 'admin-plugin-workload-sdk' })
+
+async function publishPromptBridgeGrantIdentity(input: {
+  gateway: Pick<K8sGateway, 'getResource' | 'updateResource'>
+  recipeNamespace: string
+  recipeName: string
+  nextRef: string
+}): Promise<{ error?: { status: number; error: string } }> {
+  let next = input.nextRef
+  if (!next) {
+    let recipeAgent: string | undefined
+    try {
+      const recipe = (await input.gateway.getResource(
+        'workflowrecipes',
+        input.recipeName,
+        input.recipeNamespace
+      )) as { spec?: { agent?: { provider?: string } } }
+      recipeAgent =
+        typeof recipe.spec?.agent?.provider === 'string' ? recipe.spec.agent.provider : undefined
+    } catch (err) {
+      log.error(
+        { err, recipeNamespace: input.recipeNamespace, recipeName: input.recipeName },
+        'failed to read WorkflowRecipe before publishing Codex grant identity'
+      )
+      return { error: { status: 503, error: 'recipe_annotation_publish_failed' } }
+    }
+    if (recipeAgent === 'codex-subscription') {
+      return {}
+    }
+    next = 'unassigned'
+  }
+  try {
+    await publishRecipeGrantIdentity({
+      gateway: input.gateway,
+      namespace: input.recipeNamespace,
+      name: input.recipeName,
+      next,
+    })
+  } catch (err) {
+    if (err instanceof RecipeCodexGrantIdentityError) {
+      return { error: { status: err.status, error: err.error } }
+    }
+    throw err
+  }
+  return {}
 }
 
 export function createAdminPluginWorkloadSdkRouter(
@@ -472,6 +601,27 @@ export function createAdminPluginWorkloadSdkRouter(
       // before (serialization only, no accept/reject change): a disabled model
       // reachable solely through `allowed_models` (no promptTarget) is a
       // PRE-EXISTING gap, out of R1-H3 scope.
+      const brokerConnectionRef =
+        promptTargets.find(
+          target =>
+            isBrokerBackedProvider(target.provider) &&
+            target.connectionRef &&
+            !isCodexUnassignedConnectionKey(target.connectionRef)
+        )?.connectionRef ?? ''
+      const hasBrokerTarget = promptTargets.some(target => isBrokerBackedProvider(target.provider))
+      if (capabilityFamily === 'promptBridge' && deps.gateway && hasBrokerTarget) {
+        const published = await publishPromptBridgeGrantIdentity({
+          gateway: deps.gateway,
+          recipeNamespace,
+          recipeName,
+          nextRef: brokerConnectionRef,
+        })
+        if (published.error) {
+          res.status(published.error.status).json({ error: published.error.error })
+          return
+        }
+      }
+
       let grant: Awaited<ReturnType<typeof upsertGrant>>
       try {
         grant = await withTransaction(async db => {
@@ -485,8 +635,31 @@ export function createAdminPluginWorkloadSdkRouter(
           await advisoryLockModelNames(db, allowedModels)
 
           if (capabilityFamily === 'promptBridge') {
+            // Codex (oauth-broker) targets are validated against the chosen
+            // grant's per-connection catalog, not the flat `llm_allowed_models`
+            // union: only a model offered AND enabled (non-stale) on that
+            // exact connected grant may be authorized. Missing/unassigned is
+            // allowed so a stored target remains editable; spend still
+            // fail-closes at authorize. Named unknown/revoked/not-offered
+            // keys fail closed. No Pieza D silent keep.
+            for (const target of promptTargets) {
+              if (!isBrokerBackedProvider(target.provider)) continue
+              const connectionRef = target.connectionRef ?? ''
+              if (!connectionRef || isCodexUnassignedConnectionKey(connectionRef)) {
+                continue
+              }
+              const allowed = await isCodexAssignmentAllowed(db, connectionRef, target.model)
+              if (!allowed) {
+                throw new GrantModelGateError({
+                  error: 'codex_connection_not_allowed',
+                  connectionRef: target.connectionRef ?? '',
+                  model: target.model,
+                })
+              }
+            }
             const modelsByProvider = new Map<string, string[]>()
             for (const target of promptTargets) {
+              if (isBrokerBackedProvider(target.provider)) continue
               modelsByProvider.set(target.provider, [
                 ...(modelsByProvider.get(target.provider) ?? []),
                 target.model,
@@ -694,6 +867,28 @@ export function createAdminPluginWorkloadSdkRouter(
       if (!deleted) {
         res.status(404).json({ error: 'grant not found' })
         return
+      }
+      if (deps.gateway) {
+        const remaining = await listGrants({ recipeNamespace, recipeName })
+        const remainingRef =
+          remaining
+            .flatMap(grant => grant.promptTargets)
+            .find(
+              target =>
+                isBrokerBackedProvider(target.provider) &&
+                target.connectionRef &&
+                !isCodexUnassignedConnectionKey(target.connectionRef)
+            )?.connectionRef ?? ''
+        const published = await publishPromptBridgeGrantIdentity({
+          gateway: deps.gateway,
+          recipeNamespace,
+          recipeName,
+          nextRef: remainingRef,
+        })
+        if (published.error) {
+          res.status(published.error.status).json({ error: published.error.error })
+          return
+        }
       }
       res.status(200).json({ deleted: true })
     })

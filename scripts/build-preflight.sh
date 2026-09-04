@@ -33,6 +33,7 @@ PACKAGES=(
   "mcp-host"
   "mcp-proxy"
   "control-api"
+  "codex-llm-proxy"
   "external-rest-api"
   "rpc-proxy"
   "channel-reader"

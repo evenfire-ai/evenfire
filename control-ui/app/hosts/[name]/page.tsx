@@ -15,11 +15,11 @@ import { HostIdentityTab } from '../../../components/HostIdentityTab'
 import { HostOverviewTab } from '../../../components/HostOverviewTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { LlmProviderSummary } from '../../../components/LlmProviderSummary'
-import { LlmSecretSelect } from '../../../components/LlmSecretSelect'
+import { LlmSecretSelect, type LlmSecretSelectOption } from '../../../components/LlmSecretSelect'
 import { LlmSecretUpdateModal } from '../../../components/LlmSecretUpdateModal'
 import { RowActionsMenu } from '../../../components/RowActionsMenu'
 import { IconRobot } from '../../../components/Sidebar/icons'
-import { IconCheck, IconMoreHorizontal, IconPencil, IconX } from '../../../components/icons'
+import { IconMoreHorizontal, IconPencil, IconX } from '../../../components/icons'
 import {
   apiSend,
   getHost,
@@ -28,6 +28,14 @@ import {
   updateContext,
 } from '../../../lib/api'
 import type { ContextResource, ContextSpec, HostSecretResource } from '../../../lib/api'
+import {
+  CODEX_UNASSIGNED_CONNECTION_KEY,
+  type CodexSubscriptionConnectionView,
+  isAssignableCodexGrant,
+  listCodexConnectionModels,
+  listCodexSubscriptionConnections,
+} from '../../../lib/codexSubscription'
+import { isDisabledCapabilityError } from '../../../lib/codexSubscriptionFeature'
 import { buildContextUpdatePayload, contextMutationError } from '../../../lib/contextMutation'
 import { useLlmAllowedModels } from '../../../lib/hooks/useLlmAllowedModels'
 import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '../../../lib/hostWorkflowControl'
@@ -37,16 +45,23 @@ import {
   type LlmPolicy,
   type LlmProvider,
   buildAllowedModelsSpec,
+  constrainModelOptions,
   getModelOptions,
   getProviderLabel,
   getProvidersWithCompleteCredentials,
+  hostModelNameError,
   isProviderUsable,
+  llmChainRequiresSecret,
   normalizeAllowedModels,
   normalizeLlmPolicy,
   normalizeProvider,
+  offeredCodexModelNames,
+  providerRequiresLlmSecret,
+  resolveCodexGrantModel,
   resolveDefaultModel,
   validateLlmPolicy,
 } from '../../../lib/llm'
+import { credentialSelectValue, parseCredentialSelect } from '../../../lib/llmCredentialSelect'
 import type { HostTab } from './types'
 
 const TAB_LABELS: Record<HostTab, string> = {
@@ -71,15 +86,6 @@ function parseHostTab(value: string | undefined): HostTab {
   return HOST_TABS.find(tab => TAB_SLUGS[tab] === value) ?? HOST_DEFAULT_TAB
 }
 
-// Cron×stateless: map the machine-readable suspend-blocked reason to
-// operator-friendly text. Every other reason renders verbatim.
-function friendlyLifecycleReason(reason: string): string {
-  if (reason === 'SuspendBlocked: activeCronSchedules') {
-    return 'Not suspending: active scheduled tasks keep this agent awake'
-  }
-  return reason
-}
-
 function contextResourceName(context: ContextResource | null): string {
   return String(context?.metadata?.name || context?.spec?.contextId || '').trim()
 }
@@ -100,7 +106,7 @@ function agentConnectorMutationError(error: unknown): string {
   if ((error as { status?: unknown } | null)?.status === 409) {
     return 'This agent’s connectors changed since they were loaded. Reload the agent and try again.'
   }
-  if (error instanceof Error && /context version is unavailable/i.test(error.message)) {
+  if (error instanceof Error && /required version is unavailable/i.test(error.message)) {
     return 'This agent’s connector settings are missing a server version. Reload the agent and try again.'
   }
   return contextMutationError(error, 'Failed to update connectors for this agent.')
@@ -183,13 +189,14 @@ export default function HostDetailsPage() {
 
   const [editingModel, setEditingModel] = useState(false)
   const [llmSecretModalOpen, setLlmSecretModalOpen] = useState(false)
-  const [editingContext, setEditingContext] = useState(false)
   const [showDeleteAgentConfirm, setShowDeleteAgentConfirm] = useState(false)
   const [deletingAgent, setDeletingAgent] = useState(false)
   const [deleteAgentDialogError, setDeleteAgentDialogError] = useState('')
 
   const [hostNameDraft, setHostNameDraft] = useState(routeName)
   const [hostDisplayDraft, setHostDisplayDraft] = useState('')
+  const [hostDisplaySaved, setHostDisplaySaved] = useState('')
+  const [editingDisplayName, setEditingDisplayName] = useState(false)
   const [hostDescription, setHostDescription] = useState('')
   const [contextRefDraft, setContextRefDraft] = useState('')
   const [providerDraft, setProviderDraft] = useState<LlmProvider>('openai')
@@ -202,6 +209,29 @@ export default function HostDetailsPage() {
     error: modelsError,
   } = useLlmAllowedModels()
   const [modelNameDraft, setModelNameDraft] = useState('')
+  const [connectionRefDraft, setConnectionRefDraft] = useState(CODEX_UNASSIGNED_CONNECTION_KEY)
+  const [codexModels, setCodexModels] = useState<string[]>([])
+  const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
+  const [grantCatalogError, setGrantCatalogError] = useState('')
+  const catalogForEditor = useMemo(() => {
+    if (providerDraft !== 'codex-subscription') return allowedCatalog
+    const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
+    if (codexModels.length === 0) return others
+    return [
+      ...others,
+      ...codexModels.map(model => ({
+        id: `codex:${model}`,
+        provider: 'codex-subscription' as const,
+        model,
+        vendor: 'OpenAI',
+        display_name: model,
+        context_window_tokens: null,
+        enabled: true,
+        source: 'discovery' as const,
+        stale: false,
+      })),
+    ]
+  }, [allowedCatalog, providerDraft, codexModels])
   const [secretRefDraft, setSecretRefDraft] = useState('')
   const [availableLlmSecrets, setAvailableLlmSecrets] = useState<HostSecretResource[]>([])
   // Fallback policy (spec §3-R5). `undefined` = the Host has no llmPolicy.
@@ -241,15 +271,10 @@ export default function HostDetailsPage() {
     memberNames: string[]
     teamNames: string[]
   }>({ memberCount: 0, teamCount: 0, memberNames: [], teamNames: [] })
-  const [statelessDraft, setStatelessDraft] = useState(false)
-  const [savedStateless, setSavedStateless] = useState(false)
-  const [lifecycleState, setLifecycleState] = useState('')
-  const [lifecycleReason, setLifecycleReason] = useState('')
-  const [statelessRejectionMessage, setStatelessRejectionMessage] = useState('')
 
   const providerModelOptions = useMemo(
-    () => getModelOptions(allowedCatalog, providerDraft),
-    [allowedCatalog, providerDraft]
+    () => getModelOptions(catalogForEditor, providerDraft),
+    [catalogForEditor, providerDraft]
   )
   // The EFFECTIVE per-host subset to persist (Topic 3a): the raw draft pruned to
   // the providers actually in this host's domain (primary + fallbacks — so a
@@ -284,10 +309,75 @@ export default function HostDetailsPage() {
   // fell out of the allowlist stays selectable, spec R3.7). Cannot loop: it
   // only fires on an empty draft and always sets a non-empty value.
   useEffect(() => {
+    if (providerDraft === 'codex-subscription') {
+      const offered = constrainModelOptions(
+        catalogForEditor,
+        allowedModelsDraft,
+        'codex-subscription'
+      )
+      if (offered.length === 0) return
+      const grant = codexConnections.find(row => row.connectionKey === connectionRefDraft)
+      const next = resolveCodexGrantModel(modelNameDraft, offered, grant?.defaultModel)
+      if (next !== modelNameDraft) setModelNameDraft(next)
+      return
+    }
     if (modelNameDraft === '' && providerModelOptions.length > 0) {
       setModelNameDraft(resolveDefaultModel(providerDraft, providerModelOptions))
     }
-  }, [modelNameDraft, providerDraft, providerModelOptions])
+  }, [
+    allowedModelsDraft,
+    catalogForEditor,
+    codexConnections,
+    connectionRefDraft,
+    modelNameDraft,
+    providerDraft,
+    providerModelOptions,
+  ])
+
+  useEffect(() => {
+    let cancelled = false
+    void listCodexSubscriptionConnections()
+      .then(rows => {
+        if (!cancelled) setCodexConnections(rows)
+      })
+      .catch(err => {
+        if (!cancelled) {
+          setCodexConnections([])
+          if (!isDisabledCapabilityError(err)) {
+            setError(err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions')
+          }
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!connectionRefDraft.trim() || connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY) {
+      setCodexModels([])
+      setGrantCatalogError('')
+      return
+    }
+    let cancelled = false
+    setGrantCatalogError('')
+    void listCodexConnectionModels(connectionRefDraft)
+      .then(models => {
+        if (cancelled) return
+        setCodexModels(offeredCodexModelNames(models))
+      })
+      .catch(err => {
+        if (cancelled) return
+        setCodexModels([])
+        setModelNameDraft('')
+        setGrantCatalogError(
+          err instanceof Error ? err.message : 'Could not load ChatGPT grant models'
+        )
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [connectionRefDraft])
 
   useEffect(() => {
     setActiveTab(parseHostTab(params.tab))
@@ -329,14 +419,14 @@ export default function HostDetailsPage() {
           hostDisplay: String(spec.host || host.metadata?.name || routeName),
           contextRef: String(spec.contextRef || ''),
           channels: Array.isArray(spec.channels) ? spec.channels.map(String).filter(Boolean) : [],
-          stateless: spec.lifecycle?.stateless === true,
         }
         setHostNameDraft(overview.hostName)
         setHostDisplayDraft(overview.hostDisplay)
+        setHostDisplaySaved(overview.hostDisplay)
+        setEditingDisplayName(false)
         setHostDescription(String(spec.description || '').trim())
         setContextRefDraft(overview.contextRef)
         setChannelsDraft(overview.channels)
-        setStatelessDraft(overview.stateless)
         // Overview read-only summary: linked context's MCP servers + access counts.
         const ref = overview.contextRef.trim()
         const matched = (contextsList || []).find(
@@ -403,6 +493,11 @@ export default function HostDetailsPage() {
             resolveDefaultModel(nextProvider, getModelOptions(allowedCatalog, nextProvider))
         )
         setSecretRefDraft(String(spec.secretRef || ''))
+        setConnectionRefDraft(
+          String(
+            (spec.model as { connectionRef?: string } | undefined)?.connectionRef || ''
+          ).trim() || CODEX_UNASSIGNED_CONNECTION_KEY
+        )
         setLlmPolicyDraft(nextPersistedLlmPolicy)
         // Hydrate the per-host model subset from the saved spec (Topic 3a); absent
         // → [] = unrestricted (offers the full global allowlist per provider).
@@ -413,22 +508,6 @@ export default function HostDetailsPage() {
       const rawGuardrails = spec.guardrails as HostGuardrails | undefined
       setGuardrailsData(
         rawGuardrails && typeof rawGuardrails === 'object' ? rawGuardrails : undefined
-      )
-      const specStateless = spec.lifecycle?.stateless === true
-      setSavedStateless(specStateless)
-      setLifecycleState(String(host.status?.lifecycle?.state ?? ''))
-      setLifecycleReason(String(host.status?.lifecycle?.reason ?? ''))
-      const rejection = (host.status?.conditions ?? []).find(
-        condition => condition.type === 'StatelessEnableRejected' && condition.status === 'True'
-      )
-      setStatelessRejectionMessage(
-        rejection
-          ? String(
-              rejection.message ||
-                rejection.reason ||
-                'Stateless mode was rejected by the platform.'
-            )
-          : ''
       )
 
       // Map each Secret to its data-key NAMES (never values), already carried by
@@ -553,9 +632,10 @@ export default function HostDetailsPage() {
   )
 
   const llmSecretOptions = useMemo(() => {
-    const toOption = (name: string, keys: string[]) => {
+    const toOption = (name: string, keys: string[]): LlmSecretSelectOption => {
       const providers = getProvidersWithCompleteCredentials(keys)
       return {
+        group: 'API keys',
         value: name,
         label: name,
         meta:
@@ -569,19 +649,69 @@ export default function HostDetailsPage() {
       }
     }
 
-    const options = availableLlmSecrets.map(secret =>
+    const options: LlmSecretSelectOption[] = availableLlmSecrets.map(secret =>
       toOption(secret.name, Array.isArray(secret.keys) ? secret.keys : [])
     )
     if (secretRefDraft.trim() && !options.some(secret => secret.value === secretRefDraft.trim())) {
       options.unshift(toOption(secretRefDraft.trim(), currentSecretKeys))
     }
+    for (const row of codexConnections.filter(isAssignableCodexGrant)) {
+      options.push({
+        group: 'ChatGPT subscriptions',
+        value: credentialSelectValue('', row.connectionKey),
+        label: row.displayName || row.connectionKey,
+        meta: 'ChatGPT subscription',
+        providers: [{ id: 'codex-subscription', label: 'ChatGPT Subscription' }],
+      })
+    }
+    if (
+      connectionRefDraft &&
+      connectionRefDraft !== CODEX_UNASSIGNED_CONNECTION_KEY &&
+      !codexConnections.some(
+        row => row.connectionKey === connectionRefDraft && isAssignableCodexGrant(row)
+      )
+    ) {
+      options.push({
+        group: 'ChatGPT subscriptions',
+        value: credentialSelectValue('', connectionRefDraft),
+        label: `${connectionRefDraft} (unavailable)`,
+        meta: 'ChatGPT subscription',
+        providers: [{ id: 'codex-subscription', label: 'ChatGPT Subscription' }],
+      })
+    }
     return options
-  }, [availableLlmSecrets, currentSecretKeys, secretRefDraft])
+  }, [availableLlmSecrets, codexConnections, connectionRefDraft, currentSecretKeys, secretRefDraft])
+  const apiKeySecretOptions = useMemo(
+    () => llmSecretOptions.filter(option => option.group !== 'ChatGPT subscriptions'),
+    [llmSecretOptions]
+  )
+
+  const chainRequiresSecret = llmChainRequiresSecret(providerDraft, llmPolicyDraft?.fallbacks)
+  const showFallbackSecretField = providerDraft === 'codex-subscription' && chainRequiresSecret
+  const fallbackSecretLabels = (llmPolicyDraft?.fallbacks ?? [])
+    .filter(entry => providerRequiresLlmSecret(entry.provider))
+    .map(entry => getProviderLabel(entry.provider))
+  const isCodexAssignment = providerDraft === 'codex-subscription'
+  const isCodexUnassigned =
+    isCodexAssignment &&
+    (!connectionRefDraft.trim() || connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY)
+  const assignedCodexLabel =
+    codexConnections.find(row => row.connectionKey === connectionRefDraft)?.displayName ||
+    connectionRefDraft
+  const credentialFieldLabel = isCodexAssignment ? 'Credential' : 'LLM Secret'
 
   const linkedSecretProviderMismatch =
+    chainRequiresSecret &&
     secretRefDraft.trim().length > 0 &&
     currentSecretKeys.length > 0 &&
-    !isProviderUsable(providerDraft, key => currentSecretKeys.includes(key))
+    (showFallbackSecretField
+      ? !(llmPolicyDraft?.fallbacks ?? []).some(entry =>
+          isProviderUsable(entry.provider as LlmProvider, key => currentSecretKeys.includes(key))
+        )
+      : !isProviderUsable(providerDraft, key => currentSecretKeys.includes(key)))
+  const secretMismatchLabel = showFallbackSecretField
+    ? fallbackSecretLabels[0] || 'fallback'
+    : getProviderLabel(providerDraft)
 
   const connectorOptions = useMemo(
     () =>
@@ -591,10 +721,7 @@ export default function HostDetailsPage() {
     [availableConnectorNames, contextMcpServers]
   )
 
-  async function saveHost(
-    nextDisplayName = hostDisplayDraft,
-    nextStateless = statelessDraft
-  ): Promise<boolean> {
+  async function saveHost(nextDisplayName = hostDisplayDraft): Promise<boolean> {
     const nextHostName = hostNameDraft.trim()
     if (!nextHostName) return false
 
@@ -604,23 +731,18 @@ export default function HostDetailsPage() {
       // Re-fetch to preserve fields that aren't editable in this form. K8s
       // replaceNamespacedCustomObject is a full replace, not a merge.
       const currentHost = await getHost(routeName)
-      const currentLifecycle = currentHost.spec?.lifecycle
       const currentWorkflowControl = currentHost.spec?.workflowControl
       // Overview owns only identity/shape fields (name, display, context,
-      // channels, lifecycle). Model, secret, fallback policy and the per-host
+      // channels). Model, secret, fallback policy and the per-host
       // model allowlist are owned by the "Model & credentials" tab and are
       // preserved here via the `...currentHost.spec` spread (full-replace
-      // semantics — omitting them is what keeps them intact).
+      // semantics — omitting them is what keeps them intact). spec.lifecycle
+      // is not editable here and passes through the spread unchanged.
       const nextSpec: Record<string, unknown> = {
         ...currentHost.spec,
         host: nextDisplayName.trim() || nextHostName,
         contextRef: contextRefDraft.trim(),
         channels: channelsDraft,
-        // Echo spec.lifecycle explicitly: the admin facade full-replaces the
-        // spec, so leaving lifecycle implicit would strip the stateless flag.
-        ...(nextStateless || currentLifecycle
-          ? { lifecycle: { ...currentLifecycle, stateless: nextStateless } }
-          : {}),
         ...(channelsDraft.length > 0 && currentWorkflowControl === undefined
           ? { workflowControl: { scopes: [...FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES] } }
           : {}),
@@ -663,53 +785,56 @@ export default function HostDetailsPage() {
     }
   }
 
-  async function saveSecretRef(nextSecretRef: string): Promise<void> {
-    const normalizedSecretRef = nextSecretRef.trim()
-    if (!normalizedSecretRef) throw new Error('Select an LLM Secret.')
-
-    setBusy(true)
-    setError('')
-    try {
-      const currentHost = await getHost(routeName)
-      const nextSpec = {
-        ...currentHost.spec,
-        secretRef: normalizedSecretRef,
-      }
-      const formResourceVersion = formResourceVersionRef.current
-      await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
-        ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
-        spec: nextSpec,
-      })
-      setSecretRefDraft(normalizedSecretRef)
-      await loadData('none')
-      showToast('LLM Secret link updated.', { tone: 'success' })
-    } catch (e) {
-      const status = (e as { status?: number } | null)?.status
-      const code = (e as { code?: string } | null)?.code
-      const message =
-        status === 409 && code === 'conflict'
-          ? 'This agent changed since you opened the form. Reload to see the latest, then re-apply your change.'
-          : e instanceof Error
-            ? e.message
-            : 'Failed to change the linked LLM Secret'
-      setError(message)
-      throw new Error(message)
-    } finally {
-      setBusy(false)
+  function handleCredentialChange(value: string) {
+    const parsed = parseCredentialSelect(value)
+    if (parsed.kind === 'empty') {
+      setSecretRefDraft('')
+      setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
+      setCodexModels([])
+      setGrantCatalogError('')
+      return
     }
-  }
-
-  async function handleSecretRefChange(nextSecretRef: string): Promise<void> {
-    if (nextSecretRef === secretRefDraft) return
-    try {
-      await saveSecretRef(nextSecretRef)
-    } catch {
-      // saveSecretRef surfaces the server error in the page banner. Keep the
-      // controlled select on the previously saved value when the write fails.
+    if (parsed.kind === 'subscription') {
+      if (!llmChainRequiresSecret('codex-subscription', llmPolicyDraft?.fallbacks)) {
+        setSecretRefDraft('')
+      }
+      setConnectionRefDraft(parsed.connectionKey)
+      setProviderDraft('codex-subscription')
+      setModelNameDraft('')
+      return
+    }
+    setSecretRefDraft(parsed.name)
+    setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
+    setCodexModels([])
+    setGrantCatalogError('')
+    if (providerDraft === 'codex-subscription') {
+      setProviderDraft('openai')
+      setModelNameDraft(resolveDefaultModel('openai', getModelOptions(allowedCatalog, 'openai')))
     }
   }
 
   async function saveModelConfiguration(): Promise<boolean> {
+    const modelNameProblem = hostModelNameError(modelNameDraft)
+    if (modelNameProblem) {
+      setError(modelNameProblem)
+      return false
+    }
+    if (providerDraft === 'codex-subscription') {
+      if (!connectionRefDraft.trim() || connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY) {
+        setError('Choose a ChatGPT subscription before saving.')
+        return false
+      }
+      if (grantCatalogError) {
+        setError(grantCatalogError)
+        return false
+      }
+      if (!codexModels.includes(modelNameDraft.trim())) {
+        setError(
+          'This subscription has no offered models yet. Sign in and sync the catalog before assigning agents.'
+        )
+        return false
+      }
+    }
     if (!modelNameDraft.trim()) {
       setError('Choose a current model before saving.')
       return false
@@ -730,13 +855,25 @@ export default function HostDetailsPage() {
       setError(LLM_EMPTY_TRIGGER_ERROR)
       return false
     }
+    const chainRequiresSecret = llmChainRequiresSecret(providerDraft, llmPolicyDraft?.fallbacks)
+    if (chainRequiresSecret && !secretRefDraft.trim()) {
+      setError('Select an LLM secret for the static-credentials provider in this chain.')
+      return false
+    }
+    const secretUsableFor =
+      providerDraft === 'codex-subscription'
+        ? (llmPolicyDraft?.fallbacks ?? []).find(entry =>
+            isProviderUsable(entry.provider as LlmProvider, key => currentSecretKeys.includes(key))
+          )
+        : isProviderUsable(providerDraft, key => currentSecretKeys.includes(key))
     if (
+      chainRequiresSecret &&
       secretRefDraft.trim() &&
       currentSecretKeys.length > 0 &&
-      !isProviderUsable(providerDraft, key => currentSecretKeys.includes(key))
+      !secretUsableFor
     ) {
       setError(
-        `The linked LLM Secret does not contain a usable ${getProviderLabel(providerDraft)} credential. Update the linked credentials or choose another secret.`
+        `The linked LLM Secret does not contain a usable ${secretMismatchLabel} credential. Update the linked credentials or choose another secret.`
       )
       return false
     }
@@ -750,13 +887,27 @@ export default function HostDetailsPage() {
         model: {
           provider: providerDraft,
           name: modelNameDraft.trim(),
+          ...(providerDraft === 'codex-subscription'
+            ? {
+                connectionRef: connectionRefDraft.trim() || CODEX_UNASSIGNED_CONNECTION_KEY,
+              }
+            : {}),
         },
       }
+      // Host identity is metadata.name / the route slug. Never persist
+      // hostRef/userId as execution authority on this write.
+      delete nextSpec.hostRef
+      delete nextSpec.userId
       // These fields are owned by this editor. Delete them first so removing
       // the last fallback or clearing an allowlist is persisted as an actual
       // field removal under the facade's full-replace semantics.
       delete nextSpec.llmPolicy
       delete nextSpec.allowedModels
+      if (chainRequiresSecret) {
+        nextSpec.secretRef = secretRefDraft.trim()
+      } else {
+        delete nextSpec.secretRef
+      }
       if (llmPolicyDraft && llmPolicyDraft.fallbacks.length > 0) {
         nextSpec.llmPolicy = llmPolicyDraft
       }
@@ -919,7 +1070,18 @@ export default function HostDetailsPage() {
         {activeTab === 'details' && (
           <HostOverviewTab
             hostName={routeName}
-            displayName={hostDisplayDraft}
+            displayName={hostDisplaySaved || hostDisplayDraft}
+            editingName={editingDisplayName}
+            nameDraft={hostDisplayDraft}
+            onNameDraftChange={setHostDisplayDraft}
+            onStartNameEdit={() => {
+              setHostDisplayDraft(hostDisplayDraft || hostDisplaySaved)
+              setEditingDisplayName(true)
+            }}
+            onCancelNameEdit={() => {
+              setHostDisplayDraft(hostDisplaySaved)
+              setEditingDisplayName(false)
+            }}
             description={hostDescription}
             statusLabel={hostStatusLabel}
             statusTone={hostStatusTone}
@@ -930,17 +1092,9 @@ export default function HostDetailsPage() {
             modelProviderLine={
               modelNameDraft ? `${getProviderLabel(providerDraft)} · ${modelNameDraft}` : ''
             }
-            stateless={statelessDraft}
-            lifecycleState={lifecycleState}
-            lifecycleReason={friendlyLifecycleReason(lifecycleReason)}
-            statelessRejectionMessage={statelessRejectionMessage}
             accessSummary={accessSummary}
             onNavigate={tab => selectTab(tab)}
             onSaveDisplayName={nextDisplayName => saveHost(nextDisplayName)}
-            onSaveLifecycle={nextStateless => {
-              setStatelessDraft(nextStateless)
-              return saveHost(hostDisplayDraft, nextStateless)
-            }}
             createdAt={hostCreatedAt}
           />
         )}
@@ -969,46 +1123,99 @@ export default function HostDetailsPage() {
               </div>
             </div>
 
-            <div className="cu-form-stack">
+            <div className="cu-form-stack cu-form-stack--wide">
               <div className="cu-field">
-                <label htmlFor="model-secret">LLM Secret</label>
+                <label htmlFor="model-secret">{credentialFieldLabel}</label>
                 <div className="cu-llm-secret-control">
                   <LlmSecretSelect
                     id="model-secret"
-                    value={secretRefDraft}
-                    ariaLabel="LLM Secret"
-                    onChange={value => void handleSecretRefChange(value)}
+                    value={
+                      showFallbackSecretField
+                        ? credentialSelectValue('', connectionRefDraft)
+                        : credentialSelectValue(secretRefDraft, connectionRefDraft)
+                    }
+                    ariaLabel={credentialFieldLabel}
+                    onChange={handleCredentialChange}
                     options={llmSecretOptions}
                     placeholder={
-                      llmSecretOptions.length === 0
-                        ? 'No LLM Secret available'
-                        : 'Select an LLM Secret...'
+                      isCodexAssignment
+                        ? isCodexUnassigned
+                          ? 'No credential assigned'
+                          : assignedCodexLabel
+                        : apiKeySecretOptions.length === 0
+                          ? 'No LLM Secret available'
+                          : 'Select an LLM Secret...'
                     }
-                    disabled={busy || llmSecretOptions.length === 0}
+                    disabled={busy || !editingModel}
                   />
-                  <button
-                    type="button"
-                    className="cu-btn cu-btn--icon cu-btn--toolbar"
-                    onClick={() => setLlmSecretModalOpen(true)}
-                    disabled={busy || !secretRefDraft.trim()}
-                    aria-label="Edit LLM Secret credentials"
-                    title="Edit LLM Secret credentials"
-                  >
-                    <IconPencil width={16} height={16} />
-                  </button>
+                  {showFallbackSecretField ? null : (
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--icon cu-btn--toolbar"
+                      onClick={() => setLlmSecretModalOpen(true)}
+                      disabled={busy || !secretRefDraft.trim()}
+                      aria-label="Edit LLM Secret credentials"
+                      title="Edit LLM Secret credentials"
+                    >
+                      <IconPencil width={16} height={16} />
+                    </button>
+                  )}
                 </div>
                 <span className="cu-field__hint">
-                  Select the LLM Secret linked to this agent. Use the pencil to edit its stored
-                  credentials.
+                  {showFallbackSecretField
+                    ? 'Choose the ChatGPT subscription this agent spends. Agents only choose; Secrets creates grants.'
+                    : 'Choose an API-key secret or a ChatGPT subscription. Agents only choose; Secrets creates grants.'}
                 </span>
-                {linkedSecretProviderMismatch ? (
-                  <div className="cu-banner cu-banner--warning">
-                    The linked secret does not contain a usable {getProviderLabel(providerDraft)}{' '}
-                    credential. Choose another secret or edit its credentials before saving model
-                    configuration.
-                  </div>
-                ) : null}
               </div>
+              {showFallbackSecretField ? (
+                <div className="cu-field">
+                  <label htmlFor="model-fallback-secret">LLM Secret</label>
+                  <div className="cu-llm-secret-control">
+                    <LlmSecretSelect
+                      id="model-fallback-secret"
+                      value={secretRefDraft}
+                      ariaLabel="LLM Secret"
+                      onChange={value => {
+                        const parsed = parseCredentialSelect(value)
+                        setSecretRefDraft(parsed.kind === 'secret' ? parsed.name : '')
+                      }}
+                      options={apiKeySecretOptions}
+                      placeholder={
+                        apiKeySecretOptions.length === 0
+                          ? 'No LLM Secret available'
+                          : 'Select an LLM Secret...'
+                      }
+                      disabled={busy || !editingModel}
+                    />
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--icon cu-btn--toolbar"
+                      onClick={() => setLlmSecretModalOpen(true)}
+                      disabled={busy || !secretRefDraft.trim()}
+                      aria-label="Edit LLM Secret credentials"
+                      title="Edit LLM Secret credentials"
+                    >
+                      <IconPencil width={16} height={16} />
+                    </button>
+                  </div>
+                  <span className="cu-field__hint">
+                    Needed for the {fallbackSecretLabels.join(', ') || 'static'} fallback
+                    {fallbackSecretLabels.length === 1 ? '' : 's'} in this chain.
+                  </span>
+                  {linkedSecretProviderMismatch ? (
+                    <div className="cu-banner cu-banner--warning">
+                      The linked secret does not contain a usable {secretMismatchLabel} credential.
+                      Choose another secret or edit its credentials before saving model
+                      configuration.
+                    </div>
+                  ) : null}
+                </div>
+              ) : linkedSecretProviderMismatch ? (
+                <div className="cu-banner cu-banner--warning">
+                  The linked secret does not contain a usable {secretMismatchLabel} credential.
+                  Choose another secret or edit its credentials before saving model configuration.
+                </div>
+              ) : null}
               {editingModel ? (
                 <>
                   <LlmProviderConfig
@@ -1017,12 +1224,17 @@ export default function HostDetailsPage() {
                     onPrimaryChange={next => {
                       setProviderDraft(next.provider)
                       setModelNameDraft(next.model)
+                      if (next.provider !== 'codex-subscription') {
+                        setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
+                        setCodexModels([])
+                        setGrantCatalogError('')
+                      }
                     }}
                     policy={llmPolicyDraft}
                     onPolicyChange={setLlmPolicyDraft}
                     allowedModels={allowedModelsDraft}
                     onAllowedModelsChange={setAllowedModelsDraft}
-                    catalog={allowedCatalog}
+                    catalog={catalogForEditor}
                     catalogLoading={modelsLoading}
                     catalogError={modelsError}
                     modelLabel="Current model"
@@ -1036,15 +1248,22 @@ export default function HostDetailsPage() {
                       onClick={() => void cancelModelEdit()}
                       disabled={busy}
                     >
-                      Cancel model changes
+                      Cancel
                     </button>
                     <button
                       type="button"
                       className="cu-btn cu-btn--primary"
                       onClick={() => void saveModelConfiguration()}
-                      disabled={busy}
+                      disabled={
+                        busy ||
+                        Boolean(hostModelNameError(modelNameDraft)) ||
+                        (providerDraft === 'codex-subscription' &&
+                          (connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY ||
+                            Boolean(grantCatalogError) ||
+                            !codexModels.includes(modelNameDraft.trim())))
+                      }
                     >
-                      {busy ? 'Saving…' : 'Save model configuration'}
+                      {busy ? 'Saving…' : 'Save'}
                     </button>
                   </div>
                 </>

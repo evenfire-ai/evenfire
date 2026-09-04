@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
+import { createHash } from 'node:crypto'
 import {
   AccessCatalogMergeError,
   mergeCatalogCandidateStreams,
@@ -11,15 +12,21 @@ import {
   AccessExecutionCancelledError,
 } from '../src/services/access/accessExecutionBudget.js'
 import type {
+  AccessPath,
   AccessPathBehavior,
   AccessPathSeed,
   BehaviorDimension,
 } from '../src/services/access/accessPath.js'
+import { selectEquivalentAccessPath } from '../src/services/access/accessPath.js'
 import {
   canonicalAccessPathSeeds,
   canonicalAuthorizationRelationships,
+  revisionOfValues,
 } from '../src/services/access/authorizationRevision.js'
-import type { AccessCapability } from '../src/services/access/capabilityRegistry.js'
+import {
+  type AccessCapability,
+  normalizeAccessCapabilities,
+} from '../src/services/access/capabilityRegistry.js'
 import {
   CATALOG_FAMILIES,
   type CatalogFamily,
@@ -64,6 +71,27 @@ function compareKeyOracle(left: CatalogKey, right: CatalogKey): number {
     compareTextOracle(left[2], right[2])
   )
 }
+
+function canonicalValueOracle(value: unknown): string {
+  if (value === undefined) return 'null'
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalValueOracle).join(',')}]`
+  return `{${Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => compareTextOracle(left, right))
+    .map(([key, item]) => `${JSON.stringify(key)}:${canonicalValueOracle(item)}`)
+    .join(',')}}`
+}
+
+const canonicalBehavior: AccessPathBehavior = Object.freeze({
+  capabilities: Object.freeze(['team.read', 'user.profile.read']),
+  budget: Object.freeze({ state: 'known', value: null }),
+  credentialPolicy: Object.freeze({ state: 'known', value: null }),
+  approvalPolicy: Object.freeze({ state: 'known', value: null }),
+  filesystemScope: Object.freeze({ state: 'known', value: null }),
+  runtime: Object.freeze({ state: 'known', value: null }),
+  providerModelPolicy: Object.freeze({ state: 'known', value: null }),
+  audit: Object.freeze({ state: 'known', value: null }),
+})
 
 const catalogTextArbitrary = fc
   .array(
@@ -204,6 +232,66 @@ function hydrated(input: {
 }
 
 describe('aggregate access catalog properties', () => {
+  it('uses one unsigned UTF-8 order for every public authorization identity canonicalizer', () => {
+    const directZ: AccessPathSeed = {
+      kind: 'direct',
+      grantId: 'Z',
+      behavior: canonicalBehavior,
+    }
+    const directUmlaut: AccessPathSeed = {
+      kind: 'direct',
+      grantId: 'ä',
+      behavior: canonicalBehavior,
+    }
+    expect(canonicalAccessPathSeeds([directUmlaut, directZ]).map(seed => seed.grantId)).toEqual([
+      'Z',
+      'ä',
+    ])
+
+    expect(
+      canonicalAuthorizationRelationships([
+        { type: 'ä', targetResourceId: 'resource' },
+        { type: 'Z', targetResourceId: 'resource' },
+      ]).map(relationship => relationship.type)
+    ).toEqual(['Z', 'ä'])
+
+    const values = [{ ä: '\uE000', Z: '😀' }, '\uE000', '😀']
+    const expectedRevision = createHash('sha256')
+      .update(`[${values.map(canonicalValueOracle).sort(compareTextOracle).join(',')}]`)
+      .digest('base64url')
+    expect(revisionOfValues(values)).toBe(expectedRevision)
+
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(fc.constantFrom(...capabilities), { maxLength: capabilities.length }),
+        values => {
+          const expected = [...values].sort(compareTextOracle)
+          expect(normalizeAccessCapabilities(values)).toEqual(expected)
+          expect(normalizeAccessCapabilities([...values].reverse())).toEqual(expected)
+        }
+      ),
+      { numRuns: 200 }
+    )
+
+    const equivalentPaths: AccessPath[] = [
+      {
+        id: 'ap1-umlaut',
+        kind: 'direct',
+        grantId: 'ä',
+        authorizationRevision: 'ar1',
+        behavior: canonicalBehavior,
+      },
+      {
+        id: 'ap1-z',
+        kind: 'direct',
+        grantId: 'Z',
+        authorizationRevision: 'ar1',
+        behavior: canonicalBehavior,
+      },
+    ]
+    expect(selectEquivalentAccessPath(equivalentPaths)?.grantId).toBe('Z')
+  })
+
   it('matches an independent UTF-8 byte oracle with exact identity', () => {
     fc.assert(
       fc.property(candidateArbitrary, candidateArbitrary, (left, right) => {

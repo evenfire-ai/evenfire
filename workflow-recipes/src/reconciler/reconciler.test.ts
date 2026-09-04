@@ -272,12 +272,14 @@ describe('WorkflowRecipeReconciler', () => {
       },
     })
     const workflowReconcile = vi.fn()
+    const setCodexReconcileContext = vi.fn()
     ;(
       reconciler as unknown as {
         config: { pluginWorkloadSdkEnabled: boolean }
         workflowReconciler: {
           reconcile: typeof workflowReconcile
           reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+          setCodexReconcileContext: typeof setCodexReconcileContext
         }
       }
     ).config.pluginWorkloadSdkEnabled = true
@@ -286,9 +288,14 @@ describe('WorkflowRecipeReconciler', () => {
         workflowReconciler: {
           reconcile: typeof workflowReconcile
           reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+          setCodexReconcileContext: typeof setCodexReconcileContext
         }
       }
-    ).workflowReconciler = { reconcile: workflowReconcile, reconcilePluginWorkloadSdkOnly }
+    ).workflowReconciler = {
+      reconcile: workflowReconcile,
+      reconcilePluginWorkloadSdkOnly,
+      setCodexReconcileContext,
+    }
 
     const recipe = makeRecipe({
       spec: {
@@ -301,11 +308,18 @@ describe('WorkflowRecipeReconciler', () => {
     const result = await reconciler.reconcile(recipe)
 
     expect(result.phase).toBe('active')
+    expect(setCodexReconcileContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recipeName: 'test-recipe',
+        runtimeScopeRecipeName: 'test-recipe',
+      })
+    )
     expect(reconcilePluginWorkloadSdkOnly).toHaveBeenCalledWith(
       'test-recipe',
       'uid-123',
       'sandbox-recipes',
-      recipe.spec
+      recipe.spec,
+      'test-recipe'
     )
     expect(workflowReconcile).not.toHaveBeenCalled()
   })
@@ -3842,6 +3856,462 @@ describe('WorkflowRecipeReconciler', () => {
     expect(npCall.body.spec.egress).toHaveLength(2) // internal + external
   })
 
+  // issue #299 — the WRC lane must leave a per-host resolution history.
+  //
+  // HCC emits `[NetPol] Resolved <fqdn> → [cidrs]` per DNS binding, so its lane
+  // replays from retained logs: which addresses a host used, whether its
+  // universe is closed, whether it drifts. WRC has had its own resolution path
+  // since the same initial commit and simply never got the equivalent record,
+  // so `wl-egress-*`/`ui-egress-*` were observable only in the present through
+  // the live annotation — and that is the lane where the currently-exposed
+  // hosts sit.
+  //
+  // What these tests pin, and why each matters:
+  //   - the STRUCTURE of the record (a substring assert would let a rename of
+  //     every field pass while every downstream query broke);
+  //   - PER-FQDN attribution on a multi-host policy (a flat union cannot say
+  //     which host used which address, which is the only question it is for);
+  //   - that the record equals the set the written policy ENFORCES;
+  //   - that a declared host resolving to nothing still emits an empty set;
+  //   - both lanes, ui and workload;
+  //   - and the change gate, with a positive control so "correctly quiet" is
+  //     distinguishable from "never ran".
+  //
+  // The logger is `observability/logger.ts`, which writes one JSON line to
+  // stdout and is silent under NODE_ENV=test unless LOG_LEVEL is set — hence
+  // the capture helper below rather than a console spy.
+  type EgressRecord = Record<string, unknown>
+  function captureEgressRecords(): {
+    entries: EgressRecord[]
+    payloads: () => Array<{ policy: unknown; fqdn: unknown; cidrs: unknown; ports: unknown }>
+    restore: () => void
+  } {
+    const previousLevel = process.env.LOG_LEVEL
+    process.env.LOG_LEVEL = 'info'
+    const entries: EgressRecord[] = []
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+      const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString()
+      for (const line of text.split('\n')) {
+        if (!line.startsWith('{')) continue // vitest's own stdout, not ours
+        const parsed = JSON.parse(line) as EgressRecord
+        if (parsed.msg === 'resolved external egress set') entries.push(parsed)
+      }
+      return true
+    }) as unknown as typeof process.stdout.write)
+    return {
+      entries,
+      // The payload the record exists to carry, separated from the logger's
+      // envelope (ts/level/correlationId/component/...) so a test can pin the
+      // four fields a log query keys on without asserting a timestamp.
+      payloads: () =>
+        entries.map(e => ({ policy: e.policy, fqdn: e.fqdn, cidrs: e.cidrs, ports: e.ports })),
+      restore: () => {
+        spy.mockRestore()
+        if (previousLevel === undefined) delete process.env.LOG_LEVEL
+        else process.env.LOG_LEVEL = previousLevel
+      },
+    }
+  }
+
+  function uiRecipeWithExternals(external: Array<{ fqdn: string; port: number }>) {
+    return makeRecipe({
+      spec: {
+        workloads: [{ id: 'frontend', type: 'deployment', image: 'fe:1', port: 8080 }],
+        ui: { workloadRef: 'frontend', port: 8080, egress: { external } },
+      },
+    })
+  }
+
+  function createdPolicy(name: string): k8s.V1NetworkPolicy | undefined {
+    return mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls
+      .map(c => (c[0] as { body: k8s.V1NetworkPolicy }).body)
+      .find(b => b.metadata?.name === name)
+  }
+
+  it('records the ui lane egress set with the exact enforced cidrs and ports', async () => {
+    const cap = captureEgressRecords()
+    try {
+      const kc = new k8s.KubeConfig()
+      const rec = new WorkflowRecipeReconciler(kc, undefined, {
+        // Deliberately chosen so the three candidate orders all differ: input
+        // order is 140 then 93; a plain string sort (and the accumulator's own
+        // key order) also puts "140" first because it compares '1' to '9'; only
+        // an address-wise sort puts 93 first.
+        fqdnLookup: async () => ({
+          kind: 'ok',
+          ipv4: ['140.82.112.4', '93.184.216.11'],
+          ipv6: [],
+          ttlSeconds: 300,
+        }),
+      })
+
+      await rec.reconcile(uiRecipeWithExternals([{ fqdn: 'api.stripe.com', port: 443 }]))
+
+      // The whole record, not a substring: field names and value shapes are the
+      // contract a log query depends on, so a rename must fail here.
+      expect(cap.payloads()).toEqual([
+        {
+          policy: 'ui-egress-test-recipe',
+          fqdn: 'api.stripe.com',
+          cidrs: ['93.184.216.11/32', '140.82.112.4/32'], // by address, not lexeme
+          ports: [443],
+        },
+      ])
+
+      // It must go through the service's structured logger, not a bare
+      // console.log: the envelope is what makes the record queryable and what
+      // gives operators a LOG_LEVEL switch. A regression to console.log emits
+      // no JSON line at all and fails above; this pins the envelope's shape.
+      expect(cap.entries[0]).toMatchObject({
+        level: 'info',
+        component: 'wrc',
+        recipeName: 'test-recipe',
+        msg: 'resolved external egress set',
+      })
+
+      // ...and it must equal what the policy actually enforces. This is the
+      // property the record exists to have: an audit trail that disagrees with
+      // the policy would attest to an allowance that never existed.
+      const written = createdPolicy('ui-egress-test-recipe')
+      const enforced = (written?.spec?.egress ?? [])
+        .flatMap(rule => rule.to ?? [])
+        .flatMap(peer => (peer.ipBlock ? [peer.ipBlock.cidr] : []))
+        .sort()
+      // Compared as content, not order — the record's order is its own readable
+      // contract, pinned above; what must match the policy is the SET.
+      expect([...(cap.payloads()[0].cidrs as string[])].sort()).toEqual(enforced)
+    } finally {
+      cap.restore()
+    }
+  })
+
+  it('attributes each address to its own host on a multi-FQDN policy', async () => {
+    // A flat union per policy — the shape this replaced — cannot answer "which
+    // addresses did THIS host use", which is the only question the history is
+    // for. `egress.external[]` is a list, so multi-host is the normal case.
+    const cap = captureEgressRecords()
+    try {
+      const kc = new k8s.KubeConfig()
+      const rec = new WorkflowRecipeReconciler(kc, undefined, {
+        fqdnLookup: async (fqdn: string) =>
+          fqdn === 'api.github.com'
+            ? { kind: 'ok' as const, ipv4: ['140.82.112.4'], ipv6: [], ttlSeconds: 60 }
+            : { kind: 'ok' as const, ipv4: ['93.184.216.10'], ipv6: [], ttlSeconds: 300 },
+      })
+
+      await rec.reconcile(
+        uiRecipeWithExternals([
+          { fqdn: 'api.stripe.com', port: 443 },
+          { fqdn: 'api.github.com', port: 443 },
+        ])
+      )
+
+      expect(cap.payloads()).toEqual([
+        {
+          policy: 'ui-egress-test-recipe',
+          fqdn: 'api.github.com',
+          cidrs: ['140.82.112.4/32'],
+          ports: [443],
+        },
+        {
+          policy: 'ui-egress-test-recipe',
+          fqdn: 'api.stripe.com',
+          cidrs: ['93.184.216.10/32'],
+          ports: [443],
+        },
+      ])
+      // Neither host's address leaks into the other's record.
+      expect(cap.payloads()[0].cidrs).not.toContain('93.184.216.10/32')
+      expect(cap.payloads()[1].cidrs).not.toContain('140.82.112.4/32')
+    } finally {
+      cap.restore()
+    }
+  })
+
+  it('keeps a port-only change visible when the address set is identical', async () => {
+    // `changed` is defined over (fqdn,ip,port,protocol), so the same host on a
+    // second port IS a change and rewrites the policy. Carrying only addresses
+    // would render an identical record and hide it.
+    const cap = captureEgressRecords()
+    try {
+      const kc = new k8s.KubeConfig()
+      const rec = new WorkflowRecipeReconciler(kc, undefined, {
+        fqdnLookup: async () => ({
+          kind: 'ok',
+          ipv4: ['93.184.216.10'],
+          ipv6: [],
+          ttlSeconds: 300,
+        }),
+      })
+
+      await rec.reconcile(
+        uiRecipeWithExternals([
+          { fqdn: 'api.stripe.com', port: 443 },
+          { fqdn: 'api.stripe.com', port: 8443 },
+        ])
+      )
+
+      expect(cap.payloads()).toEqual([
+        {
+          policy: 'ui-egress-test-recipe',
+          fqdn: 'api.stripe.com',
+          cidrs: ['93.184.216.10/32'],
+          ports: [443, 8443], // numeric sort, and both ports survive
+        },
+      ])
+    } finally {
+      cap.restore()
+    }
+  })
+
+  it('still records a declared host that resolved to no addresses', async () => {
+    // A set collapsing to empty is the most consequential event in the series.
+    // Suppressing the record when there is nothing to list would make it
+    // indistinguishable from "nothing happened" for a log-based replay.
+    const cap = captureEgressRecords()
+    try {
+      const kc = new k8s.KubeConfig()
+      const rec = new WorkflowRecipeReconciler(kc, undefined, {
+        fqdnLookup: async (fqdn: string) =>
+          fqdn === 'gone.example.com'
+            ? { kind: 'ok' as const, ipv4: [], ipv6: [], ttlSeconds: 60 }
+            : { kind: 'ok' as const, ipv4: ['93.184.216.10'], ipv6: [], ttlSeconds: 300 },
+      })
+
+      await rec.reconcile(
+        uiRecipeWithExternals([
+          { fqdn: 'api.stripe.com', port: 443 },
+          { fqdn: 'gone.example.com', port: 443 },
+        ])
+      )
+
+      const empty = cap.payloads().find(r => r.fqdn === 'gone.example.com')
+      expect(empty).toEqual({
+        policy: 'ui-egress-test-recipe',
+        fqdn: 'gone.example.com',
+        cidrs: [],
+        ports: [],
+      })
+    } finally {
+      cap.restore()
+    }
+  })
+
+  it('records the workload lane too, not only the ui lane', async () => {
+    // One emitter serves both call sites; without this test, silencing the
+    // `wl-egress-*` half would pass the whole suite.
+    const cap = captureEgressRecords()
+    try {
+      const kc = new k8s.KubeConfig()
+      const rec = new WorkflowRecipeReconciler(kc, undefined, {
+        fqdnLookup: async () => ({
+          kind: 'ok',
+          ipv4: ['93.184.216.10'],
+          ipv6: [],
+          ttlSeconds: 300,
+        }),
+      })
+
+      await rec.reconcile(
+        makeRecipe({
+          spec: {
+            contextRef: 'default',
+            workloads: [
+              {
+                id: 'worker',
+                type: 'deployment',
+                image: 'worker:latest',
+                port: 8080,
+                // The workload lane declares hosts as exact-host egressBindings,
+                // not ui.egress.external — the reconciler maps b.dns to the
+                // accumulator's fqdn.
+                egressBindings: [{ dns: 'api.stripe.com', port: 443 }],
+              },
+            ],
+          },
+        })
+      )
+
+      expect(cap.payloads()).toEqual([
+        {
+          policy: 'wl-egress-test-recipe-worker',
+          fqdn: 'api.stripe.com',
+          cidrs: ['93.184.216.10/32'],
+          ports: [443],
+        },
+      ])
+    } finally {
+      cap.restore()
+    }
+  })
+
+  it('never records an address the M3 filter kept OUT of the written policy', async () => {
+    // The record is taken from the post-filter set, so it cannot attest to an
+    // allowance that never existed. Fresh DNS cannot exercise this — the
+    // resolver fails a whole host closed if any A record is blocked — so the
+    // blocked address arrives the only way it can: rehydrated from the live
+    // policy's state annotation, which parseState validates for SYNTAX only.
+    const cap = captureEgressRecords()
+    try {
+      const now = Date.now()
+      const rehydrated = [
+        // A private address someone put on the annotation. Syntactically valid,
+        // still inside its window, and dropped by isBlockedExternalIPv4.
+        {
+          ip: '10.0.0.5',
+          port: 443,
+          protocol: 'TCP',
+          fqdn: 'api.stripe.com',
+          expiresAt: now + 600_000,
+          lastObservedAt: now,
+        },
+        {
+          ip: '93.184.216.10',
+          port: 443,
+          protocol: 'TCP',
+          fqdn: 'api.stripe.com',
+          expiresAt: now + 600_000,
+          lastObservedAt: now,
+        },
+      ]
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
+        metadata: {
+          name: 'ui-egress-test-recipe',
+          resourceVersion: '1',
+          annotations: { 'clerum.io/egress-fqdn-state': JSON.stringify(rehydrated) },
+        },
+      })
+
+      const kc = new k8s.KubeConfig()
+      const rec = new WorkflowRecipeReconciler(kc, undefined, {
+        // A NEW address this round, so the set changed and a record is due.
+        fqdnLookup: async () => ({
+          kind: 'ok',
+          ipv4: ['93.184.216.99'],
+          ipv6: [],
+          ttlSeconds: 300,
+        }),
+      })
+
+      await rec.reconcile(uiRecipeWithExternals([{ fqdn: 'api.stripe.com', port: 443 }]))
+
+      expect(cap.payloads()).toHaveLength(1)
+      const recorded = cap.payloads()[0].cidrs as string[]
+      expect(recorded).not.toContain('10.0.0.5/32')
+      expect(recorded).toEqual(['93.184.216.10/32', '93.184.216.99/32'])
+    } finally {
+      cap.restore()
+    }
+  })
+
+  it('does NOT record a RENEWAL write, which writes with the set unchanged', async () => {
+    // The gate is `changed`, not "did we write". A renewal (audit M1) re-persists
+    // an aging window with an identical set: the policy IS rewritten and no
+    // record is due, because nothing about the resolved set changed. That is the
+    // direction the record does NOT run — an entry implies a write, not the
+    // converse.
+    //
+    // ISOLATING renewalDue. The live policy fed back here is the reconciler's OWN
+    // first render, with only the state annotation's `expiresAt` rewound. That
+    // matters: it makes the rendered spec.egress byte-identical, so
+    // `egressWriteNeeded` is FALSE and `changed` is FALSE, leaving renewalDue as
+    // the only term of the H4 gate that can still authorise a write. A fixture
+    // carrying just `metadata` would leave egressWriteNeeded true and the test
+    // would pass without renewalDue ever being the cause.
+    const kc = new k8s.KubeConfig()
+    const rec = new WorkflowRecipeReconciler(kc, undefined, {
+      // The SAME address both rounds, so the (fqdn,ip,port,protocol) set is unchanged.
+      fqdnLookup: async () => ({
+        kind: 'ok',
+        ipv4: ['93.184.216.10'],
+        ipv6: [],
+        ttlSeconds: 300,
+      }),
+    })
+    const recipe = uiRecipeWithExternals([{ fqdn: 'api.stripe.com', port: 443 }])
+
+    await rec.reconcile(recipe)
+    const rendered = createdPolicy('ui-egress-test-recipe')
+    expect(rendered).toBeDefined()
+
+    // Rewind ONLY the persisted expiry, keeping every (fqdn,ip,port,protocol)
+    // tuple. renewalDue fires when a surviving entry's persisted expiry is within
+    // overlap/2 of now and this round would advance it.
+    const persisted = JSON.parse(
+      rendered!.metadata!.annotations!['clerum.io/egress-fqdn-state']
+    ) as Array<Record<string, unknown>>
+    const aging = persisted.map(e => ({ ...e, expiresAt: Date.now() + 30_000 }))
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
+      ...rendered,
+      metadata: {
+        ...rendered!.metadata,
+        resourceVersion: '1',
+        annotations: {
+          ...rendered!.metadata!.annotations,
+          'clerum.io/egress-fqdn-state': JSON.stringify(aging),
+        },
+      },
+    })
+
+    const cap = captureEgressRecords()
+    const noOpSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+
+      await rec.reconcile(recipe)
+
+      // POSITIVE CONTROL: a write really happened. With the spec identical and the
+      // set unchanged, renewalDue is the only term left that could have caused it,
+      // so this also proves the no-op gate did NOT short-circuit.
+      const wrote =
+        mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.length +
+        mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls.length
+      expect(wrote).toBeGreaterThan(0)
+      expect(noOpSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('ui-egress-test-recipe" in sandbox-ui egress set unchanged — no-op')
+      )
+
+      // ...and no record, because the resolved set did not change.
+      expect(cap.payloads()).toHaveLength(0)
+    } finally {
+      noOpSpy.mockRestore()
+      cap.restore()
+    }
+  })
+
+  it('does NOT re-record when the resolved set is unchanged', async () => {
+    const kc = new k8s.KubeConfig()
+    const rec = new WorkflowRecipeReconciler(kc, undefined, {
+      fqdnLookup: async () => ({ kind: 'ok', ipv4: ['93.184.216.10'], ipv6: [], ttlSeconds: 300 }),
+    })
+    const recipe = uiRecipeWithExternals([{ fqdn: 'api.stripe.com', port: 443 }])
+
+    await rec.reconcile(recipe)
+    // Feed the first render back as the live policy, exactly as the H-E test
+    // below does — no hand-built fixture.
+    const created = createdPolicy('ui-egress-test-recipe')
+    expect(created).toBeDefined()
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(created!)
+
+    const cap = captureEgressRecords()
+    const noOpSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await rec.reconcile(recipe)
+
+      expect(cap.payloads()).toHaveLength(0)
+      // POSITIVE CONTROL. Without it this assertion also passes when the second
+      // reconcile never reached the egress path at all, which would make the
+      // test a tautology rather than a check of the change gate.
+      expect(noOpSpy).toHaveBeenCalledWith(
+        expect.stringContaining('ui-egress-test-recipe" in sandbox-ui egress set unchanged — no-op')
+      )
+    } finally {
+      noOpSpy.mockRestore()
+      cap.restore()
+    }
+  })
+
   // H-E (audit): a rename of the external FQDN onto the SAME resolved IP/port
   // renders identical spec.egress, so the egress-signature gate alone would no-op
   // and discard the re-attributed state annotation. acc.changed must force the
@@ -5871,7 +6341,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'parent-recipe'
+      'parent-recipe',
+      'uid-child'
     )
     expect(mockVerifyWorkflowRunProvenance).toHaveBeenCalledWith({
       runId: 'run-child',
@@ -6156,7 +6627,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'parent-recipe'
+      'parent-recipe',
+      'uid-child'
     )
   })
 
@@ -6200,7 +6672,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
   })
 
@@ -6526,7 +6999,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
   })
 
@@ -6578,7 +7052,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
   })
 
@@ -6638,7 +7113,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
   })
 
@@ -6678,7 +7154,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
   })
 
@@ -6716,8 +7193,171 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'child-run',
       recipe.spec,
-      'child-run'
+      'child-run',
+      'uid-child'
     )
+  })
+
+  it('binds Codex context as uncertain when parent labels are claimed without provenance', async () => {
+    const setCodexReconcileContext = vi.fn()
+    const ensureMcpHostRuntimeCredentials = vi.fn().mockResolvedValue(undefined)
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          setCodexReconcileContext: typeof setCodexReconcileContext
+          ensureMcpHostRuntimeCredentials: typeof ensureMcpHostRuntimeCredentials
+        }
+      }
+    ).workflowReconciler = { setCodexReconcileContext, ensureMcpHostRuntimeCredentials }
+
+    const recipe = makeRecipe({
+      metadata: {
+        name: 'child-run',
+        namespace: 'sandbox-recipes',
+        uid: 'uid-child',
+        labels: {
+          'clerum.io/parent-recipe': 'victim-recipe',
+          'clerum.io/workflow-run-id': 'run-child',
+        },
+      },
+      spec: {
+        agent: { provider: 'codex-subscription', model: 'gpt-5.3-codex' },
+        steps: [{ id: 'research', instruction: 'run' }],
+      },
+      status: {
+        phase: 'active',
+      } as WorkflowRecipeCRD['status'],
+    })
+
+    await reconciler.reconcile(recipe)
+
+    expect(setCodexReconcileContext).toHaveBeenCalledWith({
+      recipeUid: 'uid-child',
+      recipeName: 'child-run',
+      runtimeScopeRecipeName: 'child-run',
+      claimedParent: true,
+      parentSpec: null,
+      connectionKey: 'unassigned',
+    })
+  })
+
+  it('binds the inherited parent Codex spec when child provenance is verified', async () => {
+    const parentSpec = {
+      agent: { provider: 'codex-subscription' as const, model: 'gpt-5.3-codex' },
+      steps: [{ id: 'research', instruction: 'parent target' }],
+    }
+    mockCustomApi.getNamespacedCustomObject.mockImplementation(({ name }: { name?: string }) =>
+      Promise.resolve({
+        metadata: {
+          uid: liveWorkflowRecipeUid(name),
+          resourceVersion: '1',
+        },
+        spec: name === 'parent-recipe' ? parentSpec : { mcpServers: [] },
+      })
+    )
+    const setCodexReconcileContext = vi.fn()
+    const ensureMcpHostRuntimeCredentials = vi.fn().mockResolvedValue(undefined)
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          setCodexReconcileContext: typeof setCodexReconcileContext
+          ensureMcpHostRuntimeCredentials: typeof ensureMcpHostRuntimeCredentials
+        }
+      }
+    ).workflowReconciler = { setCodexReconcileContext, ensureMcpHostRuntimeCredentials }
+
+    const recipe = makeRecipe({
+      metadata: {
+        name: 'child-run',
+        namespace: 'sandbox-recipes',
+        uid: 'uid-child',
+        annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
+        labels: {
+          'clerum.io/parent-recipe': 'parent-recipe',
+          'clerum.io/workflow-run-id': 'run-child',
+        },
+        ownerReferences: [workflowRecipeOwnerRef('parent-recipe')],
+      },
+      spec: {
+        agent: { provider: 'openai', model: 'gpt-5.4-mini' },
+        steps: [{ id: 'research', instruction: 'child body must not win' }],
+      },
+      status: {
+        phase: 'active',
+      } as WorkflowRecipeCRD['status'],
+    })
+
+    await reconciler.reconcile(recipe)
+
+    expect(setCodexReconcileContext).toHaveBeenCalledWith({
+      recipeUid: 'uid-child',
+      recipeName: 'child-run',
+      runtimeScopeRecipeName: 'parent-recipe',
+      claimedParent: true,
+      parentSpec,
+      connectionKey: 'unassigned',
+    })
+  })
+
+  it('binds the inherited parent Codex grant annotation to the reconcile context', async () => {
+    const parentSpec = {
+      agent: { provider: 'codex-subscription' as const, model: 'gpt-5.3-codex' },
+      steps: [{ id: 'research', instruction: 'parent target' }],
+    }
+    mockCustomApi.getNamespacedCustomObject.mockImplementation(({ name }: { name?: string }) =>
+      Promise.resolve({
+        metadata: {
+          uid: liveWorkflowRecipeUid(name),
+          resourceVersion: '1',
+          ...(name === 'parent-recipe'
+            ? { annotations: { 'clerum.io/codex-connection-ref': 'team-plus' } }
+            : {}),
+        },
+        spec: name === 'parent-recipe' ? parentSpec : { mcpServers: [] },
+      })
+    )
+    const setCodexReconcileContext = vi.fn()
+    const ensureMcpHostRuntimeCredentials = vi.fn().mockResolvedValue(undefined)
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          setCodexReconcileContext: typeof setCodexReconcileContext
+          ensureMcpHostRuntimeCredentials: typeof ensureMcpHostRuntimeCredentials
+        }
+      }
+    ).workflowReconciler = { setCodexReconcileContext, ensureMcpHostRuntimeCredentials }
+
+    const recipe = makeRecipe({
+      metadata: {
+        name: 'child-run',
+        namespace: 'sandbox-recipes',
+        uid: 'uid-child',
+        annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
+        labels: {
+          'clerum.io/parent-recipe': 'parent-recipe',
+          'clerum.io/workflow-run-id': 'run-child',
+        },
+        ownerReferences: [workflowRecipeOwnerRef('parent-recipe')],
+      },
+      spec: {
+        agent: { provider: 'openai', model: 'gpt-5.4-mini' },
+        steps: [{ id: 'research', instruction: 'child body must not win' }],
+      },
+      status: {
+        phase: 'active',
+      } as WorkflowRecipeCRD['status'],
+    })
+
+    await reconciler.reconcile(recipe)
+
+    expect(setCodexReconcileContext).toHaveBeenCalledWith({
+      recipeUid: 'uid-child',
+      recipeName: 'child-run',
+      runtimeScopeRecipeName: 'parent-recipe',
+      claimedParent: true,
+      parentSpec,
+      connectionKey: 'team-plus',
+    })
   })
 
   it('does not inherit a parent scope on first reconcile without DB-run metadata', async () => {
@@ -6971,7 +7611,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'test-recipe',
       recipe.spec,
-      'test-recipe'
+      'test-recipe',
+      'uid-123'
     )
   })
 
@@ -7020,7 +7661,8 @@ describe('WorkflowRecipeReconciler', () => {
       'sandbox-recipes',
       'test-recipe',
       recipe.spec,
-      'test-recipe'
+      'test-recipe',
+      'uid-123'
     )
   })
 

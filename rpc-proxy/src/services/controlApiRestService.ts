@@ -27,6 +27,15 @@ function controlApiBaseUrl(): string {
   return config.controlApiBaseUrl.replace(/\/+$/, '')
 }
 
+// Shared upstream deadline for every control-api call in this file. Without it a
+// hung control-api pins the proxy socket indefinitely (the sibling host rail in
+// mcpHostRestService.ts already bounds its fetches at the same budget).
+// AbortSignal.timeout throws a TimeoutError, which the app error handler maps to
+// a 504 via isUpstreamTimeoutError — never a silent 500 or an unbounded wait.
+function upstreamAbortSignal(): AbortSignal {
+  return AbortSignal.timeout(config.upstreamTimeoutMs)
+}
+
 export type DirectRunBindingRequest = {
   runId: string
   sessionId: string
@@ -40,6 +49,18 @@ export class ControlApiHostAccessRejectedError extends Error {
   }
 }
 
+// Typed rejection for the connectors read-model, mirroring the host rail above.
+// A generic Error collapses to 500 in the app error handler, which the desktop
+// reads as non-refreshable — so an expired/rotated rpc access token (401) would
+// never trigger a token refresh and the panel would stay broken. Carrying the
+// status lets the route map 401/403 to a real status the client can act on.
+export class ControlApiConnectorsRejectedError extends Error {
+  constructor(readonly status: 401 | 403) {
+    super(`Control API rejected connectors read (${status})`)
+    this.name = 'ControlApiConnectorsRejectedError'
+  }
+}
+
 export async function fetchUserAllowedServersFromControlApi(
   userId: string,
   rpcAccessToken: string
@@ -49,6 +70,7 @@ export async function fetchUserAllowedServersFromControlApi(
     {
       method: 'GET',
       headers: controlApiHeaders(rpcAccessToken),
+      signal: upstreamAbortSignal(),
     }
   )
 
@@ -84,6 +106,100 @@ export async function fetchUserAllowedServersFromControlApi(
   }
 }
 
+export type UserConnector = {
+  name: string
+  provider?: string
+  authKind?: 'static' | 'oauth-user' | 'oauth-context'
+  grantScope?: 'user' | 'context'
+  status: 'authorized' | 'requires_setup' | 'no_oauth'
+}
+
+export type UserAgentConnectors = {
+  name: string
+  contextRef: string | null
+  connectors: UserConnector[]
+}
+
+export type UserConnectorsResponse = {
+  userId: string
+  agents: UserAgentConnectors[]
+}
+
+const CONNECTOR_STATUSES = new Set(['authorized', 'requires_setup', 'no_oauth'])
+const CONNECTOR_AUTH_KINDS = new Set(['static', 'oauth-user', 'oauth-context'])
+const CONNECTOR_GRANT_SCOPES = new Set(['user', 'context'])
+
+function sanitizeConnector(raw: unknown): UserConnector | null {
+  if (!raw || typeof raw !== 'object') return null
+  const entry = raw as Record<string, unknown>
+  const name = typeof entry.name === 'string' ? entry.name.trim() : ''
+  const status = entry.status
+  if (!name || typeof status !== 'string' || !CONNECTOR_STATUSES.has(status)) return null
+  const connector: UserConnector = { name, status: status as UserConnector['status'] }
+  if (typeof entry.provider === 'string' && entry.provider.trim()) {
+    connector.provider = entry.provider.trim()
+  }
+  if (typeof entry.authKind === 'string' && CONNECTOR_AUTH_KINDS.has(entry.authKind)) {
+    connector.authKind = entry.authKind as UserConnector['authKind']
+  }
+  if (typeof entry.grantScope === 'string' && CONNECTOR_GRANT_SCOPES.has(entry.grantScope)) {
+    connector.grantScope = entry.grantScope as UserConnector['grantScope']
+  }
+  return connector
+}
+
+function sanitizeAgentConnectors(raw: unknown): UserAgentConnectors | null {
+  if (!raw || typeof raw !== 'object') return null
+  const agent = raw as Record<string, unknown>
+  const name = typeof agent.name === 'string' ? agent.name.trim() : ''
+  if (!name) return null
+  const contextRef =
+    typeof agent.contextRef === 'string' && agent.contextRef.trim() ? agent.contextRef.trim() : null
+  const connectors = Array.isArray(agent.connectors)
+    ? agent.connectors
+        .map(sanitizeConnector)
+        .filter((entry): entry is UserConnector => entry !== null)
+    : []
+  return { name, contextRef, connectors }
+}
+
+/**
+ * Fetch the proactive connectors read-model for a user (spec 11 U1). Projects
+ * the control-api payload down to the declared, NON-SECRET shape and drops any
+ * unexpected field — the inventory never transports `auth`/`secretRef`/tokens.
+ * Deliberately UNCACHED: the tri-state must reflect a just-completed
+ * connect/disconnect, unlike the server catalog (`fetchUserAllowedServers…`).
+ */
+export async function fetchUserConnectorsFromControlApi(
+  userId: string,
+  rpcAccessToken: string
+): Promise<UserConnectorsResponse> {
+  const response = await fetch(
+    `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-connectors`,
+    {
+      method: 'GET',
+      headers: controlApiHeaders(rpcAccessToken),
+      signal: upstreamAbortSignal(),
+    }
+  )
+
+  if (response.status === 401 || response.status === 403) {
+    throw new ControlApiConnectorsRejectedError(response.status)
+  }
+  if (!response.ok) {
+    throw new Error(`Control API MCP connectors lookup failed (${response.status})`)
+  }
+
+  const parsed = (await response.json()) as Partial<UserConnectorsResponse>
+  const agents = Array.isArray(parsed.agents)
+    ? parsed.agents
+        .map(sanitizeAgentConnectors)
+        .filter((agent): agent is UserAgentConnectors => agent !== null)
+    : []
+
+  return { userId, agents }
+}
+
 export async function fetchHostConnectionFromControlApi(
   userId: string,
   hostRef: string,
@@ -103,6 +219,7 @@ export async function fetchHostConnectionFromControlApi(
         ...(directRunBinding ? { 'content-type': 'application/json' } : {}),
       },
       ...(directRunBinding ? { body: JSON.stringify(directRunBinding) } : {}),
+      signal: upstreamAbortSignal(),
     }
   )
 
@@ -197,6 +314,7 @@ export async function requestHostWakeFromControlApi(
             }),
           }
         : {}),
+      signal: upstreamAbortSignal(),
     }
   )
 

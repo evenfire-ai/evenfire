@@ -10,6 +10,7 @@ import type {
   AcceptInvitationResponse,
   DesktopAuthorizationResponse,
   DesktopEnvironmentResponse,
+  DesktopReleaseResponse,
   InvitationPreview,
   PasswordLoginResponse,
 } from '../app/types/api'
@@ -64,6 +65,33 @@ function handleUnauthorized(): never {
   clearToken()
   globalHandleAuthError?.()
   throw new AuthExpiredError()
+}
+
+function publicErrorFields(text: string): { code?: string; detail?: string } {
+  try {
+    const parsed = JSON.parse(text) as unknown
+    if (!parsed || typeof parsed !== 'object') return {}
+    const body = parsed as Record<string, unknown>
+    const envelope =
+      body.error && typeof body.error === 'object'
+        ? (body.error as Record<string, unknown>)
+        : undefined
+    const code =
+      typeof envelope?.code === 'string'
+        ? envelope.code
+        : typeof body.error === 'string'
+          ? body.error
+          : undefined
+    const message =
+      typeof envelope?.message === 'string'
+        ? envelope.message
+        : typeof body.message === 'string'
+          ? body.message
+          : undefined
+    return { code, detail: message || code }
+  } catch {
+    return { detail: text }
+  }
 }
 
 async function parseJsonResponse(res: Response): Promise<unknown> {
@@ -124,23 +152,14 @@ export async function apiSend(
   if (!res.ok) {
     const text = await res.text()
     if (res.status === 401) handleUnauthorized()
-    let detail: string
-    try {
-      const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
-      detail = String(parsed.message || parsed.error || text)
-    } catch {
-      detail = text
-    }
-    // Substring match is REQUIRED here (not === like control-ui): profile-ui reaches
-    // control-api through external-rest-api, whose error middleware collapses any 5xx
-    // into { message: "Control API ... failed (503): <code>" }, so the code arrives
-    // embedded in a wrapper string rather than as the bare { error: '<code>' } body.
-    if (detail.includes('member_registration_unavailable')) {
+    const publicError = publicErrorFields(text)
+    const detail = publicError.detail || res.statusText
+    if (publicError.code === 'member_registration_unavailable') {
       throw new Error(
         "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
       )
     }
-    if (detail.includes('member_registration_misconfigured')) {
+    if (publicError.code === 'member_registration_misconfigured') {
       throw new Error(
         'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
       )
@@ -165,13 +184,7 @@ export async function loginWithPassword(
   })
   if (!res.ok) {
     const text = await res.text()
-    let detail: string
-    try {
-      const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
-      detail = String(parsed.message || parsed.error || text)
-    } catch {
-      detail = text
-    }
+    const detail = publicErrorFields(text).detail || res.statusText
     throw new Error(`${res.status} ${res.statusText} - ${detail}`)
   }
   clearToken()
@@ -375,6 +388,17 @@ export async function createDesktopAuthorization(
 
 export async function getDesktopEnvironment(): Promise<DesktopEnvironmentResponse> {
   return apiGet('/api/v1/desktop/environment') as Promise<DesktopEnvironmentResponse>
+}
+
+// silentUnauthorized on purpose: the release identity only feeds a label, so a
+// 401 here must not run the global auth handler and bounce the user to login.
+// The page's own getMe() call owns that decision.
+export async function getDesktopRelease(): Promise<DesktopReleaseResponse> {
+  return apiGet(
+    '/api/v1/desktop/release',
+    {},
+    { silentUnauthorized: true }
+  ) as Promise<DesktopReleaseResponse>
 }
 
 export function getConfiguredExternalRestApiBaseUrl(): string {

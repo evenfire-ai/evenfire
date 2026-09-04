@@ -205,3 +205,27 @@ describe('useHostModels — R2 new-chat composer (no chatId yet)', () => {
     act(() => result.current.store.clearPreChatModel(AGENT))
   })
 })
+
+describe('useHostModels — Codex subscription (no silent default)', () => {
+  it('does not seed a Codex session from the first catalog model when hostDefault is empty', async () => {
+    const getHostModels = vi.fn(async () =>
+      baseModels({
+        provider: 'codex-subscription',
+        hostDefault: '',
+        sessionModel: null,
+        models: [
+          { name: 'gpt-5.3', displayName: 'GPT-5.3' },
+          { name: 'gpt-5.2', displayName: 'GPT-5.2' },
+        ],
+      })
+    )
+    installClerum(getHostModels, vi.fn())
+
+    const { result } = renderHook(() => useHostModels(AGENT, CHAT))
+    await waitFor(() => expect(result.current.data).toBeTruthy())
+
+    expect(result.current.data?.provider).toBe('codex-subscription')
+    expect(result.current.data?.sessionModel).toBeNull()
+    expect(result.current.data?.hostDefault).toBe('')
+  })
+})

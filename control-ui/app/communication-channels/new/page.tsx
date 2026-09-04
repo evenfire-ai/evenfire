@@ -864,7 +864,7 @@ export default function CreateCommunicationChannelPage() {
                             {teamsInstallLink ? (
                               <>
                                 <a
-                                  className="cu-btn cu-btn--secondary cu-btn--sm cu-teams-setup__install"
+                                  className="cu-btn cu-btn--sm cu-teams-setup__install"
                                   href={teamsInstallLink}
                                   target="_blank"
                                   rel="noopener noreferrer"

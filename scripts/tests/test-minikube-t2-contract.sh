@@ -632,15 +632,75 @@ git -C "$fixture_repo" commit -q -m base
 fixture_base="$(git -C "$fixture_repo" rev-parse HEAD)"
 {
   printf '%s\n' "const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL ?? 'postgresql://postgres@127.0.0.1/postgres'"
+  printf '%s\n' "const databaseUrl = 'postgresql://postgres@127.0.0.7:5432/postgres'"
+  printf '%s\n' "const localDatabaseUrl = 'postgresql://localhost/tracing_test'"
   printf '%s\n' "const issued = { token: 'replacement-token', password: 'valid-password' }"
+  printf '%s\n' "const callbackUrl = 'http://127.0.0.1:36148/callback'"
 } >"$fixture_repo/control-api/test/example.realPostgres.integration.test.ts"
-printf '%s\n' "const sentinel = 'postgres://secret@internal/var/run/service.sock'" \
-  >"$fixture_repo/external-rest-api/src/__tests__/publicErrorContract.test.ts"
 if ! T2_PUBLIC_ROOT="$fixture_repo" T2_PUBLIC_BASE_REF="$fixture_base" \
   bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh"; then
   echo 'FAIL: public boundary rejected synthetic source/test fixtures' >&2
   exit 1
 fi
+
+assert_public_boundary_rejects_postgres_fixture() {
+  local name="$1" source_line="$2" expected_reason="$3"
+  local case_repo="$tmp/public-postgres-${name}"
+  mkdir -p "$case_repo/control-api/test"
+  git init -q -b dev "$case_repo"
+  git -C "$case_repo" config user.email test@example.invalid
+  git -C "$case_repo" config user.name boundary-test
+  printf 'base\n' >"$case_repo/README.md"
+  git -C "$case_repo" add README.md
+  git -C "$case_repo" commit -q -m base
+  local case_base
+  case_base="$(git -C "$case_repo" rev-parse HEAD)"
+  printf '%s\n' "$source_line" >"$case_repo/control-api/test/postgresFixture.test.ts"
+  if T2_PUBLIC_ROOT="$case_repo" T2_PUBLIC_BASE_REF="$case_base" \
+    bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
+    >"$tmp/${name}.out" 2>"$tmp/${name}.err"; then
+    echo "FAIL: public boundary accepted unsafe PostgreSQL fixture: $name" >&2
+    exit 1
+  fi
+  grep -Fq "$expected_reason" "$tmp/${name}.err"
+}
+
+assert_public_boundary_rejects_postgres_fixture \
+  nearby-admin-url \
+  "const adminUrl = 'postgresql://postgres@database.""internal/catalog'" \
+  'private PostgreSQL URL'
+assert_public_boundary_rejects_postgres_fixture \
+  nearby-example \
+  "const example = 'postgresql://postgres@10.""20.30.40/catalog'" \
+  'private PostgreSQL URL'
+assert_public_boundary_rejects_postgres_fixture \
+  later-private-url \
+  "const urls = ['postgresql://localhost/catalog', 'postgresql://database.""internal/catalog']" \
+  'private PostgreSQL URL'
+assert_public_boundary_rejects_postgres_fixture \
+  credentialed-loopback \
+  "const fixture = 'postgresql://app:""secret@127.0.0.1/catalog'" \
+  'credentialed PostgreSQL URL'
+
+contract_control_repo="$tmp/public-contract-control-repo"
+mkdir -p "$contract_control_repo/scripts/tests"
+git init -q -b dev "$contract_control_repo"
+git -C "$contract_control_repo" config user.email test@example.invalid
+git -C "$contract_control_repo" config user.name boundary-test
+printf 'base\n' >"$contract_control_repo/README.md"
+git -C "$contract_control_repo" add README.md
+git -C "$contract_control_repo" commit -q -m base
+contract_control_base="$(git -C "$contract_control_repo" rev-parse HEAD)"
+printf '%s\n' \
+  "const urls = ['postgresql://postgres@127.0.0.1/postgres', 'postgresql://database.""internal/catalog']" \
+  >"$contract_control_repo/scripts/tests/test-minikube-t2-public-boundary.sh"
+if T2_PUBLIC_ROOT="$contract_control_repo" T2_PUBLIC_BASE_REF="$contract_control_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
+  >"$tmp/contract-control.out" 2>"$tmp/contract-control.err"; then
+  echo 'FAIL: public boundary let one contract control mask a later unsafe URL' >&2
+  exit 1
+fi
+grep -Fq 'private PostgreSQL URL' "$tmp/contract-control.err"
 
 public_repo="$tmp/public-repo"
 mkdir -p "$public_repo"

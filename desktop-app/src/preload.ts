@@ -12,6 +12,7 @@ import type {
 // desktopCommands.test.ts, matching the existing sandbox embed-preload pattern.
 const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
   'chat.newTab',
+  'chat.switcher',
   'chat.closeTab',
   'tabs.select1',
   'tabs.select2',
@@ -36,8 +37,6 @@ const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
   'navigate.agents',
   'notifications.open',
   'navigate.plugins',
-  'navigate.contexts',
-  'navigate.teams',
   'navigate.connectors',
   'navigate.files',
   'sidebar.toggle',
@@ -86,6 +85,9 @@ const clerum = Object.freeze({
     passwordLogin: (email: string, password: string) =>
       ipcRenderer.invoke('auth:passwordLogin', { email, password }),
     diagnoseLoginBackend: () => ipcRenderer.invoke('auth:diagnoseLoginBackend'),
+    probeLocalhostReachable: () => ipcRenderer.invoke('auth:probeLocalhostReachable'),
+    openDeploymentDocs: () => ipcRenderer.invoke('auth:openDeploymentDocs'),
+    openHostedSignup: () => ipcRenderer.invoke('auth:openHostedSignup'),
     startDesktopSetup: (email: string) => ipcRenderer.invoke('auth:startDesktopSetup', { email }),
     openForgotPassword: (email?: string) =>
       ipcRenderer.invoke('auth:openForgotPassword', { email }),
@@ -456,6 +458,38 @@ const clerum = Object.freeze({
     setHostModel: (hostRef: string, chatId: string, model: string, hostRefs?: string[]) =>
       ipcRenderer.invoke('rpc:setHostModel', { hostRef, chatId, model, hostRefs }),
     getTokenMetadata: () => ipcRenderer.invoke('rpc:getTokenMetadata'),
+    // U5 (mcp-oauth reactive consent): "Connect <server>" — open the provider
+    // authorize-URL for a task that suspended with `connect_required`. Host-bound
+    // to the suspended conversation's hostRef (RPC tokens require a hostRef).
+    connectMcpServer: (
+      mcpServerName: string,
+      hostRef: string,
+      contextId?: string,
+      options?: { confirmShared?: boolean }
+    ) => ipcRenderer.invoke('rpc:connectMcpServer', { mcpServerName, hostRef, contextId, options }),
+    // Proactive connectors panel (spec 11 U2): the classified per-agent fleet.
+    listConnectors: () => ipcRenderer.invoke('rpc:listConnectors'),
+    // Proactive disconnect (spec 11 U4): revoke an mcp-server's OAuth grant.
+    // `options.shared` only drives the native confirm-dialog copy.
+    disconnectMcpServer: (
+      mcpServerName: string,
+      hostRef: string,
+      contextId?: string,
+      options?: { shared?: boolean }
+    ) =>
+      ipcRenderer.invoke('rpc:disconnectMcpServer', { mcpServerName, hostRef, contextId, options }),
+    // Fired when the OAuth deep-link returns with `source=mcp`. The renderer
+    // correlates `mcpServerName` to its suspended entries and resumes the task.
+    onMcpOauthCompleted: (
+      callback: (args: { mcpServerName: string; provider: string }) => void
+    ) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        args: { mcpServerName: string; provider: string }
+      ) => callback(args)
+      ipcRenderer.on('rpc:mcpOauthCompleted', listener)
+      return () => ipcRenderer.off('rpc:mcpOauthCompleted', listener)
+    },
   },
   workflows: {
     list: () => ipcRenderer.invoke('workflows:list'),

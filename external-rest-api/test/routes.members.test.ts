@@ -63,13 +63,13 @@ describe('routes/members', () => {
 
     expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledWith(
       'invitee@example.com',
-      'Full Name',
+      '  Full Name  ',
       [{ teamId: 'team-1', role: 'inviter' }],
       'good-token'
     )
   })
 
-  it('preserves exact public invitation-role normalization before forwarding', async () => {
+  it('forwards bounded invitation role candidates to the Control API authority unchanged', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     memberManagementMock.inviteManagedMember.mockResolvedValueOnce({ id: 'inv-roles' })
 
@@ -90,10 +90,13 @@ describe('routes/members', () => {
 
     expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledWith(
       'invitee@example.com',
-      '',
+      undefined,
       [
         { teamId: 'team-admin', role: 'admin' },
-        { teamId: 'team-default', role: 'member' },
+        { teamId: 'team-alias', role: 'leader' },
+        { teamId: 'team-case', role: 'ADMIN' },
+        { teamId: 'team-invalid', role: 'unexpected' },
+        { teamId: 'team-default' },
       ],
       'good-token'
     )
@@ -162,7 +165,7 @@ describe('routes/members', () => {
 
     expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledWith(
       'not-an-email',
-      '',
+      undefined,
       [{ teamId: 'team-1', role: 'member' }],
       'good-token'
     )
@@ -182,7 +185,7 @@ describe('routes/members', () => {
 
     expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledWith(
       'not-an-email',
-      '',
+      undefined,
       [],
       'good-token'
     )
@@ -228,7 +231,7 @@ describe('routes/members', () => {
 
     expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledWith(
       'invitee@example.com',
-      '',
+      undefined,
       [],
       'good-token'
     )
@@ -250,7 +253,12 @@ describe('routes/members', () => {
       })
       .expect(400, { error: 'Name is too long' })
 
-    expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledOnce()
+    expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledWith(
+      'invitee@example.com',
+      'a'.repeat(121),
+      [{ teamId: 'team-1', role: 'member' }],
+      'good-token'
+    )
   })
 
   it('preserves a short name after trimming an overlong raw padded value', async () => {
@@ -269,13 +277,13 @@ describe('routes/members', () => {
 
     expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledWith(
       'invitee@example.com',
-      'Alice',
+      `${' '.repeat(121)}Alice`,
       [{ teamId: 'team-1', role: 'member' }],
       'good-token'
     )
   })
 
-  it('uses a stable overlength projection after trimming the complete name', async () => {
+  it('forwards the original overlength name instead of fabricating a sentinel', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     memberManagementMock.inviteManagedMember.mockRejectedValueOnce(
       new ControlApiError('invalid invitation name', 400, { error: 'invalid_name' })
@@ -292,8 +300,7 @@ describe('routes/members', () => {
       .expect(400, { error: 'Name is too long' })
 
     const [, forwardedName] = memberManagementMock.inviteManagedMember.mock.calls[0]
-    expect(forwardedName).toHaveLength(121)
-    expect(forwardedName).not.toMatch(/\s/)
+    expect(forwardedName).toBe(`${' '.repeat(10)}${'a'.repeat(121)}`)
   })
 
   it('preserves the public team-count error after authoritative validation', async () => {
@@ -314,7 +321,16 @@ describe('routes/members', () => {
       })
       .expect(400, { error: 'Too many teams selected' })
 
-    expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledOnce()
+    const originalTeams = Array.from({ length: 51 }, (_, index) => ({
+      teamId: `team-${index}`,
+      role: 'member',
+    }))
+    expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledWith(
+      'invitee@example.com',
+      undefined,
+      originalTeams,
+      'good-token'
+    )
   })
 
   it('forwards a governed member-retirement reason, replay key, and correlation id', async () => {

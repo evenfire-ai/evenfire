@@ -1,6 +1,6 @@
 import type { NextFunction, Response } from 'express'
 import { Router } from 'express'
-import { sanitizeControlApiPublicError } from '../http/publicApiError.js'
+import { publicCorrelationId, sanitizeControlApiPublicError } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import {
   decideUserApprovalDecision,
@@ -10,7 +10,11 @@ import {
 const PROPAGATED_STATUSES = new Set([400, 403, 404, 409, 410, 422])
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
-  const sanitized = sanitizeControlApiPublicError(error, PROPAGATED_STATUSES)
+  const sanitized = sanitizeControlApiPublicError(
+    error,
+    PROPAGATED_STATUSES,
+    publicCorrelationId(res.req)
+  )
   if (sanitized) {
     res.status(sanitized.status).json(sanitized.body)
     return

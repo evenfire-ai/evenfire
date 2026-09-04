@@ -2,7 +2,8 @@ import express, { NextFunction, Request, Response } from 'express'
 import cors from 'cors'
 import { config } from './config.js'
 import {
-  sanitizeControlApiPublicError,
+  publicCorrelationId,
+  sanitizeSupportedControlApiPublicError,
   sendPublicApiError,
   sendSanitizedControlApiPublicError,
 } from './http/publicApiError.js'
@@ -105,9 +106,9 @@ export function externalRestPublicErrorHandler(
   res: Response,
   _next: NextFunction
 ): void {
-  const rateLimitError = sanitizeControlApiPublicError(err, new Set([429]))
-  if (rateLimitError) {
-    sendSanitizedControlApiPublicError(res, rateLimitError)
+  const propagatedError = sanitizeSupportedControlApiPublicError(err, publicCorrelationId(req))
+  if (propagatedError) {
+    sendSanitizedControlApiPublicError(res, propagatedError)
     return
   }
 

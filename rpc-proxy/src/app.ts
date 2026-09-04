@@ -4,6 +4,7 @@ import { config } from './config.js'
 import { stripInboundTrustedEdgeHeaders } from './middleware/auth.js'
 import { createDesktopRouter } from './routes/desktopProxy.js'
 import { createHealthRouter } from './routes/health.js'
+import { createMcpOauthRouter } from './routes/mcpOauth.js'
 import { createRpcRouter } from './routes/rpc.js'
 import { createRpcHostActivityStreamRouter } from './routes/rpcHostActivityStream.js'
 import { createRpcHostProgressStreamRouter } from './routes/rpcHostProgressStream.js'
@@ -43,6 +44,7 @@ export function createApp() {
   api.use(createRpcHostProgressStreamRouter())
   api.use(createDesktopRouter())
   api.use(createSandboxUiSessionRouter())
+  api.use(createMcpOauthRouter())
   app.use('/api/v1', api)
 
   app.use((_req, res) => {

@@ -6,6 +6,9 @@ authorization_resource_revisions	upsert
 authorization_team_revisions	upsert
 authorization_user_revisions	upsert
 budget_pending_reservations	legacy_dml
+codex_subscription_connections	upsert
+codex_subscription_oauth_states	upsert
+codex_catalog_models	upsert
 control_admin_deletion_audit	legacy_dml
 control_admin_email_change_requests	legacy_dml
 control_admin_invitations	legacy_dml
@@ -41,6 +44,8 @@ llm_allowed_models	legacy_dml
 llm_allowed_models_audit	append
 llm_catalog_sync_runs	append
 llm_model_prices	legacy_dml
+llm_provider_attempt_tickets	upsert
+llm_provider_attempts	upsert
 member_registration_credentials	upsert
 notification_deliveries	legacy_dml
 oauth_grants	legacy_dml

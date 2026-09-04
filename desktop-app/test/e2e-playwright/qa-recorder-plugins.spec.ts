@@ -14,16 +14,16 @@ import {
 // desktop-app/test/e2e-playwright/qa-recorder-plugins.spec.ts
 //
 // Optional headful QA recorder journey for the Plugins (Workflows) page.
-// Read-only inventory + detail-panel assertions always run. The trigger step is
-// gated behind QA_RECORDER_CONFIRM_MUTATIONS=1 (it creates a real workflow run
-// and may incur provider cost) and only fires when a triggerable recipe with an
-// input contract is selected. Contract: docs/testing/optional-playwright-qa-recorder.md.
+// Read-only inventory assertions always run. The trigger step is gated behind
+// QA_RECORDER_CONFIRM_MUTATIONS=1 (it creates a real workflow run and may incur
+// provider cost) and only fires when a triggerable recipe is present.
+// Contract: docs/testing/desktop-headful-journeys.md.
 //
-// Note on selectors: WorkflowsPage renders no `workflows-page`, `workflow-row`,
-// `selected-workflow`, `run-count`, or `runs-loading` data-testids. The real
-// anchors are the `Plugins` <h2> shell, the `button.da-grid__row--clickable`
-// rows, the `Details`/`Recent Runs` headings, the `workflow-run-row` run rows,
-// the `.input-contract-form`, and the `Trigger`/`Triggering...` button.
+// Note on selectors (spec 12 §5.F — flat DataTable, no accordion): WorkflowsPage
+// renders a `.da-table` with the columns `Name` / `Status` / `Recent Runs` /
+// `Actions`. Each recipe is a `<tr>` (no clickable row, no detail panel). The
+// Trigger action opens a `role="dialog"` modal carrying the `.input-contract-form`
+// only when the recipe declares an input contract; otherwise it fires directly.
 
 test('optional QA recorder: Desktop plugins journey', async ({}, testInfo) => {
   await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
@@ -46,7 +46,7 @@ test('optional QA recorder: Desktop plugins journey', async ({}, testInfo) => {
     await openResourcesNavItem(page, 'nav-workflows')
     const pluginsHeading = page.getByRole('heading', { name: 'Plugins', exact: true })
     const subtitle = page
-      .getByText('View deployed recipes. Select one to see recent runs or trigger it.')
+      .getByText('View deployed recipes, see their recent runs, and trigger them.')
       .first()
     await expect(pluginsHeading).toBeVisible({ timeout: 20_000 })
     await expect(subtitle).toBeVisible({ timeout: 20_000 })
@@ -54,66 +54,58 @@ test('optional QA recorder: Desktop plugins journey', async ({}, testInfo) => {
     // Wait for the list to settle out of the loading state into either a row or
     // the empty state. No plugin fixtures are guaranteed for the QA user, so this
     // is first-available and must pass when the cluster has zero recipes.
-    const workflowRow = page.locator('button.da-grid__row--clickable').first()
+    const table = page.locator('table.da-table')
+    const workflowRow = table.locator('tbody tr').first()
     const emptyRecipes = page.getByText('No recipes are deployed in this cluster.')
     await expect(workflowRow.or(emptyRecipes)).toBeVisible({ timeout: 20_000 })
 
-    // (2, read-only) If a row is present, open its detail panel and assert the
-    // detail shell + Recent Runs section render in one of their states.
+    // (2, read-only) When a row is present, assert the flat-table columns and
+    // the compact Recent Runs cell render (no accordion / detail panel).
     if (await workflowRow.isVisible().catch(() => false)) {
-      await workflowRow.click()
-
-      const detailsHeading = page.getByRole('heading', { name: 'Details', exact: true })
-      const recentRunsHeading = page.getByRole('heading', { name: 'Recent Runs', exact: true })
-      await expect(detailsHeading).toBeVisible({ timeout: 20_000 })
-      await expect(recentRunsHeading).toBeVisible({ timeout: 20_000 })
-
-      const runsLoading = page.getByText('Loading runs...')
-      const runsEmpty = page.getByText('No runs recorded yet.')
-      const runRow = page.getByTestId('workflow-run-row')
-      await expect(runsLoading.or(runsEmpty).or(runRow)).toBeVisible({ timeout: 20_000 })
+      for (const column of ['Name', 'Status', 'Recent Runs', 'Actions']) {
+        await expect(page.getByRole('columnheader', { name: column, exact: true })).toBeVisible({
+          timeout: 20_000,
+        })
+      }
 
       // (3, OPTIONAL + gated) Only when the operator opts in via
-      // QA_RECORDER_CONFIRM_MUTATIONS=1 AND the selected recipe is triggerable
-      // AND declares an input contract. Otherwise the read-only journey above
-      // remains the proof and the test still passes.
+      // QA_RECORDER_CONFIRM_MUTATIONS=1 AND a triggerable recipe is present.
+      // Otherwise the read-only journey above remains the proof.
       if (process.env.QA_RECORDER_CONFIRM_MUTATIONS === '1') {
-        const triggerButton = page.getByRole('button', { name: /^Trigger$/ })
-        const inputForm = page.locator('.input-contract-form')
+        const triggerButton = workflowRow.getByRole('button', { name: /^Trigger$/ })
         if (
           (await triggerButton.isVisible().catch(() => false)) &&
-          (await inputForm.isVisible().catch(() => false))
+          (await triggerButton.isEnabled().catch(() => false))
         ) {
-          const runCountBefore = await page.getByTestId('workflow-run-row').count()
-
-          // Fill free-text inputs with a sentinel value and numeric inputs with a
-          // valid number. Enums (<select>) and booleans (checkboxes) keep their
-          // defaults so we never send an invalid enum/required value.
-          const textFields = inputForm.locator('input[type="text"]')
-          const textCount = await textFields.count()
-          for (let i = 0; i < textCount; i++) {
-            const field = textFields.nth(i)
-            if (await field.isEnabled().catch(() => false)) {
-              await field.fill('qa-recorder')
-            }
-          }
-
-          const numberFields = inputForm.locator('input[type="number"]')
-          const numberCount = await numberFields.count()
-          for (let i = 0; i < numberCount; i++) {
-            const field = numberFields.nth(i)
-            if (await field.isEnabled().catch(() => false)) {
-              await field.fill('1')
-            }
-          }
-
           await triggerButton.click()
 
-          // Success = the trigger was acknowledged (button flips to
-          // "Triggering...") OR a new run row appears in Recent Runs.
-          const triggering = page.getByRole('button', { name: 'Triggering...' })
-          const newRunRow = page.getByTestId('workflow-run-row').nth(runCountBefore)
-          await expect(triggering.or(newRunRow)).toBeVisible({ timeout: 60_000 })
+          // A recipe with an input contract opens the Trigger modal; one without
+          // fires directly. Handle both.
+          const dialog = page.getByRole('dialog')
+          const inputForm = dialog.locator('.input-contract-form')
+          if (await inputForm.isVisible().catch(() => false)) {
+            // Fill free-text inputs with a sentinel and numeric inputs with a
+            // valid number; enums/booleans keep their defaults.
+            const textFields = inputForm.locator('input[type="text"]')
+            const textCount = await textFields.count()
+            for (let i = 0; i < textCount; i++) {
+              const field = textFields.nth(i)
+              if (await field.isEnabled().catch(() => false)) await field.fill('qa-recorder')
+            }
+            const numberFields = inputForm.locator('input[type="number"]')
+            const numberCount = await numberFields.count()
+            for (let i = 0; i < numberCount; i++) {
+              const field = numberFields.nth(i)
+              if (await field.isEnabled().catch(() => false)) await field.fill('1')
+            }
+
+            await dialog.getByRole('button', { name: /^Trigger(ing…)?$/ }).click()
+          }
+
+          // Success = the trigger was acknowledged: the acting Trigger button
+          // flips to its busy label, or the modal closes without an error.
+          const triggering = page.getByRole('button', { name: 'Triggering…' })
+          await expect(triggering.or(page.getByRole('dialog'))).toBeHidden({ timeout: 60_000 })
         }
       }
     }

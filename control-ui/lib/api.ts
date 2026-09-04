@@ -90,16 +90,43 @@ async function parseJsonResponse(res: Response): Promise<unknown> {
   return JSON.parse(text)
 }
 
-export function formatApiError(res: Response, text: string): Error {
-  let detail = text
-  let parsedBody: Record<string, unknown> | null = null
+function parseApiErrorPayload(text: string): {
+  body?: Record<string, unknown>
+  code?: string
+  message?: string
+} {
   try {
-    const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
-    if (parsed && typeof parsed === 'object') parsedBody = parsed as Record<string, unknown>
-    detail = String(parsed.message || parsed.error || text)
+    const parsed = JSON.parse(text) as unknown
+    if (!parsed || typeof parsed !== 'object') return {}
+    const body = parsed as Record<string, unknown>
+    const envelope =
+      body.error && typeof body.error === 'object'
+        ? (body.error as Record<string, unknown>)
+        : undefined
+    return {
+      body,
+      code:
+        typeof envelope?.code === 'string'
+          ? envelope.code
+          : typeof body.error === 'string'
+            ? body.error
+            : undefined,
+      message:
+        typeof envelope?.message === 'string'
+          ? envelope.message
+          : typeof body.message === 'string'
+            ? body.message
+            : undefined,
+    }
   } catch {
-    detail = text
+    return {}
   }
+}
+
+export function formatApiError(res: Response, text: string): Error {
+  const parsed = parseApiErrorPayload(text)
+  const parsedBody = parsed.body ?? null
+  const detail = parsed.message || parsed.code || (parsedBody ? res.statusText : text)
   const friendlyDetail =
     detail === 'duplicate_username'
       ? 'That username is already taken.'
@@ -117,11 +144,9 @@ export function formatApiError(res: Response, text: string): Error {
                   ? 'Agent access could not be updated because the page did not include its current access state. Reload the page and try again.'
                   : detail === 'deleted_agent_history_limit_exceeded'
                     ? 'Agent access was not updated because the deleted-agent history limit was reached. No existing history was removed. Reload the page, review the current access, and try again.'
-                    : // Exact match is correct HERE: control-ui calls control-api directly,
-                      // so a member-registration 503 arrives as the bare { error: '<code>' }
-                      // body. profile-ui reaches these same codes through external-rest-api,
-                      // whose error middleware wraps any 5xx into { message: '...: <code>' },
-                      // so it must use .includes() instead — the two matchers differ on purpose.
+                    : // Control UI calls Control API directly, so the legacy bare string remains
+                      // its member-registration code source. Profile UI consumes the same safe
+                      // codes from External REST's canonical nested public envelope.
                       detail === 'member_registration_unavailable'
                       ? "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
                       : detail === 'member_registration_misconfigured'
@@ -133,8 +158,7 @@ export function formatApiError(res: Response, text: string): Error {
   // render structured, actionable errors (e.g. unpriced_models, price_in_use_by_budget)
   // instead of the generic message string.
   if (parsedBody) {
-    ;(error as Error & { code?: string }).code =
-      typeof parsedBody.error === 'string' ? (parsedBody.error as string) : undefined
+    ;(error as Error & { code?: string }).code = parsed.code
     ;(error as Error & { body?: Record<string, unknown> }).body = parsedBody
   }
   return error
@@ -231,18 +255,10 @@ export async function apiGet(
       let message = `${res.status} ${res.statusText}`
       let code: string | undefined
       let body: Record<string, unknown> | undefined
-      try {
-        const parsed = JSON.parse(text) as unknown
-        if (parsed && typeof parsed === 'object') {
-          body = parsed as Record<string, unknown>
-          if (typeof body.message === 'string' && body.message.trim()) {
-            message = body.message
-          }
-          if (typeof body.error === 'string') code = body.error
-        }
-      } catch {
-        /* non-JSON error body: keep the status-text message */
-      }
+      const parsed = parseApiErrorPayload(text)
+      body = parsed.body
+      if (parsed.message?.trim()) message = parsed.message
+      code = parsed.code
       const error = new Error(message) as Error & {
         status?: number
         code?: string
@@ -1367,7 +1383,7 @@ export async function sfsUpload(
       handler?.()
       throw new Error('401 Unauthorized - session expired, please sign in again')
     }
-    let detail = text
+    let detail: string
     try {
       const parsed = JSON.parse(text) as { error?: { message?: string; code?: string } }
       detail = parsed.error?.message || parsed.error?.code || text
@@ -1436,6 +1452,13 @@ export async function createMcpServer(payload: {
   }
 }) {
   return apiSend('POST', '/api/v1/admin/mcp-servers', payload) as Promise<McpServerResource>
+}
+
+export async function deleteMcpServer(name: string) {
+  return apiSend('DELETE', `/api/v1/admin/mcp-servers/${encodeURIComponent(name)}`) as Promise<{
+    name: string
+    namespace?: string
+  }>
 }
 
 export async function getMcpServer(name: string) {
@@ -2469,6 +2492,7 @@ export type WorkflowRecipeResource = {
     namespace?: string
     creationTimestamp?: string
     labels?: Record<string, string>
+    annotations?: Record<string, string>
   }
   spec?: Record<string, unknown>
   status?: WorkflowRecipeStatus
@@ -2500,7 +2524,7 @@ export async function getRecipe(name: string) {
 }
 
 export async function createRecipe(payload: {
-  metadata: { name: string; namespace?: string }
+  metadata: { name: string; namespace?: string; annotations?: Record<string, string> }
   spec: Record<string, unknown>
 }) {
   return apiSend(
@@ -2535,7 +2559,7 @@ export type ServerValidationResult =
 // let the reconciler catch at L4.
 export async function validateRecipeServer(
   recipe: {
-    metadata: { name: string; namespace?: string }
+    metadata: { name: string; namespace?: string; annotations?: Record<string, string> }
     spec: Record<string, unknown>
   },
   opts: { mode?: 'create' | 'edit' } = {}
@@ -2558,7 +2582,13 @@ export async function validateRecipeServer(
   throw new Error(`${res.status} ${res.statusText} - ${text}`)
 }
 
-export async function updateRecipe(name: string, payload: { spec: Record<string, unknown> }) {
+export async function updateRecipe(
+  name: string,
+  payload: {
+    spec: Record<string, unknown>
+    metadata?: { annotations?: Record<string, string> }
+  }
+) {
   return apiSend(
     'PUT',
     `/api/v1/admin/recipes/${encodeURIComponent(name)}`,
@@ -3630,7 +3660,12 @@ export type PluginWorkloadSdkPromptTarget = {
   provider: string
   model: string
   // Identity of a provider-owned secret data key; never a secret value.
+  // Empty for oauth-broker (Codex) targets, which have no static Secret key.
   credentialSlot: string
+  // Codex subscription connection key the target executes against. Only set
+  // for oauth-broker providers; the grant must already exist (choose, don't
+  // create) and offer the selected model.
+  connectionRef?: string
 }
 
 export type PluginWorkloadSdkQuotaLimits = {
@@ -3646,6 +3681,11 @@ export type PluginWorkloadSdkQuotaLimits = {
   maxNotificationsPerRun?: number
   maxInvocationsPerMinute?: number
   maxNotificationsPerMinute?: number
+  /**
+   * @deprecated No longer enforced; the Codex ChatGPT wire discards
+   * max_output_tokens, so no layer capped the response by token count. Still
+   * returned on legacy grants; never sent by this UI.
+   */
   maxOutputTokens?: number
 }
 
@@ -3708,6 +3748,8 @@ export type PluginWorkloadSdkGrantInput = {
   // Input type omits the deprecated per-run keys (issue #348): this UI never
   // sends them and the server strips them on write. The response
   // PluginWorkloadSdkQuotaLimits still carries them for legacy grants.
+  // `maxOutputTokens` is NOT among them — it is a live per-grant
+  // ceiling on API-key providers.
   quotaLimits?: Omit<PluginWorkloadSdkQuotaLimits, 'maxRequestsPerRun' | 'maxNotificationsPerRun'>
   modelPolicies?: Record<string, PluginWorkloadSdkModelPolicy>
   promptTargets?: PluginWorkloadSdkPromptTarget[]

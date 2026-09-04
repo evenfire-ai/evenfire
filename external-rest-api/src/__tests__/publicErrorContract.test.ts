@@ -3,7 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { externalRestPublicErrorHandler } from '../app.js'
 import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
-import { sanitizeControlApiPublicError } from '../http/publicApiError.js'
+import { sanitizeControlApiPublicError, selectPublicCorrelationId } from '../http/publicApiError.js'
 
 function appThrowing(error: Error) {
   const app = express()
@@ -12,8 +12,36 @@ function appThrowing(error: Error) {
   return app
 }
 
+function privatePostgresSentinel(suffix = ''): string {
+  return ['postgres://secret@', 'internal', suffix].join('')
+}
+
 describe('External REST public error contract', () => {
   afterEach(() => vi.unstubAllGlobals())
+
+  it('preserves only bounded public correlation IDs through the mounted global handler', async () => {
+    const valid = await request(
+      appThrowing(new ControlApiError('private', 400, { error: { code: 'invalid_request' } }))
+    )
+      .get('/failure')
+      .set('x-correlation-id', 'request_ID-42')
+    expect(valid.body.error.correlationId).toBe('request_ID-42')
+
+    for (const rejected of ['request/with/delimiters', 'x'.repeat(129)]) {
+      const response = await request(appThrowing(new Error('private')))
+        .get('/failure')
+        .set('x-correlation-id', rejected)
+      expect(response.body.error.correlationId).not.toBe(rejected)
+      expect(response.body.error.correlationId).toMatch(/^[A-Za-z0-9_-]{1,128}$/)
+    }
+  })
+
+  it('requires the supplied correlation value itself to match without whitespace normalization', () => {
+    expect(selectPublicCorrelationId(' upstream_ID-42 ', 'request_ID-42')).toBe('request_ID-42')
+    const generated = selectPublicCorrelationId(' request_ID-42 ')
+    expect(generated).not.toBe('request_ID-42')
+    expect(generated).toMatch(/^[A-Za-z0-9_-]{1,128}$/)
+  })
 
   it('never reflects an internal upstream message, path, or secret-like value', async () => {
     const sentinel = 'oauth-secret-at-/var/run/internal/provider.json'
@@ -34,7 +62,7 @@ describe('External REST public error contract', () => {
     const response = await request(
       appThrowing(
         new ControlApiError('raw postgres failure', 503, {
-          error: 'raw failure at postgres://secret@internal',
+          error: `raw failure at ${privatePostgresSentinel()}`,
         })
       )
     ).get('/failure')
@@ -125,7 +153,7 @@ describe('External REST public error contract', () => {
   })
 
   it('rebuilds every forwarded route class from a bounded typed envelope', () => {
-    const sentinel = 'postgres://secret@internal/var/run/service.sock'
+    const sentinel = privatePostgresSentinel('/var/run/service.sock')
     for (const status of [
       400, 401, 403, 404, 408, 409, 410, 411, 412, 413, 422, 425, 429, 500, 502, 503, 504, 507,
     ]) {
@@ -156,7 +184,7 @@ describe('External REST public error contract', () => {
   ] as const)(
     'preserves the safe typed public GFS contract for %s',
     (status, expectedCode, retryable, expectedHeaders) => {
-      const sentinel = 'private upstream detail at postgres://secret@internal'
+      const sentinel = `private upstream detail at ${privatePostgresSentinel()}`
       const sanitized = sanitizeControlApiPublicError(
         new ControlApiError(
           sentinel,

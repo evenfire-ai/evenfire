@@ -426,10 +426,8 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
     expect(lockedExchange.result.status).toBe('issued')
 
     try {
-      const cutoff = new Date(Date.now() - 1_000)
-      const revokeAll = revokeAllUserSessions(source.userId, 'user_revoked_all', undefined, cutoff)
+      const revokeAll = revokeAllUserSessions(source.userId, 'user_revoked_all')
       await waitForBlockedBy(lockedExchange.pid)
-      cutoff.setTime(Date.now() + 1_000)
       releaseExchange.resolve()
       const issued = await exchange
       await revokeAll
@@ -487,12 +485,7 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
       const exchangePid = await exchangeStarted.promise
       await waitForBlock(exchangePid, gatePid)
 
-      await revokeAllUserSessions(
-        source.userId,
-        'user_revoked_all',
-        gate,
-        new Date(Date.now() + 1_000)
-      )
+      await revokeAllUserSessions(source.userId, 'user_revoked_all', gate)
       await gate.query('COMMIT')
 
       await expect(exchange).resolves.toEqual({ status: 'invalid_session' })
@@ -522,12 +515,7 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
     const rollback = await databasePool.connect()
     try {
       await rollback.query('BEGIN')
-      await revokeAllUserSessions(
-        source.userId,
-        'rollback',
-        rollback,
-        new Date('2026-08-27T12:00:00Z')
-      )
+      await revokeAllUserSessions(source.userId, 'rollback', rollback)
       await rollback.query('ROLLBACK')
     } finally {
       await rollback.query('ROLLBACK').catch(() => undefined)
@@ -537,18 +525,15 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
       validateLegacyUserSession(source.token, source.claims, { db: databasePool })
     ).resolves.toMatchObject({ status: 'valid' })
 
-    await revokeAllUserSessions(
-      source.userId,
-      'older',
-      databasePool,
-      new Date('2026-08-27T12:00:00Z')
+    await revokeAllUserSessions(source.userId, 'older', databasePool)
+    const firstEpoch = await databasePool.query<{ valid_after: Date }>(
+      `SELECT valid_after
+         FROM external_user_session_security_epochs
+        WHERE user_id = $1`,
+      [source.userId]
     )
-    await revokeAllUserSessions(
-      source.userId,
-      'newer',
-      databasePool,
-      new Date('2026-08-27T12:00:05Z')
-    )
+    await databasePool.query(`SELECT pg_sleep(1.1)`)
+    await revokeAllUserSessions(source.userId, 'newer', databasePool)
 
     const epoch = await databasePool.query<{ valid_after: Date; reason: string }>(
       `SELECT valid_after, reason
@@ -556,7 +541,9 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
         WHERE user_id = $1`,
       [source.userId]
     )
-    expect(epoch.rows[0]?.valid_after.toISOString()).toBe('2026-08-27T12:00:05.000Z')
+    expect(epoch.rows[0]!.valid_after.getTime()).toBeGreaterThan(
+      firstEpoch.rows[0]!.valid_after.getTime()
+    )
     expect(epoch.rows[0]?.reason).toBe('newer')
   })
 })

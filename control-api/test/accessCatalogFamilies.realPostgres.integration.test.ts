@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import { config } from '../src/config.js'
@@ -25,6 +25,17 @@ import {
 } from '../src/services/access/userAccessPolicy.js'
 import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
 import { TemporaryKubernetesApi } from './helpers/temporaryKubernetesApi.js'
+
+vi.mock('../src/services/access/operationTarget.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/services/access/operationTarget.js')>()
+  return {
+    ...actual,
+    validateOperationTarget: (input: Parameters<typeof actual.validateOperationTarget>[0]) =>
+      input.capability === 'gfs.write' || input.capability === 'gfs.delete'
+        ? null
+        : actual.validateOperationTarget(input),
+  }
+})
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -300,7 +311,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     await databasePool.query(
       `INSERT INTO gfs_grants(drive, resource_id, subject_type, subject_id, permissions)
        VALUES
-         ('catalog-drive', $1, 'user', $2::text, ARRAY['read']::text[]),
+         ('catalog-drive', $1, 'user', $2::text, ARRAY['read', 'write']::text[]),
          ('catalog-drive', $1, 'team', $3::text, ARRAY['read']::text[])`,
       [gfsResourceId, userId, teamId]
     )
@@ -426,6 +437,67 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       }
     })
   }
+
+  it('round-trips a catalog write path when capability selection excludes a read-only sibling', async () => {
+    const catalog = await buildAccessCatalog(
+      { session, families: ['gfs_resource'], limit: 10 },
+      {
+        transaction: transaction(databasePool),
+        teamGfsMembershipAdmissionLimit: 1,
+      }
+    )
+    const item = catalog.items[0]!
+    const directWritePath = item.accessPaths.find(
+      path => path.kind === 'direct' && path.capabilities.includes('gfs.write')
+    )
+    const teamReadPath = item.accessPaths.find(
+      path => path.kind === 'team' && path.capabilities.includes('gfs.read')
+    )
+    expect(directWritePath).toBeDefined()
+    expect(teamReadPath).toBeDefined()
+
+    const resolved = await resolveLiveAuthorization(
+      {
+        session,
+        requiredCapability: 'gfs.write',
+        resource: canonicalResourceIdentity(item.resource),
+        requestedAccessPathId: directWritePath!.accessPathId,
+      },
+      { transaction: transaction(databasePool), gateway }
+    )
+
+    expect(resolved).toEqual(
+      expect.objectContaining({
+        status: 'allowed',
+        selectedPath: expect.objectContaining({ id: directWritePath!.accessPathId }),
+      })
+    )
+
+    await expect(
+      resolveLiveAuthorization(
+        {
+          session,
+          requiredCapability: 'gfs.write',
+          resource: canonicalResourceIdentity(item.resource),
+          requestedAccessPathId: teamReadPath!.accessPathId,
+        },
+        { transaction: transaction(databasePool), gateway }
+      )
+    ).resolves.toEqual(
+      expect.objectContaining({ status: 'access_path_stale', code: 'access_path_stale' })
+    )
+
+    await expect(
+      resolveLiveAuthorization(
+        {
+          session,
+          requiredCapability: 'gfs.delete',
+          resource: canonicalResourceIdentity(item.resource),
+        },
+        { transaction: transaction(databasePool), gateway }
+      )
+    ).resolves.toEqual({ status: 'denied', code: 'forbidden' })
+  })
 
   it('enforces the operator-configured Team-GFS admission through the production budget contract', async () => {
     const intent = loadConfiguredUserAccessIntent({

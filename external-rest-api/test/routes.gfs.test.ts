@@ -594,13 +594,14 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     const res = await request(buildApp())
       .put('/me/gfs/resources/abc/content?drive=main')
       .set('authorization', 'Bearer sess-xyz')
+      .set('x-correlation-id', 'gfs_ID-42')
       .send({ contentBase64: 'AAAA' })
 
     expect(res.status).toBe(413)
     expect(res.body.error).toEqual({
       code: 'payload_too_large',
       message: 'The request payload is too large.',
-      correlationId: expect.any(String),
+      correlationId: 'gfs_ID-42',
       retryable: false,
     })
     expect(res.headers['retry-after']).toBeUndefined()

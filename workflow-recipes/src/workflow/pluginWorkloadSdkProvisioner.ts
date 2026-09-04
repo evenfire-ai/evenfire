@@ -5,6 +5,7 @@ import { getErrorCode } from '../reconciler/k8sErrors'
 import { effectiveWorkflowContextRefForSpec } from '../reconciler/workflowContext'
 import type { WorkflowRecipeSpec } from '../types'
 import { resolveEagerSdkMcpHostAgent } from './agentResolution'
+import type { CodexRecipeVerdict } from './codexRecipeVerdict'
 import {
   deletePodIfExists,
   getContainerWaitingReason,
@@ -31,6 +32,10 @@ import {
   buildPluginWorkloadSdkTokenSecretName,
 } from './resourceNames'
 import type { WorkflowRuntimePlan } from './runtimePlan'
+import {
+  type PluginWorkloadSdkCodexBindingProof,
+  readVerifiedSdkOnlyCodexBinding,
+} from './sdkOnlyCodexBinding'
 import { buildPluginWorkloadSdkTokenSecret } from './secretFactory'
 import type { WorkflowConfig } from './types'
 
@@ -41,10 +46,42 @@ export type EagerSdkMcpHostStatus =
   | 'failed'
   | 'provider_unavailable'
 
+/** Why the mcp-host runtime JWT Secret was reminted. */
+export type McpHostRuntimeTokenRefreshReason = 'scope' | 'binding' | 'ttl'
+
+export type McpHostRuntimeTokenRefreshResult = {
+  reminted: boolean
+  reason?: McpHostRuntimeTokenRefreshReason
+  /** Secret annotation; eager pods must match or they still carry a stale env JWT. */
+  tokenGeneration?: string
+}
+
+export const NO_MCP_HOST_RUNTIME_TOKEN_REFRESH: McpHostRuntimeTokenRefreshResult = {
+  reminted: false,
+}
+
+/** Env-injected access/refresh JWTs only update on a new process. */
+export function eagerMcpHostRequiresTokenRoll(
+  result: McpHostRuntimeTokenRefreshResult | void
+): boolean {
+  return result?.reminted === true && (result.reason === 'scope' || result.reason === 'binding')
+}
+
+/** Prior remint patched the Secret; the running process may still have the old JWT. */
+export function eagerMcpHostPodTokenGenerationDrift(
+  result: McpHostRuntimeTokenRefreshResult | void,
+  podGeneration?: string
+): boolean {
+  const expected = result?.tokenGeneration
+  if (!expected) return false
+  return podGeneration !== expected
+}
+
 export interface EagerSdkBootstrapProof {
   ready: true
-  contractVersion: 2
+  contractVersion: 2 | 3
   podUid: string
+  codexBinding?: PluginWorkloadSdkCodexBindingProof
   provider?: string
   model?: string
   policyReady?: boolean
@@ -86,14 +123,17 @@ export type PluginWorkloadSdkProvisionerDeps = {
     namespace: string,
     recipeName: string,
     runtimeScopeRecipeName: string,
-    spec: WorkflowRecipeSpec
-  ) => Promise<void>
+    spec: WorkflowRecipeSpec,
+    recipeUid: string | undefined,
+    codexVerdict: CodexRecipeVerdict
+  ) => Promise<McpHostRuntimeTokenRefreshResult | void>
   applyWorkflowNetworkPolicies: (
     recipeName: string,
     recipeUid: string,
     spec: WorkflowRecipeSpec,
     runtime: WorkflowRuntimePlan,
     awaitsTriggeredRun: boolean,
+    codexProjection: CodexRecipeVerdict['projection'],
     eagerSdkMcpHost: boolean
   ) => Promise<void>
   ensureMcpHostHeadlessService: (recipeName: string) => Promise<void>
@@ -174,6 +214,14 @@ export class PluginWorkloadSdkProvisioner {
     runtime: WorkflowRuntimePlan,
     opts: {
       mcpHostPhase: string | undefined
+      /**
+       * The caller's ONE Codex verdict for this pass. Required, and
+       * deliberately not a pair of optional derived fields: an optional
+       * `codexBindingUndecidable` defaulting to false is a flag a future
+       * caller can silently omit, which is precisely how a binding-less v3
+       * configure reached a live host.
+       */
+      codexVerdict: CodexRecipeVerdict
     }
   ): Promise<EagerSdkMcpHostStatus> {
     const log = createLogger('wrc', recipeName)
@@ -189,7 +237,14 @@ export class PluginWorkloadSdkProvisioner {
       return 'failed'
     }
 
-    await this.deps.ensureMcpHostSecrets(namespace, recipeName, runtimeScopeRecipeName, spec)
+    const tokenRefresh = await this.deps.ensureMcpHostSecrets(
+      namespace,
+      recipeName,
+      runtimeScopeRecipeName,
+      spec,
+      recipeUid,
+      opts.codexVerdict
+    )
 
     await this.deps.applyWorkflowNetworkPolicies(
       recipeName,
@@ -197,6 +252,7 @@ export class PluginWorkloadSdkProvisioner {
       spec,
       runtime,
       /* awaitsTriggeredRun */ true,
+      opts.codexVerdict.projection,
       /* eagerSdkMcpHost */ true
     )
 
@@ -218,6 +274,9 @@ export class PluginWorkloadSdkProvisioner {
         mountWorkflowOutput: false,
         pluginWorkloadSdkCapabilities: capabilities,
         pluginWorkloadSdkRuntimeMode: 'sdk-only',
+        ...(tokenRefresh?.tokenGeneration
+          ? { runtimeTokenGeneration: tokenRefresh.tokenGeneration }
+          : {}),
       }
     )
     const desiredRuntimeContractHash = pluginWorkloadSdkRuntimeContractHash(desiredMcpHostPod)
@@ -239,16 +298,10 @@ export class PluginWorkloadSdkProvisioner {
       }
     }
 
-    // Image-drift roll. The eager SDK mcp-host is a bare Pod (no Deployment),
-    // so a platform mcp-host image bump never reaches a long-lived recipe on
-    // its own: createIfNotExists is a no-op while the stale pod stays healthy,
-    // and there is no owning controller to perform a rolling update. A recipe
-    // deployed before an mcp-host release therefore keeps serving SDK routes
-    // from the old image (e.g. a pre-recipients-endpoint pod returns 404 for
-    // GET /sdk/v1/client-notifications/recipients). Roll the pod so the next
-    // reconcile recreates it from config.mcpHostImage. Safe on this path: the
-    // eager pod hosts only the always-on SDK server and produces no run
-    // artifacts, and no triggered run is in flight (see ensureEagerSdkMcpHost).
+    // Runtime JWT scope/binding remint, plus a Secret/Pod generation residue
+    // when a prior remint patched the Secret but the roll failed. Access/refresh
+    // tokens are env-injected on a bare Pod; Secret scopes matching is not proof
+    // that process.env was refreshed.
     if (mcpHostPhase === 'Running' || mcpHostPhase === 'Pending') {
       const runningPod = await readMcpHostPodDriftStateIfExists(
         this.deps.coreApi,
@@ -258,6 +311,22 @@ export class PluginWorkloadSdkProvisioner {
       if (runningPod?.deleting) {
         return 'deploying'
       }
+      const tokenRoll =
+        eagerMcpHostRequiresTokenRoll(tokenRefresh) ||
+        eagerMcpHostPodTokenGenerationDrift(tokenRefresh, runningPod?.tokenGeneration)
+      if (tokenRoll) {
+        log.info('Plugin Workload SDK eager mcp-host runtime token drift; rolling Pod', {
+          reason: tokenRefresh?.reason,
+          secretTokenGeneration: tokenRefresh?.tokenGeneration,
+          podTokenGeneration: runningPod?.tokenGeneration,
+        })
+        await this.rollEagerSdkMcpHostPod(recipeName)
+        return 'deploying'
+      }
+      // Image-drift roll. The eager SDK mcp-host is a bare Pod (no Deployment),
+      // so a platform mcp-host image bump never reaches a long-lived recipe on
+      // its own: createIfNotExists is a no-op while the stale pod stays healthy,
+      // and there is no owning controller to perform a rolling update.
       const imageDrift = runningPod?.image !== this.deps.config.mcpHostImage
       const runtimeContractDrift = runningPod?.runtimeContractHash !== desiredRuntimeContractHash
       if (runningPod && (imageDrift || runtimeContractDrift)) {
@@ -323,8 +392,40 @@ export class PluginWorkloadSdkProvisioner {
     }
 
     if (promptBridge && !mcpHostAgent) return 'failed'
+    if (
+      opts.codexVerdict.projection.eligibility === 'uncertain' &&
+      promptBridge &&
+      mcpHostAgent?.provider === 'codex-subscription'
+    ) {
+      const existing = this.eagerSdkBootstrapProofByRecipe.get(recipeName)
+      if (existing && existing.podUid !== readiness.uid) {
+        // Proof of a pod that has since been replaced. The new pod has never
+        // been configured, so its cached predecessor's proof must not be read
+        // as "this host already holds a Codex binding".
+        log.info('Plugin Workload SDK bootstrap proof belongs to a replaced pod; discarding', {
+          proofPodUid: existing.podUid,
+          podUid: readiness.uid,
+        })
+        this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
+        return 'awaiting_policy'
+      }
+      if (
+        !existing ||
+        existing.policyReady === false ||
+        existing.contractVersion !== 3 ||
+        !existing.codexBinding ||
+        existing.policyReason === 'codex_execution_binding_missing'
+      ) {
+        return 'awaiting_policy'
+      }
+      return 'ready'
+    }
+    // Both the skip decision above and this binding are fields of the SAME
+    // verdict the caller computed once for this pass. The provisioner never
+    // re-derives either after its own awaits.
+    const resolvedCodexBinding = opts.codexVerdict.hostBinding
     const capabilityFamily = promptBridge ? 'promptBridge' : 'clientNotifications'
-    const configureKey = `${readiness.uid}:${capabilityFamily}:${mcpHostAgent?.provider ?? 'none'}:${mcpHostAgent?.model ?? 'none'}`
+    const configureKey = `${readiness.uid}:${capabilityFamily}:${mcpHostAgent?.provider ?? 'none'}:${mcpHostAgent?.model ?? 'none'}:${resolvedCodexBinding?.bindingHash ?? 'none'}`
     try {
       const wrcConfigureToken = await this.deps.tokenFactory.signWrcConfigureToken(
         recipeName,
@@ -337,7 +438,9 @@ export class PluginWorkloadSdkProvisioner {
               mcpHostAgent!.provider,
               mcpHostAgent!.model,
               mcpHostEndpoint,
-              wrcConfigureToken
+              wrcConfigureToken,
+              'promptBridge',
+              resolvedCodexBinding
             )
           : await modelConfigHandler.configurePluginWorkloadSdkBootstrap(
               undefined,
@@ -347,13 +450,41 @@ export class PluginWorkloadSdkProvisioner {
               'clientNotifications'
             )
       if (result.status >= 400) {
+        // A pre-v3 mcp-host image answers the Codex bootstrap with a v2
+        // identity, which the broker rejects. That is a stale workload image,
+        // not a broker outage: charging it to the configure budget renders as
+        // "the configured provider is unavailable" and sends the operator
+        // looking for a credential problem. Record the stale contract as the
+        // pending policy reason instead.
+        if (
+          promptBridge &&
+          mcpHostAgent?.provider === 'codex-subscription' &&
+          result.body?.policyReason === 'codex_bootstrap_contract_stale'
+        ) {
+          log.warn(
+            'Plugin Workload SDK eager mcp-host answered the Codex bootstrap with a pre-v3 contract',
+            { status: result.status, podUid: readiness.uid }
+          )
+          this.eagerSdkBootstrapProofByRecipe.set(recipeName, {
+            ready: true,
+            contractVersion: 2,
+            podUid: readiness.uid,
+            provider: mcpHostAgent.provider,
+            model: mcpHostAgent.model,
+            policyReady: false,
+            policyState: 'contract_stale',
+            policyReason: 'codex_bootstrap_contract_stale',
+            verifiedAt: new Date().toISOString(),
+          })
+          return 'awaiting_policy'
+        }
         this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
         return this.recordEagerConfigureFailure(recipeName, configureKey, log, {
           reason: 'Plugin Workload SDK eager mcp-host bootstrap returned an error',
           detail: { status: result.status },
         })
       }
-      const proof = parseEagerSdkBootstrapProof(result.body, readiness.uid)
+      const proof = parseEagerSdkBootstrapProof(result.body, readiness.uid, mcpHostAgent?.model)
       if (!proof) {
         this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
         return this.recordEagerConfigureFailure(recipeName, configureKey, log, {
@@ -361,9 +492,46 @@ export class PluginWorkloadSdkProvisioner {
           detail: { status: result.status },
         })
       }
+      // The host must echo back exactly the binding WRC minted. A different
+      // binding is a broken host (or a mixed-up pod), not a pending policy:
+      // accepting it would let the recipe execute under a policy WRC never
+      // authorized. The hash covers all five binding fields.
+      //
+      // ORDER IS LOAD-BEARING: this check must stay BELOW the stale-contract
+      // arm in the `status >= 400` branch above. A pre-v3 host answers with no
+      // codexBinding at all, so against a non-null minted binding it compares
+      // `null !== <hash>` and would be charged here as a mismatched echo —
+      // converging on `provider_unavailable` and burying the stale-image reason
+      // under the very symptom that arm exists to replace. Moving this earlier
+      // silently reopens that.
+      if (
+        promptBridge &&
+        mcpHostAgent?.provider === 'codex-subscription' &&
+        (proof.codexBinding?.bindingHash ?? null) !== (resolvedCodexBinding?.bindingHash ?? null)
+      ) {
+        this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
+        return this.recordEagerConfigureFailure(recipeName, configureKey, log, {
+          reason:
+            'Plugin Workload SDK bootstrap echoed a Codex binding that does not match the minted binding',
+          detail: {
+            status: result.status,
+            mintedBindingHash: resolvedCodexBinding?.bindingHash ?? null,
+            echoedBindingHash: proof.codexBinding?.bindingHash ?? null,
+          },
+        })
+      }
       this.eagerSdkBootstrapProofByRecipe.set(recipeName, proof)
       this.eagerSdkConfigureFailuresByRecipe.delete(recipeName)
       if (promptBridge && proof.policyReady === false) {
+        return 'awaiting_policy'
+      }
+      if (
+        promptBridge &&
+        mcpHostAgent?.provider === 'codex-subscription' &&
+        (proof.contractVersion !== 3 ||
+          !proof.codexBinding ||
+          proof.policyReason === 'codex_execution_binding_missing')
+      ) {
         return 'awaiting_policy'
       }
       if (clientNotifications && proof.clientNotificationsPolicyReady === false) {
@@ -530,7 +698,9 @@ export class PluginWorkloadSdkProvisioner {
 
 function parseEagerSdkBootstrapProof(
   body: Record<string, unknown>,
-  podUid: string
+  podUid: string,
+  /** Agent model WRC bootstrapped; a binding for another model is not ours. */
+  expectedModel: string | undefined
 ): EagerSdkBootstrapProof | null {
   if (body.capabilityFamily === 'clientNotifications') {
     if (
@@ -558,12 +728,35 @@ function parseEagerSdkBootstrapProof(
   if (
     body.configured !== true ||
     body.ready !== true ||
-    body.contractVersion !== 2 ||
+    (body.contractVersion !== 2 && body.contractVersion !== 3) ||
     typeof body.provider !== 'string' ||
     typeof body.model !== 'string' ||
     body.provider.length === 0 ||
     body.model.length === 0
   ) {
+    return null
+  }
+  if (body.provider === 'codex-subscription' && body.contractVersion !== 3) {
+    return null
+  }
+  const codexBinding = parseCodexBindingProof(body.codexBinding, expectedModel)
+  if (
+    body.provider === 'codex-subscription' &&
+    body.policyReason === 'codex_execution_binding_missing'
+  ) {
+    return {
+      ready: true,
+      contractVersion: 3,
+      podUid,
+      provider: body.provider,
+      model: body.model,
+      policyReady: false,
+      policyState: typeof body.policyState === 'string' ? body.policyState : 'binding_missing',
+      policyReason: 'codex_execution_binding_missing',
+      verifiedAt: new Date().toISOString(),
+    }
+  }
+  if (body.provider === 'codex-subscription' && !codexBinding) {
     return null
   }
   const hasPolicyProof =
@@ -579,11 +772,15 @@ function parseEagerSdkBootstrapProof(
     body.defaultModel === body.model
   return {
     ready: true,
-    contractVersion: 2,
+    contractVersion: body.contractVersion === 3 ? 3 : 2,
     podUid,
     provider: body.provider,
     model: body.model,
-    policyReady: body.policyReady !== false && hasPolicyProof,
+    ...(codexBinding ? { codexBinding } : {}),
+    policyReady:
+      body.policyReady !== false &&
+      hasPolicyProof &&
+      (body.provider !== 'codex-subscription' || Boolean(codexBinding)),
     policyState: typeof body.policyState === 'string' ? body.policyState : 'unknown',
     ...(typeof body.policyReason === 'string' ? { policyReason: body.policyReason } : {}),
     verifiedAt: new Date().toISOString(),
@@ -606,4 +803,14 @@ function parseEagerSdkBootstrapProof(
       ? { clientNotificationsPolicyReason: body.clientNotificationsPolicyReason }
       : {}),
   }
+}
+
+function parseCodexBindingProof(
+  value: unknown,
+  expectedModel: string | undefined
+): PluginWorkloadSdkCodexBindingProof | undefined {
+  // No expected model means no pin is possible, and an unpinned binding could
+  // be for another model. Refuse the proof instead of accepting it blind.
+  if (!expectedModel) return undefined
+  return readVerifiedSdkOnlyCodexBinding(value, expectedModel) ?? undefined
 }

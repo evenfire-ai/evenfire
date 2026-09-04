@@ -485,7 +485,8 @@ describe('routes/profile', () => {
       'u1',
       'target@example.com',
       [{ teamId: 't1', role: 'admin' }],
-      'target'
+      'target',
+      expect.objectContaining({ contract: 'v1', userId: 'u1' })
     )
   })
 
@@ -741,10 +742,15 @@ describe('routes/profile', () => {
     })
     const gateway = accessCatalogGateway()
     gateway.getResource.mockRejectedValue(transientError)
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const structuredWarn = vi.fn()
 
     const app = express()
     app.use(express.json())
+    app.use((req, _res, next) => {
+      req.log = { warn: structuredWarn } as never
+      next()
+    })
     mountInternalRoutes(app, gateway)
 
     await withInternalServiceAuthAndUserSession(request(app).get('/external/users/u1/agents'))
@@ -765,8 +771,17 @@ describe('routes/profile', () => {
       'agent-stale',
       'agent-b',
     ])
-    expect(warn).toHaveBeenCalledTimes(2)
-    warn.mockRestore()
+    expect(structuredWarn).toHaveBeenCalledOnce()
+    expect(structuredWarn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        err: transientError,
+        source: 'agents',
+        userId: 'u1',
+      }),
+      'external user MCP server enrichment failed'
+    )
+    expect(consoleWarn).toHaveBeenCalledOnce()
+    consoleWarn.mockRestore()
   })
 
   it('verifies session token server-side for rpc token issuance', async () => {

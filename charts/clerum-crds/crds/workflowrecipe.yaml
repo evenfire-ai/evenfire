@@ -272,6 +272,9 @@ spec:
                     Default agent configuration for workflow execution, or the
                     provider/model bootstrap binding for a stepless
                     spec.pluginWorkloadSdk.promptBridge runtime.
+                  x-kubernetes-validations:
+                    - rule: "!has(self.provider) || self.provider != 'codex-subscription' || !has(self.secretRef)"
+                      message: spec.agent.secretRef is not allowed for oauth-broker providers
                   properties:
                     model:
                       type: string
@@ -284,7 +287,7 @@ spec:
                       # transport is mono-credential and cannot deliver Bedrock's key
                       # pair nor azure's required non-secret AZURE_OPENAI_ENDPOINT —
                       # fail at admission, not mid-workflow (see workflowService).
-                      enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax]
+                      enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax, codex-subscription]
                       description: LLM provider.
                     secretRef:
                       type: object
@@ -474,6 +477,16 @@ spec:
                                       maxOutputTokens:
                                         type: integer
                                         minimum: 1
+                                        description: >-
+                                          Per-grant output ceiling. Enforced
+                                          as max_tokens on API-key providers
+                                          (OpenAI, Claude, Z.AI, Bedrock,
+                                          Google). codex-subscription cannot
+                                          bind it: the ChatGPT wire rejects
+                                          max_output_tokens, so there it only
+                                          shapes the authorize request identity
+                                          and the enforced bound is the
+                                          contract limit of 16384.
                                   clientNotifications:
                                     type: object
                                     required: [allowedEventTypes]
@@ -558,7 +571,7 @@ spec:
                             # bedrock AND azure intentionally absent (mono-credential
                             # WRC transport; see the comment on the first llm provider
                             # enum above).
-                            enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax]
+                            enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax, codex-subscription]
                           soul:
                             type: string
                             description: Per-step SOUL content override.
@@ -1612,6 +1625,10 @@ spec:
                         # O2: known-shape adapters baked into control-api.
                         # Adding a provider is a control-api change — recipes
                         # cannot speak OAuth to arbitrary endpoints.
+                        # U2 (spec 06) scopes monday/clickup/vercel to McpServers
+                        # ONLY — they are deliberately NOT added here. The
+                        # asymmetry is fail-closed: a recipe declaring one is
+                        # rejected at admission, which is the intended behavior.
                         enum:
                           - salesforce
                           - slack
@@ -1704,6 +1721,14 @@ spec:
                         maxOutputTokens:
                           type: integer
                           minimum: 1
+                          description: >-
+                            Per-grant output ceiling. Enforced as max_tokens
+                            on API-key providers (OpenAI, Claude, Z.AI,
+                            Bedrock, Google). codex-subscription cannot bind
+                            it: the ChatGPT wire rejects max_output_tokens, so
+                            there it only shapes the authorize request identity
+                            and the enforced bound is the contract limit of
+                            16384.
                         maxRequestsPerRun:
                           type: integer
                           minimum: 1
@@ -2161,7 +2186,12 @@ spec:
                       format: date-time
                     bootstrapContractVersion:
                       type: integer
-                      enum: [2]
+                      # v2 = static-credential SDK bootstrap; v3 = Codex
+                      # reservation-only binding. WRC persists 3 when the
+                      # eager-resolved agent provider is codex-subscription:
+                      # spec.agent, or — when spec.agent is absent — the
+                      # first step that declares a complete agent.
+                      enum: [2, 3]
                     bootstrapPodUid:
                       type: string
                     bootstrapProvider:

@@ -6,6 +6,7 @@ import {
   databaseRelationshipsRevision,
   revisionOfValues,
 } from './authorizationRevision.js'
+import { compareCanonicalUtf8Text } from './canonicalText.js'
 import type { AccessCapability } from './capabilityRegistry.js'
 import { gfsPermissionsToCapabilities } from './capabilityRegistry.js'
 import {
@@ -252,7 +253,7 @@ function simpleOperationalCandidates(input: {
   const runtimeRef = JSON.stringify(
     relevantRelationships
       .map(row => boundedString(row.relationship_instance_id, 'relationship_instance', 256))
-      .sort()
+      .sort(compareCanonicalUtf8Text)
   )
   return input.pathRows.map(row =>
     commonCandidate({

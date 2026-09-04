@@ -19,8 +19,14 @@
  */
 import * as k8s from '@kubernetes/client-node'
 import { createHash } from 'node:crypto'
+import { config } from '../config.js'
 import type { DbClient } from '../db.js'
 import { pool } from '../db.js'
+import { listEnabledCodexModelsGroupedByConnection } from './codexSubscriptionCatalog.js'
+import {
+  type CodexSubscriptionSafeConnection,
+  listLiveCodexSubscriptionConnections,
+} from './codexSubscriptionConnection.js'
 import { type AllowedModelEntry, listEnabledGroupedByProvider } from './llmAllowedModels.js'
 
 // CROSS-SERVICE CONTRACT: producer side of the allowlist ConfigMap. Consumers
@@ -29,12 +35,96 @@ import { type AllowedModelEntry, listEnabledGroupedByProvider } from './llmAllow
 // modelConfigHandler.ts, ALLOWLIST_CONFIGMAP_NAME). Keep name + data format in sync.
 export const ALLOWED_MODELS_CONFIGMAP_NAME = 'clerum-llm-allowed-models'
 export const CONTENT_HASH_ANNOTATION = 'clerum.io/content-hash'
+export const CATALOG_REVISION_ANNOTATION = 'clerum.io/catalog-revision'
+export const CONNECTION_REVISION_ANNOTATION = 'clerum.io/connection-revision'
+export const CODEX_CONNECTION_STATUS_ANNOTATION = 'clerum.io/codex-connection-status'
+export const CODEX_ENABLED_ANNOTATION = 'clerum.io/codex-enabled'
+export const CODEX_CONNECTIONS_ANNOTATION = 'clerum.io/codex-connections'
+
+const KNOWN_CONNECTION_STATUSES = new Set([
+  'disconnected',
+  'connecting',
+  'connected',
+  'reauth_required',
+  'revoked',
+])
+
+export function mapCodexConnectionStatusForSnapshot(
+  connection: CodexSubscriptionSafeConnection | null
+): 'connected' | 'disconnected' | 'reauth-required' | 'unavailable' | 'revoked' {
+  if (!connection || !KNOWN_CONNECTION_STATUSES.has(connection.status)) return 'disconnected'
+  if (connection.status === 'revoked') return 'revoked'
+  if (connection.status === 'reauth_required' || connection.catalogStatus === 'auth-rejected') {
+    return 'reauth-required'
+  }
+  if (connection.catalogStatus === 'unavailable') return 'unavailable'
+  if (connection.status === 'connected' && connection.catalogStatus === 'ready') return 'connected'
+  return 'disconnected'
+}
+
+export function buildCodexReadinessAnnotations(
+  connection: CodexSubscriptionSafeConnection | null,
+  connections: CodexSubscriptionSafeConnection[] = [],
+  modelsByKey: Record<string, string[]> = {}
+): Record<string, string> {
+  const annotations: Record<string, string> = {
+    [CODEX_ENABLED_ANNOTATION]: config.codexSubscriptionEnabled ? 'true' : 'false',
+    [CODEX_CONNECTION_STATUS_ANNOTATION]: mapCodexConnectionStatusForSnapshot(connection),
+  }
+  if (
+    connection &&
+    KNOWN_CONNECTION_STATUSES.has(connection.status) &&
+    Number.isInteger(connection.catalogRevision) &&
+    Number.isInteger(connection.credentialRevision)
+  ) {
+    annotations[CATALOG_REVISION_ANNOTATION] = String(connection.catalogRevision)
+    annotations[CONNECTION_REVISION_ANNOTATION] = String(connection.credentialRevision)
+  }
+  const map: Record<
+    string,
+    {
+      status: ReturnType<typeof mapCodexConnectionStatusForSnapshot>
+      catalogRevision: number
+      connectionRevision: number
+      models: string[]
+    }
+  > = {}
+  for (const row of connections) {
+    map[row.connectionKey] = {
+      status: mapCodexConnectionStatusForSnapshot(row),
+      catalogRevision: row.catalogRevision,
+      connectionRevision: row.credentialRevision,
+      models: modelsByKey[row.connectionKey] ?? [],
+    }
+  }
+  if (Object.keys(map).length > 0) {
+    annotations[CODEX_CONNECTIONS_ANNOTATION] = JSON.stringify(map)
+  }
+  return annotations
+}
 
 const MANAGED_BY_LABEL = 'clerum.io/managed-by'
 
 /** The materializer surface the routes / boot module depend on (test seam). */
 export interface AllowedModelsConfigMapMaterializer {
   materialize(db?: DbClient): Promise<void>
+}
+
+/**
+ * Push the current Postgres allowlist + per-grant Codex snapshot to the
+ * runtime ConfigMap. Catalog sync (including recorded non-ready outcomes),
+ * manual refresh, revoke, and a successful OAuth persist must call this —
+ * mcp-host/HCC never read Postgres, and a cluster in operation cannot wait
+ * for the next control-api boot.
+ *
+ * Missing writer is a no-op so unit tests without a K8s gateway stay local.
+ */
+export async function publishAllowedModelsConfigMapAfterGrantChange(
+  writer: AllowedModelsConfigMapMaterializer | undefined
+): Promise<'published' | 'skipped'> {
+  if (!writer) return 'skipped'
+  await writer.materialize()
+  return 'published'
 }
 
 /**
@@ -78,10 +168,15 @@ export class LlmAllowedModelsConfigMapWriter implements AllowedModelsConfigMapMa
   async materialize(db: DbClient = pool): Promise<void> {
     const grouped = await listEnabledGroupedByProvider(db)
     const { data, contentHash } = buildConfigMapData(grouped)
+    const connections = await listLiveCodexSubscriptionConnections(db)
+    const modelsByKey = await listEnabledCodexModelsGroupedByConnection(db)
+    const defaultConnection =
+      connections.find(row => row.connectionKey === 'deployment-default') ?? null
+    const readiness = buildCodexReadinessAnnotations(defaultConnection, connections, modelsByKey)
     let lastError: unknown
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       try {
-        await this.writeOnce(data, contentHash)
+        await this.writeOnce(data, contentHash, readiness)
         return
       } catch (err) {
         lastError = err
@@ -91,7 +186,11 @@ export class LlmAllowedModelsConfigMapWriter implements AllowedModelsConfigMapMa
     throw lastError
   }
 
-  private async writeOnce(data: Record<string, string>, contentHash: string): Promise<void> {
+  private async writeOnce(
+    data: Record<string, string>,
+    contentHash: string,
+    readiness: Record<string, string>
+  ): Promise<void> {
     const body: k8s.V1ConfigMap = {
       apiVersion: 'v1',
       kind: 'ConfigMap',
@@ -99,7 +198,10 @@ export class LlmAllowedModelsConfigMapWriter implements AllowedModelsConfigMapMa
         name: ALLOWED_MODELS_CONFIGMAP_NAME,
         namespace: this.namespace,
         labels: { [MANAGED_BY_LABEL]: 'control-api' },
-        annotations: { [CONTENT_HASH_ANNOTATION]: contentHash },
+        annotations: {
+          [CONTENT_HASH_ANNOTATION]: contentHash,
+          ...readiness,
+        },
       },
       data,
     }

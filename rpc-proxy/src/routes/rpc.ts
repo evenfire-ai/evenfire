@@ -12,7 +12,9 @@ import {
 import { runtimeHostEdgeContext } from '../routeActionBindingV2.js'
 import { rpcInvocationContext } from '../rpcAccessContext.js'
 import {
+  ControlApiConnectorsRejectedError,
   type HostWakeApiResponse,
+  fetchUserConnectorsFromControlApi,
   requestHostWakeFromControlApi,
 } from '../services/controlApiRestService.js'
 import {
@@ -235,6 +237,48 @@ export function createRpcRouter(): Router {
           servers: result.servers,
         })
       } catch (error) {
+        next(error)
+      }
+    }
+  )
+
+  // Proactive connectors panel read-model (spec 11 U1): per-agent classified
+  // fleet (`authorized`/`requires_setup`/`no_oauth`). Read of the same catalog
+  // rail as `/rpc/servers`, so it REUSES the `mcp:servers:list` scope (no new
+  // scope minted). `userId` is the signed session subject (`auth.sub`), never a
+  // body/query param.
+  //
+  // SCOPE NOTE (review R1-SM2, owner decision): `mcp:servers:list` now spans two
+  // result-sets. `/rpc/servers` returns the INVOCABLE set (control-api's
+  // classifier filters via `filterInvocable`); this route returns the CLASSIFIED
+  // set, a strict SUPERSET — it also lists disabled and static-auth servers, with
+  // their authorization state. Not an escalation (the caller's own fleet,
+  // non-secret policy only), but anyone granting this scope should know it now
+  // covers both. See classifyConnector in control-api mcpInvocable.ts.
+  router.get(
+    '/rpc/connectors',
+    requireRpcAuth,
+    requireScope('mcp:servers:list'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const auth = req.auth!
+        const rpcAccessToken = extractAuthToken(req)
+        const result = await fetchUserConnectorsFromControlApi(auth.sub, rpcAccessToken)
+        res.status(200).json(result)
+      } catch (error) {
+        // Map a control-api 401/403 to a real status instead of the default
+        // 500. A 500 is non-refreshable on the desktop (shouldRefreshRpcToken),
+        // so an expired rpc access token surfaced as 500 would never trigger a
+        // refresh and would leave the panel stuck. 401 keeps the refresh path
+        // alive; everything else stays 500/504 via the app error handler.
+        if (error instanceof ControlApiConnectorsRejectedError) {
+          if (error.status === 401) {
+            res.status(401).json({ error: 'Unauthorized' })
+            return
+          }
+          res.status(403).json({ error: 'Forbidden: user cannot read connectors' })
+          return
+        }
         next(error)
       }
     }

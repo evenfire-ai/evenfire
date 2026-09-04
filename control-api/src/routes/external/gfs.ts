@@ -180,6 +180,15 @@ function ridOf(resourceId: string): string {
   return resourceId.replace(/-/g, '').toLowerCase()
 }
 
+function toIsoTimestamp(value: unknown): string {
+  if (value instanceof Date) return value.toISOString()
+  if (typeof value === 'string' && value.length > 0) {
+    const parsed = new Date(value)
+    return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString()
+  }
+  throw new Error('gfs_resources.updated_at is required')
+}
+
 function subjectColumns(subjects: Set<string>): { types: string[]; ids: string[] } {
   const types: string[] = []
   const ids: string[] = []
@@ -836,6 +845,7 @@ export function createExternalGfsRouter(): Router {
                 r.path_cache,
                 r.version,
                 r.bytes,
+                r.updated_at,
                 array_remove(array_agg(DISTINCT a.source), NULL) AS sources,
                 array_remove(array_agg(DISTINCT p.permission), NULL) AS permissions,
                 bool_or(a.covers_descendants) AS covers_descendants
@@ -844,7 +854,7 @@ export function createExternalGfsRouter(): Router {
              ON r.drive = $1 AND r.resource_id = a.resource_id AND r.deleted_at IS NULL
            LEFT JOIN LATERAL unnest(a.permissions) AS p(permission) ON true
           WHERE ($4::text IS NULL OR (r.name, r.resource_id) > ($4, $5::uuid))
-          GROUP BY r.resource_id, r.drive, r.parent_resource_id, r.name, r.kind, r.path_cache, r.version, r.bytes
+          GROUP BY r.resource_id, r.drive, r.parent_resource_id, r.name, r.kind, r.path_cache, r.version, r.bytes, r.updated_at
           ORDER BY r.name, r.resource_id
           LIMIT $6`,
         [drive, types, ids, after?.n ?? null, after?.i ?? null, limit + 1]
@@ -858,6 +868,7 @@ export function createExternalGfsRouter(): Router {
         path_cache: string | null
         version: number
         bytes: number
+        updated_at: unknown
         sources: string[]
         permissions: string[]
         covers_descendants: boolean
@@ -892,6 +903,7 @@ export function createExternalGfsRouter(): Router {
               path: row.path_cache,
               version: Number(row.version ?? 0),
               bytes: Number(row.bytes ?? 0),
+              updatedAt: toIsoTimestamp(row.updated_at),
               sources: row.sources ?? [],
               permissions: row.permissions ?? [],
               coversDescendants: Boolean(row.covers_descendants),

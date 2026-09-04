@@ -10,6 +10,7 @@ import {
   unknownBehavior,
 } from './accessPath.js'
 import type { AuthorizationMembershipRevision } from './authorizationRevision.js'
+import { compareCanonicalUtf8Text } from './canonicalText.js'
 import {
   type AccessCapability,
   capabilitiesForTeamRole,
@@ -432,7 +433,9 @@ async function loadSimpleOperationalGrantCandidates(input: {
     relationship => relationship.sourceType === input.resource.type || isRecipe
   )
   const runtimeRef = JSON.stringify(
-    relevantRelationships.map(relationship => relationship.relationshipInstanceId).sort()
+    relevantRelationships
+      .map(relationship => relationship.relationshipInstanceId)
+      .sort(compareCanonicalUtf8Text)
   )
   const bindingType =
     input.resource.type === 'sandbox_app' ? 'workflow_recipe' : input.resource.type

@@ -2,6 +2,16 @@ import type { Request, Response } from 'express'
 import { randomUUID } from 'node:crypto'
 import { ControlApiError } from '../controlApiClient.js'
 
+const SAFE_PUBLIC_CORRELATION_ID = /^[A-Za-z0-9_-]{1,128}$/
+
+export function selectPublicCorrelationId(...candidates: readonly unknown[]): string {
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue
+    if (SAFE_PUBLIC_CORRELATION_ID.test(candidate)) return candidate
+  }
+  return randomUUID()
+}
+
 const PUBLIC_CODE_BY_STATUS: Readonly<Record<number, string>> = {
   400: 'invalid_request',
   401: 'invalid_session',
@@ -23,6 +33,10 @@ const PUBLIC_CODE_BY_STATUS: Readonly<Record<number, string>> = {
   507: 'insufficient_storage',
 }
 
+const SUPPORTED_CONTROL_API_PUBLIC_STATUSES = new Set(
+  Object.keys(PUBLIC_CODE_BY_STATUS).map(Number)
+)
+
 const PUBLIC_MESSAGE_BY_CODE: Readonly<Record<string, string>> = {
   invalid_request: 'The request is not valid.',
   invalid_session: 'The session is not valid.',
@@ -42,6 +56,8 @@ const PUBLIC_MESSAGE_BY_CODE: Readonly<Record<string, string>> = {
   internal_error: 'The request could not be completed.',
   upstream_unavailable: 'The upstream service is temporarily unavailable.',
   authority_unavailable: 'Authorization is temporarily unavailable.',
+  member_registration_unavailable: 'Member registration is temporarily unavailable.',
+  member_registration_misconfigured: 'Member registration is not configured correctly.',
   upstream_timeout: 'The upstream service timed out.',
   insufficient_storage: 'The requested operation cannot be completed because storage is full.',
 }
@@ -62,7 +78,11 @@ const ALLOWED_CODES_BY_STATUS: Readonly<Record<number, ReadonlySet<string>>> = {
   429: new Set(['rate_limited']),
   500: new Set(['internal_error']),
   502: new Set(['upstream_unavailable']),
-  503: new Set(['authority_unavailable']),
+  503: new Set([
+    'authority_unavailable',
+    'member_registration_unavailable',
+    'member_registration_misconfigured',
+  ]),
   504: new Set(['upstream_timeout']),
   507: new Set(['insufficient_storage']),
 }
@@ -81,6 +101,8 @@ const SAFE_DOMAIN_REASONS = new Set([
   'subjects_invalid',
   'escalation_rejected',
   'manage_acl_required',
+  'desktop_requires_team',
+  'no_permitted_scopes',
 ])
 
 const PUBLIC_RATE_LIMIT_HEADERS = [
@@ -139,7 +161,8 @@ function safePathDescriptors(value: unknown): PublicPathDescriptor[] | undefined
 
 export function sanitizeControlApiPublicError(
   error: unknown,
-  propagatedStatuses: ReadonlySet<number>
+  propagatedStatuses: ReadonlySet<number>,
+  fallbackCorrelationId = ''
 ): SanitizedControlApiPublicError | null {
   if (!(error instanceof ControlApiError) || !propagatedStatuses.has(error.status)) return null
   const rawBody =
@@ -152,7 +175,9 @@ export function sanitizeControlApiPublicError(
   const suppliedCode =
     rawEnvelope && typeof (rawEnvelope as { code?: unknown }).code === 'string'
       ? String((rawEnvelope as { code: string }).code)
-      : ''
+      : error.status === 503 && typeof rawError === 'string'
+        ? rawError
+        : ''
   const fallbackCode = PUBLIC_CODE_BY_STATUS[error.status] || 'internal_error'
   const code = ALLOWED_CODES_BY_STATUS[error.status]?.has(suppliedCode)
     ? suppliedCode
@@ -161,9 +186,7 @@ export function sanitizeControlApiPublicError(
     rawEnvelope && typeof (rawEnvelope as { correlationId?: unknown }).correlationId === 'string'
       ? String((rawEnvelope as { correlationId: string }).correlationId)
       : ''
-  const correlationId = /^[A-Za-z0-9_-]{1,128}$/.test(rawCorrelationId)
-    ? rawCorrelationId
-    : randomUUID()
+  const correlationId = selectPublicCorrelationId(rawCorrelationId, fallbackCorrelationId)
   const retryable = [408, 425, 429, 502, 503, 504].includes(error.status)
   const rawDetails =
     rawEnvelope && typeof (rawEnvelope as { details?: unknown }).details === 'object'
@@ -229,6 +252,17 @@ export function sanitizeControlApiPublicError(
   }
 }
 
+export function sanitizeSupportedControlApiPublicError(
+  error: unknown,
+  fallbackCorrelationId = ''
+): SanitizedControlApiPublicError | null {
+  return sanitizeControlApiPublicError(
+    error,
+    SUPPORTED_CONTROL_API_PUBLIC_STATUSES,
+    fallbackCorrelationId
+  )
+}
+
 export function sendSanitizedControlApiPublicError(
   res: Response,
   sanitized: SanitizedControlApiPublicError
@@ -240,9 +274,7 @@ export function sendSanitizedControlApiPublicError(
 }
 
 export function publicCorrelationId(req: Request): string {
-  return (
-    String(req.header('x-correlation-id') || '').trim() || Math.random().toString(36).slice(2, 12)
-  )
+  return selectPublicCorrelationId(req.header('x-correlation-id'))
 }
 
 export function sendPublicApiError(

@@ -38,7 +38,18 @@ import type {
   WorkflowRecipeSpec,
   WorkflowSnippetRunSpec,
 } from '../types'
-import { resolveMcpHostAgent } from './agentResolution'
+import { resolveEagerSdkMcpHostAgent, resolveMcpHostAgent } from './agentResolution'
+import {
+  CODEX_EXECUTE_SCOPE,
+  type CodexCatalogSnapshot,
+  type CodexExecutionProjection,
+} from './codexExecutionProjection'
+import {
+  type CodexAllowlistView,
+  type CodexRecipeVerdict,
+  type CodexReconcileContext,
+  projectCodexRecipeVerdict,
+} from './codexRecipeVerdict'
 import {
   type PodReadiness,
   deletePodIfExists,
@@ -52,6 +63,14 @@ import {
 } from './crashRecovery'
 import { JwtTokenFactory } from './jwtTokenFactory'
 import {
+  ALLOWED_MODELS_CONFIGMAP_NAME,
+  ALLOWLIST_CONFIGMAP_NAMESPACE,
+  CODEX_UNASSIGNED_CONNECTION_KEY,
+  parseAllowedModelsSnapshot,
+  snapshotFromConfigMapError,
+} from './llmAllowedModelsSnapshot'
+import {
+  type EffectiveWorkflowControlScope,
   type WorkflowControlScope,
   issueMcpHostRuntimeTokens,
   issueMcpHostWorkflowControlToken,
@@ -61,6 +80,9 @@ import { NetworkPolicyConfig, buildWorkflowNetworkPolicies } from './networkPoli
 import { ObjectStorageClient, StorageCredentials, StorageRef } from './objectStorageClient'
 import {
   type EagerSdkBootstrapProof,
+  type McpHostRuntimeTokenRefreshReason,
+  type McpHostRuntimeTokenRefreshResult,
+  NO_MCP_HOST_RUNTIME_TOKEN_REFRESH,
   PluginWorkloadSdkProvisioner,
 } from './pluginWorkloadSdkProvisioner'
 import type {
@@ -123,7 +145,13 @@ import {
   deleteScheduling,
   reconcileScheduling,
 } from './schedulingHandler'
-import { buildMcpHostRuntimeTokenSecret, createCoordinatorTokens } from './secretFactory'
+import {
+  MCP_HOST_RUNTIME_TOKEN_GENERATION_ANNOTATION,
+  buildMcpHostRuntimeTokenSecret,
+  createCoordinatorTokens,
+  nextMcpHostRuntimeTokenGeneration,
+  readMcpHostRuntimeTokenGeneration,
+} from './secretFactory'
 import { SNIPPET_RUN_KEYS } from './snippetRunSchema'
 import {
   CyclicDependencyError,
@@ -334,14 +362,21 @@ const WORKFLOW_CONTROL_SCOPE_ORDER: WorkflowControlScope[] = [
   'plugin-workload-sdk',
 ]
 
+const EFFECTIVE_WORKFLOW_CONTROL_SCOPE_ORDER: EffectiveWorkflowControlScope[] = [
+  ...WORKFLOW_CONTROL_SCOPE_ORDER,
+  'llm:codex:execute',
+]
+
+export type { CodexReconcileContext } from './codexRecipeVerdict'
+
 function orderedScopesEqual<T extends string>(actual: T[], expected: T[]): boolean {
   if (actual.length !== expected.length) return false
   return actual.every((scope, index) => scope === expected[index])
 }
 
 function workflowControlScopesEqual(
-  actual: WorkflowControlScope[],
-  expected: WorkflowControlScope[]
+  actual: EffectiveWorkflowControlScope[],
+  expected: EffectiveWorkflowControlScope[]
 ): boolean {
   return orderedScopesEqual(actual, expected)
 }
@@ -355,6 +390,17 @@ function gfsScopesEqual(
 
 function workflowHasGfsPublishTargets(spec: WorkflowRecipeSpec): boolean {
   return (spec.gfs?.publishTargets ?? []).length > 0
+}
+
+function isCodexSnapshotTimeout(error: unknown): boolean {
+  const code = (error as { code?: unknown }).code
+  if (code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT' || code === 'ABORT_ERR') {
+    return true
+  }
+  const name = (error as { name?: string }).name
+  if (name === 'AbortError' || name === 'TimeoutError') return true
+  const message = error instanceof Error ? error.message : String(error)
+  return /timed?\s*out/i.test(message)
 }
 
 function deriveRecipeHostGfsScopes(spec: WorkflowRecipeSpec): WorkflowRecipeGfsScope[] {
@@ -380,6 +426,8 @@ function deriveWorkflowControlScopes(
   spec: WorkflowRecipeSpec,
   opts: { pluginWorkloadSdkEnabled?: boolean } = {}
 ): WorkflowControlScope[] {
+  // Declarative workflow/SDK scopes only. `llm:codex:execute` is derive-only
+  // from the Codex eligibility projection and must never be minted here.
   const scopes = new Set<WorkflowControlScope>()
   // Plugin Workload SDK (plan §3.6): only recipes that declare the
   // capability — and only while the feature flag is on — receive the scope
@@ -840,6 +888,33 @@ export interface WorkflowReconcilerDeps {
 export class WorkflowReconciler {
   private readonly log = createLogger('wrc', 'reconciler')
   private readonly pluginWorkloadSdkProvisioner: PluginWorkloadSdkProvisioner
+  /**
+   * The last allowlist refresh as ONE value. `configMap` is kept raw so each
+   * recipe's projection can re-parse it with that recipe's assigned grant key
+   * (HCC keeps the same shape for Hosts), and it is cleared on a failed read so
+   * the projection sees `missing`. They are a single field because they must be
+   * read together: a `configMap` from one refresh paired with a verdict from
+   * another is how a concurrently-reconciled recipe turns a failed read into a
+   * binding-less v3 configure that wipes a live mcp-host binding.
+   * Readers capture `this.codexView` once and use only that snapshot.
+   *
+   * There is deliberately NO derived boolean here. Every
+   * consumer reads a field of the ONE `CodexRecipeVerdict` a pass computes
+   * with `projectCodexRecipeVerdict`. Converging one dimension at a time —
+   * first `readOk`, then `snapshotError` — always left the next one free to
+   * diverge; provenance was that next one.
+   *
+   * Cleared on a failed read so grant decisions stay fail-closed. Do not send
+   * a binding-less v3 configure in that window — skip configure so mcp-host
+   * keeps a live binding. Symmetrically (see `resolveEffectiveControlScopes`),
+   * an unreadable ConfigMap must not revoke the Codex scope either: with no
+   * data there is no policy decision to apply in either direction.
+   */
+  private codexView: {
+    configMap?: k8s.V1ConfigMap
+    snapshot: CodexCatalogSnapshot
+  } = { snapshot: { flagEnabled: false } }
+  private readonly codexContexts = new Map<string, CodexReconcileContext>()
 
   constructor(private readonly deps: WorkflowReconcilerDeps) {
     this.pluginWorkloadSdkProvisioner = new PluginWorkloadSdkProvisioner({
@@ -848,14 +923,29 @@ export class WorkflowReconciler {
       tokenFactory: deps.tokenFactory,
       modelConfigHandler: deps.modelConfigHandler,
       log: this.log,
-      ensureMcpHostSecrets: (namespace, recipeName, runtimeScopeRecipeName, spec) =>
-        this.ensureMcpHostSecrets(namespace, recipeName, runtimeScopeRecipeName, spec),
+      ensureMcpHostSecrets: (
+        namespace,
+        recipeName,
+        runtimeScopeRecipeName,
+        spec,
+        recipeUid,
+        codexVerdict
+      ) =>
+        this.ensureMcpHostSecrets(
+          namespace,
+          recipeName,
+          runtimeScopeRecipeName,
+          spec,
+          recipeUid,
+          codexVerdict
+        ),
       applyWorkflowNetworkPolicies: (
         recipeName,
         recipeUid,
         spec,
         runtime,
         awaitsTriggeredRun,
+        codexProjection,
         eagerSdkMcpHost
       ) =>
         this.applyWorkflowNetworkPolicies(
@@ -864,12 +954,133 @@ export class WorkflowReconciler {
           spec,
           runtime,
           awaitsTriggeredRun,
+          codexProjection,
           eagerSdkMcpHost
         ),
       ensureMcpHostHeadlessService: recipeName => this.ensureMcpHostHeadlessService(recipeName),
       createIfNotExists: (createFn, label) => this.createIfNotExists(createFn, label),
       safeDelete: deleteFn => this.safeDelete(deleteFn),
     })
+  }
+
+  setCodexReconcileContext(context: CodexReconcileContext | null, recipeUid?: string): void {
+    if (!context) {
+      const uid = recipeUid?.trim()
+      if (uid) this.codexContexts.delete(uid)
+      return
+    }
+    this.codexContexts.set(context.recipeUid, context)
+  }
+
+  private resolveCodexContext(
+    recipeUid: string,
+    recipeName: string,
+    runtimeScopeRecipeName: string
+  ): CodexReconcileContext {
+    const stored = this.codexContexts.get(recipeUid)
+    if (stored) return stored
+    return {
+      recipeUid,
+      recipeName,
+      runtimeScopeRecipeName,
+      claimedParent: false,
+      parentSpec: null,
+      connectionKey: CODEX_UNASSIGNED_CONNECTION_KEY,
+    }
+  }
+
+  /**
+   * The single Codex verdict for one reconcile pass.
+   *
+   * `view` is a REQUIRED parameter and never defaults to `this.codexView`:
+   * the caller must capture the allowlist refresh once and hand the same
+   * object to every consumer. Reading the live field here is exactly how the
+   * scope path and the configure path ended up on two different snapshots
+   * within one pass (scope dimension).
+   */
+  private codexVerdictFor(
+    spec: WorkflowRecipeSpec,
+    recipeUid: string,
+    recipeName: string,
+    runtimeScopeRecipeName: string,
+    view: CodexAllowlistView
+  ): CodexRecipeVerdict {
+    const context = this.resolveCodexContext(recipeUid, recipeName, runtimeScopeRecipeName)
+    return projectCodexRecipeVerdict({
+      ownSpec: spec,
+      context,
+      hostAgent: resolveEagerSdkMcpHostAgent(spec),
+      view,
+      log: this.log,
+    })
+  }
+
+  /**
+   * Effective control scopes plus whether the Codex decision rests on data.
+   *
+   * `codexScopeUncertain` is true when the projection could not decide —
+   * an unreadable allowlist ConfigMap, or a spec whose Codex provenance could
+   * not be established. In that state `derivedScopes` is empty, which is
+   * indistinguishable from a real revocation; the token refresh uses the flag
+   * to preserve whatever the live JWT already carries instead of reminting
+   * (and rolling the pod) over a transient read failure. A readable ConfigMap
+   * that says `reauth-required` is a decision, not uncertainty: it still
+   * withdraws the scope.
+   */
+  private resolveEffectiveControlScopes(
+    spec: WorkflowRecipeSpec,
+    verdict: CodexRecipeVerdict
+  ): { scopes: EffectiveWorkflowControlScope[]; codexScopeUncertain: boolean } {
+    const workflow = deriveWorkflowControlScopes(spec, {
+      pluginWorkloadSdkEnabled: this.deps.config.pluginWorkloadSdkEnabled,
+    })
+    const derived = verdict.projection.derivedScopes.filter(
+      scope => !workflow.includes(scope as WorkflowControlScope)
+    )
+    return {
+      scopes: [...workflow, ...derived] as EffectiveWorkflowControlScope[],
+      codexScopeUncertain: verdict.projection.eligibility === 'uncertain',
+    }
+  }
+
+  private async refreshCodexSnapshot(): Promise<{
+    configMap?: k8s.V1ConfigMap
+    snapshot: CodexCatalogSnapshot
+  }> {
+    try {
+      const cm = await this.deps.coreApi.readNamespacedConfigMap({
+        name: ALLOWED_MODELS_CONFIGMAP_NAME,
+        namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
+      })
+      this.codexView = { configMap: cm, snapshot: parseAllowedModelsSnapshot(cm) }
+      return this.codexView
+    } catch (err) {
+      if (isCodexSnapshotTimeout(err)) {
+        this.codexView = { snapshot: snapshotFromConfigMapError('timeout') }
+        this.log.warn('Codex allowlist ConfigMap read timed out; failing closed', {
+          configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
+          namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
+        })
+        return this.codexView
+      }
+      const code = getErrorCode(err)
+      if (code === 401 || code === 403) {
+        this.codexView = { snapshot: snapshotFromConfigMapError('forbidden') }
+        this.log.warn('Codex allowlist ConfigMap read forbidden; failing closed', {
+          configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
+          namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
+          statusCode: code,
+        })
+        return this.codexView
+      }
+      this.codexView = { snapshot: snapshotFromConfigMapError('missing') }
+      this.log.warn('Codex allowlist ConfigMap unavailable; failing closed', {
+        configMap: ALLOWED_MODELS_CONFIGMAP_NAME,
+        namespace: ALLOWLIST_CONFIGMAP_NAMESPACE,
+        statusCode: code,
+      })
+      return this.codexView
+    }
   }
 
   private get runtimeTokenRefreshBeforeSeconds(): number {
@@ -936,6 +1147,17 @@ export class WorkflowReconciler {
       throw new Error('SDK-only runtime requires spec.steps to be absent or empty')
     }
 
+    const codexView = await this.refreshCodexSnapshot()
+    // One verdict per pass. Scope, binding and the configure skip are fields of
+    // this object, not three derivations that must be kept in agreement.
+    const codexVerdict = this.codexVerdictFor(
+      spec,
+      recipeUid,
+      recipeName,
+      runtimeScopeRecipeName,
+      codexView
+    )
+
     const runtime = deriveWorkflowRuntimePlan(spec, {
       recipeName,
       runtimeScopeRecipeName,
@@ -953,7 +1175,7 @@ export class WorkflowReconciler {
       runtimeScopeRecipeName,
       spec,
       runtime,
-      { mcpHostPhase }
+      { mcpHostPhase, codexVerdict }
     )
     const bootstrapProof = this.pluginWorkloadSdkProvisioner.getBootstrapProof(recipeName)
     switch (status) {
@@ -1004,6 +1226,7 @@ export class WorkflowReconciler {
       `${recipeName}-mcp-host-to-llm-api`,
       `${recipeName}-mcp-host-to-gfs`,
       `${recipeName}-mcp-host-to-approval-gateway`,
+      `${recipeName}-mcp-host-to-codex-proxy`,
     ]
     const networkPolicyNames = preserveWorkflowRuntime
       ? sdkNetworkPolicyNames
@@ -1230,6 +1453,19 @@ export class WorkflowReconciler {
   ): Promise<WorkflowReconcileResult> {
     const preflightError = this.validateWorkflowSpec(spec)
     if (preflightError) return { phase: 'failed', message: preflightError, workflowPhase: 'failed' }
+    // Capture the allowlist refresh ONCE for this pass and
+    // compute the verdict from it. Every consumer below — eager configure, the
+    // run path's secrets, and the NetworkPolicy decision — reads this object
+    // instead of `this.codexView`, which a concurrent recipe can replace
+    // between two of them.
+    const codexView = await this.refreshCodexSnapshot()
+    const codexVerdict = this.codexVerdictFor(
+      spec,
+      recipeUid,
+      recipeName,
+      runtimeScopeRecipeName,
+      codexView
+    )
     const secretPreflightError = await this.validateSnippetSecretRefs(
       recipeName,
       spec,
@@ -1398,6 +1634,15 @@ export class WorkflowReconciler {
           // (that PVC is provisioned by the triggered-run path). Mounting it
           // here would wedge the pod in Pending — the PVC does not exist until a
           // run starts. The triggered run later recreates the pod with the mount.
+          // Reuse the verdict this pass already computed rather than deriving a
+          // second one from the same view. Two derivations cannot disagree here
+          // (identical arguments, `codexView` is const), but a second one is a
+          // seam waiting to drift the moment either call site's arguments move —
+          // and it emits the uncertain-provenance warning twice per pass.
+          // Resolving the binding inside the provisioner (after its own awaits)
+          // let a concurrently-reconciled recipe's failed refresh hand over a
+          // null binding that read as decidable — a binding-less v3 configure
+          // that wipes the live host binding.
           const eagerStatus = await this.pluginWorkloadSdkProvisioner.ensureEagerSdkMcpHost(
             recipeName,
             recipeUid,
@@ -1405,7 +1650,7 @@ export class WorkflowReconciler {
             runtimeScopeRecipeName,
             spec,
             runtime,
-            { mcpHostPhase }
+            { mcpHostPhase, codexVerdict }
           )
           const eagerBootstrapProof =
             this.pluginWorkloadSdkProvisioner.getBootstrapProof(recipeName)
@@ -1639,7 +1884,14 @@ export class WorkflowReconciler {
       }
 
       if (needsMcpHost && !awaitsTriggeredRun) {
-        await this.ensureMcpHostSecrets(namespace, recipeName, runtimeScopeRecipeName, spec)
+        await this.ensureMcpHostSecrets(
+          namespace,
+          recipeName,
+          runtimeScopeRecipeName,
+          spec,
+          recipeUid,
+          codexVerdict
+        )
       }
 
       if (runtime.output.ensurePvc) {
@@ -1879,7 +2131,8 @@ export class WorkflowReconciler {
         recipeUid,
         spec,
         runtime,
-        awaitsTriggeredRun
+        awaitsTriggeredRun,
+        codexVerdict.projection
       )
 
       // 6. Create Pods — mcp-host FIRST, then coordinator. If the coordinator
@@ -2430,7 +2683,8 @@ export class WorkflowReconciler {
     recipeNamespace: string,
     recipeName: string,
     spec: WorkflowRecipeSpec,
-    runtimeScopeRecipeName = recipeName
+    runtimeScopeRecipeName = recipeName,
+    recipeUid?: string
   ): Promise<void> {
     const runtime = deriveWorkflowRuntimePlan(spec, {
       recipeName,
@@ -2438,7 +2692,15 @@ export class WorkflowReconciler {
       pluginWorkloadSdkEnabled: this.deps.config.pluginWorkloadSdkEnabled,
     })
     if (!runtime.mcpHost.required) return
-    await this.ensureMcpHostSecrets(recipeNamespace, recipeName, runtimeScopeRecipeName, spec)
+    const codexView = await this.refreshCodexSnapshot()
+    await this.ensureMcpHostSecrets(
+      recipeNamespace,
+      recipeName,
+      runtimeScopeRecipeName,
+      spec,
+      recipeUid,
+      this.codexVerdictFor(spec, recipeUid ?? '', recipeName, runtimeScopeRecipeName, codexView)
+    )
   }
 
   async ensureCoordinatorRuntimeCredentials(
@@ -2642,6 +2904,12 @@ export class WorkflowReconciler {
     spec: WorkflowRecipeSpec,
     runtime: WorkflowRuntimePlan,
     awaitsTriggeredRun: boolean,
+    /**
+     * The pass's Codex projection. Recomputing it here read the
+     * live allowlist view after this method's own awaits, so a NetworkPolicy
+     * decision could rest on a different snapshot than the binding did.
+     */
+    codexProjection: CodexExecutionProjection,
     eagerSdkMcpHost = false
   ): Promise<k8s.V1NetworkPolicy[]> {
     const runtimeHttpEgressPolicyNames = this.runtimeHttpEgressPolicyNames(recipeName, spec)
@@ -2661,6 +2929,8 @@ export class WorkflowReconciler {
     // deploys the mcp-host (and its NetworkPolicy lanes) before any run is
     // triggered. The artifact-reader/snippet-runner stay run-only.
     const mcpHostLaneLive = !awaitsTriggeredRun || eagerSdkMcpHost
+    const includeMcpHost = runtime.network.includeMcpHost && mcpHostLaneLive
+
     const npConfig: NetworkPolicyConfig = {
       recipeName,
       sandboxNamespace: this.deps.config.sandboxNamespace,
@@ -2670,7 +2940,8 @@ export class WorkflowReconciler {
       mcpHostPort: 8080,
       artifactReaderPort: 8080,
       snippetRunnerPort: 8095,
-      includeMcpHost: runtime.network.includeMcpHost && mcpHostLaneLive,
+      includeMcpHost,
+      includeCodexProxyEgress: codexProjection.requiresCodexProxyEgress && includeMcpHost,
       // A stepless eager SDK host has no coordinator pod. Keep the mcp-host
       // control/egress lanes, but do not manufacture coordinator policies
       // whose selectors can never match a real workload.
@@ -2762,6 +3033,7 @@ export class WorkflowReconciler {
     spec: WorkflowRecipeSpec,
     runtime: WorkflowRuntimePlan,
     awaitsTriggeredRun: boolean,
+    codexProjection: CodexExecutionProjection,
     eagerSdkMcpHost = false
   ): Promise<void> {
     const policies = await this.buildWorkflowNetworkPoliciesForSpec(
@@ -2770,10 +3042,22 @@ export class WorkflowReconciler {
       spec,
       runtime,
       awaitsTriggeredRun,
+      codexProjection,
       eagerSdkMcpHost
     )
     for (const policy of policies) {
       await this.applyNetworkPolicy(policy)
+    }
+    const policyNames = new Set(policies.map(policy => policy.metadata?.name))
+    const codexProxyPolicyName = `${recipeName}-mcp-host-to-codex-proxy`
+
+    if (!policyNames.has(codexProxyPolicyName) && codexProjection.eligibility !== 'uncertain') {
+      await this.safeDelete(() =>
+        this.deps.networkingApi.deleteNamespacedNetworkPolicy({
+          name: codexProxyPolicyName,
+          namespace: this.deps.config.sandboxNamespace,
+        })
+      )
     }
     await this.pruneLegacyMcpServersInternetEgressPolicy(recipeName)
   }
@@ -3105,6 +3389,7 @@ export class WorkflowReconciler {
       `${recipeName}-mcp-host-to-servers`,
       `${recipeName}-mcp-host-to-llm-api`,
       `${recipeName}-mcp-host-to-approval-gateway`,
+      `${recipeName}-mcp-host-to-codex-proxy`,
       `${recipeName}-coord-to-snippet-runner`,
       `${recipeName}-coord-to-snippet-runner-ingress`,
       `${recipeName}-snippet-runner-egress`,
@@ -3474,20 +3759,26 @@ export class WorkflowReconciler {
     namespace: string,
     recipeName: string,
     runtimeScopeRecipeName: string,
-    spec: WorkflowRecipeSpec
-  ): Promise<void> {
-    await this.ensureMcpHostRuntimeTokenSecret(
+    spec: WorkflowRecipeSpec,
+    recipeUid: string | undefined,
+    // The SAME verdict the caller used for the configure decision.
+    // Recomputing it here read `this.codexView` live, so a concurrent refresh
+    // could give the binding one snapshot and the scopes another.
+    codexVerdict: CodexRecipeVerdict
+  ): Promise<McpHostRuntimeTokenRefreshResult> {
+    const effectiveScopes = this.resolveEffectiveControlScopes(spec, codexVerdict)
+    const tokenRefresh = await this.ensureMcpHostRuntimeTokenSecret(
       namespace,
       recipeName,
       runtimeScopeRecipeName,
-      deriveWorkflowControlScopes(spec, {
-        pluginWorkloadSdkEnabled: this.deps.config.pluginWorkloadSdkEnabled,
-      }),
-      deriveRecipeHostGfsScopes(spec)
+      effectiveScopes.scopes,
+      deriveRecipeHostGfsScopes(spec),
+      effectiveScopes.codexScopeUncertain
     )
     if (this.deps.config.pluginWorkloadSdkEnabled && spec.pluginWorkloadSdk) {
       await this.pluginWorkloadSdkProvisioner.ensurePluginWorkloadSdkTokenSecret(recipeName, spec)
     }
+    return tokenRefresh
   }
 
   /**
@@ -4416,9 +4707,10 @@ export class WorkflowReconciler {
     recipeNamespace: string,
     recipeName: string,
     runtimeScopeRecipeName = recipeName,
-    workflowControlScopes: WorkflowControlScope[] = [],
-    gfsScopes: WorkflowRecipeGfsScope[] = ['gfs.read']
-  ): Promise<void> {
+    workflowControlScopes: EffectiveWorkflowControlScope[] = [],
+    gfsScopes: WorkflowRecipeGfsScope[] = ['gfs.read'],
+    codexScopeUncertain = false
+  ): Promise<McpHostRuntimeTokenRefreshResult> {
     const secretName = `wf-${recipeName}-mcp-host-runtime-tokens`
     const sandboxNamespace = this.deps.config.sandboxNamespace
 
@@ -4427,19 +4719,22 @@ export class WorkflowReconciler {
         name: secretName,
         namespace: sandboxNamespace,
       })
-      await this.refreshMcpHostRuntimeTokensIfExpiring(
+      return await this.refreshMcpHostRuntimeTokensIfExpiring(
         recipeNamespace,
         recipeName,
         runtimeScopeRecipeName,
         workflowControlScopes,
         gfsScopes,
-        existing
+        existing,
+        codexScopeUncertain
       )
-      return
     } catch (err) {
       if (getErrorCode(err) !== 404) throw err
     }
 
+    // First mint: there is no live JWT whose Codex decision could be preserved,
+    // so an uncertain snapshot mints without the scope (fail-closed). The real
+    // remint happens once the ConfigMap is readable again.
     const mcpHostRuntimeTokens = await issueMcpHostRuntimeTokens(
       recipeNamespace,
       runtimeScopeRecipeName,
@@ -4464,21 +4759,24 @@ export class WorkflowReconciler {
         body: mcpHostRuntimeSecret,
       })
       this.log.info(`Created Secret "${secretName}"`)
+      return NO_MCP_HOST_RUNTIME_TOKEN_REFRESH
     } catch (err) {
       if (getErrorCode(err) !== 409) throw err
       const existing = await this.deps.coreApi.readNamespacedSecret({
         name: secretName,
         namespace: sandboxNamespace,
       })
-      await this.refreshMcpHostRuntimeTokensIfExpiring(
+      const tokenRefresh = await this.refreshMcpHostRuntimeTokensIfExpiring(
         recipeNamespace,
         recipeName,
         runtimeScopeRecipeName,
         workflowControlScopes,
         gfsScopes,
-        existing
+        existing,
+        codexScopeUncertain
       )
       this.log.info(`Secret "${secretName}" already exists (skip)`)
+      return tokenRefresh
     }
   }
 
@@ -4486,15 +4784,25 @@ export class WorkflowReconciler {
    * Refreshes the mcp-host-runtime-token Secret if either stored JWT is missing or will expire
    * within the configured runtime refresh window. Refresh failures are fatal to reconcile so the
    * mounted Secret never silently drifts stale after a pod restart.
+   *
+   * `codexScopeUncertain` marks a projection that had no data to decide on (see
+   * `resolveEffectiveControlScopes`). In that state the expected scope set
+   * inherits `llm:codex:execute` from the live JWT instead of dropping it: a
+   * transient ConfigMap read failure otherwise looks exactly like a revocation
+   * and remints with reason `scope`, which rolls the eager pod, discards its
+   * bootstrap proof, and rolls it a second time when the ConfigMap returns.
+   * Every other scope is still compared, and a readable ConfigMap that denies
+   * the grant still withdraws the scope and rolls the pod.
    */
   private async refreshMcpHostRuntimeTokensIfExpiring(
     recipeNamespace: string,
     recipeName: string,
     runtimeScopeRecipeName: string,
-    workflowControlScopes: WorkflowControlScope[],
+    requestedWorkflowControlScopes: EffectiveWorkflowControlScope[],
     expectedGfsScopes: WorkflowRecipeGfsScope[],
-    existing: k8s.V1Secret
-  ): Promise<void> {
+    existing: k8s.V1Secret,
+    codexScopeUncertain = false
+  ): Promise<McpHostRuntimeTokenRefreshResult> {
     const rawAccess = existing.data?.['mcp-host-runtime-access-token']
     const rawRefresh = existing.data?.['mcp-host-runtime-refresh-token']
     const accessJwt = rawAccess ? Buffer.from(rawAccess, 'base64').toString('utf-8') : ''
@@ -4511,6 +4819,25 @@ export class WorkflowReconciler {
       refreshJwt,
       'workflowControlScopes'
     )
+    // Uncertain neither grants nor revokes: with no readable catalog the Codex
+    // decision already in the live access JWT is carried forward, so a failed
+    // ConfigMap read cannot masquerade as a revocation. Applies to the issued
+    // tokens as well — expecting a scope the mint would drop would remint on
+    // every pass.
+    const preservedCodexScope =
+      codexScopeUncertain &&
+      accessScopes.includes(CODEX_EXECUTE_SCOPE) &&
+      !requestedWorkflowControlScopes.includes(CODEX_EXECUTE_SCOPE)
+    if (preservedCodexScope) {
+      this.log.warn('Codex catalog is undecidable; preserving the live Codex scope', {
+        recipeName,
+        runtimeScopeRecipeName,
+        scope: CODEX_EXECUTE_SCOPE,
+      })
+    }
+    const workflowControlScopes: EffectiveWorkflowControlScope[] = preservedCodexScope
+      ? [...requestedWorkflowControlScopes, CODEX_EXECUTE_SCOPE]
+      : requestedWorkflowControlScopes
     const rawMcpHostControl = existing.data?.['mcp-host-workflow-control-token']
     const mcpHostControlJwt = rawMcpHostControl
       ? Buffer.from(rawMcpHostControl, 'base64').toString('utf-8')
@@ -4575,8 +4902,19 @@ export class WorkflowReconciler {
       gfsScopesMismatch ||
       gfsAccessExp - nowSecs < refreshBeforeSeconds
 
-    if (!needsMcpHostRuntimeRefresh && !needsWorkflowControlRefresh && !needsGfsAccessRefresh)
-      return
+    if (!needsMcpHostRuntimeRefresh && !needsWorkflowControlRefresh && !needsGfsAccessRefresh) {
+      const tokenGeneration = readMcpHostRuntimeTokenGeneration(existing)
+      return tokenGeneration
+        ? { reminted: false, tokenGeneration }
+        : NO_MCP_HOST_RUNTIME_TOKEN_REFRESH
+    }
+
+    const refreshReason: McpHostRuntimeTokenRefreshReason =
+      runtimeScopesMismatch || controlScopesMismatch
+        ? 'scope'
+        : runtimeBindingMismatch || controlBindingMismatch
+          ? 'binding'
+          : 'ttl'
 
     if (
       runtimeBindingMismatch ||
@@ -4641,19 +4979,43 @@ export class WorkflowReconciler {
         data['mcp-host-gfs-token'] = Buffer.from(gfs.token).toString('base64')
       }
 
+      const currentGeneration = readMcpHostRuntimeTokenGeneration(existing)
+      const tokenGeneration =
+        refreshReason === 'scope' || refreshReason === 'binding'
+          ? nextMcpHostRuntimeTokenGeneration(currentGeneration)
+          : currentGeneration
       await this.deps.coreApi.patchNamespacedSecret(
         {
           name: `wf-${recipeName}-mcp-host-runtime-tokens`,
           namespace: this.deps.config.sandboxNamespace,
           body: {
             data,
+            ...(tokenGeneration && (refreshReason === 'scope' || refreshReason === 'binding')
+              ? {
+                  metadata: {
+                    annotations: {
+                      [MCP_HOST_RUNTIME_TOKEN_GENERATION_ANNOTATION]: tokenGeneration,
+                    },
+                  },
+                }
+              : {}),
           },
         },
         { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
       )
       this.log.info(
-        `Refreshed workflow auth Secret for ${recipeName} (mcpHostRuntime=${needsMcpHostRuntimeRefresh}, mcpHostControl=${needsWorkflowControlRefresh})`
+        `Refreshed workflow auth Secret for ${recipeName} (mcpHostRuntime=${needsMcpHostRuntimeRefresh}, mcpHostControl=${needsWorkflowControlRefresh}, reason=${refreshReason})`
       )
+      // Do not delete ${recipeName}-mcp-host here. This helper also runs on the
+      // in-progress step-based credential refresh path, where a mid-run pod
+      // delete is not recreated. Eager sdk-only hosts roll via
+      // eagerMcpHostRequiresTokenRoll → rollEagerSdkMcpHostPod, including when
+      // this pass only reports the Secret generation residue.
+      return {
+        reminted: true,
+        reason: refreshReason,
+        ...(tokenGeneration ? { tokenGeneration } : {}),
+      }
     } catch (err) {
       this.log.error(`Failed to refresh mcpHost runtime tokens for ${recipeName}`, {
         error: err instanceof Error ? err.message : String(err),
@@ -4665,7 +5027,7 @@ export class WorkflowReconciler {
   private async issueMcpHostControlToken(
     recipeNamespace: string,
     recipeName: string,
-    workflowControlScopes: WorkflowControlScope[]
+    workflowControlScopes: EffectiveWorkflowControlScope[]
   ): Promise<string> {
     try {
       return await issueMcpHostWorkflowControlToken(
@@ -4713,23 +5075,23 @@ export class WorkflowReconciler {
   private static jwtWorkflowControlScopes(
     jwt: string,
     claim: 'scopes' | 'workflowControlScopes' = 'scopes'
-  ): WorkflowControlScope[] {
+  ): EffectiveWorkflowControlScope[] {
     try {
       const payload = decodeJwt(jwt)
       const scopes = Array.isArray(payload[claim]) ? payload[claim] : []
-      const normalized: WorkflowControlScope[] = []
+      const normalized: EffectiveWorkflowControlScope[] = []
       const seen = new Set<string>()
       for (const scope of scopes) {
         if (
           typeof scope === 'string' &&
-          (WORKFLOW_CONTROL_SCOPE_ORDER as string[]).includes(scope) &&
+          (EFFECTIVE_WORKFLOW_CONTROL_SCOPE_ORDER as string[]).includes(scope) &&
           !seen.has(scope)
         ) {
           seen.add(scope)
-          normalized.push(scope as WorkflowControlScope)
+          normalized.push(scope as EffectiveWorkflowControlScope)
         }
       }
-      return WORKFLOW_CONTROL_SCOPE_ORDER.filter(scope => normalized.includes(scope))
+      return EFFECTIVE_WORKFLOW_CONTROL_SCOPE_ORDER.filter(scope => normalized.includes(scope))
     } catch {
       return []
     }

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DbClient } from '../src/db.js'
+import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import {
   type AccessPathBehavior,
   type AccessPathSeed,
@@ -15,6 +16,17 @@ import {
 } from '../src/services/access/liveAuthorizationResolver.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
+
+vi.mock('../src/services/access/operationTarget.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/services/access/operationTarget.js')>()
+  return {
+    ...actual,
+    validateOperationTarget: (input: Parameters<typeof actual.validateOperationTarget>[0]) =>
+      input.capability === 'gfs.write' || input.capability === 'gfs.delete'
+        ? null
+        : actual.validateOperationTarget(input),
+  }
+})
 
 const environmentId = canonicalEnvironmentId()
 const userId = '10000000-0000-4000-8000-000000000001'
@@ -304,6 +316,135 @@ describe('live user-access resolution', () => {
         selectedPath: expect.objectContaining({ kind: 'team', teamId }),
       })
     )
+  })
+
+  it('preserves a path identity when capability selection filters a sibling path', async () => {
+    const options = {
+      memberships: [
+        {
+          teamId,
+          role: 'member',
+          membershipUpdatedAt: '2026-08-10T00:00:00.000Z',
+          teamRevision: '1',
+        },
+      ],
+      hostGrantRows: [
+        {
+          kind: 'direct',
+          grant_id: 'gfs_grants:direct',
+          team_id: null,
+          current_role: null,
+          permissions: ['read', 'write'],
+          drive: '3rd',
+        },
+        {
+          kind: 'team',
+          grant_id: 'gfs_grants:team',
+          team_id: teamId,
+          current_role: 'member',
+          permissions: ['read'],
+          drive: '3rd',
+        },
+      ],
+    }
+    const catalogEquivalent = await resolveLiveAuthorization(gfsRequest(), {
+      transaction: fakeTransaction(options).transaction,
+    })
+    expect(catalogEquivalent.status).toBe('access_path_required')
+    if (catalogEquivalent.status !== 'access_path_required') return
+    const directPath = catalogEquivalent.safePathDescriptors.find(path => path.kind === 'direct')
+    const teamPath = catalogEquivalent.safePathDescriptors.find(path => path.kind === 'team')
+    expect(directPath).toBeDefined()
+    expect(teamPath).toBeDefined()
+
+    const write = await resolveLiveAuthorization(
+      gfsRequest({
+        requiredCapability: 'gfs.write',
+        requestedAccessPathId: directPath!.id,
+      }),
+      { transaction: fakeTransaction(options).transaction }
+    )
+
+    expect(write).toEqual(
+      expect.objectContaining({
+        status: 'allowed',
+        selectedPath: expect.objectContaining({ id: directPath!.id, kind: 'direct' }),
+      })
+    )
+
+    await expect(
+      resolveLiveAuthorization(
+        gfsRequest({
+          requiredCapability: 'gfs.write',
+          requestedAccessPathId: teamPath!.id,
+        }),
+        { transaction: fakeTransaction(options).transaction }
+      )
+    ).resolves.toEqual(
+      expect.objectContaining({ status: 'access_path_stale', code: 'access_path_stale' })
+    )
+
+    const unheldDb = fakeTransaction(options)
+    await expect(
+      resolveLiveAuthorization(gfsRequest({ requiredCapability: 'gfs.delete' }), {
+        transaction: unheldDb.transaction,
+      })
+    ).resolves.toEqual({ status: 'denied', code: 'forbidden' })
+    expect(unheldDb.query).toHaveBeenCalled()
+
+    const unsupportedDb = fakeTransaction(options)
+    await expect(
+      resolveLiveAuthorization(gfsRequest({ requiredCapability: 'gfs.future.unsupported' }), {
+        transaction: unsupportedDb.transaction,
+      })
+    ).resolves.toEqual({ status: 'denied', code: 'unknown_capability' })
+    expect(unsupportedDb.query).not.toHaveBeenCalled()
+  })
+
+  it('charges the complete identity seed set before capability selection', async () => {
+    const db = fakeTransaction({
+      memberships: [
+        {
+          teamId,
+          role: 'member',
+          membershipUpdatedAt: '2026-08-10T00:00:00.000Z',
+          teamRevision: '1',
+        },
+      ],
+      hostGrantRows: [
+        {
+          kind: 'direct',
+          grant_id: 'gfs_grants:direct',
+          team_id: null,
+          current_role: null,
+          permissions: ['read', 'write'],
+          drive: '3rd',
+        },
+        {
+          kind: 'team',
+          grant_id: 'gfs_grants:team',
+          team_id: teamId,
+          current_role: 'member',
+          permissions: ['read'],
+          drive: '3rd',
+        },
+      ],
+    })
+    const budget = AccessExecutionBudget.create('action', { limits: { accessPaths: 1 } })
+    try {
+      await expect(
+        resolveLiveAuthorization(gfsRequest({ requiredCapability: 'gfs.write' }), {
+          transaction: db.transaction,
+          budget,
+        })
+      ).resolves.toEqual({
+        status: 'unavailable',
+        dependencyClass: 'capacity',
+        retryable: true,
+      })
+    } finally {
+      budget.close()
+    }
   })
 
   it('revalidates the exact provider incarnation for a selected operational path', async () => {

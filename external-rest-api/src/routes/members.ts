@@ -18,8 +18,6 @@ import {
 import { TEAM_ROLES, TeamRole } from '../types.js'
 
 const MAX_INVITATION_EMAIL_LENGTH = 320
-const MAX_INVITATION_TEAM_ASSIGNMENTS = 50
-const MAX_INVITEE_NAME_LENGTH = 120
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const MEMBER_RETIREMENT_EDGE_RATE_LIMIT_PER_MINUTE = 30
 const MEMBER_RETIREMENT_SUBJECT_RATE_LIMIT_PER_MINUTE = 30
@@ -162,25 +160,11 @@ export function createMembersRouter(): Router {
         return
       }
       const email = rawEmail.trim().toLowerCase()
-      const normalizedName = String(req.body?.name || '').trim()
-      const name =
-        normalizedName.length > MAX_INVITEE_NAME_LENGTH
-          ? 'x'.repeat(MAX_INVITEE_NAME_LENGTH + 1)
-          : normalizedName
-      const rawTeams: unknown[] = Array.isArray(req.body?.teams) ? req.body.teams : []
-      const teams =
-        rawTeams.length > MAX_INVITATION_TEAM_ASSIGNMENTS
-          ? Array.from({ length: MAX_INVITATION_TEAM_ASSIGNMENTS + 1 }, () => null)
-          : rawTeams
-              .map((item: unknown) => {
-                const row =
-                  item && typeof item === 'object' ? (item as Record<string, unknown>) : {}
-                const teamId = String(row.teamId || row.id || '').trim()
-                const role = String(row.role || 'member').trim() as TeamRole
-                return teamId && TEAM_ROLES.includes(role) ? { teamId, role } : null
-              })
-              .filter((item): item is { teamId: string; role: TeamRole } => Boolean(item))
-      res.status(201).json(await inviteManagedMember(email, name, teams, extractAuthToken(req)))
+      res
+        .status(201)
+        .json(
+          await inviteManagedMember(email, req.body?.name, req.body?.teams, extractAuthToken(req))
+        )
     } catch (error) {
       if (isControlApiBadRequest(error, 'invalid_email')) {
         res.status(400).json({ error: 'Valid email is required' })

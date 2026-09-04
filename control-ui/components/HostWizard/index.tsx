@@ -9,7 +9,6 @@ import { SelectionDropdown } from '@/components/SelectionDropdown'
 import { useToast } from '@/components/Toast'
 import { IconAlertTriangle, IconCheck, IconX } from '@/components/icons'
 import { Button, CheckboxField, Field, TextInput } from '@/components/ui'
-import { createAgentContextName } from '@/lib/agentContext'
 import {
   apiSend,
   getAdminTeams,
@@ -18,6 +17,14 @@ import {
   updateAgentUsers,
 } from '@/lib/api'
 import { cn } from '@/lib/cn'
+import {
+  CODEX_UNASSIGNED_CONNECTION_KEY,
+  type CodexSubscriptionConnectionView,
+  isAssignableCodexGrant,
+  listCodexConnectionModels,
+  listCodexSubscriptionConnections,
+} from '@/lib/codexSubscription'
+import { isDisabledCapabilityError } from '@/lib/codexSubscriptionFeature'
 import { useLlmAllowedModels } from '@/lib/hooks/useLlmAllowedModels'
 import { getAgentNameError } from '@/lib/k8sValidation'
 import {
@@ -25,16 +32,22 @@ import {
   type LlmPolicy,
   type LlmProvider,
   buildAllowedModelsSpec,
+  constrainModelOptions,
   createEmptyLlmKeyDraft,
   getActiveCredentialKeys,
   getModelOptions,
   getProviderLabel,
   getProvidersWithCompleteCredentials,
   isProviderUsable,
+  llmChainRequiresSecret,
+  offeredCodexModelNames,
   projectCredentialDraft,
+  resolveCodexGrantModel,
   resolveDefaultModel,
   validateLlmSecretData,
 } from '@/lib/llm'
+import { credentialSelectValue, parseCredentialSelect } from '@/lib/llmCredentialSelect'
+import { createPrivateContext } from '@/lib/privateContext'
 import { toKebabCase, toKebabInput } from '@/lib/string'
 import {
   HOST_NAMESPACE,
@@ -136,43 +149,28 @@ async function createOrThrow(path: string, body: unknown, collisionMessage: stri
   }
 }
 
-async function createPrivateContext(
-  agentName: string,
-  selectedMcpServers: string[],
-  collisionMessage: string
-): Promise<string> {
-  // A generated context name is an implementation detail. Hide the rare
-  // collision from the operator by trying one fresh suffix before surfacing the
-  // existing friendly error. The successful name is returned to become the
-  // Host's contextRef.
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const contextName = createAgentContextName(agentName)
-    try {
-      await createOrThrow(
-        '/api/v1/admin/contexts',
-        {
-          metadata: { name: contextName },
-          spec: {
-            contextId: contextName,
-            description: `Connector context for agent ${agentName}`,
-            mcpServers: selectedMcpServers,
-          },
-        },
-        collisionMessage
-      )
-      return contextName
-    } catch (error) {
-      if (!(error instanceof ResourceNameCollisionError) || attempt === 1) throw error
-    }
-  }
-
-  throw new Error(collisionMessage)
-}
-
 function isStepValid(stepIndex: number, state: HostWizardValidationState): boolean {
   if (stepIndex === 0)
     return state.hostName.trim().length > 0 && getAgentNameError(state.hostName) === ''
   if (stepIndex === 1) {
+    if (!state.modelName.trim()) return false
+    if (
+      state.provider === 'codex-subscription' &&
+      (!state.connectionRef.trim() ||
+        state.connectionRef.trim() === CODEX_UNASSIGNED_CONNECTION_KEY ||
+        (state.codexModels.length > 0 && !state.codexModels.includes(state.modelName.trim())))
+    ) {
+      return false
+    }
+    // Broker-only chains (Codex with no static fallback) need the grant in the
+    // shared LLM Secret picker. Any static primary/fallback still requires the
+    // exact credential slots (existing Secret or a complete new one).
+    if (!llmChainRequiresSecret(state.provider, state.llmPolicy?.fallbacks)) {
+      return (
+        state.provider === 'codex-subscription' &&
+        parseCredentialSelect(state.existingSecret).kind === 'subscription'
+      )
+    }
     // New secret: the PRIMARY provider must be usable (asymmetric gate — a
     // fallback missing its key only warns). Cross-slot mistakes (half Bedrock
     // pair, malformed Vertex JSON) anywhere still block. Existing secret: the
@@ -186,11 +184,13 @@ function isStepValid(stepIndex: number, state: HostWizardValidationState): boole
     )
     const hasValidSecret =
       state.secretMode === 'existing'
-        ? state.existingSecret.trim().length > 0
+        ? state.provider === 'codex-subscription'
+          ? state.existingLlmSecret.trim().length > 0
+          : parseCredentialSelect(state.existingSecret).kind === 'secret'
         : toKebabCase(state.newSecretName).length > 0 &&
           primaryCredentialUsable(state.provider, state.llmKeyDraft) &&
           validateLlmSecretData(projectedDraft).length === 0
-    return hasValidSecret && state.modelName.trim().length > 0
+    return hasValidSecret
   }
   if (stepIndex === 2 || stepIndex === 3) return true
   return false
@@ -229,6 +229,7 @@ export function HostWizard({
   // remains available when the operator explicitly chooses New credential.
   const [secretMode, setSecretMode] = useState<'existing' | 'new'>('existing')
   const [existingSecret, setExistingSecret] = useState('')
+  const [existingLlmSecret, setExistingLlmSecret] = useState('')
   const [newSecretName, setNewSecretName] = useState('')
   const [secretNameTouched, setSecretNameTouched] = useState(false)
   const [llmKeyDraft, setLlmKeyDraft] = useState<Record<string, string>>(createEmptyLlmKeyDraft)
@@ -247,6 +248,9 @@ export function HostWizard({
     error: modelsError,
   } = useLlmAllowedModels()
   const [modelName, setModelName] = useState('')
+  const [connectionRef, setConnectionRef] = useState(CODEX_UNASSIGNED_CONNECTION_KEY)
+  const [codexModels, setCodexModels] = useState<string[]>([])
+  const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
   const [stateless, setStateless] = useState(false)
   const [users, setUsers] = useState<
     Array<{ id: string; email: string; name: string | null; displayName: string | null }>
@@ -266,8 +270,8 @@ export function HostWizard({
   )
 
   const secretOptions = useMemo(
-    () =>
-      existingSecrets
+    () => [
+      ...existingSecrets
         .map(secret => {
           const name = secret.name || secret.metadata?.name
           if (!name) return null
@@ -281,6 +285,7 @@ export function HostWizard({
                 ? `Providers: ${providers.map(getProviderLabel).join(', ')}`
                 : 'No recognized provider credentials'
           return {
+            group: 'API keys',
             value: name,
             label: name,
             meta: providerSummary,
@@ -292,39 +297,126 @@ export function HostWizard({
         })
         .filter(option => option !== null)
         .sort((left, right) => left.value.localeCompare(right.value)),
-    [existingSecrets]
+      ...codexConnections.filter(isAssignableCodexGrant).map(row => ({
+        group: 'ChatGPT subscriptions',
+        value: credentialSelectValue('', row.connectionKey),
+        label: row.displayName || row.connectionKey,
+        meta: 'ChatGPT subscription',
+        providers: [{ id: 'codex-subscription', label: 'ChatGPT Subscription' }],
+      })),
+    ],
+    [codexConnections, existingSecrets]
   )
+  const apiKeyOptions = useMemo(
+    () => secretOptions.filter(option => option.group === 'API keys'),
+    [secretOptions]
+  )
+  const catalogForEditor = useMemo(() => {
+    if (provider !== 'codex-subscription') return allowedCatalog
+    const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
+    if (codexModels.length === 0) return others
+    return [
+      ...others,
+      ...codexModels.map(model => ({
+        id: `codex:${model}`,
+        provider: 'codex-subscription',
+        model,
+        vendor: 'OpenAI',
+        display_name: model,
+        context_window_tokens: null,
+        enabled: true,
+        source: 'discovery' as const,
+        stale: false,
+      })),
+    ]
+  }, [allowedCatalog, provider, codexModels])
   const providerModelOptions = useMemo(
-    () => getModelOptions(allowedCatalog, provider),
-    [allowedCatalog, provider]
+    () => getModelOptions(catalogForEditor, provider),
+    [catalogForEditor, provider]
   )
+  const chainRequiresSecret = llmChainRequiresSecret(provider, llmPolicy?.fallbacks)
   const handleExistingSecretChange = useCallback(
     (secretName: string) => {
       setExistingSecret(secretName)
+      const parsed = parseCredentialSelect(secretName)
+      if (parsed.kind === 'subscription') {
+        setConnectionRef(parsed.connectionKey)
+        setProvider('codex-subscription')
+        setModelName('')
+        return
+      }
+      setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
+      setCodexModels([])
       const selectedSecret = existingSecrets.find(
         secret => (secret.name || secret.metadata?.name) === secretName
       )
       if (!Array.isArray(selectedSecret?.keys)) return
       const [linkedProvider] = getProvidersWithCompleteCredentials(selectedSecret.keys)
       if (!linkedProvider) return
-      setProvider(linkedProvider)
-      setModelName(
-        resolveDefaultModel(linkedProvider, getModelOptions(allowedCatalog, linkedProvider))
-      )
+      const nextProvider = linkedProvider === 'codex-subscription' ? 'openai' : linkedProvider
+      setProvider(nextProvider)
+      setModelName(resolveDefaultModel(nextProvider, getModelOptions(allowedCatalog, nextProvider)))
     },
     [allowedCatalog, existingSecrets]
   )
+  useEffect(() => {
+    let cancelled = false
+    void listCodexSubscriptionConnections()
+      .then(rows => {
+        if (!cancelled) setCodexConnections(rows)
+      })
+      .catch(err => {
+        if (!cancelled) {
+          setCodexConnections([])
+          if (!isDisabledCapabilityError(err)) {
+            setError(err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions')
+          }
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  useEffect(() => {
+    if (!connectionRef.trim() || connectionRef === CODEX_UNASSIGNED_CONNECTION_KEY) {
+      setCodexModels([])
+      return
+    }
+    let cancelled = false
+    void listCodexConnectionModels(connectionRef)
+      .then(models => {
+        if (!cancelled) setCodexModels(offeredCodexModelNames(models))
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCodexModels([])
+          setModelName('')
+          setError('Could not load ChatGPT grant models')
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [connectionRef])
   // Keep the selected model valid for the current provider's enabled models:
   // seed the default once the allowlist loads, and re-default if a provider
   // switch left the model out of range.
   useEffect(() => {
     if (modelsLoading) return
+    if (provider === 'codex-subscription') {
+      const offered = constrainModelOptions(catalogForEditor, allowedModels, provider)
+      if (offered.length === 0) return
+      const grant = codexConnections.find(row => row.connectionKey === connectionRef)
+      const next = resolveCodexGrantModel(modelName, offered, grant?.defaultModel)
+      if (next !== modelName) setModelName(next)
+      return
+    }
     if (!providerModelOptions.includes(modelName)) {
       setModelName(resolveDefaultModel(provider, providerModelOptions))
     }
     // Intentionally omit modelName: this reconciles the picker to the options.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [providerModelOptions, modelsLoading])
+  }, [allowedModels, catalogForEditor, modelsLoading, provider, providerModelOptions])
 
   // Auto-derive the new Secret name from the agent name ("this agent's
   // credentials") until the operator edits it, so naming a Kubernetes Secret is
@@ -366,28 +458,36 @@ export function HostWizard({
     [teams]
   )
 
-  const canNext = useMemo(() => {
-    return isStepValid(step, {
+  const validationState = useMemo<HostWizardValidationState>(
+    () => ({
       hostName,
       secretMode,
       existingSecret,
+      existingLlmSecret,
       newSecretName,
       llmKeyDraft,
       llmPolicy,
       provider,
       modelName,
-    })
-  }, [
-    step,
-    hostName,
-    secretMode,
-    existingSecret,
-    newSecretName,
-    llmKeyDraft,
-    llmPolicy,
-    provider,
-    modelName,
-  ])
+      connectionRef,
+      codexModels,
+    }),
+    [
+      hostName,
+      secretMode,
+      existingSecret,
+      existingLlmSecret,
+      newSecretName,
+      llmKeyDraft,
+      llmPolicy,
+      provider,
+      modelName,
+      connectionRef,
+      codexModels,
+    ]
+  )
+
+  const canNext = useMemo(() => isStepValid(step, validationState), [step, validationState])
 
   const loadDirectory = useCallback(async () => {
     setDirectoryLoading(true)
@@ -419,34 +519,13 @@ export function HostWizard({
     () => (targetStep: number) => {
       if (targetStep <= step) return true
       for (let i = 0; i < targetStep; i += 1) {
-        if (
-          !isStepValid(i, {
-            hostName,
-            secretMode,
-            existingSecret,
-            newSecretName,
-            llmKeyDraft,
-            llmPolicy,
-            provider,
-            modelName,
-          })
-        ) {
+        if (!isStepValid(i, validationState)) {
           return false
         }
       }
       return true
     },
-    [
-      step,
-      hostName,
-      secretMode,
-      existingSecret,
-      newSecretName,
-      llmKeyDraft,
-      llmPolicy,
-      provider,
-      modelName,
-    ]
+    [step, validationState]
   )
 
   const validationMessage = useMemo(() => {
@@ -457,6 +536,15 @@ export function HostWizard({
     if (step === 1 && !modelName.trim()) return 'Model name is required.'
     if (step === 1 && secretMode === 'existing' && !existingSecret.trim())
       return 'Select an existing LLM Secret.'
+    if (
+      step === 1 &&
+      secretMode === 'existing' &&
+      provider === 'codex-subscription' &&
+      chainRequiresSecret &&
+      !existingLlmSecret.trim()
+    ) {
+      return 'Select an existing LLM Secret.'
+    }
     if (step === 1 && secretMode === 'new' && !toKebabCase(newSecretName)) {
       return 'For a new LLM Secret, set a name.'
     }
@@ -477,11 +565,13 @@ export function HostWizard({
     hostName,
     secretMode,
     existingSecret,
+    existingLlmSecret,
     newSecretName,
     llmKeyDraft,
     llmPolicy,
     provider,
     modelName,
+    chainRequiresSecret,
   ])
 
   function resetForm() {
@@ -492,6 +582,7 @@ export function HostWizard({
     setSelectedMcp([])
     setSecretMode('existing')
     setExistingSecret('')
+    setExistingLlmSecret('')
     setNewSecretName('')
     setSecretNameTouched(false)
     setLlmKeyDraft(createEmptyLlmKeyDraft())
@@ -499,6 +590,8 @@ export function HostWizard({
     setAllowedModels([])
     setProvider('openai')
     setModelName(resolveDefaultModel('openai', getModelOptions(allowedCatalog, 'openai')))
+    setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
+    setCodexModels([])
     setStateless(false)
     setSelectedUserIds([])
     setSelectedTeamIds([])
@@ -532,7 +625,7 @@ export function HostWizard({
       const normalizedHostName = toKebabCase(hostName)
       const normalizedSecretName = toKebabCase(newSecretName)
 
-      if (secretMode === 'new') {
+      if (chainRequiresSecret && secretMode === 'new') {
         // Project the draft onto the active domain before writing: only the
         // primary provider's slots ∪ each fallback's effective slot(s) reach the
         // Secret — a key left behind by a since-removed provider is dropped, not
@@ -570,9 +663,12 @@ export function HostWizard({
       // intentionally generated here instead of being exposed as a wizard
       // field; the agent still needs a contextRef for its runtime contract.
       const generatedContextName = await createPrivateContext(
-        normalizedHostName,
-        Array.from(new Set(selectedMcp)),
-        'The agent connector context could not be created — please try again.'
+        {
+          subject: normalizedHostName,
+          description: `Connector context for agent ${normalizedHostName}`,
+          mcpServers: Array.from(new Set(selectedMcp)),
+        },
+        'We couldn’t finish setting up this agent’s connectors — please try again.'
       )
       created.push({ kind: 'context', name: generatedContextName })
 
@@ -588,14 +684,25 @@ export function HostWizard({
         allowedCatalog
       )
 
+      const resolvedSecretRef = !chainRequiresSecret
+        ? ''
+        : secretMode === 'new'
+          ? normalizedSecretName
+          : provider === 'codex-subscription'
+            ? existingLlmSecret.trim()
+            : parseCredentialSelect(existingSecret).kind === 'secret'
+              ? existingSecret
+              : ''
+
       const hostSpec: Record<string, unknown> = {
         host: normalizedHostName,
         contextRef: generatedContextName,
-        secretRef: secretMode === 'existing' ? existingSecret : normalizedSecretName,
+        ...(resolvedSecretRef ? { secretRef: resolvedSecretRef } : {}),
         channels: [],
         model: {
           provider,
           name: modelName,
+          ...(provider === 'codex-subscription' ? { connectionRef } : {}),
         },
         // Opt-in fallback policy (spec §3-R5): only set when at least one
         // fallback is configured, so a Host without fallbacks behaves as today.
@@ -794,7 +901,19 @@ export function HostWizard({
                   <input
                     type="radio"
                     checked={secretMode === 'new'}
-                    onChange={() => setSecretMode('new')}
+                    onChange={() => {
+                      setSecretMode('new')
+                      if (provider === 'codex-subscription' && !llmPolicy?.fallbacks.length) {
+                        setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
+                        setCodexModels([])
+                        setExistingSecret('')
+                        setExistingLlmSecret('')
+                        setProvider('openai')
+                        setModelName(
+                          resolveDefaultModel('openai', getModelOptions(allowedCatalog, 'openai'))
+                        )
+                      }
+                    }}
                   />
                   <span className="cu-agent-radio__copy">
                     <span className="cu-agent-radio__title">Create a new LLM Secret</span>
@@ -814,6 +933,17 @@ export function HostWizard({
                     options={secretOptions}
                     onChange={handleExistingSecretChange}
                   />
+                  {provider === 'codex-subscription' && chainRequiresSecret ? (
+                    <>
+                      <strong>LLM secret</strong>
+                      <LlmSecretSelect
+                        value={existingLlmSecret}
+                        placeholder="Select secret..."
+                        options={apiKeyOptions}
+                        onChange={setExistingLlmSecret}
+                      />
+                    </>
+                  ) : null}
                 </div>
               ) : (
                 <Field
@@ -852,18 +982,25 @@ export function HostWizard({
               onPrimaryChange={next => {
                 setProvider(next.provider)
                 setModelName(next.model)
+                if (next.provider !== 'codex-subscription') {
+                  setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
+                  setCodexModels([])
+                  if (parseCredentialSelect(existingSecret).kind === 'subscription') {
+                    setExistingSecret('')
+                  }
+                }
               }}
               policy={llmPolicy}
               onPolicyChange={setLlmPolicy}
               allowedModels={allowedModels}
               onAllowedModelsChange={setAllowedModels}
-              catalog={allowedCatalog}
+              catalog={catalogForEditor}
               catalogLoading={modelsLoading}
               catalogError={modelsError}
               modelLabel="Default model"
               showAllowedModels={false}
               credentials={
-                secretMode === 'new'
+                chainRequiresSecret && secretMode === 'new'
                   ? {
                       draft: llmKeyDraft,
                       onChange: (dataKey, value) =>
@@ -871,7 +1008,7 @@ export function HostWizard({
                     }
                   : undefined
               }
-              secretKeys={secretMode === 'new' ? llmSecretKeys : []}
+              secretKeys={chainRequiresSecret && secretMode === 'new' ? llmSecretKeys : []}
               fallbackProvidersInitiallyCollapsed
               disabled={busy}
             />

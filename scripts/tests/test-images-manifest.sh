@@ -654,6 +654,200 @@ assert_display_field_change_rebuilds_both_consumers() {
   fi
 }
 
+assert_llm_provider_attempt_contract_change_rebuilds_consumers() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(async m => {
+      const fs = await import("node:fs")
+      const wfPath = "'"$REPO_ROOT"'/.github/workflows/build-publish.yml"
+      const wf = fs.readFileSync(wfPath, "utf8")
+      const sourcePath = "packages/llm-provider-attempt-contract/**"
+      const expectedFilters = ["codex-llm-proxy", "control-api", "mcp-host", "workflow-recipes"]
+      const expectedImages = [
+        "clerum-workflow-base",
+        "codex-llm-proxy",
+        "control-api",
+        "mcp-host",
+        "mcp-host-desktop",
+        "mcp-host-full",
+        "mcp-host-slim",
+        "workflow-coordinator",
+        "workflow-recipes",
+        "workflow-snippet-runner",
+      ]
+
+      const filtersMatch = wf.match(/filters: \|\n([\s\S]*?)\n\n {2}build-push:/)
+      if (!filtersMatch) {
+        console.log(`PARSE_ERROR: could not find the paths-filter filters block in ${wfPath}`)
+        process.exit(1)
+      }
+      const filters = {}
+      let currentKey = null
+      for (const line of filtersMatch[1].split("\n")) {
+        if (!line.trim()) continue
+        const keyMatch = line.match(/^\s*([\w.-]+):\s*$/)
+        const pathMatch = line.match(/^\s*-\s*\x27([^\x27]+)\x27\s*$/)
+        if (keyMatch) {
+          currentKey = keyMatch[1]
+          filters[currentKey] = []
+        } else if (pathMatch && currentKey) {
+          filters[currentKey].push(pathMatch[1])
+        }
+      }
+
+      const sectionMatch = wf.match(/include:\n([\s\S]*?)\n {4}steps:/)
+      if (!sectionMatch) {
+        console.log(`PARSE_ERROR: could not find the build-push matrix section in ${wfPath}`)
+        process.exit(1)
+      }
+      const imageFilterKeys = {}
+      for (const block of sectionMatch[1].split(/\n(?=\s*- image:)/)) {
+        const image = block.match(/- image:\s*(\S+)/)?.[1]
+        if (!image) continue
+        const changedKey = block.match(/\n\s*changed:\s*\$\{\{\s*needs\.detect\.outputs\.([\w.-]+)\s*\}\}/)?.[1]
+        if (changedKey) imageFilterKeys[image] = changedKey
+      }
+
+      const problems = []
+      const filterKeys = Object.entries(filters)
+        .filter(([, paths]) => paths.includes(sourcePath))
+        .map(([key]) => key)
+        .sort()
+      if (filterKeys.join(",") !== expectedFilters.join(",")) {
+        problems.push(`filters are ${filterKeys.join(",") || "<none>"}, expected ${expectedFilters.join(",")}`)
+      }
+      const selectedImages = Object.entries(imageFilterKeys)
+        .filter(([, filterKey]) => filterKeys.includes(filterKey))
+        .map(([image]) => image)
+        .sort()
+      if (selectedImages.join(",") !== expectedImages.join(",")) {
+        problems.push(`selected images are ${selectedImages.join(",") || "<none>"}, expected ${expectedImages.join(",")}`)
+      }
+      for (const name of expectedImages) {
+        const image = m.IMAGES.find(item => item.name === name)
+        if (!image) problems.push(`${name} has no manifest row`)
+        else if (!image.source_paths?.includes(sourcePath)) {
+          problems.push(`${name} does not mirror ${sourcePath} in source_paths`)
+        }
+      }
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "llm-provider-attempt-contract changed-path contract parse failed: $output"
+  elif [ -z "$output" ]; then
+    pass "a provider-attempt-contract change rebuilds Control API, mcp-host variants, the proxy, and the workflow-recipes family"
+  else
+    fail "llm-provider-attempt-contract changed-path contract failed: $output"
+  fi
+}
+
+# assert_source_paths_match_filters only proves the two sides AGREE; it passes
+# when a shared package is absent from both, which is exactly how
+# codex-catalog-projection stayed invisible to the rebuild graph while HCC,
+# mcp-host, and WRC all baked it into their images. This case pins the
+# consumer set itself, so dropping the path from the graph fails loudly.
+#
+# clerum-workflow-base is in expectedImages even though packages/workflow-sdk/
+# Dockerfile.base does not COPY the package: the four WRC-family images share
+# the single `workflow-recipes` filter, and assert_source_paths_match_filters
+# demands each image's source_paths equal that filter's list exactly. The
+# filter, not the image, is the smallest unit this manifest can express, so
+# the family deliberately over-rebuilds (clerum-workflow-base already carries
+# packages/image-policy/** and scripts/e2e/** on the same terms).
+assert_codex_catalog_projection_change_rebuilds_consumers() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(async m => {
+      const fs = await import("node:fs")
+      const wfPath = "'"$REPO_ROOT"'/.github/workflows/build-publish.yml"
+      const wf = fs.readFileSync(wfPath, "utf8")
+      const sourcePath = "packages/codex-catalog-projection/**"
+      const expectedFilters = ["host-context-controller", "mcp-host", "workflow-recipes"]
+      const expectedImages = [
+        "clerum-workflow-base",
+        "host-context-controller",
+        "mcp-host",
+        "mcp-host-desktop",
+        "mcp-host-full",
+        "mcp-host-slim",
+        "workflow-coordinator",
+        "workflow-recipes",
+        "workflow-snippet-runner",
+      ]
+
+      const filtersMatch = wf.match(/filters: \|\n([\s\S]*?)\n\n {2}build-push:/)
+      if (!filtersMatch) {
+        console.log(`PARSE_ERROR: could not find the paths-filter filters block in ${wfPath}`)
+        process.exit(1)
+      }
+      const filters = {}
+      let currentKey = null
+      for (const line of filtersMatch[1].split("\n")) {
+        if (!line.trim()) continue
+        const keyMatch = line.match(/^\s*([\w.-]+):\s*$/)
+        const pathMatch = line.match(/^\s*-\s*\x27([^\x27]+)\x27\s*$/)
+        if (keyMatch) {
+          currentKey = keyMatch[1]
+          filters[currentKey] = []
+        } else if (pathMatch && currentKey) {
+          filters[currentKey].push(pathMatch[1])
+        }
+      }
+
+      const sectionMatch = wf.match(/include:\n([\s\S]*?)\n {4}steps:/)
+      if (!sectionMatch) {
+        console.log(`PARSE_ERROR: could not find the build-push matrix section in ${wfPath}`)
+        process.exit(1)
+      }
+      const imageFilterKeys = {}
+      for (const block of sectionMatch[1].split(/\n(?=\s*- image:)/)) {
+        const image = block.match(/- image:\s*(\S+)/)?.[1]
+        if (!image) continue
+        const changedKey = block.match(/\n\s*changed:\s*\$\{\{\s*needs\.detect\.outputs\.([\w.-]+)\s*\}\}/)?.[1]
+        if (changedKey) imageFilterKeys[image] = changedKey
+      }
+
+      const problems = []
+      const filterKeys = Object.entries(filters)
+        .filter(([, paths]) => paths.includes(sourcePath))
+        .map(([key]) => key)
+        .sort()
+      if (filterKeys.join(",") !== expectedFilters.join(",")) {
+        problems.push(`filters are ${filterKeys.join(",") || "<none>"}, expected ${expectedFilters.join(",")}`)
+      }
+      const selectedImages = Object.entries(imageFilterKeys)
+        .filter(([, filterKey]) => filterKeys.includes(filterKey))
+        .map(([image]) => image)
+        .sort()
+      if (selectedImages.join(",") !== expectedImages.join(",")) {
+        problems.push(`selected images are ${selectedImages.join(",") || "<none>"}, expected ${expectedImages.join(",")}`)
+      }
+      for (const name of expectedImages) {
+        const image = m.IMAGES.find(item => item.name === name)
+        if (!image) problems.push(`${name} has no manifest row`)
+        else if (!image.source_paths?.includes(sourcePath)) {
+          problems.push(`${name} does not mirror ${sourcePath} in source_paths`)
+        }
+      }
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "codex-catalog-projection changed-path contract parse failed: $output"
+  elif [ -z "$output" ]; then
+    pass "a codex-catalog-projection change rebuilds HCC, mcp-host variants, and the workflow-recipes family"
+  else
+    fail "codex-catalog-projection changed-path contract failed: $output"
+  fi
+}
+
 # THREE copies of the 28-image list exist in build-publish.yml, not two:
 # build-push's `image:` matrix dimension (the array that, crossed with
 # `arch`, produces the 56 base combinations), build-push's `include:` list
@@ -1144,6 +1338,8 @@ assert_every_matrix_image_has_a_manifest_row
 assert_source_paths_match_filters
 assert_network_policy_core_change_rebuilds_all_consumers
 assert_display_field_change_rebuilds_both_consumers
+assert_llm_provider_attempt_contract_change_rebuilds_consumers
+assert_codex_catalog_projection_change_rebuilds_consumers
 assert_all_three_image_lists_agree
 assert_the_verify_set_splits_on_published_not_on_mode
 assert_the_default_ghcr_verify_set_omits_only_the_e2e_fixtures

@@ -150,16 +150,6 @@ export function IconPlus(props: IconProps) {
   )
 }
 
-export function IconData(props: IconProps) {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
-      <ellipse cx="12" cy="5" rx="7" ry="3" />
-      <path d="M5 5v6c0 1.66 3.13 3 7 3s7-1.34 7-3V5" />
-      <path d="M5 11v6c0 1.66 3.13 3 7 3s7-1.34 7-3v-6" />
-    </svg>
-  )
-}
-
 export function IconWorkflows(props: IconProps) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
