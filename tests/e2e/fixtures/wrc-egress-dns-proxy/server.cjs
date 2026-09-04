@@ -71,13 +71,22 @@ function tcpFrame(message) {
 
 function send(entry, selectedMode) {
   const response = dnsResponse(entry.message, entry.parsed, selectedMode === 'ok' ? 0 : 2)
-  counts[selectedMode]++
+  if (selectedMode === 'ok') counts.ok++
+  else counts.servfail++
   if (entry.transport === 'udp') {
     udp.send(response, entry.rinfo.port, entry.rinfo.address)
   } else if (!entry.socket.destroyed) {
     entry.socket.write(tcpFrame(response))
   }
-  console.log(`${selectedMode} DNS A ${target} via ${entry.transport.toUpperCase()}`)
+  if (selectedMode === 'ok') {
+    console.log(entry.transport === 'udp' ? 'ok DNS A fixture via UDP' : 'ok DNS A fixture via TCP')
+  } else {
+    console.log(
+      entry.transport === 'udp'
+        ? 'servfail DNS A fixture via UDP'
+        : 'servfail DNS A fixture via TCP'
+    )
+  }
 }
 
 function forwardUdp(message, rinfo) {
@@ -122,7 +131,9 @@ function handle(message, entry) {
     if (mode === 'hold') {
       counts.hold++
       held.push(entry)
-      console.log(`hold DNS A ${target} via ${entry.transport.toUpperCase()}`)
+      console.log(
+        entry.transport === 'udp' ? 'hold DNS A fixture via UDP' : 'hold DNS A fixture via TCP'
+      )
     } else {
       send(entry, mode)
     }
@@ -142,7 +153,7 @@ function setMode(nextMode) {
 let listeners = 0
 function listening() {
   listeners++
-  if (listeners === 2) console.log(`wrc egress DNS proxy ready for ${target}`)
+  if (listeners === 2) console.log('wrc egress DNS proxy ready')
 }
 
 udp.on('message', (message, rinfo) => handle(message, { transport: 'udp', rinfo }))
