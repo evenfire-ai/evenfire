@@ -498,7 +498,14 @@ export function buildOAuthBrokerTokenSecret(
 const CONTROL_API_PORT = 8090
 
 export function oauthBrokerEgressPolicyName(recipeName: string): string {
-  return `${OAUTH_BROKER_EGRESS_PREFIX}${recipeName}${OAUTH_BROKER_EGRESS_SUFFIX}`
+  const direct = `${OAUTH_BROKER_EGRESS_PREFIX}${recipeName}${OAUTH_BROKER_EGRESS_SUFFIX}`
+  if (direct.length <= 63) return direct
+
+  const hash = policyNameHash(['oauth-broker-egress', recipeName])
+  const recipeBudget =
+    63 - OAUTH_BROKER_EGRESS_PREFIX.length - 1 - hash.length - OAUTH_BROKER_EGRESS_SUFFIX.length
+  const recipeStem = dns1123Stem(recipeName, recipeBudget, 'recipe')
+  return `${OAUTH_BROKER_EGRESS_PREFIX}${recipeStem}-${hash}${OAUTH_BROKER_EGRESS_SUFFIX}`
 }
 
 /**
@@ -1468,14 +1475,15 @@ export function uiIngressPolicyName(recipeName: string, workloadId: string): str
  * Name for the per-recipe UI egress NetworkPolicy.
  *
  * Unlike every other recipe NetworkPolicy this one is per-RECIPE, not per
- * workload, so it does not go through `composePolicyName` and is not truncated.
+ * workload. Short legacy names remain byte-identical; overflow names use the
+ * same deterministic hash rule as the workload families.
  * Extracted from three duplicated template literals (this builder, the
  * reconciler's finalizer, and `reconcileUiEgressPolicy`) because issue #582's
  * reap classifies live policies by name prefix: a name built in one place and
  * classified in another has to have exactly one definition, or the two drift.
  */
 export function uiEgressPolicyName(recipeName: string): string {
-  return `${UI_EGRESS_PREFIX}-${recipeName}`
+  return composePerRecipePolicyName(UI_EGRESS_PREFIX, recipeName)
 }
 
 /**
@@ -1656,33 +1664,52 @@ export function resolveClusterLocalBinding(
  * truncated when (stem + suffix) would overflow; trailing hyphens are
  * stripped so we never produce `foo--egress`.
  */
+function policyNameHash(parts: readonly string[]): string {
+  return createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 8)
+}
+
+function dns1123Stem(value: string, budget: number, fallback: string): string {
+  const normalized = value.slice(0, Math.max(1, budget)).replace(/-+$/g, '')
+  return normalized || fallback.slice(0, Math.max(1, budget))
+}
+
+function composePerRecipePolicyName(prefix: string, recipeName: string): string {
+  const direct = `${prefix}-${recipeName}`
+  if (direct.length <= 63) return direct
+
+  const hash = policyNameHash([prefix, recipeName])
+  const recipeBudget = 63 - prefix.length - 2 - hash.length
+  return `${prefix}-${dns1123Stem(recipeName, recipeBudget, 'recipe')}-${hash}`
+}
+
 function composePolicyName(prefix: string, recipeName: string, workloadId: string): string {
-  // `prefix-<recipe>-<workload>`, clamped to the DNS-1123 63-char limit.
-  //
-  // The workload segment used to be exempt from truncation, so `maxRecipe` could
-  // clamp to its floor of 1 and the result still overflowed — a 60-char workload
-  // id produced a 70+ char name that the apiserver rejects with
-  // `422 metadata.name: Invalid value`. Measured worst case before this fix: 223
-  // characters. Truncating only the recipe cannot fix that, because the overflow
-  // comes from the segment that was never being cut.
-  //
-  // Nothing is orphaned by the change: every name it alters is one that exceeded
-  // 63 characters, which means the apply always failed and no such object exists
-  // in a cluster. Names already within budget are byte-identical.
-  //
-  // This shortens; it does NOT disambiguate. Two recipes whose names differ only
-  // past the cut still collide on one policy name — see #582's follow-up issue.
-  // The internal-dependency lane solves that with a hash suffix; this one does
-  // not, and changing it here would rename every live policy.
-  const separators = 2
-  const budget = 63 - prefix.length - separators
-  const workload =
-    workloadId.length > budget ? workloadId.slice(0, budget).replace(/-+$/g, '') : workloadId
-  const workloadStem = workload || 'workload'
-  const maxRecipe = Math.max(1, budget - workloadStem.length)
-  const stem =
-    recipeName.length > maxRecipe ? recipeName.slice(0, maxRecipe).replace(/-+$/g, '') : recipeName
-  return `${prefix}-${stem || 'recipe'}-${workloadStem}`
+  const direct = `${prefix}-${recipeName}-${workloadId}`
+  if (direct.length <= 63) return direct
+
+  // Only legacy-overflow identities change shape. Those direct names could not
+  // have existed in Kubernetes, so adding a hash fixes validity and collision
+  // safety without renaming any live, already-valid policy.
+  const hash = policyNameHash([prefix, recipeName, workloadId])
+  const segmentBudget = 63 - prefix.length - 3 - hash.length
+  let recipeBudget = Math.max(1, Math.floor(segmentBudget / 2))
+  let workloadBudget = Math.max(1, segmentBudget - recipeBudget)
+  let remaining =
+    segmentBudget -
+    Math.min(recipeName.length, recipeBudget) -
+    Math.min(workloadId.length, workloadBudget)
+
+  if (remaining > 0 && recipeBudget < recipeName.length) {
+    const add = Math.min(remaining, recipeName.length - recipeBudget)
+    recipeBudget += add
+    remaining -= add
+  }
+  if (remaining > 0 && workloadBudget < workloadId.length) {
+    workloadBudget += Math.min(remaining, workloadId.length - workloadBudget)
+  }
+
+  const recipeStem = dns1123Stem(recipeName, recipeBudget, 'recipe')
+  const workloadStem = dns1123Stem(workloadId, workloadBudget, 'workload')
+  return `${prefix}-${recipeStem}-${workloadStem}-${hash}`
 }
 
 export function workloadEgressPolicyName(recipeName: string, workloadId: string): string {
@@ -1701,11 +1728,8 @@ export function workloadIngressPolicyName(recipeName: string, workloadId: string
 // distinguishing label (#524 — only wr-intdep-* has `policy-type`).
 //
 // Name parsing is safe here for one specific reason: NEITHER `composePolicyName`
-// implementation can touch the prefix. This file's version truncates the recipe
-// and workload segments; the internal-dependency lane's shortens both and appends
-// a hash. Both interpolate the prefix whole. `resourceBuilder.test.ts` pins it
-// with a round-trip over every builder, including names long enough to force
-// truncation in each segment.
+// implementation can touch the prefix. Both preserve it whole and hash only the
+// shortened identity suffix when a direct name would overflow.
 //
 // Anything unrecognised classifies as `null` and is NEVER deleted: the run lane's
 // policies, the coordinator-GFS one, and anything a human created by hand.

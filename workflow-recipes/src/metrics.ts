@@ -62,12 +62,11 @@ export const reconciliationsTotal = counter({
 /**
  * Stale NetworkPolicies the reap was FORBIDDEN from deleting (issue #582).
  *
- * A 403 here is an enforcement leak: the policy is no longer desired but stays
- * enforced, and no code path will retry it into existence-or-absence. It does not
- * fail the recipe — a latched phase would be both invisible (nothing renders a
- * recipe's phase outside kubectl) and sticky — so this counter plus the
- * `NetworkPolicyReapFailed` condition are the durable signal. Alert on any
- * sustained non-zero value.
+ * A 401/403 here is an enforcement leak: the policy is no longer desired but
+ * stays enforced until the level-triggered retry succeeds. This monotonic
+ * counter records denial EVENTS; `NetworkPolicyReapFailed` is the durable current
+ * state. Alert on recent activity (`increase(...[5m]) > 0`), never on the
+ * counter's absolute value, which cannot clear after recovery.
  *
  * Also answers issue #578's criticism that a persistent failure raises no metric.
  */

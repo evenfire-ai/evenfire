@@ -335,9 +335,14 @@ It now reaps from the live set instead. Once every lane has recorded what it wan
 is live, belongs to a recipe family, and is not wanted.
 
 **The `LIST` adds no request**: the internal-dependency prune already issued one per
-namespace, over the same three namespaces. What changed is the *result set*, not the
+namespace, over the same three namespaces. What changed is the _result set_, not the
 count — dropping the `policy-type` term from the selector makes the query return all six
 families instead of one, and the family check then re-narrows what may be deleted.
+
+The hardened destructive path does add one metadata `GET` of the WorkflowRecipe
+immediately before prune. That freshness fence is the cost of proving the UID/generation
+still matches the plan during a rolling update; it replaces thousands of write-shaped
+404s with a bounded read and prevents an obsolete pass from deleting newer state.
 
 **Six families are reaped**: `ui-ingress-*`, `ui-egress-*`, `wl-egress-*`,
 `wl-ingress-*`, `wr-intdep-egress/ingress-*`, and `wf-*-oauth-broker-egress`. Family is
@@ -355,9 +360,9 @@ policies (they carry no `clerum.io/recipe` label), the workflow run lane's, the
   policies are stale and nothing writes them, but the producer is a spec edit rather
   than the reconcile loop, so reaping them here would widen this change into a family it
   does not own. Carved out explicitly (issue #583).
-(An earlier draft also excluded `reconcileUiEgressPolicy`'s own unconditional delete.
-That is gone: it was redundant — `ui-egress` is a reaped family and `sandbox-ui` is
-always scanned, so the prune already removed the same object on the same pass.)
+  (An earlier draft also excluded `reconcileUiEgressPolicy`'s own unconditional delete.
+  That is gone: it was redundant — `ui-egress` is a reaped family and `sandbox-ui` is
+  always scanned, so the prune already removed the same object on the same pass.)
 
 **Operational consequences:**
 
@@ -369,8 +374,10 @@ always scanned, so the prune already removed the same object on the same pass.)
   not be removed, the `NetworkPolicyReapFailed` condition on the recipe (written in both
   directions, so it clears on the next clean pass), and the
   `clerum_wrc_networkpolicy_reap_denied_total` counter, labelled by `family` and by
-  `operation`. **Alert on any sustained non-zero value** — it means a policy that should
-  be gone is still filtering traffic.
+  `operation`. The counter is monotonic event history, not current state: alert on
+  `increase(clerum_wrc_networkpolicy_reap_denied_total[5m]) > 0`, never on its absolute
+  value. The condition is the current-state signal and the controller rechecks denied
+  work every 30 seconds until a clean pass publishes `False/Reaped`.
 
   The `operation` label matters for triage: `delete` means one named policy survived;
   `list` means the controller could not examine that namespace **at all**, so nothing of
@@ -382,9 +389,16 @@ always scanned, so the prune already removed the same object on the same pass.)
   `phase === 'active'` — over a residual object, and the transient-latch self-heal only
   clears messages that look like infrastructure faults, which an authorization failure
   does not.
+
 - **A transient failure (5xx, timeout, transport fault) degrades and retries** on the next
   pass, using the same contract as any other transient infrastructure fault. This applies
   to both the `LIST` and the `DELETE`.
+- **A permanent request failure (for example 400/405/422) fails the reconcile** rather
+  than being mislabeled transient. It remains visible through
+  `NetworkPolicyReapFailed` and is rechecked at a slow operator cadence.
+- **Destructive freshness:** immediately before pruning, WRC rechecks the recipe UID and
+  generation. Every DELETE carries the listed policy UID/resourceVersion as Kubernetes
+  preconditions, so an obsolete reconcile or changed object cannot be deleted blindly.
 - **RBAC invariant.** The prune queries exactly `sandbox-recipes`, `mcp-server` and
   `sandbox-ui`, because `resolveWorkloadNamespace` can return no others. The
   `workflow-recipes` ServiceAccount holds `list` and `delete` on `networkpolicies` in all

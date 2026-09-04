@@ -521,26 +521,46 @@ class ImmutableStatefulSetDriftError extends Error {
  * it on every pass. That is the one mistake in this change that causes an
  * enforcement outage rather than a wasted request.
  */
-/**
- * An authorization failure that left the reap unable to do its job (issue #582).
- *
- * Two shapes, because the blast radius differs by an order of magnitude:
- * `delete` names the one policy that stays enforced; `list` means NOTHING in that
- * namespace could be examined, so every stale policy of all six families survives
- * the pass. The condition message distinguishes them so an operator can tell a
- * single leaked allow from a namespace the controller has gone blind to.
- */
-type ReapDenial =
-  | {
-      operation: 'delete'
-      name: string
-      namespace: string
-      family: rb.RecipeNetworkPolicyFamily
-    }
-  | { operation: 'list'; namespace: string }
+export type NetworkPolicyReapFailureClass = 'authorization' | 'transient' | 'permanent'
+
+type NetworkPolicyReapFailure = {
+  operation: 'list' | 'delete'
+  namespace?: string
+  name?: string
+  family?: rb.RecipeNetworkPolicyFamily
+  failureClass: NetworkPolicyReapFailureClass
+  code?: number
+  message: string
+}
+
+type NetworkPolicyReapOutcome =
+  | { kind: 'not_evaluated' }
+  | { kind: 'stale_generation' }
+  | { kind: 'clean'; deleted: number }
+  | { kind: 'incomplete'; deleted: number; failures: NetworkPolicyReapFailure[] }
+
+type RecipeNetworkPolicyPass = {
+  internalDependencyConditions: StatusCondition[]
+  projection: NetworkPolicyReapProjection | undefined
+  laneError?: unknown
+}
+
+export interface NetworkPolicyReapProjection {
+  /** Omitted only when this pass had no authoritative reap opinion. */
+  condition?: StatusCondition
+  failureClass?: NetworkPolicyReapFailureClass
+  requeueAfterMs?: number
+  requeueFixedInterval?: boolean
+  staleGeneration?: boolean
+}
+
+const RECIPE_GENERATION_ANNOTATION = 'clerum.io/recipe-generation'
 
 class DesiredNetworkPolicyLedger {
-  private readonly byNamespace = new Map<string, Set<string>>()
+  private readonly byNamespace = new Map<string, Map<string, string>>()
+  private readonly completed = new Set<rb.RecipeNetworkPolicyFamily>()
+
+  constructor(private readonly recipeGeneration?: number) {}
 
   /**
    * Record a policy as desired. Throws on a manifest with no name or namespace:
@@ -558,8 +578,25 @@ class DesiredNetworkPolicyLedger {
         }, namespace=${namespace ?? '<none>'})`
       )
     }
-    const names = this.byNamespace.get(namespace) ?? new Set<string>()
-    names.add(name)
+    if (this.recipeGeneration !== undefined) {
+      policy.metadata!.annotations = {
+        ...(policy.metadata?.annotations ?? {}),
+        [RECIPE_GENERATION_ANNOTATION]: String(this.recipeGeneration),
+      }
+    }
+    const family = rb.classifyRecipeNetworkPolicyName(name)
+    if (family === null) {
+      throw new Error(`Cannot record unclassified desired NetworkPolicy "${name}" in ${namespace}`)
+    }
+    const fingerprint = JSON.stringify(policy)
+    const names = this.byNamespace.get(namespace) ?? new Map<string, string>()
+    const existing = names.get(name)
+    if (existing !== undefined && existing !== fingerprint) {
+      throw new Error(
+        `NetworkPolicy identity collision for "${name}" in ${namespace}: two distinct desired manifests share one name`
+      )
+    }
+    names.set(name, fingerprint)
     this.byNamespace.set(namespace, names)
   }
 
@@ -569,6 +606,32 @@ class DesiredNetworkPolicyLedger {
 
   namespaces(): string[] {
     return [...this.byNamespace.keys()]
+  }
+
+  complete(...families: rb.RecipeNetworkPolicyFamily[]): void {
+    for (const family of families) this.completed.add(family)
+  }
+
+  completedFamilies(): ReadonlySet<rb.RecipeNetworkPolicyFamily> {
+    return new Set(this.completed)
+  }
+}
+
+class NetworkPolicyPassError extends Error {
+  constructor(
+    readonly causeError: unknown,
+    readonly projection: NetworkPolicyReapProjection | undefined,
+    readonly internalDependencyConditions: StatusCondition[] = []
+  ) {
+    super(causeError instanceof Error ? causeError.message : String(causeError))
+    this.name = 'NetworkPolicyPassError'
+  }
+}
+
+class StaleNetworkPolicyPlanError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'StaleNetworkPolicyPlanError'
   }
 }
 
@@ -601,12 +664,11 @@ export interface ReconcileResult {
   workflowConditions?: StatusCondition[]
   internalDependencyConditions?: StatusCondition[]
   /**
-   * NetworkPolicyReapFailed condition(s) from Step 9e (issue #582). `True` when
-   * RBAC denied deleting a stale policy, which therefore stays enforced; `False`
-   * on a clean pass. Never affects `phase`: a latched failure would be invisible
-   * (nothing outside kubectl renders a recipe phase) and sticky.
+   * One authoritative projection of the reap outcome. Undefined means this path
+   * did not evaluate the reap and therefore has no permission to clear its
+   * durable condition or retry state.
    */
-  networkPolicyReapConditions?: StatusCondition[]
+  networkPolicyReapProjection?: NetworkPolicyReapProjection
   /**
    * EnvSecretOwnershipDenied condition(s) from the Step 8 ownership gate
    * (Issue #637). `True` when a workload references a Secret it does not own;
@@ -1335,9 +1397,10 @@ export class WorkflowRecipeReconciler {
     )
     return {
       phase: recipe.status?.phase ?? 'candidate',
-      message: `Recipe deleted during reconcile; skipped ${stage}`,
+      message: recipe.status?.message ?? `Recipe deleted during reconcile; skipped ${stage}`,
       workloadStatuses: [],
       skipStatusPatch: true,
+      requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
     }
   }
 
@@ -1364,6 +1427,35 @@ export class WorkflowRecipeReconciler {
 
   async isRecipeStillActive(recipe: WorkflowRecipeCRD): Promise<boolean> {
     return this.recipeStillActive(recipe)
+  }
+
+  private async recipeGenerationStillCurrent(recipe: WorkflowRecipeCRD): Promise<boolean> {
+    try {
+      const live = (await this.customApi.getNamespacedCustomObject({
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: recipe.metadata.namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: recipe.metadata.name,
+      })) as {
+        metadata?: { uid?: string; generation?: number; deletionTimestamp?: string }
+      }
+      if (live.metadata?.deletionTimestamp) return false
+      if (recipe.metadata.uid && live.metadata?.uid && recipe.metadata.uid !== live.metadata.uid) {
+        return false
+      }
+      if (
+        recipe.metadata.generation !== undefined &&
+        live.metadata?.generation !== undefined &&
+        recipe.metadata.generation !== live.metadata.generation
+      ) {
+        return false
+      }
+      return true
+    } catch (error) {
+      if (getErrorCode(error) === 404) return false
+      throw error
+    }
   }
 
   // ─── Namespace Resolution ────────────────────────────────────────
@@ -1515,7 +1607,7 @@ export class WorkflowRecipeReconciler {
       `[WR-Reconciler] Reconciling "${name}" in namespace "${ns}" (phase: ${currentPhase})`
     )
 
-    if (!(await this.recipeStillActive(recipe))) {
+    if (!(await this.recipeGenerationStillCurrent(recipe))) {
       return this.staleRecipeResult(recipe, 'initial check')
     }
 
@@ -1971,7 +2063,7 @@ export class WorkflowRecipeReconciler {
       }
 
       let workflowInternalDependencyConditions: StatusCondition[] | undefined
-      let workflowNetworkPolicyReapConditions: StatusCondition[] | undefined
+      let workflowNetworkPolicyReapProjection: NetworkPolicyReapProjection | undefined
       let workflowSecretOwnershipConditions: StatusCondition[] | undefined
       let workflowWorkloadConditions: StatusCondition[] | undefined
       if (workflowWorkloads.length > 0) {
@@ -1981,19 +2073,36 @@ export class WorkflowRecipeReconciler {
         try {
           const workflowDeploy = await this.deployWorkflowWorkloads(recipe, name)
           workflowInternalDependencyConditions = workflowDeploy.internalDependencyConditions
-          workflowNetworkPolicyReapConditions = workflowDeploy.networkPolicyReapConditions
+          workflowNetworkPolicyReapProjection = workflowDeploy.networkPolicyReapProjection
           workflowWorkloadConditions = workflowDeploy.workloadConditions
           // Issue #637 — surface the EnvSecretOwnershipDenied condition from the
           // workflow build path too; previously it was computed and dropped, so a
           // denied workflow workload degraded silently with no status condition.
           workflowSecretOwnershipConditions = workflowDeploy.secretOwnershipConditions
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          const internalDependencyConditions =
-            error instanceof InternalDependencyReconcileError ? error.conditions : undefined
+          const policyPassError = error instanceof NetworkPolicyPassError ? error : undefined
+          const underlyingError = policyPassError?.causeError ?? error
+          const message =
+            underlyingError instanceof Error ? underlyingError.message : String(underlyingError)
+          const internalDependencyConditions = policyPassError?.internalDependencyConditions.length
+            ? policyPassError.internalDependencyConditions
+            : underlyingError instanceof InternalDependencyReconcileError
+              ? underlyingError.conditions
+              : undefined
           const workloadConditions =
-            error instanceof ImmutableStatefulSetDriftError ? [error.condition] : undefined
-          if (error instanceof RetryableReconcileError) {
+            underlyingError instanceof ImmutableStatefulSetDriftError
+              ? [underlyingError.condition]
+              : undefined
+          if (policyPassError?.projection?.staleGeneration) {
+            return {
+              phase: currentPhase,
+              message: recipe.status?.message ?? '',
+              workloadStatuses: [],
+              skipStatusPatch: true,
+              networkPolicyReapProjection: policyPassError.projection,
+            }
+          }
+          if (underlyingError instanceof RetryableReconcileError) {
             // Transient infra failure (e.g. DNS SERVFAIL on egress). Degrade
             // instead of failing so the next reconcile retries before the
             // workflow runs — don't mark workflowPhase failed.
@@ -2003,15 +2112,19 @@ export class WorkflowRecipeReconciler {
               workloadStatuses: [],
               internalDependencyConditions,
               workloadConditions,
+              networkPolicyReapProjection: policyPassError?.projection,
+              requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
             }
           }
           return {
             phase: 'failed' as RecipePhase,
             message,
             workloadStatuses: [],
-            workflowPhase: 'failed',
+            workflowPhase:
+              policyPassError?.projection?.failureClass === 'permanent' ? undefined : 'failed',
             internalDependencyConditions,
             workloadConditions,
+            networkPolicyReapProjection: policyPassError?.projection,
           }
         }
       }
@@ -2071,7 +2184,12 @@ export class WorkflowRecipeReconciler {
         pluginWorkloadSdkPolicyPending: result.pluginWorkloadSdkPolicyPending,
         // Thread the inner reconciler's transient-skip up so the watcher leaves
         // status untouched and requeues instead of patching a false failure.
-        skipStatusPatch: result.skipStatusPatch,
+        skipStatusPatch:
+          result.skipStatusPatch &&
+          !(
+            workflowNetworkPolicyReapProjection?.condition &&
+            workflowNetworkPolicyReapProjection.condition.status !== 'False'
+          ),
         // Requeue on a timer when the workflow reconcile is either (a) a
         // transient skip, or (b) still bringing up infra (phase === 'deploying',
         // e.g. waiting on the output anchor/prepare pod). The controller watches
@@ -2099,7 +2217,7 @@ export class WorkflowRecipeReconciler {
           !result.skipStatusPatch &&
           (result.phase === 'deploying' || result.pluginWorkloadSdkPolicyPending === true),
         internalDependencyConditions: workflowInternalDependencyConditions,
-        networkPolicyReapConditions: workflowNetworkPolicyReapConditions,
+        networkPolicyReapProjection: workflowNetworkPolicyReapProjection,
         secretOwnershipConditions: workflowSecretOwnershipConditions,
       }
     }
@@ -2135,6 +2253,14 @@ export class WorkflowRecipeReconciler {
           typeof condition.message === 'string' &&
           condition.message.includes('.mcp-server.svc.cluster.local') &&
           condition.message.includes('not an eligible runtime Service')
+      )
+    const latchedByNetworkPolicyReapFailure =
+      currentPhase === 'failed' &&
+      recipe.status?.conditions?.some(
+        condition =>
+          condition.type === 'NetworkPolicyReapFailed' &&
+          condition.status === 'True' &&
+          condition.reason === 'PermanentReapFailure'
       )
     // Observed-health self-heal (the durable backstop): a recipe latched
     // `failed` whose LAST-OBSERVED workloads were all `ready` was healthy
@@ -2184,6 +2310,7 @@ export class WorkflowRecipeReconciler {
       nonDeployablePhases.includes(currentPhase as RecipePhase) &&
       !latchedByTransientError &&
       !latchedBySharedMcpInternalDependencyBoundary &&
+      !latchedByNetworkPolicyReapFailure &&
       !latchedDespiteHealthyWorkloads
     ) {
       console.log(
@@ -2573,35 +2700,33 @@ export class WorkflowRecipeReconciler {
       const legacyRawCleanupPending =
         legacyRawStatefulSetCleanupPending || legacyRawDeploymentCleanupPending
 
-      // Step 9b: Sandbox UI egress policy + symmetric ingress on each
-      // internal-egress target (without the ingress side the target stays
-      // behind deny-all-<ns> and UI→backend traffic is dropped).
-      // #582: every NP lane records what it wants here; one prune after them all
-      // deletes whatever is live and no longer wanted. Replaces six per-workload
-      // unconditional DELETEs that returned NOT_FOUND ~15 100 times an hour.
-      const desiredNetworkPolicies = new DesiredNetworkPolicyLedger()
-      await this.reconcileUiEgressPolicy(recipe, desiredNetworkPolicies)
-      await this.reconcileUiIngressPolicies(recipe, desiredNetworkPolicies)
-      // Egress for background-OAuth workloads → control-api broker route.
-      await this.reconcileOAuthBrokerEgressPolicy(recipe, desiredNetworkPolicies)
-
-      // Step 9c: Per-workload egressBindings → NetworkPolicies
-      // For each non-MCP, non-UI workload that declares egressBindings,
-      // emit an egress policy on the source + symmetric ingress policy on
-      // any sibling targets it points at. MCP workloads inherit egress
-      // through HCC via the McpServer CRD path; UI workloads use
-      // `spec.ui.egress.*` which is handled by reconcileUiEgressPolicy.
-      const skippedWorkloadIds = await this.reconcileWorkloadEgressPolicies(
-        recipe,
-        desiredNetworkPolicies
-      )
-
-      // Step 9d: WRC-owned intra-recipe internal dependency policies.
-      // This lane is separate from HCC binding-allow and legacy wl-* policies.
-      const internalDependencyConditions = await this.reconcileInternalDependencyPolicies(
-        recipe,
-        desiredNetworkPolicies
-      )
+      // Steps 9b-9e: each family records a complete desired set before it is
+      // eligible for live-set pruning. A later lane failure cannot suppress
+      // revocations already determined by an earlier, complete family.
+      const networkPolicyPass = await this.reconcileRecipeNetworkPolicyPass(recipe)
+      const { internalDependencyConditions, projection: networkPolicyReapProjection } =
+        networkPolicyPass
+      if (networkPolicyReapProjection?.staleGeneration) {
+        return {
+          phase: currentPhase,
+          message: recipe.status?.message ?? '',
+          workloadStatuses: (recipe.status?.workloads ?? []).map(workload => ({
+            id: workload.id,
+            phase: workload.phase,
+            ready: workload.ready ?? false,
+            message: workload.message,
+          })),
+          skipStatusPatch: true,
+          networkPolicyReapProjection,
+        }
+      }
+      if (networkPolicyPass.laneError !== undefined) {
+        throw new NetworkPolicyPassError(
+          networkPolicyPass.laneError,
+          networkPolicyReapProjection,
+          internalDependencyConditions
+        )
+      }
       const internalDependencyNotReady = internalDependencyConditions.some(
         c => c.status === 'False'
       )
@@ -2613,19 +2738,29 @@ export class WorkflowRecipeReconciler {
             'Internal dependencies are not ready',
           workloadStatuses: [],
           internalDependencyConditions,
+          networkPolicyReapProjection,
         }
       }
-
-      // Step 9e (#582): reap what is live but no longer desired. Runs only once
-      // every lane has completed — a lane that threw leaves a half-built ledger,
-      // and reaping against that would delete live policies.
-      const reap = await this.pruneStaleRecipeNetworkPolicies(
-        recipe,
-        desiredNetworkPolicies,
-        rb.RECIPE_NETWORK_POLICY_FAMILIES,
-        skippedWorkloadIds
-      )
-      const networkPolicyReapConditions = [this.networkPolicyReapCondition(reap.reapDenied)]
+      if (networkPolicyReapProjection?.failureClass === 'transient') {
+        return {
+          phase: 'degraded',
+          message: networkPolicyReapProjection.condition?.message ?? 'NetworkPolicy reap retrying',
+          workloadStatuses: [],
+          internalDependencyConditions,
+          networkPolicyReapProjection,
+        }
+      }
+      if (networkPolicyReapProjection?.failureClass === 'permanent') {
+        return {
+          phase: 'failed',
+          message:
+            networkPolicyReapProjection.condition?.message ??
+            'Permanent NetworkPolicy reap failure',
+          workloadStatuses: [],
+          internalDependencyConditions,
+          networkPolicyReapProjection,
+        }
+      }
 
       // Step 9a: MCP delegation — finalize (Context patch + ensure McpServer CRDs).
       // McpServer CRDs were already created in Step 7b (pre-deploy handshake).
@@ -2757,7 +2892,7 @@ export class WorkflowRecipeReconciler {
         workloadStatuses,
         webhookConditions: webhookOutcome.conditions,
         internalDependencyConditions,
-        networkPolicyReapConditions,
+        networkPolicyReapProjection,
         secretOwnershipConditions: secretOwnership.conditions,
         workloadConditions,
         pluginWorkloadSdkProviderUnavailable: sdkOnlyProviderUnavailable,
@@ -2778,6 +2913,24 @@ export class WorkflowRecipeReconciler {
           sdkOnlyPolicyPending || sdkOnlyRuntime?.phase === 'deploying' || sdkOnlyBootstrapPending,
       }
     } catch (error) {
+      const policyPassError = error instanceof NetworkPolicyPassError ? error : undefined
+      const underlyingError = policyPassError?.causeError ?? error
+      const networkPolicyReapProjection = policyPassError?.projection
+      const internalDependencyConditions = policyPassError?.internalDependencyConditions
+      if (networkPolicyReapProjection?.staleGeneration) {
+        return {
+          phase: currentPhase as RecipePhase,
+          message: recipe.status?.message ?? '',
+          workloadStatuses: (recipe.status?.workloads ?? []).map(workload => ({
+            id: workload.id,
+            phase: workload.phase,
+            ready: workload.ready ?? false,
+            message: workload.message,
+          })),
+          skipStatusPatch: true,
+          networkPolicyReapProjection,
+        }
+      }
       // Transient failures must not brick a healthy recipe at the terminal,
       // never-retried `failed` phase. Two complementary signals:
       //
@@ -2787,14 +2940,17 @@ export class WorkflowRecipeReconciler {
       //     dependency recovers. egressResolutionError() raises this ONLY when
       //     every failure was transient; a permanent failure yields a plain
       //     Error that must stay terminal (fail-closed) below.
-      if (error instanceof RetryableReconcileError) {
+      if (underlyingError instanceof RetryableReconcileError) {
         console.warn(
-          `[WR-Reconciler] Transient failure reconciling "${name}" (will retry): ${error.message}`
+          `[WR-Reconciler] Transient failure reconciling "${name}" (will retry): ${underlyingError.message}`
         )
         return {
           phase: 'degraded',
-          message: error.message,
+          message: underlyingError.message,
           workloadStatuses: [],
+          internalDependencyConditions,
+          networkPolicyReapProjection,
+          requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
         }
       }
       // (2) A raw retryable infra error (connect ETIMEDOUT/ECONNRESET, 5xx,
@@ -2811,10 +2967,11 @@ export class WorkflowRecipeReconciler {
       //     re-classified retryable here, silently overriding that fail-closed
       //     decision and hiding the permanent misconfiguration.
       const isEgressResolutionError =
-        error instanceof Error && error.message.includes('egress resolution failed')
-      if (!isEgressResolutionError && isRetryableInfraError(error)) {
+        underlyingError instanceof Error &&
+        underlyingError.message.includes('egress resolution failed')
+      if (!isEgressResolutionError && isRetryableInfraError(underlyingError)) {
         console.warn(
-          `[WR-Reconciler] Transient infra error reconciling "${name}" — keeping phase "${currentPhase}", will retry: ${String(error)}`
+          `[WR-Reconciler] Transient infra error reconciling "${name}" — keeping phase "${currentPhase}", will retry: ${String(underlyingError)}`
         )
         return {
           phase: currentPhase as RecipePhase,
@@ -2826,17 +2983,23 @@ export class WorkflowRecipeReconciler {
             message: w.message,
           })),
           skipStatusPatch: true,
+          internalDependencyConditions,
+          networkPolicyReapProjection,
           // No status patch ⇒ no MODIFIED event to drive the retry; ask the
           // watcher to re-enqueue this recipe with backoff so self-heal does
           // not depend on an unrelated future watch/secret/external event.
           requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
         }
       }
-      console.error(`[WR-Reconciler] Failed to reconcile "${name}":`, error)
+      createLogger('wrc', name).error('reconcile failed', {
+        errorClass: underlyingError instanceof Error ? underlyingError.name : 'UnknownError',
+      })
       return {
         phase: 'failed',
-        message: String(error),
+        message: String(underlyingError),
         workloadStatuses: [],
+        internalDependencyConditions,
+        networkPolicyReapProjection,
       }
     }
   }
@@ -3225,7 +3388,7 @@ export class WorkflowRecipeReconciler {
     name: string
   ): Promise<{
     internalDependencyConditions: StatusCondition[]
-    networkPolicyReapConditions: StatusCondition[]
+    networkPolicyReapProjection?: NetworkPolicyReapProjection
     secretOwnershipConditions: StatusCondition[]
     workloadConditions: StatusCondition[]
   }> {
@@ -3233,7 +3396,6 @@ export class WorkflowRecipeReconciler {
     if (workloads.length === 0)
       return {
         internalDependencyConditions: [],
-        networkPolicyReapConditions: [],
         secretOwnershipConditions: [],
         workloadConditions: [],
       }
@@ -3243,7 +3405,6 @@ export class WorkflowRecipeReconciler {
       )
       return {
         internalDependencyConditions: [],
-        networkPolicyReapConditions: [],
         secretOwnershipConditions: [],
         workloadConditions: [],
       }
@@ -3303,7 +3464,6 @@ export class WorkflowRecipeReconciler {
       )
       return {
         internalDependencyConditions: [],
-        networkPolicyReapConditions: [],
         secretOwnershipConditions: [],
         workloadConditions: [],
       }
@@ -3429,59 +3589,53 @@ export class WorkflowRecipeReconciler {
       }
     }
 
-    // Sandbox UI egress policy + symmetric ingress on internal-egress
-    // targets (no-op when spec.ui is unset; idempotent)
-    // #582: same ledger-then-prune shape as reconcileInternal.
-    const desiredNetworkPolicies = new DesiredNetworkPolicyLedger()
-    try {
-      await this.reconcileUiEgressPolicy(recipe, desiredNetworkPolicies)
-      await this.reconcileUiIngressPolicies(recipe, desiredNetworkPolicies)
-      await this.reconcileOAuthBrokerEgressPolicy(recipe, desiredNetworkPolicies)
-    } catch (err) {
-      console.error(
-        `[WR-Reconciler] UI egress/ingress policies failed for workflow "${name}":`,
-        err
-      )
-      throw err
-    }
-
-    // Per-workload egressBindings → NetworkPolicies (idempotent; no-op when
-    // no workload declares egressBindings).
-    let skippedWorkloadIds: ReadonlySet<string>
-    try {
-      skippedWorkloadIds = await this.reconcileWorkloadEgressPolicies(
-        recipe,
-        desiredNetworkPolicies
-      )
-    } catch (err) {
-      console.error(`[WR-Reconciler] Workload egress policies failed for workflow "${name}":`, err)
-      throw err
-    }
-
-    const internalDependencyConditions = await this.reconcileInternalDependencyPolicies(
-      recipe,
-      desiredNetworkPolicies
-    )
-    const internalDependencyNotReady = internalDependencyConditions.some(c => c.status === 'False')
-    if (internalDependencyNotReady) {
-      throw new InternalDependencyReconcileError(
-        internalDependencyConditions.find(c => c.status === 'False')?.message ??
-          'Internal dependencies are not ready',
+    const networkPolicyPass = await this.reconcileRecipeNetworkPolicyPass(recipe)
+    const { internalDependencyConditions, projection: networkPolicyReapProjection } =
+      networkPolicyPass
+    if (networkPolicyReapProjection?.staleGeneration) {
+      throw new NetworkPolicyPassError(
+        new RetryableReconcileError('WorkflowRecipe generation changed before NetworkPolicy reap'),
+        networkPolicyReapProjection,
         internalDependencyConditions
       )
     }
-
-    // Step 9e (#582): reap what is live but no longer desired, once every lane
-    // has recorded what it wants. A RetryableReconcileError from here reaches
-    // `deployWorkflowWorkloads`' only caller, whose catch maps it to `degraded` +
-    // retry rather than the default `failed` + `workflowPhase: failed`.
-    const reap = await this.pruneStaleRecipeNetworkPolicies(
-      recipe,
-      desiredNetworkPolicies,
-      rb.RECIPE_NETWORK_POLICY_FAMILIES,
-      skippedWorkloadIds
-    )
-    const networkPolicyReapConditions = [this.networkPolicyReapCondition(reap.reapDenied)]
+    if (networkPolicyPass.laneError !== undefined) {
+      throw new NetworkPolicyPassError(
+        networkPolicyPass.laneError,
+        networkPolicyReapProjection,
+        internalDependencyConditions
+      )
+    }
+    const internalDependencyNotReady = internalDependencyConditions.some(c => c.status === 'False')
+    if (internalDependencyNotReady) {
+      throw new NetworkPolicyPassError(
+        new InternalDependencyReconcileError(
+          internalDependencyConditions.find(c => c.status === 'False')?.message ??
+            'Internal dependencies are not ready',
+          internalDependencyConditions
+        ),
+        networkPolicyReapProjection,
+        internalDependencyConditions
+      )
+    }
+    if (networkPolicyReapProjection?.failureClass === 'transient') {
+      throw new NetworkPolicyPassError(
+        new RetryableReconcileError(
+          networkPolicyReapProjection.condition?.message ?? 'NetworkPolicy reap retrying'
+        ),
+        networkPolicyReapProjection,
+        internalDependencyConditions
+      )
+    }
+    if (networkPolicyReapProjection?.failureClass === 'permanent') {
+      throw new NetworkPolicyPassError(
+        new Error(
+          networkPolicyReapProjection.condition?.message ?? 'Permanent NetworkPolicy reap failure'
+        ),
+        networkPolicyReapProjection,
+        internalDependencyConditions
+      )
+    }
 
     // MCP delegation — finalize Context allowlist and McpServer CRDs.
     // Children live in `mcp-server` (mcpBatchNs), not the recipe's own ns.
@@ -3492,7 +3646,7 @@ export class WorkflowRecipeReconciler {
         )
         return {
           internalDependencyConditions,
-          networkPolicyReapConditions,
+          networkPolicyReapProjection,
           secretOwnershipConditions: secretOwnership.conditions,
           workloadConditions: [],
         }
@@ -3523,7 +3677,7 @@ export class WorkflowRecipeReconciler {
 
     return {
       internalDependencyConditions,
-      networkPolicyReapConditions,
+      networkPolicyReapProjection,
       secretOwnershipConditions: secretOwnership.conditions,
       workloadConditions: [],
     }
@@ -4230,6 +4384,54 @@ export class WorkflowRecipeReconciler {
     await this.safeDelete(del, label)
   }
 
+  private async reconcileRecipeNetworkPolicyPass(
+    recipe: WorkflowRecipeCRD
+  ): Promise<RecipeNetworkPolicyPass> {
+    const desired = new DesiredNetworkPolicyLedger(recipe.metadata.generation)
+    let skippedWorkloadIds: ReadonlySet<string> = new Set()
+    let internalDependencyConditions: StatusCondition[] = []
+    let laneError: unknown
+
+    try {
+      await this.reconcileUiEgressPolicy(recipe, desired)
+      desired.complete('ui-egress')
+
+      await this.reconcileUiIngressPolicies(recipe, desired)
+      desired.complete('ui-ingress')
+
+      await this.reconcileOAuthBrokerEgressPolicy(recipe, desired)
+      desired.complete('oauth-broker-egress')
+
+      skippedWorkloadIds = await this.reconcileWorkloadEgressPolicies(recipe, desired)
+      desired.complete('wl-egress', 'wl-ingress')
+
+      internalDependencyConditions = await this.reconcileInternalDependencyPolicies(recipe, desired)
+      desired.complete('internal-dependency')
+    } catch (error) {
+      laneError = error
+    }
+
+    if (laneError instanceof StaleNetworkPolicyPlanError) {
+      return {
+        internalDependencyConditions,
+        projection: this.networkPolicyReapProjection({ kind: 'stale_generation' }),
+        laneError,
+      }
+    }
+
+    const outcome = await this.pruneStaleRecipeNetworkPolicies(
+      recipe,
+      desired,
+      desired.completedFamilies(),
+      skippedWorkloadIds
+    )
+    return {
+      internalDependencyConditions,
+      projection: this.networkPolicyReapProjection(outcome),
+      laneError,
+    }
+  }
+
   /**
    * Reconcile the per-recipe `ui-egress-<recipeName>` NetworkPolicy in
    * `sandboxUiNamespace`. Ensures the policy converges with `recipe.spec.ui`:
@@ -4347,6 +4549,8 @@ export class WorkflowRecipeReconciler {
     // make the prune delete it on every pass.
     desired.remember(policy)
 
+    if (existing) this.assertNetworkPolicyOwnership(policy, existing, ns)
+
     // issue #299: NO-OP when the accumulated egress set and rules are already
     // live — a TTL-only refresh must not churn the apiserver/dataplane. But DO
     // write when the persisted window is aging (renewalDue, audit M1), even if
@@ -4433,42 +4637,75 @@ export class WorkflowRecipeReconciler {
     }
   }
 
-  /**
-   * Surface stale NetworkPolicies the reap could not delete (issue #582).
-   *
-   * Emitted in BOTH directions so it clears on the next successful pass — a
-   * condition written only on failure latches `True` forever and stops meaning
-   * anything. The recipe phase is deliberately untouched: see the 403 branch of
-   * `pruneStaleRecipeNetworkPolicies`.
-   */
-  private networkPolicyReapCondition(reapDenied: readonly ReapDenial[]): StatusCondition {
+  private networkPolicyReapProjection(
+    outcome: NetworkPolicyReapOutcome
+  ): NetworkPolicyReapProjection | undefined {
+    if (outcome.kind === 'not_evaluated') return undefined
+    if (outcome.kind === 'stale_generation') {
+      return {
+        staleGeneration: true,
+        requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+        requeueFixedInterval: false,
+      }
+    }
+
     const base = {
       type: 'NetworkPolicyReapFailed',
       lastTransitionTime: new Date().toISOString(),
     }
-    if (reapDenied.length === 0) {
+    if (outcome.kind === 'clean') {
       return {
-        ...base,
-        status: 'False',
-        reason: 'Reaped',
-        message: 'No stale WRC NetworkPolicy deletions were denied',
+        condition: {
+          ...base,
+          status: 'False',
+          reason: 'Reaped',
+          message: 'The WRC NetworkPolicy live set is converged',
+        },
       }
     }
-    const listed = reapDenied
-      .map(d =>
-        d.operation === 'list'
-          ? `every family in ${d.namespace} (LIST denied — nothing could be examined)`
-          : `"${d.name}" in ${d.namespace} (${d.family})`
-      )
+
+    const classes = new Set(outcome.failures.map(failure => failure.failureClass))
+    const failureClass: NetworkPolicyReapFailureClass = classes.has('permanent')
+      ? 'permanent'
+      : classes.has('transient')
+        ? 'transient'
+        : 'authorization'
+    const hasAuthorization = classes.has('authorization')
+    const listed = outcome.failures
+      .slice(0, 5)
+      .map(failure => {
+        const target = failure.name
+          ? `"${failure.name}" in ${failure.namespace ?? '<unknown>'}`
+          : (failure.namespace ?? 'recipe generation')
+        return `${failure.operation} ${target} (${failure.message})`
+      })
       .join('; ')
-    const blind = reapDenied.some(d => d.operation === 'list')
+    const omitted = Math.max(0, outcome.failures.length - 5)
+    const reason = classes.has('permanent')
+      ? 'PermanentReapFailure'
+      : hasAuthorization
+        ? outcome.failures.some(failure => failure.operation === 'list')
+          ? 'ListForbidden'
+          : 'DeleteForbidden'
+        : 'ReapRetrying'
+
     return {
-      ...base,
-      status: 'True',
-      // A denied LIST is the wider failure: the controller cannot see the
-      // namespace at all, so the reason names that rather than a single delete.
-      reason: blind ? 'ListForbidden' : 'DeleteForbidden',
-      message: `RBAC denied the NetworkPolicy reap in ${reapDenied.length} place(s); stale policies remain enforced: ${listed}`,
+      condition: {
+        ...base,
+        status: hasAuthorization || classes.has('permanent') ? 'True' : 'Unknown',
+        reason,
+        message: `NetworkPolicy reap incomplete in ${outcome.failures.length} place(s): ${listed}${
+          omitted > 0 ? `; ${omitted} more` : ''
+        }`,
+      },
+      failureClass,
+      requeueAfterMs:
+        failureClass === 'transient'
+          ? TRANSIENT_REQUEUE_BASE_MS
+          : failureClass === 'authorization'
+            ? 30_000
+            : 60_000,
+      requeueFixedInterval: failureClass !== 'transient',
     }
   }
 
@@ -4524,21 +4761,6 @@ export class WorkflowRecipeReconciler {
       )
         ? 'OwnershipConflict'
         : 'InvalidInternalDependency'
-      try {
-        await this.pruneStaleRecipeNetworkPolicies(
-          recipe,
-          new DesiredNetworkPolicyLedger(),
-          new Set<rb.RecipeNetworkPolicyFamily>(['internal-dependency'])
-        )
-      } catch (error) {
-        return [
-          this.internalDependencyCondition(
-            'False',
-            'PolicyApplyFailed',
-            `Failed to prune stale internal-dependency policies for WorkflowRecipe "${recipe.metadata.name}": ${String(error)}`
-          ),
-        ]
-      }
       return [
         this.internalDependencyCondition(
           'False',
@@ -4588,42 +4810,41 @@ export class WorkflowRecipeReconciler {
       sourcesByTarget.set(dep.targetWorkloadId, sources)
     }
 
-    try {
-      for (const [sourceWorkloadId, targets] of targetsBySource.entries()) {
-        const source = workloadById.get(sourceWorkloadId)
-        if (!source) continue
-        const sourceNamespace = this.resolveWorkloadNamespace(source, recipe.spec.ui?.workloadRef)
-        const policy = buildInternalDependencyEgressNetworkPolicy(
-          source,
-          recipe,
-          sourceNamespace,
-          targets
-        )
-        if (!policy) continue
-        desired.remember(policy)
-        await this.applyNetworkPolicy(policy, sourceNamespace)
-      }
+    const policies: Array<{ policy: k8s.V1NetworkPolicy; namespace: string }> = []
+    for (const [sourceWorkloadId, targets] of targetsBySource.entries()) {
+      const source = workloadById.get(sourceWorkloadId)
+      if (!source) continue
+      const sourceNamespace = this.resolveWorkloadNamespace(source, recipe.spec.ui?.workloadRef)
+      const policy = buildInternalDependencyEgressNetworkPolicy(
+        source,
+        recipe,
+        sourceNamespace,
+        targets
+      )
+      if (!policy) continue
+      desired.remember(policy)
+      policies.push({ policy, namespace: sourceNamespace })
+    }
 
-      for (const [targetWorkloadId, sources] of sourcesByTarget.entries()) {
-        const target = workloadById.get(targetWorkloadId)
-        if (!target) continue
-        const targetNamespace = this.resolveWorkloadNamespace(target, recipe.spec.ui?.workloadRef)
-        const policy = buildInternalDependencyIngressNetworkPolicy(
-          target,
-          recipe,
-          targetNamespace,
-          sources
-        )
-        if (!policy) continue
-        desired.remember(policy)
-        await this.applyNetworkPolicy(policy, targetNamespace)
+    for (const [targetWorkloadId, sources] of sourcesByTarget.entries()) {
+      const target = workloadById.get(targetWorkloadId)
+      if (!target) continue
+      const targetNamespace = this.resolveWorkloadNamespace(target, recipe.spec.ui?.workloadRef)
+      const policy = buildInternalDependencyIngressNetworkPolicy(
+        target,
+        recipe,
+        targetNamespace,
+        sources
+      )
+      if (!policy) continue
+      desired.remember(policy)
+      policies.push({ policy, namespace: targetNamespace })
+    }
+
+    try {
+      for (const { policy, namespace } of policies) {
+        await this.applyNetworkPolicy(policy, namespace)
       }
-      // The prune moved OUT of this try (issue #582). It now runs once, after
-      // every lane has recorded what it wants, for two reasons: this catch maps
-      // any error to OwnershipConflict/PolicyApplyFailed, which would swallow the
-      // RetryableReconcileError the prune raises on a 5xx and lose the `degraded`
-      // + retry path; and reaping against a ledger only this lane filled would
-      // delete every live policy the other five lanes own.
     } catch (error) {
       const reason =
         error instanceof NetworkPolicyOwnershipConflictError
@@ -4659,11 +4880,18 @@ export class WorkflowRecipeReconciler {
    * finalizer that throws can wedge a recipe in `Terminating`). Separate PR.
    */
   private async cleanupInternalDependencyPolicies(recipe: WorkflowRecipeCRD): Promise<void> {
-    await this.pruneStaleRecipeNetworkPolicies(
+    const outcome = await this.pruneStaleRecipeNetworkPolicies(
       recipe,
       new DesiredNetworkPolicyLedger(),
-      new Set<rb.RecipeNetworkPolicyFamily>(['internal-dependency'])
+      new Set<rb.RecipeNetworkPolicyFamily>(['internal-dependency']),
+      new Set(),
+      { context: 'finalizer' }
     )
+    if (outcome.kind !== 'clean') {
+      throw new Error(
+        `NetworkPolicy cleanup incomplete for WorkflowRecipe "${recipe.metadata.name}"`
+      )
+    }
   }
 
   /**
@@ -4695,8 +4923,14 @@ export class WorkflowRecipeReconciler {
     recipe: WorkflowRecipeCRD,
     desired: DesiredNetworkPolicyLedger,
     families: ReadonlySet<rb.RecipeNetworkPolicyFamily>,
-    excludedWorkloadIds: ReadonlySet<string> = new Set()
-  ): Promise<{ deleted: number; reapDenied: ReapDenial[] }> {
+    excludedWorkloadIds: ReadonlySet<string> = new Set(),
+    options: { context: 'active' | 'finalizer' } = { context: 'active' }
+  ): Promise<NetworkPolicyReapOutcome> {
+    if (families.size === 0) return { kind: 'not_evaluated' }
+    if (options.context === 'active' && !(await this.recipeGenerationStillCurrent(recipe))) {
+      return { kind: 'stale_generation' }
+    }
+
     const namespaces = new Set<string>([
       this.config.sandboxNamespace,
       this.config.namespace,
@@ -4715,7 +4949,15 @@ export class WorkflowRecipeReconciler {
     }
 
     let deleted = 0
-    const reapDenied: ReapDenial[] = []
+    const failures: NetworkPolicyReapFailure[] = []
+    const log = createLogger('wrc', recipe.metadata.name)
+    const classifyFailure = (error: unknown): NetworkPolicyReapFailureClass => {
+      const code = getErrorCode(error)
+      if (code === 401 || code === 403) return 'authorization'
+      if (code === 409 || code === 412) return 'transient'
+      if (isRetryableInfraError(error)) return 'transient'
+      return 'permanent'
+    }
 
     for (const namespace of namespaces) {
       let list: k8s.V1NetworkPolicyList
@@ -4726,32 +4968,26 @@ export class WorkflowRecipeReconciler {
         })) as k8s.V1NetworkPolicyList
       } catch (error) {
         const code = getErrorCode(error)
-        // The LIST gets the SAME three-class treatment as the DELETE, because a
-        // failure here is worse than one there: without it we do not know what is
-        // live, so NOTHING in this namespace is reaped — for all six families,
-        // not just one policy. Before this change the per-workload deletes still
-        // ran when the (intdep-only) LIST failed; now the prune is the only
-        // reaper, so the blast radius of a failed LIST grew.
-        //
-        // Unreachable with the current manifests — `workflow-recipes` holds `list`
-        // on networkpolicies in all three namespaces (`deploy/base/{sandbox-recipes,
-        // sandbox-ui,mcp-server}/rbac.yaml`) and this method queries no others,
-        // since `resolveWorkloadNamespace` can return only those three. Handled
-        // anyway so that adding a fourth namespace, or tightening a Role, fails
-        // visibly instead of latching every recipe in it.
-        if (code === 401 || code === 403) {
-          console.error(
-            `[WR-Reconciler] FORBIDDEN listing NetworkPolicies in ${namespace} — nothing can be reaped there this pass:`,
-            error
-          )
+        const failureClass = classifyFailure(error)
+        log.error('NetworkPolicy inventory failed', {
+          operation: 'list',
+          context: options.context,
+          namespace,
+          code,
+          failureClass,
+          errorClass: error instanceof Error ? error.name : 'KubernetesApiError',
+        })
+        if (failureClass === 'authorization') {
           networkPolicyReapDeniedTotal.inc({ family: 'all', operation: 'list' })
-          reapDenied.push({ namespace, operation: 'list' })
-          continue
         }
-        throw new RetryableReconcileError(
-          `Listing NetworkPolicies in ${namespace} failed transiently`,
-          { cause: error }
-        )
+        failures.push({
+          operation: 'list',
+          namespace,
+          failureClass,
+          code,
+          message: `LIST failed${code === undefined ? '' : ` with HTTP ${code}`}`,
+        })
+        continue
       }
       for (const policy of list.items ?? []) {
         const name = policy.metadata?.name
@@ -4761,62 +4997,73 @@ export class WorkflowRecipeReconciler {
         if (!families.has(family)) continue
         if (desired.has(namespace, name)) continue
         if (excludedNames.has(name)) continue
+        const uid = policy.metadata?.uid
+        const resourceVersion = policy.metadata?.resourceVersion
+        if (!uid || !resourceVersion) {
+          failures.push({
+            operation: 'delete',
+            name,
+            namespace,
+            family,
+            failureClass: 'permanent',
+            message: 'live object identity is incomplete',
+          })
+          log.error('Refusing unsafe NetworkPolicy reap without object identity', {
+            operation: 'delete',
+            context: options.context,
+            namespace,
+            family,
+            policy: name,
+          })
+          continue
+        }
         try {
-          await this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace })
+          await this.networkingApi.deleteNamespacedNetworkPolicy({
+            name,
+            namespace,
+            body: { preconditions: { uid, resourceVersion } },
+          })
           deleted += 1
-          // Logged ONLY on an actual deletion. A per-pass line would be ~12k
-          // lines/hour across 3 namespaces × 19 recipes × 206 passes, which is
-          // the log volume #492 exists to reduce.
-          console.log(
-            `[WR-Reconciler] Deleted stale ${family} NetworkPolicy "${name}" in ${namespace} (not in desired set)`
-          )
+          log.info('Deleted stale NetworkPolicy', {
+            operation: 'delete',
+            context: options.context,
+            namespace,
+            family,
+            policy: name,
+          })
         } catch (error) {
           const code = getErrorCode(error)
-          // The normal case, and the reason this whole change exists: the object
-          // is already gone. Something else removed it, or the ui-egress inline
-          // delete got there first. Not a fault, no signal.
           if (code === 404) continue
-          // 401 and 403 are both PERMANENT authorization failures, and both leave
-          // a stale allow policy enforced. Neither is retryable: a rotated or
-          // expired ServiceAccount token (401) and a revoked Role (403) stay
-          // broken until an operator acts. Treating them as transient would
-          // degrade the recipe forever under a message claiming otherwise — and
-          // `degraded` is the one phase `POST /recipes/:name/retry` refuses, so
-          // there would be no recovery path short of deleting the CR.
-          if (code === 401 || code === 403) {
-            // An enforcement leak, not a transient fault: the policy is no longer
-            // desired and stays enforced. Report on three channels and keep going
-            // — deliberately NOT a throw, because the caller's default arm maps an
-            // unrecognised error to `phase: failed` + `workflowPhase: failed`, and
-            // a latched recipe is sticky: the transient-latch self-heal requires
-            // `status.message` to match `isRetryableInfraError`, which an auth
-            // failure never does. And it is NOT cosmetic — `control-api` gates
-            // Sandbox UI access and workflow invocation on `phase === 'active'`,
-            // so failing here takes a working recipe out of service over a
-            // residual object. `POST /recipes/:name/retry` recovers `failed` but
-            // rejects `degraded`, which is why neither is used.
-            console.error(
-              `[WR-Reconciler] FORBIDDEN deleting stale ${family} NetworkPolicy "${name}" in ${namespace} — it remains enforced:`,
-              error
-            )
+          const failureClass = classifyFailure(error)
+          log.error('NetworkPolicy reap failed', {
+            operation: 'delete',
+            context: options.context,
+            namespace,
+            family,
+            policy: name,
+            code,
+            failureClass,
+            errorClass: error instanceof Error ? error.name : 'KubernetesApiError',
+          })
+          if (failureClass === 'authorization') {
             networkPolicyReapDeniedTotal.inc({ family, operation: 'delete' })
-            reapDenied.push({ operation: 'delete', name, namespace, family })
-            continue
           }
-          // 5xx, timeouts, transport faults: hand the caller the type its own
-          // catch already maps to `degraded` + retry next pass — the
-          // `instanceof RetryableReconcileError` arms in `reconcile`'s workflow
-          // branch and in `reconcileInternal`'s catch. Named rather than
-          // line-numbered: the earlier `:1907` reference was already stale.
-          throw new RetryableReconcileError(
-            `Pruning stale ${family} NetworkPolicy "${name}" in ${namespace} failed transiently`,
-            { cause: error }
-          )
+          failures.push({
+            operation: 'delete',
+            name,
+            namespace,
+            family,
+            failureClass,
+            code,
+            message: `DELETE failed${code === undefined ? '' : ` with HTTP ${code}`}`,
+          })
         }
       }
     }
 
-    return { deleted, reapDenied }
+    return failures.length > 0
+      ? { kind: 'incomplete', deleted, failures }
+      : { kind: 'clean', deleted }
   }
 
   /**
@@ -4964,6 +5211,8 @@ export class WorkflowRecipeReconciler {
       // would make the prune delete it on every pass.
       desired.remember(policy)
 
+      if (existingWlPolicy) this.assertNetworkPolicyOwnership(policy, existingWlPolicy, wlNs)
+
       // issue #299: NO-OP when the accumulated set and rules are already live —
       // but still write when the persisted window is aging (renewalDue, M1).
       if (
@@ -5006,25 +5255,44 @@ export class WorkflowRecipeReconciler {
     return skippedWorkloadIds
   }
 
-  private assertInternalDependencyPolicyOwnership(
+  private assertNetworkPolicyOwnership(
     desired: k8s.V1NetworkPolicy,
     existing: k8s.V1NetworkPolicy,
     namespace: string
   ): void {
     const desiredLabels = desired.metadata?.labels ?? {}
-    if (desiredLabels[NETWORK_POLICY_TYPE_LABEL] !== INTERNAL_DEPENDENCY_POLICY_TYPE) return
-
     const existingLabels = existing.metadata?.labels ?? {}
     const desiredName = desired.metadata?.name ?? '<unknown>'
     const desiredRecipe = desiredLabels['clerum.io/recipe']
     const ownsSameLane =
       existingLabels['clerum.io/managed-by'] === 'workflow-recipes' &&
-      existingLabels[NETWORK_POLICY_TYPE_LABEL] === INTERNAL_DEPENDENCY_POLICY_TYPE &&
-      existingLabels['clerum.io/recipe'] === desiredRecipe
+      existingLabels['clerum.io/recipe'] === desiredRecipe &&
+      (desiredLabels[NETWORK_POLICY_TYPE_LABEL] !== INTERNAL_DEPENDENCY_POLICY_TYPE ||
+        existingLabels[NETWORK_POLICY_TYPE_LABEL] === INTERNAL_DEPENDENCY_POLICY_TYPE)
 
     if (!ownsSameLane) {
+      const lane =
+        desiredLabels[NETWORK_POLICY_TYPE_LABEL] === INTERNAL_DEPENDENCY_POLICY_TYPE
+          ? 'WRC internal-dependency policy'
+          : 'WRC recipe policy'
       throw new NetworkPolicyOwnershipConflictError(
-        `Refusing to replace NetworkPolicy "${desiredName}" in ${namespace}: existing policy is not the WRC internal-dependency policy for WorkflowRecipe "${desiredRecipe}"`
+        `Refusing to replace NetworkPolicy "${desiredName}" in ${namespace}: existing policy is not the ${lane} for WorkflowRecipe "${desiredRecipe}"`
+      )
+    }
+
+    const desiredGeneration = Number(
+      desired.metadata?.annotations?.[RECIPE_GENERATION_ANNOTATION] ?? Number.NaN
+    )
+    const existingGeneration = Number(
+      existing.metadata?.annotations?.[RECIPE_GENERATION_ANNOTATION] ?? Number.NaN
+    )
+    if (
+      Number.isFinite(desiredGeneration) &&
+      Number.isFinite(existingGeneration) &&
+      existingGeneration > desiredGeneration
+    ) {
+      throw new StaleNetworkPolicyPlanError(
+        `Refusing to replace NetworkPolicy "${desiredName}" in ${namespace}: live generation ${existingGeneration} is newer than planned generation ${desiredGeneration}`
       )
     }
   }
@@ -5207,7 +5475,7 @@ export class WorkflowRecipeReconciler {
           name: policyName,
           namespace,
         })
-        this.assertInternalDependencyPolicyOwnership(policy, existing, namespace)
+        this.assertNetworkPolicyOwnership(policy, existing, namespace)
         policy.metadata!.resourceVersion = existing.metadata?.resourceVersion
         return this.networkingApi.replaceNamespacedNetworkPolicy({
           name: policyName,
@@ -6672,13 +6940,30 @@ export class WorkflowRecipeReconciler {
       workflowOutputMergedConditions ?? webhookMergedConditions ?? recipe.status?.conditions,
       result.internalDependencyConditions
     )
-    const networkPolicyReapMergedConditions = mergeNetworkPolicyReapConditions(
-      internalDependencyMergedConditions ??
-        workflowOutputMergedConditions ??
-        webhookMergedConditions ??
-        recipe.status?.conditions,
-      result.networkPolicyReapConditions
+    const projectedReapCondition = result.networkPolicyReapProjection?.condition
+    const persistedReapCondition = recipe.status?.conditions?.find(
+      condition => condition.type === 'NetworkPolicyReapFailed'
     )
+    const reapCondition =
+      projectedReapCondition &&
+      persistedReapCondition &&
+      projectedReapCondition.status === persistedReapCondition.status &&
+      projectedReapCondition.reason === persistedReapCondition.reason &&
+      projectedReapCondition.message === persistedReapCondition.message
+        ? {
+            ...projectedReapCondition,
+            lastTransitionTime: persistedReapCondition.lastTransitionTime,
+          }
+        : projectedReapCondition
+    const networkPolicyReapMergedConditions = reapCondition
+      ? mergeNetworkPolicyReapConditions(
+          internalDependencyMergedConditions ??
+            workflowOutputMergedConditions ??
+            webhookMergedConditions ??
+            recipe.status?.conditions,
+          [reapCondition]
+        )
+      : undefined
     const secretOwnershipMergedConditions = mergeSecretOwnershipConditions(
       networkPolicyReapMergedConditions ??
         internalDependencyMergedConditions ??
