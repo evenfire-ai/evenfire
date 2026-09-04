@@ -1,13 +1,12 @@
 'use client'
 
 import Link from 'next/link'
+import { DataTable, TableStateRow, TableViewport, useTableSort } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { GrantedToMeItem } from '../../lib/api'
 import type { InboundGrantsStatus } from '../../lib/hooks/useInboundGrants'
-import { SectionLoadingSkeleton } from '../SectionLoadingSkeleton'
 import { TableHeaderRow } from '../TableHeaderRow'
 import type { TableHeaderColumn } from '../TableHeaderRow/types'
-import { RetryBanner } from './RetryBanner'
 
 const COLUMNS: TableHeaderColumn[] = [
   { key: 'plugin', label: 'Plugin' },
@@ -35,43 +34,74 @@ export function GrantedToMe({
   grants: GrantedToMeItem[]
   reload: () => void
 }) {
-  if (status === 'loading') {
-    return <SectionLoadingSkeleton label="Loading shared plugins" rows={3} />
-  }
-  if (status === 'unavailable') {
-    return (
-      <p className="cu-banner cu-banner--warn">
-        Plugins shared with your org appear in your{' '}
-        <Link href={CONTROL_ROUTES.marketplace.root}>Marketplace catalog</Link> and can be installed
-        from there.
-      </p>
-    )
-  }
-  if (status === 'error') {
-    return <RetryBanner message="Could not load inbound grants." onRetry={reload} />
-  }
-  if (grants.length === 0) {
-    return <p>No plugins have been shared with your org yet.</p>
-  }
-
+  const grantSort = useTableSort<GrantedToMeItem, 'plugin' | 'owner' | 'since'>({
+    rows: grants,
+    defaultKey: 'plugin',
+    identity: grant => `${grant.ownerOrg}/${grant.pluginName}`,
+    accessors: {
+      plugin: grant => grant.pluginName,
+      owner: grant => grant.ownerOrg,
+      since: grant => grant.createdAt,
+    },
+  })
+  const columns = COLUMNS.map(column => ({
+    ...column,
+    activeDirection: grantSort.key === column.key ? grantSort.direction : null,
+    onSort: () => grantSort.sortBy(column.key as 'plugin' | 'owner' | 'since'),
+  }))
   return (
-    <div className="cu-table-wrap">
-      <table className="cu-table">
+    <TableViewport className="cu-table-wrap">
+      <DataTable className="eft-table cu-table">
         <thead>
-          <TableHeaderRow columns={COLUMNS} />
+          <TableHeaderRow columns={columns} />
         </thead>
         <tbody>
-          {grants.map(g => (
-            <tr key={`${g.ownerOrg}/${g.pluginName}`}>
-              <td>
-                <code>{g.pluginName}</code>
-              </td>
-              <td>{g.ownerOrg}</td>
-              <td>{fmt(g.createdAt)}</td>
-            </tr>
-          ))}
+          {status === 'loading' ? (
+            <TableStateRow
+              colSpan={columns.length}
+              kind="loading"
+              message="Loading shared plugins…"
+            />
+          ) : status === 'error' ? (
+            <TableStateRow
+              action={
+                <button type="button" className="cu-btn cu-btn--ghost cu-btn--sm" onClick={reload}>
+                  Retry
+                </button>
+              }
+              colSpan={columns.length}
+              kind="error"
+              message="Could not load inbound grants."
+            />
+          ) : status === 'unavailable' ? (
+            <TableStateRow
+              colSpan={columns.length}
+              message={
+                <>
+                  Plugins shared with your org appear in your{' '}
+                  <Link href={CONTROL_ROUTES.marketplace.root}>Marketplace catalog</Link> and can be
+                  installed from there.
+                </>
+              }
+            />
+          ) : grants.length === 0 ? (
+            <TableStateRow
+              colSpan={columns.length}
+              message="No plugins have been shared with your org yet."
+            />
+          ) : (
+            grantSort.sortedRows.map(g => (
+              <tr key={`${g.ownerOrg}/${g.pluginName}`}>
+                <td>
+                  <code>{g.pluginName}</code>
+                </td>
+                <td>{g.ownerOrg}</td>
+                <td>{fmt(g.createdAt)}</td>
+              </tr>
+            ))
+          )}
         </tbody>
-      </table>
-    </div>
+      </DataTable>
+    </TableViewport>
   )
 }

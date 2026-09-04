@@ -153,11 +153,8 @@ describe('WorkflowAccessPanel', () => {
     const section = screen.getByTestId('workflow-access-trigger-users')
     await waitFor(() => expect(within(section).getByText(/alice@example\.com/)).toBeInTheDocument())
 
-    fireEvent.click(
-      within(section).getByRole('button', {
-        name: 'Remove member trigger access: alice@example.com',
-      })
-    )
+    fireEvent.click(within(section).getByRole('button', { name: 'Actions for Alice' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove member trigger access' }))
     expect(setWorkflowGrants).not.toHaveBeenCalled()
     expect(
       await screen.findByRole('alertdialog', { name: 'Remove Member Trigger Access' })
@@ -168,6 +165,71 @@ describe('WorkflowAccessPanel', () => {
     await waitFor(() =>
       expect(setWorkflowGrants).toHaveBeenCalledWith('sandbox-recipes', 'installed-recipe', ['u-2'])
     )
+  })
+
+  it('sorts visible access records by human identity with a stable id tie-break', async () => {
+    vi.mocked(listWorkflowGrants).mockResolvedValue({
+      items: [
+        bobGrant,
+        { id: 'u-10', email: 'same-10@example.com', name: 'Same', displayName: null },
+        { id: 'u-3', email: 'same-3@example.com', name: 'Same', displayName: null },
+        aliceGrant,
+      ],
+    })
+
+    render(<EditHarness />)
+
+    const section = screen.getByTestId('workflow-access-trigger-users')
+    await waitFor(() => expect(within(section).getByText('Alice')).toBeInTheDocument())
+    const rows = section.querySelectorAll('.cu-workflow-access__row-title')
+    expect([...rows].map(row => row.textContent)).toEqual(['Alice', 'Bob', 'Same', 'Same'])
+    expect(
+      within(section)
+        .getAllByRole('listitem')
+        .map(row => row.getAttribute('data-access-id'))
+    ).toEqual(['u-1', 'u-2', 'u-3', 'u-10'])
+    expect(section.querySelector('.cu-workflow-access__rows')).toHaveAttribute('role', 'list')
+  })
+
+  it('sorts trigger-team and approval-team records by name with stable id tie-breaks', async () => {
+    vi.mocked(listWorkflowTeamGrants).mockResolvedValue({
+      items: [
+        { id: 'team-z', name: 'Zulu' },
+        { id: 'team-10', name: 'Same Team' },
+        { id: 'team-2', name: 'Same Team' },
+        { id: 'team-a', name: 'Alpha Team' },
+      ],
+    })
+    vi.mocked(listWorkflowApprovalAllowedTeams).mockResolvedValue({
+      items: [
+        { id: 'approval-z', name: 'Zulu Approval', createdAt: '2026-01-01T00:00:00Z' },
+        { id: 'approval-10', name: 'Same Approval', createdAt: '2026-01-01T00:00:00Z' },
+        { id: 'approval-2', name: 'Same Approval', createdAt: '2026-01-01T00:00:00Z' },
+        { id: 'approval-a', name: 'Alpha Approval', createdAt: '2026-01-01T00:00:00Z' },
+      ],
+    })
+
+    render(<EditHarness />)
+
+    fireEvent.click(screen.getByRole('tab', { name: /Teams/ }))
+    const teamSection = screen.getByTestId('workflow-access-trigger-teams')
+    await waitFor(() => expect(within(teamSection).getByText('Alpha Team')).toBeInTheDocument())
+    expect(
+      within(teamSection)
+        .getAllByRole('listitem')
+        .map(row => row.getAttribute('data-access-id'))
+    ).toEqual(['team-a', 'team-2', 'team-10', 'team-z'])
+
+    fireEvent.click(screen.getByRole('tab', { name: /Approval target teams/ }))
+    const approvalSection = screen.getByTestId('workflow-access-approval-target-teams')
+    await waitFor(() =>
+      expect(within(approvalSection).getByText('Alpha Approval')).toBeInTheDocument()
+    )
+    expect(
+      within(approvalSection)
+        .getAllByRole('listitem')
+        .map(row => row.getAttribute('data-access-id'))
+    ).toEqual(['approval-a', 'approval-2', 'approval-10', 'approval-z'])
   })
 
   it('blocks live grant writes until the current edit-mode grants are loaded', async () => {

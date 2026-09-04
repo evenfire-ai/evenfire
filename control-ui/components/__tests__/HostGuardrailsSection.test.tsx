@@ -107,11 +107,8 @@ describe('HostGuardrailsSection', () => {
       <HostGuardrailsSection busy={false} canWrite initialGuardrails={GUARDRAILS} onSave={onSave} />
     )
 
-    fireEvent.click(
-      await screen.findByRole('button', {
-        name: 'Remove hook hook-token-compactor from Pre-call',
-      })
-    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for hook-token-compactor' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove from Pre-call' }))
 
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1))
     const saved = onSave.mock.calls[0][0] as HostGuardrails
@@ -127,11 +124,8 @@ describe('HostGuardrailsSection', () => {
       <HostGuardrailsSection busy={false} canWrite initialGuardrails={GUARDRAILS} onSave={onSave} />
     )
 
-    fireEvent.click(
-      await screen.findByRole('button', {
-        name: 'Remove hook hook-token-compactor from Pre-call',
-      })
-    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for hook-token-compactor' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove from Pre-call' }))
 
     await waitFor(() => expect(confirmMock).toHaveBeenCalled())
     expect(onSave).not.toHaveBeenCalled()

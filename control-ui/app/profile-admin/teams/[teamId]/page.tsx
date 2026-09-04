@@ -2,6 +2,13 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
+import {
+  DataTable,
+  RecordList,
+  RecordListRow,
+  RowActionMenu,
+  TableViewport,
+} from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
 import { SelectionDropdown } from '@components/SelectionDropdown'
@@ -10,17 +17,11 @@ import { TeamRolePermissionEditor } from '@components/TeamRolePermissionEditor'
 import { useToast } from '@components/Toast'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { partitionVisibleAccess } from '@lib/accessVisibility'
-import {
-  agentNamesForContextAccess,
-  applyAgentAccessCompatibilityUpdate,
-} from '@lib/agentAccessCompatibility'
+import { applyAgentAccessCompatibilityUpdate } from '@lib/agentAccessCompatibility'
 import { getAgentDisplayName } from '@lib/agentName'
-import { contextResourceName, contextResourceNameForAlias } from '@lib/contextIdentity'
-import { ConnectorCountCell } from '../../../../components/ConnectorCountCell'
 import { InviteMemberDialog } from '../../../../components/InviteMemberDialog'
 import { IconUsers } from '../../../../components/Sidebar/icons'
-import { IconCheck, IconMoreHorizontal, IconPencil, IconX } from '../../../../components/icons'
-import { accessScopeLabeler } from '../../../../lib/accessScopeLabels'
+import { IconCheck, IconMoreHorizontal, IconX } from '../../../../components/icons'
 import {
   AdminTeamPendingInvitation,
   ContextResource,
@@ -59,6 +60,7 @@ const TEAM_TAB_LABELS: Record<TeamTab, string> = {
 }
 
 function parseTeamTab(value: string | undefined): TeamTab {
+  if (value === 'contexts') return 'agents'
   return TEAM_TABS.includes(value as TeamTab) ? (value as TeamTab) : 'members'
 }
 
@@ -180,16 +182,14 @@ export default function TeamDetailsPage() {
   const [addingMember, setAddingMember] = useState(false)
   const [addMemberError, setAddMemberError] = useState('')
 
-  const [showAddContext, setShowAddContext] = useState(false)
+  const [showAddAgent, setShowAddAgent] = useState(false)
 
   const [availableContextIds, setAvailableContextIds] = useState<string[]>([])
+  const [contextResources, setContextResources] = useState<ContextResource[]>([])
   const [assignedContextIds, setAssignedContextIds] = useState<string[]>([])
   const [deletedContextIds, setDeletedContextIds] = useState<string[]>([])
-  const [selectedContextIdsToAdd, setSelectedContextIdsToAdd] = useState<string[]>([])
   const [hosts, setHosts] = useState<HostResource[]>([])
-  const [contextResources, setContextResources] = useState<ContextResource[]>([])
   const [assignedAgentNames, setAssignedAgentNames] = useState<string[]>([])
-  const [deletedAgentNames, setDeletedAgentNames] = useState<string[]>([])
   const [observedAgentNames, setObservedAgentNames] = useState<string[]>([])
   const [selectedAgentNamesToAdd, setSelectedAgentNamesToAdd] = useState<string[]>([])
 
@@ -202,66 +202,17 @@ export default function TeamDetailsPage() {
     [hosts]
   )
 
-  // Rows are context IDs on the wire, but the user sees what that access
-  // means: the owning agent(s) for private scopes, the stored display name
-  // for anything else, and the raw id as a last-resort muted fallback.
-  // contextRef → attached connector names (per-agent Connectors column).
-  const contextsByRef = useMemo(() => {
-    const map: Record<string, string[]> = {}
-    for (const context of contextResources) {
-      const ref = String(context.spec?.contextId || context.metadata?.name || '').trim()
-      if (!ref) continue
-      map[ref] = Array.isArray(context.spec?.mcpServers) ? context.spec.mcpServers.map(String) : []
-    }
-    return map
-  }, [contextResources])
-
-  const hostsByName = useMemo(() => {
-    const map = new Map<string, HostResource>()
-    for (const host of hosts || []) {
-      const name = String(host.metadata?.name || '').trim()
-      if (name) map.set(name, host)
-    }
-    return map
-  }, [hosts])
-
-  // D8: granted set is agent-centric — direct team↔agent mapping unioned with
-  // agents resolved from legacy scope-only mappings.
-  const grantedAgentNames = useMemo(() => {
-    const granted = new Set([
-      ...assignedAgentNames,
-      ...agentNamesForContextAccess(
-        assignedContextIds,
-        [...hostsByName.values()],
-        contextResources
-      ),
-    ])
-    return [...granted].sort((a, b) => a.localeCompare(b))
-  }, [assignedAgentNames, assignedContextIds, contextResources, hostsByName])
-
-  const agentDisplay = (agentName: string): string => {
-    const host = hostsByName.get(agentName)
-    return String((host?.spec as { host?: string } | undefined)?.host || '').trim() || agentName
-  }
-
-  const agentContextRef = (agentName: string): string => {
-    const host = hostsByName.get(agentName)
-    return String((host?.spec as { contextRef?: string } | undefined)?.contextRef || '').trim()
-  }
-
-  const accessLabeler = useMemo(
-    () => accessScopeLabeler(contextResources, hosts || []),
-    [contextResources, hosts]
-  )
-  function accessLabelFor(contextId: string): { label: string; resolved: boolean } {
-    return accessLabeler(contextId)
+  function contextIdFromResource(item: {
+    metadata?: { name?: string }
+    spec?: { contextId?: string }
+  }) {
+    return String(item.spec?.contextId || item.metadata?.name || '').trim()
   }
 
   async function loadTeamData(
     resolvedTeamId: string,
     visibleContextIds = availableContextIds,
-    visibleAgentNames = hostNameOptions,
-    visibleContexts = contextResources
+    visibleAgentNames = hostNameOptions
   ) {
     const [team, teamMembers, teamContexts, teamAgents, pendingInv] = await Promise.all([
       getAdminTeam(resolvedTeamId),
@@ -283,11 +234,7 @@ export default function TeamDetailsPage() {
       )
     )
     const contextPartition = partitionVisibleAccess(
-      Array.isArray(teamContexts.contextIds)
-        ? teamContexts.contextIds.map(contextId =>
-            contextResourceNameForAlias(visibleContexts, contextId)
-          )
-        : [],
+      Array.isArray(teamContexts.contextIds) ? teamContexts.contextIds : [],
       visibleContextIds,
       Array.isArray(teamContexts.deletedContextIds) ? teamContexts.deletedContextIds : []
     )
@@ -318,12 +265,13 @@ export default function TeamDetailsPage() {
         ])
         setUsers(Array.isArray(usersData.items) ? usersData.items : [])
         setHosts(Array.isArray(hostsData.items) ? hostsData.items : [])
-        setContextResources((contextsData.items || []) as ContextResource[])
-        const resources = (contextsData.items || []) as ContextResource[]
-        const ids = resources
-          .map(contextResourceName)
+        const ids = (contextsData.items || [])
+          .map(item => contextIdFromResource(item as never))
           .filter(Boolean)
           .sort((a, b) => a.localeCompare(b))
+        setContextResources(
+          Array.isArray(contextsData.items) ? (contextsData.items as ContextResource[]) : []
+        )
         const hostNames = Array.from(
           new Set(
             (hostsData.items || [])
@@ -333,7 +281,7 @@ export default function TeamDetailsPage() {
         ).sort((a, b) => a.localeCompare(b))
         setAvailableContextIds(ids)
         if (!isNew) {
-          await loadTeamData(teamId, ids, hostNames, resources)
+          await loadTeamData(teamId, ids, hostNames)
         }
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to load team data')
@@ -525,65 +473,61 @@ export default function TeamDetailsPage() {
     }
   }
 
-  // D8 composite write: the tab manages AGENTS; both legacy mappings stay in
-  // sync so whichever table the runtime enforces, the grant works.
-  async function saveAccess(nextGrantedAgents: string[], message: string) {
+  async function saveAgents(next: string[], message: string) {
     if (isNew) return
     setBusy(true)
     setError('')
     try {
+      const normalized = Array.from(new Set(next.map(v => v.trim()).filter(Boolean)))
       const [updatedAgents, updatedContexts] = await applyAgentAccessCompatibilityUpdate({
         contexts: contextResources,
-        hosts: [...hostsByName.values()],
+        hosts,
         loadCurrentContextIds: async () => {
           const current = await getAdminTeamContexts(teamId)
-          return [...(current.contextIds || []), ...(current.deletedContextIds || [])]
+          return Array.isArray(current.contextIds) ? current.contextIds : []
         },
-        nextGrantedAgentNames: nextGrantedAgents,
+        nextGrantedAgentNames: normalized,
         updateAgents: agentNames => updateAdminTeamAgents(teamId, agentNames, observedAgentNames),
         updateContexts: contextIds => updateAdminTeamContexts(teamId, contextIds),
       })
-
-      const hostNames = [...hostsByName.keys()]
       const agentPartition = partitionVisibleAccess(
         updatedAgents.agentNames || [],
-        hostNames,
+        hostNameOptions,
         updatedAgents.deletedAgentNames || []
       )
       const contextPartition = partitionVisibleAccess(
-        (updatedContexts.contextIds || []).map(contextId =>
-          contextResourceNameForAlias(contextResources, contextId)
-        ),
+        updatedContexts.contextIds || [],
         availableContextIds,
         updatedContexts.deletedContextIds || []
       )
       setAssignedAgentNames(agentPartition.active)
-      setDeletedAgentNames(agentPartition.deleted)
+      setObservedAgentNames([
+        ...(updatedAgents.agentNames || []),
+        ...(updatedAgents.deletedAgentNames || []),
+      ])
       setAssignedContextIds(contextPartition.active)
       setDeletedContextIds(contextPartition.deleted)
       setSelectedAgentNamesToAdd([])
-      setSelectedContextIdsToAdd([])
       showToast(message, { tone: 'success' })
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to update team access')
+      setError(e instanceof Error ? e.message : 'Failed to update team agents')
     } finally {
       setBusy(false)
     }
   }
 
-  async function removeAccess(agentName: string) {
-    const target = agentDisplay(agentName)
-    const shouldRemove = await confirm({
-      title: 'Remove Agent',
-      message: `Remove ${teamName || 'this team'}'s access to ${target}? This revokes the agent and every connector it carries.`,
-      confirmLabel: 'Remove',
+  async function revokeAgentAccess(agentName: string) {
+    const shouldRevoke = await confirm({
+      title: 'Revoke Agent Access',
+      message: `Revoke ${teamName || 'this team'}'s access to ${agentName}?`,
+      confirmLabel: 'Revoke',
       tone: 'danger',
     })
-    if (!shouldRemove) return
+    if (!shouldRevoke) return
 
-    await saveAccess(
-      grantedAgentNames.filter(name => name !== agentName),
-      'Team agents updated.'
+    await saveAgents(
+      assignedAgentNames.filter(name => name !== agentName),
+      'Team agent access updated.'
     )
   }
 
@@ -641,6 +585,30 @@ export default function TeamDetailsPage() {
     router.replace(teamTabHref(tab))
   }
 
+  const activeTabAction =
+    !isNew && activeTab === 'members' ? (
+      <button
+        type="button"
+        className="cu-btn cu-btn--primary cu-btn--sm"
+        onClick={() => {
+          setShowAddMember(true)
+          setAddMemberError('')
+        }}
+        disabled={busy}
+      >
+        Add member
+      </button>
+    ) : !isNew && activeTab === 'agents' ? (
+      <button
+        type="button"
+        className="cu-btn cu-btn--primary cu-btn--sm"
+        onClick={() => setShowAddAgent(true)}
+        disabled={busy}
+      >
+        Add agent
+      </button>
+    ) : null
+
   return (
     <DetailPageShell<TeamTab>
       activeTab={activeTab}
@@ -679,14 +647,17 @@ export default function TeamDetailsPage() {
             </button>
           </div>
         ) : (
-          <TeamActionsMenu
-            busy={busy}
-            onRename={startEditingName}
-            onDelete={() => {
-              setDeleteTeamDialogError('')
-              setShowDeleteTeamConfirm(true)
-            }}
-          />
+          <>
+            <TeamActionsMenu
+              busy={busy}
+              onRename={startEditingName}
+              onDelete={() => {
+                setDeleteTeamDialogError('')
+                setShowDeleteTeamConfirm(true)
+              }}
+            />
+            {activeTabAction}
+          </>
         )
       }
       backLabel="Back to teams"
@@ -699,7 +670,7 @@ export default function TeamDetailsPage() {
           ? 'Name the new team.'
           : initialLoading
             ? 'Loading team details...'
-            : 'Members, connector access, and agents.'
+            : 'Members and agent access.'
       }
       tabAriaLabel="Team sections"
       tabs={
@@ -712,6 +683,7 @@ export default function TeamDetailsPage() {
             }))
       }
       title={isNew ? 'Create team' : initialLoading && !teamName ? 'Team' : teamName || teamId}
+      contentMode={isNew ? 'card' : 'plain'}
     >
       {isNew ? (
         <div className="cu-card">
@@ -742,394 +714,297 @@ export default function TeamDetailsPage() {
         </div>
       ) : (
         <>
-          <div className="cu-card">
-            <div className="cu-card__body">
-              {activeTab === 'members' && (
-                <>
-                  <div
-                    style={{
-                      display: 'flex',
-                      flexWrap: 'wrap',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      gap: '0.5rem',
-                      marginBottom: '1rem',
-                    }}
-                  >
-                    <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-                      Team members and their roles.
-                    </p>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--primary cu-btn--sm"
-                      onClick={() => {
-                        setShowAddMember(true)
-                        setAddMemberError('')
-                      }}
-                      disabled={busy}
-                    >
-                      Add member
-                    </button>
-                  </div>
-                  {initialLoading ? (
-                    <div className="cu-table-wrap">
-                      <table className="cu-table">
-                        <thead>
-                          <tr>
-                            <th>Member</th>
-                            <th>Email</th>
-                            <th>Role</th>
-                            <th>Can Invite Members</th>
-                            <th>Can Delete Members</th>
-                            <th></th>
+          <>
+            {activeTab === 'members' && (
+              <>
+                <p className="cu-muted cu-detail-section-copy">Team members and their roles.</p>
+                {initialLoading ? (
+                  <TableViewport className="cu-table-wrap">
+                    <DataTable className="eft-table cu-table">
+                      <thead>
+                        <tr>
+                          <th>Member</th>
+                          <th>Email</th>
+                          <th>Role</th>
+                          <th>Can Invite Members</th>
+                          <th>Can Delete Members</th>
+                          <th></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {[1, 2, 3].map(i => (
+                          <tr key={i}>
+                            <td>
+                              <div
+                                className="cu-skeleton cu-skeleton--cell"
+                                style={{ width: '8rem' }}
+                              ></div>
+                            </td>
+                            <td>
+                              <div
+                                className="cu-skeleton cu-skeleton--cell"
+                                style={{ width: '12rem' }}
+                              ></div>
+                            </td>
+                            <td>
+                              <div
+                                className="cu-skeleton cu-skeleton--cell"
+                                style={{ width: '6rem' }}
+                              ></div>
+                            </td>
+                            <td>
+                              <div
+                                className="cu-skeleton cu-skeleton--cell"
+                                style={{ width: '4rem' }}
+                              ></div>
+                            </td>
+                            <td>
+                              <div
+                                className="cu-skeleton cu-skeleton--cell"
+                                style={{ width: '4rem' }}
+                              ></div>
+                            </td>
+                            <td></td>
                           </tr>
-                        </thead>
-                        <tbody>
-                          {[1, 2, 3].map(i => (
-                            <tr key={i}>
-                              <td>
-                                <div
-                                  className="cu-skeleton cu-skeleton--cell"
-                                  style={{ width: '8rem' }}
-                                ></div>
-                              </td>
-                              <td>
-                                <div
-                                  className="cu-skeleton cu-skeleton--cell"
-                                  style={{ width: '12rem' }}
-                                ></div>
-                              </td>
-                              <td>
-                                <div
-                                  className="cu-skeleton cu-skeleton--cell"
-                                  style={{ width: '6rem' }}
-                                ></div>
-                              </td>
-                              <td>
-                                <div
-                                  className="cu-skeleton cu-skeleton--cell"
-                                  style={{ width: '4rem' }}
-                                ></div>
-                              </td>
-                              <td>
-                                <div
-                                  className="cu-skeleton cu-skeleton--cell"
-                                  style={{ width: '4rem' }}
-                                ></div>
-                              </td>
-                              <td></td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : (
-                    <>
-                      {pendingInvitations.length > 0 && (
-                        <div style={{ marginBottom: '1.25rem' }}>
-                          <p
-                            className="cu-muted"
-                            style={{
-                              fontSize: '0.8125rem',
-                              fontWeight: 600,
-                              margin: '0 0 0.5rem',
-                              textTransform: 'uppercase',
-                              letterSpacing: '0.04em',
-                            }}
-                          >
-                            Pending invitations
-                          </p>
-                          <div className="cu-table-wrap">
-                            <table className="cu-table">
-                              <thead>
-                                <tr>
-                                  <th>Email</th>
-                                  <th>Role</th>
-                                  <th>Invited</th>
-                                  <th></th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {pendingInvitations.map(inv => (
-                                  <tr key={inv.id}>
-                                    <td>{inv.email}</td>
-                                    <td>{formatTeamRole(inv.role)}</td>
-                                    <td
-                                      style={{
-                                        color: 'var(--cu-text-muted)',
-                                        fontSize: '0.875rem',
-                                      }}
-                                    >
-                                      {new Date(inv.created_at).toLocaleString()}
-                                    </td>
-                                    <td style={{ textAlign: 'right' }}>
-                                      <div
-                                        style={{
-                                          display: 'flex',
-                                          gap: '0.35rem',
-                                          justifyContent: 'flex-end',
-                                          flexWrap: 'wrap',
-                                        }}
-                                      >
-                                        <button
-                                          type="button"
-                                          className="cu-btn cu-btn--sm"
-                                          onClick={() => void resendPendingInvitation(inv)}
-                                          disabled={
-                                            busy ||
-                                            resendingInvitationId === inv.id ||
-                                            revokingInvitationId === inv.id
-                                          }
-                                        >
-                                          {resendingInvitationId === inv.id
-                                            ? 'Sending…'
-                                            : 'Resend email'}
-                                        </button>
-                                        <button
-                                          type="button"
-                                          className="cu-btn cu-btn--ghost cu-btn--sm"
-                                          style={{ color: 'var(--cu-danger)' }}
-                                          onClick={() => void cancelPendingInvitation(inv)}
-                                          disabled={
-                                            busy ||
-                                            resendingInvitationId === inv.id ||
-                                            revokingInvitationId === inv.id
-                                          }
-                                        >
-                                          {revokingInvitationId === inv.id
-                                            ? 'Cancelling…'
-                                            : 'Cancel'}
-                                        </button>
-                                      </div>
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      )}
-                      {members.length === 0 ? (
-                        <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
-                          {pendingInvitations.length > 0
-                            ? 'No active members yet.'
-                            : 'No members yet.'}
-                        </div>
-                      ) : (
-                        <div className="cu-table-wrap">
-                          <table className="cu-table">
+                        ))}
+                      </tbody>
+                    </DataTable>
+                  </TableViewport>
+                ) : (
+                  <>
+                    {pendingInvitations.length > 0 && (
+                      <div style={{ marginBottom: '1.25rem' }}>
+                        <p
+                          className="cu-muted"
+                          style={{
+                            fontSize: '0.8125rem',
+                            fontWeight: 600,
+                            margin: '0 0 0.5rem',
+                            textTransform: 'uppercase',
+                            letterSpacing: '0.04em',
+                          }}
+                        >
+                          Pending invitations
+                        </p>
+                        <TableViewport className="cu-table-wrap">
+                          <DataTable className="eft-table cu-table">
                             <thead>
                               <tr>
-                                <th>Member</th>
                                 <th>Email</th>
                                 <th>Role</th>
-                                <th>Can Invite Members</th>
-                                <th>Can Delete Members</th>
+                                <th>Invited</th>
                                 <th></th>
                               </tr>
                             </thead>
                             <tbody>
-                              {members.map(member => {
-                                const permissions = permissionsForTeamRole(member.role)
-                                return (
-                                  <tr key={member.id}>
-                                    <td>
+                              {pendingInvitations.map(inv => (
+                                <tr key={inv.id}>
+                                  <td>{inv.email}</td>
+                                  <td>{formatTeamRole(inv.role)}</td>
+                                  <td
+                                    style={{
+                                      color: 'var(--cu-text-muted)',
+                                      fontSize: '0.875rem',
+                                    }}
+                                  >
+                                    {new Date(inv.created_at).toLocaleString()}
+                                  </td>
+                                  <td style={{ textAlign: 'right' }}>
+                                    <div
+                                      style={{
+                                        display: 'flex',
+                                        gap: '0.35rem',
+                                        justifyContent: 'flex-end',
+                                        flexWrap: 'wrap',
+                                      }}
+                                    >
                                       <button
                                         type="button"
-                                        className="cu-link"
-                                        onClick={() =>
-                                          router.push(CONTROL_ROUTES.usersAndTeams.user(member.id))
+                                        className="cu-btn cu-btn--sm"
+                                        onClick={() => void resendPendingInvitation(inv)}
+                                        disabled={
+                                          busy ||
+                                          resendingInvitationId === inv.id ||
+                                          revokingInvitationId === inv.id
                                         }
                                       >
-                                        {member.name || '-'}
+                                        {resendingInvitationId === inv.id
+                                          ? 'Sending…'
+                                          : 'Resend email'}
                                       </button>
-                                    </td>
-                                    <td>{member.email}</td>
-                                    <td>
-                                      <span style={{ color: 'var(--cu-text-muted)' }}>
-                                        {formatTeamRole(member.role)}
-                                      </span>
-                                    </td>
-                                    <td className="cu-permission-cell">
-                                      <input
-                                        type="checkbox"
-                                        checked={permissions.canInviteMembers}
-                                        readOnly
-                                        disabled
-                                        aria-label={`${member.email} can invite members`}
-                                      />
-                                    </td>
-                                    <td className="cu-permission-cell">
-                                      <input
-                                        type="checkbox"
-                                        checked={permissions.canDeleteMembers}
-                                        readOnly
-                                        disabled
-                                        aria-label={`${member.email} can delete members`}
-                                      />
-                                    </td>
-                                    <td>
-                                      <div
-                                        style={{
-                                          display: 'flex',
-                                          gap: '0.35rem',
-                                          justifyContent: 'flex-end',
-                                        }}
+                                      <button
+                                        type="button"
+                                        className="cu-btn cu-btn--ghost cu-btn--sm"
+                                        style={{ color: 'var(--cu-danger)' }}
+                                        onClick={() => void cancelPendingInvitation(inv)}
+                                        disabled={
+                                          busy ||
+                                          resendingInvitationId === inv.id ||
+                                          revokingInvitationId === inv.id
+                                        }
                                       >
-                                        <button
-                                          type="button"
-                                          className="cu-btn cu-btn--icon cu-btn--ghost"
-                                          onClick={() => {
+                                        {revokingInvitationId === inv.id ? 'Cancelling…' : 'Cancel'}
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </DataTable>
+                        </TableViewport>
+                      </div>
+                    )}
+                    {members.length === 0 ? (
+                      <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
+                        {pendingInvitations.length > 0
+                          ? 'No active members yet.'
+                          : 'No members yet.'}
+                      </div>
+                    ) : (
+                      <TableViewport className="cu-table-wrap">
+                        <DataTable className="eft-table cu-table">
+                          <thead>
+                            <tr>
+                              <th>Member</th>
+                              <th>Email</th>
+                              <th>Role</th>
+                              <th>Can Invite Members</th>
+                              <th>Can Delete Members</th>
+                              <th></th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {members.map(member => {
+                              const permissions = permissionsForTeamRole(member.role)
+                              return (
+                                <tr key={member.id}>
+                                  <td>
+                                    <button
+                                      type="button"
+                                      className="cu-link"
+                                      onClick={() =>
+                                        router.push(CONTROL_ROUTES.usersAndTeams.user(member.id))
+                                      }
+                                    >
+                                      {member.name || '-'}
+                                    </button>
+                                  </td>
+                                  <td>{member.email}</td>
+                                  <td>
+                                    <span style={{ color: 'var(--cu-text-muted)' }}>
+                                      {formatTeamRole(member.role)}
+                                    </span>
+                                  </td>
+                                  <td className="cu-permission-cell">
+                                    <input
+                                      type="checkbox"
+                                      checked={permissions.canInviteMembers}
+                                      readOnly
+                                      disabled
+                                      aria-label={`${member.email} can invite members`}
+                                    />
+                                  </td>
+                                  <td className="cu-permission-cell">
+                                    <input
+                                      type="checkbox"
+                                      checked={permissions.canDeleteMembers}
+                                      readOnly
+                                      disabled
+                                      aria-label={`${member.email} can delete members`}
+                                    />
+                                  </td>
+                                  <td>
+                                    <RowActionMenu
+                                      ariaLabel={`Actions for ${member.email}`}
+                                      actions={[
+                                        {
+                                          key: 'edit-role',
+                                          label: 'Edit role',
+                                          disabled: busy,
+                                          onSelect: () => {
                                             setRoleEditMember(member)
                                             setRoleEditDraft(member.role)
-                                          }}
-                                          disabled={busy}
-                                          aria-label="Edit role"
-                                        >
-                                          <IconPencil width={14} height={14} />
-                                        </button>
-                                        <button
-                                          type="button"
-                                          className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                                          onClick={() => void removeMember(member.id)}
-                                          disabled={busy}
-                                          title="Remove"
-                                          aria-label="Remove member"
-                                        >
-                                          <IconX width={16} height={16} />
-                                        </button>
-                                      </div>
-                                    </td>
-                                  </tr>
-                                )
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </>
-              )}
+                                          },
+                                        },
+                                        {
+                                          key: 'remove',
+                                          label: 'Remove member',
+                                          danger: true,
+                                          disabled: busy,
+                                          onSelect: () => void removeMember(member.id),
+                                        },
+                                      ]}
+                                    />
+                                  </td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </DataTable>
+                      </TableViewport>
+                    )}
+                  </>
+                )}
+              </>
+            )}
 
-              {activeTab === 'agents' && (
-                <>
-                  <div
-                    style={{
-                      display: 'flex',
-                      flexWrap: 'wrap',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      gap: '0.5rem',
-                      marginBottom: '1rem',
-                    }}
-                  >
-                    <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-                      Agents this team may use — and the connectors each one carries.
-                    </p>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--primary cu-btn--sm"
-                      onClick={() => setShowAddContext(true)}
-                      disabled={busy}
-                    >
-                      Add agents
-                    </button>
+            {activeTab === 'agents' && (
+              <>
+                <p className="cu-muted cu-detail-section-copy">Agents this team may use.</p>
+                {initialLoading ? (
+                  <div role="list">
+                    {[1, 2, 3].map(i => (
+                      <div key={i} className="cu-skeleton--row" role="listitem">
+                        <div
+                          className="cu-skeleton cu-skeleton--cell"
+                          style={{ width: '10rem' }}
+                        ></div>
+                        <div
+                          className="cu-skeleton cu-skeleton--cell"
+                          style={{ width: '4rem' }}
+                        ></div>
+                      </div>
+                    ))}
                   </div>
-                  {initialLoading ? (
-                    <div className="cu-table-wrap">
-                      <table className="cu-table">
-                        <thead>
-                          <tr>
-                            <th>Agent</th>
-                            <th>Connectors</th>
-                            <th></th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {[1, 2, 3].map(i => (
-                            <tr key={i}>
-                              <td>
-                                <div
-                                  className="cu-skeleton cu-skeleton--cell"
-                                  style={{ width: '12rem' }}
-                                ></div>
-                              </td>
-                              <td></td>
-                              <td></td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : grantedAgentNames.length === 0 ? (
-                    <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
-                      No agents assigned yet.
-                    </div>
-                  ) : (
-                    <div className="cu-table-wrap">
-                      <table className="cu-table">
-                        <thead>
-                          <tr>
-                            <th>Agent</th>
-                            <th>Connectors</th>
-                            <th></th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {grantedAgentNames.map(agentName => (
-                            <tr key={agentName}>
-                              <td>
-                                <button
-                                  type="button"
-                                  className="cu-link"
-                                  onClick={() =>
-                                    router.push(CONTROL_ROUTES.agents.detail(agentName))
-                                  }
-                                >
-                                  {agentDisplay(agentName)}
-                                </button>
-                              </td>
-                              <td>
-                                <ConnectorCountCell
-                                  agentKey={`team-access-${agentName}`}
-                                  contextRef={agentContextRef(agentName)}
-                                  contextsByRef={contextsByRef}
-                                  onOpenConnectors={() =>
-                                    router.push(CONTROL_ROUTES.agents.tab(agentName, 'connectors'))
-                                  }
-                                />
-                              </td>
-                              <td>
-                                <div
-                                  style={{
-                                    display: 'flex',
-                                    gap: '0.35rem',
-                                    justifyContent: 'flex-end',
-                                  }}
-                                >
-                                  <button
-                                    type="button"
-                                    className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                                    onClick={() => void removeAccess(agentName)}
-                                    disabled={busy}
-                                    title="Remove"
-                                    aria-label="Remove agent"
-                                  >
-                                    <IconX width={16} height={16} />
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
+                ) : assignedAgentNames.length === 0 ? (
+                  <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
+                    No agent access yet.
+                  </div>
+                ) : (
+                  <RecordList>
+                    {assignedAgentNames.map(agentName => (
+                      <RecordListRow key={agentName} className="cu-access-row">
+                        <button
+                          type="button"
+                          className="cu-link"
+                          onClick={() => router.push(CONTROL_ROUTES.agents.detail(agentName))}
+                        >
+                          {agentName}
+                        </button>
+                        <RowActionMenu
+                          ariaLabel={`Actions for agent ${agentName}`}
+                          actions={[
+                            {
+                              key: 'view',
+                              label: 'View agent details',
+                              onSelect: () => router.push(CONTROL_ROUTES.agents.detail(agentName)),
+                            },
+                            {
+                              key: 'revoke',
+                              label: 'Revoke agent access',
+                              danger: true,
+                              disabled: busy,
+                              onSelect: () => void revokeAgentAccess(agentName),
+                            },
+                          ]}
+                        />
+                      </RecordListRow>
+                    ))}
+                  </RecordList>
+                )}
+              </>
+            )}
+          </>
         </>
       )}
 
@@ -1351,7 +1226,7 @@ export default function TeamDetailsPage() {
         </div>
       )}
 
-      {showAddContext && (
+      {showAddAgent && (
         <div
           style={{
             position: 'fixed',
@@ -1365,23 +1240,23 @@ export default function TeamDetailsPage() {
           }}
           role="presentation"
           onClick={e => {
-            if (e.target === e.currentTarget && !busy) setShowAddContext(false)
+            if (e.target === e.currentTarget && !busy) setShowAddAgent(false)
           }}
         >
           <div
             className="cu-modal-panel cu-modal-panel--selection"
             role="dialog"
-            aria-labelledby="add-agents-title"
+            aria-labelledby="add-agent-title"
             onClick={e => e.stopPropagation()}
           >
             <div className="cu-modal-panel__head">
-              <strong id="add-agents-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add agents
+              <strong id="add-agent-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
+                Add agent
               </strong>
               <button
                 type="button"
                 className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowAddContext(false)}
+                onClick={() => setShowAddAgent(false)}
                 disabled={busy}
                 aria-label="Close"
               >
@@ -1396,14 +1271,11 @@ export default function TeamDetailsPage() {
                 inline
                 value={selectedAgentNamesToAdd}
                 onChange={setSelectedAgentNamesToAdd}
-                options={[...hostsByName.keys()]
-                  .filter(agentName => !grantedAgentNames.includes(agentName))
-                  .sort((a, b) => agentDisplay(a).localeCompare(agentDisplay(b)))
-                  .map(agentName => ({ value: agentName, label: agentDisplay(agentName) }))}
+                options={availableAgentOptions}
                 placeholder="Select agents"
                 searchPlaceholder="Search agents..."
                 selectionLabel="Selected agents"
-                emptyLabel="No additional agents available."
+                emptyLabel="No available agents."
                 disabled={busy}
               />
             </div>
@@ -1412,7 +1284,7 @@ export default function TeamDetailsPage() {
               <button
                 type="button"
                 className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setShowAddContext(false)}
+                onClick={() => setShowAddAgent(false)}
                 disabled={busy}
               >
                 Cancel
@@ -1421,15 +1293,86 @@ export default function TeamDetailsPage() {
                 type="button"
                 className="cu-btn cu-btn--primary"
                 onClick={() => {
-                  void saveAccess(
-                    [...grantedAgentNames, ...selectedAgentNamesToAdd],
-                    'Team agents updated.'
+                  void saveAgents(
+                    [...assignedAgentNames, ...selectedAgentNamesToAdd],
+                    selectedAgentNamesToAdd.length === 1
+                      ? 'Team agent access updated.'
+                      : 'Team agents access updated.'
                   )
-                  setShowAddContext(false)
+                  setShowAddAgent(false)
                 }}
                 disabled={busy || selectedAgentNamesToAdd.length === 0}
               >
-                Add agents
+                {selectedAgentNamesToAdd.length > 1 ? 'Add agents' : 'Add agent'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showDeleteTeamConfirm && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.6)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: '1rem',
+          }}
+          role="presentation"
+          onClick={e => {
+            if (e.target === e.currentTarget && !deletingTeam) setShowDeleteTeamConfirm(false)
+          }}
+        >
+          <div
+            className="cu-modal-panel"
+            style={{ width: 'min(28rem, 96vw)' }}
+            role="alertdialog"
+            aria-labelledby="confirm-delete-team"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="cu-modal-panel__head">
+              <strong id="confirm-delete-team" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
+                Delete team permanently?
+              </strong>
+              <button
+                type="button"
+                className="cu-btn cu-btn--icon cu-btn--ghost"
+                onClick={() => setShowDeleteTeamConfirm(false)}
+                disabled={deletingTeam}
+                aria-label="Close"
+              >
+                <IconX width={18} height={18} />
+              </button>
+            </div>
+            <p className="cu-muted" style={{ fontSize: '0.875rem', margin: '0 0 1rem' }}>
+              This removes <strong>{teamName || teamId}</strong> and cannot be undone.
+            </p>
+            {deleteTeamDialogError ? (
+              <div className="cu-banner cu-banner--error" style={{ marginBottom: '0.75rem' }}>
+                {deleteTeamDialogError}
+              </div>
+            ) : null}
+            <div className="cu-modal-panel__foot">
+              <button
+                type="button"
+                className="cu-btn cu-btn--ghost cu-btn--sm"
+                onClick={() => setShowDeleteTeamConfirm(false)}
+                disabled={deletingTeam}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="cu-btn cu-btn--primary"
+                style={{ background: 'var(--cu-danger)', borderColor: 'var(--cu-danger)' }}
+                onClick={() => void deleteTeamPermanently()}
+                disabled={deletingTeam}
+              >
+                {deletingTeam ? 'Deleting…' : 'Delete team'}
               </button>
             </div>
           </div>

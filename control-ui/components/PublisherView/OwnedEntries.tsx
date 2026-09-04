@@ -1,8 +1,14 @@
 'use client'
 
-import React, { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { IconChevronRight } from '@components/icons'
+import {
+  DataTable,
+  TableRow,
+  TableStateRow,
+  TableViewport,
+  useTableSort,
+} from '@clerum/frontend-components'
 import { MARKETPLACE_ENTRY_TYPE_LABELS } from '@constants/marketplaceEntryTypes'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
@@ -13,14 +19,11 @@ import {
 } from '../../lib/api'
 import { useConfirmDialog } from '../ConfirmDialog'
 import { type RowActionMenuItem, RowActionsMenu } from '../RowActionsMenu'
-import { SectionLoadingSkeleton } from '../SectionLoadingSkeleton'
 import { TableHeaderRow } from '../TableHeaderRow'
 import type { TableHeaderColumn } from '../TableHeaderRow/types'
 import { TablePanelHeader } from '../TablePanelHeader'
 import { useToast } from '../Toast'
-import { Button } from '../ui'
 import { GrantAccessModal } from './GrantAccessModal'
-import { RetryBanner } from './RetryBanner'
 
 type GrantTarget = {
   entryName: string
@@ -28,7 +31,6 @@ type GrantTarget = {
 }
 
 const COLUMNS: TableHeaderColumn[] = [
-  { key: 'expand', ariaLabel: 'Expand versions' },
   { key: 'name', label: 'Name' },
   { key: 'type', label: 'Type' },
   { key: 'version', label: 'Version' },
@@ -41,36 +43,16 @@ function entryKey(e: OwnedRegistryEntry): string {
   return `${e.name}@${e.version}`
 }
 
-// Descending semver-ish sort so the latest version leads each group. Falls back
-// to a reverse lexical compare when a segment isn't numeric.
 function compareVersionDesc(a: string, b: string): number {
   const pa = a.split('.')
   const pb = b.split('.')
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const x = Number.parseInt(pa[i] ?? '0', 10)
-    const y = Number.parseInt(pb[i] ?? '0', 10)
-    if (Number.isNaN(x) || Number.isNaN(y)) return b.localeCompare(a)
-    if (x !== y) return y - x
+  for (let index = 0; index < Math.max(pa.length, pb.length); index += 1) {
+    const left = Number.parseInt(pa[index] ?? '0', 10)
+    const right = Number.parseInt(pb[index] ?? '0', 10)
+    if (Number.isNaN(left) || Number.isNaN(right)) return b.localeCompare(a)
+    if (left !== right) return right - left
   }
   return b.localeCompare(a)
-}
-
-// Collapse same-named entries into one group. `latest` leads the collapsed row;
-// `versions` holds every version (latest first) so the expanded row can offer
-// the previous ones individually.
-function groupByName(
-  entries: OwnedRegistryEntry[]
-): { latest: OwnedRegistryEntry; versions: OwnedRegistryEntry[] }[] {
-  const byName = new Map<string, OwnedRegistryEntry[]>()
-  for (const e of entries) {
-    const list = byName.get(e.name)
-    if (list) list.push(e)
-    else byName.set(e.name, [e])
-  }
-  return Array.from(byName.values()).map(list => {
-    const versions = [...list].sort((a, b) => compareVersionDesc(a.version, b.version))
-    return { latest: versions[0], versions }
-  })
 }
 
 // The registry's owned-entries payload carries `serverMode` but not `entry_type`
@@ -103,10 +85,18 @@ export function OwnedEntries({
   orgScope,
   canShare = true,
   sharingUnavailable = false,
+  embedded = false,
+  hideHeader = false,
+  search = '',
+  refreshSignal = 0,
 }: {
   orgScope: string
   canShare?: boolean
   sharingUnavailable?: boolean
+  embedded?: boolean
+  hideHeader?: boolean
+  search?: string
+  refreshSignal?: number
 }) {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -116,7 +106,6 @@ export function OwnedEntries({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
   const [grantTarget, setGrantTarget] = useState<GrantTarget | null>(null)
-  const [expandedNames, setExpandedNames] = useState<Set<string>>(new Set())
   // Installed cluster resources (same source the catalog uses to show
   // "Installed"). Best-effort: a catalog fetch failure just means no entry is
   // marked installed, never an error on the entries list.
@@ -151,6 +140,10 @@ export function OwnedEntries({
     void load()
   }, [load])
 
+  useEffect(() => {
+    if (refreshSignal > 0) void load()
+  }, [load, refreshSignal])
+
   const handleRemove = useCallback(
     async (e: OwnedRegistryEntry) => {
       const ok = await confirm({
@@ -171,15 +164,6 @@ export function OwnedEntries({
     [confirm, showToast, load]
   )
 
-  const toggleExpanded = useCallback((name: string) => {
-    setExpandedNames(prev => {
-      const next = new Set(prev)
-      if (next.has(name)) next.delete(name)
-      else next.add(name)
-      return next
-    })
-  }, [])
-
   function isInstalled(e: OwnedRegistryEntry): boolean {
     const kind = ownedEntryKind(e)
     const key = `${e.name}@${e.version}`
@@ -190,47 +174,73 @@ export function OwnedEntries({
     return installedRecipeKeys.has(key)
   }
 
-  function renderInstall(e: OwnedRegistryEntry) {
-    return isInstalled(e) ? (
-      <Button type="button" variant="ghost" size="sm" disabled>
-        Installed
-      </Button>
-    ) : (
-      <Button
-        type="button"
-        variant="primary"
-        size="sm"
-        onClick={() =>
-          router.push(CONTROL_ROUTES.marketplace.install({ entry: e.name, version: e.version }))
-        }
-      >
-        Install
-      </Button>
-    )
-  }
-
   // `?type=` narrows the list to a single entry kind — this is how "Add hook"
   // on an agent lands here showing only guardrail hooks. An unrecognised value
   // filters nothing, so a stale or hand-edited link degrades to the full list
   // instead of an empty one.
   const typeFilter = searchParams?.get('type') ?? null
   const activeTypeLabel = typeFilter ? MARKETPLACE_ENTRY_TYPE_LABELS[typeFilter] : undefined
+  const normalizedSearch = search.trim().toLowerCase()
   const visibleEntries = useMemo(
-    () => (activeTypeLabel ? entries.filter(e => ownedEntryKind(e) === typeFilter) : entries),
-    [entries, typeFilter, activeTypeLabel]
+    () =>
+      (activeTypeLabel ? entries.filter(e => ownedEntryKind(e) === typeFilter) : entries).filter(
+        entry =>
+          [
+            entry.name,
+            entryTypeLabel(entry),
+            entry.version,
+            entry.visibility,
+            entry.status,
+            entry.entryType ?? entry.entry_type ?? '',
+          ]
+            .join(' ')
+            .toLowerCase()
+            .includes(normalizedSearch)
+      ),
+    [entries, typeFilter, activeTypeLabel, normalizedSearch]
   )
 
   // Deliberately org-wide, not `visibleEntries`: the notice describes what
   // cross-org sharing does to this org's private entries, so a `?type=` filter
   // that happens to hide them all must not make it disappear.
   const hasPrivateEntries = entries.some(e => e.visibility === 'private')
-  // Collapse same-named entries into one row (latest leads); expanding a row
-  // reveals the previous versions, each individually installable.
-  const grouped = groupByName(visibleEntries)
+  const entrySort = useTableSort<
+    OwnedRegistryEntry,
+    'name' | 'type' | 'version' | 'visibility' | 'status'
+  >({
+    rows: visibleEntries,
+    defaultKey: 'name',
+    identity: entryKey,
+    accessors: {
+      name: entry => entry.name,
+      type: entry => entryTypeLabel(entry),
+      version: entry => entry.version,
+      visibility: entry => entry.visibility,
+      status: entry => entry.status,
+    },
+  })
+  const columns = COLUMNS.map(column =>
+    column.key === 'actions'
+      ? column
+      : {
+          ...column,
+          activeDirection: entrySort.key === column.key ? entrySort.direction : null,
+          onSort: () =>
+            entrySort.sortBy(column.key as 'name' | 'type' | 'version' | 'visibility' | 'status'),
+        }
+  )
+  const sortedEntries = useMemo(() => {
+    if (entrySort.key !== 'name') return entrySort.sortedRows
+    const direction = entrySort.direction === 'asc' ? 1 : -1
+    return [...entrySort.sortedRows].sort((left, right) => {
+      const byName = left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
+      return byName === 0 ? compareVersionDesc(left.version, right.version) : byName * direction
+    })
+  }, [entrySort.direction, entrySort.key, entrySort.sortedRows])
 
-  return (
-    <section>
-      <div className="cu-card cu-card--viewport-fill">
+  const content = (
+    <>
+      {hideHeader ? null : (
         <TablePanelHeader
           title="Published entries"
           subtitle={
@@ -239,176 +249,157 @@ export function OwnedEntries({
               : undefined
           }
         />
-        <div className="cu-card__body">
-          {loading ? <SectionLoadingSkeleton label="Loading published entries" /> : null}
-          {error ? (
-            <RetryBanner
-              message="Could not load your published entries."
-              onRetry={() => void load()}
-            />
-          ) : null}
-          {!loading && !error && activeTypeLabel ? (
-            <p className="cu-banner cu-banner--info">
-              Showing {activeTypeLabel.toLowerCase()} only.{' '}
-              <button
-                type="button"
-                className="cu-link"
-                onClick={() => router.replace(CONTROL_ROUTES.marketplace.orgEntries)}
-              >
-                Show all entries
-              </button>
-            </p>
-          ) : null}
-          {!loading && !error && entries.length === 0 ? (
-            <p>You haven’t published any registry entries yet.</p>
-          ) : null}
-          {!loading && !error && entries.length > 0 && visibleEntries.length === 0 ? (
-            <p>No {activeTypeLabel?.toLowerCase() ?? 'entries'} published yet.</p>
-          ) : null}
-          {!loading && !error && visibleEntries.length > 0 ? (
-            <>
-              <div className="cu-table-wrap">
-                <table className="cu-table">
-                  <thead>
-                    <TableHeaderRow columns={COLUMNS} />
-                  </thead>
-                  <tbody>
-                    {grouped.map(({ latest: e, versions }) => {
-                      const isPrivate = e.visibility === 'private'
-                      const isGranting = grantTarget?.entryName === e.name
-                      const expanded = expandedNames.has(e.name)
-                      const hasPrevious = versions.length > 1
-                      const rowActions: RowActionMenuItem[] = [
-                        {
-                          key: 'edit',
-                          label: 'Edit',
-                          onClick: () =>
-                            router.push(CONTROL_ROUTES.marketplace.editEntry(e.name, e.version)),
-                        },
-                        {
-                          key: 'remove',
-                          label: 'Remove from Marketplace',
-                          danger: true,
-                          onClick: () => void handleRemove(e),
-                        },
-                      ]
-                      return (
-                        <Fragment key={e.name}>
-                          <tr
-                            className={
-                              hasPrevious
-                                ? 'cu-table__row cu-table__row--clickable cu-expandable-row'
-                                : undefined
-                            }
-                            onClick={hasPrevious ? () => toggleExpanded(e.name) : undefined}
-                            onKeyDown={
-                              hasPrevious
-                                ? event => {
-                                    if (event.key === 'Enter' || event.key === ' ') {
-                                      event.preventDefault()
-                                      toggleExpanded(e.name)
-                                    }
-                                  }
-                                : undefined
-                            }
-                            tabIndex={hasPrevious ? 0 : undefined}
-                            aria-expanded={hasPrevious ? expanded : undefined}
-                          >
-                            <td className="cu-expandable-row__chevron" aria-hidden="true">
-                              {hasPrevious ? (
-                                <IconChevronRight
-                                  className={expanded ? 'is-expanded' : undefined}
-                                  width={18}
-                                  height={18}
-                                />
-                              ) : null}
-                            </td>
-                            <td>
-                              <code>{e.name}</code>
-                            </td>
-                            <td>{entryTypeLabel(e)}</td>
-                            <td>
-                              {e.version}
-                              {hasPrevious ? (
-                                <span className="cu-muted"> +{versions.length - 1} more</span>
-                              ) : null}
-                            </td>
-                            <td>
-                              <span
-                                className={`cu-registry-chip cu-registry-chip--visibility-${e.visibility}`}
-                              >
-                                {e.visibility}
-                              </span>
-                            </td>
-                            <td>{e.status}</td>
-                            <td
-                              onClick={hasPrevious ? event => event.stopPropagation() : undefined}
-                              onKeyDown={hasPrevious ? event => event.stopPropagation() : undefined}
-                            >
-                              <div className="cu-table-actions">
-                                {renderInstall(e)}
-                                {isPrivate && canShare ? (
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    aria-haspopup="dialog"
-                                    aria-expanded={isGranting}
-                                    onClick={event =>
-                                      setGrantTarget({
-                                        entryName: e.name,
-                                        opener: event.currentTarget,
-                                      })
-                                    }
-                                  >
-                                    Share access
-                                  </Button>
-                                ) : null}
-                                <RowActionsMenu
-                                  ariaLabel={`Actions for ${e.name} v${e.version}`}
-                                  actions={rowActions}
-                                />
-                              </div>
-                            </td>
-                          </tr>
-                          {expanded && hasPrevious ? (
-                            <tr className="cu-expandable-detail-row">
-                              <td colSpan={COLUMNS.length}>
-                                <div className="cu-expandable-detail">
-                                  <div className="cu-marketplace-versions">
-                                    <span className="cu-expandable-field__label">
-                                      Previous versions
-                                    </span>
-                                    {versions.slice(1).map(v => (
-                                      <div
-                                        key={entryKey(v)}
-                                        className="cu-table-actions"
-                                        style={{ justifyContent: 'space-between' }}
-                                      >
-                                        <code className="cu-code-text">
-                                          {v.version}
-                                          {isInstalled(v) ? (
-                                            <span className="cu-muted"> · installed</span>
-                                          ) : null}
-                                        </code>
-                                        {renderInstall(v)}
-                                      </div>
-                                    ))}
-                                  </div>
-                                </div>
-                              </td>
-                            </tr>
-                          ) : null}
-                        </Fragment>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </>
-          ) : null}
-        </div>
+      )}
+      <div className="cu-card__body">
+        {hideHeader && sharingUnavailable && hasPrivateEntries ? (
+          <p className="cu-muted-note">
+            Cross-org sharing isn’t available on this deployment, so private entries stay visible
+            only to your org.
+          </p>
+        ) : null}
+        {!loading && !error && activeTypeLabel ? (
+          <p className="cu-banner cu-banner--info">
+            Showing {activeTypeLabel.toLowerCase()} only.{' '}
+            <button
+              type="button"
+              className="cu-link"
+              onClick={() => router.replace(CONTROL_ROUTES.marketplace.orgEntries)}
+            >
+              Show all entries
+            </button>
+          </p>
+        ) : null}
+        <TableViewport className="cu-table-wrap">
+          <DataTable className="eft-table cu-table">
+            <thead>
+              <TableHeaderRow columns={columns} />
+            </thead>
+            <tbody>
+              {loading ? (
+                <TableStateRow
+                  colSpan={columns.length}
+                  kind="loading"
+                  message="Loading published entries…"
+                />
+              ) : error ? (
+                <TableStateRow
+                  action={
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--ghost cu-btn--sm"
+                      onClick={() => void load()}
+                    >
+                      Retry
+                    </button>
+                  }
+                  colSpan={columns.length}
+                  kind="error"
+                  message="Could not load your published entries."
+                />
+              ) : visibleEntries.length === 0 ? (
+                <TableStateRow
+                  colSpan={columns.length}
+                  message={
+                    normalizedSearch
+                      ? 'No entries match this search.'
+                      : entries.length === 0
+                        ? 'You haven’t published any registry entries yet.'
+                        : `No ${activeTypeLabel?.toLowerCase() ?? 'entries'} published yet.`
+                  }
+                />
+              ) : (
+                sortedEntries.map(e => {
+                  const isPrivate = e.visibility === 'private'
+                  const detailRoute = CONTROL_ROUTES.marketplace.entry(e.name, e.version)
+                  const rowActions: RowActionMenuItem[] = [
+                    {
+                      key: 'view',
+                      label: 'View details',
+                      onClick: () => router.push(detailRoute),
+                    },
+                    ...(isInstalled(e)
+                      ? [
+                          {
+                            key: 'installed',
+                            label: 'Installed',
+                            disabled: true,
+                            onClick: () => undefined,
+                          },
+                        ]
+                      : [
+                          {
+                            key: 'install',
+                            label: 'Install',
+                            onClick: () =>
+                              router.push(
+                                CONTROL_ROUTES.marketplace.install({
+                                  entry: e.name,
+                                  version: e.version,
+                                })
+                              ),
+                          },
+                        ]),
+                    ...(isPrivate && canShare
+                      ? [
+                          {
+                            key: 'share',
+                            label: 'Share access',
+                            onClick: () =>
+                              setGrantTarget({
+                                entryName: e.name,
+                                opener: document.activeElement as HTMLButtonElement,
+                              }),
+                          },
+                        ]
+                      : []),
+                    {
+                      key: 'edit',
+                      label: 'Edit',
+                      onClick: () =>
+                        router.push(CONTROL_ROUTES.marketplace.editEntry(e.name, e.version)),
+                    },
+                    {
+                      key: 'remove',
+                      label: 'Remove from Marketplace',
+                      danger: true,
+                      onClick: () => void handleRemove(e),
+                    },
+                  ]
+                  return (
+                    <TableRow key={entryKey(e)} onNavigate={() => router.push(detailRoute)}>
+                      <td>
+                        <code>{e.name}</code>
+                      </td>
+                      <td>{entryTypeLabel(e)}</td>
+                      <td>{e.version}</td>
+                      <td>
+                        <span
+                          className={`cu-registry-chip cu-registry-chip--visibility-${e.visibility}`}
+                        >
+                          {e.visibility}
+                        </span>
+                      </td>
+                      <td>{e.status}</td>
+                      <td className="cu-table__cell-actions">
+                        <RowActionsMenu
+                          ariaLabel={`Actions for ${e.name} v${e.version}`}
+                          actions={rowActions}
+                        />
+                      </td>
+                    </TableRow>
+                  )
+                })
+              )}
+            </tbody>
+          </DataTable>
+        </TableViewport>
       </div>
+    </>
+  )
+
+  return (
+    <section>
+      {embedded ? content : <div className="cu-card cu-card--viewport-fill">{content}</div>}
       {grantTarget ? (
         <GrantAccessModal
           entryName={grantTarget.entryName}

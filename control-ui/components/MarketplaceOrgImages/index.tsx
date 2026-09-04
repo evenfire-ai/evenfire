@@ -1,9 +1,9 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
+import { DataTable, TableStateRow, TableViewport, useTableSort } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { type OrgImage, listOrgImages } from '../../lib/api'
-import { RetryBanner } from '../PublisherView/RetryBanner'
 import {
   DEFAULT_REGISTRY_HOST,
   buildImageCoordinate,
@@ -31,7 +31,19 @@ type View =
  * the registry exposes the listing endpoint, this shows an "unavailable" notice
  * rather than failing.
  */
-export function MarketplaceOrgImages({ orgScope }: { orgScope: string }) {
+export function MarketplaceOrgImages({
+  orgScope,
+  embedded = false,
+  hideHeader = false,
+  search = '',
+  refreshSignal = 0,
+}: {
+  orgScope: string
+  embedded?: boolean
+  hideHeader?: boolean
+  search?: string
+  refreshSignal?: number
+}) {
   const [view, setView] = useState<View>({ kind: 'loading' })
 
   const load = useCallback(async () => {
@@ -51,6 +63,10 @@ export function MarketplaceOrgImages({ orgScope }: { orgScope: string }) {
     void load()
   }, [load])
 
+  useEffect(() => {
+    if (refreshSignal > 0) void load()
+  }, [load, refreshSignal])
+
   const namespace = dockerNamespace(orgScope)
 
   // One row per (image, tag). The registry lists repos without tags today, so a
@@ -63,10 +79,32 @@ export function MarketplaceOrgImages({ orgScope }: { orgScope: string }) {
             : [{ name: img.name, tag: '<tag>' }]
         )
       : []
+  const normalizedSearch = search.trim().toLowerCase()
+  const visibleRows = rows.filter(row =>
+    [row.name, row.tag, buildImageCoordinate(DEFAULT_REGISTRY_HOST, orgScope, row.name, row.tag)]
+      .join(' ')
+      .toLowerCase()
+      .includes(normalizedSearch)
+  )
+  const imageSort = useTableSort<(typeof rows)[number], 'image' | 'tag' | 'coordinate'>({
+    rows: visibleRows,
+    defaultKey: 'image',
+    identity: row => `${row.name}:${row.tag}`,
+    accessors: {
+      image: row => row.name,
+      tag: row => row.tag,
+      coordinate: row => buildImageCoordinate(DEFAULT_REGISTRY_HOST, orgScope, row.name, row.tag),
+    },
+  })
+  const columns = COLUMNS.map(column => ({
+    ...column,
+    activeDirection: imageSort.key === column.key ? imageSort.direction : null,
+    onSort: () => imageSort.sortBy(column.key as 'image' | 'tag' | 'coordinate'),
+  }))
 
-  return (
-    <section>
-      <div className="cu-card cu-card--viewport-fill">
+  const content = (
+    <>
+      {hideHeader ? null : (
         <TablePanelHeader
           title="Images"
           subtitle={
@@ -83,60 +121,93 @@ export function MarketplaceOrgImages({ orgScope }: { orgScope: string }) {
             </>
           }
         />
-        <div className="cu-card__body">
-          {view.kind === 'loading' ? <p>Loading your images…</p> : null}
-          {view.kind === 'error' ? (
-            <RetryBanner message="Could not load your images." onRetry={() => void load()} />
-          ) : null}
-          {view.kind === 'unavailable' ? (
-            <p className="cu-banner cu-banner--info">
-              Image listing isn’t available on this registry yet. Your pushed images still work —
-              the list will appear here once the registry exposes it.
-            </p>
-          ) : null}
-
-          {view.kind === 'ready' && rows.length === 0 ? (
-            <p>
-              No images yet. Push a connector or plugin image under{' '}
-              <code>
-                {DEFAULT_REGISTRY_HOST}/{namespace}/
-              </code>{' '}
-              and it appears here.
-            </p>
-          ) : null}
-
-          {view.kind === 'ready' && rows.length > 0 ? (
-            <>
-              <div className="cu-table-wrap">
-                <table className="cu-table">
-                  <thead>
-                    <TableHeaderRow columns={COLUMNS} />
-                  </thead>
-                  <tbody>
-                    {rows.map(r => (
-                      <tr key={`${r.name}:${r.tag}`}>
-                        <td>
-                          <code>{r.name}</code>
-                        </td>
-                        <td>{r.tag}</td>
-                        <td>
-                          <code>
-                            {buildImageCoordinate(DEFAULT_REGISTRY_HOST, orgScope, r.name, r.tag)}
-                          </code>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <p className="cu-muted-note cu-muted-note--spaced">
-                A push can still be rejected if the credential lacks publish permission or the org
-                has reached its image quota — those surface at push time.
-              </p>
-            </>
-          ) : null}
-        </div>
+      )}
+      <div className="cu-card__body">
+        {hideHeader ? (
+          <p className="cu-muted-note">
+            Your connectors and plugins push container images to{' '}
+            <code>
+              {DEFAULT_REGISTRY_HOST}/{namespace}/
+            </code>
+            .
+          </p>
+        ) : null}
+        <TableViewport className="cu-table-wrap">
+          <DataTable className="eft-table cu-table">
+            <thead>
+              <TableHeaderRow columns={columns} />
+            </thead>
+            <tbody>
+              {view.kind === 'loading' ? (
+                <TableStateRow colSpan={columns.length} kind="loading" message="Loading images…" />
+              ) : view.kind === 'error' ? (
+                <TableStateRow
+                  action={
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--ghost cu-btn--sm"
+                      onClick={() => void load()}
+                    >
+                      Retry
+                    </button>
+                  }
+                  colSpan={columns.length}
+                  kind="error"
+                  message="Could not load your images."
+                />
+              ) : view.kind === 'unavailable' ? (
+                <TableStateRow
+                  colSpan={columns.length}
+                  message="Image listing isn’t available on this registry yet. Your pushed images still work, and the list will appear here once the registry exposes it."
+                />
+              ) : visibleRows.length === 0 ? (
+                <TableStateRow
+                  colSpan={columns.length}
+                  message={
+                    normalizedSearch ? (
+                      'No images match this search.'
+                    ) : (
+                      <>
+                        No images yet. Push a connector or plugin image under{' '}
+                        <code>
+                          {DEFAULT_REGISTRY_HOST}/{namespace}/
+                        </code>{' '}
+                        and it appears here.
+                      </>
+                    )
+                  }
+                />
+              ) : (
+                imageSort.sortedRows.map(r => (
+                  <tr key={`${r.name}:${r.tag}`}>
+                    <td>
+                      <code>{r.name}</code>
+                    </td>
+                    <td>{r.tag}</td>
+                    <td>
+                      <code>
+                        {buildImageCoordinate(DEFAULT_REGISTRY_HOST, orgScope, r.name, r.tag)}
+                      </code>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </DataTable>
+        </TableViewport>
+        {view.kind === 'ready' && rows.length > 0 ? (
+          <p className="cu-muted-note cu-muted-note--spaced">
+            A push can still be rejected if the credential lacks publish permission or the org has
+            reached its image quota — those surface at push time.
+          </p>
+        ) : null}
       </div>
+    </>
+  )
+
+  return (
+    <section>
+      {embedded ? content : <div className="cu-card cu-card--viewport-fill">{content}</div>}
     </section>
   )
 }

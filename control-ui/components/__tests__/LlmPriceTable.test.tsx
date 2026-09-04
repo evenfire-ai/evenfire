@@ -38,6 +38,23 @@ function renderTable(overrides: Partial<React.ComponentProps<typeof LlmPriceTabl
 }
 
 describe('LlmPriceTable', () => {
+  it('navigates priced rows by pointer and keyboard without activating from the menu trigger', () => {
+    const onEdit = vi.fn()
+    renderTable({ onEdit })
+
+    const row = screen.getByText('claude-sonnet-4-6').closest('tr')
+    expect(row).toHaveAttribute('tabindex', '0')
+    fireEvent.click(row!)
+    fireEvent.keyDown(row!, { key: 'Enter' })
+    fireEvent.keyDown(row!, { key: ' ' })
+    expect(onEdit).toHaveBeenCalledTimes(3)
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for price claude/claude-sonnet-4-6' })
+    )
+    expect(onEdit).toHaveBeenCalledTimes(3)
+  })
+
   it('renders a priced row with the provider label and prices', () => {
     renderTable()
     expect(screen.getByText('Anthropic')).toBeInTheDocument()
@@ -77,6 +94,8 @@ describe('LlmPriceTable', () => {
     fireEvent.change(screen.getByLabelText('Search prices'), { target: { value: 'openai' } })
     expect(screen.queryByText('claude-sonnet-4-6')).not.toBeInTheDocument()
     expect(screen.getByText('No prices match this search.')).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: /provider/i })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: /model/i })).toBeInTheDocument()
   })
 
   it('renders an unpriced model as a compact missing row with an add-price warning', () => {
@@ -128,5 +147,18 @@ describe('LlmPriceTable', () => {
       'href',
       '/cost-and-usage/llm-prices/new?model=shared-model'
     )
+  })
+
+  it('sorts priced and missing rows as one global result set', () => {
+    renderTable({
+      items: [{ ...prices[0], provider: 'acme-labs', model: 'configured-model' }],
+      unpricedItems: [{ provider: 'openai', model: 'missing-model' }],
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Provider descending' }))
+
+    const rows = screen.getByRole('table').querySelectorAll('tbody tr')
+    expect(rows[0]).toHaveTextContent('OpenAI')
+    expect(rows[1]).toHaveTextContent('acme-labs')
   })
 })

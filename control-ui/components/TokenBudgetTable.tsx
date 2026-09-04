@@ -1,6 +1,13 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
+import {
+  DataTable,
+  TableRow,
+  TableStateRow,
+  TableViewport,
+  useTableSort,
+} from '@clerum/frontend-components'
 import type { TokenBudget } from '@lib/api'
 import {
   budgetProgressPercent,
@@ -12,7 +19,6 @@ import {
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconBudget } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -63,6 +69,46 @@ export function TokenBudgetTable({
         .includes(normalizedSearch)
     })
   }, [items, lookups, normalizedSearch])
+  const budgetSort = useTableSort<
+    TokenBudget,
+    'name' | 'scope' | 'unit' | 'period' | 'progress' | 'enforcement' | 'enabled'
+  >({
+    rows: filteredItems,
+    defaultKey: 'name',
+    identity: budget => budget.id,
+    accessors: {
+      name: budget => budget.name,
+      scope: budget =>
+        formatBudgetScope(budget.scope, lookups)
+          .map(segment => `${segment.label} ${segment.values.join(' ')}`)
+          .join(' '),
+      unit: budget => budget.unit,
+      period: budget => budget.period,
+      progress: budget =>
+        budget.limit_amount > 0 ? (budget.spent ?? 0) / budget.limit_amount : (budget.spent ?? 0),
+      enforcement: budget => budget.enforcement,
+      enabled: budget => budget.enabled,
+    },
+  })
+  const columns = BUDGET_COLUMNS.map(column =>
+    column.key === 'actions'
+      ? column
+      : {
+          ...column,
+          activeDirection: budgetSort.key === column.key ? budgetSort.direction : null,
+          onSort: () =>
+            budgetSort.sortBy(
+              column.key as
+                | 'name'
+                | 'scope'
+                | 'unit'
+                | 'period'
+                | 'progress'
+                | 'enforcement'
+                | 'enabled'
+            ),
+        }
+  )
 
   const isInitialLoad = Boolean(loading) && items.length === 0
 
@@ -76,60 +122,52 @@ export function TokenBudgetTable({
           </>
         }
         subtitle="Spend caps per dimension, shown against live usage. P0c runs in observation mode (warn)."
-        actions={
-          <>
-            <SectionSearchInput
-              value={searchQuery}
-              onChange={setSearchQuery}
-              placeholder="Search budgets"
-              ariaLabel="Search budgets"
-              disabled={isInitialLoad}
-            />
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--toolbar"
-              onClick={() => void onRefresh()}
-              disabled={refreshing || isInitialLoad}
-              aria-label={refreshing ? 'Refreshing…' : 'Reload budgets'}
-            >
-              <IconRefresh className={refreshing ? 'cu-spin' : undefined} width={18} height={18} />
-            </button>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={onCreate}
-              disabled={isInitialLoad}
-            >
-              New budget
-            </button>
-          </>
+        primaryAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--primary cu-btn--sm"
+            onClick={onCreate}
+            disabled={isInitialLoad}
+          >
+            New budget
+          </button>
+        }
+        refreshAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--icon cu-btn--toolbar"
+            onClick={() => void onRefresh()}
+            disabled={refreshing || isInitialLoad}
+            aria-label={refreshing ? 'Refreshing…' : 'Reload budgets'}
+          >
+            <IconRefresh className={refreshing ? 'cu-spin' : undefined} width={18} height={18} />
+          </button>
+        }
+        search={
+          <SectionSearchInput
+            value={searchQuery}
+            onChange={setSearchQuery}
+            placeholder="Search budgets"
+            ariaLabel="Search budgets"
+            disabled={isInitialLoad}
+          />
         }
       />
-      {isInitialLoad ? (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={BUDGET_COLUMNS} />
-            </thead>
-            <tbody>
-              <SkeletonTableRows columns={BUDGET_COLUMNS.length} rows={4} />
-            </tbody>
-          </table>
-        </div>
-      ) : filteredItems.length === 0 ? (
-        <div className="cu-empty">
-          {normalizedSearch
-            ? 'No budgets match this search.'
-            : 'No token budgets defined yet. Create one to start tracking spend against a limit.'}
-        </div>
-      ) : (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={BUDGET_COLUMNS} />
-            </thead>
-            <tbody>
-              {filteredItems.map((budget: TokenBudget) => (
+      <TableViewport className="cu-table-wrap">
+        <DataTable className="eft-table cu-table cu-table--header-band">
+          <thead>
+            <TableHeaderRow columns={columns} />
+          </thead>
+          <tbody>
+            {isInitialLoad ? (
+              <TableStateRow colSpan={columns.length} kind="loading" message="Loading budgets…" />
+            ) : filteredItems.length === 0 ? (
+              <TableStateRow
+                colSpan={columns.length}
+                message={normalizedSearch ? 'No budgets match this search.' : undefined}
+              />
+            ) : (
+              budgetSort.sortedRows.map((budget: TokenBudget) => (
                 <BudgetRow
                   key={budget.id}
                   budget={budget}
@@ -140,11 +178,11 @@ export function TokenBudgetTable({
                   deleting={deletingId === budget.id}
                   toggling={togglingId === budget.id}
                 />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+              ))
+            )}
+          </tbody>
+        </DataTable>
+      </TableViewport>
     </div>
   )
 }
@@ -175,7 +213,7 @@ function BudgetRow({
   const limitText = formatBudgetAmount(limit, budget.unit, budget.currency)
 
   return (
-    <tr className="cu-table__row">
+    <TableRow className="cu-table__row" onNavigate={() => onEdit(budget.id)}>
       <td className="cu-tb-name">{budget.name}</td>
       <td>
         {segments.length === 0 ? (
@@ -271,6 +309,6 @@ function BudgetRow({
           ]}
         />
       </td>
-    </tr>
+    </TableRow>
   )
 }

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type RecipeSecretItem,
@@ -173,25 +174,25 @@ export function RecipeSecretsPanel({
             namespace where the workload will read the Secret.
           </>
         }
-        actions={
-          <>
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--toolbar"
-              onClick={() => void load()}
-              disabled={loading}
-              aria-label={loading ? 'Refreshing…' : 'Reload secrets'}
-            >
-              <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
-            </button>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={navigateToCreateBlank}
-            >
-              Create secret
-            </button>
-          </>
+        primaryAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--primary cu-btn--sm"
+            onClick={navigateToCreateBlank}
+          >
+            Create secret
+          </button>
+        }
+        refreshAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--icon cu-btn--toolbar"
+            onClick={() => void load()}
+            disabled={loading}
+            aria-label={loading ? 'Refreshing…' : 'Reload secrets'}
+          >
+            <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
+          </button>
         }
       />
 
@@ -212,8 +213,8 @@ export function RecipeSecretsPanel({
             : 'This recipe declares no API-key Secret references.'}
         </div>
       ) : (
-        <div className="cu-table-wrap">
-          <table className="cu-table">
+        <TableViewport className="cu-table-wrap">
+          <DataTable className="eft-table cu-table">
             <thead>
               <tr>
                 <th>Name</th>
@@ -275,7 +276,7 @@ export function RecipeSecretsPanel({
                         ? 'No keys declared by recipe.'
                         : 'No keys defined.'}
                   </td>
-                  <td style={{ textAlign: 'right' }}>
+                  <td className="cu-table__cell-actions">
                     {row.status === 'missing' ? (
                       <button
                         type="button"
@@ -312,8 +313,8 @@ export function RecipeSecretsPanel({
                 </tr>
               ))}
             </tbody>
-          </table>
-        </div>
+          </DataTable>
+        </TableViewport>
       )}
 
       {missingCount > 0 ? (

@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { McpServerTable } from '../McpServerTable'
-import type { ConnectorAgentBinding } from '../McpServerTable.types'
 
 afterEach(() => {
   cleanup()
@@ -23,7 +22,6 @@ function makeItem(overrides: {
   description?: string
   transportType?: 'sse' | 'streamableHttp' | 'stdio'
   enabled?: boolean
-  oauthGrantScope?: 'user' | 'context'
   conditions?: McpServerCondition[] | undefined
   hasStatus?: boolean
 }) {
@@ -35,7 +33,6 @@ function makeItem(overrides: {
       description?: string
       enabled?: boolean
       transport: { type: 'sse' | 'streamableHttp' | 'stdio'; url: string }
-      oauth?: { grantScope: 'user' | 'context' }
     }
     status?: { conditions?: McpServerCondition[] }
   } = {
@@ -52,13 +49,16 @@ function makeItem(overrides: {
         type: overrides.transportType ?? 'streamableHttp',
         url: 'http://brave-search.mcp-server.svc.cluster.local:3000/mcp',
       },
-      ...(overrides.oauthGrantScope ? { oauth: { grantScope: overrides.oauthGrantScope } } : {}),
     },
   }
   if (overrides.hasStatus !== false) {
     item.status = { conditions: overrides.conditions }
   }
   return item
+}
+
+function makeAgentBinding(contextRef: string, agents: Array<{ id: string; label: string }>) {
+  return { contextRef, agents }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -146,32 +146,6 @@ describe('McpServerTable — search filter by condition text', () => {
     expect(screen.getByText('broken-server')).toBeInTheDocument()
     expect(screen.queryByText('healthy-server')).not.toBeInTheDocument()
   })
-
-  // Regression (caught live by the qa-recorder connectors-search-agent
-  // journey): the page's summary.agents must carry the binding agents so the
-  // search haystack keeps matching agent display names after the Phase-1
-  // agent-access rework.
-  it('keeps a row when searching by an agent display name from the access summary', () => {
-    render(
-      <McpServerTable
-        items={[makeItem({ name: 'airtable-server' })]}
-        accessByConnectorKey={{
-          'mcp-server/airtable-server': {
-            agents: [{ id: 'research-agent', label: 'Research Agent' }],
-            users: [],
-            teams: [],
-          },
-        }}
-      />
-    )
-
-    const search = screen.getByLabelText('Search connectors') as HTMLInputElement
-    fireEvent.change(search, { target: { value: 'Research Agent' } })
-    expect(screen.getByText('airtable-server')).toBeInTheDocument()
-
-    fireEvent.change(search, { target: { value: 'no-such-agent' } })
-    expect(screen.queryByText('airtable-server')).not.toBeInTheDocument()
-  })
 })
 
 describe('McpServerTable — column sorting', () => {
@@ -197,27 +171,30 @@ describe('McpServerTable — column sorting', () => {
     render(<McpServerTable items={items} />)
 
     const listedNames = () =>
-      Array.from(document.querySelectorAll('.cu-connectors-table .cu-expandable-row__name')).map(
+      Array.from(document.querySelectorAll('.cu-connectors-table tbody tr > td:first-child')).map(
         element => element.textContent
       )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by name ascending' }))
     expect(listedNames()).toEqual([
       'alpha-server',
       'bravo-server',
       'charlie-server',
       'zebra-server',
     ])
+    expect(screen.getByRole('columnheader', { name: 'Name' })).toHaveAttribute(
+      'aria-sort',
+      'ascending'
+    )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by enabled ascending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Enabled ascending' }))
     expect(listedNames()).toEqual([
       'alpha-server',
       'charlie-server',
-      'zebra-server',
       'bravo-server',
+      'zebra-server',
     ])
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by status ascending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Status ascending' }))
     expect(listedNames()).toEqual([
       'charlie-server',
       'bravo-server',
@@ -228,7 +205,7 @@ describe('McpServerTable — column sorting', () => {
 })
 
 describe('McpServerTable — marketplace-aligned rows', () => {
-  it('renders a connector description below its name in the list row', () => {
+  it('renders a connector description in its own data column', () => {
     render(
       <McpServerTable
         items={[makeItem({ name: 'brave-search', description: 'Search the public web.' })]}
@@ -238,26 +215,34 @@ describe('McpServerTable — marketplace-aligned rows', () => {
     const row = screen.getByText('brave-search').closest('tr')
     expect(row).not.toBeNull()
     expect(row).toHaveTextContent('Search the public web.')
-    expect(row?.querySelector('.cu-registry-description')).toHaveAttribute(
-      'title',
-      'Search the public web.'
+    expect(within(row!).getByText('Search the public web.')).toHaveClass(
+      'eft-truncated-text__value'
     )
+  })
+
+  it('truncates long connector descriptions with a hoverable full-value affordance', async () => {
+    const longDescription =
+      'Searches the public web with a long connector description that should be bounded in tables.'
+    render(
+      <McpServerTable items={[makeItem({ name: 'brave-search', description: longDescription })]} />
+    )
+
+    const description = screen.getByText(
+      'Searches the public web with a long connector description that should be bounded...'
+    )
+    expect(description).toHaveClass('eft-truncated-text__value')
+    fireEvent.mouseEnter(description)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(longDescription)
   })
 })
 
 describe('McpServerTable — connector access summaries', () => {
-  it('exposes expandable rows as named buttons with their current state', () => {
+  it('renders ordinary rows without inline detail expansion', () => {
     const items = [makeItem({ name: 'airtable-server' })]
     render(<McpServerTable items={items} />)
 
-    const row = screen.getByRole('button', { name: 'Expand connector airtable-server' })
-    expect(row).toHaveAttribute('aria-expanded', 'false')
-
-    fireEvent.click(row)
-
-    expect(
-      screen.getByRole('button', { name: 'Collapse connector airtable-server' })
-    ).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText('airtable-server').closest('tr')).not.toHaveAttribute('aria-expanded')
+    expect(screen.queryByRole('button', { name: /Expand connector/ })).toBeNull()
   })
 
   it('renders agents, teams, and users in marketplace-style access groups', () => {
@@ -265,6 +250,18 @@ describe('McpServerTable — connector access summaries', () => {
     render(
       <McpServerTable
         items={items}
+        agentBindingsByConnectorName={{
+          'airtable-server': [
+            makeAgentBinding('ctx-alpha', [
+              { id: 'agent-alpha', label: 'agent-alpha' },
+              { id: 'bravo', label: 'bravo' },
+              { id: 'charlie', label: 'charlie' },
+              { id: 'delta', label: 'delta' },
+              { id: 'echo', label: 'echo' },
+              { id: 'foxtrot', label: 'foxtrot' },
+            ]),
+          ],
+        }}
         accessByConnectorKey={{
           'mcp-server/airtable-server': {
             agents: [],
@@ -272,40 +269,16 @@ describe('McpServerTable — connector access summaries', () => {
             teams: [{ id: 'team-1', label: 'Research' }],
           },
         }}
-        agentBindingsByConnectorName={{
-          'airtable-server': [
-            {
-              contextRef: 'ctx-research',
-              agents: [
-                { id: 'agent-alpha', label: 'agent-alpha' },
-                { id: 'bravo', label: 'bravo' },
-                { id: 'charlie', label: 'charlie' },
-              ],
-            },
-            {
-              contextRef: 'ctx-sales',
-              agents: [
-                { id: 'delta', label: 'delta' },
-                { id: 'echo', label: 'echo' },
-                { id: 'foxtrot', label: 'foxtrot' },
-              ],
-            },
-          ],
-        }}
       />
     )
 
-    fireEvent.click(screen.getByText('airtable-server').closest('tr')!)
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for connector airtable-server' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'View access details' }))
 
-    const access = screen.getByRole('region', { name: 'Connector access' })
+    const access = screen.getByRole('dialog', { name: 'Access for airtable-server' })
     expect(access).toHaveTextContent('Agents')
     expect(access).toHaveTextContent('Teams')
     expect(access).toHaveTextContent('Users')
-    expect(screen.queryByText('ctx-research')).not.toBeInTheDocument()
-    expect(screen.queryByText('ctx-sales')).not.toBeInTheDocument()
-
-    const agentsHeading = screen.getByRole('heading', { name: 'Agents' })
-    expect(agentsHeading.parentElement).toHaveTextContent('6')
 
     for (const label of [
       'agent-alpha',
@@ -321,55 +294,73 @@ describe('McpServerTable — connector access summaries', () => {
     }
   })
 
+  it('preserves accessible access-dialog focus behavior without context links', () => {
+    render(
+      <McpServerTable
+        items={[makeItem({ name: 'airtable-server' })]}
+        agentBindingsByConnectorName={{
+          'airtable-server': [
+            makeAgentBinding('research', [{ id: 'agent-alpha', label: 'agent-alpha' }]),
+          ],
+        }}
+      />
+    )
+
+    const trigger = screen.getByRole('button', {
+      name: 'Actions for connector airtable-server',
+    })
+    fireEvent.click(trigger)
+    fireEvent.click(screen.getByRole('menuitem', { name: 'View access details' }))
+
+    const close = screen.getByRole('button', { name: 'Close' })
+    const agentLabel = screen.getByText('agent-alpha')
+    expect(close).toHaveFocus()
+    fireEvent.keyDown(window, { key: 'Tab' })
+    expect(agentLabel).toBeInTheDocument()
+    fireEvent.keyDown(window, { key: 'Tab', shiftKey: true })
+    expect(close).toHaveFocus()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'Access for airtable-server' })).toBeNull()
+    expect(trigger).toHaveFocus()
+  })
+
+  it('keeps connector endpoints searchable after removing the visible endpoint column', () => {
+    const onEdit = vi.fn()
+    render(<McpServerTable items={[makeItem({ name: 'airtable-server' })]} onEdit={onEdit} />)
+
+    expect(screen.queryByRole('columnheader', { name: /Endpoint/i })).toBeNull()
+    fireEvent.change(screen.getByLabelText('Search connectors'), {
+      target: { value: 'brave-search.mcp-server' },
+    })
+    expect(screen.getByText('airtable-server')).toBeInTheDocument()
+    expect(onEdit).not.toHaveBeenCalled()
+  })
+
   it('renders an empty access state when no principals are mapped', () => {
     const items = [makeItem({ name: 'unused-server' })]
     render(<McpServerTable items={items} />)
 
-    fireEvent.click(screen.getByText('unused-server').closest('tr')!)
-    expect(screen.getByText('No agents have access yet.')).toBeInTheDocument()
-    expect(screen.getByText('No teams have access.')).toBeInTheDocument()
-    expect(screen.getByText('No users have access.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for connector unused-server' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'View access details' }))
+    expect(screen.getByText('No agents linked.')).toBeInTheDocument()
+    expect(screen.getByText('No teams linked.')).toBeInTheDocument()
+    expect(screen.getByText('No users linked.')).toBeInTheDocument()
   })
 
-  it('orders URL, image, transport, and managed together and copies both full URLs', async () => {
+  it('shows the compact connector columns and omits removed metadata columns', () => {
     const image =
       'us-central1-docker.pkg.dev/example-project/example/nginx-egress-proxy:sha-3cbdf33'
     const url = 'http://brave-search.mcp-server.svc.cluster.local:3000/mcp'
-    const writeText = vi.fn().mockResolvedValue(undefined)
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText },
-    })
-    render(
-      <McpServerTable
-        items={[makeItem({ name: 'airtable-server', image, contextRef: 'ctx-private-plumbing' })]}
-      />
-    )
+    render(<McpServerTable items={[makeItem({ name: 'airtable-server', image })]} />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Expand connector airtable-server' }))
-
-    const metadata = document.querySelector('.cu-connector-detail__metadata')
-    expect(metadata).not.toBeNull()
-    const labels = Array.from(metadata!.querySelectorAll('.cu-expandable-field__label')).map(
-      label => label.textContent
-    )
-    expect(labels).toEqual(['URL', 'Image', 'Transport', 'Managed'])
-    expect(metadata).not.toHaveTextContent('ctx-private-plumbing')
-
-    const compactUrl = screen.getByTitle(url)
-    expect(compactUrl.textContent).toContain('...')
-    expect(compactUrl).toHaveAttribute('href', url)
-    const compactImage = screen.getByTitle(image)
-    expect(compactImage.textContent).toContain('...')
-    expect(compactImage.textContent).not.toBe(image)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Copy image URL' }))
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(image))
-    expect(screen.getByRole('button', { name: 'image URL copied' })).toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Copy URL' }))
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(url))
-    expect(screen.getByRole('button', { name: 'URL copied' })).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: /Endpoint/i })).toBeNull()
+    expect(screen.queryByRole('columnheader', { name: /Image/i })).toBeNull()
+    expect(screen.queryByRole('columnheader', { name: /Transport/i })).toBeNull()
+    expect(screen.queryByRole('columnheader', { name: /Access/i })).toBeNull()
+    expect(screen.getByRole('columnheader', { name: /Managed/i })).toBeInTheDocument()
+    expect(screen.queryByTitle(url)).toBeNull()
+    expect(screen.queryByTitle(image)).toBeNull()
   })
 
   it('filters rows by agent, user, and team access labels', () => {
@@ -412,81 +403,49 @@ describe('McpServerTable — connector access summaries', () => {
 })
 
 describe('McpServerTable — agent membership', () => {
-  it('does not display a stale legacy contextRef when no agent bindings exist', () => {
+  it('does not display a stale legacy contextRef without authoritative allowlist membership', () => {
     render(
       <McpServerTable
         items={[makeItem({ name: 'airtable-server', contextRef: 'removed-context' })]}
-        agentBindingsByConnectorName={{}}
         accessByConnectorKey={{}}
       />
     )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Expand connector airtable-server' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for connector airtable-server' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'View access details' }))
 
     expect(screen.queryByText('removed-context')).not.toBeInTheDocument()
-    expect(screen.getByText('No agents have access yet.')).toBeInTheDocument()
-    expect(screen.getByText('No teams have access.')).toBeInTheDocument()
-    expect(screen.getByText('No users have access.')).toBeInTheDocument()
+    expect(screen.getByText('No agents linked.')).toBeInTheDocument()
+    expect(screen.getByText('No teams linked.')).toBeInTheDocument()
+    expect(screen.getByText('No users linked.')).toBeInTheDocument()
   })
 
-  it('shows bound agents and lets an operator remove the connector from one', async () => {
+  it('shows attached agents and lets an operator remove the connector from one binding', async () => {
     const onRemoveFromAgents = vi.fn().mockResolvedValue(undefined)
-    const researchBinding: ConnectorAgentBinding = {
-      contextRef: 'ctx-research',
-      agents: [{ id: 'research-agent', label: 'research-agent' }],
-    }
+    const items = [makeItem({ name: 'airtable-server' })]
     render(
       <McpServerTable
-        items={[makeItem({ name: 'airtable-server' })]}
-        agentBindingsByConnectorName={{ 'airtable-server': [researchBinding] }}
+        items={items}
+        agentBindingsByConnectorName={{
+          'airtable-server': [
+            makeAgentBinding('research', [{ id: 'agent-alpha', label: 'Agent Alpha' }]),
+          ],
+        }}
+        onAddToAgents={vi.fn().mockResolvedValue(undefined)}
         onRemoveFromAgents={onRemoveFromAgents}
       />
     )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Expand connector airtable-server' }))
-
-    expect(screen.getByRole('heading', { name: 'Agents' })).toBeInTheDocument()
-    expect(screen.getByText('research-agent')).toBeInTheDocument()
-    expect(screen.queryByText('ctx-research')).not.toBeInTheDocument()
-
-    fireEvent.click(
-      screen.getByRole('button', {
-        name: 'Remove connector airtable-server from agent research-agent',
-      })
-    )
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for connector airtable-server' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove from Agent Alpha' }))
 
     expect(onRemoveFromAgents).toHaveBeenCalledWith(
       { namespace: 'mcp-server', name: 'airtable-server' },
-      researchBinding
+      makeAgentBinding('research', [{ id: 'agent-alpha', label: 'Agent Alpha' }])
     )
   })
 
-  it('names shared-scope removal buttons with every affected agent', () => {
-    const sharedBinding: ConnectorAgentBinding = {
-      contextRef: 'ctx-shared',
-      agents: [
-        { id: 'agent-alpha', label: 'Alpha' },
-        { id: 'agent-beta', label: 'Beta' },
-      ],
-    }
-    render(
-      <McpServerTable
-        items={[makeItem({ name: 'airtable-server' })]}
-        agentBindingsByConnectorName={{ 'airtable-server': [sharedBinding] }}
-        onRemoveFromAgents={vi.fn().mockResolvedValue(undefined)}
-      />
-    )
-
-    fireEvent.click(screen.getByRole('button', { name: 'Expand connector airtable-server' }))
-
-    expect(
-      screen.getAllByRole('button', {
-        name: 'Remove connector airtable-server from agents Alpha, Beta',
-      })
-    ).toHaveLength(2)
-  })
-
-  it('uses the agent selection modal to give more agents access to the connector', async () => {
+  it('uses the agent selection modal to add the connector to more agents', async () => {
     const onAddToAgents = vi.fn().mockResolvedValue(undefined)
     const items = [makeItem({ name: 'airtable-server' })]
     render(
@@ -494,24 +453,20 @@ describe('McpServerTable — agent membership', () => {
         items={items}
         agentBindingsByConnectorName={{
           'airtable-server': [
-            {
-              contextRef: 'ctx-research',
-              agents: [{ id: 'research-agent', label: 'research-agent' }],
-            },
+            makeAgentBinding('research', [{ id: 'agent-alpha', label: 'Agent Alpha' }]),
           ],
         }}
         agentTargets={[
-          { name: 'research-agent', label: 'research-agent', contextRef: 'ctx-research' },
-          { name: 'sales-agent', label: 'sales-agent', contextRef: 'ctx-sales' },
-          { name: 'support-agent', label: 'support-agent', contextRef: 'ctx-support' },
+          { name: 'agent-alpha', label: 'Agent Alpha', contextRef: 'research' },
+          { name: 'sales', label: 'Sales', contextRef: 'sales-context' },
         ]}
         onAddToAgents={onAddToAgents}
         onRemoveFromAgents={vi.fn().mockResolvedValue(undefined)}
       />
     )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Expand connector airtable-server' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Add agents' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for connector airtable-server' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Add to agents' }))
 
     const dialog = screen.getByRole('dialog', { name: 'Give agents access to this connector' })
     expect(dialog).toBeInTheDocument()
@@ -520,49 +475,15 @@ describe('McpServerTable — agent membership', () => {
     expect(screen.getByLabelText('Agents')).toBeInTheDocument()
     expect(screen.queryByText('No other agents available.')).not.toBeInTheDocument()
 
-    // Agents already bound to the connector are not offered again.
-    expect(screen.queryByRole('option', { name: 'research-agent' })).not.toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('option', { name: 'sales-agent' }))
-    expect(screen.getByRole('button', { name: 'Add to agent' })).toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('option', { name: 'support-agent' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Add to agents' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Sales' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add to agent' }))
 
     await waitFor(() =>
       expect(onAddToAgents).toHaveBeenCalledWith(
         { namespace: 'mcp-server', name: 'airtable-server' },
-        [
-          { name: 'sales-agent', contextRef: 'ctx-sales' },
-          { name: 'support-agent', contextRef: 'ctx-support' },
-        ]
+        [{ name: 'sales', contextRef: 'sales-context' }]
       )
     )
-  })
-
-  it('offers a context-scoped OAuth connector only to Agents in its authoritative scope', () => {
-    render(
-      <McpServerTable
-        items={[
-          makeItem({
-            name: 'shared-drive',
-            contextRef: 'ctx-authoritative',
-            oauthGrantScope: 'context',
-          }),
-        ]}
-        agentTargets={[
-          { name: 'agent-alpha', label: 'Alpha', contextRef: 'ctx-authoritative' },
-          { name: 'agent-beta', label: 'Beta', contextRef: 'ctx-foreign' },
-        ]}
-        onAddToAgents={vi.fn().mockResolvedValue(undefined)}
-      />
-    )
-
-    fireEvent.click(screen.getByRole('button', { name: 'Expand connector shared-drive' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Add agents' }))
-
-    expect(screen.getByRole('option', { name: 'Alpha' })).toBeInTheDocument()
-    expect(screen.queryByRole('option', { name: 'Beta' })).not.toBeInTheDocument()
   })
 })
 
@@ -580,9 +501,9 @@ describe('McpServerTable — row actions kebab', () => {
     const trigger = screen.getByRole('button', { name: 'Actions for connector airtable-server' })
     fireEvent.click(trigger)
 
-    const editItem = await screen.findByRole('menuitem', { name: 'Edit' })
+    const editItem = await screen.findByRole('menuitem', { name: 'View details' })
     const deleteItem = screen.getByRole('menuitem', { name: 'Delete' })
-    expect(deleteItem).toHaveClass('cu-kebab__item--danger')
+    expect(deleteItem).toHaveClass('eft-row-actions__item--danger')
 
     fireEvent.click(editItem)
     expect(onEdit).toHaveBeenCalledWith({ namespace: 'mcp-server', name: 'airtable-server' })
@@ -609,18 +530,18 @@ describe('McpServerTable — row actions kebab', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Actions for connector airtable-server' }))
 
-    const editItem = screen.getByRole('menuitem', { name: 'Edit' })
+    const editItem = screen.getByRole('menuitem', { name: 'View details' })
     const deletingItem = screen.getByRole('menuitem', { name: 'Deleting…' })
 
     expect(editItem).not.toBeDisabled()
     expect(deletingItem).toBeDisabled()
   })
 
-  it('renders no kebab when neither onEdit nor onDelete is provided', () => {
+  it('retains the access-details menu when edit and delete are unavailable', () => {
     const items = [makeItem({ name: 'airtable-server' })]
     render(<McpServerTable items={items} />)
     expect(
-      screen.queryByRole('button', { name: 'Actions for connector airtable-server' })
-    ).not.toBeInTheDocument()
+      screen.getByRole('button', { name: 'Actions for connector airtable-server' })
+    ).toBeInTheDocument()
   })
 })

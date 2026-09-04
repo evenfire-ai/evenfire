@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { GfsPermissionDropdown } from '@components/GfsPermissionDropdown'
 import { GFS_PERMISSION_LABELS } from '@components/GfsPermissionDropdown/constants'
@@ -314,19 +315,36 @@ export function GfsGrantPanel({
     return () => onCreateShareActionChange(null, true)
   }, [canCreateShare, canSubmit, onCreateShareActionChange])
 
-  function subjectLabel(item: GfsExistingAccessItem): string {
-    if (item.subject.type === 'operator') return 'Operator'
-    const option = bulkSubjectOptions.find(
-      candidate =>
-        candidate.subject.type === item.subject.type && candidate.subject.id === item.subject.id
-    )
-    if (option) return option.label
-    const typeLabel =
-      item.subject.type === 'host'
-        ? 'Agent or workflow'
-        : item.subject.type.charAt(0).toUpperCase() + item.subject.type.slice(1)
-    return item.subject.id ? `${typeLabel} · ${item.subject.id}` : typeLabel
-  }
+  const subjectLabel = useCallback(
+    (item: GfsExistingAccessItem): string => {
+      if (item.subject.type === 'operator') return 'Operator'
+      const option = bulkSubjectOptions.find(
+        candidate =>
+          candidate.subject.type === item.subject.type && candidate.subject.id === item.subject.id
+      )
+      if (option) return option.label
+      const typeLabel =
+        item.subject.type === 'host'
+          ? 'Agent or workflow'
+          : item.subject.type.charAt(0).toUpperCase() + item.subject.type.slice(1)
+      return item.subject.id ? `${typeLabel} · ${item.subject.id}` : typeLabel
+    },
+    [bulkSubjectOptions]
+  )
+
+  const sortedExistingAccess = useMemo(
+    () =>
+      [...existingAccess].sort(
+        (left, right) =>
+          subjectLabel(left).localeCompare(subjectLabel(right), undefined, {
+            numeric: true,
+            sensitivity: 'base',
+          }) ||
+          left.kind.localeCompare(right.kind) ||
+          left.id.localeCompare(right.id)
+      ),
+    [existingAccess, subjectLabel]
+  )
 
   async function revokeAccess(item: GfsExistingAccessItem) {
     const label = subjectLabel(item)
@@ -435,15 +453,16 @@ export function GfsGrantPanel({
         ) : existingAccess.length === 0 ? (
           <p className="cu-gfs-existing-access__empty">No direct grants or shares yet.</p>
         ) : (
-          <ul className="cu-gfs-existing-access__list" aria-label="Resource access">
-            {existingAccess.map(item => {
+          <RecordList className="cu-gfs-existing-access__list" aria-label="Resource access">
+            {sortedExistingAccess.map(item => {
               const label = subjectLabel(item)
               const coversDescendants =
                 item.kind === 'grant' ? item.inherit : item.includeDescendants
               return (
-                <li
+                <RecordListRow
                   className="cu-gfs-existing-access__item"
                   data-testid={`gfs-access-row-${item.kind}-${item.id}`}
+                  data-access-id={item.id}
                   key={`${item.kind}:${item.id}`}
                 >
                   <span className="cu-gfs-existing-access__identity">
@@ -468,22 +487,22 @@ export function GfsGrantPanel({
                       </span>
                     ) : null}
                   </span>
-                  <Button
-                    aria-label={`Remove ${item.kind} access for ${label}`}
-                    className="cu-gfs-existing-access__revoke"
-                    data-testid={`gfs-revoke-${item.kind}-${item.id}`}
-                    title={`Remove ${item.kind} access for ${label}`}
-                    size="sm"
-                    disabled={actionPending}
-                    onClick={() => void revokeAccess(item)}
-                    variant="ghost"
-                  >
-                    X
-                  </Button>
-                </li>
+                  <RowActionMenu
+                    actions={[
+                      {
+                        key: 'remove',
+                        label: 'Remove access',
+                        danger: true,
+                        disabled: actionPending,
+                        onSelect: () => void revokeAccess(item),
+                      },
+                    ]}
+                    ariaLabel={`Actions for ${label}`}
+                  />
+                </RecordListRow>
               )
             })}
-          </ul>
+          </RecordList>
         )}
       </section>
       {confirmDialog}

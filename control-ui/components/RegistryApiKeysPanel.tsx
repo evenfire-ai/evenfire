@@ -1,7 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
+import { DataTable, TableStateRow, TableViewport, useTableSort } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type CreateRegistryApiKeyInput,
@@ -16,7 +17,7 @@ import { useConfirmDialog } from './ConfirmDialog'
 import CreateApiKeyModal from './CreateApiKeyModal'
 import type { RegistryApiKeysPanelProps } from './RegistryApiKeysPanel.types'
 import RevealApiKeyModal from './RevealApiKeyModal'
-import { SectionLoadingSkeleton } from './SectionLoadingSkeleton'
+import { RowActionsMenu } from './RowActionsMenu'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -53,12 +54,40 @@ function fmtExpiry(v: string | null): string {
   return d.getTime() < Date.now() ? `Expired ${d.toLocaleDateString()}` : d.toLocaleString()
 }
 
-export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKeysPanelProps) {
+export default function RegistryApiKeysPanel({
+  embedded = false,
+  hideHeader = false,
+  search = '',
+  refreshSignal = 0,
+  createSignal = 0,
+  onCreateAvailabilityChange,
+}: RegistryApiKeysPanelProps) {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [view, setView] = useState<View>({ kind: 'loading' })
   const [creating, setCreating] = useState(false)
   const [revealed, setRevealed] = useState<CreatedRegistryApiKey | null>(null)
+  const normalizedSearch = search.trim().toLowerCase()
+  const visibleKeys = useMemo(
+    () =>
+      view.kind === 'ready'
+        ? view.keys.filter(key =>
+            [
+              key.key_prefix,
+              key.description,
+              key.scopes.join(' '),
+              key.created_by_username,
+              key.created_at,
+              key.expires_at ?? '',
+              key.last_used_at ?? '',
+            ]
+              .join(' ')
+              .toLowerCase()
+              .includes(normalizedSearch)
+          )
+        : [],
+    [normalizedSearch, view]
+  )
   // The auth-disabled view needs mode-specific copy: self-hosted fixes it by
   // connecting, managed fixes it via CLERUM_REGISTRY_AUTH_ENABLED (no connect
   // flow exists there). Same best-effort detection RegistryCatalog uses for its
@@ -68,6 +97,43 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
   // likely than a real managed deployment misreporting its own mode.
   const [connectionMode, setConnectionMode] = useState<'self-hosted' | 'managed' | 'unknown'>(
     'unknown'
+  )
+  const keySort = useTableSort<
+    RegistryApiKey,
+    'prefix' | 'description' | 'scopes' | 'created_by' | 'created' | 'expires' | 'last_used'
+  >({
+    rows: visibleKeys,
+    defaultKey: 'created',
+    defaultDirection: 'desc',
+    identity: key => key.id,
+    accessors: {
+      prefix: key => key.key_prefix,
+      description: key => key.description,
+      scopes: key => key.scopes.join(', '),
+      created_by: key => key.created_by_username,
+      created: key => key.created_at,
+      expires: key => key.expires_at,
+      last_used: key => key.last_used_at,
+    },
+  })
+  const columns = API_KEYS_COLUMNS.map(column =>
+    column.key === 'actions'
+      ? column
+      : {
+          ...column,
+          activeDirection: keySort.key === column.key ? keySort.direction : null,
+          onSort: () =>
+            keySort.sortBy(
+              column.key as
+                | 'prefix'
+                | 'description'
+                | 'scopes'
+                | 'created_by'
+                | 'created'
+                | 'expires'
+                | 'last_used'
+            ),
+        }
   )
 
   const load = useCallback(async () => {
@@ -101,6 +167,18 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
     void load()
     void loadConnectionMode()
   }, [load, loadConnectionMode])
+
+  useEffect(() => {
+    if (refreshSignal > 0) void load()
+  }, [load, refreshSignal])
+
+  useEffect(() => {
+    if (createSignal > 0 && view.kind === 'ready') setCreating(true)
+  }, [createSignal, view.kind])
+
+  useEffect(() => {
+    onCreateAvailabilityChange?.(view.kind === 'ready')
+  }, [onCreateAvailabilityChange, view.kind])
 
   async function handleCreate(input: CreateRegistryApiKeyInput) {
     const created: CreatedRegistryApiKey = await createRegistryApiKey(input)
@@ -137,21 +215,20 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
 
   const content = (
     <>
-      <TablePanelHeader
-        title={`API keys${isReady ? ` for @${(view as { org: string }).org}` : ''}`}
-        actions={
-          isReady ? (
-            <Button type="button" variant="primary" size="sm" onClick={() => setCreating(true)}>
-              + Create key
-            </Button>
-          ) : null
-        }
-      />
+      {hideHeader ? null : (
+        <TablePanelHeader
+          title={`API keys${isReady ? ` for @${(view as { org: string }).org}` : ''}`}
+          primaryAction={
+            isReady ? (
+              <Button type="button" variant="primary" size="sm" onClick={() => setCreating(true)}>
+                + Create key
+              </Button>
+            ) : null
+          }
+        />
+      )}
 
       <div className="cu-card__body">
-        {view.kind === 'loading' ? (
-          <SectionLoadingSkeleton label="Loading registry API keys" />
-        ) : null}
         {view.kind === 'not-owner' ? (
           <p className="cu-banner cu-banner--warn">
             You must be an org owner to manage API keys
@@ -186,26 +263,41 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
             managing API keys.
           </p>
         ) : null}
-        {view.kind === 'error' ? (
-          <p className="cu-banner cu-banner--warn">
-            Could not load API keys.{' '}
-            <Button type="button" variant="ghost" size="sm" onClick={() => void load()}>
-              Retry
-            </Button>
-          </p>
-        ) : null}
-
-        {view.kind === 'ready' ? (
-          view.keys.length === 0 ? (
-            <p>No API keys yet. Create one to publish to @{view.org} from CI or scripts.</p>
-          ) : (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
-                <thead>
-                  <TableHeaderRow columns={API_KEYS_COLUMNS} />
-                </thead>
-                <tbody>
-                  {view.keys.map(k => (
+        {view.kind === 'loading' || view.kind === 'error' || view.kind === 'ready' ? (
+          <TableViewport className="cu-table-wrap">
+            <DataTable className="eft-table cu-table">
+              <thead>
+                <TableHeaderRow columns={columns} />
+              </thead>
+              <tbody>
+                {view.kind === 'loading' ? (
+                  <TableStateRow
+                    colSpan={columns.length}
+                    kind="loading"
+                    message="Loading registry API keys…"
+                  />
+                ) : view.kind === 'error' ? (
+                  <TableStateRow
+                    action={
+                      <Button type="button" variant="ghost" size="sm" onClick={() => void load()}>
+                        Retry
+                      </Button>
+                    }
+                    colSpan={columns.length}
+                    kind="error"
+                    message="Could not load API keys."
+                  />
+                ) : visibleKeys.length === 0 ? (
+                  <TableStateRow
+                    colSpan={columns.length}
+                    message={
+                      normalizedSearch
+                        ? 'No API keys match this search.'
+                        : `No API keys yet. Create one to publish to @${view.org} from CI or scripts.`
+                    }
+                  />
+                ) : (
+                  keySort.sortedRows.map(k => (
                     <tr key={k.id}>
                       <td>
                         <code>{k.key_prefix}</code>
@@ -216,22 +308,26 @@ export default function RegistryApiKeysPanel({ embedded = false }: RegistryApiKe
                       <td title={k.created_at}>{fmtTime(k.created_at, '—')}</td>
                       <td>{fmtExpiry(k.expires_at)}</td>
                       <td>{fmtTime(k.last_used_at, 'Never used')}</td>
-                      <td>
-                        <Button
-                          type="button"
-                          variant="danger"
-                          size="sm"
-                          onClick={() => void handleRevoke(k)}
-                        >
-                          Revoke
-                        </Button>
+                      <td className="cu-table__cell-actions">
+                        <RowActionsMenu
+                          ariaLabel={`Actions for API key ${k.key_prefix}`}
+                          horizontalTrigger
+                          actions={[
+                            {
+                              key: 'revoke',
+                              label: 'Revoke',
+                              danger: true,
+                              onClick: () => void handleRevoke(k),
+                            },
+                          ]}
+                        />
                       </td>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )
+                  ))
+                )}
+              </tbody>
+            </DataTable>
+          </TableViewport>
         ) : null}
       </div>
     </>

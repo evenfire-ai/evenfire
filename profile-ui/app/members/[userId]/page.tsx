@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
+import { DataTable, RowActionMenu, TableViewport } from '@clerum/frontend-components'
 import { useAuth } from '@components/AuthContext'
 import { AuthGate } from '@components/AuthGate'
 import { Button } from '@components/Button'
@@ -220,8 +221,8 @@ export default function MemberDetailsPage() {
                   </p>
                 </div>
               </div>
-              <div className="members-table-wrap">
-                <table className="members-table">
+              <TableViewport>
+                <DataTable className="eft-table eft-table--wide">
                   <thead>
                     <tr>
                       <th>Team</th>
@@ -264,46 +265,32 @@ export default function MemberDetailsPage() {
                               disabled
                             />
                           </td>
-                          <td>
-                            <div className="row-actions">
-                              {!memberIsSelf ? (
-                                <button
-                                  type="button"
-                                  className="icon-button"
-                                  onClick={() => {
-                                    if (!team.canEdit) return
-                                    setEditTeam(team)
-                                    setEditRole(team.role)
-                                    setEditError('')
-                                  }}
-                                  disabled={busy || !team.canEdit}
-                                  title={
-                                    team.canEdit
-                                      ? `Edit ${team.name} permissions`
-                                      : 'Only leaders can edit member permissions.'
-                                  }
-                                  aria-label={`Edit ${team.name} permissions`}
-                                >
-                                  Edit
-                                </button>
-                              ) : null}
-                              {!memberIsSelf ? (
-                                <button
-                                  type="button"
-                                  className="icon-button icon-button--danger"
-                                  onClick={() => void removeMemberFromTeam(team)}
-                                  disabled={busy || !team.canDelete}
-                                  title={
-                                    team.canDelete
-                                      ? `Remove from ${team.name}`
-                                      : 'Only leaders can remove members from this team.'
-                                  }
-                                  aria-label={`Remove from ${team.name}`}
-                                >
-                                  <IconTrash />
-                                </button>
-                              ) : null}
-                            </div>
+                          <td className="eft-table__cell--actions">
+                            {!memberIsSelf ? (
+                              <RowActionMenu
+                                ariaLabel={`Actions for team ${team.name}`}
+                                actions={[
+                                  {
+                                    key: 'edit',
+                                    label: 'Edit permissions',
+                                    disabled: busy || !team.canEdit,
+                                    onSelect: () => {
+                                      if (!team.canEdit) return
+                                      setEditTeam(team)
+                                      setEditRole(team.role)
+                                      setEditError('')
+                                    },
+                                  },
+                                  {
+                                    key: 'remove',
+                                    label: 'Remove from team',
+                                    danger: true,
+                                    disabled: busy || !team.canDelete,
+                                    onSelect: () => void removeMemberFromTeam(team),
+                                  },
+                                ]}
+                              />
+                            ) : null}
                           </td>
                         </tr>
                       )
@@ -314,8 +301,8 @@ export default function MemberDetailsPage() {
                       </tr>
                     ) : null}
                   </tbody>
-                </table>
-              </div>
+                </DataTable>
+              </TableViewport>
               {editableTeams.length === 0 && !memberIsSelf ? (
                 <p className="body-copy">No editable teams are available for this member.</p>
               ) : null}

@@ -36,7 +36,7 @@ function renderTable(items: LlmAllowedModel[], unpricedKeys = new Set<string>())
 }
 
 function expandAnthropicModels() {
-  fireEvent.click(screen.getByRole('button', { name: 'Expand Anthropic models' }))
+  // Provider rows are no longer collapsed; retained as a no-op for row-focused tests below.
 }
 
 describe('LlmModelTable catalog-lifecycle columns', () => {
@@ -47,10 +47,10 @@ describe('LlmModelTable catalog-lifecycle columns', () => {
     expect(screen.queryByText('Manual')).not.toBeInTheDocument()
   })
 
-  it('does not render the removed Catalog status column', () => {
+  it('keeps stale status on its record without restoring the removed Catalog status column', () => {
     renderTable([{ ...baseModel, id: 'm-stale', source: 'discovery', stale: true }, baseModel])
     expandAnthropicModels()
-    expect(screen.queryByText('Stale', { selector: '.cu-px-badge--warn' })).toBeNull()
+    expect(screen.getByText('Stale', { selector: '.cu-px-badge--warn' })).toBeVisible()
     expect(screen.queryByRole('columnheader', { name: 'Catalog status' })).toBeNull()
   })
 
@@ -68,7 +68,6 @@ describe('LlmModelTable catalog-lifecycle columns', () => {
       updated_at: '2026-01-01T00:00:00.000Z',
     } as LlmAllowedModel
     renderTable([legacy])
-    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI models' }))
     expect(screen.getByText('Manual', { selector: '.cu-px-badge' })).toBeInTheDocument()
     expect(screen.queryByText('Discovered')).not.toBeInTheDocument()
     expect(screen.queryByText('Stale', { selector: '.cu-px-badge--warn' })).toBeNull()
@@ -104,7 +103,6 @@ describe('LlmModelTable catalog-lifecycle columns', () => {
     expect(
       screen.queryByRole('button', { name: /OpenAI Codex Subscription/i })
     ).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI models' }))
     expect(screen.getByText('gpt-5.1')).toBeInTheDocument()
     expect(screen.getByText('API key · Subscription')).toBeInTheDocument()
     expect(screen.getByText('gpt-5.3-codex').closest('tr')).toHaveTextContent('Subscription')
@@ -142,7 +140,6 @@ describe('LlmModelTable catalog-lifecycle columns', () => {
         loading={false}
       />
     )
-    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI models' }))
     fireEvent.click(screen.getByRole('button', { name: 'Actions for model openai/gpt-5.1' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Edit subscription' }))
     expect(onEdit).toHaveBeenCalledWith('oa-sub')
@@ -224,7 +221,7 @@ describe('LlmModelTable filters', () => {
 
     await waitFor(() => {
       expect(screen.queryByLabelText('Filter by provider')).toBeNull()
-      expect(screen.getByRole('button', { name: 'Expand Anthropic models' })).toBeInTheDocument()
+      expect(screen.getByText('claude-enabled')).toBeInTheDocument()
     })
     expect(screen.queryByText('No models match this filter.')).toBeNull()
   })
@@ -271,8 +268,8 @@ describe('LlmModelTable filters', () => {
       )
     })
     expect(screen.queryByText('No models match this filter.')).toBeNull()
-    expect(screen.getByRole('button', { name: 'Expand Anthropic models' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Expand google models' })).toBeInTheDocument()
+    expect(screen.getByText('claude-enabled')).toBeInTheDocument()
+    expect(screen.getByText('gemini-2.5-pro')).toBeInTheDocument()
   })
 
   it('shows the filtered empty state when no row matches', () => {
@@ -284,7 +281,7 @@ describe('LlmModelTable filters', () => {
   })
 })
 
-describe('LlmModelTable provider groups', () => {
+describe('LlmModelTable provider columns', () => {
   const openAiModel: LlmAllowedModel = {
     ...baseModel,
     id: 'openai-model',
@@ -294,39 +291,23 @@ describe('LlmModelTable provider groups', () => {
     display_name: 'GPT-5',
   }
 
-  it('starts with compact provider summaries and expands groups independently', () => {
+  it('shows every model as a first-class row with readable provider identity', () => {
     renderTable([baseModel, openAiModel])
 
-    expect(screen.getByRole('button', { name: 'Expand Anthropic models' })).toHaveAttribute(
-      'aria-expanded',
-      'false'
-    )
-    expect(screen.getByRole('button', { name: 'Expand OpenAI models' })).toHaveAttribute(
-      'aria-expanded',
-      'false'
-    )
-    expect(screen.queryByText('claude-sonnet-4-6')).toBeNull()
-    expect(screen.queryByText('gpt-5')).toBeNull()
-
-    expandAnthropicModels()
-
     expect(screen.getByText('claude-sonnet-4-6')).toBeInTheDocument()
-    expect(screen.queryByText('gpt-5')).toBeNull()
-    expect(screen.getByRole('button', { name: 'Collapse Anthropic models' })).toHaveAttribute(
-      'aria-expanded',
-      'true'
-    )
+    expect(screen.getByText('gpt-5')).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: /Provider/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Expand .* models/ })).toBeNull()
   })
 
-  it('surfaces stale counts in the collapsed provider summary', () => {
+  it('surfaces stale state on the affected record instead of a group summary', () => {
     renderTable([{ ...baseModel, source: 'discovery', stale: true }])
 
-    expect(screen.getByRole('button', { name: 'Expand Anthropic models' })).toHaveTextContent(
-      '1 stale'
-    )
+    expect(screen.getByText('claude-sonnet-4-6')).toBeInTheDocument()
+    expect(screen.getByText('Stale')).toBeVisible()
   })
 
-  it('opens matching groups while searching and shows the match count', () => {
+  it('filters first-class rows without provider disclosure state', () => {
     renderTable([
       baseModel,
       openAiModel,
@@ -343,13 +324,8 @@ describe('LlmModelTable provider groups', () => {
     })
 
     expect(screen.getByText('gpt-5')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /Anthropic models/ })).toBeNull()
-    expect(screen.getByRole('button', { name: 'Collapse OpenAI models' })).toHaveTextContent(
-      '2 models'
-    )
-    expect(screen.getByRole('button', { name: 'Collapse OpenAI models' })).toHaveTextContent(
-      '1 matching'
-    )
+    expect(screen.queryByText('claude-sonnet-4-6')).toBeNull()
+    expect(screen.queryByText('o3')).toBeNull()
   })
 
   it('opens a provider selected from the provider filter', () => {
@@ -365,7 +341,7 @@ describe('LlmModelTable provider groups', () => {
     expect(
       screen.getByRole('button', { name: 'Filter by provider' }).querySelector('img')
     ).toHaveAttribute('src', '/provider-icons/openai.svg')
-    expect(screen.queryByRole('button', { name: /Anthropic models/ })).toBeNull()
+    expect(screen.queryByText('claude-sonnet-4-6')).toBeNull()
   })
 
   it('shows missing-price details and a prefilled CTA only on the affected row', () => {
@@ -406,7 +382,7 @@ describe('LlmModelTable sorting', () => {
 
   it('keeps the static LLM Models title regardless of filters', () => {
     renderTable([baseModel])
-    expect(document.querySelector('.cu-panel-title')?.textContent).toContain('LLM Models')
+    expect(screen.getByRole('heading', { name: /LLM Models/ })).toBeInTheDocument()
   })
 
   it('sorts models inside a provider group by model name when ascending', () => {
@@ -416,7 +392,7 @@ describe('LlmModelTable sorting', () => {
     renderTable([charlie, alpha, bravo])
     expandAnthropicModels()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by model ascending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Model ascending' }))
 
     expect(expandedRowOrder()).toEqual(['alpha', 'bravo', 'charlie'])
   })
@@ -427,11 +403,11 @@ describe('LlmModelTable sorting', () => {
     renderTable([alpha, bravo])
     expandAnthropicModels()
 
-    const modelSort = screen.getByRole('button', { name: 'Sort by model ascending' })
+    const modelSort = screen.getByRole('button', { name: 'Sort by Model ascending' })
     fireEvent.click(modelSort)
     expect(expandedRowOrder()).toEqual(['alpha', 'bravo'])
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by model descending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Model descending' }))
     expect(expandedRowOrder()).toEqual(['bravo', 'alpha'])
   })
 
@@ -442,7 +418,7 @@ describe('LlmModelTable sorting', () => {
     renderTable([small, large, unknown])
     expandAnthropicModels()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by context window descending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Context window descending' }))
 
     expect(expandedRowOrder()).toEqual(['large', 'small', 'unknown'])
   })
@@ -454,12 +430,12 @@ describe('LlmModelTable sorting', () => {
     expandAnthropicModels()
 
     // Model asc (default for text columns).
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by model ascending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Model ascending' }))
     expect(expandedRowOrder()).toEqual(['alpha', 'bravo'])
 
     // Switching to context window uses its natural default (descending) — not
     // the previous direction — so the operator gets the most useful ordering.
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by context window descending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Context window descending' }))
     expect(expandedRowOrder()).toEqual(['bravo', 'alpha'])
   })
 })

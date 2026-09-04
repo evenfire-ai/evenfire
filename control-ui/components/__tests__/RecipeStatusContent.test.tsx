@@ -7,6 +7,7 @@ import {
   render as rtlRender,
   screen,
   waitFor,
+  within,
 } from '@testing-library/react'
 import {
   deleteWorkflowRunArtifact,
@@ -117,6 +118,12 @@ describe('RecipeStatusContent — workload recipe', () => {
     expect(screen.getByText('Ready')).toBeInTheDocument()
     expect(screen.getByText('Not Ready')).toBeInTheDocument()
     expect(screen.getByText('×2')).toBeInTheDocument()
+    const list = screen.getByRole('list', { name: 'Execution workloads' })
+    expect(
+      within(list)
+        .getAllByRole('listitem')
+        .map(row => row.textContent)
+    ).toEqual(['my-mcp-serverReady×2', 'redisNot Ready'])
   })
 
   it('shows message section with copy button', async () => {
@@ -543,6 +550,77 @@ describe('RecipeStatusContent — GrantsReadonlyPanel', () => {
     expect(screen.queryByText('team-approval')).not.toBeInTheDocument()
   })
 
+  it('sorts readonly access groups by visible identity with stable id tie-breaks', async () => {
+    mockListGrants.mockResolvedValueOnce({
+      items: [
+        { id: 'u-z', email: 'zed@example.com', name: 'Zed', displayName: null },
+        { id: 'u-10', email: 'same-10@example.com', name: 'Same', displayName: null },
+        { id: 'u-2', email: 'same-2@example.com', name: 'Same', displayName: null },
+        { id: 'u-a', email: 'alpha@example.com', name: null, displayName: 'Alpha' },
+      ],
+    })
+    mockListTeamGrants.mockResolvedValueOnce({
+      items: [
+        { id: 'team-z', name: 'Zulu' },
+        { id: 'team-10', name: 'Same Team' },
+        { id: 'team-2', name: 'Same Team' },
+        { id: 'team-a', name: 'Alpha Team' },
+      ],
+    })
+    mockListApprovalAllowedTeams.mockResolvedValueOnce({
+      items: [
+        { id: 'approval-z', name: 'Zulu Approval', createdAt: '2026-05-21T00:00:00Z' },
+        { id: 'approval-10', name: 'Same Approval', createdAt: '2026-05-21T00:00:00Z' },
+        { id: 'approval-2', name: 'Same Approval', createdAt: '2026-05-21T00:00:00Z' },
+        { id: 'approval-a', name: 'Alpha Approval', createdAt: '2026-05-21T00:00:00Z' },
+      ],
+    })
+
+    render(<RecipeStatusContent {...DEFAULT_PROPS} />)
+
+    const triggerUsers = await screen.findByRole('list', { name: 'Trigger users' })
+    const triggerTeams = await screen.findByRole('list', { name: 'Trigger teams' })
+    const approvalTargetTeams = await screen.findByRole('list', {
+      name: 'Approval target teams',
+    })
+
+    expect(
+      within(triggerUsers)
+        .getAllByRole('listitem')
+        .map(row => row.textContent)
+    ).toEqual([
+      'Alpha(alpha@example.com)',
+      'Same(same-2@example.com)',
+      'Same(same-10@example.com)',
+      'Zed(zed@example.com)',
+    ])
+    expect(
+      within(triggerUsers)
+        .getAllByRole('listitem')
+        .map(row => row.getAttribute('data-access-id'))
+    ).toEqual(['u-a', 'u-2', 'u-10', 'u-z'])
+    expect(
+      within(triggerTeams)
+        .getAllByRole('listitem')
+        .map(row => row.textContent)
+    ).toEqual(['Alpha Team', 'Same Team', 'Same Team', 'Zulu'])
+    expect(
+      within(triggerTeams)
+        .getAllByRole('listitem')
+        .map(row => row.getAttribute('data-access-id'))
+    ).toEqual(['team-a', 'team-2', 'team-10', 'team-z'])
+    expect(
+      within(approvalTargetTeams)
+        .getAllByRole('listitem')
+        .map(row => row.textContent)
+    ).toEqual(['Alpha Approval', 'Same Approval', 'Same Approval', 'Zulu Approval'])
+    expect(
+      within(approvalTargetTeams)
+        .getAllByRole('listitem')
+        .map(row => row.getAttribute('data-access-id'))
+    ).toEqual(['approval-a', 'approval-2', 'approval-10', 'approval-z'])
+  })
+
   it('ignores stale grants responses after switching recipes', async () => {
     const first = createDeferred<Awaited<ReturnType<typeof listWorkflowGrants>>>()
     const second = createDeferred<Awaited<ReturnType<typeof listWorkflowGrants>>>()
@@ -647,6 +725,12 @@ describe('RecipeStatusContent — runId child resolution', () => {
             sizeBytes: 42,
             createdAt: '2026-05-06T00:00:00.000Z',
           },
+          {
+            name: 'audit-log.txt',
+            format: 'txt',
+            sizeBytes: 84,
+            createdAt: '2026-05-06T00:01:00.000Z',
+          },
         ],
       },
     } as unknown as Awaited<ReturnType<typeof getRecipe>>)
@@ -671,7 +755,10 @@ describe('RecipeStatusContent — runId child resolution', () => {
     render(<RecipeStatusContent {...DEFAULT_PROPS} runId="ABCD1234-aaaa-bbbb-cccc-dddddddddddd" />)
     await screen.findByText('custom-sdk-result.json')
 
-    fireEvent.click(screen.getByTestId('artifact-download'))
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for artifact custom-sdk-result.json' })
+    )
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Download' }))
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith('http://localhost/run-download', {
@@ -686,7 +773,17 @@ describe('RecipeStatusContent — runId child resolution', () => {
     )
     expect(downloadName).toBe('ABCD1234-custom-sdk-result.json')
     expect(screen.getByText('Clear All')).toBeInTheDocument()
-    expect(screen.getByTitle('Delete custom-sdk-result.json')).toBeInTheDocument()
+    const artifacts = screen.getByRole('list', { name: 'Output artifacts' })
+    expect(
+      within(artifacts)
+        .getAllByRole('listitem')
+        .map(row => row.textContent)
+    ).toEqual(['JSONcustom-sdk-result.json42 B⋮', 'TXTaudit-log.txt84 B⋮'])
+    expect(
+      within(artifacts)
+        .getAllByRole('listitem')
+        .map(row => row.getAttribute('data-artifact-name'))
+    ).toEqual(['custom-sdk-result.json', 'audit-log.txt'])
     expect(click).toHaveBeenCalled()
   })
 
@@ -713,7 +810,10 @@ describe('RecipeStatusContent — runId child resolution', () => {
     render(<RecipeStatusContent {...DEFAULT_PROPS} runId="ABCD1234-aaaa-bbbb-cccc-dddddddddddd" />)
     await screen.findByText('custom-sdk-result.json')
 
-    fireEvent.click(screen.getByTitle('Delete custom-sdk-result.json'))
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for artifact custom-sdk-result.json' })
+    )
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }))
     expect(mockDeleteWorkflowRunArtifact).not.toHaveBeenCalled()
     expect(await screen.findByRole('alertdialog', { name: 'Delete Artifact' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }))

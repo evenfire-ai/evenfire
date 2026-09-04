@@ -4,6 +4,12 @@
 !packages/workflow-recipe-capability-policy/**
 !packages/display-field/
 !packages/display-field/**
+!packages/frontend-components/
+!packages/frontend-components/package.json
+!packages/frontend-components/src/
+!packages/frontend-components/src/index.tsx
+!packages/frontend-components/styles.css
+packages/frontend-components/node_modules/
 !packages/llm-providers/
 !packages/llm-providers/**
 !scripts/

@@ -2,13 +2,18 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import {
+  DataTable,
+  TableHeaderCell,
+  TableStateRow,
+  TableViewport,
+  useTableSort,
+} from '@clerum/frontend-components'
 import { useAuth } from '@components/AuthContext'
 import { useConfirmDialog } from '@components/ConfirmDialog'
-import { IconUsers } from '@components/Sidebar/icons'
-import { SkeletonTableRows } from '@components/SkeletonTableRows'
+import { RowActionsMenu } from '@components/RowActionsMenu'
 import { useToast } from '@components/Toast'
-import { IconAlertTriangle, IconTrash } from '@components/icons'
-import { Button } from '@components/ui'
+import { IconAlertTriangle } from '@components/icons'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type ControlAdminInvitationItem,
@@ -109,6 +114,7 @@ export function ControlAdminsPanel({
         .some(value => value.toLowerCase().includes(normalizedSearch))
     )
   }, [invitations, normalizedSearch])
+  const showInvitationsTable = loading || invitations.length > 0
 
   const filteredAdmins = useMemo(() => {
     // Disabled admins are retained for audit/lifecycle history, but they are
@@ -123,6 +129,35 @@ export function ControlAdminsPanel({
         .some(value => value.toLowerCase().includes(normalizedSearch))
     )
   }, [admins, normalizedSearch])
+  const invitationSort = useTableSort<
+    ControlAdminInvitationItem,
+    'email' | 'status' | 'expires' | 'created'
+  >({
+    rows: filteredInvitations,
+    defaultKey: 'email',
+    identity: invitation => invitation.id,
+    accessors: {
+      email: invitation => invitation.email,
+      status: invitation => invitation.status,
+      expires: invitation => invitation.expiresAt,
+      created: invitation => invitation.createdAt,
+    },
+  })
+  const adminSort = useTableSort<
+    ControlAdminListItem,
+    'username' | 'email' | 'status' | 'gfs' | 'lastLogin'
+  >({
+    rows: filteredAdmins,
+    defaultKey: 'username',
+    identity: admin => admin.id,
+    accessors: {
+      username: admin => admin.username,
+      email: admin => admin.email,
+      status: admin => formatAdminStatus(admin.status),
+      gfs: admin => admin.gfsOperatorLink?.status,
+      lastLogin: admin => admin.lastLoginAt,
+    },
+  })
 
   async function handleCancelInvitation(invitation: ControlAdminInvitationItem) {
     const shouldCancel = await confirm({
@@ -326,72 +361,126 @@ export function ControlAdminsPanel({
   return (
     <div className="cu-profile-section">
       {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
-      {loading || filteredInvitations.length > 0 ? (
-        <div className="cu-table-wrap cu-table-wrap--border-top">
-          <table className="cu-table cu-table--header-band">
+      {showInvitationsTable ? (
+        <TableViewport className="cu-table-wrap cu-table-wrap--border-top">
+          <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <tr>
-                <th>Pending invitation</th>
-                <th>Status</th>
-                <th>Expires</th>
-                <th>Created</th>
+                <TableHeaderCell
+                  activeDirection={invitationSort.key === 'email' ? invitationSort.direction : null}
+                  label="Pending invitation"
+                  onSort={() => invitationSort.sortBy('email')}
+                />
+                <TableHeaderCell
+                  activeDirection={
+                    invitationSort.key === 'status' ? invitationSort.direction : null
+                  }
+                  label="Status"
+                  onSort={() => invitationSort.sortBy('status')}
+                />
+                <TableHeaderCell
+                  activeDirection={
+                    invitationSort.key === 'expires' ? invitationSort.direction : null
+                  }
+                  label="Expires"
+                  onSort={() => invitationSort.sortBy('expires')}
+                />
+                <TableHeaderCell
+                  activeDirection={
+                    invitationSort.key === 'created' ? invitationSort.direction : null
+                  }
+                  label="Created"
+                  onSort={() => invitationSort.sortBy('created')}
+                />
                 <th aria-label="Actions" />
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <SkeletonTableRows columns={5} rows={2} />
+                <TableStateRow colSpan={5} kind="loading" message="Loading invitations…" />
+              ) : error && filteredInvitations.length === 0 ? (
+                <TableStateRow colSpan={5} kind="error" message={error} />
+              ) : filteredInvitations.length === 0 ? (
+                <TableStateRow colSpan={5} message="No pending invitations match this search." />
               ) : (
-                filteredInvitations.map(invitation => (
+                invitationSort.sortedRows.map(invitation => (
                   <tr key={invitation.id}>
                     <td>{invitation.email}</td>
                     <td>{invitation.status}</td>
                     <td>{formatDate(invitation.expiresAt)}</td>
                     <td>{formatDate(invitation.createdAt)}</td>
                     <td className="cu-table__cell-actions">
-                      <div className="cu-row-actions">
-                        <Button
-                          type="button"
-                          variant="danger"
-                          size="sm"
-                          disabled={cancellingInvitationId === invitation.id}
-                          onClick={() => void handleCancelInvitation(invitation)}
-                        >
-                          {cancellingInvitationId === invitation.id ? 'Canceling...' : 'Cancel'}
-                        </Button>
-                      </div>
+                      <RowActionsMenu
+                        ariaLabel={`Actions for invitation ${invitation.email}`}
+                        actions={[
+                          {
+                            key: 'cancel',
+                            label:
+                              cancellingInvitationId === invitation.id
+                                ? 'Canceling…'
+                                : 'Cancel invitation',
+                            disabled: cancellingInvitationId === invitation.id,
+                            onClick: () => void handleCancelInvitation(invitation),
+                            danger: true,
+                          },
+                        ]}
+                      />
                     </td>
                   </tr>
                 ))
               )}
             </tbody>
-          </table>
-        </div>
+          </DataTable>
+        </TableViewport>
       ) : null}
-      <div className="cu-table-wrap cu-table-wrap--border-top">
-        <table className="cu-table cu-table--header-band">
+      <TableViewport
+        className={`cu-table-wrap cu-table-wrap--border-top${
+          showInvitationsTable ? ' cu-table-wrap--section-gap' : ''
+        }`}
+      >
+        <DataTable className="eft-table cu-table cu-table--header-band">
           <thead>
             <tr>
-              <th>Username</th>
-              <th>Email</th>
-              <th>Status</th>
-              <th>Desktop GFS access</th>
-              <th>Last sign-in</th>
+              <TableHeaderCell
+                activeDirection={adminSort.key === 'username' ? adminSort.direction : null}
+                label="Username"
+                onSort={() => adminSort.sortBy('username')}
+              />
+              <TableHeaderCell
+                activeDirection={adminSort.key === 'email' ? adminSort.direction : null}
+                label="Email"
+                onSort={() => adminSort.sortBy('email')}
+              />
+              <TableHeaderCell
+                activeDirection={adminSort.key === 'status' ? adminSort.direction : null}
+                label="Status"
+                onSort={() => adminSort.sortBy('status')}
+              />
+              <TableHeaderCell
+                activeDirection={adminSort.key === 'gfs' ? adminSort.direction : null}
+                label="Desktop GFS access"
+                onSort={() => adminSort.sortBy('gfs')}
+              />
+              <TableHeaderCell
+                activeDirection={adminSort.key === 'lastLogin' ? adminSort.direction : null}
+                label="Last sign-in"
+                onSort={() => adminSort.sortBy('lastLogin')}
+              />
               <th aria-label="Actions" />
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <SkeletonTableRows columns={6} rows={5} />
+              <TableStateRow colSpan={6} kind="loading" message="Loading administrators…" />
+            ) : error && filteredAdmins.length === 0 ? (
+              <TableStateRow colSpan={6} kind="error" message={error} />
             ) : filteredAdmins.length > 0 ? (
-              filteredAdmins.map(admin => {
+              adminSort.sortedRows.map(admin => {
                 const currentAdmin = isCurrentAdmin(admin)
                 const label = admin.email ? `${admin.username} (${admin.email})` : admin.username
                 const memberCreationUnavailable = !admin.email || admin.passwordPending
                 const memberAccessDisabled = !admin.memberId && memberCreationUnavailable
-                const canCreateMember = !admin.memberId && !memberCreationUnavailable
                 const memberAccessAction = memberAccessActionLabel(admin)
-                const memberAccessLabel = `${memberAccessAction} for admin ${label}`
                 return (
                   <tr
                     key={admin.id}
@@ -444,100 +533,72 @@ export function ControlAdminsPanel({
                     </td>
                     <td>{formatDate(admin.lastLoginAt)}</td>
                     <td className="cu-table__cell-actions">
-                      <div className="cu-row-actions cu-row-actions--nowrap">
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--icon cu-btn--toolbar"
-                          disabled={memberAccessDisabled}
-                          onClick={() => openMemberAccess(admin)}
-                          aria-label={memberAccessLabel}
-                          title={memberAccessAction}
-                        >
-                          <IconUsers createBadge={canCreateMember} relationshipRole="member" />
-                        </button>
-                        {admin.gfsOperatorLink?.status === 'active' ? (
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--danger"
-                            disabled={revokingGfsLinkAdminId === admin.id}
-                            onClick={() => void handleRevokeGfsOperatorLink(admin)}
-                            aria-label={
-                              revokingGfsLinkAdminId === admin.id
-                                ? `Revoking Desktop GFS operator access for ${label}`
-                                : `Revoke Desktop GFS operator access for ${label}`
-                            }
-                            title="Remove only GFS operator authority; keep the admin and passwords"
-                          >
-                            {revokingGfsLinkAdminId === admin.id ? 'Revoking...' : 'Revoke GFS'}
-                          </button>
-                        ) : null}
-                        {admin.gfsOperatorLink?.status === 'revoked' ? (
-                          <button
-                            type="button"
-                            className="cu-btn"
-                            disabled={reactivatingGfsLinkAdminId === admin.id}
-                            onClick={() => void handleReactivateGfsOperatorLink(admin)}
-                            aria-label={
-                              reactivatingGfsLinkAdminId === admin.id
-                                ? `Reactivating Desktop GFS operator access for ${label}`
-                                : `Reactivate Desktop GFS operator access for ${label}`
-                            }
-                            title="Create a new audited GFS operator-link generation"
-                          >
-                            {reactivatingGfsLinkAdminId === admin.id
-                              ? 'Reactivating...'
-                              : 'Reactivate GFS'}
-                          </button>
-                        ) : null}
-                        {currentAdmin ? (
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            disabled
-                            aria-label="Current admin cannot be deleted"
-                            title="Current admin"
-                          >
-                            <IconTrash width={16} height={16} />
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            disabled={deletingAdminId === admin.id}
-                            onClick={() => void handleDeleteAdmin(admin)}
-                            aria-label={
-                              deletingAdminId === admin.id
-                                ? `Deleting admin ${label}`
-                                : `Delete admin ${label}`
-                            }
-                            title={
-                              admin.passwordPending
+                      <RowActionsMenu
+                        ariaLabel={`Actions for ${label}`}
+                        actions={[
+                          {
+                            key: 'member-access',
+                            label: memberAccessAction,
+                            disabled: memberAccessDisabled,
+                            onClick: () => openMemberAccess(admin),
+                          },
+                          ...(admin.gfsOperatorLink?.status === 'active'
+                            ? [
+                                {
+                                  key: 'revoke-gfs',
+                                  label:
+                                    revokingGfsLinkAdminId === admin.id
+                                      ? 'Revoking GFS…'
+                                      : 'Revoke GFS',
+                                  disabled: revokingGfsLinkAdminId === admin.id,
+                                  onClick: () => void handleRevokeGfsOperatorLink(admin),
+                                  danger: true,
+                                },
+                              ]
+                            : []),
+                          ...(admin.gfsOperatorLink?.status === 'revoked'
+                            ? [
+                                {
+                                  key: 'reactivate-gfs',
+                                  label:
+                                    reactivatingGfsLinkAdminId === admin.id
+                                      ? 'Reactivating GFS…'
+                                      : 'Reactivate GFS',
+                                  disabled: reactivatingGfsLinkAdminId === admin.id,
+                                  onClick: () => void handleReactivateGfsOperatorLink(admin),
+                                },
+                              ]
+                            : []),
+                          {
+                            key: 'delete',
+                            label: currentAdmin
+                              ? 'Current admin cannot be deleted'
+                              : admin.passwordPending
                                 ? deletingAdminId === admin.id
-                                  ? 'Canceling setup...'
+                                  ? 'Canceling setup…'
                                   : 'Cancel admin setup'
                                 : deletingAdminId === admin.id
-                                  ? 'Deleting...'
-                                  : 'Delete admin'
-                            }
-                          >
-                            <IconTrash width={16} height={16} />
-                          </button>
-                        )}
-                      </div>
+                                  ? 'Deleting…'
+                                  : 'Delete admin',
+                            disabled: currentAdmin || deletingAdminId === admin.id,
+                            onClick: () => void handleDeleteAdmin(admin),
+                            danger: true,
+                          },
+                        ]}
+                      />
                     </td>
                   </tr>
                 )
               })
             ) : (
-              <tr>
-                <td colSpan={6}>
-                  {normalizedSearch ? 'No admins match this search.' : 'No admins found.'}
-                </td>
-              </tr>
+              <TableStateRow
+                colSpan={6}
+                message={normalizedSearch ? 'No admins match this search.' : 'No admins found.'}
+              />
             )}
           </tbody>
-        </table>
-      </div>
+        </DataTable>
+      </TableViewport>
       {confirmDialog}
     </div>
   )

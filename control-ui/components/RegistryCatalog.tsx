@@ -3,46 +3,35 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
+import {
+  DataTable,
+  TableRow,
+  TableStateRow,
+  TableViewport,
+  TruncatedText,
+} from '@clerum/frontend-components'
 import { FilterSelect } from '@components/FilterSelect'
 import { MarketplaceTabs } from '@components/MarketplaceTabs'
 import { type RowActionMenuItem, RowActionsMenu } from '@components/RowActionsMenu'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { IconStore } from '@components/Sidebar/icons'
-import { SkeletonTableRows } from '@components/SkeletonTableRows'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
 import { useToast } from '@components/Toast'
-import { IconChevronRight } from '@components/icons'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { type RegistryEntry, deleteRegistryEntry, getRegistryCatalog } from '../lib/api'
 import { useRegistryCapability } from '../lib/hooks/useRegistryCapability'
-import { trustBgColor, trustColor } from '../lib/trustLevel'
 
-type CatalogSortKey = 'name' | 'version'
+type CatalogSortKey = 'name' | 'description' | 'quality'
 type SortDirection = 'asc' | 'desc'
 
 const REGISTRY_COLUMNS: TableHeaderColumn[] = [
-  { key: 'expand', ariaLabel: 'Expand Marketplace entry' },
-  { key: 'name', label: 'Name' },
-  { key: 'version', label: 'Version' },
-  { key: 'install', align: 'right', ariaLabel: 'Installation' },
-  { key: 'actions', align: 'right', ariaLabel: 'Edit or remove' },
+  { key: 'name', label: 'Name', width: '24%' },
+  { key: 'description', label: 'Description' },
+  { key: 'quality', label: 'Verification', width: '9rem' },
+  { key: 'actions', align: 'right', ariaLabel: 'Actions', width: '3.5rem' },
 ]
-
-function compareVersions(left: string, right: string): number {
-  const leftParts = left.split('.')
-  const rightParts = right.split('.')
-  for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
-    const leftPart = Number.parseInt(leftParts[index] ?? '0', 10)
-    const rightPart = Number.parseInt(rightParts[index] ?? '0', 10)
-    if (Number.isNaN(leftPart) || Number.isNaN(rightPart)) {
-      return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
-    }
-    if (leftPart !== rightPart) return leftPart - rightPart
-  }
-  return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
-}
 
 export default function RegistryCatalog() {
   const router = useRouter()
@@ -55,9 +44,8 @@ export default function RegistryCatalog() {
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('all')
-  const [sortKey, setSortKey] = useState<CatalogSortKey | null>(null)
+  const [sortKey, setSortKey] = useState<CatalogSortKey>('name')
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
-  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set())
   const [removeTarget, setRemoveTarget] = useState<RegistryEntry | null>(null)
   const [removing, setRemoving] = useState(false)
   const [removeError, setRemoveError] = useState('')
@@ -73,11 +61,13 @@ export default function RegistryCatalog() {
   const connectionState = capability?.connectionState ?? null
   // Curators administer the shared catalog, so they keep inline edit/remove;
   // everyone else manages their own entries from the ownership area (§5.4).
-  const columns = (
-    isCurator ? REGISTRY_COLUMNS : REGISTRY_COLUMNS.filter(c => c.key !== 'actions')
-  ).map(column => {
-    if (column.key === 'name' || column.key === 'version') {
-      return { ...column, label: renderSortHeader(column.key, column.label as string) }
+  const columns: TableHeaderColumn[] = REGISTRY_COLUMNS.map(column => {
+    if (column.key === 'name' || column.key === 'description' || column.key === 'quality') {
+      return {
+        ...column,
+        activeDirection: sortKey === column.key ? sortDirection : null,
+        onSort: () => toggleSort(column.key as CatalogSortKey),
+      }
     }
     return column
   })
@@ -147,15 +137,16 @@ export default function RegistryCatalog() {
         entry.tags.some(tag => tag.toLowerCase().includes(query))
       )
     })
-    if (!sortKey) return visibleEntries
-
     const direction = sortDirection === 'asc' ? 1 : -1
     return [...visibleEntries].sort((left, right) => {
       const comparison =
-        sortKey === 'name'
-          ? left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
-          : compareVersions(left.version, right.version)
-      return comparison * direction
+        sortKey === 'description'
+          ? left.description.localeCompare(right.description, undefined, { sensitivity: 'base' })
+          : sortKey === 'quality'
+            ? left.quality_tier.localeCompare(right.quality_tier)
+            : left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
+      if (comparison !== 0) return comparison * direction
+      return `${left.name}@${left.version}`.localeCompare(`${right.name}@${right.version}`)
     })
   }, [categoryFilter, connectorEntries, search, sortDirection, sortKey])
 
@@ -167,30 +158,7 @@ export default function RegistryCatalog() {
       return
     }
     setSortKey(key)
-    setSortDirection(key === 'version' ? 'desc' : 'asc')
-  }
-
-  function renderSortHeader(key: CatalogSortKey, label: string) {
-    const isActive = sortKey === key
-    const indicator = isActive ? (sortDirection === 'asc' ? '↑' : '↓') : ''
-    const nextDirection = isActive
-      ? sortDirection === 'asc'
-        ? 'descending'
-        : 'ascending'
-      : key === 'version'
-        ? 'descending'
-        : 'ascending'
-    return (
-      <button
-        type="button"
-        className={`cu-table__sort-link${isActive ? ' is-active' : ''}`}
-        onClick={() => toggleSort(key)}
-        aria-label={`Sort by ${label.toLowerCase()} ${nextDirection}`}
-        aria-pressed={isActive}
-      >
-        {label} {indicator}
-      </button>
-    )
+    setSortDirection('asc')
   }
 
   function isEntryInstalled(entry: RegistryEntry): boolean {
@@ -200,47 +168,16 @@ export default function RegistryCatalog() {
     )
   }
 
-  function renderInstallButton(entry: RegistryEntry) {
-    const installed = isEntryInstalled(entry)
-    return installed ? (
-      <button type="button" className="cu-btn cu-btn--sm" disabled>
-        Installed
-      </button>
-    ) : (
-      <button
-        type="button"
-        className="cu-btn cu-btn--sm cu-btn--primary"
-        onClick={() =>
-          router.push(
-            CONTROL_ROUTES.marketplace.install({ entry: entry.name, version: entry.version })
-          )
-        }
-      >
-        Install
-      </button>
-    )
-  }
-
   // An entry belongs to this deployment's org when its name carries the org
   // scope prefix (publishes are stored as `@org/name`, see applyPublishScope).
   function isOwnedEntry(entry: RegistryEntry): boolean {
     return !!orgScope && entry.name.startsWith(`${orgScope}/`)
   }
 
-  function toggleExpanded(key: string) {
-    setExpandedKeys(current => {
-      const next = new Set(current)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }
-
   const showConnectBanner =
     connectionMode === 'self-hosted' &&
     (connectionState === 'disconnected' || connectionState === 'rejected')
-  // Computed once, rendered in BOTH the error early-return and the normal branch
-  // so the connect prompt survives a catalog browse failure (DRY).
+  // Keep the connect prompt visible even when the catalog request fails.
   const connectBanner = showConnectBanner ? (
     <div className="cu-banner cu-banner--info" role="status">
       <span>
@@ -257,19 +194,6 @@ export default function RegistryCatalog() {
     </div>
   ) : null
 
-  if (error) {
-    return (
-      <div className="cu-registry-layout">
-        {connectBanner}
-        <div className="cu-card cu-card--viewport-fill cu-section-card">
-          <div className="cu-card__body">
-            <div className="cu-banner cu-banner--error">Error: {error}</div>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
   return (
     <div className="cu-registry-layout">
       {connectBanner}
@@ -283,15 +207,8 @@ export default function RegistryCatalog() {
           }
           subtitle="Discover and install connectors from the Marketplace."
           actionsClassName="cu-registry-toolbar"
-          actions={
+          secondaryActions={
             <>
-              <SectionSearchInput
-                value={search}
-                onChange={setSearch}
-                placeholder="Search connectors..."
-                ariaLabel="Search the Marketplace"
-                disabled={isInitialLoad}
-              />
               <div className="cu-registry-filter-group">
                 <FilterSelect
                   value={categoryFilter}
@@ -332,178 +249,144 @@ export default function RegistryCatalog() {
               */}
             </>
           }
+          search={
+            <SectionSearchInput
+              value={search}
+              onChange={setSearch}
+              placeholder="Search connectors..."
+              ariaLabel="Search the Marketplace"
+              disabled={isInitialLoad}
+            />
+          }
         />
         <MarketplaceTabs active="connectors" />
-        <div className="cu-table-wrap cu-marketplace-table-wrap">
-          <table className="cu-table cu-table--header-band cu-expandable-table cu-marketplace-table">
+        {error ? <div className="cu-banner cu-banner--error">Error: {error}</div> : null}
+        <TableViewport className="cu-table-wrap cu-marketplace-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band cu-marketplace-table">
             <thead>
               <TableHeaderRow columns={columns} />
             </thead>
             <tbody>
               {isInitialLoad ? (
-                <SkeletonTableRows columns={columns.length} rows={5} />
+                <TableStateRow
+                  colSpan={columns.length}
+                  kind="loading"
+                  message="Loading Marketplace connectors…"
+                />
+              ) : error ? (
+                <TableStateRow colSpan={columns.length} kind="error" message={error} />
+              ) : filtered.length === 0 ? (
+                <TableStateRow
+                  colSpan={columns.length}
+                  message="No connectors match your filters."
+                />
               ) : (
                 filtered.map(entry => {
-                  const expandKey = `${entry.name}@${entry.version}`
-                  const expanded = expandedKeys.has(expandKey)
-                  const typeMeta = entry.server_mode
-                    ? `${entry.server_mode}${entry.transport ? ` / ${entry.transport}` : ''}`
-                    : '—'
+                  const detailRoute = CONTROL_ROUTES.marketplace.entry(entry.name, entry.version)
+                  const installed = isEntryInstalled(entry)
                   return (
-                    <Fragment key={entry.id}>
-                      <tr
-                        className="cu-table__row cu-table__row--clickable cu-expandable-row"
-                        onClick={() => toggleExpanded(expandKey)}
-                        onKeyDown={event => {
-                          if (event.key === 'Enter' || event.key === ' ') {
-                            event.preventDefault()
-                            toggleExpanded(expandKey)
-                          }
-                        }}
-                        tabIndex={0}
-                        aria-expanded={expanded}
-                        aria-controls={`marketplace-details-${entry.id}`}
-                      >
-                        <td className="cu-expandable-row__chevron" aria-hidden="true">
-                          <IconChevronRight
-                            className={expanded ? 'is-expanded' : undefined}
-                            width={18}
-                            height={18}
-                          />
-                        </td>
-                        <td>
-                          <Link
-                            className="cu-registry-name cu-link"
-                            href={CONTROL_ROUTES.marketplace.entry(entry.name, entry.version)}
-                            onClick={event => event.stopPropagation()}
-                            onKeyDown={event => event.stopPropagation()}
-                          >
-                            {entry.name}
-                          </Link>
-                          <div className="cu-registry-description" title={entry.description}>
-                            {entry.description}
-                          </div>
-                          {!isCurator && isOwnedEntry(entry) ? (
-                            <div className="cu-registry-owned">
-                              <Link
-                                className="cu-link"
-                                href={CONTROL_ROUTES.publisher.entries}
-                                onClick={event => event.stopPropagation()}
-                                onKeyDown={event => event.stopPropagation()}
-                              >
-                                You own this
-                              </Link>
-                            </div>
-                          ) : null}
-                        </td>
-                        <td className="cu-code-text">{entry.version}</td>
-                        <td
-                          className="cu-table__cell-actions cu-marketplace-action-cell"
-                          onClick={event => event.stopPropagation()}
-                          onKeyDown={event => event.stopPropagation()}
-                        >
-                          {renderInstallButton(entry)}
-                        </td>
-                        {isCurator ? (
-                          <td
-                            className="cu-table__cell-actions cu-marketplace-action-cell"
-                            onClick={event => event.stopPropagation()}
-                            onKeyDown={event => event.stopPropagation()}
-                          >
-                            <RowActionsMenu
-                              ariaLabel={`Actions for ${entry.name} v${entry.version}`}
-                              actions={
-                                [
-                                  {
-                                    key: 'edit',
-                                    label: 'Edit',
-                                    onClick: () =>
-                                      router.push(
-                                        CONTROL_ROUTES.marketplace.editEntry(
-                                          entry.name,
-                                          entry.version
-                                        )
-                                      ),
-                                  },
-                                  {
-                                    key: 'remove',
-                                    label: 'Remove from Marketplace',
-                                    danger: true,
-                                    onClick: () => {
-                                      setRemoveError('')
-                                      setRemoveTarget(entry)
-                                    },
-                                  },
-                                ] satisfies RowActionMenuItem[]
-                              }
-                            />
-                          </td>
+                    <TableRow
+                      className="cu-table__row cu-table__row--clickable"
+                      key={entry.id}
+                      onNavigate={() => router.push(detailRoute)}
+                    >
+                      <td>
+                        <span className="cu-registry-name">{entry.name}</span>
+                        {!isCurator && isOwnedEntry(entry) ? (
+                          <div className="cu-registry-owned">Owned by your organization</div>
                         ) : null}
-                      </tr>
-                      {expanded ? (
-                        <tr
-                          id={`marketplace-details-${entry.id}`}
-                          className="cu-expandable-detail-row"
+                      </td>
+                      <td>
+                        <TruncatedText value={entry.description} />
+                      </td>
+                      <td>
+                        <span
+                          className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
                         >
-                          <td colSpan={columns.length}>
-                            <div className="cu-expandable-detail cu-marketplace-row-detail">
-                              <div className="cu-expandable-detail__fields">
-                                <div className="cu-expandable-field">
-                                  <span className="cu-expandable-field__label">Type</span>
-                                  <span className="cu-registry-type-meta">{typeMeta}</span>
-                                </div>
-                                <div className="cu-expandable-field">
-                                  <span className="cu-expandable-field__label">Trust</span>
-                                  <span
-                                    className="cu-registry-chip"
-                                    style={{
-                                      color: trustColor(entry.trust_level),
-                                      background: trustBgColor(entry.trust_level),
-                                      borderColor: trustColor(entry.trust_level),
-                                    }}
-                                  >
-                                    {entry.trust_level.toUpperCase()}
-                                  </span>
-                                </div>
-                                <div className="cu-expandable-field">
-                                  <span className="cu-expandable-field__label">Verification</span>
-                                  <span
-                                    className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
-                                  >
-                                    {entry.quality_tier}
-                                  </span>
-                                </div>
-                                {entry.tags.length > 0 && (
-                                  <div className="cu-expandable-field">
-                                    <span className="cu-expandable-field__label">Tags</span>
-                                    <div className="cu-expandable-tags">
-                                      {entry.tags.map(tag => (
-                                        <span key={tag} className="cu-registry-tag">
-                                          {tag}
-                                        </span>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          </td>
-                        </tr>
-                      ) : null}
-                    </Fragment>
+                          {entry.quality_tier}
+                        </span>
+                      </td>
+                      <td
+                        className="cu-table__cell-actions"
+                        onClick={event => event.stopPropagation()}
+                        onKeyDown={event => event.stopPropagation()}
+                      >
+                        <RowActionsMenu
+                          ariaLabel={`Actions for ${entry.name} v${entry.version}`}
+                          actions={
+                            [
+                              {
+                                key: 'view',
+                                label: 'View details',
+                                onClick: () => router.push(detailRoute),
+                              },
+                              ...(!isCurator && isOwnedEntry(entry)
+                                ? [
+                                    {
+                                      key: 'manage-owned',
+                                      label: 'Manage published entry',
+                                      onClick: () =>
+                                        router.push(CONTROL_ROUTES.marketplace.orgEntries),
+                                    },
+                                  ]
+                                : []),
+                              ...(installed
+                                ? [
+                                    {
+                                      key: 'installed',
+                                      label: 'Installed',
+                                      disabled: true,
+                                      onClick: () => undefined,
+                                    },
+                                  ]
+                                : [
+                                    {
+                                      key: 'install',
+                                      label: 'Install',
+                                      onClick: () =>
+                                        router.push(
+                                          CONTROL_ROUTES.marketplace.install({
+                                            entry: entry.name,
+                                            version: entry.version,
+                                          })
+                                        ),
+                                    },
+                                  ]),
+                              ...(isCurator
+                                ? [
+                                    {
+                                      key: 'edit',
+                                      label: 'Edit',
+                                      onClick: () =>
+                                        router.push(
+                                          CONTROL_ROUTES.marketplace.editEntry(
+                                            entry.name,
+                                            entry.version
+                                          )
+                                        ),
+                                    },
+                                    {
+                                      key: 'remove',
+                                      label: 'Remove from Marketplace',
+                                      danger: true,
+                                      onClick: () => {
+                                        setRemoveError('')
+                                        setRemoveTarget(entry)
+                                      },
+                                    },
+                                  ]
+                                : []),
+                            ] satisfies RowActionMenuItem[]
+                          }
+                        />
+                      </td>
+                    </TableRow>
                   )
                 })
               )}
-              {!isInitialLoad && filtered.length === 0 ? (
-                <tr>
-                  <td colSpan={columns.length} className="cu-empty">
-                    No connectors match your filters.
-                  </td>
-                </tr>
-              ) : null}
             </tbody>
-          </table>
-        </div>
+          </DataTable>
+        </TableViewport>
       </div>
       {removeTarget ? (
         <div

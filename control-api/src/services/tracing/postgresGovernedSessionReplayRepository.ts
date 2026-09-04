@@ -31,6 +31,7 @@ export class PostgresGovernedSessionReplayRepository {
     after: SessionPageAnchor | null
     limit: number
     promptState: 'enabled' | 'disabled' | 'unavailable'
+    order: 'oldest' | 'latest'
   }) {
     return this.listRepository.list(params)
   }

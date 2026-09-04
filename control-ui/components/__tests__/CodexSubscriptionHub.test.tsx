@@ -236,6 +236,35 @@ describe('CodexSubscriptionHub', () => {
     expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument()
   })
 
+  it('renders the ChatGPT verification link from the Update sign-in path', async () => {
+    vi.stubGlobal(
+      'open',
+      vi.fn(() => ({}))
+    )
+    vi.mocked(startCodexDeviceConnect).mockResolvedValue({
+      userCode: 'WXYZ-9876',
+      verificationUri: 'https://auth.openai.com/codex/device',
+      intervalSeconds: 0.3,
+      state: 'state-pencil',
+      intent: 'reconnect',
+    })
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for ChatGPT subscription Team A' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with ChatGPT' }))
+    const link = await screen.findByTestId('codex-device-verification-link')
+    expect(link).toHaveAttribute('href', 'https://auth.openai.com/codex/device')
+    expect(link.getAttribute('rel') ?? '').toContain('noopener')
+    expect(link.getAttribute('rel') ?? '').toContain('noreferrer')
+    expect(screen.getByTestId('codex-device-code')).toHaveTextContent('WXYZ-9876')
+  })
+
   it('opens the grant modal for reconnect and model toggles without binding hosts', async () => {
     vi.mocked(startCodexDeviceConnect).mockResolvedValue({
       userCode: 'ABCD-1234',

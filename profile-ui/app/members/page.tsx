@@ -2,12 +2,19 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import {
+  DataTable,
+  RowActionMenu,
+  TableHeaderCell,
+  TableStateRow,
+  TableViewport,
+  useTableSort,
+} from '@clerum/frontend-components'
 import { useAuth } from '@components/AuthContext'
 import { AuthGate } from '@components/AuthGate'
 import { Button } from '@components/Button'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useProfileAccess } from '@components/ProfileAccessContext'
-import { ProfileBodySkeleton } from '@components/ProfileBodySkeleton'
 import { ProfileShell } from '@components/ProfileShell'
 import { useToast } from '@components/Toast'
 import { IconAlertTriangle, IconRefresh, IconTrash } from '@components/icons'
@@ -37,6 +44,27 @@ export default function MembersPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const currentUserId = authState.me?.id || ''
+  const invitationSort = useTableSort<ManagedPendingInvitation, 'email' | 'teams' | 'expires'>({
+    rows: invitations,
+    defaultKey: 'email' as const,
+    identity: invitation => invitation.id,
+    accessors: {
+      email: (invitation: ManagedPendingInvitation) => invitation.email,
+      teams: (invitation: ManagedPendingInvitation) => invitation.teams.length,
+      expires: (invitation: ManagedPendingInvitation) => new Date(invitation.expiresAt),
+    },
+  })
+  const showInvitationsTable = state === 'loading' || invitations.length > 0
+  const memberSort = useTableSort<ManagedMember, 'name' | 'email' | 'teams'>({
+    rows: members,
+    defaultKey: 'name' as const,
+    identity: member => member.id,
+    accessors: {
+      name: (member: ManagedMember) => displayMemberName(member),
+      email: (member: ManagedMember) => member.email,
+      teams: (member: ManagedMember) => member.teams.length,
+    },
+  })
 
   async function loadMembers(forceAccess = false) {
     setState('loading')
@@ -145,15 +173,6 @@ export default function MembersPage() {
             </div>
           </header>
 
-          {state === 'loading' ? (
-            <ProfileBodySkeleton
-              label="Loading members"
-              sections={[
-                { title: 'Pending invitations', rows: 2 },
-                { title: 'Members', rows: 4 },
-              ]}
-            />
-          ) : null}
           {error ? <div className="message message--error">{error}</div> : null}
 
           {state !== 'loading' && manageableTeams.length === 0 ? (
@@ -162,93 +181,128 @@ export default function MembersPage() {
             </div>
           ) : null}
 
-          {state === 'ready' && invitations.length > 0 ? (
+          {showInvitationsTable ? (
             <section className="section members-section">
               <div className="settings-section-head">
                 <div>
                   <h2 className="section-title">Pending invitations</h2>
                 </div>
               </div>
-              <div className="members-table-wrap">
-                <table className="members-table">
+              <TableViewport>
+                <DataTable className="eft-table eft-table--wide">
                   <thead>
                     <tr>
-                      <th>Email</th>
-                      <th>Teams</th>
-                      <th>Expires</th>
+                      <TableHeaderCell
+                        activeDirection={
+                          invitationSort.key === 'email' ? invitationSort.direction : null
+                        }
+                        label="Email"
+                        onSort={() => invitationSort.sortBy('email')}
+                      />
+                      <TableHeaderCell
+                        activeDirection={
+                          invitationSort.key === 'teams' ? invitationSort.direction : null
+                        }
+                        label="Teams"
+                        onSort={() => invitationSort.sortBy('teams')}
+                      />
+                      <TableHeaderCell
+                        activeDirection={
+                          invitationSort.key === 'expires' ? invitationSort.direction : null
+                        }
+                        label="Expires"
+                        onSort={() => invitationSort.sortBy('expires')}
+                      />
                       <th></th>
                     </tr>
                   </thead>
                   <tbody>
-                    {invitations.map(invitation => (
-                      <tr key={invitation.id}>
-                        <td>{invitation.email}</td>
-                        <td>{invitation.teams.map(team => team.name).join(', ')}</td>
-                        <td>{new Date(invitation.expiresAt).toLocaleString()}</td>
-                        <td>
-                          <div className="row-actions">
-                            <button
-                              type="button"
-                              className="icon-button"
-                              onClick={() => void resendInvitation(invitation)}
-                              disabled={busy || !invitation.canResend}
-                              title={
-                                invitation.canResend
-                                  ? 'Resend invitation'
-                                  : 'You can only resend invitations for teams you can invite to.'
-                              }
-                            >
-                              Resend
-                            </button>
-                            <button
-                              type="button"
-                              className="icon-button icon-button--danger"
-                              onClick={() => void cancelInvitation(invitation)}
-                              disabled={busy || !invitation.canCancel}
-                              title={
-                                invitation.canCancel
-                                  ? 'Cancel invitation'
-                                  : 'You can only cancel invitations for teams you can invite to.'
-                              }
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                    {state === 'loading' ? (
+                      <TableStateRow colSpan={4} kind="loading" message="Loading invitations…" />
+                    ) : state === 'error' ? (
+                      <TableStateRow colSpan={4} kind="error" message="Invitations unavailable." />
+                    ) : (
+                      invitationSort.sortedRows.map(invitation => (
+                        <tr key={invitation.id}>
+                          <td>{invitation.email}</td>
+                          <td>{invitation.teams.map(team => team.name).join(', ')}</td>
+                          <td>{new Date(invitation.expiresAt).toLocaleString()}</td>
+                          <td className="eft-table__cell--actions">
+                            <RowActionMenu
+                              ariaLabel={`Actions for invitation ${invitation.email}`}
+                              actions={[
+                                {
+                                  key: 'resend',
+                                  label: 'Resend invitation',
+                                  disabled: busy || !invitation.canResend,
+                                  onSelect: () => void resendInvitation(invitation),
+                                },
+                                {
+                                  key: 'cancel',
+                                  label: 'Cancel invitation',
+                                  danger: true,
+                                  disabled: busy || !invitation.canCancel,
+                                  onSelect: () => void cancelInvitation(invitation),
+                                },
+                              ]}
+                            />
+                          </td>
+                        </tr>
+                      ))
+                    )}
                   </tbody>
-                </table>
-              </div>
+                </DataTable>
+              </TableViewport>
             </section>
           ) : null}
 
-          {state !== 'loading' ? (
-            <section className="section members-section">
-              <div className="members-table-wrap">
-                <table className="members-table">
-                  <thead>
-                    <tr>
-                      <th>Member</th>
-                      <th>Email</th>
-                      <th>Teams</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {members.map(member => {
+          <section className="section members-section">
+            <TableViewport>
+              <DataTable className="eft-table eft-table--wide">
+                <thead>
+                  <tr>
+                    <TableHeaderCell
+                      activeDirection={memberSort.key === 'name' ? memberSort.direction : null}
+                      label="Member"
+                      onSort={() => memberSort.sortBy('name')}
+                    />
+                    <TableHeaderCell
+                      activeDirection={memberSort.key === 'email' ? memberSort.direction : null}
+                      label="Email"
+                      onSort={() => memberSort.sortBy('email')}
+                    />
+                    <TableHeaderCell
+                      activeDirection={memberSort.key === 'teams' ? memberSort.direction : null}
+                      label="Teams"
+                      onSort={() => memberSort.sortBy('teams')}
+                    />
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {state === 'loading' ? (
+                    <TableStateRow colSpan={4} kind="loading" message="Loading members…" />
+                  ) : state === 'error' ? (
+                    <TableStateRow colSpan={4} kind="error" message="Members unavailable." />
+                  ) : memberSort.sortedRows.length === 0 ? (
+                    <TableStateRow colSpan={4} message="No members are visible for your teams." />
+                  ) : (
+                    memberSort.sortedRows.map(member => {
                       const deleteAllowed = canDeleteMemberAccount(member, currentUserId)
                       return (
-                        <tr key={member.id}>
-                          <td>
-                            <button
-                              type="button"
-                              className="table-link"
-                              onClick={() => router.push(PROFILE_ROUTES.members.detail(member.id))}
-                            >
-                              {displayMemberName(member)}
-                            </button>
-                          </td>
+                        <tr
+                          className="eft-table__row--navigable"
+                          key={member.id}
+                          onClick={() => router.push(PROFILE_ROUTES.members.detail(member.id))}
+                          onKeyDown={event => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault()
+                              router.push(PROFILE_ROUTES.members.detail(member.id))
+                            }
+                          }}
+                          tabIndex={0}
+                        >
+                          <td>{displayMemberName(member)}</td>
                           <td>
                             <span className="member-email">
                               <span>{member.email}</span>
@@ -264,33 +318,38 @@ export default function MembersPage() {
                             </span>
                           </td>
                           <td>{member.teams.length}</td>
-                          <td>
-                            <div className="row-actions">
-                              <button
-                                type="button"
-                                className="icon-button icon-button--danger"
-                                onClick={() => void deleteMemberAccount(member)}
-                                disabled={busy || !deleteAllowed}
-                                title={memberDeleteTooltip(member, currentUserId)}
-                                aria-label={`Delete ${displayMemberName(member)}`}
-                              >
-                                <IconTrash />
-                              </button>
-                            </div>
+                          <td
+                            className="eft-table__cell--actions"
+                            onClick={event => event.stopPropagation()}
+                            onKeyDown={event => event.stopPropagation()}
+                          >
+                            <RowActionMenu
+                              ariaLabel={`Actions for ${displayMemberName(member)}`}
+                              actions={[
+                                {
+                                  key: 'view',
+                                  label: 'View details',
+                                  onSelect: () =>
+                                    router.push(PROFILE_ROUTES.members.detail(member.id)),
+                                },
+                                {
+                                  key: 'delete',
+                                  label: 'Delete member',
+                                  danger: true,
+                                  disabled: busy || !deleteAllowed,
+                                  onSelect: () => void deleteMemberAccount(member),
+                                },
+                              ]}
+                            />
                           </td>
                         </tr>
                       )
-                    })}
-                    {state === 'ready' && members.length === 0 ? (
-                      <tr>
-                        <td colSpan={4}>No members are visible for your teams.</td>
-                      </tr>
-                    ) : null}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          ) : null}
+                    })
+                  )}
+                </tbody>
+              </DataTable>
+            </TableViewport>
+          </section>
 
           {confirmDialog}
         </div>

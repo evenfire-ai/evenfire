@@ -892,7 +892,8 @@ describe('EditCommunicationChannelPage conversation delete validation', () => {
   it('deletes a conversation through the same validation as Save', async () => {
     const user = await openTeamsTabWithConversation('My Bot')
 
-    await user.click(screen.getByRole('button', { name: 'Delete General' }))
+    await user.click(screen.getByRole('button', { name: 'Actions for General' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }))
     await user.click(await screen.findByRole('button', { name: 'Delete conversation' }))
 
     await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
@@ -909,7 +910,8 @@ describe('EditCommunicationChannelPage conversation delete validation', () => {
     await user.clear(nameInput)
     fireEvent.change(nameInput, { target: { value: 'a'.repeat(81) } })
 
-    await user.click(screen.getByRole('button', { name: 'Delete General' }))
+    await user.click(screen.getByRole('button', { name: 'Actions for General' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }))
     await user.click(await screen.findByRole('button', { name: 'Delete conversation' }))
 
     expect(

@@ -2,21 +2,29 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
+import { RowActionsMenu } from '@components/RowActionsMenu'
 import { SelectionModal } from '@components/SelectionModal'
 import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
-import { IconX } from '@components/icons'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { applyAgentAccessCompatibilityUpdate } from '@lib/agentAccessCompatibility'
 import {
   getAdminTeamAgents,
+  getAdminTeamContexts,
   getAdminTeams,
   getAdminUserAgents,
+  getAdminUserContexts,
   getAdminUsers,
   getAgentTeams,
   getAgentUsers,
+  getContexts,
+  getHosts,
   updateAdminTeamAgents,
+  updateAdminTeamContexts,
   updateAdminUserAgents,
+  updateAdminUserContexts,
 } from '@lib/api'
 import type {
   AccessSubTab,
@@ -128,19 +136,38 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
     [allTeams, teamIdsWithAccess]
   )
 
+  async function loadCompatibilityResources() {
+    const [contextsData, hostsData] = await Promise.all([getContexts(), getHosts()])
+    return {
+      contexts: Array.isArray(contextsData.items) ? contextsData.items : [],
+      hosts: Array.isArray(hostsData.items) ? hostsData.items : [],
+    }
+  }
+
   async function grantUserAccess() {
     if (selectedUserIdsToGrant.length === 0) return
     setBusy(true)
     setError('')
     try {
+      const compatibility = await loadCompatibilityResources()
       await Promise.all(
         selectedUserIdsToGrant.map(async userId => {
           const current = await getAdminUserAgents(userId)
           const next = Array.from(new Set([...(current.agentNames || []), hostName]))
-          await updateAdminUserAgents(userId, next, [
-            ...(current.agentNames || []),
-            ...(current.deletedAgentNames || []),
-          ])
+          await applyAgentAccessCompatibilityUpdate({
+            ...compatibility,
+            loadCurrentContextIds: async () => {
+              const contexts = await getAdminUserContexts(userId)
+              return Array.isArray(contexts.contextIds) ? contexts.contextIds : []
+            },
+            nextGrantedAgentNames: next,
+            updateAgents: agentNames =>
+              updateAdminUserAgents(userId, agentNames, [
+                ...(current.agentNames || []),
+                ...(current.deletedAgentNames || []),
+              ]),
+            updateContexts: contextIds => updateAdminUserContexts(userId, contextIds),
+          })
         })
       )
       const grantedUserIds = selectedUserIdsToGrant
@@ -175,12 +202,23 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
     setBusy(true)
     setError('')
     try {
+      const compatibility = await loadCompatibilityResources()
       const current = await getAdminUserAgents(userId)
       const next = (current.agentNames || []).filter(name => name !== hostName)
-      await updateAdminUserAgents(userId, next, [
-        ...(current.agentNames || []),
-        ...(current.deletedAgentNames || []),
-      ])
+      await applyAgentAccessCompatibilityUpdate({
+        ...compatibility,
+        loadCurrentContextIds: async () => {
+          const contexts = await getAdminUserContexts(userId)
+          return Array.isArray(contexts.contextIds) ? contexts.contextIds : []
+        },
+        nextGrantedAgentNames: next,
+        updateAgents: agentNames =>
+          updateAdminUserAgents(userId, agentNames, [
+            ...(current.agentNames || []),
+            ...(current.deletedAgentNames || []),
+          ]),
+        updateContexts: contextIds => updateAdminUserContexts(userId, contextIds),
+      })
       if (!mountedRef.current) return
       const removedUser = usersWithAccess.find(u => u.id === userId)
       setUsersWithAccess(prev => prev.filter(u => u.id !== userId))
@@ -200,14 +238,25 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
     setBusy(true)
     setError('')
     try {
+      const compatibility = await loadCompatibilityResources()
       await Promise.all(
         selectedTeamIdsToGrant.map(async teamId => {
           const current = await getAdminTeamAgents(teamId)
           const next = Array.from(new Set([...(current.agentNames || []), hostName]))
-          await updateAdminTeamAgents(teamId, next, [
-            ...(current.agentNames || []),
-            ...(current.deletedAgentNames || []),
-          ])
+          await applyAgentAccessCompatibilityUpdate({
+            ...compatibility,
+            loadCurrentContextIds: async () => {
+              const contexts = await getAdminTeamContexts(teamId)
+              return Array.isArray(contexts.contextIds) ? contexts.contextIds : []
+            },
+            nextGrantedAgentNames: next,
+            updateAgents: agentNames =>
+              updateAdminTeamAgents(teamId, agentNames, [
+                ...(current.agentNames || []),
+                ...(current.deletedAgentNames || []),
+              ]),
+            updateContexts: contextIds => updateAdminTeamContexts(teamId, contextIds),
+          })
         })
       )
       const grantedTeamIds = selectedTeamIdsToGrant
@@ -242,12 +291,23 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
     setBusy(true)
     setError('')
     try {
+      const compatibility = await loadCompatibilityResources()
       const current = await getAdminTeamAgents(teamId)
       const next = (current.agentNames || []).filter(name => name !== hostName)
-      await updateAdminTeamAgents(teamId, next, [
-        ...(current.agentNames || []),
-        ...(current.deletedAgentNames || []),
-      ])
+      await applyAgentAccessCompatibilityUpdate({
+        ...compatibility,
+        loadCurrentContextIds: async () => {
+          const contexts = await getAdminTeamContexts(teamId)
+          return Array.isArray(contexts.contextIds) ? contexts.contextIds : []
+        },
+        nextGrantedAgentNames: next,
+        updateAgents: agentNames =>
+          updateAdminTeamAgents(teamId, agentNames, [
+            ...(current.agentNames || []),
+            ...(current.deletedAgentNames || []),
+          ]),
+        updateContexts: contextIds => updateAdminTeamContexts(teamId, contextIds),
+      })
       if (!mountedRef.current) return
       const removedTeam = teamsWithAccess.find(t => t.id === teamId)
       setTeamsWithAccess(prev => prev.filter(team => team.id !== teamId))
@@ -306,8 +366,8 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
           )}
         </div>
 
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
+        <TableViewport className="cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <tr>
                 <th>{subTab === 'members' ? 'Member' : 'Team'}</th>
@@ -347,18 +407,24 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
                         </button>
                       </td>
                       <td className="cu-table__cell-actions">
-                        <div className="cu-row-actions">
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void revokeUserAccess(user.id)}
-                            disabled={busy}
-                            title="Revoke"
-                            aria-label="Revoke member access"
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
-                        </div>
+                        <RowActionsMenu
+                          ariaLabel={`Actions for ${user.displayName || user.name || user.email}`}
+                          actions={[
+                            {
+                              key: 'view',
+                              label: 'View details',
+                              onClick: () =>
+                                router.push(CONTROL_ROUTES.usersAndTeams.user(user.id)),
+                            },
+                            {
+                              key: 'revoke',
+                              label: 'Revoke access',
+                              onClick: () => void revokeUserAccess(user.id),
+                              disabled: busy,
+                              danger: true,
+                            },
+                          ]}
+                        />
                       </td>
                     </tr>
                   ))
@@ -382,25 +448,30 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
                       </button>
                     </td>
                     <td className="cu-table__cell-actions">
-                      <div className="cu-row-actions">
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                          onClick={() => void revokeTeamAccess(team.id)}
-                          disabled={busy}
-                          title="Revoke"
-                          aria-label="Revoke team access"
-                        >
-                          <IconX width={16} height={16} />
-                        </button>
-                      </div>
+                      <RowActionsMenu
+                        ariaLabel={`Actions for ${team.name}`}
+                        actions={[
+                          {
+                            key: 'view',
+                            label: 'View details',
+                            onClick: () => router.push(CONTROL_ROUTES.usersAndTeams.team(team.id)),
+                          },
+                          {
+                            key: 'revoke',
+                            label: 'Revoke access',
+                            onClick: () => void revokeTeamAccess(team.id),
+                            disabled: busy,
+                            danger: true,
+                          },
+                        ]}
+                      />
                     </td>
                   </tr>
                 ))
               )}
             </tbody>
-          </table>
-        </div>
+          </DataTable>
+        </TableViewport>
       </div>
 
       {showAddUser ? (
