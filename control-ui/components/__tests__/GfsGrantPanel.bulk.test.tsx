@@ -81,27 +81,14 @@ async function chooseSubjects(...names: string[]) {
   for (const name of names) fireEvent.click(screen.getByRole('option', { name }))
 }
 
-function openPermissionMenu() {
-  let menu = screen.queryByRole('menu', { name: 'Permissions' })
-  if (!menu) {
-    const trigger = document.querySelector<HTMLButtonElement>(
-      '.cu-gfs-permission-dropdown__trigger'
-    )
-    if (!trigger) throw new Error('permission trigger missing')
-    fireEvent.click(trigger)
-    menu = screen.getByRole('menu', { name: 'Permissions' })
-  }
-  return menu
-}
-
 function selectPermission(name: string) {
-  fireEvent.click(within(openPermissionMenu()).getByRole('menuitemcheckbox', { name }))
+  fireEvent.change(screen.getByRole('combobox', { name: 'Access role for selected recipients' }), {
+    target: { value: name === 'Read' ? 'read' : 'editor' },
+  })
 }
 
-async function submit(action: 'Grant access') {
+async function submit(action: 'Share') {
   fireEvent.click(screen.getByRole('button', { name: action }))
-  const dialog = await screen.findByRole('alertdialog')
-  fireEvent.click(within(dialog).getByRole('button', { name: action }))
 }
 
 describe('GfsGrantPanel bulk access', () => {
@@ -157,11 +144,12 @@ describe('GfsGrantPanel bulk access', () => {
       .mockResolvedValueOnce({ items: [] })
     renderPanel()
 
-    const existing = await screen.findByRole('region', { name: 'Who has access' })
+    const existing = await screen.findByRole('region', { name: 'People with access' })
     expect(within(existing).getByText('Ada Lovelace')).toBeTruthy()
     expect(within(existing).getByText('Direct grant · user')).toBeTruthy()
-    expect(within(existing).getByText('Read')).toBeTruthy()
-    expect(within(existing).getByText('Write')).toBeTruthy()
+    expect(
+      within(existing).getByRole('combobox', { name: 'Access role for Ada Lovelace' })
+    ).toHaveValue('editor')
     expect(within(existing).getByText('X')).toBeTruthy()
     expect(
       within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
@@ -182,6 +170,45 @@ describe('GfsGrantPanel bulk access', () => {
     )
     expect(mockGetGfsGrants).toHaveBeenCalledTimes(2)
     expect(mockGetGfsShares).toHaveBeenCalledTimes(2)
+  })
+
+  it('changes an existing member between Editor and Read', async () => {
+    const persistedGrant = {
+      id: '33333333-3333-3333-3333-333333333333',
+      drive: 'main',
+      resourceId: resource.resourceId,
+      subject: userSubject,
+      permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
+      inherit: false,
+    }
+    mockGetGfsGrants
+      .mockResolvedValueOnce({ items: [persistedGrant] })
+      .mockResolvedValueOnce({ items: [{ ...persistedGrant, permissions: ['read', 'share'] }] })
+    mockPutGfsGrant.mockResolvedValue(successfulMutation(userSubject))
+    renderPanel()
+
+    const role = await screen.findByRole('combobox', { name: 'Access role for Ada Lovelace' })
+    expect((role as HTMLSelectElement).value).toBe('editor')
+    fireEvent.change(role, { target: { value: 'read' } })
+
+    await waitFor(() =>
+      expect(mockPutGfsGrant).toHaveBeenCalledWith({
+        drive: 'main',
+        resourceId: resource.resourceId,
+        subject: userSubject,
+        permissions: ['read', 'share'],
+        inherit: false,
+      })
+    )
+    await waitFor(() =>
+      expect(
+        (
+          screen.getByRole('combobox', {
+            name: 'Access role for Ada Lovelace',
+          }) as HTMLSelectElement
+        ).value
+      ).toBe('read')
+    )
   })
 
   it('self-heals a row that another admin already revoked without hiding other errors', async () => {
@@ -206,7 +233,7 @@ describe('GfsGrantPanel bulk access', () => {
       })
     )
     renderPanel()
-    const existing = await screen.findByRole('region', { name: 'Who has access' })
+    const existing = await screen.findByRole('region', { name: 'People with access' })
     fireEvent.click(
       within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
     )
@@ -241,7 +268,7 @@ describe('GfsGrantPanel bulk access', () => {
       })
     )
     renderPanel()
-    const existing = await screen.findByRole('region', { name: 'Who has access' })
+    const existing = await screen.findByRole('region', { name: 'People with access' })
     fireEvent.click(
       within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
     )
@@ -277,9 +304,9 @@ describe('GfsGrantPanel bulk access', () => {
     const initialSignal = mockGetGfsGrants.mock.calls[0][2]
     await chooseSubjects('Ada Lovelace')
     selectPermission('Read')
-    await submit('Grant access')
+    await submit('Share')
 
-    const existing = await screen.findByRole('region', { name: 'Who has access' })
+    const existing = await screen.findByRole('region', { name: 'People with access' })
     expect(await within(existing).findByText('Direct grant · user')).toBeTruthy()
     expect(initialSignal?.aborted).toBe(true)
     resolveInitialGrants({ items: [] })
@@ -327,16 +354,14 @@ describe('GfsGrantPanel bulk access', () => {
     )
     renderPanel()
     await chooseSubjects('Ada Lovelace', 'Research')
-    selectPermission('Read')
-    selectPermission('Delete')
+    selectPermission('Editor')
     await chooseSubjects('chatllm (Stateful)', 'chatllm-stateless (Stateless)', 'sandbox-ui-hello')
 
-    const permissions = openPermissionMenu()
-    expect(within(permissions).getByRole('menuitemcheckbox', { name: 'Read' })).toBeChecked()
-    expect(within(permissions).getByRole('menuitemcheckbox', { name: 'Write' })).not.toBeChecked()
-    expect(within(permissions).queryByRole('menuitemcheckbox', { name: 'Delete' })).toBeNull()
-    expect(within(permissions).queryByRole('menuitemcheckbox', { name: 'Share' })).toBeNull()
-    await submit('Grant access')
+    expect(screen.getByText(/use read\/write access only/i)).toBeTruthy()
+    expect(
+      screen.getByRole('combobox', { name: 'Access role for selected recipients' })
+    ).toHaveValue('editor')
+    await submit('Share')
 
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenCalledWith({
@@ -349,29 +374,24 @@ describe('GfsGrantPanel bulk access', () => {
           { type: 'host', id: '1st:mcp-host/chatllm-stateless' },
           { type: 'host', id: '3rd:sandbox-recipes/sandbox-ui-hello' },
         ],
-        permissions: ['read'],
+        permissions: ['read', 'write'],
         inherit: false,
       })
     )
     await waitFor(() => expect(mockGetGfsGrants).toHaveBeenCalledTimes(2))
   })
 
-  it('requires an explicit scope review before creating access', async () => {
+  it('shows scope and role only after a recipient is selected', async () => {
     const directory = { ...resource, name: 'reports', kind: 'directory' as const }
     renderPanel(directory)
+    expect(screen.queryByRole('button', { name: 'Share' })).toBeNull()
+    expect(screen.queryByRole('checkbox', { name: /Include contents/ })).toBeNull()
     await chooseSubjects('Ada Lovelace', 'Research')
-    selectPermission('Read')
-    selectPermission('Write')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
-    const dialog = await screen.findByRole('alertdialog')
-    expect(dialog).toHaveTextContent('2 recipients (1 user, 1 team)')
-    expect(dialog).toHaveTextContent('"reports"')
-    expect(dialog).toHaveTextContent('Permissions: read, write')
-    expect(dialog).toHaveTextContent('Scope: this resource and all descendants')
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
-    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
-    expect(mockPutGfsGrant).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Share' })).toBeEnabled()
+    expect(screen.getByRole('checkbox', { name: /Include contents/ })).toBeChecked()
+    expect(
+      screen.getByRole('combobox', { name: 'Access role for selected recipients' })
+    ).toHaveValue('read')
   })
 
   it('keeps operator singular and prevents mixing it with bulk subjects', async () => {
@@ -382,14 +402,14 @@ describe('GfsGrantPanel bulk access', () => {
     expect(screen.queryByRole('button', { name: 'Remove Ada Lovelace' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Remove Operator' })).toBeTruthy()
     selectPermission('Read')
-    await submit('Grant access')
+    await submit('Share')
 
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenCalledWith({
         drive: 'main',
         resourceId: resource.resourceId,
         subject: { type: 'operator' },
-        permissions: ['read'],
+        permissions: ['read', 'share'],
         inherit: false,
       })
     )
@@ -408,23 +428,23 @@ describe('GfsGrantPanel bulk access', () => {
     renderPanel()
     await chooseSubjects('Ada Lovelace', 'Research')
     selectPermission('Write')
-    await submit('Grant access')
+    await submit('Share')
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'escalation_rejected: Requested permissions exceed operator authority. (invalid indexes: 1)'
     )
     expect(screen.getByRole('button', { name: 'Remove Ada Lovelace' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Remove Research' })).toBeTruthy()
-    expect(document.querySelector('.cu-gfs-permission-dropdown__trigger')).toHaveTextContent(
-      'Write'
-    )
+    expect(
+      screen.getByRole('combobox', { name: 'Access role for selected recipients' })
+    ).toHaveValue('editor')
 
-    await submit('Grant access')
+    await submit('Share')
     await waitFor(() => expect(mockPutGfsGrant).toHaveBeenCalledTimes(2))
     expect(screen.queryByRole('button', { name: 'Remove Ada Lovelace' })).toBeNull()
-    expect(document.querySelector('.cu-gfs-permission-dropdown__trigger')).toHaveTextContent(
-      'Permissions'
-    )
+    expect(
+      screen.queryByRole('combobox', { name: 'Access role for selected recipients' })
+    ).toBeNull()
   })
 
   it('does not duplicate the machine code when the server message matches it', async () => {
@@ -437,27 +457,25 @@ describe('GfsGrantPanel bulk access', () => {
     renderPanel()
     await chooseSubjects('Ada Lovelace')
     selectPermission('Read')
-    await submit('Grant access')
+    await submit('Share')
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('subjects_invalid')
     expect(alert).not.toHaveTextContent('subjects_invalid: subjects_invalid')
   })
 
-  it('does not restore incompatible permissions after the final host is removed', async () => {
+  it('adapts the Editor role to the read/write-only host permission model', async () => {
     renderPanel()
     await chooseSubjects('Ada Lovelace')
-    selectPermission('Delete')
+    selectPermission('Editor')
     await chooseSubjects('chatllm (Stateful)')
 
-    expect(
-      within(openPermissionMenu()).queryByRole('menuitemcheckbox', { name: 'Delete' })
-    ).toBeNull()
+    expect(screen.getByText(/use read\/write access only/i)).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Remove chatllm (Stateful)' }))
 
     expect(
-      within(openPermissionMenu()).getByRole('menuitemcheckbox', { name: 'Delete' })
-    ).not.toBeChecked()
+      screen.getByRole('combobox', { name: 'Access role for selected recipients' })
+    ).toHaveValue('editor')
     selectPermission('Read')
   })
 

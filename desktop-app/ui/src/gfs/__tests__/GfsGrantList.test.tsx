@@ -44,7 +44,7 @@ function shareItem(overrides: Partial<GfsShareListItem>): GfsShareListItem {
 }
 
 describe('GfsGrantList', () => {
-  it('renders resolved subject labels, permission chips, and the inherit badge', () => {
+  it('renders resolved subject labels, grouped roles, and the inherit badge', () => {
     render(
       <GfsGrantList
         agents={agents}
@@ -63,8 +63,13 @@ describe('GfsGrantList', () => {
     )
 
     const agentRow = screen.getByText('Chat LLM').closest('li')!
-    expect(within(agentRow).getByText('Read')).toBeTruthy()
-    expect(within(agentRow).getByText('Write')).toBeTruthy()
+    expect(
+      (
+        within(agentRow).getByRole('combobox', {
+          name: 'Access role for Chat LLM',
+        }) as HTMLSelectElement
+      ).value
+    ).toBe('editor')
     expect(within(agentRow).getByText('Includes contents')).toBeTruthy()
     expect(within(agentRow).getByText('X')).toBeTruthy()
     expect(
@@ -72,7 +77,13 @@ describe('GfsGrantList', () => {
     ).toContain('da-gfs-grant-list__revoke')
 
     const userRow = screen.getByText('Test Two').closest('li')!
-    expect(within(userRow).getByText('Read')).toBeTruthy()
+    expect(
+      (
+        within(userRow).getByRole('combobox', {
+          name: 'Access role for Test Two',
+        }) as HTMLSelectElement
+      ).value
+    ).toBe('read')
     expect(within(userRow).queryByText('Includes contents')).toBeNull()
 
     // Unresolvable subject ids stay visible as raw ids — never hidden.
@@ -109,6 +120,25 @@ describe('GfsGrantList', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Revoke access for Chat LLM' }))
 
     expect(onRevoke).toHaveBeenCalledWith(item, 'Chat LLM')
+  })
+
+  it('changes a member between the grouped Read and Editor roles', () => {
+    const onChangeRole = vi.fn()
+    const item = grantItem({ subject: { type: 'user', id: 'user-2' } })
+    render(
+      <GfsGrantList
+        agents={agents}
+        items={[item]}
+        onChangeRole={onChangeRole}
+        onRevoke={vi.fn()}
+        subjects={subjects}
+      />
+    )
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Access role for Test Two' }), {
+      target: { value: 'editor' },
+    })
+    expect(onChangeRole).toHaveBeenCalledWith(item, 'Test Two', 'editor')
   })
 
   it('combines direct shares with grants and routes share revoke separately', () => {

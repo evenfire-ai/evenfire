@@ -14174,6 +14174,14 @@ pre {
   align-items: stretch;
 }
 
+.da-gfs-delegation:not(.da-gfs-delegation--details) .da-gfs-delegation__composer {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.da-gfs-delegation__composer > .ui-dropdown-select {
+  min-width: 150px;
+}
+
 .da-gfs-subject-picker,
 .da-gfs-permission-dropdown {
   position: relative;
@@ -15226,6 +15234,7 @@ pre {
 
 .da-gfs-manage-dialog__title-row h3 {
   min-width: 0;
+  white-space: normal;
 }
 
 .da-gfs-manage-dialog__title-edit {
@@ -15818,9 +15827,9 @@ pre {
   gap: var(--space-2);
   min-width: 0;
   padding: var(--space-2);
-  border: 1px solid var(--border-soft);
+  border: 0;
   border-radius: var(--radius-md);
-  background: var(--surface-soft);
+  background: transparent;
 }
 
 .da-gfs-grant-list__identity {
@@ -15850,6 +15859,28 @@ pre {
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-1);
+}
+
+.da-gfs-grant-list__role.ui-control {
+  width: 112px;
+  min-height: 32px;
+  border-color: transparent;
+  background: transparent;
+  font-weight: var(--font-weight-medium);
+}
+
+.da-gfs-grant-list__role.ui-control:hover,
+.da-gfs-grant-list__role.ui-control:focus {
+  border-color: var(--control-border);
+  background: var(--control-bg-strong);
+}
+
+.da-gfs-grant-list__role-label {
+  min-width: 112px;
+  padding-inline: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
 }
 
 .da-gfs-grant-list__chips {

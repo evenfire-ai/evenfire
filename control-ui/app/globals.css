@@ -13062,6 +13062,7 @@ button.cu-gfs-tree__button:focus-visible,
 
 .cu-gfs-manage-dialog__title-row h3 {
   min-width: 0;
+  white-space: normal;
 }
 
 .cu-gfs-inline-rename {
@@ -13460,6 +13461,17 @@ button.cu-gfs-tree__button:focus-visible,
   gap: var(--cu-space-2);
 }
 
+.cu-gfs-grant__composer:not(.cu-gfs-grant__composer--details) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.cu-gfs-role-select.cu-input {
+  min-width: 8.5rem;
+  min-height: 2.875rem;
+  background-color: var(--cu-bg-elevated);
+  font-weight: 500;
+}
+
 .cu-gfs-subject-picker,
 .cu-gfs-permission-dropdown {
   position: relative;
@@ -13778,9 +13790,9 @@ button.cu-gfs-tree__button:focus-visible,
   gap: var(--cu-space-2);
   min-width: 0;
   padding: var(--cu-space-2);
-  border: 1px solid var(--cu-border);
+  border: 0;
   border-radius: var(--cu-radius-sm);
-  background: var(--cu-surface);
+  background: transparent;
 }
 
 .cu-gfs-existing-access__identity {
@@ -13813,6 +13825,28 @@ button.cu-gfs-tree__button:focus-visible,
   align-items: center;
   flex-wrap: wrap;
   gap: var(--cu-space-1);
+}
+
+.cu-gfs-existing-access__role.cu-input {
+  width: 7rem;
+  min-height: 2rem;
+  border-color: transparent;
+  background-color: transparent;
+  font-weight: 500;
+}
+
+.cu-gfs-existing-access__role.cu-input:hover,
+.cu-gfs-existing-access__role.cu-input:focus {
+  border-color: var(--cu-border);
+  background-color: var(--cu-bg-elevated);
+}
+
+.cu-gfs-existing-access__role-label {
+  min-width: 7rem;
+  padding-inline: var(--cu-space-2);
+  color: var(--cu-text-soft);
+  font-size: 0.8125rem;
+  font-weight: 500;
 }
 
 .cu-gfs-existing-access__chips {

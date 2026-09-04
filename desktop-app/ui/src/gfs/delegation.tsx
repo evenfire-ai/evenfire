@@ -1,7 +1,6 @@
-import { useState } from 'react'
-import { Button, StatusBanner } from '@components/Common'
+import { useEffect, useState } from 'react'
+import { Button, DropdownSelect, StatusBanner } from '@components/Common'
 import { describeGfsGrantError } from '@lib/gfsGrantErrors'
-import { GfsPermissionDropdown } from '@/gfs/GfsPermissionDropdown'
 import { GfsSubjectPicker } from '@/gfs/GfsSubjectPicker'
 import type { GfsDelegationPanelProps } from './delegation.types'
 
@@ -10,9 +9,28 @@ import type { GfsDelegationPanelProps } from './delegation.types'
  * (`managed_agent_permission_forbidden`) — when the selection contains a host,
  * the dropdown never offers more, and any incompatible held bits are stripped.
  */
-const HOST_PERMISSION_BITS = ['read', 'write'] as const
-
 const HOST_SUBJECT_KEY_PREFIX = 'host:'
+type AccessRole = 'read' | 'editor'
+
+const ROLE_OPTIONS = [
+  { value: 'read', label: 'Read' },
+  { value: 'editor', label: 'Editor' },
+]
+
+function permissionsForRole(
+  role: AccessRole,
+  hostOnly: boolean,
+  grantableBits: string[]
+): string[] {
+  const requested = hostOnly
+    ? role === 'editor'
+      ? ['read', 'write']
+      : ['read']
+    : role === 'editor'
+      ? ['read', 'write', 'delete', 'manage_acl', 'share']
+      : ['read', 'share']
+  return requested.filter(permission => grantableBits.includes(permission))
+}
 
 /**
  * P4-S07 — Desktop gfs delegation panel (renderer). A folder owner delegates
@@ -37,11 +55,10 @@ export function GfsDelegationPanel({
   subjectOptionsError = null,
   isDirectory,
   onGrant,
+  onDetailViewChange,
 }: GfsDelegationPanelProps) {
   const [subjectKeys, setSubjectKeys] = useState<string[]>([])
-  const [bits, setBits] = useState<string[]>(() =>
-    affordances.grantableBits.includes('read') ? ['read'] : affordances.grantableBits.slice(0, 1)
-  )
+  const [role, setRole] = useState<AccessRole>('read')
   const [inherit, setInherit] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -51,19 +68,18 @@ export function GfsDelegationPanel({
   // Hosts cap the WHOLE bulk grant to read/write (the server enforces this per
   // host subject; the bulk request is atomic, so the cap applies to all). Also
   // keep the cap within the bits the caller actually holds.
-  const visiblePermissionBits = hasHost
-    ? HOST_PERMISSION_BITS.filter(bit => grantableBits.includes(bit))
-    : grantableBits
+  const bits = permissionsForRole(role, hasHost, grantableBits)
+  const canOfferEditor = (hasHost ? ['write'] : ['write', 'delete', 'manage_acl']).some(bit =>
+    grantableBits.includes(bit)
+  )
+  const roleOptions = canOfferEditor ? ROLE_OPTIONS : ROLE_OPTIONS.slice(0, 1)
+
+  useEffect(() => {
+    onDetailViewChange?.(subjectKeys.length > 0)
+  }, [onDetailViewChange, subjectKeys.length])
+
   function changeSubjects(nextKeys: string[]) {
     setSubjectKeys(nextKeys)
-    const nextHasHost = nextKeys.some(key => key.startsWith(HOST_SUBJECT_KEY_PREFIX))
-    if (!nextHasHost) return
-    // Drop any bit a host subject cannot receive so the bulk grant stays valid.
-    const allowed: string[] = HOST_PERMISSION_BITS.filter(bit => grantableBits.includes(bit))
-    setBits(current => {
-      const filtered = current.filter(bit => allowed.includes(bit))
-      return filtered.length === current.length ? current : filtered
-    })
   }
 
   async function run(action: () => Promise<void>) {
@@ -72,6 +88,7 @@ export function GfsDelegationPanel({
     try {
       await action()
       setSubjectKeys([])
+      setRole('read')
     } catch (e) {
       // The bulk grant is atomic — a failure means NONE of the subjects landed,
       // so keep the whole selection for a retry. Surface the server's
@@ -94,7 +111,9 @@ export function GfsDelegationPanel({
   }
 
   return (
-    <div className="da-gfs-delegation">
+    <div
+      className={`da-gfs-delegation${subjectKeys.length > 0 ? ' da-gfs-delegation--details' : ''}`}
+    >
       <div className="da-gfs-delegation__composer">
         <GfsSubjectPicker
           disabled={busy}
@@ -103,42 +122,59 @@ export function GfsDelegationPanel({
           options={subjectOptions}
           value={subjectKeys}
         />
-        <GfsPermissionDropdown
-          disabled={busy}
-          onChange={setBits}
-          permissions={visiblePermissionBits}
-          value={bits}
-        />
+        {subjectKeys.length > 0 ? (
+          <DropdownSelect
+            ariaLabel="Access role for selected recipients"
+            disabled={busy}
+            onChange={value => setRole(value as AccessRole)}
+            options={roleOptions}
+            placeholder="Role"
+            value={role}
+          />
+        ) : null}
       </div>
-      {hasHost ? (
+      {subjectKeys.length > 0 && hasHost ? (
         <p className="da-gfs-delegation__hint muted">
-          Agent selections are limited to read and write. Incompatible permissions were removed.
+          Agents, workflows, and plugins use read/write access only.
         </p>
       ) : null}
       {subjectOptionsError ? <StatusBanner tone="error" text={subjectOptionsError} /> : null}
-      <div className="da-gfs-delegation__scope-actions">
-        {isDirectory ? (
-          <label className="da-gfs-delegation__inherit">
-            <input
-              checked={inherit}
+      {subjectKeys.length > 0 ? (
+        <div className="da-gfs-delegation__scope-actions">
+          {isDirectory ? (
+            <label className="da-gfs-delegation__inherit">
+              <input
+                checked={inherit}
+                disabled={busy}
+                onChange={event => setInherit(event.target.checked)}
+                type="checkbox"
+              />
+              <span>Include contents of this folder</span>
+            </label>
+          ) : null}
+          <div className="da-gfs-delegation__actions">
+            <Button
               disabled={busy}
-              onChange={event => setInherit(event.target.checked)}
-              type="checkbox"
-            />
-            <span>Include contents of this folder</span>
-          </label>
-        ) : null}
-        <div className="da-gfs-delegation__actions">
-          <Button
-            type="button"
-            loading={busy}
-            disabled={busy || subjectKeys.length === 0 || bits.length === 0}
-            onClick={() => run(() => onGrant(subjectKeys, bits, isDirectory ? inherit : false))}
-          >
-            Grant access
-          </Button>
+              onClick={() => {
+                setSubjectKeys([])
+                setRole('read')
+              }}
+              type="button"
+              variant="ghost"
+            >
+              Back
+            </Button>
+            <Button
+              type="button"
+              loading={busy}
+              disabled={busy || bits.length === 0}
+              onClick={() => run(() => onGrant(subjectKeys, bits, isDirectory ? inherit : false))}
+            >
+              Share
+            </Button>
+          </div>
         </div>
-      </div>
+      ) : null}
       {error !== null && <StatusBanner tone="error" text={error} />}
     </div>
   )

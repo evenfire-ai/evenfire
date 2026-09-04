@@ -2,13 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useConfirmDialog } from '@components/ConfirmDialog'
-import { GfsPermissionDropdown } from '@components/GfsPermissionDropdown'
-import { GFS_PERMISSION_LABELS } from '@components/GfsPermissionDropdown/constants'
 import { GfsSubjectPicker } from '@components/GfsSubjectPicker'
 import type { SelectionDropdownOption } from '@components/SelectionDropdown/types'
 import { IconFolder } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
-import { Button, CheckboxField } from '@components/ui'
+import { Button, CheckboxField, SelectInput } from '@components/ui'
 import { GFS_MAX_BULK_SUBJECTS } from '@constants/gfsGrantSubjects'
 import {
   type AdminUser,
@@ -39,10 +37,24 @@ import { buildGfsBulkSubjectOptions, toGfsBulkSubjectInputs } from './gfsGrantSu
  * authoritative.
  */
 
-const PERMISSION_BITS = ['read', 'write', 'delete', 'manage_acl', 'share'] as const
-const HOST_PERMISSION_BITS = ['read', 'write'] as const
 const OPERATOR_VALUE = 'operator'
 const DRIVE = 'main'
+type AccessRole = 'read' | 'editor'
+
+function rolePermissions(role: AccessRole, hostOnly: boolean): string[] {
+  if (hostOnly) return role === 'editor' ? ['read', 'write'] : ['read']
+  return role === 'editor' ? ['read', 'write', 'delete', 'manage_acl', 'share'] : ['read', 'share']
+}
+
+function roleForPermissions(permissions: string[]): AccessRole {
+  return permissions.some(permission => ['write', 'delete', 'manage_acl'].includes(permission))
+    ? 'editor'
+    : 'read'
+}
+
+function hostOnlySubject(subject: { type: string }): boolean {
+  return subject.type === 'host'
+}
 
 const OPERATOR_OPTION: SelectionDropdownOption = {
   value: OPERATOR_VALUE,
@@ -51,9 +63,7 @@ const OPERATOR_OPTION: SelectionDropdownOption = {
   badge: 'Operator',
 }
 
-export function GfsGrantPanel({
-  resource,
-}: GfsGrantPanelProps): React.JSX.Element {
+export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Element {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [users, setUsers] = useState<AdminUser[]>([])
@@ -64,10 +74,9 @@ export function GfsGrantPanel({
   const [directoryError, setDirectoryError] = useState('')
   const [selectedValues, setSelectedValues] = useState<string[]>([])
   const [selectionError, setSelectionError] = useState('')
-  const [bits, setBits] = useState<string[]>([])
+  const [role, setRole] = useState<AccessRole>('read')
   const [includeDescendants, setIncludeDescendants] = useState(resource.kind === 'directory')
   const [busy, setBusy] = useState(false)
-  const [confirming, setConfirming] = useState(false)
   const [error, setError] = useState('')
   const [existingAccess, setExistingAccess] = useState<GfsExistingAccessItem[]>([])
   const [existingAccessLoading, setExistingAccessLoading] = useState(true)
@@ -182,9 +191,9 @@ export function GfsGrantPanel({
     [selectedBulkOptions]
   )
   const hasHost = selectedSubjects.some(subject => subject.type === 'host')
-  const visiblePermissionBits = hasHost ? HOST_PERMISSION_BITS : PERMISSION_BITS
   const subjectValid = operatorSelected || selectedSubjects.length > 0
-  const actionPending = busy || confirming
+  const actionPending = busy
+  const bits = rolePermissions(role, hasHost)
   const canSubmit = subjectValid && bits.length > 0 && !actionPending
 
   function changeSelectedSubjects(nextValues: string[]) {
@@ -204,11 +213,6 @@ export function GfsGrantPanel({
     const nextOptions = bulkValues
       .map(value => bulkSubjectOptions.find(option => option.value === value))
       .filter(option => option !== undefined)
-    if (nextOptions.some(option => option.subject.type === 'host')) {
-      setBits(current =>
-        current.filter(bit => HOST_PERMISSION_BITS.includes(bit as 'read' | 'write'))
-      )
-    }
     setSelectionError('')
     setSelectedValues(bulkValues)
   }
@@ -219,32 +223,6 @@ export function GfsGrantPanel({
       setError('subject_and_permissions_required')
       return
     }
-
-    const recipientSummary = operatorSelected
-      ? 'the cluster operator'
-      : (() => {
-          const counts = selectedSubjects.reduce<Record<string, number>>((result, subject) => {
-            result[subject.type] = (result[subject.type] ?? 0) + 1
-            return result
-          }, {})
-          const types = Object.entries(counts)
-            .map(([type, count]) => `${count} ${type}${count === 1 ? '' : 's'}`)
-            .join(', ')
-          return `${selectedSubjects.length} recipient${selectedSubjects.length === 1 ? '' : 's'} (${types})`
-        })()
-    const scope =
-      canIncludeDescendants && includeDescendants
-        ? 'this resource and all descendants'
-        : 'this resource only'
-
-    setConfirming(true)
-    const confirmed = await confirm({
-      title: 'Grant access?',
-      message: `Grant access for ${recipientSummary} on "${resource.name}". Permissions: ${bits.join(', ')}. Scope: ${scope}.`,
-      confirmLabel: 'Grant access',
-    })
-    setConfirming(false)
-    if (!confirmed) return
 
     setBusy(true)
     try {
@@ -265,10 +243,10 @@ export function GfsGrantPanel({
         }
         await putGfsGrant({ ...body, inherit: includeDescendants })
       }
-      showToast('Grant saved.', { tone: 'success' })
+      showToast('Access shared.', { tone: 'success' })
       await loadExistingAccess()
-      setBits([])
       setSelectedValues([])
+      setRole('read')
       setSelectionError('')
       setIncludeDescendants(resource.kind === 'directory')
     } catch (e) {
@@ -337,9 +315,38 @@ export function GfsGrantPanel({
     }
   }
 
+  async function updateAccessRole(item: GfsExistingAccessItem, nextRole: AccessRole) {
+    if (item.kind !== 'grant') return
+    const permissions = rolePermissions(nextRole, hostOnlySubject(item.subject))
+    setBusy(true)
+    setError('')
+    try {
+      await putGfsGrant({
+        drive: DRIVE,
+        resourceId: resource.resourceId,
+        subject: item.subject,
+        permissions,
+        inherit: item.inherit,
+      })
+      showToast(
+        `${subjectLabel(item)} is now ${nextRole === 'editor' ? 'an Editor' : 'Read-only'}.`,
+        {
+          tone: 'success',
+        }
+      )
+      await loadExistingAccess()
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Failed to update access')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="cu-gfs-grant-panel">
-      <div className="cu-gfs-grant__composer">
+      <div
+        className={`cu-gfs-grant__composer${subjectValid ? ' cu-gfs-grant__composer--details' : ''}`}
+      >
         <GfsSubjectPicker
           disabled={actionPending}
           loading={directoryLoading}
@@ -347,12 +354,18 @@ export function GfsGrantPanel({
           options={subjectOptions}
           value={selectedValues}
         />
-        <GfsPermissionDropdown
-          disabled={actionPending}
-          onChange={setBits}
-          permissions={visiblePermissionBits}
-          value={bits}
-        />
+        {subjectValid ? (
+          <SelectInput
+            aria-label="Access role for selected recipients"
+            className="cu-gfs-role-select"
+            disabled={actionPending}
+            onChange={event => setRole(event.currentTarget.value as AccessRole)}
+            value={role}
+          >
+            <option value="read">Read</option>
+            <option value="editor">Editor</option>
+          </SelectInput>
+        ) : null}
       </div>
       {selectionError ? (
         <p role="alert" className="cu-field__error">
@@ -364,105 +377,128 @@ export function GfsGrantPanel({
           {directoryError}
         </p>
       ) : null}
-      {hasHost ? (
-        <p className="cu-field__hint">
-          Host selections are limited to read and write in Control UI. Incompatible permissions were
-          removed.
-        </p>
+      {subjectValid && hasHost ? (
+        <p className="cu-field__hint">Agents, workflows, and plugins use read/write access only.</p>
       ) : null}
-      <div className="cu-gfs-grant__scope-actions">
-        {canIncludeDescendants ? (
-          <CheckboxField
-            className="cu-gfs-grant__scope"
-            label="Include contents of this folder"
-            checked={includeDescendants}
-            onChange={() => setIncludeDescendants(current => !current)}
-            disabled={actionPending}
-          />
-        ) : null}
-        <div className="cu-gfs-grant__actions">
-          <Button variant="primary" disabled={!canSubmit} onClick={() => submit()}>
-            Grant access
-          </Button>
+      {subjectValid ? (
+        <div className="cu-gfs-grant__scope-actions">
+          {canIncludeDescendants ? (
+            <CheckboxField
+              className="cu-gfs-grant__scope"
+              label="Include contents of this folder"
+              checked={includeDescendants}
+              onChange={() => setIncludeDescendants(current => !current)}
+              disabled={actionPending}
+            />
+          ) : null}
+          <div className="cu-gfs-grant__actions">
+            <Button
+              disabled={actionPending}
+              onClick={() => {
+                setSelectedValues([])
+                setRole('read')
+                setSelectionError('')
+              }}
+              variant="ghost"
+            >
+              Back
+            </Button>
+            <Button variant="primary" disabled={!canSubmit} onClick={() => submit()}>
+              Share
+            </Button>
+          </div>
         </div>
-      </div>
+      ) : null}
       {error ? (
         <p role="alert" className="cu-field__error">
           {error}
         </p>
       ) : null}
-      <section className="cu-gfs-existing-access" aria-label="Who has access">
-        <div className="cu-gfs-existing-access__header">
-          <h4>Who has access</h4>
-          <p>Existing grants and shares on this resource. Revoking is immediate.</p>
-        </div>
-        {existingAccessLoading ? (
-          <p className="cu-gfs-existing-access__empty" role="status">
-            Loading access…
-          </p>
-        ) : existingAccessError ? (
-          <div className="cu-gfs-existing-access__error">
-            <p role="alert" className="cu-field__error">
-              {existingAccessError}
-            </p>
-            <Button size="sm" disabled={actionPending} onClick={() => void loadExistingAccess()}>
-              Retry
-            </Button>
+      {!subjectValid ? (
+        <section className="cu-gfs-existing-access" aria-label="People with access">
+          <div className="cu-gfs-existing-access__header">
+            <h4>People with access</h4>
           </div>
-        ) : existingAccess.length === 0 ? (
-          <p className="cu-gfs-existing-access__empty">No direct grants or shares yet.</p>
-        ) : (
-          <ul className="cu-gfs-existing-access__list" aria-label="Resource access">
-            {existingAccess.map(item => {
-              const label = subjectLabel(item)
-              const coversDescendants =
-                item.kind === 'grant' ? item.inherit : item.includeDescendants
-              return (
-                <li
-                  className="cu-gfs-existing-access__item"
-                  data-testid={`gfs-access-row-${item.kind}-${item.id}`}
-                  key={`${item.kind}:${item.id}`}
-                >
-                  <span className="cu-gfs-existing-access__identity">
-                    <span className="cu-gfs-existing-access__subject">{label}</span>
-                    <span className="cu-gfs-existing-access__detail">
-                      {item.kind === 'grant' ? 'Direct grant' : 'Direct share'} ·{' '}
-                      {item.subject.type}
-                    </span>
-                  </span>
-                  <span className="cu-gfs-existing-access__meta">
-                    <span className="cu-gfs-existing-access__chips" aria-label="Permissions">
-                      {item.permissions.map(permission => (
-                        <span className="cu-gfs-existing-access__permission" key={permission}>
-                          {GFS_PERMISSION_LABELS[permission] ?? permission}
-                        </span>
-                      ))}
-                    </span>
-                    {coversDescendants ? (
-                      <span className="cu-gfs-existing-access__inherit">
-                        <IconFolder />
-                        Includes contents
-                      </span>
-                    ) : null}
-                  </span>
-                  <Button
-                    aria-label={`Remove ${item.kind} access for ${label}`}
-                    className="cu-gfs-existing-access__revoke"
-                    data-testid={`gfs-revoke-${item.kind}-${item.id}`}
-                    title={`Remove ${item.kind} access for ${label}`}
-                    size="sm"
-                    disabled={actionPending}
-                    onClick={() => void revokeAccess(item)}
-                    variant="ghost"
+          {existingAccessLoading ? (
+            <p className="cu-gfs-existing-access__empty" role="status">
+              Loading access…
+            </p>
+          ) : existingAccessError ? (
+            <div className="cu-gfs-existing-access__error">
+              <p role="alert" className="cu-field__error">
+                {existingAccessError}
+              </p>
+              <Button size="sm" disabled={actionPending} onClick={() => void loadExistingAccess()}>
+                Retry
+              </Button>
+            </div>
+          ) : existingAccess.length === 0 ? (
+            <p className="cu-gfs-existing-access__empty">No direct grants or shares yet.</p>
+          ) : (
+            <ul className="cu-gfs-existing-access__list" aria-label="Resource access">
+              {existingAccess.map(item => {
+                const label = subjectLabel(item)
+                const coversDescendants =
+                  item.kind === 'grant' ? item.inherit : item.includeDescendants
+                return (
+                  <li
+                    className="cu-gfs-existing-access__item"
+                    data-testid={`gfs-access-row-${item.kind}-${item.id}`}
+                    key={`${item.kind}:${item.id}`}
                   >
-                    X
-                  </Button>
-                </li>
-              )
-            })}
-          </ul>
-        )}
-      </section>
+                    <span className="cu-gfs-existing-access__identity">
+                      <span className="cu-gfs-existing-access__subject">{label}</span>
+                      <span className="cu-gfs-existing-access__detail">
+                        {item.kind === 'grant' ? 'Direct grant' : 'Direct share'} ·{' '}
+                        {item.subject.type}
+                      </span>
+                    </span>
+                    <span className="cu-gfs-existing-access__meta">
+                      {item.kind === 'grant' ? (
+                        <SelectInput
+                          aria-label={`Access role for ${label}`}
+                          className="cu-gfs-existing-access__role"
+                          compact
+                          disabled={actionPending}
+                          onChange={event =>
+                            void updateAccessRole(item, event.currentTarget.value as AccessRole)
+                          }
+                          value={roleForPermissions(item.permissions)}
+                        >
+                          <option value="read">Read</option>
+                          <option value="editor">Editor</option>
+                        </SelectInput>
+                      ) : (
+                        <span className="cu-gfs-existing-access__role-label">
+                          {roleForPermissions(item.permissions) === 'editor' ? 'Editor' : 'Read'}
+                        </span>
+                      )}
+                      {coversDescendants ? (
+                        <span className="cu-gfs-existing-access__inherit">
+                          <IconFolder />
+                          Includes contents
+                        </span>
+                      ) : null}
+                    </span>
+                    <Button
+                      aria-label={`Remove ${item.kind} access for ${label}`}
+                      className="cu-gfs-existing-access__revoke"
+                      data-testid={`gfs-revoke-${item.kind}-${item.id}`}
+                      title={`Remove ${item.kind} access for ${label}`}
+                      size="sm"
+                      disabled={actionPending}
+                      onClick={() => void revokeAccess(item)}
+                      variant="ghost"
+                    >
+                      X
+                    </Button>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </section>
+      ) : null}
       {confirmDialog}
     </div>
   )

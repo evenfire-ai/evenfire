@@ -106,7 +106,7 @@ async function openManageDialog(resourceName: string) {
 }
 
 async function chooseManageAction(resourceName: string, actionName: string) {
-  const dialog = screen.getByRole('dialog', { name: new RegExp(`Manage .* ${resourceName}`) })
+  const dialog = screen.getByRole('dialog', { name: new RegExp(`Share .* ${resourceName}`) })
   await act(async () => {
     fireEvent.click(within(dialog).getByRole('button', { name: `Options for ${resourceName}` }))
   })
@@ -618,7 +618,7 @@ describe('FilesPage', () => {
     renderFilesPage()
 
     await openManageDialog('Team folder')
-    const dialog = screen.getByRole('dialog', { name: 'Manage folder Team folder' })
+    const dialog = screen.getByRole('dialog', { name: 'Share folder Team folder' })
     expect(within(dialog).queryByRole('button', { name: 'Upload file' })).toBeNull()
     expect(within(dialog).queryByLabelText('Upload file')).toBeNull()
   })
@@ -1233,7 +1233,7 @@ describe('FilesPage', () => {
     // The manage modal opens (titled for the current selection — the mocked
     // controller does not navigate, so it stays on the parent folder).
     expect(screen.getByRole('dialog')).toBeTruthy()
-    expect(screen.getByRole('heading', { name: 'Who has access' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'People with access' })).toBeTruthy()
   })
 
   it('returns to Shared with me after closing Manage for a file row', async () => {
@@ -1291,7 +1291,7 @@ describe('FilesPage', () => {
 
     renderFilesPage()
     await openManageDialog('report.txt')
-    fireEvent.click(screen.getByRole('button', { name: 'Close manage dialog' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Close share dialog' }))
 
     await waitFor(() => expect(restoreCrumbs).toHaveBeenCalledWith([]))
     expect(screen.getByRole('button', { name: 'report.txt' })).toBeTruthy()
@@ -1440,9 +1440,7 @@ describe('FilesPage', () => {
     fireEvent.focus(picker)
     expect(await screen.findByRole('option', { name: /chatllm/ })).toBeTruthy()
     expect(screen.queryByRole('option', { name: /pending-agent/ })).toBeNull()
-    expect(
-      screen.getByRole('checkbox', { name: 'Include contents of this folder' })
-    ).toHaveProperty('checked', true)
+    expect(screen.queryByRole('checkbox', { name: 'Include contents of this folder' })).toBeNull()
   })
 
   it('refetches the grants list after a successful agent grant', async () => {
@@ -1489,7 +1487,7 @@ describe('FilesPage', () => {
     const picker = await screen.findByRole('combobox', { name: 'Add people, teams, or agents' })
     fireEvent.focus(picker)
     fireEvent.click(await screen.findByRole('option', { name: /chatllm/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }))
 
     await waitFor(() =>
       expect(grant).toHaveBeenCalledWith(['host:1st:mcp-host/chatllm'], ['read'], true)
@@ -1555,7 +1553,7 @@ describe('FilesPage', () => {
     })
     fireEvent.focus(subjectPicker)
     fireEvent.click(await screen.findByRole('option', { name: /Test Two/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }))
 
     // handleGrant issues the grant then MUST list-after-write (the grant PUT
     // returns no ids). Deleting `await ctrl.refreshGrants()` must fail here.
@@ -1612,7 +1610,7 @@ describe('FilesPage', () => {
     renderFilesPage(pushToast)
     await openManageDialog('Team folder')
 
-    const dialog = screen.getByRole('dialog', { name: 'Manage folder Team folder' })
+    const dialog = screen.getByRole('dialog', { name: 'Share folder Team folder' })
     const menuTrigger = within(dialog).getByRole('button', { name: 'Options for Team folder' })
     await act(async () => {
       fireEvent.click(menuTrigger)
@@ -1687,7 +1685,7 @@ describe('FilesPage', () => {
     fireEvent.focus(subjectPicker)
     fireEvent.click(await screen.findByRole('option', { name: /Test Two/ }))
     fireEvent.click(await screen.findByRole('option', { name: /Test Three/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }))
 
     await waitFor(() =>
       expect(grant).toHaveBeenCalledWith(['user:user-2', 'user:user-3'], ['read'], true)
@@ -1754,6 +1752,67 @@ describe('FilesPage', () => {
     await waitFor(() =>
       expect(pushToast).toHaveBeenCalledWith('Access revoked for chatllm', 'success')
     )
+  })
+
+  it('changes an existing agent from Read to Editor using read/write only', async () => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        agents: {
+          listMine: vi.fn(async () => [
+            {
+              name: 'chatllm',
+              contextRef: 'ctx-1',
+              mcpServers: [],
+              gfsSubject: { type: 'host', id: '1st:mcp-host/chatllm' },
+            },
+          ]),
+        },
+        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+      },
+    })
+    const grant = vi.fn(async () => undefined)
+    const refreshGrants = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder',
+        name: 'Team folder',
+        kind: 'directory',
+      },
+      affordances: {
+        held: ['read', 'write', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read', 'write'],
+        canCreateShare: false,
+      },
+      grants: [
+        {
+          id: 'grant-1',
+          drive: 'main',
+          resourceId: 'folder-1',
+          subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+          permissions: ['read'],
+          inherit: true,
+        },
+      ],
+      grant,
+      refreshGrants,
+    })
+
+    renderFilesPage(pushToast)
+    await openManageDialog('Team folder')
+    fireEvent.change(await screen.findByRole('combobox', { name: 'Access role for chatllm' }), {
+      target: { value: 'editor' },
+    })
+
+    await waitFor(() =>
+      expect(grant).toHaveBeenCalledWith(['host:1st:mcp-host/chatllm'], ['read', 'write'], true)
+    )
+    expect(refreshGrants).toHaveBeenCalledTimes(1)
+    expect(pushToast).toHaveBeenCalledWith('chatllm is now an Editor', 'success')
   })
 
   it('lists direct shares in the who-has-access list and revokes them', async () => {
@@ -1926,7 +1985,7 @@ describe('FilesPage', () => {
     await openManageDialog('Product')
     await act(async () => {
       fireEvent.click(
-        within(screen.getByRole('dialog', { name: 'Manage folder Product' })).getByRole('button', {
+        within(screen.getByRole('dialog', { name: 'Share folder Product' })).getByRole('button', {
           name: 'Options for Product',
         })
       )
@@ -1943,7 +2002,7 @@ describe('FilesPage', () => {
       expect(screen.queryByRole('dialog', { name: 'Move folder Product' })).toBeNull()
     )
     await waitFor(() =>
-      expect(screen.queryByRole('dialog', { name: 'Manage folder Product' })).toBeNull()
+      expect(screen.queryByRole('dialog', { name: 'Share folder Product' })).toBeNull()
     )
     expect(await screen.findByText('File access is not authorized')).toBeTruthy()
     expect(moveResource).not.toHaveBeenCalled()

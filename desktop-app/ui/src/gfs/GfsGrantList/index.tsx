@@ -1,5 +1,4 @@
-import { Badge, IconButton, Pill, StatusBanner } from '@components/Common'
-import { GFS_PERMISSION_LABELS } from '@/gfs/GfsPermissionDropdown/constants'
+import { Badge, IconButton, SelectInput, StatusBanner } from '@components/Common'
 import type {
   GfsAgentSubjectOption,
   GfsDelegationSubjectOption,
@@ -7,6 +6,7 @@ import type {
   GfsShareListItem,
 } from '@/gfs/delegation.types'
 import type { GfsGrantListProps } from './types'
+import type { GfsAccessRole } from './types'
 
 /**
  * "Who has access" — the resource's current grants, sourced from the user-plane
@@ -36,6 +36,12 @@ function subjectLabel(
   return subject.id ?? subject.type
 }
 
+function roleForPermissions(permissions: string[]): GfsAccessRole {
+  return permissions.some(permission => ['write', 'delete', 'manage_acl'].includes(permission))
+    ? 'editor'
+    : 'read'
+}
+
 export function GfsGrantList({
   items,
   shares = [],
@@ -45,9 +51,11 @@ export function GfsGrantList({
   agents,
   subjects,
   onRevoke,
+  onChangeRole,
   onRevokeShare,
   revoking = false,
   revokingShare = false,
+  updatingRole = false,
 }: GfsGrantListProps) {
   // Grants and shares are independent server surfaces with independent
   // failure modes (R4 spec §2): one list's error suppresses only its own rows
@@ -93,13 +101,23 @@ export function GfsGrantList({
                       </span>
                     </span>
                     <span className="da-gfs-grant-list__meta">
-                      <span className="da-gfs-grant-list__chips">
-                        {item.permissions.map(permission => (
-                          <Pill key={permission} size="xs" tone="neutral">
-                            {GFS_PERMISSION_LABELS[permission] ?? permission}
-                          </Pill>
-                        ))}
-                      </span>
+                      <SelectInput
+                        aria-label={`Access role for ${label}`}
+                        className="da-gfs-grant-list__role"
+                        dense
+                        disabled={updatingRole || !onChangeRole}
+                        onChange={event =>
+                          void onChangeRole?.(
+                            item,
+                            label,
+                            event.currentTarget.value as GfsAccessRole
+                          )
+                        }
+                        value={roleForPermissions(item.permissions)}
+                      >
+                        <option value="read">Read</option>
+                        <option value="editor">Editor</option>
+                      </SelectInput>
                       {item.inherit ? <Badge tone="accent">Includes contents</Badge> : null}
                     </span>
                     <IconButton
@@ -134,12 +152,8 @@ export function GfsGrantList({
                       </span>
                     </span>
                     <span className="da-gfs-grant-list__meta">
-                      <span className="da-gfs-grant-list__chips">
-                        {item.permissions.map(permission => (
-                          <Pill key={permission} size="xs" tone="neutral">
-                            {GFS_PERMISSION_LABELS[permission] ?? permission}
-                          </Pill>
-                        ))}
+                      <span className="da-gfs-grant-list__role-label">
+                        {roleForPermissions(item.permissions) === 'editor' ? 'Editor' : 'Read'}
                       </span>
                       {item.includeDescendants ? (
                         <Badge tone="accent">Includes contents</Badge>
@@ -173,4 +187,4 @@ export function GfsGrantList({
   )
 }
 
-export type { GfsGrantListProps } from './types'
+export type { GfsAccessRole, GfsGrantListProps } from './types'

@@ -94,14 +94,9 @@ async function openSubjectPicker() {
 }
 
 function selectPermission(label: string) {
-  fireEvent.click(screen.getByRole('button', { name: 'Permissions' }))
-  fireEvent.click(screen.getByRole('menuitemcheckbox', { name: label }))
-}
-
-async function confirmGrantAccess() {
-  const dialog = await screen.findByRole('alertdialog', { name: 'Grant access?' })
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Grant access' }))
-  await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+  fireEvent.change(screen.getByRole('combobox', { name: 'Access role for selected recipients' }), {
+    target: { value: label === 'Read' ? 'read' : 'editor' },
+  })
 }
 
 async function openResourceMenu(resourceName: string) {
@@ -925,7 +920,7 @@ describe('GfsBrowser', () => {
     renderBrowser()
 
     await openManage('report.txt')
-    const manageDialog = await screen.findByRole('dialog', { name: 'Manage file report.txt' })
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
     const manageMenuTrigger = within(manageDialog).getByRole('button', {
       name: 'Actions for report.txt',
     })
@@ -1474,7 +1469,7 @@ describe('GfsBrowser', () => {
     await openManage('report.md')
     await waitFor(() => expect(mockGetAdminUsers).toHaveBeenCalledWith(''))
     await waitFor(() => expect(mockGetAdminTeams).toHaveBeenCalled())
-    const manageDialog = screen.getByRole('dialog', { name: 'Manage file report.md' })
+    const manageDialog = screen.getByRole('dialog', { name: 'Share file report.md' })
     const manageMenuTrigger = within(manageDialog).getByRole('button', {
       name: 'Actions for report.md',
     })
@@ -1492,15 +1487,14 @@ describe('GfsBrowser', () => {
     await openSubjectPicker()
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
     selectPermission('Read')
-    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
-    await confirmGrantAccess()
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }))
 
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenCalledWith({
         drive: 'main',
         resourceId: 'id-2',
         subjects: [{ type: 'user', id: '11111111-1111-1111-1111-111111111111' }],
-        permissions: ['read'],
+        permissions: ['read', 'share'],
         inherit: false,
       })
     )
@@ -1518,7 +1512,7 @@ describe('GfsBrowser', () => {
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
     selectPermission('Read')
 
-    expect(screen.getByRole('button', { name: 'Grant access' })).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Share' })).not.toBeDisabled()
   })
 
   it('does not expose share creation from a directory resource menu', async () => {
@@ -1540,10 +1534,8 @@ describe('GfsBrowser', () => {
     )
     expect(screen.queryByText('Manage folder')).toBeNull()
     await waitFor(() => expect(mockGetAdminUsers).toHaveBeenCalledWith(''))
-    expect(
-      await screen.findByRole('checkbox', { name: /Include contents of this folder/ })
-    ).toBeChecked()
-    const manageDialog = screen.getByRole('dialog', { name: 'Manage folder team-folder' })
+    expect(screen.queryByRole('checkbox', { name: /Include contents of this folder/ })).toBeNull()
+    const manageDialog = screen.getByRole('dialog', { name: 'Share folder team-folder' })
     const manageMenuTrigger = within(manageDialog).getByRole('button', {
       name: 'Actions for team-folder',
     })
@@ -1554,7 +1546,8 @@ describe('GfsBrowser', () => {
     await openSubjectPicker()
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
     selectPermission('Read')
-    expect(screen.getByRole('button', { name: 'Grant access' })).toBeEnabled()
+    expect(screen.getByRole('checkbox', { name: /Include contents of this folder/ })).toBeChecked()
+    expect(screen.getByRole('button', { name: 'Share' })).toBeEnabled()
   })
 
   it('lets an operator select team and operator subjects without typing UUIDs', async () => {
@@ -1571,8 +1564,7 @@ describe('GfsBrowser', () => {
     expect(within(screen.getByRole('listbox')).getByRole('option', { name: 'Ada Lovelace' }))
     fireEvent.click(await screen.findByRole('option', { name: 'Research' }))
     selectPermission('Read')
-    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
-    await confirmGrantAccess()
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }))
 
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenCalledWith(
@@ -1585,8 +1577,7 @@ describe('GfsBrowser', () => {
     await openSubjectPicker()
     fireEvent.click(await screen.findByRole('option', { name: 'Operator' }))
     selectPermission('Read')
-    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
-    await confirmGrantAccess()
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }))
 
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenLastCalledWith(
@@ -1610,8 +1601,7 @@ describe('GfsBrowser', () => {
     await openSubjectPicker()
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
     selectPermission('Write')
-    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
-    await confirmGrantAccess()
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }))
 
     expect((await screen.findByText('escalation_rejected')).getAttribute('role')).toBe('alert')
   })

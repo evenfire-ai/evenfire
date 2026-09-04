@@ -36,10 +36,12 @@ import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
 import { gfsVideoPreviewMimeType } from '@lib/gfsVideoPreview'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
+import type { GfsAccessRole } from '@/gfs/GfsGrantList'
 import {
   type GfsAgentSubjectOption,
   GfsDelegationPanel,
   type GfsDelegationSubjectOption,
+  type GfsGrantListItem,
 } from '@/gfs/delegation'
 import { GfsFilePicker } from '@/gfs/filePicker'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
@@ -239,6 +241,8 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const [renameDraft, setRenameDraft] = useState('')
   const [openLinkOpen, setOpenLinkOpen] = useState(false)
   const [manageOpen, setManageOpen] = useState(false)
+  const [shareDetailsOpen, setShareDetailsOpen] = useState(false)
+  const [updatingAccessRole, setUpdatingAccessRole] = useState(false)
   const [filePreview, setFilePreview] = useState<GfsPreviewResource | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
@@ -506,6 +510,36 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     } catch (revokeError) {
       if (failClosedOnAuthorizationError(revokeError)) return
       pushToast?.(describeGfsGrantError(revokeError).message, 'error')
+    }
+  }
+
+  const handleAccessRoleChange = async (
+    item: GfsGrantListItem,
+    label: string,
+    role: GfsAccessRole
+  ) => {
+    const requested =
+      item.subject.type === 'host'
+        ? role === 'editor'
+          ? ['read', 'write']
+          : ['read']
+        : role === 'editor'
+          ? ['read', 'write', 'delete', 'manage_acl', 'share']
+          : ['read', 'share']
+    const bits = requested.filter(bit => affordances?.grantableBits.includes(bit))
+    const subjectKey = item.subject.id
+      ? `${item.subject.type}:${item.subject.id}`
+      : item.subject.type
+    setUpdatingAccessRole(true)
+    try {
+      await ctrl.grant([subjectKey], bits, item.inherit)
+      pushToast?.(`${label} is now ${role === 'editor' ? 'an Editor' : 'Read-only'}`, 'success')
+      await ctrl.refreshGrants()
+    } catch (roleError) {
+      if (failClosedOnAuthorizationError(roleError)) return
+      pushToast?.(describeGfsGrantError(roleError).message, 'error')
+    } finally {
+      setUpdatingAccessRole(false)
     }
   }
 
@@ -996,6 +1030,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     setCreateFolderOpen(false)
     setRenameOpen(false)
     setDeleteOpen(false)
+    setShareDetailsOpen(false)
     setManageOpen(true)
   }
 
@@ -1516,7 +1551,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
             className="da-gfs-manage-dialog"
             role="dialog"
             aria-modal="true"
-            aria-label={`Manage ${currentIsFolder ? 'folder' : 'file'} ${current.name}`}
+            aria-label={`Share ${currentIsFolder ? 'folder' : 'file'} ${current.name}`}
           >
             <header className="da-gfs-manage-dialog__header">
               <span
@@ -1555,7 +1590,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                   </form>
                 ) : (
                   <span className="da-gfs-manage-dialog__title-row">
-                    <h3>{current.name}</h3>
+                    <h3>Share “{current.name}”</h3>
                     <GfsResourceMenu
                       resourceName={current.name}
                       onCopyLink={() => void handleCopyLink(current.gfsUri)}
@@ -1614,7 +1649,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                 ) : null}
                 <IconButton
                   autoFocus
-                  label="Close manage dialog"
+                  label="Close share dialog"
                   onClick={closeManage}
                   size="sm"
                   variant="ghost"
@@ -1703,8 +1738,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
               <section className="da-gfs-manage-section da-gfs-manage-section--access">
                 <div className="da-gfs-manage-section__header">
                   <div>
-                    <h4>Access</h4>
-                    <p className="muted">Control who can use this resource and what they can do.</p>
+                    <h4>Add people, teams, agents, or workflows</h4>
                   </div>
                 </div>
                 {loadingAffordances ? (
@@ -1725,6 +1759,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                       )}
                       isDirectory={currentIsFolder}
                       onGrant={handleGrant}
+                      onDetailViewChange={setShareDetailsOpen}
                     />
                   </>
                 ) : (
@@ -1732,29 +1767,30 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                 )}
               </section>
 
-              <section className="da-gfs-manage-section da-gfs-manage-section--grants">
-                <div className="da-gfs-manage-section__header">
-                  <div>
-                    <h4>Who has access</h4>
-                    <p className="muted">
-                      Existing direct grants and shares on this resource. Revoking is immediate.
-                    </p>
+              {!shareDetailsOpen ? (
+                <section className="da-gfs-manage-section da-gfs-manage-section--grants">
+                  <div className="da-gfs-manage-section__header">
+                    <div>
+                      <h4>People with access</h4>
+                    </div>
                   </div>
-                </div>
-                <GfsGrantList
-                  agents={agentSubjects}
-                  error={grantsError}
-                  items={ctrl.grants}
-                  loading={ctrl.loadingGrants || ctrl.loadingShares}
-                  onRevoke={(item, label) => void handleRevokeGrant(item.id, label)}
-                  onRevokeShare={(item, label) => void handleRevokeShare(item.id, label)}
-                  revoking={ctrl.revoking}
-                  revokingShare={ctrl.revokingShare}
-                  shareError={sharesError}
-                  shares={ctrl.shares}
-                  subjects={delegationSubjects}
-                />
-              </section>
+                  <GfsGrantList
+                    agents={agentSubjects}
+                    error={grantsError}
+                    items={ctrl.grants}
+                    loading={ctrl.loadingGrants || ctrl.loadingShares}
+                    onChangeRole={affordances?.canDelegate ? handleAccessRoleChange : undefined}
+                    onRevoke={(item, label) => void handleRevokeGrant(item.id, label)}
+                    onRevokeShare={(item, label) => void handleRevokeShare(item.id, label)}
+                    revoking={ctrl.revoking}
+                    revokingShare={ctrl.revokingShare}
+                    shareError={sharesError}
+                    shares={ctrl.shares}
+                    subjects={delegationSubjects}
+                    updatingRole={updatingAccessRole}
+                  />
+                </section>
+              ) : null}
             </div>
           </section>
         </div>

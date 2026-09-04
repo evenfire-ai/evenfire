@@ -1413,7 +1413,7 @@ export function GfsBrowser(): React.JSX.Element {
             className="cu-gfs-manage-dialog"
             role="dialog"
             aria-modal="true"
-            aria-label={`Manage ${selected.kind === 'directory' ? 'folder' : 'file'} ${selected.name}`}
+            aria-label={`Share ${selected.kind === 'directory' ? 'folder' : 'file'} ${selected.name}`}
           >
             <header className="cu-gfs-manage-dialog__header">
               <span
@@ -1445,7 +1445,7 @@ export function GfsBrowser(): React.JSX.Element {
                   />
                 ) : (
                   <span className="cu-gfs-manage-dialog__title-row">
-                    <h3>{selected.name}</h3>
+                    <h3>Share “{selected.name}”</h3>
                     <GfsResourceMenu
                       resourceName={selected.name}
                       resourceUri={selected.gfsUri}
@@ -1486,7 +1486,7 @@ export function GfsBrowser(): React.JSX.Element {
                   autoFocus
                   className="cu-gfs-manage-dialog__close"
                   variant="ghost"
-                  aria-label="Close manage dialog"
+                  aria-label="Close share dialog"
                   onClick={() => setSelected(null)}
                 >
                   <IconX width={18} height={18} />
@@ -1497,8 +1497,7 @@ export function GfsBrowser(): React.JSX.Element {
             <div className="cu-gfs-manage-dialog__body">
               <section className="cu-gfs-manage-section cu-gfs-manage-section--access">
                 <div className="cu-gfs-manage-section__header">
-                  <h4>Access</h4>
-                  <p>Control who can use this resource and what they can do.</p>
+                  <h4>Add people, teams, agents, or workflows</h4>
                 </div>
                 <GfsGrantPanel
                   resource={{

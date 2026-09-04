@@ -23,6 +23,7 @@ export interface GfsDelegationPanelProps {
   /** Directories offer the "Include contents" toggle (default ON); files always send inherit=false. */
   isDirectory: boolean
   onGrant: (subjectKeys: string[], bits: string[], inherit: boolean) => Promise<void>
+  onDetailViewChange?: (open: boolean) => void
 }
 
 /**
