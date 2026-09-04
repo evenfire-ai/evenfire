@@ -95,6 +95,20 @@ jobs:
         working-directory: packages/workflow-runtime-core
         run: npm run build
 
+      # These consumer suites execute the real producer source from a sibling
+      # deployable service. Install that producer's declared dependencies so
+      # Node resolves file dependencies from the producer directory in the
+      # same service-isolated shape used by CI.
+      - name: Install Control API producer dependencies
+        if: matrix.service == 'rpc-proxy'
+        working-directory: control-api
+        run: npm ci
+
+      - name: Install RPC Proxy producer dependencies
+        if: matrix.service == 'mcp-host'
+        working-directory: rpc-proxy
+        run: npm ci
+
       # keytar is a native Desktop dependency. When its prebuild is unavailable,
       # node-gyp requires libsecret development metadata on Linux.
       - name: Install Desktop native build prerequisite

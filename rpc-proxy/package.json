@@ -1,6 +1,6 @@
 {
   "name": "clerum-rpc-proxy",
-  "version": "0.1.72",
+  "version": "0.1.74",
   "description": "External-facing RPC proxy for tenant-scoped MCP access",
   "main": "dist/main.js",
   "engines": {
@@ -16,6 +16,7 @@
     "dev": "tsx src/main.ts"
   },
   "dependencies": {
+    "@clerum/action-context-contracts": "file:../packages/action-context-contracts",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "http-proxy": "^1.18.1",

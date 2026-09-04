@@ -2,6 +2,7 @@ import type { DbClient } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
 import {
+  type AccessAuthoritySession,
   type AuthorityCandidate,
   filterCandidatesForOperationTarget,
   loadPrincipalAuthoritySnapshot,
@@ -21,6 +22,12 @@ import {
   buildAccessPath,
   selectEquivalentAccessPath,
 } from './accessPath.js'
+import {
+  type ActionOperationId,
+  ActionOperationTargetError,
+  getActionOperationDefinition,
+  validateActionOperationTarget,
+} from './actionOperationRegistry.js'
 import {
   authorizationRevision,
   canonicalAccessPathSeeds,
@@ -46,8 +53,16 @@ import {
 } from './resourceIdentity.js'
 
 export type LiveAuthorizationInput = Readonly<{
-  session: ExternalSessionAuthorityContext
+  session: AccessAuthoritySession
   requiredCapability: unknown
+  resource: CanonicalResourceIdentity
+  operationTarget?: unknown
+  requestedAccessPathId?: string
+}>
+
+export type LiveActionAuthorizationInput = Readonly<{
+  session: AccessAuthoritySession
+  operationId: ActionOperationId
   resource: CanonicalResourceIdentity
   operationTarget?: unknown
   requestedAccessPathId?: string
@@ -91,6 +106,14 @@ export type LiveAuthorizationResult =
     }>
 
 type ResolverTransaction = <T>(work: (db: DbClient) => Promise<T>) => Promise<T>
+
+export type LiveAuthorizationOptions = Readonly<{
+  gateway?: Pick<K8sGateway, 'getResourceExact'>
+  budget?: AccessExecutionBudget
+  memo?: AuthorizationRequestMemo
+  transaction?: ResolverTransaction
+  correlationId?: string
+}>
 
 function validPathHandle(value: string | undefined): value is string {
   return typeof value === 'string' && /^ap1_[A-Za-z0-9_-]{43}$/.test(value)
@@ -335,15 +358,13 @@ async function resolveInTransaction(input: {
   })
 }
 
-export async function resolveLiveAuthorization(
+async function resolveLiveAuthorizationUsing(
   input: LiveAuthorizationInput,
-  options: {
-    gateway?: Pick<K8sGateway, 'getResourceExact'>
-    budget?: AccessExecutionBudget
-    memo?: AuthorizationRequestMemo
-    transaction?: ResolverTransaction
-    correlationId?: string
-  } = {}
+  options: LiveAuthorizationOptions,
+  targetValidator: (
+    capability: AccessCapability,
+    resource: CanonicalResourceIdentity
+  ) => ReturnType<typeof validateOperationTarget>
 ): Promise<LiveAuthorizationResult> {
   const ownedBudget = options.budget ? null : AccessExecutionBudget.create('action')
   const budget = options.budget ?? ownedBudget!
@@ -375,13 +396,12 @@ export async function resolveLiveAuthorization(
     }
     let operationTarget: ReturnType<typeof validateOperationTarget>
     try {
-      operationTarget = validateOperationTarget({
-        capability: input.requiredCapability,
-        resource,
-        operationTarget: input.operationTarget,
-      })
+      operationTarget = targetValidator(input.requiredCapability, resource)
     } catch (error) {
-      if (error instanceof OperationTargetValidationError) {
+      if (
+        error instanceof OperationTargetValidationError ||
+        error instanceof ActionOperationTargetError
+      ) {
         return { status: 'invalid', code: 'invalid_operation_target' }
       }
       throw error
@@ -412,4 +432,49 @@ export async function resolveLiveAuthorization(
   } finally {
     ownedBudget?.close()
   }
+}
+
+export async function resolveLiveAuthorization(
+  input: LiveAuthorizationInput,
+  options: LiveAuthorizationOptions = {}
+): Promise<LiveAuthorizationResult> {
+  return resolveLiveAuthorizationUsing(input, options, (capability, resource) =>
+    validateOperationTarget({ capability, resource, operationTarget: input.operationTarget })
+  )
+}
+
+/**
+ * Resolves one canonical PR 2 action without passing its exact target through
+ * the legacy capability-target table. The shared operation registry owns target
+ * shape and resource binding. The common live resolver continues to own current
+ * session, grant, selected-path, revision, and exact operational binding checks.
+ */
+export async function resolveLiveActionAuthorization(
+  input: LiveActionAuthorizationInput,
+  options: LiveAuthorizationOptions = {}
+): Promise<LiveAuthorizationResult> {
+  let operation
+  try {
+    operation = getActionOperationDefinition(input.operationId)
+  } catch {
+    return { status: 'invalid', code: 'invalid_operation_target' }
+  }
+  const requiredCapability = operation.requiredCapabilities[0]
+  if (!requiredCapability || operation.requiredCapabilities.length !== 1) {
+    return { status: 'denied', code: 'unknown_capability' }
+  }
+  const request: LiveAuthorizationInput = {
+    session: input.session,
+    requiredCapability,
+    resource: input.resource,
+    operationTarget: input.operationTarget,
+    ...(input.requestedAccessPathId ? { requestedAccessPathId: input.requestedAccessPathId } : {}),
+  }
+  return resolveLiveAuthorizationUsing(request, options, (_capability, resource) =>
+    validateActionOperationTarget({
+      operationId: input.operationId,
+      resource,
+      operationTarget: input.operationTarget,
+    })
+  )
 }

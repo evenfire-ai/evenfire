@@ -1,3 +1,4 @@
+import { type AuthorizedActionV2, actionAuthorityCheckpointRequest } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
 
@@ -276,6 +277,7 @@ export type HostWakeApiResponse =
   | { kind: 'unknown' }
   | { kind: 'rate-limited'; retryAfterSeconds: number }
   | { kind: 'auth'; status: number }
+  | { kind: 'authority'; status: 400 | 403 | 404 | 409 | 503; code: string }
 
 async function drainBody(response: Response): Promise<void> {
   try {
@@ -287,16 +289,61 @@ async function drainBody(response: Response): Promise<void> {
 
 export async function requestHostWakeFromControlApi(
   hostRef: string,
-  rpcAccessToken: string
+  rpcAccessToken: string,
+  options: { authorizedActionV2?: AuthorizedActionV2; wakeReason?: string } = {}
 ): Promise<HostWakeApiResponse> {
+  const v2 = options.authorizedActionV2
   const response = await fetch(
-    `${controlApiBaseUrl()}/rpc/hosts/${encodeURIComponent(hostRef)}/wake`,
+    v2
+      ? `${controlApiBaseUrl()}/internal/action-authority/hosts/${encodeURIComponent(hostRef)}/wake`
+      : `${controlApiBaseUrl()}/rpc/hosts/${encodeURIComponent(hostRef)}/wake`,
     {
       method: 'POST',
-      headers: controlApiHeaders(rpcAccessToken),
+      headers: v2
+        ? {
+            authorization: `Bearer ${config.controlApiServiceToken}`,
+            'content-type': 'application/json',
+            'x-service-token': config.controlApiServiceName,
+          }
+        : controlApiHeaders(rpcAccessToken),
+      ...(v2
+        ? {
+            body: JSON.stringify({
+              binding: actionAuthorityCheckpointRequest(v2.claims, v2.bound),
+              wakeReason: options.wakeReason ?? 'message_retry',
+            }),
+          }
+        : {}),
       signal: upstreamAbortSignal(),
     }
   )
+
+  if (v2 && [400, 403, 404, 409, 503].includes(response.status)) {
+    let parsed: unknown
+    try {
+      parsed = await response.json()
+    } catch {
+      throw new Error('Control API v2 host wake returned an invalid authority response')
+    }
+    const value = parsed as { status?: unknown; code?: unknown }
+    if (
+      ![
+        'invalid_binding',
+        'denied',
+        'not_found',
+        'access_path_stale',
+        'authority_unavailable',
+      ].includes(String(value.status)) ||
+      typeof value.code !== 'string'
+    ) {
+      throw new Error('Control API v2 host wake returned an invalid authority response')
+    }
+    return {
+      kind: 'authority',
+      status: response.status as 400 | 403 | 404 | 409 | 503,
+      code: value.code,
+    }
+  }
 
   if (response.status === 401 || response.status === 403) {
     await drainBody(response)
