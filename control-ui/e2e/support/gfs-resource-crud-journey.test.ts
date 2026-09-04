@@ -27,7 +27,9 @@ export async function exerciseGfsResourceCrudJourney({
     await expect(row).toBeVisible({ timeout: 20_000 })
     const actionsButton = row.getByRole('button', { name: `Actions for ${fixture.name}` })
     await actionsButton.click()
-    const copyButton = page.getByRole('menuitem', { name: 'Copy GFS link' })
+    await page.getByRole('menuitem', { name: 'Share' }).hover()
+    const shareMenu = page.getByRole('menu', { name: `Share options for ${fixture.name}` })
+    const copyButton = shareMenu.getByRole('menuitem', { name: 'Copy link' })
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], {
       origin: new URL(baseUi).origin,
     })
@@ -35,7 +37,11 @@ export async function exerciseGfsResourceCrudJourney({
     await copyButton.click()
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(fixture.uri)
     await actionsButton.click()
-    await page.getByRole('menuitem', { name: 'Manage access' }).click()
+    await page.getByRole('menuitem', { name: 'Share' }).hover()
+    await page
+      .getByRole('menu', { name: `Share options for ${fixture.name}` })
+      .getByRole('menuitem', { name: 'Share' })
+      .click()
     await expect(
       page.getByRole('dialog', { name: `Manage folder ${fixture.name}`, exact: true })
     ).toBeVisible()

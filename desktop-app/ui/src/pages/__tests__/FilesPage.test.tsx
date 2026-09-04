@@ -95,6 +95,14 @@ async function openManageDialog(resourceName: string) {
   await act(async () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
   })
+  await act(async () => {
+    fireEvent.click(
+      within(screen.getByRole('menu', { name: `Share options for ${resourceName}` })).getByRole(
+        'menuitem',
+        { name: 'Share' }
+      )
+    )
+  })
 }
 
 async function chooseManageAction(resourceName: string, actionName: string) {
@@ -1174,6 +1182,14 @@ describe('FilesPage', () => {
     })
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
+    })
+    await act(async () => {
+      fireEvent.click(
+        within(screen.getByRole('menu', { name: 'Share options for notes.txt' })).getByRole(
+          'menuitem',
+          { name: 'Share' }
+        )
+      )
     })
     // The manage modal opens (titled for the current selection — the mocked
     // controller does not navigate, so it stays on the parent folder).
@@ -2994,15 +3010,20 @@ describe('FilesPage', () => {
     expect(openChild).toHaveBeenCalledWith(nestedFolder)
 
     fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
-    const manageItem = screen.getByRole('menuitem', { name: 'Share' })
-    await waitFor(() => expect(document.activeElement).toBe(manageItem))
-    fireEvent.keyDown(manageItem, { key: 'ArrowDown' })
+    const shareItem = screen.getByRole('menuitem', { name: 'Share' })
+    await waitFor(() => expect(document.activeElement).toBe(shareItem))
+    fireEvent.keyDown(shareItem, { key: 'ArrowDown' })
     expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Open folder' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Open folder' }))
     expect(openChild).toHaveBeenCalledTimes(2)
 
     fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy GFS link' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
+    fireEvent.click(
+      within(screen.getByRole('menu', { name: 'Share options for Nested' })).getByRole('menuitem', {
+        name: 'Copy link',
+      })
+    )
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('gfs://main/nested-1'))
   })
 

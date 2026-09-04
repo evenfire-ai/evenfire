@@ -12570,6 +12570,24 @@ button.cu-gfs-tree__button:focus-visible,
   scrollbar-width: thin;
 }
 
+.cu-gfs-resource-menu__submenu {
+  position: fixed;
+  top: auto;
+  right: auto;
+  z-index: 61;
+  width: min(15rem, calc(100vw - (var(--cu-space-4) * 2)));
+  max-height: calc(100vh - (var(--cu-space-4) * 2));
+  display: grid;
+  gap: 0;
+  overflow-y: auto;
+  padding: var(--cu-space-1);
+  border: 1px solid var(--cu-border);
+  border-radius: var(--cu-radius);
+  background: var(--cu-bg-elevated);
+  box-shadow: var(--cu-shadow);
+  scrollbar-width: thin;
+}
+
 .cu-gfs-resource-menu__group {
   display: grid;
 }
@@ -12591,6 +12609,21 @@ button.cu-gfs-tree__button:focus-visible,
   background: var(--cu-surface-hover);
 }
 
+.cu-gfs-resource-menu__trailing {
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: 0 0 1.5rem;
+  display: grid;
+  place-items: center;
+  margin-left: auto;
+  color: var(--cu-text-muted);
+}
+
+.cu-gfs-resource-menu__trailing svg {
+  width: 1.125rem;
+  height: 1.125rem;
+}
+
 .cu-gfs-resource-menu__icon {
   width: 1.5rem;
   height: 1.5rem;
@@ -12603,6 +12636,23 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-resource-menu__icon svg {
   width: 1.125rem;
   height: 1.125rem;
+}
+
+.cu-gfs-resource-menu__submenu .cu-gfs-resource-menu__item.cu-kebab__item {
+  min-height: 2.75rem;
+  padding: 0 var(--cu-space-3);
+  gap: var(--cu-space-2);
+  border-radius: calc(var(--cu-radius-sm) - 2px);
+  color: var(--cu-text);
+  font-size: var(--cu-font-size-md);
+  font-weight: var(--cu-font-weight-medium);
+  line-height: normal;
+}
+
+.cu-gfs-resource-menu__submenu .cu-gfs-resource-menu__item.cu-kebab__item:hover:not(:disabled),
+.cu-gfs-resource-menu__submenu .cu-gfs-resource-menu__item.cu-kebab__item:focus-visible {
+  color: var(--cu-text);
+  background: var(--cu-surface-hover);
 }
 
 .cu-gfs-resource-menu__item.cu-kebab__item--danger {

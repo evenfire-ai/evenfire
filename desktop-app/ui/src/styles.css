@@ -14770,7 +14770,24 @@ pre {
   scrollbar-width: thin;
 }
 
-.da-gfs-resource-menu__panel .ui-menu-item {
+.da-gfs-resource-menu__submenu {
+  position: fixed;
+  z-index: calc(var(--layer-dropdown) + 61);
+  width: min(240px, calc(100vw - (var(--space-4) * 2)));
+  max-height: calc(100vh - (var(--space-4) * 2));
+  display: grid;
+  gap: 0;
+  overflow-y: auto;
+  padding: var(--space-1-5);
+  border: 1px solid rgba(var(--edge-rgb), 0.46);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev-2);
+  box-shadow: var(--shadow-hard);
+  scrollbar-width: thin;
+}
+
+.da-gfs-resource-menu__panel .ui-menu-item,
+.da-gfs-resource-menu__submenu .ui-menu-item {
   min-height: 44px;
   padding: 0 var(--space-2-5);
   gap: var(--space-2);
@@ -14782,30 +14799,49 @@ pre {
 }
 
 .da-gfs-resource-menu__panel .ui-menu-item:hover:enabled,
-.da-gfs-resource-menu__panel .ui-menu-item:focus-visible {
+.da-gfs-resource-menu__panel .ui-menu-item:focus-visible,
+.da-gfs-resource-menu__submenu .ui-menu-item:hover:enabled,
+.da-gfs-resource-menu__submenu .ui-menu-item:focus-visible {
   border-color: transparent;
   background: var(--surface-hover);
   color: var(--text);
 }
 
-.da-gfs-resource-menu__panel .ui-menu-item__icon {
+.da-gfs-resource-menu__panel .ui-menu-item__icon,
+.da-gfs-resource-menu__submenu .ui-menu-item__icon {
   width: 24px;
   height: 24px;
   flex: 0 0 24px;
   color: var(--text-dim);
 }
 
-.da-gfs-resource-menu__panel .ui-menu-item__icon svg {
+.da-gfs-resource-menu__panel .ui-menu-item__icon svg,
+.da-gfs-resource-menu__submenu .ui-menu-item__icon svg {
   width: 18px;
   height: 18px;
 }
 
-.da-gfs-resource-menu__panel .ui-menu-item--danger {
+.da-gfs-resource-menu__panel .ui-menu-item__trailing {
+  width: 18px;
+  height: 18px;
+  margin-left: auto;
+  color: var(--text-dim);
+}
+
+.da-gfs-resource-menu__panel .ui-menu-item__trailing svg {
+  width: 18px;
+  height: 18px;
+}
+
+.da-gfs-resource-menu__panel .ui-menu-item--danger,
+.da-gfs-resource-menu__submenu .ui-menu-item--danger {
   color: var(--danger);
 }
 
 .da-gfs-resource-menu__panel .ui-menu-item--danger:hover:enabled,
-.da-gfs-resource-menu__panel .ui-menu-item--danger:focus-visible {
+.da-gfs-resource-menu__panel .ui-menu-item--danger:focus-visible,
+.da-gfs-resource-menu__submenu .ui-menu-item--danger:hover:enabled,
+.da-gfs-resource-menu__submenu .ui-menu-item--danger:focus-visible {
   background: rgba(var(--danger-rgb), 0.12);
   color: var(--danger);
 }

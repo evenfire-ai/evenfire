@@ -3,13 +3,15 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { IconFolder, IconSharedFiles } from '@components/Sidebar/icons'
+import { IconFolder } from '@components/Sidebar/icons'
 import {
+  IconChevronRight,
   IconCopy,
   IconDotsVertical,
   IconDownload,
   IconEye,
   IconPencil,
+  IconShare,
   IconTrash,
   IconUpload,
 } from '@components/icons'
@@ -22,6 +24,7 @@ type GfsResourceMenuAction = {
   key: string
   label: string
   onClick: () => void
+  submenu?: boolean
 }
 
 function menuAction(
@@ -29,7 +32,7 @@ function menuAction(
   label: string,
   icon: ReactNode,
   onClick: (() => void) | undefined,
-  options?: Pick<GfsResourceMenuAction, 'danger' | 'disabled'>
+  options?: Pick<GfsResourceMenuAction, 'danger' | 'disabled' | 'submenu'>
 ): GfsResourceMenuAction | null {
   return onClick ? { ...options, icon, key, label, onClick } : null
 }
@@ -52,18 +55,30 @@ export function GfsResourceMenu({
   resourceUri,
 }: GfsResourceMenuProps) {
   const [open, setOpen] = useState(false)
+  const [shareOpen, setShareOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
+  const submenuRef = useRef<HTMLDivElement | null>(null)
+  const shareTriggerRef = useRef<HTMLButtonElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const replaceInputRef = useRef<HTMLInputElement | null>(null)
   const [menuPosition, setMenuPosition] = useState<{ left: number; top: number } | null>(null)
-  const closeMenu = useCallback(() => setOpen(false), [])
+  const [submenuPosition, setSubmenuPosition] = useState<{ left: number; top: number } | null>(null)
+  const closeMenu = useCallback(() => {
+    setOpen(false)
+    setShareOpen(false)
+  }, [])
 
   useEffect(() => {
     if (!open) return
     function handlePointerDown(event: MouseEvent) {
       const target = event.target as Node
-      if (rootRef.current?.contains(target) || menuRef.current?.contains(target)) return
+      if (
+        rootRef.current?.contains(target) ||
+        menuRef.current?.contains(target) ||
+        submenuRef.current?.contains(target)
+      )
+        return
       closeMenu()
     }
     document.addEventListener('mousedown', handlePointerDown)
@@ -108,21 +123,88 @@ export function GfsResourceMenu({
     }
   }, [open, positionMenu])
 
+  const positionSubmenu = useCallback(() => {
+    const trigger = shareTriggerRef.current
+    const submenu = submenuRef.current
+    if (!trigger || !submenu) return
+
+    const triggerRect = trigger.getBoundingClientRect()
+    const submenuRect = submenu.getBoundingClientRect()
+    const edgeInset = 8
+    const gap = 6
+    const viewportWidth = window.innerWidth
+    const viewportHeight = window.innerHeight
+    const opensLeft = triggerRect.right + gap + submenuRect.width > viewportWidth - edgeInset
+    const preferredLeft = opensLeft
+      ? triggerRect.left - submenuRect.width - gap
+      : triggerRect.right + gap
+    const maxLeft = Math.max(edgeInset, viewportWidth - submenuRect.width - edgeInset)
+    const left = Math.min(Math.max(edgeInset, preferredLeft), maxLeft)
+    const maxTop = Math.max(edgeInset, viewportHeight - submenuRect.height - edgeInset)
+    const top = Math.min(Math.max(edgeInset, triggerRect.top), maxTop)
+
+    setSubmenuPosition({ left, top })
+  }, [])
+
+  useLayoutEffect(() => {
+    if (!shareOpen) {
+      setSubmenuPosition(null)
+      return
+    }
+
+    positionSubmenu()
+    window.addEventListener('resize', positionSubmenu)
+    window.addEventListener('scroll', positionSubmenu, true)
+    return () => {
+      window.removeEventListener('resize', positionSubmenu)
+      window.removeEventListener('scroll', positionSubmenu, true)
+    }
+  }, [positionSubmenu, shareOpen])
+
   useEffect(() => {
     if (!open) return
     menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus()
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
-        closeMenu()
-        triggerRef.current?.focus()
+        if (shareOpen) {
+          event.preventDefault()
+          setShareOpen(false)
+          shareTriggerRef.current?.focus()
+        } else {
+          closeMenu()
+          triggerRef.current?.focus()
+        }
       }
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [closeMenu, open])
+  }, [closeMenu, open, shareOpen])
+
+  useEffect(() => {
+    if (!shareOpen) return
+    submenuRef.current
+      ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
+      ?.focus()
+  }, [shareOpen])
 
   function handleMenuKeyDown(event: ReactKeyboardEvent<HTMLElement>): void {
-    if (!open || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+    if (!open) return
+    if (event.key === 'ArrowRight' && event.target === shareTriggerRef.current) {
+      event.preventDefault()
+      setShareOpen(true)
+      return
+    }
+    if (
+      event.key === 'ArrowLeft' &&
+      shareOpen &&
+      submenuRef.current?.contains(document.activeElement)
+    ) {
+      event.preventDefault()
+      setShareOpen(false)
+      shareTriggerRef.current?.focus()
+      return
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
     const items = Array.from(
       event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
     )
@@ -144,7 +226,14 @@ export function GfsResourceMenu({
 
   const actionGroups: GfsResourceMenuAction[][] = [
     [
-      menuAction('share', 'Share', <IconSharedFiles />, onManage),
+      menuAction(
+        'share',
+        'Share',
+        <IconShare />,
+        onManage ? () => setShareOpen(value => !value) : undefined,
+        { submenu: true }
+      ),
+      onManage ? null : menuAction('copy-link', 'Copy link', <IconCopy />, onCopyLink),
       menuAction('preview', 'Preview', <IconEye />, onPreview),
     ].filter(isMenuAction),
     [
@@ -165,7 +254,6 @@ export function GfsResourceMenu({
       ),
     ].filter(isMenuAction),
     [
-      menuAction('copy-link', 'Copy GFS link', <IconCopy />, onCopyLink),
       menuAction('rename', 'Rename', <IconPencil />, onRename),
       menuAction('move', 'Move to…', <IconFolder />, onMove),
     ].filter(isMenuAction),
@@ -185,53 +273,122 @@ export function GfsResourceMenu({
         ref={triggerRef}
         onClick={event => {
           event.stopPropagation()
-          setOpen(current => !current)
+          if (open) {
+            closeMenu()
+          } else {
+            setOpen(true)
+          }
         }}
       >
         <IconDotsVertical width={18} height={18} />
       </button>
       {open
         ? createPortal(
-            <div
-              className="cu-gfs-resource-menu__menu cu-kebab__menu"
-              ref={menuRef}
-              role="menu"
-              style={
-                menuPosition
-                  ? { left: menuPosition.left, top: menuPosition.top }
-                  : { left: 0, top: 0, visibility: 'hidden' }
-              }
-              onKeyDown={handleMenuKeyDown}
-            >
-              {actionGroups.map((group, groupIndex) => (
-                <span key={`group-${groupIndex}`} className="cu-gfs-resource-menu__group">
-                  {groupIndex > 0 ? (
-                    <span className="cu-gfs-resource-menu__separator" role="separator" />
-                  ) : null}
-                  {group.map(action => (
+            <>
+              <div
+                className="cu-gfs-resource-menu__menu cu-kebab__menu"
+                ref={menuRef}
+                role="menu"
+                aria-label={`Actions for ${resourceName}`}
+                style={
+                  menuPosition
+                    ? { left: menuPosition.left, top: menuPosition.top }
+                    : { left: 0, top: 0, visibility: 'hidden' }
+                }
+                onKeyDown={handleMenuKeyDown}
+              >
+                {actionGroups.map((group, groupIndex) => (
+                  <span key={`group-${groupIndex}`} className="cu-gfs-resource-menu__group">
+                    {groupIndex > 0 ? (
+                      <span className="cu-gfs-resource-menu__separator" role="separator" />
+                    ) : null}
+                    {group.map(action => (
+                      <button
+                        aria-expanded={action.submenu ? shareOpen : undefined}
+                        aria-haspopup={action.submenu ? 'menu' : undefined}
+                        data-gfs-action={action.key}
+                        key={action.key}
+                        type="button"
+                        role="menuitem"
+                        className={`cu-gfs-resource-menu__item cu-kebab__item${
+                          action.danger ? ' cu-kebab__item--danger' : ''
+                        }`}
+                        disabled={action.disabled}
+                        ref={action.submenu ? shareTriggerRef : undefined}
+                        title={action.key === 'copy-link' ? resourceUri : undefined}
+                        onMouseEnter={() => setShareOpen(action.submenu === true)}
+                        onClick={event => {
+                          event.stopPropagation()
+                          if (action.submenu) {
+                            action.onClick()
+                          } else {
+                            run(action.onClick)
+                          }
+                        }}
+                      >
+                        <span className="cu-gfs-resource-menu__icon" aria-hidden="true">
+                          {action.icon}
+                        </span>
+                        <span>{action.label}</span>
+                        {action.submenu ? (
+                          <span className="cu-gfs-resource-menu__trailing" aria-hidden="true">
+                            <IconChevronRight width={18} height={18} />
+                          </span>
+                        ) : null}
+                      </button>
+                    ))}
+                  </span>
+                ))}
+              </div>
+              {shareOpen && onManage ? (
+                <div
+                  aria-label={`Share options for ${resourceName}`}
+                  className="cu-gfs-resource-menu__submenu"
+                  ref={submenuRef}
+                  role="menu"
+                  style={
+                    submenuPosition
+                      ? { left: submenuPosition.left, top: submenuPosition.top }
+                      : { left: 0, top: 0, visibility: 'hidden' }
+                  }
+                  onKeyDown={handleMenuKeyDown}
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="cu-gfs-resource-menu__item cu-kebab__item"
+                    data-gfs-action="share-access"
+                    onClick={event => {
+                      event.stopPropagation()
+                      run(onManage)
+                    }}
+                  >
+                    <span className="cu-gfs-resource-menu__icon" aria-hidden="true">
+                      <IconShare />
+                    </span>
+                    <span>Share</span>
+                  </button>
+                  {onCopyLink ? (
                     <button
-                      key={action.key}
                       type="button"
                       role="menuitem"
-                      className={`cu-gfs-resource-menu__item cu-kebab__item${
-                        action.danger ? ' cu-kebab__item--danger' : ''
-                      }`}
-                      disabled={action.disabled}
-                      title={action.key === 'copy-link' ? resourceUri : undefined}
+                      className="cu-gfs-resource-menu__item cu-kebab__item"
+                      data-gfs-action="copy-link"
+                      title={resourceUri}
                       onClick={event => {
                         event.stopPropagation()
-                        run(action.onClick)
+                        run(onCopyLink)
                       }}
                     >
                       <span className="cu-gfs-resource-menu__icon" aria-hidden="true">
-                        {action.icon}
+                        <IconCopy />
                       </span>
-                      <span>{action.label}</span>
+                      <span>Copy link</span>
                     </button>
-                  ))}
-                </span>
-              ))}
-            </div>,
+                  ) : null}
+                </div>
+              ) : null}
+            </>,
             document.body
           )
         : null}
