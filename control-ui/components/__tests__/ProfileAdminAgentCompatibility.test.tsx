@@ -128,6 +128,15 @@ afterEach(() => {
 })
 
 describe('profile-admin agent compatibility access', () => {
+  it('renders team agent loading skeleton rows as listitems', () => {
+    vi.mocked(api.getAdminTeamAgents).mockReturnValue(new Promise(() => {}))
+
+    renderTeamDetails()
+
+    const list = screen.getByRole('list')
+    expect(within(list).getAllByRole('listitem')).toHaveLength(3)
+  })
+
   it('removes only owned Context grants when a member loses final agent access', async () => {
     vi.mocked(api.getAdminUserContexts)
       .mockResolvedValueOnce({ userId: 'user-1', contextIds: ['ctx-alpha', 'ctx-unrelated'] })

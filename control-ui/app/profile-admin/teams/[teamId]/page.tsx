@@ -954,7 +954,7 @@ export default function TeamDetailsPage() {
                 {initialLoading ? (
                   <div role="list">
                     {[1, 2, 3].map(i => (
-                      <div key={i} className="cu-skeleton--row">
+                      <div key={i} className="cu-skeleton--row" role="listitem">
                         <div
                           className="cu-skeleton cu-skeleton--cell"
                           style={{ width: '10rem' }}
