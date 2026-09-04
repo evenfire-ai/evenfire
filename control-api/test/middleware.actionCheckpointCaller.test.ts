@@ -26,8 +26,8 @@ describe('requireActionCheckpointCaller', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockedConfig.internalServiceTokens = {
-      'rpc-proxy': 'rpc-proxy-token-1234567890',
-      'external-rest-api': 'external-token-1234567890',
+      'rpc-proxy': 'rpc-proxy-token1',
+      'external-rest-api': 'external-token-1',
     }
   })
 
@@ -93,7 +93,7 @@ describe('requireActionCheckpointCaller', () => {
   it('composes the existing rpc-proxy service-token verifier', async () => {
     const response = await request(app())
       .post('/checkpoint')
-      .set('authorization', 'Bearer rpc-proxy-token-1234567890')
+      .set('authorization', 'Bearer rpc-proxy-token1')
       .set('x-service-token', 'rpc-proxy')
 
     expect(response.status).toBe(200)
