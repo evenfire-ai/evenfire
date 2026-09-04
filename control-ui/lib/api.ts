@@ -126,7 +126,14 @@ export function formatApiError(res: Response, text: string): Error {
                       ? "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
                       : detail === 'member_registration_misconfigured'
                         ? 'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
-                        : detail
+                        : // Emitted by the control-api proxy ROUTE, not by control-api:
+                          // the pod's pre-auth body budget is full, most often because a
+                          // large upload is in flight. apiSend never reads response
+                          // headers, so the Retry-After sent with it is unreachable from
+                          // here — the wait has to be stated in words instead.
+                          detail === 'proxy_busy'
+                          ? 'The server is busy handling a large request. Wait a moment and try again.'
+                          : detail
   const error = new Error(`${res.status} ${res.statusText} - ${friendlyDetail}`)
   ;(error as Error & { status?: number }).status = res.status
   // Preserve the machine-readable error code and full JSON body so callers can

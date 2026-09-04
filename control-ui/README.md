@@ -5,7 +5,7 @@ Admin dashboard for the control plane. A Next.js (App Router) React app that man
 ## How It Works
 
 - The browser only talks to same-origin paths: all API calls go to `/control-api/*` (base overridable via `NEXT_PUBLIC_CONTROL_API_BASE_URL`).
-- A Next.js route handler (`app/control-api/[...path]/route.ts`) proxies those requests server-side to `CONTROL_API_INTERNAL_URL` (default `http://127.0.0.1:8090`), stripping hop-by-hop headers, with a 30 s upstream timeout.
+- A Next.js route handler (`app/control-api/[...path]/route.ts`) proxies those requests server-side to `CONTROL_API_INTERNAL_URL` (default `http://127.0.0.1:8090`), stripping hop-by-hop headers. It buffers each request body before control-api authenticates it, so the per-request cap, the pod-wide in-flight byte budget, and the upstream timeout below are all enforced there.
 - Dashboard pages redirect unauthenticated visitors to the login page — most via `<AuthGate>` (`components/AuthGate`), either directly or through a section shell (e.g. `/cost/*` via `CostShell`); the rest use an equivalent `useAuth` redirect.
 
 ## Authentication
@@ -49,13 +49,25 @@ Routes not in the sidebar: `/control-admins/new` (invite a control admin), `/plu
 
 ## Configuration
 
-| Variable                                    | Explanation                                                                       | Canonical example                                         |
-| ------------------------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| `CONTROL_API_INTERNAL_URL`                  | Server-side proxy target for `/control-api/*` requests.                           | `http://control-api.control-plane.svc.cluster.local:8090` |
-| `CONTROL_UI_PUBLIC_TOKEN_CSRF_SECRET`       | HMAC secret for CSRF tokens on public token pages (invitations, password resets). | random string (set via `control-ui-secrets`)              |
-| `NEXT_PUBLIC_CONTROL_API_BASE_URL`          | Browser-side API base path; defaults to the same-origin `/control-api` proxy.     | `/control-api`                                            |
-| `NEXT_PUBLIC_CLERUM_ENABLE_LOCAL_TEMPLATES` | Shows local recipe templates in the recipe editor.                                | `true`                                                    |
-| `PORT`                                      | Inert — the Docker `CMD` runs `next start -p 3000`, and `-p` overrides `PORT`.    | `3000`                                                    |
+| Variable                                     | Explanation                                                                                  | Canonical example                                         |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `CONTROL_API_INTERNAL_URL`                   | Server-side proxy target for `/control-api/*` requests.                                      | `http://control-api.control-plane.svc.cluster.local:8090` |
+| `CONTROL_API_PROXY_TIMEOUT_MS`               | Upstream timeout for proxied body-bearing requests. GET/HEAD are never timed out.            | `300000`                                                  |
+| `CONTROL_UI_PROXY_MAX_BODY_BYTES`            | Largest single request body the proxy will buffer, before auth. Over it: `413`.              | `25165824` (24MiB)                                        |
+| `CONTROL_UI_PROXY_MAX_INFLIGHT_BODY_BYTES`   | Pre-auth body bytes buffered pod-wide at once. Over it: `429` + `Retry-After`.               | `201326592` (192MiB)                                      |
+| `CONTROL_UI_PROXY_BODY_READ_IDLE_TIMEOUT_MS` | Abort a request body that stalls mid-read for this long. Over it: `408`.                     | `30000`                                                   |
+| `CONTROL_UI_GFS_UPLOAD_PROXY_TIMEOUT_MS`     | Upstream timeout for raw GFS Upload v2 part PUTs only, separate from the JSON timeout above. | `600000`                                                  |
+| `CONTROL_UI_PUBLIC_TOKEN_CSRF_SECRET`        | HMAC secret for CSRF tokens on public token pages (invitations, password resets).            | random string (set via `control-ui-secrets`)              |
+| `NEXT_PUBLIC_CONTROL_API_BASE_URL`           | Browser-side API base path; defaults to the same-origin `/control-api` proxy.                | `/control-api`                                            |
+| `NEXT_PUBLIC_CLERUM_ENABLE_LOCAL_TEMPLATES`  | Shows local recipe templates in the recipe editor.                                           | `true`                                                    |
+| `PORT`                                       | Inert — the Docker `CMD` runs `next start -p 3000`, and `-p` overrides `PORT`.               | `3000`                                                    |
+
+Raw GFS Upload v2 part PUTs are the exception to the two generic proxy settings
+above: each part is capped at a fixed **16 MiB** (`GFS_UPLOAD_MAX_PART_BYTES` in
+`app/control-api/[...path]/route.ts`, not `CONTROL_UI_PROXY_MAX_BODY_BYTES`), and
+their upstream timeout is `CONTROL_UI_GFS_UPLOAD_PROXY_TIMEOUT_MS`, not
+`CONTROL_API_PROXY_TIMEOUT_MS`. Both still count against the shared in-flight byte
+budget.
 
 ## Ports
 

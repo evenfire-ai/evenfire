@@ -41,8 +41,11 @@ spec:
               cpu: 25m
               memory: 128Mi
 ---
-# control-ui: 512Mi — the /control-api proxy route handler buffers a full
-# arrayBuffer copy (~22.4MB for a 16MB upload) per in-flight request.
+# control-ui: 512Mi — the /control-api proxy route handler buffers each request
+# body twice while it reads (the chunk list plus the contiguous copy it is
+# flattened into), so an in-flight 16MB upload part peaks near 32MB, not ~22.4MB.
+# Concurrent requests are bounded by the in-flight byte budget in
+# app/control-api/[...path]/route.ts rather than by this limit.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
