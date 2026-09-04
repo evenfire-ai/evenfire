@@ -11,7 +11,7 @@ import {
   IconEye,
   IconMoreVertical,
   IconPlus,
-  IconSettings,
+  IconTeams,
   IconTrash,
 } from '@components/SidebarNav/icons'
 import type { GfsResourceMenuProps } from './types'
@@ -169,7 +169,7 @@ export function GfsResourceMenu({
 
   const actionGroups = [
     [
-      menuAction('manage', 'Manage', <IconSettings />, onManage),
+      menuAction('manage', 'Share', <IconTeams />, onManage),
       menuAction('open-folder', 'Open folder', <IconContexts />, onOpen),
       menuAction('open-gfs-link', 'Open GFS link', <IconConnectors />, onOpenGfsLink),
       menuAction('preview', 'Preview', <IconEye />, onPreview),

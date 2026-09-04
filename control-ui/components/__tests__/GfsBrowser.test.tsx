@@ -110,7 +110,7 @@ async function openResourceMenu(resourceName: string) {
 
 async function openManage(resourceName: string) {
   await openResourceMenu(resourceName)
-  fireEvent.click(screen.getByRole('menuitem', { name: 'Manage access' }))
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
 }
 
 function child(name: string, kind: string, n: number) {
@@ -1191,7 +1191,7 @@ describe('GfsBrowser', () => {
     renderBrowser()
 
     await openResourceMenu('report.md')
-    const manageItem = screen.getByRole('menuitem', { name: 'Manage access' })
+    const manageItem = screen.getByRole('menuitem', { name: 'Share' })
     await waitFor(() => expect(document.activeElement).toBe(manageItem))
     fireEvent.keyDown(manageItem, { key: 'ArrowDown' })
     expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Preview' }))
@@ -1406,13 +1406,13 @@ describe('GfsBrowser', () => {
     expect(within(manageDialog).queryByRole('button', { name: 'Replace file' })).toBeNull()
     expect(within(manageDialog).queryByText('Quick actions')).toBeNull()
     fireEvent.click(manageMenuTrigger)
-    const manageMenu = within(manageDialog).getByRole('menu')
+    const manageMenu = screen.getByRole('menu')
     expect(within(manageMenu).getByRole('menuitem', { name: 'Download' })).toBeTruthy()
     expect(within(manageMenu).getByRole('menuitem', { name: 'Replace file' })).toBeTruthy()
     expect(within(manageMenu).getByRole('menuitem', { name: 'Copy GFS link' })).toBeTruthy()
     expect(within(manageMenu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
     expect(within(manageMenu).getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
-    expect(within(manageMenu).queryByRole('menuitem', { name: 'Manage access' })).toBeNull()
+    expect(within(manageMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()
     fireEvent.click(manageMenuTrigger)
     await openSubjectPicker()
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
@@ -1456,7 +1456,7 @@ describe('GfsBrowser', () => {
     await openResourceMenu('team-folder')
     const rowMenu = screen.getByRole('menu')
     expect(within(rowMenu).queryByRole('menuitem', { name: 'Create share' })).toBeNull()
-    fireEvent.click(within(rowMenu).getByRole('menuitem', { name: 'Manage access' }))
+    fireEvent.click(within(rowMenu).getByRole('menuitem', { name: 'Share' }))
     expect(screen.queryByText('Manage folder')).toBeNull()
     await waitFor(() => expect(mockGetAdminUsers).toHaveBeenCalledWith(''))
     expect(
@@ -1468,9 +1468,7 @@ describe('GfsBrowser', () => {
     })
     expect(within(manageDialog).queryByRole('button', { name: 'Upload file' })).toBeNull()
     fireEvent.click(manageMenuTrigger)
-    expect(
-      within(manageDialog).queryByRole('menuitem', { name: 'Create share' })
-    ).toBeNull()
+    expect(within(manageDialog).queryByRole('menuitem', { name: 'Create share' })).toBeNull()
     fireEvent.click(manageMenuTrigger)
     await openSubjectPicker()
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))

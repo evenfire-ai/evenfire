@@ -93,7 +93,7 @@ async function openManageDialog(resourceName: string) {
     fireEvent.click(screen.getByRole('button', { name: `Options for ${resourceName}` }))
   })
   await act(async () => {
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Manage' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
   })
 }
 
@@ -2755,7 +2755,7 @@ describe('FilesPage', () => {
     expect(openChild).toHaveBeenCalledWith(nestedFolder)
 
     fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
-    const manageItem = screen.getByRole('menuitem', { name: 'Manage' })
+    const manageItem = screen.getByRole('menuitem', { name: 'Share' })
     await waitFor(() => expect(document.activeElement).toBe(manageItem))
     fireEvent.keyDown(manageItem, { key: 'ArrowDown' })
     expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Open folder' }))
