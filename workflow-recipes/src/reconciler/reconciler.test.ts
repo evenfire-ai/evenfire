@@ -5517,7 +5517,13 @@ describe('WorkflowRecipeReconciler', () => {
 
     it('preserves a clean projection when the inner workflow reconcile throws after deploy', async () => {
       liveIn('sandbox-recipes', 'wl-egress-test-recipe-retired')
-      const workflowReconcile = vi.fn().mockRejectedValue(new Error('inner workflow failed'))
+      const workflowReconcile = vi
+        .fn()
+        .mockRejectedValue(
+          new Error(
+            'snippet secret "api-key" ownership could not be verified in namespace "sandbox-recipes"'
+          )
+        )
       ;(
         reconciler as unknown as {
           workflowReconciler: {
@@ -5554,7 +5560,10 @@ describe('WorkflowRecipeReconciler', () => {
 
       expect(workflowReconcile).toHaveBeenCalled()
       expect(reapedNames()).toContain('wl-egress-test-recipe-retired')
-      expect(result.phase).toBe('failed')
+      expect(result.phase).toBe('candidate')
+      expect(result.workflowPhase).toBeUndefined()
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(result.skipStatusPatch).toBe(false)
       expect(result.networkPolicyReapProjection?.condition).toMatchObject({
         status: 'False',
         reason: 'Reaped',

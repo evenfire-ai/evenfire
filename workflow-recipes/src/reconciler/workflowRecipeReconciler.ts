@@ -2236,33 +2236,30 @@ export class WorkflowRecipeReconciler {
           secretOwnershipConditions: workflowSecretOwnershipConditions,
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        if (isRetryableInfraError(error)) {
-          return {
-            phase: currentPhase,
-            message: recipe.status?.message ?? '',
-            workloadStatuses: (recipe.status?.workloads ?? []).map(workload => ({
-              id: workload.id,
-              phase: workload.phase,
-              ready: workload.ready ?? false,
-              message: workload.message,
-            })),
-            skipStatusPatch: !this.workflowFastPathReapConditionNeedsPatch(
-              recipe,
-              workflowNetworkPolicyReapProjection?.condition
-            ),
-            requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
-            internalDependencyConditions: workflowInternalDependencyConditions,
-            networkPolicyReapProjection: workflowNetworkPolicyReapProjection,
-            secretOwnershipConditions: workflowSecretOwnershipConditions,
-            workloadConditions: workflowWorkloadConditions,
-          }
-        }
+        // The inner workflow layer returns intentional terminal outcomes as a
+        // ReconcileResult. A throw here historically reached the watcher, which
+        // preserved status and retried. Keep that contract for ALL throws: some
+        // preflight adapters normalize a Kubernetes 503 into a plain Error and
+        // lose code/cause, so reclassifying by shape here can terminalize a
+        // healthy workflow. The structured log remains the diagnostic signal.
+        createLogger('wrc', name).warn('workflow post-policy reconcile threw; requeueing', {
+          errorClass: error instanceof Error ? error.name : 'UnknownError',
+          recognizedRetryable: isRetryableInfraError(error),
+        })
         return {
-          phase: 'failed',
-          message,
-          workloadStatuses: [],
-          workflowPhase: 'failed',
+          phase: currentPhase,
+          message: recipe.status?.message ?? '',
+          workloadStatuses: (recipe.status?.workloads ?? []).map(workload => ({
+            id: workload.id,
+            phase: workload.phase,
+            ready: workload.ready ?? false,
+            message: workload.message,
+          })),
+          skipStatusPatch: !this.workflowFastPathReapConditionNeedsPatch(
+            recipe,
+            workflowNetworkPolicyReapProjection?.condition
+          ),
+          requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
           internalDependencyConditions: workflowInternalDependencyConditions,
           networkPolicyReapProjection: workflowNetworkPolicyReapProjection,
           secretOwnershipConditions: workflowSecretOwnershipConditions,
