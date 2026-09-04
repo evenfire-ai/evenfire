@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useEffect, useRef, useState } from 'react'
+import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
 import { WorkflowAccessPanel } from '@components/WorkflowAccessPanel'
@@ -559,21 +560,13 @@ function ArtifactsPanel({
           </button>
         </div>
       )}
-      <div style={{ display: 'grid', gap: 6 }}>
+      <RecordList className="cu-diagnostic-record-list" aria-label="Output artifacts">
         {visibleArtifacts.map(a => (
-          <div
+          <RecordListRow
             key={a.name}
+            className="cu-diagnostic-record-list__row"
             data-testid="artifact-row"
             data-artifact-name={a.name}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              padding: '8px 12px',
-              background: 'var(--cu-bg-elevated)',
-              border: '1px solid var(--cu-border-subtle)',
-              borderRadius: 6,
-            }}
           >
             <span
               data-testid="artifact-format"
@@ -606,50 +599,31 @@ function ArtifactsPanel({
             <span style={{ color: 'var(--cu-text-muted)', fontSize: '0.75rem' }}>
               {formatBytes(a.sizeBytes)}
             </span>
-            <button
-              onClick={() => handleDownload(a)}
-              disabled={downloading === a.name || !runId}
-              title={runId ? `Download ${a.name}` : 'Open a specific run to download artifacts'}
-              data-testid="artifact-download"
-              style={{
-                padding: '3px 10px',
-                borderRadius: 4,
-                border: '1px solid var(--cu-border)',
-                background:
-                  downloading === a.name || !runId
-                    ? 'var(--cu-border-subtle)'
-                    : 'var(--cu-bg-elevated)',
-                color:
-                  downloading === a.name || !runId ? 'var(--cu-text-muted)' : 'var(--cu-text-soft)',
-                cursor: downloading === a.name ? 'wait' : runId ? 'pointer' : 'not-allowed',
-                fontSize: '0.75rem',
-                fontWeight: 600,
-              }}
-            >
-              {downloading === a.name ? '...' : 'Download'}
-            </button>
-            {runId && (
-              <button
-                onClick={() => void handleDeleteFile(a)}
-                disabled={deleting === a.name}
-                title={`Delete ${a.name}`}
-                style={{
-                  padding: '3px 7px',
-                  borderRadius: 4,
-                  border: '1px solid #5a2020',
-                  background: deleting === a.name ? '#1a0a0a' : '#0d0505',
-                  color: deleting === a.name ? '#6b4040' : '#ff8ea7',
-                  cursor: deleting === a.name ? 'wait' : 'pointer',
-                  fontSize: '0.72rem',
-                  fontWeight: 700,
-                }}
-              >
-                {deleting === a.name ? '...' : '✕'}
-              </button>
-            )}
-          </div>
+            <RowActionMenu
+              actions={[
+                {
+                  key: 'download',
+                  label: downloading === a.name ? 'Downloading…' : 'Download',
+                  disabled: downloading === a.name || !runId,
+                  onSelect: () => void handleDownload(a),
+                },
+                ...(runId
+                  ? [
+                      {
+                        key: 'delete',
+                        label: deleting === a.name ? 'Deleting…' : 'Delete',
+                        danger: true,
+                        disabled: deleting === a.name,
+                        onSelect: () => void handleDeleteFile(a),
+                      },
+                    ]
+                  : []),
+              ]}
+              ariaLabel={`Actions for artifact ${a.name}`}
+            />
+          </RecordListRow>
         ))}
-      </div>
+      </RecordList>
       {downloadError && (
         <p style={{ margin: '6px 0 0', color: '#ff8ea7', fontSize: '0.78rem' }}>{downloadError}</p>
       )}
@@ -1493,19 +1467,11 @@ export function RecipeStatusContent({ name, namespace, runId }: RecipeStatusCont
                 >
                   Workloads ({workloads.length})
                 </div>
-                <div style={{ display: 'grid', gap: 4 }}>
+                <RecordList className="cu-diagnostic-record-list" aria-label="Execution workloads">
                   {workloads.map(w => (
-                    <div
+                    <RecordListRow
                       key={w.id}
-                      style={{
-                        display: 'flex',
-                        gap: 10,
-                        alignItems: 'center',
-                        padding: '6px 10px',
-                        background: 'var(--cu-bg-elevated)',
-                        borderRadius: 6,
-                        fontSize: '0.85rem',
-                      }}
+                      className="cu-diagnostic-record-list__row cu-diagnostic-record-list__row--workload"
                     >
                       <span style={{ color: 'var(--cu-text)', fontWeight: 600, flexGrow: 1 }}>
                         {w.id}
@@ -1521,9 +1487,9 @@ export function RecipeStatusContent({ name, namespace, runId }: RecipeStatusCont
                       {w.replicas !== undefined && (
                         <span style={{ color: 'var(--cu-text-muted)' }}>×{w.replicas}</span>
                       )}
-                    </div>
+                    </RecordListRow>
                   ))}
-                </div>
+                </RecordList>
               </div>
             )}
 

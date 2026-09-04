@@ -7,6 +7,7 @@ import {
   render as rtlRender,
   screen,
   waitFor,
+  within,
 } from '@testing-library/react'
 import {
   deleteWorkflowRunArtifact,
@@ -117,6 +118,12 @@ describe('RecipeStatusContent — workload recipe', () => {
     expect(screen.getByText('Ready')).toBeInTheDocument()
     expect(screen.getByText('Not Ready')).toBeInTheDocument()
     expect(screen.getByText('×2')).toBeInTheDocument()
+    const list = screen.getByRole('list', { name: 'Execution workloads' })
+    expect(
+      within(list)
+        .getAllByRole('listitem')
+        .map(row => row.textContent)
+    ).toEqual(['my-mcp-serverReady×2', 'redisNot Ready'])
   })
 
   it('shows message section with copy button', async () => {
@@ -671,7 +678,10 @@ describe('RecipeStatusContent — runId child resolution', () => {
     render(<RecipeStatusContent {...DEFAULT_PROPS} runId="ABCD1234-aaaa-bbbb-cccc-dddddddddddd" />)
     await screen.findByText('custom-sdk-result.json')
 
-    fireEvent.click(screen.getByTestId('artifact-download'))
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for artifact custom-sdk-result.json' })
+    )
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Download' }))
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith('http://localhost/run-download', {
@@ -686,7 +696,7 @@ describe('RecipeStatusContent — runId child resolution', () => {
     )
     expect(downloadName).toBe('ABCD1234-custom-sdk-result.json')
     expect(screen.getByText('Clear All')).toBeInTheDocument()
-    expect(screen.getByTitle('Delete custom-sdk-result.json')).toBeInTheDocument()
+    expect(screen.getByRole('list', { name: 'Output artifacts' })).toBeInTheDocument()
     expect(click).toHaveBeenCalled()
   })
 
@@ -713,7 +723,10 @@ describe('RecipeStatusContent — runId child resolution', () => {
     render(<RecipeStatusContent {...DEFAULT_PROPS} runId="ABCD1234-aaaa-bbbb-cccc-dddddddddddd" />)
     await screen.findByText('custom-sdk-result.json')
 
-    fireEvent.click(screen.getByTitle('Delete custom-sdk-result.json'))
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for artifact custom-sdk-result.json' })
+    )
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }))
     expect(mockDeleteWorkflowRunArtifact).not.toHaveBeenCalled()
     expect(await screen.findByRole('alertdialog', { name: 'Delete Artifact' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }))

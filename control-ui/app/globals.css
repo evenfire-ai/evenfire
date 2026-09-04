@@ -9138,6 +9138,19 @@ td.cu-registry-description {
   gap: var(--cu-space-2);
 }
 
+.cu-diagnostic-record-list {
+  background: var(--cu-bg-elevated);
+}
+
+.cu-diagnostic-record-list__row {
+  min-width: 0;
+  font-size: 0.82rem;
+}
+
+.cu-diagnostic-record-list__row--workload {
+  font-size: 0.85rem;
+}
+
 .cu-recipe-inline-error {
   color: var(--cu-danger);
   font-size: 0.75rem;
