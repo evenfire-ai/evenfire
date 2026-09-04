@@ -17,8 +17,8 @@ import { contextAliases, contextForAlias } from '@lib/contextIdentity'
 //   /contexts/<unknown-slug>[/any/tab]    → the Agents list (fail-safe)
 //
 // Lookup failures also fall back to the Agents list so a bookmark never dead-
-// ends. The write model is untouched: this page only navigates.
-export default function LegacyContextRedirectPage() {
+// ends. The write model is untouched: this component only navigates.
+export function LegacyContextRedirect() {
   const router = useRouter()
   const params = useParams<{ slug?: string[] | string }>()
 
