@@ -196,9 +196,12 @@ export function GfsMoveDialog({
 
   const accessibleQuery = useInfiniteQuery({
     queryKey: desktopQueryKeys.gfsAccessible(scope, GFS_DRIVE_MAIN),
-    queryFn: ({ pageParam }) =>
-      window.clerum?.gfs?.listAccessible(GFS_DRIVE_MAIN, pageParam) ??
-      Promise.resolve({ items: [], nextCursor: null }),
+    queryFn: ({ pageParam }) => {
+      const listAccessible = window.clerum?.gfs?.listAccessible
+      return typeof listAccessible === 'function'
+        ? listAccessible(GFS_DRIVE_MAIN, pageParam)
+        : Promise.resolve({ items: [], nextCursor: null })
+    },
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
@@ -211,12 +214,25 @@ export function GfsMoveDialog({
         parentResourceId: item.parentResourceId ?? null,
       }))
       .filter(item => item.kind === 'directory')
+    const currentPathRoot = initialCrumbs[0]
+    if (
+      currentPathRoot?.kind === 'directory' &&
+      !accessibleFolders.some(folder => folder.resourceId === currentPathRoot.resourceId)
+    ) {
+      accessibleFolders.unshift({
+        ...currentPathRoot,
+        rid: currentPathRoot.resourceId,
+        drive: GFS_DRIVE_MAIN,
+        parentResourceId: null,
+        path: null,
+      })
+    }
     const accessibleFolderIds = new Set(accessibleFolders.map(folder => folder.resourceId))
     const roots = accessibleFolders.filter(
       folder => !folder.parentResourceId || !accessibleFolderIds.has(folder.parentResourceId)
     )
     return folderItems(roots, new Set([target.resourceId]))
-  }, [accessibleQuery.data, target.resourceId])
+  }, [accessibleQuery.data, initialCrumbs, target.resourceId])
 
   const listError = errorMessage(accessibleQuery.error)
   const loadingRoots = accessibleQuery.isFetching && rootFolders.length === 0
@@ -280,8 +296,7 @@ export function GfsMoveDialog({
             <IconContexts />
           </span>
           <span className="da-gfs-manage-dialog__heading">
-            <h3>Move {target.name}</h3>
-            <span className="muted">Choose a destination folder.</span>
+            <h3>Move “{target.name}”</h3>
           </span>
           <span className="da-gfs-manage-dialog__top-actions">
             <IconButton label="Close move dialog" onClick={onClose} size="sm" variant="ghost">
@@ -292,12 +307,17 @@ export function GfsMoveDialog({
         <div className="da-gfs-manage-dialog__body">
           {error ? <StatusBanner tone="error" text={error} /> : null}
           {listError ? <StatusBanner tone="error" text={listError} /> : null}
+          <div className="da-gfs-move-dialog__current-location">
+            <span>Current location:</span>
+            <span className="da-gfs-move-dialog__location-pill">
+              <IconContexts />
+              <strong>{selectedDestination?.name ?? 'Choose a folder'}</strong>
+            </span>
+          </div>
           <div className="da-gfs-move-dialog__tree-heading">
             <span className="da-gfs-move-dialog__tree-heading-copy">
-              <span className="da-gfs-move-dialog__tree-eyebrow">Destination</span>
               <strong>Shared with me</strong>
             </span>
-            <span className="muted">Expand folders to browse the full tree.</span>
           </div>
           <div
             className="da-gfs-move-dialog__tree"
@@ -357,12 +377,15 @@ export function GfsMoveDialog({
                 Cancel
               </Button>
               <Button
+                aria-label={
+                  selectedDestination ? `Move here (${selectedDestination.name})` : 'Move'
+                }
                 disabled={!selectedDestination || pathPassesThroughTarget}
                 loading={busy}
                 onClick={() => void commit()}
                 type="button"
               >
-                Move here{selectedDestination ? ` (${selectedDestination.name})` : ''}
+                Move
               </Button>
             </span>
           </div>

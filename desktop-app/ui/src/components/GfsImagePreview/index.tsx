@@ -1,25 +1,10 @@
-import { type CSSProperties, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Button, StatusBanner } from '@components/Common'
 import { IconClose, IconCopy } from '@components/SidebarNav/icons'
+import { useWorkspaceModalStyle } from '@hooks/useWorkspaceModalStyle'
 import { assertGfsImagePreviewSize } from '@lib/gfsImagePreview'
 import type { GfsImagePreviewProps } from './types'
-
-const MOBILE_SIDEBAR_QUERY = '(max-width: 900px)'
-
-function readWorkspaceLeft(): number {
-  if (typeof window === 'undefined' || typeof document === 'undefined') return 0
-  if (window.matchMedia?.(MOBILE_SIDEBAR_QUERY).matches) return 0
-
-  const sidebar = document.querySelector<HTMLElement>('.left-nav')
-  if (!sidebar) return 0
-
-  const rect = sidebar.getBoundingClientRect()
-  const viewportWidth = window.innerWidth || document.documentElement.clientWidth
-  if (rect.width <= 0 || rect.height <= 0 || viewportWidth <= 0) return 0
-
-  return Math.max(0, Math.min(rect.right, viewportWidth))
-}
 
 export function GfsImagePreview({
   byteLength,
@@ -35,39 +20,10 @@ export function GfsImagePreview({
   const [sourceBlob, setSourceBlob] = useState<Blob | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
-  const [workspaceLeft, setWorkspaceLeft] = useState(0)
+  const backdropStyle = useWorkspaceModalStyle()
   const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mountedRef = useRef(true)
   const onDownloadErrorRef = useRef(onDownloadError)
-
-  // The preview is portaled to document.body, so its grid would otherwise
-  // center against the whole window. Keep the dialog centered in the space to
-  // the right of the desktop sidebar as that sidebar is expanded or collapsed.
-  useLayoutEffect(() => {
-    const measure = (): void => {
-      const next = readWorkspaceLeft()
-      setWorkspaceLeft(current => (current === next ? current : next))
-    }
-
-    measure()
-    const sidebar = document.querySelector<HTMLElement>('.left-nav')
-    const resizeObserver =
-      sidebar && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null
-    resizeObserver?.observe(sidebar)
-
-    const mutationObserver =
-      sidebar && typeof MutationObserver !== 'undefined' ? new MutationObserver(measure) : null
-    mutationObserver?.observe(sidebar, { attributes: true, attributeFilter: ['class'] })
-
-    window.addEventListener('resize', measure)
-    window.addEventListener('scroll', measure, true)
-    return () => {
-      resizeObserver?.disconnect()
-      mutationObserver?.disconnect()
-      window.removeEventListener('resize', measure)
-      window.removeEventListener('scroll', measure, true)
-    }
-  }, [])
 
   useEffect(() => {
     onDownloadErrorRef.current = onDownloadError
@@ -157,9 +113,6 @@ export function GfsImagePreview({
       markCopyState('error')
     }
   }
-
-  const backdropStyle: CSSProperties | undefined =
-    workspaceLeft > 0 ? { left: workspaceLeft, right: 0 } : undefined
 
   return createPortal(
     <div

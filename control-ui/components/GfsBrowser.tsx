@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { FileUploadModal } from '@components/FileUploadModal'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
+import { GfsMoveDialog } from '@components/GfsMoveDialog'
 import { GfsVideoPreview } from '@components/GfsVideoPreview'
 import {
   IconDocumentText,
@@ -14,7 +15,7 @@ import {
 } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { IconChevronRight, IconDownload, IconPaperclip, IconUpload, IconX } from '@components/icons'
-import { Button, TextInput } from '@components/ui'
+import { Button } from '@components/ui'
 import { apiGet, apiSend, gfsDownload, isSilentApiError } from '@lib/api'
 import { isGfsDocumentFile } from '@lib/gfsDocumentFile'
 import {
@@ -32,6 +33,7 @@ import { nextAvailableGfsResourceName, normalizeGfsResourceName } from '@lib/gfs
 import { isGfsVideoFile } from '@lib/gfsVideoFile'
 import { gfsVideoPreviewMimeType } from '@lib/gfsVideoPreview'
 import { GfsGrantPanel } from './GfsGrantPanel'
+import { GfsInlineRename } from './GfsInlineRename'
 import { GfsResourceMenu } from './GfsResourceMenu'
 import { NewFolderModal } from './NewFolderModal'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -227,8 +229,10 @@ export function GfsBrowser(): React.JSX.Element {
   const [error, setError] = useState('')
   // Operator selects a resource to delegate access on (grant panel).
   const [selected, setSelected] = useState<GfsChild | null>(null)
+  const [renameTarget, setRenameTarget] = useState<GfsChild | null>(null)
   const [renameOpen, setRenameOpen] = useState(false)
   const [renameName, setRenameName] = useState('')
+  const [renaming, setRenaming] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   // New-folder dialog (replaces the native window.prompt flow).
   const [newFolderOpen, setNewFolderOpen] = useState(false)
@@ -245,6 +249,7 @@ export function GfsBrowser(): React.JSX.Element {
   const [draggingResourceId, setDraggingResourceId] = useState<string | null>(null)
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
+  const [moveTarget, setMoveTarget] = useState<GfsChild | null>(null)
   const draggingResourceRef = useRef<GfsChild | null>(null)
   const movingResourceRef = useRef<string | null>(null)
   const [imagePreview, setImagePreview] = useState<{
@@ -472,16 +477,20 @@ export function GfsBrowser(): React.JSX.Element {
   }, [current, load])
 
   useEffect(() => {
-    if (!selected || imagePreview || markdownPreview || videoPreview) return
+    if ((!selected && !renameTarget) || imagePreview || markdownPreview || videoPreview) return
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') setSelected(null)
+      if (event.key !== 'Escape') return
+      setSelected(null)
+      setRenameOpen(false)
+      setRenameTarget(null)
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [imagePreview, markdownPreview, videoPreview, selected])
+  }, [imagePreview, markdownPreview, renameTarget, selected, videoPreview])
 
   function openDirectory(child: GfsChild): void {
     if (child.kind !== 'directory') return
+    setRenameTarget(null)
     setCrumbs(prev => [...prev, { id: child.resourceId, rid: child.rid, name: child.name }])
     const cached = childCacheRef.current.get(child.resourceId)
     if (cached) {
@@ -529,6 +538,7 @@ export function GfsBrowser(): React.JSX.Element {
 
   function goToCrumb(index: number): void {
     if (index === crumbs.length - 1) return
+    setRenameTarget(null)
     setLoading(true)
     setCrumbs(crumbs.slice(0, index + 1))
   }
@@ -547,10 +557,7 @@ export function GfsBrowser(): React.JSX.Element {
     await load(current)
   }
 
-  function handleResourceDragStart(
-    event: React.DragEvent<HTMLLIElement>,
-    child: GfsChild
-  ): void {
+  function handleResourceDragStart(event: React.DragEvent<HTMLLIElement>, child: GfsChild): void {
     if (child.kind === 'directory' || movingResourceRef.current) {
       event.preventDefault()
       return
@@ -568,28 +575,17 @@ export function GfsBrowser(): React.JSX.Element {
     setDragOverFolderId(null)
   }
 
-  function handleFolderDragOver(
-    event: React.DragEvent<HTMLLIElement>,
-    folder: GfsChild
-  ): void {
+  function handleFolderDragOver(event: React.DragEvent<HTMLLIElement>, folder: GfsChild): void {
     if (!hasDraggedGfsResource(event)) return
     const source = draggingResourceRef.current
-    if (
-      !source ||
-      source.resourceId === folder.resourceId ||
-      folder.kind !== 'directory'
-    )
-      return
+    if (!source || source.resourceId === folder.resourceId || folder.kind !== 'directory') return
     event.preventDefault()
     event.stopPropagation()
     event.dataTransfer.dropEffect = 'move'
     setDragOverFolderId(folder.resourceId)
   }
 
-  function handleFolderDragEnter(
-    event: React.DragEvent<HTMLLIElement>,
-    folder: GfsChild
-  ): void {
+  function handleFolderDragEnter(event: React.DragEvent<HTMLLIElement>, folder: GfsChild): void {
     handleFolderDragOver(event, folder)
   }
 
@@ -604,10 +600,10 @@ export function GfsBrowser(): React.JSX.Element {
 
   async function moveResource(
     source: GfsChild,
-    destination: GfsChild
+    destination: Pick<GfsChild, 'resourceId' | 'name' | 'kind'>,
+    bubbleError = false
   ): Promise<void> {
     if (
-      source.kind === 'directory' ||
       destination.kind !== 'directory' ||
       source.resourceId === destination.resourceId ||
       movingResourceRef.current
@@ -637,6 +633,7 @@ export function GfsBrowser(): React.JSX.Element {
       })
       await refreshCurrent()
     } catch (err) {
+      if (bubbleError) throw err
       showToast(err instanceof Error ? err.message : 'Could not move resource.', {
         tone: 'error',
       })
@@ -954,18 +951,38 @@ export function GfsBrowser(): React.JSX.Element {
     }
   }
 
-  function openManage(child: GfsChild, mode?: 'rename' | 'delete'): void {
+  function openManage(child: GfsChild, mode?: 'delete'): void {
+    setRenameTarget(null)
     setSelected(child)
     setRenameName(child.name)
-    setRenameOpen(mode === 'rename')
+    setRenameOpen(false)
     setDeleteOpen(mode === 'delete')
   }
 
+  function openMove(child: GfsChild): void {
+    setSelected(null)
+    setDeleteOpen(false)
+    setMoveTarget(child)
+  }
+
+  function openRowRename(child: GfsChild): void {
+    setSelected(null)
+    setRenameOpen(false)
+    setDeleteOpen(false)
+    setRenameTarget(child)
+    setRenameName(child.name)
+  }
+
   async function renameResource(child: GfsChild, requestedName: string): Promise<void> {
-    if (!requestedName.trim()) return
+    if (!requestedName.trim() || renaming) return
+    setRenaming(true)
     try {
       const name = await normalizeGfsResourceName(requestedName.trim())
-      if (name === child.name) return
+      if (name === child.name) {
+        setRenameOpen(false)
+        setRenameTarget(null)
+        return
+      }
       await apiSend(
         'PATCH',
         `/api/v1/gfs/resources/${encodeURIComponent(child.resourceId)}`,
@@ -973,12 +990,16 @@ export function GfsBrowser(): React.JSX.Element {
         { drive: DRIVE }
       )
       showToast('Resource renamed.', { tone: 'success' })
+      setRenameOpen(false)
+      setRenameTarget(null)
       setSelected(null)
       await refreshCurrent()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Could not rename resource.', {
         tone: 'error',
       })
+    } finally {
+      setRenaming(false)
     }
   }
 
@@ -1207,10 +1228,10 @@ export function GfsBrowser(): React.JSX.Element {
               <ul className="cu-gfs-list" aria-label="Current folder resources">
                 {items.map(child => {
                   const rowOpenable = child.kind === 'directory' || isGfsPreviewFile(child.name)
+                  const isRenaming = renameTarget?.resourceId === child.resourceId
                   const isDragging = draggingResourceId === child.resourceId
                   const isDropTarget = dragOverFolderId === child.resourceId
-                  const canDragResource =
-                    child.kind !== 'directory' && movingResourceId === null
+                  const canDragResource = child.kind !== 'directory' && movingResourceId === null
                   const openRow = () => {
                     if (child.kind === 'directory') openDirectory(child)
                     else openFilePreview(child)
@@ -1221,14 +1242,10 @@ export function GfsBrowser(): React.JSX.Element {
                       key={child.resourceId}
                       draggable={canDragResource}
                       title={
-                        canDragResource
-                          ? `Drag ${child.name} into a folder to move it`
-                          : undefined
+                        canDragResource ? `Drag ${child.name} into a folder to move it` : undefined
                       }
                       onDragStart={
-                        canDragResource
-                          ? event => handleResourceDragStart(event, child)
-                          : undefined
+                        canDragResource ? event => handleResourceDragStart(event, child) : undefined
                       }
                       onDragEnd={canDragResource ? handleResourceDragEnd : undefined}
                       onDragEnter={
@@ -1241,9 +1258,7 @@ export function GfsBrowser(): React.JSX.Element {
                           ? event => handleFolderDragOver(event, child)
                           : undefined
                       }
-                      onDragLeave={
-                        child.kind === 'directory' ? handleFolderDragLeave : undefined
-                      }
+                      onDragLeave={child.kind === 'directory' ? handleFolderDragLeave : undefined}
                       onDrop={
                         child.kind === 'directory'
                           ? event => void handleFolderDrop(event, child)
@@ -1288,7 +1303,15 @@ export function GfsBrowser(): React.JSX.Element {
                       </span>
                       <span className="cu-gfs-list__identity">
                         <span className="cu-gfs-list__name">
-                          {child.kind === 'directory' ? (
+                          {isRenaming ? (
+                            <GfsInlineRename
+                              onCancel={() => setRenameTarget(null)}
+                              onChange={setRenameName}
+                              onSubmit={() => void renameResource(child, renameName)}
+                              value={renameName}
+                              busy={renaming}
+                            />
+                          ) : child.kind === 'directory' ? (
                             <button
                               className="cu-gfs-list__name-button"
                               type="button"
@@ -1347,7 +1370,8 @@ export function GfsBrowser(): React.JSX.Element {
                               : undefined
                           }
                           onCopyLink={() => void copyGfsUri(child.gfsUri)}
-                          onRename={() => openManage(child, 'rename')}
+                          onRename={() => openRowRename(child)}
+                          onMove={() => openMove(child)}
                           onDelete={() => openManage(child, 'delete')}
                         />
                       </span>
@@ -1410,27 +1434,13 @@ export function GfsBrowser(): React.JSX.Element {
               </span>
               <span className="cu-gfs-manage-dialog__heading">
                 {renameOpen ? (
-                  <form
-                    className="cu-gfs-manage-dialog__title-edit"
-                    aria-label="Rename resource"
-                    onSubmit={event => {
-                      event.preventDefault()
-                      void renameResource(selected, renameName)
-                    }}
-                  >
-                    <TextInput
-                      aria-label="New name"
-                      autoFocus
-                      value={renameName}
-                      onChange={event => setRenameName(event.currentTarget.value)}
-                    />
-                    <Button variant="primary" size="sm" type="submit" disabled={!renameName.trim()}>
-                      Save
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={() => setRenameOpen(false)}>
-                      Cancel
-                    </Button>
-                  </form>
+                  <GfsInlineRename
+                    onCancel={() => setRenameOpen(false)}
+                    onChange={setRenameName}
+                    onSubmit={() => void renameResource(selected, renameName)}
+                    value={renameName}
+                    busy={renaming}
+                  />
                 ) : (
                   <span className="cu-gfs-manage-dialog__title-row">
                     <h3>{selected.name}</h3>
@@ -1451,9 +1461,11 @@ export function GfsBrowser(): React.JSX.Element {
                       onCopyLink={() => void copyGfsUri(selected.gfsUri)}
                       onRename={() => {
                         setRenameName(selected.name)
+                        setRenameTarget(null)
                         setRenameOpen(true)
                         setDeleteOpen(false)
                       }}
+                      onMove={() => openMove(selected)}
                       onReplace={
                         selected.kind !== 'directory'
                           ? file => void replaceFile(selected, file)
@@ -1544,6 +1556,23 @@ export function GfsBrowser(): React.JSX.Element {
           error={createFolderError}
           onCreate={name => void createFolder(name)}
           onCancel={() => setNewFolderOpen(false)}
+        />
+      ) : null}
+
+      {moveTarget ? (
+        <GfsMoveDialog
+          busy={movingResourceId === moveTarget.resourceId}
+          initialCrumbs={crumbs}
+          onClose={() => setMoveTarget(null)}
+          onMove={async (destinationId, destinationName) => {
+            await moveResource(
+              moveTarget,
+              { resourceId: destinationId, name: destinationName, kind: 'directory' },
+              true
+            )
+            setMoveTarget(null)
+          }}
+          target={moveTarget}
         />
       ) : null}
 

@@ -616,6 +616,46 @@ describe('GfsBrowser', () => {
     await waitFor(() => expect(screen.queryByText('report.md')).toBeNull())
   })
 
+  it('opens the compact move picker from the resource menu and moves to its selection', async () => {
+    const folder = child('archive', 'directory', 1)
+    const file = child('report.md', 'file', 2)
+    mockApiGet.mockImplementation(async (path: string) => {
+      if (
+        path === '/api/v1/gfs/tree' ||
+        path === '/api/v1/gfs/resources/11111111-1111-1111-1111-111111111111/children'
+      ) {
+        return {
+          rootResourceId: '11111111-1111-1111-1111-111111111111',
+          items: [folder, file],
+          nextCursor: null,
+        }
+      }
+      return { items: [], nextCursor: null }
+    })
+    mockApiSend.mockResolvedValueOnce({ ok: true })
+    renderBrowser()
+
+    await waitFor(() => expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull())
+    await openResourceMenu('report.md')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move file report.md' })
+    const destination = await within(dialog).findByRole('button', { name: 'archive' })
+    expect(destination.classList.contains('cu-gfs-move-dialog__tree-select')).toBe(true)
+    fireEvent.click(destination)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (archive)' }))
+
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenCalledWith(
+        'PATCH',
+        '/api/v1/gfs/resources/id-2',
+        { drive: 'main', newParentId: 'id-1', ifMatch: 0 },
+        { drive: 'main' }
+      )
+    )
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  })
+
   it('keeps a persisted drag-and-drop session when resumable capabilities are unavailable', async () => {
     const rootId = '11111111-1111-1111-1111-111111111111'
     const rootRid = '11111111111111111111111111111111'
@@ -848,11 +888,14 @@ describe('GfsBrowser', () => {
     expect(reportRow).toBeTruthy()
     await openResourceMenu('report.txt')
     fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
-    const renameForm = await screen.findByRole('form', { name: 'Rename resource' })
+    const renameForm = await within(reportRow!).findByRole('form', { name: 'Rename resource' })
+    expect(screen.queryByRole('dialog', { name: 'Manage file report.txt' })).toBeNull()
     fireEvent.change(within(renameForm).getByLabelText('New name'), {
       target: { value: rawRename },
     })
-    fireEvent.click(within(renameForm).getByRole('button', { name: 'Save' }))
+    expect(within(renameForm).getByRole('button', { name: 'Save name' })).toBeTruthy()
+    expect(within(renameForm).getByRole('button', { name: 'Cancel rename' })).toBeTruthy()
+    fireEvent.click(within(renameForm).getByRole('button', { name: 'Save name' }))
 
     await waitFor(() =>
       expect(mockApiSend).toHaveBeenCalledWith(
@@ -862,6 +905,28 @@ describe('GfsBrowser', () => {
         { drive: 'main' }
       )
     )
+  })
+
+  it('keeps manage-dialog rename inline with the shared confirmation controls', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('report.txt', 'file', 2)],
+      nextCursor: null,
+    })
+    renderBrowser()
+
+    await openManage('report.txt')
+    const manageDialog = await screen.findByRole('dialog', { name: 'Manage file report.txt' })
+    const manageMenuTrigger = within(manageDialog).getByRole('button', {
+      name: 'Actions for report.txt',
+    })
+    fireEvent.click(manageMenuTrigger)
+    fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Rename' }))
+
+    const renameForm = within(manageDialog).getByRole('form', { name: 'Rename resource' })
+    expect(within(renameForm).getByRole('button', { name: 'Save name' })).toBeTruthy()
+    expect(within(renameForm).getByRole('button', { name: 'Cancel rename' })).toBeTruthy()
+    fireEvent.click(within(renameForm).getByRole('button', { name: 'Cancel rename' }))
+    expect(within(manageDialog).queryByRole('form', { name: 'Rename resource' })).toBeNull()
   })
 
   it('downloads a file through the operator content proxy using rid + name', async () => {

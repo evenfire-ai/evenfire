@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { IconSharedFiles } from '@components/Sidebar/icons'
+import { IconFolder, IconSharedFiles } from '@components/Sidebar/icons'
 import {
   IconCopy,
   IconDotsVertical,
@@ -44,6 +44,7 @@ export function GfsResourceMenu({
   onDelete,
   onDownload,
   onManage,
+  onMove,
   onPreview,
   onRename,
   onReplace,
@@ -166,6 +167,7 @@ export function GfsResourceMenu({
     [
       menuAction('copy-link', 'Copy GFS link', <IconCopy />, onCopyLink),
       menuAction('rename', 'Rename', <IconPencil />, onRename),
+      menuAction('move', 'Move to…', <IconFolder />, onMove),
     ].filter(isMenuAction),
     [menuAction('delete', 'Delete', <IconTrash />, onDelete, { danger: true })].filter(
       isMenuAction

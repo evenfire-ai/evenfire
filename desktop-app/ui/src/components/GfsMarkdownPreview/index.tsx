@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Button, StatusBanner } from '@components/Common'
 import { IconClose, IconCopy } from '@components/SidebarNav/icons'
+import { useWorkspaceModalStyle } from '@hooks/useWorkspaceModalStyle'
 import { assertGfsMarkdownPreviewSize } from '@lib/gfsMarkdownPreview'
 import { parseVanillaMarkdown } from '@lib/vanillaMarkdown'
 import type { MarkdownBlock, MarkdownInlineNode } from '@lib/vanillaMarkdown.types'
@@ -72,6 +73,7 @@ export function GfsMarkdownPreview({
   const [source, setSource] = useState<string | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
+  const backdropStyle = useWorkspaceModalStyle()
   const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mountedRef = useRef(true)
   const onDownloadErrorRef = useRef(onDownloadError)
@@ -153,6 +155,7 @@ export function GfsMarkdownPreview({
     <div
       className="da-gfs-markdown-preview-modal"
       role="presentation"
+      style={backdropStyle}
       onMouseDown={event => {
         if (event.target === event.currentTarget) onClose()
       }}

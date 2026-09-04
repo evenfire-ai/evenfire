@@ -14132,6 +14132,19 @@ pre {
   justify-self: end;
 }
 
+.da-gfs-drive__grid .da-gfs-list__actions > .ui-icon-button {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast);
+}
+
+.da-gfs-drive__grid .da-grid__row:hover .da-gfs-list__actions > .ui-icon-button,
+.da-gfs-drive__grid .da-grid__row:focus-within .da-gfs-list__actions > .ui-icon-button,
+.da-gfs-drive__grid .da-gfs-list__actions > .ui-icon-button:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .da-gfs-list__rid {
   max-width: 8rem;
   overflow: hidden;
@@ -15421,16 +15434,80 @@ pre {
   border-top: 1px solid rgba(var(--edge-rgb), 0.2);
 }
 
-/* Move-to-folder picker: an inline tree that keeps the GFS hierarchy visible. */
+/* Compact Drive-style move picker. The hierarchy stays inline, but rows read
+   as a folder list rather than large cards. */
 .da-gfs-move-dialog {
-  width: min(780px, 96vw);
+  width: min(680px, 94vw);
+  max-height: min(620px, 90vh);
+  overflow: hidden;
+}
+
+.da-gfs-move-dialog .da-gfs-manage-dialog__header {
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-5) var(--space-3);
+  border-bottom: 0;
+}
+
+.da-gfs-move-dialog .da-gfs-manage-dialog__icon {
+  width: 28px;
+  height: 28px;
+}
+
+.da-gfs-move-dialog .da-gfs-manage-dialog__heading h3 {
+  font-size: var(--font-size-xl);
+}
+
+.da-gfs-move-dialog .da-gfs-manage-dialog__body {
+  grid-template-rows: auto auto minmax(180px, 1fr) auto auto;
+  gap: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+.da-gfs-move-dialog__current-location {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-5) var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.da-gfs-move-dialog__location-pill {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--control-bg-strong);
+  color: var(--text);
+}
+
+.da-gfs-move-dialog__location-pill svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  color: var(--text-muted);
+}
+
+.da-gfs-move-dialog__location-pill strong {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: var(--font-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .da-gfs-move-dialog__tree-heading {
   display: flex;
-  align-items: end;
-  justify-content: space-between;
-  gap: var(--space-3);
+  align-items: center;
+  min-height: 38px;
+  padding: 0 var(--space-5);
+  border-top: 1px solid rgba(var(--edge-rgb), 0.2);
+  border-bottom: 1px solid rgba(var(--edge-rgb), 0.2);
 }
 
 .da-gfs-move-dialog__tree-heading-copy {
@@ -15441,33 +15518,17 @@ pre {
 
 .da-gfs-move-dialog__tree-heading-copy strong {
   color: var(--text);
-  font-size: var(--font-size-xl);
+  font-size: var(--font-size-sm);
   font-weight: var(--font-weight-semibold);
   line-height: var(--line-height-tight);
 }
 
-.da-gfs-move-dialog__tree-eyebrow {
-  color: var(--accent-strong);
-  font-size: var(--font-size-2xs);
-  font-weight: var(--font-weight-bold);
-  letter-spacing: var(--letter-spacing-caps);
-  text-transform: uppercase;
-}
-
-.da-gfs-move-dialog__tree-heading > .muted {
-  flex: 0 1 auto;
-  font-size: var(--font-size-sm);
-  text-align: right;
-}
-
 .da-gfs-move-dialog__tree {
-  min-height: 220px;
-  max-height: min(460px, 52vh);
+  min-height: 180px;
+  max-height: min(360px, 48vh);
   overflow-y: auto;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
-  padding: var(--space-2);
-  background: var(--surface-soft);
+  padding: var(--space-1) var(--space-3);
+  background: var(--bg-elev);
   scrollbar-width: thin;
 }
 
@@ -15475,12 +15536,12 @@ pre {
 .da-gfs-move-dialog__tree-group {
   display: grid;
   align-content: start;
-  gap: var(--space-1);
+  gap: 0;
 }
 
 .da-gfs-move-dialog__tree-group {
-  margin-left: calc(32px + var(--space-1));
-  padding: var(--space-1) 0 var(--space-1) var(--space-2);
+  margin-left: 28px;
+  padding-left: var(--space-1);
   border-left: 1px solid rgba(var(--edge-rgb), 0.24);
 }
 
@@ -15491,16 +15552,16 @@ pre {
 .da-gfs-move-dialog__tree-row {
   min-width: 0;
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
+  grid-template-columns: 28px minmax(0, 1fr);
   align-items: center;
   gap: var(--space-1);
 }
 
 .da-gfs-move-dialog__tree-toggle.ui-icon-button {
-  width: 32px;
-  min-width: 32px;
-  height: 32px;
-  min-height: 32px;
+  width: 28px;
+  min-width: 28px;
+  height: 34px;
+  min-height: 34px;
   padding: 0;
   border-color: transparent;
   background: transparent;
@@ -15525,20 +15586,20 @@ pre {
 }
 
 .da-gfs-move-dialog__tree-toggle-placeholder {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 34px;
 }
 
 .da-gfs-move-dialog__tree-select.ui-button {
   min-width: 0;
-  min-height: 46px;
+  min-height: 34px;
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid rgba(var(--edge-rgb), 0.22);
-  border-radius: var(--radius-md);
-  background: rgba(var(--edge-rgb), 0.07);
+  padding: var(--space-0-5) var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--text);
   text-align: left;
   transition:
@@ -15551,38 +15612,38 @@ pre {
 .da-gfs-move-dialog__tree-select.ui-button:focus-visible {
   border-color: rgba(var(--accent-rgb), 0.38);
   background: rgba(var(--accent-rgb), 0.1);
-  box-shadow: inset 3px 0 0 rgba(var(--accent-rgb), 0.55);
+  box-shadow: none;
 }
 
 .da-gfs-move-dialog__tree-select.ui-button[aria-selected='true'] {
   border-color: rgba(var(--accent-rgb), 0.52);
   background: rgba(var(--accent-rgb), 0.14);
-  box-shadow: inset 3px 0 0 var(--accent);
+  box-shadow: none;
 }
 
 .da-gfs-move-dialog__tree-folder-icon {
-  width: 30px;
-  height: 30px;
-  flex: 0 0 30px;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
   display: grid;
   place-items: center;
-  border: 1px solid rgba(var(--warning-rgb), 0.28);
-  border-radius: var(--radius-sm);
-  background: rgba(var(--warning-rgb), 0.1);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--warning);
 }
 
 .da-gfs-move-dialog__tree-folder-icon svg {
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
 }
 
 .da-gfs-move-dialog__tree-folder-name {
   min-width: 0;
   flex: 1 1 auto;
   overflow: hidden;
-  font-size: var(--font-size-md);
-  font-weight: var(--font-weight-semibold);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -15618,7 +15679,7 @@ pre {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  padding-top: var(--space-3);
+  padding: var(--space-3) var(--space-5);
   border-top: 1px solid rgba(var(--edge-rgb), 0.2);
 }
 
@@ -15642,6 +15703,10 @@ pre {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+}
+
+.da-gfs-move-dialog__action-buttons .ui-button {
+  border-radius: 999px;
 }
 
 .da-gfs-manage-section--actions .da-gfs-inline-form__field {

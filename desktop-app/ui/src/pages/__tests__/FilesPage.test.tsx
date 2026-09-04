@@ -438,7 +438,7 @@ describe('FilesPage', () => {
         version: 7,
       },
       affordances: {
-        held: ['read', 'write', 'delete'],
+        held: ['read', 'write', 'delete', 'manage_acl'],
         canDelegate: false,
         grantableBits: [],
         canCreateShare: false,
@@ -561,7 +561,7 @@ describe('FilesPage', () => {
         version: 7,
       },
       affordances: {
-        held: ['read', 'write'],
+        held: ['read', 'write', 'manage_acl'],
         canDelegate: false,
         grantableBits: [],
         canCreateShare: false,
@@ -1031,7 +1031,7 @@ describe('FilesPage', () => {
         version: 7,
       },
       affordances: {
-        held: ['read', 'delete'],
+        held: ['read', 'delete', 'manage_acl'],
         canDelegate: false,
         grantableBits: [],
         canCreateShare: false,
@@ -1072,7 +1072,7 @@ describe('FilesPage', () => {
         version: 7,
       },
       affordances: {
-        held: ['read', 'write'],
+        held: ['read', 'write', 'manage_acl'],
         canDelegate: false,
         grantableBits: [],
         canCreateShare: false,
@@ -1108,6 +1108,79 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith('precondition_failed: stale resource version', 'error')
   })
 
+  it('hides the Manage menu entry on rows the caller cannot manage (read-only access)', async () => {
+    const child = {
+      resourceId: 'child-1',
+      rid: 'child-1',
+      gfsUri: 'gfs://main/child-1',
+      drive: 'main',
+      parentResourceId: 'folder-1',
+      name: 'notes.txt',
+      kind: 'file' as const,
+      path: '/Product/notes.txt',
+      version: 3,
+      bytes: 2048,
+    }
+    const controller = {
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [child],
+    }
+
+    // Read-only row: the ⋯ menu must not offer Manage — the ACL modal would
+    // only 403 on open (view-ACL = manage-ACL server-side).
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller,
+      rowAffordancesResourceId: 'child-1',
+      rowAffordances: {
+        held: ['read'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      },
+    })
+    const view = renderFilesPage()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+    })
+    expect(screen.queryByRole('menuitem', { name: 'Share' })).toBeNull()
+
+    // Same row with manage_acl held: the entry appears and opens the modal.
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller,
+      rowAffordancesResourceId: 'child-1',
+      rowAffordances: {
+        held: ['read', 'manage_acl'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      },
+    })
+    await act(async () => {
+      view.rerender(
+        <QueryClientProvider
+          client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+        >
+          <FilesPage />
+        </QueryClientProvider>
+      )
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
+    })
+    // The manage modal opens (titled for the current selection — the mocked
+    // controller does not navigate, so it stays on the parent folder).
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Who has access' })).toBeTruthy()
+  })
+
   it('returns to Shared with me after closing Manage for a file row', async () => {
     const managedFile = {
       resourceId: 'file-1',
@@ -1121,7 +1194,7 @@ describe('FilesPage', () => {
       version: 7,
       bytes: 128,
       sources: ['grant'],
-      permissions: ['read', 'write'],
+      permissions: ['read', 'write', 'manage_acl'],
       coversDescendants: false,
     }
     const restoreCrumbs = vi.fn()
@@ -1136,7 +1209,7 @@ describe('FilesPage', () => {
         accessibleResources: current ? [] : [managedFile],
         affordances: current
           ? {
-              held: ['read', 'write'],
+              held: ['read', 'write', 'manage_acl'],
               canDelegate: false,
               grantableBits: [],
               canCreateShare: false,
@@ -1832,7 +1905,7 @@ describe('FilesPage', () => {
         kind: 'directory',
       },
       affordances: {
-        held: ['read'],
+        held: ['read', 'manage_acl'],
         canDelegate: false,
         grantableBits: [],
         canCreateShare: false,
@@ -1856,7 +1929,7 @@ describe('FilesPage', () => {
         kind: 'directory',
       },
       affordances: {
-        held: ['read'],
+        held: ['read', 'manage_acl'],
         canDelegate: false,
         grantableBits: [],
         canCreateShare: false,
@@ -2149,6 +2222,165 @@ describe('FilesPage', () => {
 
     expect(moveResource).toHaveBeenCalledWith('child-1', 'folder-1', 3)
     expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Product', 'success')
+  })
+
+  it('moves a dragged file onto a folder only after confirming destination write access', async () => {
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({}))
+    const affordances = vi.fn(async () => ({
+      held: ['read', 'write'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'archive-1',
+          rid: 'archive-1',
+          gfsUri: 'gfs://main/archive-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Archive',
+          kind: 'directory',
+          path: '/Product/Archive',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+
+    const sourceRow = screen.getByRole('button', { name: 'Open notes.txt' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Archive' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+
+    await waitFor(() => {
+      expect(affordances).toHaveBeenCalledWith('archive-1', 'main')
+      expect(destinationRow.getAttribute('data-drop-target')).toBe('true')
+    })
+    fireEvent.dragOver(destinationRow, { dataTransfer })
+    expect(dataTransfer.dropEffect).toBe('move')
+
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    await waitFor(() => {
+      expect(moveResource).toHaveBeenCalledWith('file-1', 'archive-1', 3)
+      expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Archive', 'success')
+    })
+  })
+
+  it('rejects a file drop when the destination folder lacks write access', async () => {
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({}))
+    const affordances = vi.fn(async () => ({
+      held: ['read'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'private-1',
+          rid: 'private-1',
+          gfsUri: 'gfs://main/private-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Private',
+          kind: 'directory',
+          path: '/Product/Private',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+
+    const sourceRow = screen.getByRole('button', { name: 'Open notes.txt' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Private' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('private-1', 'main'))
+
+    expect(destinationRow.getAttribute('data-drop-target')).toBeNull()
+    expect(dataTransfer.dropEffect).toBe('none')
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    await waitFor(() => {
+      expect(moveResource).not.toHaveBeenCalled()
+      expect(pushToast).toHaveBeenCalledWith(
+        'You can’t move files to Private because you don’t have write permission for this folder.',
+        'error'
+      )
+    })
   })
 
   it('renames a folder child from its row menu once write affordances resolve', async () => {
@@ -2747,6 +2979,13 @@ describe('FilesPage', () => {
         },
       ],
       items: [nestedFolder],
+      rowAffordancesResourceId: 'nested-1',
+      rowAffordances: {
+        held: ['read', 'write', 'manage_acl'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      },
       openChild,
     })
     renderFilesPage()
@@ -2778,7 +3017,7 @@ describe('FilesPage', () => {
         version: 1,
       },
       affordances: {
-        held: ['read', 'write'],
+        held: ['read', 'write', 'manage_acl'],
         canDelegate: false,
         grantableBits: [],
         canCreateShare: false,

@@ -86,7 +86,12 @@ describe('GfsMoveDialog pagination', () => {
     renderDialog({ listAccessible }, { onMove })
 
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
-    expect(await within(dialog).findByRole('button', { name: 'Archive' })).toBeTruthy()
+    expect(within(dialog).getByText('Move “notes.txt”')).toBeTruthy()
+    expect(within(dialog).queryByText('Suggested')).toBeNull()
+    expect(within(dialog).queryByText('Starred')).toBeNull()
+    expect(within(dialog).queryByText('All locations')).toBeNull()
+    const archive = await within(dialog).findByRole('button', { name: 'Archive' })
+    expect(archive.classList.contains('da-gfs-move-dialog__tree-select')).toBe(true)
     // Page two is not silently fetched, but reachable through Load more.
     expect(within(dialog).queryByRole('button', { name: 'Deep Storage' })).toBeNull()
     expect(within(dialog).getByRole('button', { name: 'Load more' })).toBeTruthy()

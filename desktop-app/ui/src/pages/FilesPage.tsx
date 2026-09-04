@@ -58,6 +58,14 @@ function hasDraggedFiles(event: ReactDragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer.types || []).includes('Files')
 }
 
+const GFS_RESOURCE_DRAG_TYPE = 'application/x-evenfire-gfs-resource'
+
+function hasDraggedGfsResource(event: ReactDragEvent<HTMLElement>): boolean {
+  return Array.from(event.dataTransfer.types || []).includes(GFS_RESOURCE_DRAG_TYPE)
+}
+
+type FolderDropAccessResult = { allowed: boolean; error?: unknown }
+
 function isGfsPreviewFile(fileName: string): boolean {
   return (
     gfsImagePreviewMimeType(fileName) !== null ||
@@ -232,6 +240,15 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const [filePreview, setFilePreview] = useState<GfsPreviewResource | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
+  const [draggingResourceId, setDraggingResourceId] = useState<string | null>(null)
+  const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
+  const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
+  const draggingResourceRef = useRef<GfsDriveResource | null>(null)
+  const movingResourceRef = useRef<string | null>(null)
+  const hoveredFolderRef = useRef<string | null>(null)
+  const folderDropAccessRef = useRef(new Map<string, FolderDropAccessResult>())
+  const folderDropChecksRef = useRef(new Map<string, Promise<FolderDropAccessResult>>())
+  const dragSessionRef = useRef(0)
   const manageReturnCrumbsRef = useRef<GfsCrumb[] | null>(null)
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
   const replaceInputRef = useRef<HTMLInputElement | null>(null)
@@ -361,6 +378,9 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   )
   const canWriteCurrent = !accessRevoked && hasBit(affordances, 'write')
   const canDeleteCurrent = !accessRevoked && hasBit(affordances, 'delete')
+  // The Manage modal lists ACL rows, and view-ACL = manage-ACL server-side —
+  // a caller without the bit gets the API's 403, so the entry must not show.
+  const canManageCurrent = !accessRevoked && hasBit(affordances, 'manage_acl')
   const currentIsFolder = current?.kind === 'directory'
   const currentIsFile = current?.kind === 'file'
   const currentPreviewAvailable = currentIsFile && isGfsPreviewFile(current?.name ?? '')
@@ -603,6 +623,142 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     }
   }
 
+  const clearResourceDrag = () => {
+    dragSessionRef.current += 1
+    draggingResourceRef.current = null
+    hoveredFolderRef.current = null
+    folderDropAccessRef.current.clear()
+    folderDropChecksRef.current.clear()
+    setDraggingResourceId(null)
+    setDragOverFolderId(null)
+  }
+
+  const resolveFolderDropAccess = (folder: GfsDriveResource): Promise<FolderDropAccessResult> => {
+    const cached = folderDropAccessRef.current.get(folder.resourceId)
+    if (cached) return Promise.resolve(cached)
+    const pending = folderDropChecksRef.current.get(folder.resourceId)
+    if (pending) return pending
+
+    const dragSession = dragSessionRef.current
+    const check = Promise.resolve()
+      .then(() => window.clerum.gfs.affordances(folder.resourceId, 'main'))
+      .then(result => ({ allowed: result.held.includes('write') }))
+      .catch((permissionError: unknown) => {
+        const failedClosed = failClosedOnAuthorizationError(permissionError)
+        return { allowed: false, error: failedClosed ? undefined : permissionError }
+      })
+      .then(result => {
+        if (dragSession === dragSessionRef.current) {
+          folderDropAccessRef.current.set(folder.resourceId, result)
+          if (result.allowed && hoveredFolderRef.current === folder.resourceId) {
+            setDragOverFolderId(folder.resourceId)
+          }
+        }
+        return result
+      })
+      .finally(() => {
+        if (dragSession === dragSessionRef.current) {
+          folderDropChecksRef.current.delete(folder.resourceId)
+        }
+      })
+
+    folderDropChecksRef.current.set(folder.resourceId, check)
+    return check
+  }
+
+  const handleResourceDragStart = (
+    event: ReactDragEvent<HTMLElement>,
+    resource: GfsDriveResource
+  ) => {
+    if (resource.kind === 'directory' || movingResourceRef.current) {
+      event.preventDefault()
+      return
+    }
+    dragSessionRef.current += 1
+    folderDropAccessRef.current.clear()
+    folderDropChecksRef.current.clear()
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData(GFS_RESOURCE_DRAG_TYPE, resource.resourceId)
+    event.dataTransfer.setData('text/plain', resource.name)
+    draggingResourceRef.current = resource
+    setDraggingResourceId(resource.resourceId)
+  }
+
+  const handleResourceDragEnd = () => {
+    clearResourceDrag()
+  }
+
+  const handleFolderDragOver = (event: ReactDragEvent<HTMLElement>, folder: GfsDriveResource) => {
+    if (!hasDraggedGfsResource(event)) return
+    const source = draggingResourceRef.current
+    if (!source || folder.kind !== 'directory' || source.resourceId === folder.resourceId) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    hoveredFolderRef.current = folder.resourceId
+    const access = folderDropAccessRef.current.get(folder.resourceId)
+    if (access?.allowed) {
+      event.dataTransfer.dropEffect = 'move'
+      setDragOverFolderId(folder.resourceId)
+      return
+    }
+
+    event.dataTransfer.dropEffect = 'none'
+    setDragOverFolderId(null)
+    if (!access) void resolveFolderDropAccess(folder)
+  }
+
+  const handleFolderDragLeave = (event: ReactDragEvent<HTMLElement>) => {
+    if (!hasDraggedGfsResource(event)) return
+    event.preventDefault()
+    event.stopPropagation()
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      hoveredFolderRef.current = null
+      setDragOverFolderId(null)
+    }
+  }
+
+  const handleFolderDrop = async (
+    event: ReactDragEvent<HTMLElement>,
+    destination: GfsDriveResource
+  ) => {
+    if (!hasDraggedGfsResource(event)) return
+    event.preventDefault()
+    event.stopPropagation()
+    hoveredFolderRef.current = null
+    setDragOverFolderId(null)
+    const source = draggingResourceRef.current
+    if (!source || destination.kind !== 'directory' || movingResourceRef.current) return
+
+    try {
+      const access = await resolveFolderDropAccess(destination)
+      if (!access.allowed) {
+        const message = access.error
+          ? access.error instanceof Error
+            ? access.error.message
+            : String(access.error)
+          : `You can’t move files to ${destination.name} because you don’t have write permission for this folder.`
+        pushToast?.(message, 'error')
+        return
+      }
+
+      movingResourceRef.current = source.resourceId
+      setMovingResourceId(source.resourceId)
+      try {
+        await ctrl.moveResource(source.resourceId, destination.resourceId, source.version)
+        pushToast?.(`Moved ${source.name} to ${destination.name}`, 'success')
+      } catch (moveError) {
+        if (failClosedOnAuthorizationError(moveError)) return
+        pushToast?.(moveError instanceof Error ? moveError.message : String(moveError), 'error')
+      } finally {
+        movingResourceRef.current = null
+        setMovingResourceId(null)
+      }
+    } finally {
+      clearResourceDrag()
+    }
+  }
+
   const handleGfsDragEnter = (event: ReactDragEvent<HTMLElement>) => {
     if (!hasDraggedFiles(event)) return
     event.preventDefault()
@@ -743,6 +899,19 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       )
     }
     return Boolean(resource.permissions?.includes('write'))
+  }
+
+  /** Manage gate: the ACL modal needs `manage_acl` (view-ACL = manage-ACL
+   *  server-side). Same lazy row resolution as delete/rename — a read-only
+   *  row must not offer a Manage entry that would only 403 on open. */
+  const rowCanManage = (resource: GfsDriveResource): boolean => {
+    if (currentIsFolder) {
+      return (
+        ctrl.rowAffordancesResourceId === resource.resourceId &&
+        Boolean(ctrl.rowAffordances?.held.includes('manage_acl'))
+      )
+    }
+    return Boolean(resource.permissions?.includes('manage_acl'))
   }
 
   /** Move commits bubble their failure back to the dialog (in-place banner);
@@ -929,12 +1098,16 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
               {current && !currentIsFile && !currentIsBeingRenamed ? (
                 <GfsResourceMenu
                   resourceName={current.name}
-                  onManage={() => {
-                    setCreateFolderOpen(false)
-                    setRenameOpen(false)
-                    setDeleteOpen(false)
-                    setManageOpen(true)
-                  }}
+                  onManage={
+                    canManageCurrent
+                      ? () => {
+                          setCreateFolderOpen(false)
+                          setRenameOpen(false)
+                          setDeleteOpen(false)
+                          setManageOpen(true)
+                        }
+                      : undefined
+                  }
                   onCopyLink={() => void handleCopyLink(current.gfsUri)}
                   onDelete={canDeleteCurrent ? () => setDeleteTarget(current) : undefined}
                   onOpenGfsLink={() => setOpenLinkOpen(true)}
@@ -1045,13 +1218,17 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                       <h3>{current.name}</h3>
                       <GfsResourceMenu
                         resourceName={current.name}
-                        onManage={() => {
-                          manageReturnCrumbsRef.current = crumbs.slice(0, -1)
-                          setCreateFolderOpen(false)
-                          setRenameOpen(false)
-                          setDeleteOpen(false)
-                          setManageOpen(true)
-                        }}
+                        onManage={
+                          canManageCurrent
+                            ? () => {
+                                manageReturnCrumbsRef.current = crumbs.slice(0, -1)
+                                setCreateFolderOpen(false)
+                                setRenameOpen(false)
+                                setDeleteOpen(false)
+                                setManageOpen(true)
+                              }
+                            : undefined
+                        }
                         onCopyLink={() => void handleCopyLink(current.gfsUri)}
                         onDelete={canDeleteCurrent ? () => setDeleteTarget(current) : undefined}
                         onRename={canWriteCurrent ? () => openRenameTarget(current) : undefined}
@@ -1097,106 +1274,149 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                 <span className="da-grid__col-header da-grid__col-header--right">Actions</span>
               </div>
               <div className="da-grid__body">
-                {visibleResources.map(resource => (
-                  <div
-                    className="da-grid__row da-grid__row--clickable da-grid__row--compact"
-                    key={resource.resourceId}
-                    role="button"
-                    tabIndex={0}
-                    aria-label={
-                      resource.readable === false
-                        ? `${resource.name || resource.drive} (no read access)`
-                        : `Open ${resource.name || resource.drive}`
-                    }
-                    onClick={event => {
-                      if (isEventFromNestedInteractive(event)) return
-                      openResource(resource)
-                    }}
-                    onKeyDown={event => {
-                      if (event.key !== 'Enter' && event.key !== ' ') return
-                      if (isEventFromNestedInteractive(event)) return
-                      event.preventDefault()
-                      openResource(resource)
-                    }}
-                  >
-                    <span className="da-gfs-list__icon da-grid__cell" aria-hidden="true">
-                      {resource.kind === 'directory' ? (
-                        <IconContexts />
-                      ) : (
-                        <GfsFileIcon name={resource.name} />
-                      )}
-                    </span>
-                    <span className="da-gfs-list__identity da-grid__cell">
-                      <span className="da-gfs-list__name">
-                        {renameTarget?.resourceId === resource.resourceId ? (
-                          <GfsInlineRename
-                            onCancel={() => setRenameTarget(null)}
-                            onChange={setRenameDraft}
-                            onSubmit={() => void handleRenameTarget()}
-                            value={renameDraft}
-                            busy={ctrl.mutating}
-                          />
+                {visibleResources.map(resource => {
+                  const isDragging =
+                    draggingResourceId === resource.resourceId ||
+                    movingResourceId === resource.resourceId
+                  const isDropTarget = dragOverFolderId === resource.resourceId
+                  const canDragResource =
+                    resource.kind === 'file' &&
+                    resource.readable !== false &&
+                    movingResourceId === null &&
+                    !ctrl.mutating
+                  return (
+                    <div
+                      className="da-grid__row da-grid__row--clickable da-grid__row--compact"
+                      key={resource.resourceId}
+                      draggable={canDragResource}
+                      title={
+                        canDragResource
+                          ? `Drag ${resource.name} into a folder to move it`
+                          : undefined
+                      }
+                      data-dragging={isDragging ? 'true' : undefined}
+                      data-drop-target={isDropTarget ? 'true' : undefined}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={
+                        resource.readable === false
+                          ? `${resource.name || resource.drive} (no read access)`
+                          : `Open ${resource.name || resource.drive}`
+                      }
+                      onClick={event => {
+                        if (isEventFromNestedInteractive(event)) return
+                        openResource(resource)
+                      }}
+                      onKeyDown={event => {
+                        if (event.key !== 'Enter' && event.key !== ' ') return
+                        if (isEventFromNestedInteractive(event)) return
+                        event.preventDefault()
+                        openResource(resource)
+                      }}
+                      onDragStart={
+                        canDragResource
+                          ? event => handleResourceDragStart(event, resource)
+                          : undefined
+                      }
+                      onDragEnd={canDragResource ? handleResourceDragEnd : undefined}
+                      onDragEnter={
+                        resource.kind === 'directory'
+                          ? event => handleFolderDragOver(event, resource)
+                          : undefined
+                      }
+                      onDragOver={
+                        resource.kind === 'directory'
+                          ? event => handleFolderDragOver(event, resource)
+                          : undefined
+                      }
+                      onDragLeave={
+                        resource.kind === 'directory' ? handleFolderDragLeave : undefined
+                      }
+                      onDrop={
+                        resource.kind === 'directory'
+                          ? event => void handleFolderDrop(event, resource)
+                          : undefined
+                      }
+                    >
+                      <span className="da-gfs-list__icon da-grid__cell" aria-hidden="true">
+                        {resource.kind === 'directory' ? (
+                          <IconContexts />
                         ) : (
-                          <Button
-                            align="start"
-                            block
-                            onClick={() => openResource(resource)}
-                            variant="text"
-                          >
-                            {resource.name || resource.drive}
-                          </Button>
+                          <GfsFileIcon name={resource.name} />
                         )}
-                        {resource.readable === false ? (
-                          <Badge tone="neutral">No access</Badge>
-                        ) : null}
                       </span>
-                    </span>
-                    <span className="da-gfs-drive__size da-grid__cell da-grid__cell--right">
-                      {formatSharedFileSize(resource.bytes)}
-                    </span>
-                    <span className="da-gfs-list__actions da-grid__cell da-grid__cell--right">
-                      {resource.kind === 'file' ? (
-                        <IconButton
-                          label={`Download ${resource.name}`}
-                          onClick={() => void handleDownload(resource.gfsUri, resource.name)}
-                          size="sm"
-                          variant="ghost"
-                          disabled={resource.readable === false}
-                        >
-                          <IconDownload width={16} height={16} />
-                        </IconButton>
-                      ) : null}
-                      <GfsResourceMenu
-                        resourceName={resource.name}
-                        onManage={() => openManage(resource)}
-                        onCopyLink={() => void handleCopyLink(resource.gfsUri)}
-                        onDelete={
-                          rowCanDelete(resource) ? () => setDeleteTarget(resource) : undefined
-                        }
-                        onOpen={
-                          resource.kind === 'directory' ? () => openResource(resource) : undefined
-                        }
-                        onOpenChange={open =>
-                          ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)
-                        }
-                        onRename={
-                          rowCanRename(resource) ? () => openRenameTarget(resource) : undefined
-                        }
-                        onMove={() => setMoveTarget(resource)}
-                        onPreview={
-                          isGfsPreviewFile(resource.name)
-                            ? () => void openFilePreview(resource)
-                            : undefined
-                        }
-                        onDownload={
-                          resource.kind === 'file'
-                            ? () => void handleDownload(resource.gfsUri, resource.name)
-                            : undefined
-                        }
-                      />
-                    </span>
-                  </div>
-                ))}
+                      <span className="da-gfs-list__identity da-grid__cell">
+                        <span className="da-gfs-list__name">
+                          {renameTarget?.resourceId === resource.resourceId ? (
+                            <GfsInlineRename
+                              onCancel={() => setRenameTarget(null)}
+                              onChange={setRenameDraft}
+                              onSubmit={() => void handleRenameTarget()}
+                              value={renameDraft}
+                              busy={ctrl.mutating}
+                            />
+                          ) : (
+                            <Button
+                              align="start"
+                              block
+                              onClick={() => openResource(resource)}
+                              variant="text"
+                            >
+                              {resource.name || resource.drive}
+                            </Button>
+                          )}
+                          {resource.readable === false ? (
+                            <Badge tone="neutral">No access</Badge>
+                          ) : null}
+                        </span>
+                      </span>
+                      <span className="da-gfs-drive__size da-grid__cell da-grid__cell--right">
+                        {formatSharedFileSize(resource.bytes)}
+                      </span>
+                      <span className="da-gfs-list__actions da-grid__cell da-grid__cell--right">
+                        {resource.kind === 'file' ? (
+                          <IconButton
+                            label={`Download ${resource.name}`}
+                            onClick={() => void handleDownload(resource.gfsUri, resource.name)}
+                            size="sm"
+                            variant="ghost"
+                            disabled={resource.readable === false}
+                          >
+                            <IconDownload width={16} height={16} />
+                          </IconButton>
+                        ) : null}
+                        <GfsResourceMenu
+                          resourceName={resource.name}
+                          onManage={rowCanManage(resource) ? () => openManage(resource) : undefined}
+                          onCopyLink={() => void handleCopyLink(resource.gfsUri)}
+                          onDelete={
+                            rowCanDelete(resource) ? () => setDeleteTarget(resource) : undefined
+                          }
+                          onOpen={
+                            resource.kind === 'directory' ? () => openResource(resource) : undefined
+                          }
+                          onOpenChange={open =>
+                            ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)
+                          }
+                          onRename={
+                            rowCanRename(resource) ? () => openRenameTarget(resource) : undefined
+                          }
+                          onMove={() => setMoveTarget(resource)}
+                          onPreview={
+                            isGfsPreviewFile(resource.name)
+                              ? () => void openFilePreview(resource)
+                              : undefined
+                          }
+                          onDownload={
+                            resource.kind === 'file'
+                              ? () => void handleDownload(resource.gfsUri, resource.name)
+                              : undefined
+                          }
+                        />
+                      </span>
+                    </div>
+                  )
+                })}
               </div>
             </div>
           )}
