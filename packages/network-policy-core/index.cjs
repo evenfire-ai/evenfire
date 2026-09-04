@@ -134,6 +134,31 @@ function dnsCodeOf(err) {
   return typeof err.code === 'string' ? err.code : undefined
 }
 
+/**
+ * Classify one value rejected by the DNS promise at the resolver boundary.
+ * Unlike classifyDnsError, this is a total trust-boundary verdict: an unknown,
+ * missing, or non-object rejection is a controller fault, never an implicit
+ * negative DNS answer. The caller must invoke this only in the catch that wraps
+ * the DNS operation itself; a code cannot prove where an exception originated.
+ */
+function classifyDnsRejection(value) {
+  const code = dnsCodeOf(value)
+  if (typeof code === 'string' && TRANSIENT_DNS_CODES.has(code)) {
+    return { kind: 'transient', code }
+  }
+  if (typeof code === 'string' && NO_RECORDS_DNS_CODES.includes(code)) {
+    return { kind: 'negative', reason: 'no-records', code }
+  }
+  if (code === 'EBADNAME') {
+    return { kind: 'negative', reason: 'invalid-name', code }
+  }
+  return {
+    kind: 'fault',
+    ...(typeof code === 'string' ? { code } : {}),
+    cause: value,
+  }
+}
+
 /** True for the two genuine no-records answers, false for every other code. */
 function isNoRecordsDnsCode(code) {
   return typeof code === 'string' && NO_RECORDS_DNS_CODES.includes(code)
@@ -484,6 +509,87 @@ function parseState(annotations, now, config, declarations) {
   return { entries: [] }
 }
 
+/**
+ * Strict current-format parser for authorization decisions. Unlike parseState,
+ * this never falls back to legacy data and never drops malformed entries while
+ * returning success. It is intentionally separate so migration/availability
+ * callers can keep parseState's tolerant behavior without making corrupt or
+ * over-cap state authoritative.
+ */
+function parseStateStrict(annotations, config, declarations) {
+  const raw = annotations && annotations[STATE_ANNOTATION]
+  if (typeof raw !== 'string' || raw.length === 0) return { kind: 'absent' }
+
+  let value
+  try {
+    value = JSON.parse(raw)
+  } catch (_error) {
+    return { kind: 'invalid', reason: 'state annotation is not valid JSON' }
+  }
+  if (!Array.isArray(value)) {
+    return { kind: 'invalid', reason: 'state annotation is not an array' }
+  }
+  if (value.length > config.maxEntries) {
+    return { kind: 'invalid', reason: 'state annotation exceeds maxEntries' }
+  }
+
+  const declarationIds = Array.isArray(declarations)
+    ? new Set(
+        declarations
+          .filter(declaration => declaration && typeof declaration.fqdn === 'string')
+          .map(declaration =>
+            idOf(declaration.fqdn, declaration.port, declaration.protocol || DEFAULT_PROTOCOL)
+          )
+      )
+    : null
+  const entries = []
+  const seen = new Set()
+  for (const entry of value) {
+    if (
+      !entry ||
+      !isValidIpv4(entry.ip) ||
+      !Number.isInteger(entry.port) ||
+      entry.port < 1 ||
+      entry.port > 65535 ||
+      typeof entry.fqdn !== 'string' ||
+      entry.fqdn.length === 0 ||
+      typeof entry.protocol !== 'string' ||
+      entry.protocol.length === 0 ||
+      !Number.isFinite(entry.expiresAt) ||
+      !Number.isFinite(entry.lastObservedAt) ||
+      !Number.isFinite(new Date(entry.lastObservedAt).getTime())
+    ) {
+      return { kind: 'invalid', reason: 'state annotation contains a malformed entry' }
+    }
+    if (declarationIds && !declarationIds.has(idOf(entry.fqdn, entry.port, entry.protocol))) {
+      return { kind: 'invalid', reason: 'state annotation contains an undeclared identity' }
+    }
+    const normalized = {
+      ip: entry.ip,
+      port: entry.port,
+      protocol: entry.protocol,
+      fqdn: entry.fqdn,
+      expiresAt: entry.expiresAt,
+      lastObservedAt: entry.lastObservedAt,
+    }
+    const key = keyOf(normalized)
+    if (seen.has(key)) {
+      return { kind: 'invalid', reason: 'state annotation contains a duplicate entry' }
+    }
+    seen.add(key)
+    entries.push(normalized)
+  }
+  entries.sort(byKey)
+  const serialized = serializeState({ entries })
+  const combinedBytes =
+    Buffer.byteLength(serialized[STATE_ANNOTATION], 'utf8') +
+    Buffer.byteLength(serialized[TARGETS_ANNOTATION], 'utf8')
+  if (combinedBytes > MAX_ANNOTATION_BYTES) {
+    return { kind: 'invalid', reason: 'state annotation exceeds the byte budget' }
+  }
+  return { kind: 'valid', state: { entries } }
+}
+
 module.exports = {
   STATE_ANNOTATION,
   TARGETS_ANNOTATION,
@@ -496,9 +602,11 @@ module.exports = {
   stateHash,
   serializeState,
   parseState,
+  parseStateStrict,
   classifyDnsError,
   PERMANENT_DNS_CODES,
   isPermanentDnsCode,
   isNoRecordsDnsCode,
   dnsCodeOf,
+  classifyDnsRejection,
 }

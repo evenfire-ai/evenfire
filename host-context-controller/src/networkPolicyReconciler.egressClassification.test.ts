@@ -88,24 +88,41 @@ function makeReconciler(
     currentContext: 'test',
   })
   const reconciler = new NetworkPolicyReconciler(kc, new Map())
+  const normalizePolicy = (
+    policy: k8s.V1NetworkPolicy,
+    namespace: string,
+    index = 0
+  ): k8s.V1NetworkPolicy => {
+    const name = policy.metadata?.name ?? `unnamed-${index}`
+    return {
+      ...policy,
+      metadata: {
+        ...policy.metadata,
+        name,
+        namespace: policy.metadata?.namespace ?? namespace,
+        uid: policy.metadata?.uid ?? `${namespace}:${name}:uid`,
+        resourceVersion: policy.metadata?.resourceVersion ?? '1',
+      },
+    }
+  }
   const networkingApi = {
     ...mockApi,
     listNamespacedNetworkPolicy: async (args: { namespace: string }) => {
       const response = await mockApi.listNamespacedNetworkPolicy(args)
-      const items = (response.items ?? []).map((policy: k8s.V1NetworkPolicy, index: number) => {
-        const name = policy.metadata?.name ?? `unnamed-${index}`
-        return {
-          ...policy,
-          metadata: {
-            ...policy.metadata,
-            name,
-            namespace: policy.metadata?.namespace ?? args.namespace,
-            uid: policy.metadata?.uid ?? `${args.namespace}:${name}:uid`,
-            resourceVersion: policy.metadata?.resourceVersion ?? '1',
-          },
-        }
-      })
+      const items = (response.items ?? []).map((policy: k8s.V1NetworkPolicy, index: number) =>
+        normalizePolicy(policy, args.namespace, index)
+      )
       return { ...response, items }
+    },
+    readNamespacedNetworkPolicy: async (args: { name: string; namespace: string }) => {
+      const direct = (await mockApi.readNamespacedNetworkPolicy(args)) as k8s.V1NetworkPolicy
+      if (direct.metadata?.name || direct.spec) return normalizePolicy(direct, args.namespace)
+      const response = await mockApi.listNamespacedNetworkPolicy({ namespace: args.namespace })
+      const found = (response.items ?? []).find(
+        (policy: k8s.V1NetworkPolicy) => policy.metadata?.name === args.name
+      )
+      if (!found) throw Object.assign(new Error('not found'), { code: 404 })
+      return normalizePolicy(found, args.namespace)
     },
   }
   ;(reconciler as unknown as { networkingApi: unknown }).networkingApi = networkingApi
@@ -184,6 +201,15 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     ])
   }
 
+  function injectPostResolutionCodedError(code: string): void {
+    const record = Object.defineProperty({ ttl: 300 }, 'address', {
+      get() {
+        throw Object.assign(new Error(`post-resolution ${code}`), { code })
+      },
+    }) as RecordWithTtl
+    resolve4Mock.mockResolvedValueOnce([record])
+  }
+
   type Condition = { type?: string; status?: string; reason?: string; message?: string }
 
   /**
@@ -218,9 +244,11 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     injectPostResolutionTypeError()
 
-    // No throw: there is a live policy, so the fault is served fail-static (T7).
-    // Everything else this test pins is unchanged.
-    await reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    // A verified prior policy may remain for already-running pods, but the
+    // controller fault still blocks new/update runtime reconciliation.
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(TypeError)
 
     // The operator must not be pointed at DNS for a fault in the reconciler.
     expect(warn.mock.calls.flat().join('\n')).not.toContain('permanent DNS failure')
@@ -242,9 +270,9 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     await seedAccumulatedPolicy({ lapsed: true })
     injectPostResolutionTypeError()
 
-    // No throw: the policy is live (its window lapsed, the object did not), so
-    // the fault is served fail-static (T7). The prune assertion is the point.
-    await reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(TypeError)
 
     // Pre-fix this prunes the lapsed set to zero, hits the `continue`, and the
     // policy is swept as undesired. D4 fail-static must hold for a fault that is
@@ -254,6 +282,86 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     const egress = statusConditions().filter(c => c.type === 'ExternalEgressReady')
     expect(egress.at(-1)?.reason).toBe('ExternalEgressReconcileFailed')
   })
+
+  it('T2b never promotes annotation-only state during transient fail-static', async () => {
+    await seedAccumulatedPolicy({ lapsed: false })
+    const listed = (await mockApi.listNamespacedNetworkPolicy({ namespace: 'mcp-server' })) as {
+      items: k8s.V1NetworkPolicy[]
+    }
+    const drifted = structuredClone(listed)
+    const state = JSON.parse(
+      drifted.items[0].metadata!.annotations!['clerum.io/egress-fqdn-state']
+    ) as Array<Record<string, unknown>>
+    state.push({
+      ...state[0],
+      ip: '8.8.8.8',
+    })
+    drifted.items[0].metadata!.annotations!['clerum.io/egress-fqdn-state'] = JSON.stringify(state)
+    mockApi.listNamespacedNetworkPolicy.mockResolvedValue(drifted)
+    resolve4Mock.mockRejectedValueOnce(
+      Object.assign(new Error('queryA ESERVFAIL api.example.com'), { code: 'ESERVFAIL' })
+    )
+
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(/Fail-static proof failed/)
+
+    expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ name: drifted.items[0].metadata!.name })
+    )
+    const written = mockApi.replaceNamespacedNetworkPolicy.mock.calls
+      .map(call => JSON.stringify(call[0]?.body))
+      .join(' ')
+    expect(written).not.toContain('8.8.8.8')
+    const egress = statusConditions().filter(c => c.type === 'ExternalEgressReady')
+    expect(egress.at(-1)?.status).toBe('False')
+    expect(egress.at(-1)?.reason).toBe('ExternalEgressReconcileFailed')
+    expect(egress.at(-1)?.message).toContain('REVOKED')
+  })
+
+  it('T2c never promotes annotation-only state after an accepted DNS answer', async () => {
+    await seedAccumulatedPolicy({ lapsed: false })
+    const listed = (await mockApi.listNamespacedNetworkPolicy({ namespace: 'mcp-server' })) as {
+      items: k8s.V1NetworkPolicy[]
+    }
+    const drifted = structuredClone(listed)
+    const state = JSON.parse(
+      drifted.items[0].metadata!.annotations!['clerum.io/egress-fqdn-state']
+    ) as Array<Record<string, unknown>>
+    state.push({ ...state[0], ip: '8.8.8.8' })
+    drifted.items[0].metadata!.annotations!['clerum.io/egress-fqdn-state'] = JSON.stringify(state)
+    mockApi.listNamespacedNetworkPolicy.mockResolvedValue(drifted)
+
+    await reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+
+    const writes = [
+      ...mockApi.createNamespacedNetworkPolicy.mock.calls,
+      ...mockApi.replaceNamespacedNetworkPolicy.mock.calls,
+    ]
+      .map(call => JSON.stringify(call[0]?.body))
+      .join(' ')
+    expect(writes).not.toContain('8.8.8.8')
+    expect(writes).toContain('1.2.3.4')
+    expect(servedPayload()).not.toContain('8.8.8.8')
+    expect(servedPayload()).toContain('1.2.3.4')
+  })
+
+  it.each(['ETIMEDOUT', 'ENOTFOUND'])(
+    'T2a keeps a post-resolution %s exception out of DNS classification',
+    async code => {
+      await seedAccumulatedPolicy({ lapsed: false })
+      injectPostResolutionCodedError(code)
+
+      await expect(
+        reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+      ).rejects.toThrow(`post-resolution ${code}`)
+
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      const egress = statusConditions().filter(c => c.type === 'ExternalEgressReady')
+      expect(egress.at(-1)?.reason).toBe('ExternalEgressReconcileFailed')
+      expect(egress.at(-1)?.message).not.toContain('DNS failure')
+    }
+  )
 
   it('T3 still prunes and fails loud on a genuine NXDOMAIN with a lapsed window', async () => {
     await seedAccumulatedPolicy({ lapsed: true })
@@ -269,6 +377,22 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
 
     const egress = statusConditions().filter(c => c.type === 'ExternalEgressReady')
+    expect(egress.at(-1)?.reason).toBe('ExternalEgressRejected')
+  })
+
+  it('T3a revokes and blocks on genuine NXDOMAIN even while the prior window is unexpired', async () => {
+    await seedAccumulatedPolicy({ lapsed: false })
+    resolve4Mock.mockRejectedValueOnce(
+      Object.assign(new Error('queryA ENOTFOUND api.example.com'), { code: 'ENOTFOUND' })
+    )
+
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(/failed to resolve hostname "api\.example\.com"/)
+
+    expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    const egress = statusConditions().filter(c => c.type === 'ExternalEgressReady')
+    expect(egress.at(-1)?.status).toBe('False')
     expect(egress.at(-1)?.reason).toBe('ExternalEgressRejected')
   })
 
@@ -305,11 +429,11 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
 
     // The operator removes a.example.com; b.example.com faults after resolution.
     injectPostResolutionTypeError()
-    // No throw: b.example.com has a live policy, so the fault is served
-    // fail-static (T7). What this test pins is that the cleanup still ran.
-    await reconciler.reconcileExternalEgress(bindings(['b.example.com']), {
-      isCurrent: () => true,
-    })
+    await expect(
+      reconciler.reconcileExternalEgress(bindings(['b.example.com']), {
+        isCurrent: () => true,
+      })
+    ).rejects.toThrow(TypeError)
 
     // Exactly one delete, and it is A's. `toHaveBeenCalledWith` alone is a
     // membership check, not an exclusivity one: it stays green when the cleanup
@@ -325,24 +449,13 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     )
   })
 
-  it('T7 serves the frozen set and does NOT block the workload when a fault has a live policy', async () => {
-    // Review of #567, major 3. The throw reaches k8sClient's catch, which logs
-    // "runtime reconciliation blocked" and returns BEFORE the managed Deployment
-    // is created — so a fault in ONE binding kept a whole server's pod down,
-    // healthy siblings included. #513 never asked for that: its acceptance is "no
-    // permanent DNS failure line, no prune". D4 fail-static is the house rule for
-    // a condition we cannot resolve this pass, and the transient branch already
-    // obeys it. When there is a live policy to serve, serve it, report the fault,
-    // and let the HCC-managed Deployment start on the last known-good egress.
-    //
-    // Scoped to HCC on purpose. Every consumer of ExternalEgressReady treats a
-    // False as terminal whatever the reason, so a WRC recipe depending on this
-    // server still fails — see #577, which is a decision about what the
-    // condition means, not something this test can assert away.
+  it('T7 retains a verified set for existing pods but blocks runtime on a controller fault', async () => {
     await seedAccumulatedPolicy({ lapsed: false })
     injectPostResolutionTypeError()
 
-    await reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(TypeError)
 
     expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
     expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
@@ -527,7 +640,7 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     expect(egress.at(-1)?.message).toContain('REVOKED')
   })
 
-  it('T11c still serves a clean /32 — the guard narrowed, it did not close', async () => {
+  it('T11c retains a clean /32 for existing pods while blocking runtime', async () => {
     // Anti-over-correction. T11/T11a/T11b all assert revocation, so a guard that
     // simply declared everything untrustworthy would satisfy the three of them
     // and destroy fail-static, which is the property five review rounds converged
@@ -535,14 +648,9 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     await seedAccumulatedPolicy({ lapsed: false })
     injectPostResolutionTypeError()
 
-    // Fail-static in one assertion: a fault WITH something trustworthy to serve
-    // completes instead of throwing. T11/T11a/T11b are the three shapes that must
-    // block; this is the shape that must not, and it is also the liveness witness
-    // — the pass reached the fault branch and chose to serve, rather than never
-    // faulting at all. T8 pins the other side (nothing to serve ⇒ still throws).
     await expect(
       reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
-    ).resolves.toBeUndefined()
+    ).rejects.toThrow(TypeError)
 
     // The clean policy is kept, not revoked …
     expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
@@ -557,6 +665,145 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
       )
     )
     expect(served).toContain('1.2.3.4')
+  })
+
+  it('T11c1 revokes a canonical public /32 absent from persisted DNS state', async () => {
+    await seedAccumulatedPolicy({ lapsed: false })
+    const policyName = await driftLivePolicy(spec => {
+      spec.egress!.push({
+        to: [{ ipBlock: { cidr: '8.8.8.8/32' } }],
+        ports: [{ port: 443, protocol: 'TCP' }],
+      })
+    })
+    injectPostResolutionTypeError()
+
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(TypeError)
+
+    expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ name: policyName })
+    )
+    expect(servedPayload()).not.toContain('8.8.8.8')
+  })
+
+  it('T11c2 rejects an otherwise canonical state above the configured cap', async () => {
+    await seedAccumulatedPolicy({ lapsed: false })
+    const items = (await mockApi.listNamespacedNetworkPolicy({ namespace: 'mcp-server' })) as {
+      items: k8s.V1NetworkPolicy[]
+    }
+    const drifted = structuredClone(items)
+    const now = Date.now()
+    const ips = Array.from({ length: 129 }, (_, index) => `11.0.0.${index + 1}`)
+    drifted.items[0].metadata!.annotations!['clerum.io/egress-fqdn-state'] = JSON.stringify(
+      ips.map(ip => ({
+        ip,
+        port: 443,
+        protocol: 'TCP',
+        fqdn: 'api.example.com',
+        expiresAt: now + 600_000,
+        lastObservedAt: now,
+      }))
+    )
+    drifted.items[0].spec!.egress = ips.map(ip => ({
+      to: [{ ipBlock: { cidr: `${ip}/32` } }],
+      ports: [{ port: 443, protocol: 'TCP' }],
+    }))
+    const policyName = drifted.items[0].metadata!.name!
+    mockApi.listNamespacedNetworkPolicy.mockResolvedValue(drifted)
+    injectPostResolutionTypeError()
+
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(TypeError)
+    expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ name: policyName })
+    )
+  })
+
+  it('T11c3 judges a fresh GET and fences deletion to that resourceVersion', async () => {
+    await seedAccumulatedPolicy({ lapsed: false })
+    const listed = (await mockApi.listNamespacedNetworkPolicy({ namespace: 'mcp-server' })) as {
+      items: k8s.V1NetworkPolicy[]
+    }
+    const fresh = structuredClone(listed.items[0])
+    fresh.metadata = {
+      ...fresh.metadata,
+      name: fresh.metadata!.name!,
+      namespace: 'mcp-server',
+      uid: 'fresh-policy-uid',
+      resourceVersion: '99',
+    }
+    fresh.spec!.egress!.push({
+      to: [{ ipBlock: { cidr: '8.8.4.4/32' } }],
+      ports: [{ port: 443, protocol: 'TCP' }],
+    })
+    mockApi.readNamespacedNetworkPolicy.mockResolvedValue(fresh)
+    injectPostResolutionTypeError()
+
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(TypeError)
+
+    expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: fresh.metadata!.name,
+        body: { preconditions: { uid: 'fresh-policy-uid', resourceVersion: '99' } },
+      })
+    )
+  })
+
+  it('T11c3a leaves a fresh homonymous policy untouched when HCC does not own it', async () => {
+    const policyName = 'ext-egress-classify-mcp-api.example.com-443'
+    mockApi.readNamespacedNetworkPolicy.mockResolvedValue({
+      metadata: {
+        name: policyName,
+        namespace: 'mcp-server',
+        uid: 'foreign-policy-uid',
+        resourceVersion: '77',
+        labels: {
+          'clerum.io/managed-by': 'another-controller',
+          'clerum.io/policy-type': 'external-egress',
+          'clerum.io/mcpserver': server.name,
+        },
+      },
+      spec: {
+        podSelector: { matchLabels: { app: 'foreign-workload' } },
+        policyTypes: ['Egress'],
+        egress: [],
+      },
+    } satisfies k8s.V1NetworkPolicy)
+    injectPostResolutionTypeError()
+
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(/conflicting or incomplete ownership/)
+
+    // A fresh GET is authoritative for both integrity and ownership. A policy
+    // that merely occupies HCC's deterministic name is not ours to retain,
+    // rewrite, or revoke—even while the controller correctly blocks runtime.
+    expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    const egress = statusConditions().filter(c => c.type === 'ExternalEgressReady')
+    expect(egress.at(-1)?.reason).toBe('ExternalEgressReconcileFailed')
+    expect(egress.at(-1)?.message).toContain('not HCC-owned')
+    expect(egress.at(-1)?.message).toContain('left untouched')
+  })
+
+  it('T11c4 preserves the last successful resolvedAt on a controller fault', async () => {
+    await seedAccumulatedPolicy({ lapsed: false })
+    const listed = (await mockApi.listNamespacedNetworkPolicy({ namespace: 'mcp-server' })) as {
+      items: k8s.V1NetworkPolicy[]
+    }
+    const oldResolvedAt = '2000-01-01T00:00:00.000Z'
+    listed.items[0].metadata!.annotations!['clerum.io/egress-fqdn-resolved-at'] = oldResolvedAt
+    mockApi.listNamespacedNetworkPolicy.mockResolvedValue(listed)
+    injectPostResolutionTypeError()
+
+    await expect(
+      reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+    ).rejects.toThrow(TypeError)
+    expect(servedPayload()).toContain(oldResolvedAt)
   })
 
   /** The live policy the fixture seeded, cloned and handed to a drift mutation. */
@@ -698,7 +945,7 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     ).toContain('REVOKED')
   })
 
-  it('T11g still serves a clean multi-CIDR UDP binding — the shape check reads the binding', async () => {
+  it('T11g retains a clean multi-CIDR UDP binding while blocking runtime', async () => {
     // Anti-over-correction, the half T11c cannot cover. T11c serves ONE /32 on the
     // default TCP/443 binding, so a verdict that rebuilt the shape with a
     // hardcoded TCP, a hardcoded port, or only the first CIDR would still satisfy
@@ -720,12 +967,9 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     await seedAccumulatedPolicy({ lapsed: false, srv: udpServer })
     injectPostResolutionTypeError()
 
-    // Fail-static in one assertion: a fault WITH something trustworthy to serve
-    // completes instead of throwing. It is also the liveness witness — the pass
-    // reached the fault branch and chose to serve, rather than never faulting.
     await expect(
       reconciler.reconcileExternalEgress(udpServer, { isCurrent: () => true })
-    ).resolves.toBeUndefined()
+    ).rejects.toThrow(TypeError)
 
     // Both accumulated addresses are still served, so a rebuild that kept only the
     // first CIDR fails here rather than passing quietly.
@@ -737,7 +981,7 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
       statusConditions()
         .filter(c => c.type === 'ExternalEgressReady')
         .at(-1)?.message
-    ).toContain('left untouched')
+    ).toContain('runtime remains blocked')
   })
 
   it('T11h revokes a live policy with no egress rules — a deny disguised as an allow', async () => {

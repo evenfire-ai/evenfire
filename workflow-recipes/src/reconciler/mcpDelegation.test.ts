@@ -2062,6 +2062,60 @@ describe('waitForExternalEgressReady', () => {
     expect(result.pending).toEqual(['web-search'])
     expect(result.failed).toEqual([])
   })
+
+  it('treats a current controller-fault condition as retryable pending', async () => {
+    const deps: DelegationDeps = {
+      customApi: {
+        getNamespacedCustomObject: vi.fn().mockResolvedValue({
+          metadata: { generation: 3 },
+          status: {
+            conditions: [
+              {
+                type: 'ExternalEgressReady',
+                status: 'False',
+                reason: 'ExternalEgressReconcileFailed',
+                message: 'controller fault; runtime remains blocked',
+                observedGeneration: 3,
+              },
+            ],
+          },
+        }),
+      } as any,
+      coreApi: {} as any,
+    }
+
+    const result = await waitForExternalEgressReady(deps, ['web-search'], 'mcp-server', 1)
+    expect(result).toEqual({ ready: false, pending: ['web-search'], failed: [] })
+  })
+
+  it('keeps a current rejected binding terminal and fail-closed', async () => {
+    const deps: DelegationDeps = {
+      customApi: {
+        getNamespacedCustomObject: vi.fn().mockResolvedValue({
+          metadata: { generation: 3 },
+          status: {
+            conditions: [
+              {
+                type: 'ExternalEgressReady',
+                status: 'False',
+                reason: 'ExternalEgressRejected',
+                message: 'hostname is not allowed',
+                observedGeneration: 3,
+              },
+            ],
+          },
+        }),
+      } as any,
+      coreApi: {} as any,
+    }
+
+    const result = await waitForExternalEgressReady(deps, ['web-search'], 'mcp-server', 1000)
+    expect(result).toEqual({
+      ready: false,
+      pending: ['web-search'],
+      failed: [{ name: 'web-search', message: 'hostname is not allowed' }],
+    })
+  })
 })
 
 // ─── Issue #408 — waitForNetworkReady must be generation-aware ─────────────────

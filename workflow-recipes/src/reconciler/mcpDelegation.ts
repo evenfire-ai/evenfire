@@ -37,6 +37,14 @@ import { effectiveWorkflowContextRef, privateWorkflowContextName } from './workf
 const MCPSERVER_PLURAL = 'mcpservers'
 const CONTEXT_PLURAL = 'contexts'
 const EXTERNAL_EGRESS_READY_CONDITION = 'ExternalEgressReady'
+const RETRYABLE_EXTERNAL_EGRESS_REASONS = new Set([
+  'ExternalEgressReconcileFailed',
+  'InventoryListFailed',
+  'CleanupFailed',
+  'ExternalEgressProofFailed',
+  'ExternalEgressUntrustedState',
+  'StatusWriteFailed',
+])
 const MCPSERVER_REPLACE_CONFLICT_RETRIES = 3
 const CONTEXT_REPLACE_CONFLICT_RETRIES = 3
 
@@ -1041,6 +1049,7 @@ export async function waitForExternalEgressReady(
           return {
             name,
             status: isFresh ? condition?.status : 'Unknown',
+            reason: isFresh ? condition?.reason : undefined,
             message:
               isFresh && condition
                 ? (condition.message ??
@@ -1053,7 +1062,8 @@ export async function waitForExternalEgressReady(
         } catch (error) {
           return {
             name,
-            status: 'False',
+            status: getErrorCode(error) === 404 ? 'False' : 'Unknown',
+            reason: getErrorCode(error) === 404 ? 'McpServerDeleted' : 'InventoryReadFailed',
             message:
               getErrorCode(error) === 404
                 ? 'McpServer was deleted before external egress became ready'
@@ -1068,7 +1078,9 @@ export async function waitForExternalEgressReady(
         pending.delete(result.name)
         console.log(`[MCP-Delegation] External egress ready for "${result.name}"`)
       } else if (result.status === 'False') {
-        failed.set(result.name, result.message ?? `${EXTERNAL_EGRESS_READY_CONDITION} is False`)
+        if (!result.reason || !RETRYABLE_EXTERNAL_EGRESS_REASONS.has(result.reason)) {
+          failed.set(result.name, result.message ?? `${EXTERNAL_EGRESS_READY_CONDITION} is False`)
+        }
       }
     }
 

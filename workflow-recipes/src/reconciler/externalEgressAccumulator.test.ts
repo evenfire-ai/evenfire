@@ -7,7 +7,7 @@ import {
   reconcileEgressState,
   serializeState,
 } from '@clerum/network-policy-core'
-import { accumulateExternalEgress } from './externalEgressAccumulator'
+import { accumulateExternalEgress, contractExternalEgress } from './externalEgressAccumulator'
 import type { ResolveResult } from './fqdnResolver'
 
 const CONFIG = { overlapMs: 300_000, maxEntries: 128 }
@@ -95,6 +95,7 @@ describe('accumulateExternalEgress — H1 fail-static under transient DNS failur
       [{ fqdn: 'api.github.com', port: 443, ip: '140.82.112.3', ttlSeconds: 15 }],
       NOW
     )
+    prev[RESOLVED_AT_ANNOTATION] = '2000-01-01T00:00:00.000Z'
     const resolveResult: ResolveResult = {
       resolved: [],
       failures: [{ fqdn: 'api.github.com', error: 'ESERVFAIL', retryable: true }],
@@ -110,6 +111,41 @@ describe('accumulateExternalEgress — H1 fail-static under transient DNS failur
     // The IP is CONSERVED (frozen), not pruned.
     expect(out.resolved.map(r => r.cidr)).toEqual(['140.82.112.3/32'])
     expect(out.frozenFqdns).toContain('api.github.com')
+    expect(out.annotations[RESOLVED_AT_ANNOTATION]).toBe('2000-01-01T00:00:00.000Z')
+  })
+
+  it('preserves the last accepted timestamp on a permanent failure that removes state', () => {
+    const prev = previousAnnotations(
+      [{ fqdn: 'api.github.com', port: 443, ip: '140.82.112.3', ttlSeconds: 15 }],
+      NOW
+    )
+    prev[RESOLVED_AT_ANNOTATION] = '2000-01-01T00:00:00.000Z'
+    const out = accumulateExternalEgress({
+      externals: [{ fqdn: 'api.github.com', port: 443 }],
+      resolveResult: {
+        resolved: [],
+        failures: [{ fqdn: 'api.github.com', error: 'no A records', retryable: false }],
+      },
+      previousAnnotations: prev,
+      now: NOW + 1000,
+      config: CONFIG,
+    })
+    expect(out.entries).toEqual([])
+    expect(out.annotations[RESOLVED_AT_ANNOTATION]).toBe('2000-01-01T00:00:00.000Z')
+  })
+
+  it('does not synthesize a resolved timestamp for a bootstrap failure', () => {
+    const out = accumulateExternalEgress({
+      externals: [{ fqdn: 'api.github.com', port: 443 }],
+      resolveResult: {
+        resolved: [],
+        failures: [{ fqdn: 'api.github.com', error: 'ESERVFAIL', retryable: true }],
+      },
+      previousAnnotations: undefined,
+      now: NOW,
+      config: CONFIG,
+    })
+    expect(out.annotations[RESOLVED_AT_ANNOTATION]).toBeUndefined()
   })
 })
 
@@ -199,6 +235,64 @@ describe('accumulateExternalEgress — F1 revocation of a removed fqdn (audit #2
     })
     expect(out.resolved.map(r => r.cidr)).toEqual(['140.82.112.3/32'])
     expect(out.frozenFqdns).toEqual(['api.github.com'])
+  })
+})
+
+describe('contractExternalEgress — subtractive phase before DNS', () => {
+  it('revokes undeclared identities, freezes current ones, and preserves resolved-at', () => {
+    const prev = previousAnnotations(
+      [
+        { fqdn: 'removed.example.com', port: 443, ip: '93.184.216.10', ttlSeconds: 30 },
+        { fqdn: 'current.example.com', port: 443, ip: '93.184.216.20', ttlSeconds: 30 },
+      ],
+      NOW
+    )
+    prev[RESOLVED_AT_ANNOTATION] = new Date(NOW).toISOString()
+
+    const out = contractExternalEgress({
+      externals: [{ fqdn: 'current.example.com', port: 443 }],
+      previousAnnotations: prev,
+      now: NOW + 30_000 + CONFIG.overlapMs + 60_000,
+      config: CONFIG,
+    })
+
+    expect(out.resolved.map(entry => entry.cidr)).toEqual(['93.184.216.20/32'])
+    expect(out.changed).toBe(true)
+    expect(out.annotations[RESOLVED_AT_ANNOTATION]).toBe(new Date(NOW).toISOString())
+    expect(out.annotations[TARGETS_ANNOTATION]).not.toContain('removed.example.com')
+  })
+
+  it('returns empty trusted state when prior provenance is absent', () => {
+    const out = contractExternalEgress({
+      externals: [{ fqdn: 'current.example.com', port: 443 }],
+      previousAnnotations: undefined,
+      now: NOW,
+      config: CONFIG,
+    })
+    expect(out.entries).toEqual([])
+    expect(out.resolved).toEqual([])
+    expect(out.annotations[STATE_ANNOTATION]).toBe('[]')
+    expect(out.annotations[RESOLVED_AT_ANNOTATION]).toBeUndefined()
+  })
+
+  it('removes persisted entries rejected by the lane safety filter from state and spec', () => {
+    const prev = previousAnnotations(
+      [
+        { fqdn: 'api.example.com', port: 443, ip: '10.0.0.5', ttlSeconds: 30 },
+        { fqdn: 'api.example.com', port: 443, ip: '93.184.216.20', ttlSeconds: 30 },
+      ],
+      NOW
+    )
+    const out = contractExternalEgress({
+      externals: [{ fqdn: 'api.example.com', port: 443 }],
+      previousAnnotations: prev,
+      now: NOW + 1000,
+      config: CONFIG,
+      isAllowedIp: ip => !ip.startsWith('10.'),
+    })
+    expect(out.resolved.map(entry => entry.cidr)).toEqual(['93.184.216.20/32'])
+    expect(out.annotations[STATE_ANNOTATION]).not.toContain('10.0.0.5')
+    expect(out.changed).toBe(true)
   })
 })
 

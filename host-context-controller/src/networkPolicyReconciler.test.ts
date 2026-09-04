@@ -19,6 +19,7 @@ import {
   sameContextDesiredRevision,
 } from './networkPolicyReconciler'
 import { ContextCRD, McpServerCRD } from './types'
+import { getErrorCode } from './utils'
 
 function deferred<T = void>(): {
   promise: Promise<T>
@@ -88,6 +89,7 @@ function makeMockNetworkingApi() {
     createNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
     readNamespacedNetworkPolicy: vi.fn().mockImplementation(async ({ name }) => {
       if (
+        name.startsWith('ext-egress-') ||
         name === 'allow-desktop-egress-rpc-proxy' ||
         name === 'allow-rpc-proxy-to-managed-mcp-servers'
       ) {
@@ -155,8 +157,14 @@ function makeReconciler(
       return { ...response, items }
     },
     readNamespacedNetworkPolicy: async (args: { name: string; namespace: string }) => {
-      const response = await mockApi.readNamespacedNetworkPolicy(args)
       const listed = listedPolicies.get(`${args.namespace}/${args.name}`)
+      let response: k8s.V1NetworkPolicy
+      try {
+        response = await mockApi.readNamespacedNetworkPolicy(args)
+      } catch (error: unknown) {
+        if (getErrorCode(error) === 404 && listed) return listed
+        throw error
+      }
       return {
         ...listed,
         ...response,
@@ -2164,6 +2172,72 @@ describe('NetworkPolicyReconciler', () => {
       expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
 
+    it.each(['success', 'transient'] as const)(
+      'uses a fresh GET before the %s DNS no-op decision and prevents a widened live policy',
+      async mode => {
+        const server: McpServerCRD = {
+          name: `fresh-${mode}-mcp`,
+          namespace: 'mcp-server',
+          spec: {
+            contextRef: 'dev',
+            image: 'fresh:test',
+            transport: { type: 'streamableHttp', url: 'http://fresh:3000', port: 3000 },
+            egressBindings: [{ dns: 'api.example.com', port: 443 }],
+          },
+        }
+        await reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+        const written = (
+          mockApi.createNamespacedNetworkPolicy.mock.calls[0][0] as {
+            body: k8s.V1NetworkPolicy
+          }
+        ).body
+        const listed = structuredClone(written)
+        const freshWidened = structuredClone(written)
+        freshWidened.metadata = {
+          ...freshWidened.metadata,
+          name: written.metadata!.name!,
+          namespace: 'mcp-server',
+          uid: `fresh-${mode}-uid`,
+          resourceVersion: '22',
+        }
+        freshWidened.spec!.egress!.push({
+          to: [{ ipBlock: { cidr: '8.8.8.8/32' } }],
+          ports: [{ port: 443, protocol: 'TCP' }],
+        })
+        mockApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [listed] })
+        mockApi.readNamespacedNetworkPolicy.mockResolvedValue(freshWidened)
+        mockApi.createNamespacedNetworkPolicy.mockReset()
+        mockApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+        mockApi.replaceNamespacedNetworkPolicy.mockClear()
+        mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+        if (mode === 'transient') {
+          resolve4Mock.mockRejectedValueOnce(
+            Object.assign(new Error('queryA ESERVFAIL api.example.com'), { code: 'ESERVFAIL' })
+          )
+        }
+
+        if (mode === 'transient') {
+          await expect(
+            reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+          ).rejects.toThrow(/Fail-static proof failed/)
+          expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+            expect.objectContaining({ name: written.metadata!.name })
+          )
+          expect(
+            JSON.stringify(mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls)
+          ).toContain('ExternalEgressReconcileFailed')
+        } else {
+          await reconciler.reconcileExternalEgress(server, { isCurrent: () => true })
+          const replacement = mockApi.replaceNamespacedNetworkPolicy.mock.calls.at(-1)?.[0]
+            ?.body as k8s.V1NetworkPolicy
+          expect(replacement).toBeDefined()
+        }
+        expect(JSON.stringify(mockApi.replaceNamespacedNetworkPolicy.mock.calls)).not.toContain(
+          '8.8.8.8'
+        )
+      }
+    )
+
     it('WRITES on resync when the persisted window is AGING even though the IP set is unchanged (issue #299 M1 renewalDue wiring)', async () => {
       const server: McpServerCRD = {
         name: 'renew-mcp',
@@ -2607,7 +2681,16 @@ describe('NetworkPolicyReconciler', () => {
     it('deletes only orphaned external egress policies after applying the desired set', async () => {
       mockApi.listNamespacedNetworkPolicy.mockResolvedValue({
         items: [
-          { metadata: { name: 'ext-egress-openai-mcp-api.openai.com-443' } },
+          {
+            metadata: {
+              name: 'ext-egress-openai-mcp-api.openai.com-443',
+              labels: {
+                [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+                [POLICY_TYPE_LABEL]: 'external-egress',
+                [MCPSERVER_LABEL]: 'openai-mcp',
+              },
+            },
+          },
           { metadata: { name: 'ext-egress-openai-mcp-old-example-com-443' } },
         ],
       })
@@ -2637,7 +2720,16 @@ describe('NetworkPolicyReconciler', () => {
     it('fails closed when an orphaned external egress policy cannot be deleted', async () => {
       mockApi.listNamespacedNetworkPolicy.mockResolvedValue({
         items: [
-          { metadata: { name: 'ext-egress-openai-mcp-api.openai.com-443' } },
+          {
+            metadata: {
+              name: 'ext-egress-openai-mcp-api.openai.com-443',
+              labels: {
+                [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+                [POLICY_TYPE_LABEL]: 'external-egress',
+                [MCPSERVER_LABEL]: 'openai-mcp',
+              },
+            },
+          },
           { metadata: { name: 'ext-egress-openai-mcp-old-example-com-443' } },
         ],
       })
@@ -2671,7 +2763,16 @@ describe('NetworkPolicyReconciler', () => {
       )
       mockApi.listNamespacedNetworkPolicy.mockResolvedValue({
         items: [
-          { metadata: { name: 'ext-egress-openai-mcp-api.openai.com-443' } },
+          {
+            metadata: {
+              name: 'ext-egress-openai-mcp-api.openai.com-443',
+              labels: {
+                [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+                [POLICY_TYPE_LABEL]: 'external-egress',
+                [MCPSERVER_LABEL]: 'openai-mcp',
+              },
+            },
+          },
           { metadata: { name: 'ext-egress-openai-mcp-old-example-com-443' } },
         ],
       })

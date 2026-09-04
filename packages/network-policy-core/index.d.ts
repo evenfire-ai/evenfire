@@ -126,6 +126,21 @@ export declare function parseState(
   declarations?: ReadonlyArray<{ fqdn: string; port: number; protocol?: string }>
 ): EgressState
 
+export type StrictStateRead =
+  | { kind: 'valid'; state: EgressState }
+  | { kind: 'absent' }
+  | { kind: 'invalid'; reason: string }
+
+/**
+ * Parse only the current structured state for authorization decisions. No
+ * legacy fallback and no silent dropping of malformed/over-cap entries.
+ */
+export declare function parseStateStrict(
+  annotations: Record<string, string> | undefined,
+  config: EgressCoreConfig,
+  declarations?: ReadonlyArray<{ fqdn: string; port: number; protocol?: string }>
+): StrictStateRead
+
 export declare const STATE_ANNOTATION: string
 export declare const TARGETS_ANNOTATION: string
 export declare const RESOLVED_AT_ANNOTATION: string
@@ -173,6 +188,19 @@ export declare function isPermanentDnsCode(code: unknown): boolean
  * shape does not occur in production.
  */
 export declare function dnsCodeOf(err: unknown): string | undefined
+
+export type DnsRejectionVerdict =
+  | { kind: 'transient'; code: string }
+  | { kind: 'negative'; reason: 'no-records' | 'invalid-name'; code: string }
+  | { kind: 'fault'; code?: string; cause: unknown }
+
+/**
+ * Total verdict for a value rejected by a DNS promise. Unknown, missing, and
+ * non-object values are faults rather than implicit negative DNS answers.
+ * Invoke only at the exact resolver rejection boundary: a code alone does not
+ * establish where an exception originated.
+ */
+export declare function classifyDnsRejection(value: unknown): DnsRejectionVerdict
 
 /**
  * True for the two genuine no-records answers (ENODATA, ENOTFOUND) and false for

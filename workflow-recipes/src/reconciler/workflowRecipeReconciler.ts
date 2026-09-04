@@ -14,7 +14,13 @@
  * 11. Handle delete (reverse dependency order, skip PVCs)
  */
 import * as k8s from '@kubernetes/client-node'
-import { STATE_ANNOTATION } from '@clerum/network-policy-core'
+import {
+  type EgressEntry,
+  RESOLVED_AT_ANNOTATION,
+  STATE_ANNOTATION,
+  TARGETS_ANNOTATION,
+  serializeState,
+} from '@clerum/network-policy-core'
 import { OperatorConfig, loadConfig } from '../config'
 import { getPool } from '../db'
 import { createLogger } from '../observability/logger'
@@ -58,7 +64,11 @@ import {
 import { evaluateComputedValues } from './computedValuesEvaluator'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './crdConstants'
 import { sort as sortDependencies } from './dependencyGraph'
-import { type AccumulateOutput, accumulateExternalEgress } from './externalEgressAccumulator'
+import {
+  type AccumulateOutput,
+  accumulateExternalEgress,
+  contractExternalEgress,
+} from './externalEgressAccumulator'
 import {
   type FqdnLookup,
   defaultFqdnLookup,
@@ -134,11 +144,11 @@ function externalEgressReadinessError(
 ): Error {
   const pending = result.pending.map(name => `${name}: pending`)
   const failed = result.failed.map(({ name, message }) => `${name}: ${message}`)
-  return new Error(
+  const message =
     `External egress policy readiness not achieved for WorkflowRecipe "${recipeName}". ` +
-      `${[...pending, ...failed].join('; ')}. ` +
-      `External egress bindings are not enforceable until HCC reports ExternalEgressReady=True.`
-  )
+    `${[...pending, ...failed].join('; ')}. ` +
+    `External egress bindings are not enforceable until HCC reports ExternalEgressReady=True.`
+  return result.failed.length === 0 ? new RetryableReconcileError(message) : new Error(message)
 }
 
 function clusterNetworkPolicyEnforcementError(recipeName: string): Error {
@@ -718,6 +728,110 @@ export function egressSignature(policy: k8s.V1NetworkPolicy): string {
       egress: spec?.egress ?? [],
     })
   )
+}
+
+function networkPolicySpecSignature(policy: k8s.V1NetworkPolicy): string {
+  return JSON.stringify(canonicalize(policy.spec ?? {}))
+}
+
+function contractionWriteNeeded(
+  existing: k8s.V1NetworkPolicy,
+  desired: k8s.V1NetworkPolicy
+): boolean {
+  if (networkPolicySpecSignature(existing) !== networkPolicySpecSignature(desired)) return true
+  const currentAnnotations = existing.metadata?.annotations ?? {}
+  const desiredAnnotations = desired.metadata?.annotations ?? {}
+  return [STATE_ANNOTATION, TARGETS_ANNOTATION, RESOLVED_AT_ANNOTATION].some(
+    key => currentAnnotations[key] !== desiredAnnotations[key]
+  )
+}
+
+function intersectRules<T>(existing: T[] | undefined, desired: T[] | undefined): T[] {
+  const available = new Map<string, number>()
+  for (const rule of existing ?? []) {
+    const signature = JSON.stringify(canonicalize(rule))
+    available.set(signature, (available.get(signature) ?? 0) + 1)
+  }
+  return (desired ?? []).filter(rule => {
+    const signature = JSON.stringify(canonicalize(rule))
+    const remaining = available.get(signature) ?? 0
+    if (remaining === 0) return false
+    available.set(signature, remaining - 1)
+    return true
+  })
+}
+
+/**
+ * Intersect a desired policy with the rules already enforced by the live
+ * snapshot. Used only by the pre-DNS contraction phase: it may remove rules but
+ * can never add one. Selector/policy-type drift cannot be proven subtractive,
+ * so the caller revokes the policy instead.
+ */
+function subtractiveNetworkPolicy(
+  existing: k8s.V1NetworkPolicy,
+  desired: k8s.V1NetworkPolicy | null
+): k8s.V1NetworkPolicy | null {
+  if (!desired) return null
+  const existingSelector = JSON.stringify(canonicalize(existing.spec?.podSelector ?? {}))
+  const desiredSelector = JSON.stringify(canonicalize(desired.spec?.podSelector ?? {}))
+  const existingTypes = JSON.stringify([...(existing.spec?.policyTypes ?? [])].sort())
+  const desiredTypes = JSON.stringify([...(desired.spec?.policyTypes ?? [])].sort())
+  if (existingSelector !== desiredSelector || existingTypes !== desiredTypes) return null
+
+  const contractedSpec: k8s.V1NetworkPolicySpec = { ...desired.spec! }
+  if (desired.spec?.egress !== undefined) {
+    contractedSpec.egress = intersectRules(existing.spec?.egress, desired.spec.egress)
+  }
+  if (desired.spec?.ingress !== undefined) {
+    contractedSpec.ingress = intersectRules(existing.spec?.ingress, desired.spec.ingress)
+  }
+  const contracted: k8s.V1NetworkPolicy = { ...desired, spec: contractedSpec }
+
+  // State is authorization provenance for later fail-static rounds. Keep only
+  // entries represented by a retained live ipBlock+port rule so a transient DNS
+  // failure cannot re-add an annotation-only destination that was not enforced.
+  const rawState = contracted.metadata?.annotations?.[STATE_ANNOTATION]
+  if (rawState) {
+    const livePairs = new Set<string>()
+    for (const rule of contractedSpec.egress ?? []) {
+      for (const peer of rule.to ?? []) {
+        const cidr = peer.ipBlock?.cidr
+        if (!cidr?.endsWith('/32')) continue
+        for (const port of rule.ports ?? []) {
+          livePairs.add(
+            `${cidr.slice(0, -3)}\u0000${String(port.port)}\u0000${port.protocol ?? 'TCP'}`
+          )
+        }
+      }
+    }
+    const entries = (JSON.parse(rawState) as EgressEntry[]).filter(entry =>
+      livePairs.has(`${entry.ip}\u0000${entry.port}\u0000${entry.protocol}`)
+    )
+    const priorResolvedAt = contracted.metadata?.annotations?.[RESOLVED_AT_ANNOTATION]
+    contracted.metadata = {
+      ...(contracted.metadata ?? {}),
+      annotations: {
+        ...(contracted.metadata?.annotations ?? {}),
+        ...serializeState({ entries }),
+        ...(priorResolvedAt ? { [RESOLVED_AT_ANNOTATION]: priorResolvedAt } : {}),
+      },
+    }
+  }
+  return contracted
+}
+
+interface WorkloadEgressContractionPlan {
+  plans: Array<{
+    workload: WorkloadDef
+    namespace: string
+    policyName: string
+    externalDeclared: Array<{ fqdn: string; port: number }>
+  }>
+  ingressSourcesByTarget: Map<string, rb.WorkloadIngressSource[]>
+}
+
+interface RecipeEgressContractionPlan {
+  workload: WorkloadEgressContractionPlan
 }
 
 export class WorkflowRecipeReconciler {
@@ -2486,6 +2600,7 @@ export class WorkflowRecipeReconciler {
       // Step 9b: Sandbox UI egress policy + symmetric ingress on each
       // internal-egress target (without the ingress side the target stays
       // behind deny-all-<ns> and UI→backend traffic is dropped).
+      const externalEgressPlan = await this.prepareRecipeEgressContractions(recipe)
       await this.reconcileUiEgressPolicy(recipe)
       await this.reconcileUiIngressPolicies(recipe)
       // Egress for background-OAuth workloads → control-api broker route.
@@ -2497,7 +2612,7 @@ export class WorkflowRecipeReconciler {
       // any sibling targets it points at. MCP workloads inherit egress
       // through HCC via the McpServer CRD path; UI workloads use
       // `spec.ui.egress.*` which is handled by reconcileUiEgressPolicy.
-      await this.reconcileWorkloadEgressPolicies(recipe)
+      await this.reconcileWorkloadEgressPolicies(recipe, externalEgressPlan.workload)
 
       // Step 9d: WRC-owned intra-recipe internal dependency policies.
       // This lane is separate from HCC binding-allow and legacy wl-* policies.
@@ -3316,23 +3431,17 @@ export class WorkflowRecipeReconciler {
     // Sandbox UI egress policy + symmetric ingress on internal-egress
     // targets (no-op when spec.ui is unset; idempotent)
     try {
+      const externalEgressPlan = await this.prepareRecipeEgressContractions(recipe)
       await this.reconcileUiEgressPolicy(recipe)
       await this.reconcileUiIngressPolicies(recipe)
       await this.reconcileOAuthBrokerEgressPolicy(recipe)
-    } catch (err) {
-      console.error(
-        `[WR-Reconciler] UI egress/ingress policies failed for workflow "${name}":`,
-        err
-      )
-      throw err
-    }
 
-    // Per-workload egressBindings → NetworkPolicies (idempotent; no-op when
-    // no workload declares egressBindings).
-    try {
-      await this.reconcileWorkloadEgressPolicies(recipe)
+      // Per-workload egressBindings → NetworkPolicies (idempotent; no-op when
+      // no workload declares egressBindings). Its subtractive phase already ran
+      // recipe-wide above, before the first DNS lookup.
+      await this.reconcileWorkloadEgressPolicies(recipe, externalEgressPlan.workload)
     } catch (err) {
-      console.error(`[WR-Reconciler] Workload egress policies failed for workflow "${name}":`, err)
+      createLogger('wrc', name).error('recipe network policy reconciliation failed', { err })
       throw err
     }
 
@@ -4092,36 +4201,97 @@ export class WorkflowRecipeReconciler {
   }
 
   /**
-   * Reconcile the per-recipe `ui-egress-<recipeName>` NetworkPolicy in
-   * `sandboxUiNamespace`. Ensures the policy converges with `recipe.spec.ui`:
-   *   - spec.ui set   → create-or-replace the policy
-   *   - spec.ui unset → delete any leftover policy from a prior reconcile
-   *
-   * The policy lives in a different namespace from the WorkflowRecipe CRD, so
-   * it carries no ownerReference and relies on this method (and reconcileDelete)
-   * for cleanup.
+   * One recipe-wide subtractive barrier. Every WRC policy whose authorization
+   * derives from UI/workload egress intent is narrowed before any resolver call
+   * in any lane. Later phases may add current intent only after their own lookup
+   * succeeds; a UI fault can therefore no longer strand a removed workload or
+   * symmetric-ingress permission.
+   */
+  private async prepareRecipeEgressContractions(
+    recipe: WorkflowRecipeCRD
+  ): Promise<RecipeEgressContractionPlan> {
+    await this.contractUiEgressPolicy(recipe)
+    const workload = await this.contractWorkloadEgressPolicies(recipe)
+    await this.contractUiIngressPolicies(recipe)
+    await this.contractWorkloadIngressPolicies(recipe, workload.ingressSourcesByTarget)
+    return { workload }
+  }
+
+  private async contractUiEgressPolicy(
+    recipe: WorkflowRecipeCRD
+  ): Promise<k8s.V1NetworkPolicy | null> {
+    const namespace = this.config.sandboxUiNamespace
+    const policyName = `ui-egress-${recipe.metadata.name}`
+    const existing = await this.readNetworkPolicyOrNull(policyName, namespace)
+    if (!existing) return null
+
+    const externals = recipe.spec.ui?.egress?.external ?? []
+    const declarations = externals.map(entry => ({ fqdn: entry.fqdn, port: entry.port }))
+    const contraction = contractExternalEgress({
+      externals: declarations,
+      previousAnnotations: existing.metadata?.annotations,
+      now: Date.now(),
+      config: {
+        overlapMs: this.config.externalEgressOverlapSeconds * 1000,
+        maxEntries: this.config.externalEgressMaxEntries,
+      },
+      isAllowedIp: ip => !isBlockedExternalIPv4(ip),
+    })
+    const needsStateAnnotations =
+      declarations.length > 0 ||
+      contraction.entries.length > 0 ||
+      existing.metadata?.annotations?.[STATE_ANNOTATION] !== undefined
+    const desired = rb.buildUiEgressNetworkPolicy(
+      recipe,
+      namespace,
+      this.config.sandboxNamespace,
+      contraction.resolved,
+      needsStateAnnotations ? contraction.annotations : undefined
+    )
+    return this.applyNetworkPolicyContraction({
+      existing,
+      desired: subtractiveNetworkPolicy(existing, desired),
+      namespace,
+      recipeName: recipe.metadata.name,
+    })
+  }
+
+  /**
+   * Reconcile the additive/fail-static half of the per-recipe UI policy. The
+   * caller supplies the snapshot returned by the recipe-wide contraction pass,
+   * which has already narrowed UI, workload, and symmetric ingress policies
+   * before the first DNS lookup can fail.
    */
   private async reconcileUiEgressPolicy(recipe: WorkflowRecipeCRD): Promise<void> {
     const policyName = `ui-egress-${recipe.metadata.name}`
     const ns = this.config.sandboxUiNamespace
 
     const externals = recipe.spec.ui?.egress?.external ?? []
-    const { resolved, failures } = await resolveExternalEgress(externals, this.fqdnLookup)
+    const externalDeclarations = externals.map(e => ({ fqdn: e.fqdn, port: e.port }))
+    const egressConfig = {
+      overlapMs: this.config.externalEgressOverlapSeconds * 1000,
+      maxEntries: this.config.externalEgressMaxEntries,
+    }
+
+    let resolution: Awaited<ReturnType<typeof resolveExternalEgress>>
+    try {
+      resolution = await resolveExternalEgress(externals, this.fqdnLookup)
+    } catch (error: unknown) {
+      // DNS/controller latency is a race window. Re-contract from a fresh read
+      // before propagating so a concurrent widening cannot survive merely
+      // because the lookup itself faulted.
+      await this.contractUiEgressPolicy(recipe)
+      throw error
+    }
+    const existing = await this.contractUiEgressPolicy(recipe)
+    const { resolved, failures } = resolution
     this.recordExternalEgressTtl(resolved)
 
-    // Permanent failures (no-records / blocked range) never author a partial
-    // policy — fail exactly as the single-snapshot resolver did.
     const permanentFailures = failures.filter(f => !f.retryable)
-    if (permanentFailures.length > 0) {
-      throw egressResolutionError(
-        `WorkflowRecipe "${recipe.metadata.name}" ui external egress resolution failed`,
-        permanentFailures
-      )
-    }
+    let blockingFailures = permanentFailures
 
     let effectiveResolved: rb.ResolvedExternalEgressInput[] = resolved
     let stateAnnotations: Record<string, string> | undefined
-    let existing: k8s.V1NetworkPolicy | null = null
     let egressRenewalDue = false
     // H-E: the write gate compares rendered spec.egress (ipBlock cidr+port, no
     // fqdn), so a rename old.example.com→new.example.com onto the SAME ip/port is
@@ -4129,32 +4299,20 @@ export class WorkflowRecipeReconciler {
     // annotation and losing the overlap grace when the new name later rotates.
     // acc.changed is over (fqdn,ip,port,protocol), so it catches the rename.
     let egressStateChanged = false
-    // R1-M2: read the live policy for ALL cases, not only external egress, so an
-    // internal-only sibling policy (ui.egress.internal[] with no external[]) can
-    // hit the no-op gate below instead of being rewritten on every reconcile —
-    // which the 60s external-egress refresh loop amplifies for mixed recipes. For
-    // external egress it also seeds the accumulator's rehydration (H5).
-    existing = await this.readNetworkPolicyOrNull(policyName, ns)
     if (externals.length > 0) {
       // issue #299: fold this DNS snapshot into the accumulated sliding-window
       // set persisted on the live policy's annotations (rehydrate H5).
       const acc = accumulateExternalEgress({
-        externals: externals.map(e => ({ fqdn: e.fqdn, port: e.port })),
+        externals: externalDeclarations,
         resolveResult: { resolved, failures },
         previousAnnotations: existing?.metadata?.annotations,
         now: Date.now(),
-        config: {
-          overlapMs: this.config.externalEgressOverlapSeconds * 1000,
-          maxEntries: this.config.externalEgressMaxEntries,
-        },
+        config: egressConfig,
       })
       // Bootstrap fail-closed: a transient resolver failure with NOTHING to
       // freeze (no rehydratable prior set) must not author an empty policy.
       if (acc.entries.length === 0 && failures.length > 0) {
-        throw egressResolutionError(
-          `WorkflowRecipe "${recipe.metadata.name}" ui external egress resolution failed`,
-          failures
-        )
+        blockingFailures = failures
       }
       // Audit L3: a transient failure of a newly-added FQDN (with resolving
       // siblings) does not throw and freezes nothing — surface it so the missing
@@ -4190,11 +4348,30 @@ export class WorkflowRecipeReconciler {
       stateAnnotations
     )
 
-    if (!policy) {
-      await this.safeDelete(
-        () => this.networkingApi.deleteNamespacedNetworkPolicy({ name: policyName, namespace: ns }),
-        `NetworkPolicy "${policyName}" in ${ns}`
+    if (blockingFailures.length > 0) {
+      if (existing) {
+        await this.applyNetworkPolicyContraction({
+          existing,
+          desired: subtractiveNetworkPolicy(existing, policy),
+          namespace: ns,
+          recipeName: recipe.metadata.name,
+        })
+      }
+      throw egressResolutionError(
+        `WorkflowRecipe "${recipe.metadata.name}" ui external egress resolution failed`,
+        blockingFailures
       )
+    }
+
+    if (!policy) {
+      if (existing) {
+        await this.applyNetworkPolicyContraction({
+          existing,
+          desired: null,
+          namespace: ns,
+          recipeName: recipe.metadata.name,
+        })
+      }
       return
     }
 
@@ -4206,37 +4383,46 @@ export class WorkflowRecipeReconciler {
       console.log(
         `[WR-Reconciler] NetworkPolicy "${policyName}" in ${ns} egress set unchanged — no-op`
       )
-      return
+    } else {
+      await this.applyOwnedRecipeNetworkPolicy(policy, ns, recipe.metadata.name)
+      // #299: the policy has landed — record the set it actually enforces.
+      this.logResolvedEgressSet(
+        recipe.metadata.name,
+        policyName,
+        externals.map(e => e.fqdn),
+        effectiveResolved,
+        egressStateChanged
+      )
+    }
+  }
+
+  private async contractUiIngressPolicies(recipe: WorkflowRecipeCRD): Promise<void> {
+    const namespace = this.config.sandboxNamespace
+    const portsByWorkload = new Map<string, Set<number>>()
+    for (const rule of recipe.spec.ui?.egress?.internal ?? []) {
+      const ports = portsByWorkload.get(rule.workloadRef) ?? new Set<number>()
+      ports.add(rule.port)
+      portsByWorkload.set(rule.workloadRef, ports)
     }
 
-    await this.createOrReplace(
-      () =>
-        this.networkingApi.createNamespacedNetworkPolicy({
-          namespace: ns,
-          body: policy,
-        }),
-      async () => {
-        const existing = await this.networkingApi.readNamespacedNetworkPolicy({
-          name: policyName,
-          namespace: ns,
-        })
-        policy.metadata!.resourceVersion = existing.metadata?.resourceVersion
-        return this.networkingApi.replaceNamespacedNetworkPolicy({
-          name: policyName,
-          namespace: ns,
-          body: policy,
-        })
-      },
-      `NetworkPolicy "${policyName}" in ${ns}`
-    )
-    // #299: the policy has landed — record the set it actually enforces.
-    this.logResolvedEgressSet(
-      recipe.metadata.name,
-      policyName,
-      externals.map(e => e.fqdn),
-      effectiveResolved,
-      egressStateChanged
-    )
+    for (const workload of recipe.spec.workloads ?? []) {
+      const name = rb.uiIngressPolicyName(recipe.metadata.name, workload.id)
+      const existing = await this.readNetworkPolicyOrNull(name, namespace)
+      if (!existing) continue
+      const desired = rb.buildUiIngressNetworkPolicy(
+        recipe,
+        workload.id,
+        [...(portsByWorkload.get(workload.id) ?? [])],
+        namespace,
+        this.config.sandboxUiNamespace
+      )
+      await this.applyNetworkPolicyContraction({
+        existing,
+        desired: subtractiveNetworkPolicy(existing, desired),
+        namespace,
+        recipeName: recipe.metadata.name,
+      })
+    }
   }
 
   /**
@@ -4280,7 +4466,7 @@ export class WorkflowRecipeReconciler {
         await this.deleteUiIngressIfExists(recipe.metadata.name, w.id, ns)
         continue
       }
-      await this.applyNetworkPolicy(policy, ns)
+      await this.applyOwnedRecipeNetworkPolicy(policy, ns, recipe.metadata.name)
     }
   }
 
@@ -4290,10 +4476,14 @@ export class WorkflowRecipeReconciler {
     namespace: string
   ): Promise<void> {
     const name = rb.uiIngressPolicyName(recipeName, workloadId)
-    await this.safeDelete(
-      () => this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace }),
-      `NetworkPolicy "${name}" in ${namespace}`
-    )
+    const existing = await this.readNetworkPolicyOrNull(name, namespace)
+    if (!existing) return
+    await this.applyNetworkPolicyContraction({
+      existing,
+      desired: null,
+      namespace,
+      recipeName,
+    })
   }
 
   private internalDependencyCondition(
@@ -4515,6 +4705,117 @@ export class WorkflowRecipeReconciler {
     }
   }
 
+  private async contractWorkloadEgressPolicies(
+    recipe: WorkflowRecipeCRD
+  ): Promise<WorkloadEgressContractionPlan> {
+    const workloads = recipe.spec.workloads ?? []
+    const uiWorkloadId = recipe.spec.ui?.workloadRef
+    const ingressSourcesByTarget = new Map<string, rb.WorkloadIngressSource[]>()
+    const plans: WorkloadEgressContractionPlan['plans'] = []
+
+    for (const workload of workloads) {
+      if (workload.transport) continue
+      if (uiWorkloadId && workload.id === uiWorkloadId) continue
+      const namespace = this.resolveWorkloadNamespace(workload, uiWorkloadId)
+      const bindings = workload.egressBindings ?? []
+      if (bindings.length === 0) {
+        await this.deleteWorkloadEgressIfExists(recipe.metadata.name, workload.id, namespace)
+        continue
+      }
+
+      const externalDeclared: Array<{ fqdn: string; port: number }> = []
+      for (const binding of bindings) {
+        if (!binding.dns || binding.port == null) continue
+        const resolved = rb.resolveClusterLocalBinding(binding.dns, recipe, namespace)
+        if (resolved?.kind === 'cluster-local') {
+          const sources = ingressSourcesByTarget.get(resolved.workloadId) ?? []
+          sources.push({
+            fromWorkloadId: workload.id,
+            fromNamespace: namespace,
+            port: binding.port,
+            protocol: (binding.protocol ?? 'TCP') as 'TCP' | 'UDP',
+          })
+          ingressSourcesByTarget.set(resolved.workloadId, sources)
+        } else if (!resolved) {
+          externalDeclared.push({ fqdn: binding.dns, port: binding.port })
+        }
+      }
+
+      const policyName = rb.workloadEgressPolicyName(recipe.metadata.name, workload.id)
+      await this.contractOneWorkloadEgressPolicy(recipe, workload, namespace, externalDeclared)
+      plans.push({ workload, namespace, policyName, externalDeclared })
+    }
+
+    return { plans, ingressSourcesByTarget }
+  }
+
+  private async contractOneWorkloadEgressPolicy(
+    recipe: WorkflowRecipeCRD,
+    workload: WorkloadDef,
+    namespace: string,
+    externalDeclared: Array<{ fqdn: string; port: number }>
+  ): Promise<k8s.V1NetworkPolicy | null> {
+    const policyName = rb.workloadEgressPolicyName(recipe.metadata.name, workload.id)
+    const existing = await this.readNetworkPolicyOrNull(policyName, namespace)
+    if (!existing) return null
+
+    const contraction = contractExternalEgress({
+      externals: externalDeclared,
+      previousAnnotations: existing.metadata?.annotations,
+      now: Date.now(),
+      config: {
+        overlapMs: this.config.externalEgressOverlapSeconds * 1000,
+        maxEntries: this.config.externalEgressMaxEntries,
+      },
+      isAllowedIp: ip => !isBlockedExternalIPv4(ip),
+    })
+    const needsStateAnnotations =
+      externalDeclared.length > 0 ||
+      contraction.entries.length > 0 ||
+      existing.metadata?.annotations?.[STATE_ANNOTATION] !== undefined
+    const desired = rb.buildWorkloadEgressNetworkPolicy(
+      workload,
+      recipe,
+      namespace,
+      contraction.resolved,
+      needsStateAnnotations ? contraction.annotations : undefined
+    )
+    return this.applyNetworkPolicyContraction({
+      existing,
+      desired: subtractiveNetworkPolicy(existing, desired),
+      namespace,
+      recipeName: recipe.metadata.name,
+    })
+  }
+
+  private async contractWorkloadIngressPolicies(
+    recipe: WorkflowRecipeCRD,
+    ingressSourcesByTarget: Map<string, rb.WorkloadIngressSource[]>
+  ): Promise<void> {
+    const workloads = recipe.spec.workloads ?? []
+    const uiWorkloadId = recipe.spec.ui?.workloadRef
+    for (const workload of workloads) {
+      if (workload.transport) continue
+      if (uiWorkloadId && workload.id === uiWorkloadId) continue
+      const namespace = this.resolveWorkloadNamespace(workload, uiWorkloadId)
+      const name = rb.workloadIngressPolicyName(recipe.metadata.name, workload.id)
+      const existing = await this.readNetworkPolicyOrNull(name, namespace)
+      if (!existing) continue
+      const desired = rb.buildWorkloadIngressNetworkPolicy(
+        workload,
+        recipe,
+        namespace,
+        ingressSourcesByTarget.get(workload.id) ?? []
+      )
+      await this.applyNetworkPolicyContraction({
+        existing,
+        desired: subtractiveNetworkPolicy(existing, desired),
+        namespace,
+        recipeName: recipe.metadata.name,
+      })
+    }
+  }
+
   /**
    * Reconcile per-workload egress NetworkPolicies for each workload that
    * declares `egressBindings[]`. Also emits the symmetric ingress policy
@@ -4530,80 +4831,45 @@ export class WorkflowRecipeReconciler {
    * silent authorization drift, so any unresolved or blocked hostname fails
    * the reconcile before policy apply.
    */
-  private async reconcileWorkloadEgressPolicies(recipe: WorkflowRecipeCRD): Promise<void> {
+  private async reconcileWorkloadEgressPolicies(
+    recipe: WorkflowRecipeCRD,
+    preparation: WorkloadEgressContractionPlan
+  ): Promise<void> {
     const workloads = recipe.spec.workloads ?? []
     if (workloads.length === 0) return
     const uiWorkloadId = recipe.spec.ui?.workloadRef
+    const { plans, ingressSourcesByTarget } = preparation
 
-    // Aggregate ingress sources keyed by target workload id. Filled as we
-    // walk each source workload's cluster-local bindings.
-    const ingressSourcesByTarget = new Map<string, rb.WorkloadIngressSource[]>()
-
-    for (const w of workloads) {
-      // Skip MCP + UI workloads — covered by other code paths.
-      if (w.transport) continue
-      if (uiWorkloadId && w.id === uiWorkloadId) continue
-      const wlNs = this.resolveWorkloadNamespace(w, uiWorkloadId)
-      const bindings = w.egressBindings ?? []
-      if (bindings.length === 0) {
-        // Reap any policy left over from a previous reconcile that DID
-        // have bindings — keeps the policy set in lockstep with the spec.
-        await this.deleteWorkloadEgressIfExists(recipe.metadata.name, w.id, wlNs)
-        continue
+    // Phase 2: resolve and add/freeze only the identities that survived phase 1.
+    for (const plan of plans) {
+      const { workload: w, namespace: wlNs, policyName: wlPolicyName, externalDeclared } = plan
+      let resolution: Awaited<ReturnType<typeof resolveExternalEgress>>
+      try {
+        resolution = await resolveExternalEgress(externalDeclared, this.fqdnLookup)
+      } catch (error: unknown) {
+        await this.contractOneWorkloadEgressPolicy(recipe, w, wlNs, externalDeclared)
+        throw error
       }
-
-      // Split into cluster-local sibling targets vs external FQDNs.
-      const externalDeclared: { fqdn: string; port: number }[] = []
-      for (const b of bindings) {
-        if (!b.dns || b.port == null) continue
-        const port = b.port
-        const resolved = rb.resolveClusterLocalBinding(b.dns, recipe, wlNs)
-        if (resolved && resolved.kind === 'cluster-local') {
-          const sources = ingressSourcesByTarget.get(resolved.workloadId) ?? []
-          sources.push({
-            fromWorkloadId: w.id,
-            fromNamespace: wlNs,
-            port,
-            protocol: (b.protocol ?? 'TCP') as 'TCP' | 'UDP',
-          })
-          ingressSourcesByTarget.set(resolved.workloadId, sources)
-        } else if (!resolved) {
-          // null = treat as external FQDN
-          externalDeclared.push({ fqdn: b.dns, port })
-        }
-        // resolved.kind === 'mismatch' is unreachable here — validation
-        // ran upstream and would have thrown.
-      }
-
-      const { resolved: resolvedExternal, failures } = await resolveExternalEgress(
-        externalDeclared.map(e => ({ fqdn: e.fqdn, port: e.port })),
-        this.fqdnLookup
+      let existingWlPolicy = await this.contractOneWorkloadEgressPolicy(
+        recipe,
+        w,
+        wlNs,
+        externalDeclared
       )
+      const { resolved: resolvedExternal, failures } = resolution
       this.recordExternalEgressTtl(resolvedExternal)
 
-      // Permanent failures never author a partial policy — fail as before.
       const permanentFailures = failures.filter(f => !f.retryable)
-      if (permanentFailures.length > 0) {
-        throw egressResolutionError(
-          `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress resolution failed`,
-          permanentFailures
-        )
-      }
+      let blockingFailures = permanentFailures
 
       let effectiveExternal: rb.ResolvedExternalEgressInput[] = resolvedExternal
       let wlStateAnnotations: Record<string, string> | undefined
-      let existingWlPolicy: k8s.V1NetworkPolicy | null = null
       let wlEgressRenewalDue = false
       let wlEgressStateChanged = false // H-E: catch fqdn-attribution-only changes
-      const wlPolicyName = rb.workloadEgressPolicyName(recipe.metadata.name, w.id)
-      // R1-M2: read the live policy for ALL cases so an internal-only (cluster-
-      // local) workload egress policy hits the no-op gate instead of churning
-      // every reconcile; for external egress it also seeds rehydration (H5).
-      existingWlPolicy = await this.readNetworkPolicyOrNull(wlPolicyName, wlNs)
       if (externalDeclared.length > 0) {
         // issue #299: accumulate the sliding-window egress set (rehydrate H5).
         const acc = accumulateExternalEgress({
-          externals: externalDeclared.map(e => ({ fqdn: e.fqdn, port: e.port })),
+          externals: externalDeclared,
           resolveResult: { resolved: resolvedExternal, failures },
           previousAnnotations: existingWlPolicy?.metadata?.annotations,
           now: Date.now(),
@@ -4614,10 +4880,7 @@ export class WorkflowRecipeReconciler {
         })
         // Bootstrap fail-closed: transient failure with nothing to freeze.
         if (acc.entries.length === 0 && failures.length > 0) {
-          throw egressResolutionError(
-            `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress resolution failed`,
-            failures
-          )
+          blockingFailures = failures
         }
         this.warnEgressAccumulator(wlPolicyName, acc)
         // Defense-in-depth (audit M3): re-validate rehydrated IPs vs blocked ranges.
@@ -4641,8 +4904,30 @@ export class WorkflowRecipeReconciler {
         effectiveExternal,
         wlStateAnnotations
       )
+      if (blockingFailures.length > 0) {
+        if (existingWlPolicy) {
+          await this.applyNetworkPolicyContraction({
+            existing: existingWlPolicy,
+            desired: subtractiveNetworkPolicy(existingWlPolicy, policy),
+            namespace: wlNs,
+            recipeName: recipe.metadata.name,
+          })
+        }
+        throw egressResolutionError(
+          `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress resolution failed`,
+          blockingFailures
+        )
+      }
       if (!policy) {
-        await this.deleteWorkloadEgressIfExists(recipe.metadata.name, w.id, wlNs)
+        if (existingWlPolicy) {
+          await this.applyNetworkPolicyContraction({
+            existing: existingWlPolicy,
+            desired: null,
+            namespace: wlNs,
+            recipeName: recipe.metadata.name,
+          })
+          existingWlPolicy = null
+        }
         continue
       }
       // issue #299: NO-OP when the accumulated set and rules are already live —
@@ -4655,17 +4940,17 @@ export class WorkflowRecipeReconciler {
         console.log(
           `[WR-Reconciler] NetworkPolicy "${wlPolicyName}" in ${wlNs} egress set unchanged — no-op`
         )
-        continue
+      } else {
+        await this.applyOwnedRecipeNetworkPolicy(policy, wlNs, recipe.metadata.name)
+        // #299: the policy has landed — record the set it actually enforces.
+        this.logResolvedEgressSet(
+          recipe.metadata.name,
+          wlPolicyName,
+          externalDeclared.map(e => e.fqdn),
+          effectiveExternal,
+          wlEgressStateChanged
+        )
       }
-      await this.applyNetworkPolicy(policy, wlNs)
-      // #299: the policy has landed — record the set it actually enforces.
-      this.logResolvedEgressSet(
-        recipe.metadata.name,
-        wlPolicyName,
-        externalDeclared.map(e => e.fqdn),
-        effectiveExternal,
-        wlEgressStateChanged
-      )
     }
 
     // Now ingress side: for each target workload that any sibling pointed
@@ -4684,7 +4969,7 @@ export class WorkflowRecipeReconciler {
         await this.deleteWorkloadIngressIfExists(recipe.metadata.name, w.id, wlNs)
         continue
       }
-      await this.applyNetworkPolicy(policy, wlNs)
+      await this.applyOwnedRecipeNetworkPolicy(policy, wlNs, recipe.metadata.name)
     }
   }
 
@@ -4726,6 +5011,150 @@ export class WorkflowRecipeReconciler {
       if (getErrorCode(error) === 404) return null
       throw error
     }
+  }
+
+  private assertRecipeNetworkPolicyOwnership(
+    existing: k8s.V1NetworkPolicy,
+    recipeName: string,
+    policyName: string,
+    namespace: string
+  ): void {
+    const labels = existing.metadata?.labels ?? {}
+    if (
+      labels['clerum.io/managed-by'] !== 'workflow-recipes' ||
+      labels['clerum.io/recipe'] !== recipeName
+    ) {
+      throw new NetworkPolicyOwnershipConflictError(
+        `Refusing to mutate NetworkPolicy "${policyName}" in ${namespace}: existing policy is not owned by WorkflowRecipe "${recipeName}"`
+      )
+    }
+  }
+
+  /**
+   * Apply a strictly subtractive pre-DNS transition against the exact snapshot
+   * that was read. This path never creates a policy and therefore cannot add an
+   * authorization before DNS succeeds. ResourceVersion/UID fencing makes a
+   * concurrent replacement fail loud instead of mutating a newer object.
+   */
+  private async applyNetworkPolicyContraction(input: {
+    existing: k8s.V1NetworkPolicy
+    desired: k8s.V1NetworkPolicy | null
+    namespace: string
+    recipeName: string
+  }): Promise<k8s.V1NetworkPolicy | null> {
+    const { existing, desired, namespace, recipeName } = input
+    const policyName = existing.metadata?.name
+    const resourceVersion = existing.metadata?.resourceVersion
+    if (!policyName || !resourceVersion) {
+      throw new Error('NetworkPolicy contraction requires policy name and resourceVersion')
+    }
+    this.assertRecipeNetworkPolicyOwnership(existing, recipeName, policyName, namespace)
+
+    if (desired === null) {
+      const uid = existing.metadata?.uid
+      if (!uid) throw new Error('NetworkPolicy contraction delete requires policy uid')
+      try {
+        await this.networkingApi.deleteNamespacedNetworkPolicy({
+          name: policyName,
+          namespace,
+          body: { preconditions: { uid, resourceVersion } },
+        })
+      } catch (error: unknown) {
+        if (getErrorCode(error) !== 404) throw error
+      }
+      createLogger('wrc', recipeName).info('contracted recipe network policy', {
+        policy: policyName,
+        namespace,
+        action: 'delete',
+      })
+      return null
+    }
+
+    if (!contractionWriteNeeded(existing, desired)) return existing
+    desired.metadata = { ...(desired.metadata ?? {}), resourceVersion }
+    await this.networkingApi.replaceNamespacedNetworkPolicy({
+      name: policyName,
+      namespace,
+      body: desired,
+    })
+    let live: k8s.V1NetworkPolicy
+    try {
+      live = await this.networkingApi.readNamespacedNetworkPolicy({
+        name: policyName,
+        namespace,
+      })
+    } catch (error: unknown) {
+      if (getErrorCode(error) === 404) return null
+      throw error
+    }
+    this.assertRecipeNetworkPolicyOwnership(live, recipeName, policyName, namespace)
+    const liveUid = live.metadata?.uid
+    const liveResourceVersion = live.metadata?.resourceVersion
+    if (
+      live.metadata?.name !== policyName ||
+      live.metadata?.namespace !== namespace ||
+      !liveUid ||
+      !liveResourceVersion ||
+      (existing.metadata?.uid && liveUid !== existing.metadata.uid)
+    ) {
+      throw new NetworkPolicyOwnershipConflictError(
+        `NetworkPolicy "${policyName}" in ${namespace} changed identity during contraction`
+      )
+    }
+    const provenLive = subtractiveNetworkPolicy(live, desired)
+    if (!provenLive || contractionWriteNeeded(live, provenLive)) {
+      // The apiserver read-back is broader or carries provenance that does not
+      // match its enforced rules. Do not let phase 2 treat the request body as
+      // reality; revoke this exact owned identity and force a clean re-plan.
+      await this.networkingApi.deleteNamespacedNetworkPolicy({
+        name: policyName,
+        namespace,
+        body: { preconditions: { uid: liveUid, resourceVersion: liveResourceVersion } },
+      })
+      throw new NetworkPolicyOwnershipConflictError(
+        `NetworkPolicy "${policyName}" in ${namespace} did not read back as the requested contraction`
+      )
+    }
+    createLogger('wrc', recipeName).info('contracted recipe network policy', {
+      policy: policyName,
+      namespace,
+      action: 'replace',
+    })
+    return live
+  }
+
+  private async applyOwnedRecipeNetworkPolicy(
+    policy: k8s.V1NetworkPolicy,
+    namespace: string,
+    recipeName: string
+  ): Promise<void> {
+    const policyName = policy.metadata?.name
+    if (!policyName) throw new Error('Recipe NetworkPolicy requires a name')
+    await this.createOrReplace(
+      () => this.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy }),
+      async () => {
+        const live = await this.networkingApi.readNamespacedNetworkPolicy({
+          name: policyName,
+          namespace,
+        })
+        this.assertRecipeNetworkPolicyOwnership(live, recipeName, policyName, namespace)
+        if (!live.metadata?.resourceVersion) {
+          throw new NetworkPolicyOwnershipConflictError(
+            `Refusing to replace NetworkPolicy "${policyName}" in ${namespace}: live resourceVersion is missing`
+          )
+        }
+        policy.metadata = {
+          ...(policy.metadata ?? {}),
+          resourceVersion: live.metadata?.resourceVersion,
+        }
+        return this.networkingApi.replaceNamespacedNetworkPolicy({
+          name: policyName,
+          namespace,
+          body: policy,
+        })
+      },
+      `NetworkPolicy "${policyName}" in ${namespace}`
+    )
   }
 
   /**
@@ -5050,10 +5479,14 @@ export class WorkflowRecipeReconciler {
     namespace: string
   ): Promise<void> {
     const name = rb.workloadEgressPolicyName(recipeName, workloadId)
-    await this.safeDelete(
-      () => this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace }),
-      `NetworkPolicy "${name}" in ${namespace}`
-    )
+    const existing = await this.readNetworkPolicyOrNull(name, namespace)
+    if (!existing) return
+    await this.applyNetworkPolicyContraction({
+      existing,
+      desired: null,
+      namespace,
+      recipeName,
+    })
   }
 
   private async deleteWorkloadIngressIfExists(
@@ -5062,10 +5495,14 @@ export class WorkflowRecipeReconciler {
     namespace: string
   ): Promise<void> {
     const name = rb.workloadIngressPolicyName(recipeName, workloadId)
-    await this.safeDelete(
-      () => this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace }),
-      `NetworkPolicy "${name}" in ${namespace}`
-    )
+    const existing = await this.readNetworkPolicyOrNull(name, namespace)
+    if (!existing) return
+    await this.applyNetworkPolicyContraction({
+      existing,
+      desired: null,
+      namespace,
+      recipeName,
+    })
   }
 
   // ─── Workload Ensure Methods ──────────────────────────────────────

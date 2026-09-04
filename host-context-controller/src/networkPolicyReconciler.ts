@@ -17,10 +17,12 @@ import * as k8s from '@kubernetes/client-node'
 import * as dns from 'node:dns/promises'
 import { isIP } from 'node:net'
 import {
+  RESOLVED_AT_ANNOTATION,
   STATE_ANNOTATION,
-  classifyDnsError,
-  dnsCodeOf,
-  isPermanentDnsCode,
+  TARGETS_ANNOTATION,
+  classifyDnsRejection,
+  parseStateStrict,
+  serializeState,
 } from '@clerum/network-policy-core'
 import { config } from './config'
 import {
@@ -32,6 +34,7 @@ import {
   POLICY_TYPE_LABEL,
 } from './constants'
 import { accumulateHostExactHostEgress } from './externalEgressAccumulator'
+import { hccLogger } from './logger'
 import {
   confirmAuthoritativeMcpServerAbsence,
   sameMcpServerDesiredRevision,
@@ -148,9 +151,21 @@ function sameNetworkPolicySpec(
  */
 type LiveEgressVerdict =
   | { state: 'none' }
-  | { state: 'intact'; cidrs: string[] }
-  | { state: 'drifted-shape' }
-  | { state: 'drifted-cidr' }
+  | { state: 'foreign' }
+  | { state: 'intact'; cidrs: string[]; resolvedAt: string; policy: k8s.V1NetworkPolicy }
+  | { state: 'drifted-shape'; policy: k8s.V1NetworkPolicy }
+  | { state: 'drifted-cidr'; policy: k8s.V1NetworkPolicy }
+  | { state: 'untrusted-state'; policy: k8s.V1NetworkPolicy }
+
+type FreshExternalEgressPolicy = {
+  policy: k8s.V1NetworkPolicy | null
+  repairRequired: boolean
+}
+
+type ProvenDnsAnnotations = {
+  annotations: Record<string, string> | undefined
+  contracted: boolean
+}
 
 /**
  * What the ExternalEgressReady message says about the live policy on a non-DNS
@@ -159,10 +174,12 @@ type LiveEgressVerdict =
  */
 const LIVE_EGRESS_FAULT_TEXT: Record<LiveEgressVerdict['state'], string> = {
   none: 'no live policy to serve',
-  intact: 'accumulated egress left untouched',
+  foreign: 'homonymous live policy is not HCC-owned and was left untouched',
+  intact: 'verified policy retained for existing pods; runtime remains blocked',
   'drifted-cidr':
     'live policy REVOKED: it enforced a CIDR outside the /32 allowlist this controller writes',
   'drifted-shape': 'live policy REVOKED: its egress shape is not one this controller writes',
+  'untrusted-state': 'live policy REVOKED: its DNS provenance was absent or invalid',
 }
 
 function hasExpectedPolicyOwnership(policy: k8s.V1NetworkPolicy, policyType: string): boolean {
@@ -1869,19 +1886,64 @@ export class NetworkPolicyReconciler {
    * A rebuild-and-compare has no dimension to miss: anything the controller does
    * not write differs from the rebuild, whatever it happens to allow.
    */
-  private judgeLiveExactHostEgress(
+  private async judgeLiveExactHostEgress(
+    server: McpServerCRD,
+    name: string,
+    binding: EgressBinding
+  ): Promise<LiveEgressVerdict> {
+    let existingPolicy: k8s.V1NetworkPolicy
+    try {
+      existingPolicy = await this.networkingApi.readNamespacedNetworkPolicy({
+        name,
+        namespace: server.namespace,
+      })
+    } catch (error: unknown) {
+      if (getErrorCode(error) === 404) return { state: 'none' }
+      throw error
+    }
+    return this.judgeExactHostEgressPolicy(server, name, binding, existingPolicy)
+  }
+
+  private judgeExactHostEgressPolicy(
     server: McpServerCRD,
     name: string,
     binding: EgressBinding,
-    existingPolicy: k8s.V1NetworkPolicy | null
+    existingPolicy: k8s.V1NetworkPolicy
   ): LiveEgressVerdict {
-    // Bootstrap: nothing live to judge, and nothing to serve.
-    if (existingPolicy === null) return { state: 'none' }
+    const metadata = existingPolicy.metadata
+    const labels = metadata?.labels ?? {}
+    if (
+      metadata?.name !== name ||
+      metadata.namespace !== server.namespace ||
+      !metadata.uid ||
+      !metadata.resourceVersion
+    ) {
+      return { state: 'untrusted-state', policy: existingPolicy }
+    }
+    const ownsExpectedLane =
+      hasExpectedPolicyOwnership(existingPolicy, EXTERNAL_EGRESS_POLICY_TYPE) &&
+      labels[MCPSERVER_LABEL] === server.name
+    if (!ownsExpectedLane) return { state: 'foreign' }
 
-    const cidrs = (existingPolicy.spec?.egress ?? [])
-      .flatMap(rule => rule.to ?? [])
-      .map(peer => peer.ipBlock?.cidr)
-      .filter((cidr): cidr is string => typeof cidr === 'string')
+    const stateRead = parseStateStrict(
+      existingPolicy.metadata?.annotations,
+      {
+        overlapMs: config.externalEgressOverlapSec * 1000,
+        maxEntries: config.externalEgressMaxEntries,
+      },
+      [
+        {
+          fqdn: binding.dns!,
+          port: binding.port!,
+          protocol: binding.protocol ?? 'TCP',
+        },
+      ]
+    )
+    if (stateRead.kind !== 'valid' || stateRead.state.entries.length === 0) {
+      return { state: 'untrusted-state', policy: existingPolicy }
+    }
+
+    const cidrs = stateRead.state.entries.map(entry => `${entry.ip}/32`)
 
     // A policy with no ipBlock peers is a deny disguised as an allow, and the
     // rebuild from an empty CIDR list would compare equal to it. Gate first, the
@@ -1898,10 +1960,130 @@ export class NetworkPolicyReconciler {
       cidr => cidr.endsWith('/32') && isAllowedExternalEgressCidr(cidr)
     )
 
-    if (shapeIntact && cidrsIntact) return { state: 'intact', cidrs }
+    if (shapeIntact && cidrsIntact) {
+      const annotatedResolvedAt = existingPolicy.metadata?.annotations?.[RESOLVED_AT_ANNOTATION]
+      const latestObservedAt = Math.max(
+        ...stateRead.state.entries.map(entry => entry.lastObservedAt)
+      )
+      const resolvedAt =
+        annotatedResolvedAt && Number.isFinite(Date.parse(annotatedResolvedAt))
+          ? annotatedResolvedAt
+          : new Date(latestObservedAt).toISOString()
+      return { state: 'intact', cidrs, resolvedAt, policy: existingPolicy }
+    }
     // A bad CIDR is the more specific diagnosis and the one an operator acts on
     // first, so it wins when a policy drifted on both axes.
-    return { state: cidrsIntact ? 'drifted-shape' : 'drifted-cidr' }
+    return {
+      state: cidrsIntact ? 'drifted-shape' : 'drifted-cidr',
+      policy: existingPolicy,
+    }
+  }
+
+  /**
+   * Rehydrate a successful DNS observation only from structured entries that
+   * were already enforced by the fresh live spec. STATE is provenance, not an
+   * alternate allowlist: annotation-only entries are discarded before the
+   * accumulator can union them into the next policy. A fresh DNS answer may
+   * then add only the addresses it actually returned.
+   */
+  private provenPreviousDnsAnnotations(
+    server: McpServerCRD,
+    name: string,
+    binding: EgressBinding,
+    existingPolicy: k8s.V1NetworkPolicy | null
+  ): ProvenDnsAnnotations {
+    if (!existingPolicy) return { annotations: undefined, contracted: false }
+    const empty = serializeState({ entries: [] })
+    const finish = (annotations: Record<string, string>): ProvenDnsAnnotations => {
+      const current = existingPolicy.metadata?.annotations ?? {}
+      return {
+        annotations,
+        contracted: [STATE_ANNOTATION, TARGETS_ANNOTATION, RESOLVED_AT_ANNOTATION].some(
+          key => current[key] !== annotations[key]
+        ),
+      }
+    }
+    const stateRead = parseStateStrict(
+      existingPolicy.metadata?.annotations,
+      {
+        overlapMs: config.externalEgressOverlapSec * 1000,
+        maxEntries: config.externalEgressMaxEntries,
+      },
+      [
+        {
+          fqdn: binding.dns!,
+          port: binding.port!,
+          protocol: binding.protocol ?? 'TCP',
+        },
+      ]
+    )
+    if (stateRead.kind !== 'valid') return finish(empty)
+
+    const expectedShape = this.buildExactHostEgressPolicy(server, name, binding, [])
+    const liveShape: k8s.V1NetworkPolicy = {
+      ...existingPolicy,
+      spec: { ...existingPolicy.spec!, egress: [] },
+    }
+    if (!sameNetworkPolicySpec(liveShape, expectedShape)) return finish(empty)
+
+    const liveRules = new Set(
+      (existingPolicy.spec?.egress ?? []).map(rule =>
+        JSON.stringify(canonicalizeNetworkPolicyValue(rule))
+      )
+    )
+    const entries = stateRead.state.entries.filter(entry => {
+      const expectedRule = this.buildExactHostEgressPolicy(server, name, binding, [
+        `${entry.ip}/32`,
+      ]).spec?.egress?.[0]
+      return (
+        expectedRule !== undefined &&
+        liveRules.has(JSON.stringify(canonicalizeNetworkPolicyValue(expectedRule)))
+      )
+    })
+    const annotations = serializeState({ entries })
+    const priorResolvedAt = existingPolicy.metadata?.annotations?.[RESOLVED_AT_ANNOTATION]
+    if (entries.length > 0 && priorResolvedAt && Number.isFinite(Date.parse(priorResolvedAt))) {
+      annotations[RESOLVED_AT_ANNOTATION] = priorResolvedAt
+    }
+    return finish(annotations)
+  }
+
+  /**
+   * Re-read the exact external-egress object after DNS latency. LIST is only a
+   * discovery/cleanup snapshot; it cannot authorize a no-op or status claim.
+   * A single missing HCC marker remains repairable under the existing inventory
+   * contract, but foreign/ambiguous ownership and incomplete identity fail loud.
+   */
+  private async readFreshExternalEgressPolicy(
+    server: McpServerCRD,
+    name: string
+  ): Promise<FreshExternalEgressPolicy> {
+    let policy: k8s.V1NetworkPolicy
+    try {
+      policy = await this.networkingApi.readNamespacedNetworkPolicy({
+        name,
+        namespace: server.namespace,
+      })
+    } catch (error: unknown) {
+      if (getErrorCode(error) === 404) return { policy: null, repairRequired: false }
+      throw error
+    }
+
+    const classification = classifySafetyInventoryPolicy(policy, 'external-egress')
+    const metadata = policy.metadata
+    if (
+      metadata?.name !== name ||
+      metadata.namespace !== server.namespace ||
+      !metadata.uid ||
+      !metadata.resourceVersion ||
+      metadata.labels?.[MCPSERVER_LABEL] !== server.name ||
+      (classification !== 'owned' && classification !== 'repairable')
+    ) {
+      throw new Error(
+        `NetworkPolicy "${name}" has conflicting or incomplete ownership for the external-egress lane`
+      )
+    }
+    return { policy, repairRequired: classification === 'repairable' }
   }
 
   private async resolveExternalEgressDns(
@@ -1918,10 +2100,9 @@ export class NetworkPolicyReconciler {
           timeout = setTimeout(
             () =>
               // A bounded-timeout DNS failure is a TRANSIENT resolver error, not a
-              // permanent one. classifyDnsError keys on `.code`, and a codeless Error
-              // falls into the 'permanent' (NXDOMAIN/expire) branch, which prunes the
-              // accumulated egress instead of freezing it — breaking D4 fail-static.
-              // Tag it ETIMEDOUT (already in TRANSIENT_DNS_CODES) so it freezes.
+              // permanent one. The resolver-boundary verdict keys on `.code`;
+              // tag the bounded timeout ETIMEDOUT so it is positively transient
+              // and freezes the accumulated set.
               reject(
                 Object.assign(
                   new Error(
@@ -2164,11 +2345,56 @@ export class NetworkPolicyReconciler {
     const reconcileFaults: Array<{
       dns: string
       err: unknown
-      blocking: boolean
       live: LiveEgressVerdict['state']
+      verificationError?: unknown
     }> = []
+    const freshPolicySnapshots = new Map<string, k8s.V1NetworkPolicy>()
     const resolvedAtMs = Date.now()
     const resolvedAt = new Date(resolvedAtMs).toISOString()
+    let dnsFailStatic = false
+
+    const recordReconcileFault = async (
+      binding: EgressBinding,
+      name: string,
+      err: unknown
+    ): Promise<void> => {
+      if (!binding.dns) throw new Error('DNS reconcile fault requires a DNS binding')
+      hccLogger.error('external egress reconcile fault is not a DNS condition', {
+        serverName: server.name,
+        dns: binding.dns,
+        err,
+      })
+
+      let verdict: LiveEgressVerdict
+      try {
+        verdict = await this.judgeLiveExactHostEgress(server, name, binding)
+      } catch (verificationError: unknown) {
+        hccLogger.error('external egress live policy verification failed', {
+          serverName: server.name,
+          dns: binding.dns,
+          err: verificationError,
+        })
+        reconcileFaults.push({
+          dns: binding.dns,
+          err,
+          live: 'untrusted-state',
+          verificationError,
+        })
+        return
+      }
+
+      if (verdict.state === 'intact') {
+        desiredPolicyNames.add(name)
+        resolvedEgressIPs.push({
+          dns: binding.dns,
+          ips: verdict.cidrs.map(cidr => cidr.replace(/\/32$/, '')),
+          resolvedAt: verdict.resolvedAt,
+        })
+      } else if ('policy' in verdict) {
+        freshPolicySnapshots.set(name, verdict.policy)
+      }
+      reconcileFaults.push({ dns: binding.dns, err, live: verdict.state })
+    }
 
     for (const binding of bindings) {
       if (!isCurrent()) return
@@ -2178,7 +2404,7 @@ export class NetworkPolicyReconciler {
         continue
       }
 
-      let cidrs: string[]
+      let cidrs: string[] = []
       // Sliding-window state annotations to persist on the policy (issue #299).
       // Only the DNS branch sets this; CIDR/public-web bindings leave it undefined.
       let stateAnnotations: Record<string, string> | undefined
@@ -2191,6 +2417,9 @@ export class NetworkPolicyReconciler {
       // accumulated.changed is over (fqdn,ip,port,protocol), so it forces the
       // write that re-persists the identity and preserves the overlap grace.
       let egressStateChanged = false
+      let resolvedStatus: McpServerResolvedEgressIP | undefined
+      let bindingDnsFailStatic = false
+      let ownershipRepairRequired = false
       const name = this.externalEgressPolicyName(server.name, binding)
       if (!name) {
         failures.push('exact-host external egress bindings must declare dns or cidr')
@@ -2200,7 +2429,7 @@ export class NetworkPolicyReconciler {
       // AND to decide whether a write is actually needed (audit F2/L1) — the
       // write is gated on the ENFORCED spec.egress, so identical static policies
       // never churn and out-of-band drift self-heals, for every egress class.
-      const existingPolicy = existingPolicies.find(p => p.metadata?.name === name) ?? null
+      let existingPolicy = existingPolicies.find(p => p.metadata?.name === name) ?? null
 
       if (egressClass === 'public-web') {
         if (
@@ -2215,16 +2444,18 @@ export class NetworkPolicyReconciler {
           continue
         }
 
-        desiredPolicyNames.add(name)
-
         // public-web is a static policy. Preserve #205's ownership-fenced write
         // (applyOwnedPolicy asserts ownership + honors the isCurrent generation
         // fence) while keeping dev's F2 no-churn gate so the TTL-accelerated
         // resync does not rewrite it every tick.
         const policy = this.buildPublicWebEgressPolicy(server, name)
-        if (this.externalEgressWriteNeeded(existingPolicy, policy)) {
+        const fresh = await this.readFreshExternalEgressPolicy(server, name)
+        existingPolicy = fresh.policy
+        if (fresh.repairRequired || this.externalEgressWriteNeeded(existingPolicy, policy)) {
           await this.applyOwnedPolicy(name, server.namespace, policy, 'external-egress', isCurrent)
         }
+        if (!isCurrent()) return
+        desiredPolicyNames.add(name)
         continue
       }
 
@@ -2264,217 +2495,199 @@ export class NetworkPolicyReconciler {
         // resolver failure we fail-static: keep serving the accumulated set
         // rather than deleting the policy (the pre-#299 catch dropped egress on
         // any DNS hiccup).
-        const previousAnnotations = existingPolicy?.metadata?.annotations
         const now = Date.parse(resolvedAt)
         const coreConfig = {
           overlapMs: config.externalEgressOverlapSec * 1000,
           maxEntries: config.externalEgressMaxEntries,
         }
+        let records: Array<{ address: string; ttl: number }> | undefined
+        let resolverFailure: { error: unknown; kind: 'transient' | 'permanent' } | undefined
         try {
-          const records = await this.resolveExternalEgressDns(binding.dns)
-          if (!isCurrent()) return
-          const uniqueIps = [...new Set(records.map(r => r.address))].sort()
-          if (uniqueIps.length === 0) {
-            failures.push(`hostname "${binding.dns}" resolved to no IPv4 addresses`)
+          records = await this.resolveExternalEgressDns(binding.dns)
+        } catch (resolverError: unknown) {
+          const verdict = classifyDnsRejection(resolverError)
+          if (verdict.kind === 'fault') {
+            await recordReconcileFault(binding, name, resolverError)
             continue
           }
-          const invalidIps = uniqueIps.filter(ip => isIP(ip) !== 4)
-          if (invalidIps.length > 0) {
-            failures.push(
-              `hostname "${binding.dns}" resolved invalid IPv4 answer(s): ${invalidIps.join(', ')}`
-            )
-            continue
+          resolverFailure = {
+            error: resolverError,
+            kind: verdict.kind === 'transient' ? 'transient' : 'permanent',
           }
-          const freshCidrs = uniqueIps.map(ip => `${ip}/32`)
-          const disallowedCidrs = freshCidrs.filter(cidr => !isAllowedExternalEgressCidr(cidr))
-          if (disallowedCidrs.length > 0) {
-            failures.push(
-              `hostname "${binding.dns}" resolved disallowed address(es): ${disallowedCidrs.join(', ')}`
-            )
-            continue
-          }
-          // Security gates above ran on the FRESH snapshot; only validated IPs
-          // enter the accumulator, so the union can never contain a blocked IP.
-          const ttlSeconds = records.length > 0 ? Math.min(...records.map(r => r.ttl)) : 0
-          if (ttlSeconds > 0) {
-            this.externalEgressMinObservedTtlMs = Math.min(
-              this.externalEgressMinObservedTtlMs,
-              ttlSeconds * 1000
-            )
-          }
-          const accumulated = accumulateHostExactHostEgress({
-            fqdn: binding.dns,
-            port: binding.port,
-            protocol,
-            resolution: { kind: 'ok', ips: uniqueIps, ttlSeconds },
-            previousAnnotations,
-            now,
-            config: coreConfig,
-          })
-          // Defense-in-depth (audit M3): rehydrated IPs (from the policy's own
-          // annotations) bypass the fresh-snapshot CIDR gate, so a tampered/corrupt
-          // state annotation could union a blocked/private IP. Re-validate the
-          // effective set against the blocked ranges before rendering.
-          cidrs = accumulated.cidrs.filter(c => isAllowedExternalEgressCidr(c))
-          stateAnnotations = accumulated.annotations
-          egressRenewalDue = accumulated.renewalDue
-          egressStateChanged = accumulated.changed
-          resolvedEgressIPs.push({
-            dns: binding.dns,
-            ips: cidrs.map(cidr => cidr.replace(/\/32$/, '')),
-            resolvedAt,
-          })
-          if (accumulated.overCap) {
-            console.warn(
-              `[NetPol] "${binding.dns}" egress set hit the cap (${config.externalEgressMaxEntries}); evicted ${accumulated.evicted} least-recently-observed IP(s)`
-            )
-          }
-          console.log(`[NetPol] Resolved ${binding.dns} → [${cidrs.join(', ')}]`)
-        } catch (err) {
-          // Fail-static (H1): freeze the accumulated set on a transient resolver
-          // failure; fail loud when there is nothing to serve (bootstrap, or a
-          // permanent no-records answer).
-          //
-          // Issue #513: only a POSITIVELY identified DNS condition may reach the
-          // sliding-window classifier. classifyDnsError defaults every unknown or
-          // missing code to 'permanent' (network-policy-core index.cjs), and
-          // 'permanent' PRUNES the accumulated set rather than freezing it. This
-          // try covers the whole resolve-and-render block, so without this gate a
-          // programming fault raised after resolution — a TypeError from a
-          // contract violation, an ERR_* argument error — is laundered into the
-          // prune branch and reported to the operator as a DNS failure, pointing
-          // at the resolver while the fault is here. Transient codes are positive
-          // by construction (TRANSIENT_DNS_CODES); 'permanent' is positive only for
-          // PERMANENT_DNS_CODES — the two no-records answers plus EBADNAME, a name
-          // c-ares refuses to query. EBADNAME cannot arrive from this controller's
-          // own CRD field (isPublicDnsHostname rejects `..` and 64-octet labels
-          // before we resolve), but the set is shared with WRC, whose ui lane
-          // validates the fqdn with the CRD pattern alone; there it IS the
-          // operator's misconfiguration, and it must keep pruning and reporting
-          // ExternalEgressRejected rather than blame the controller.
-          //
-          // `dnsCodeOf` reads the code off any object, so a rejection that is not
-          // an Error instance is still classified by its code rather than by how
-          // it was thrown. It is deliberately not full parity with
-          // classifyDnsError, which also accepts a bare code string: a rejection
-          // whose value IS the string 'ENOTFOUND' classifies permanent there and
-          // yields no code here, so it lands in the fault branch. `node:dns`
-          // rejects with Error objects, so that shape does not occur in
-          // production. Shared with WRC rather than unwrapped by hand in each
-          // process — two hand-written extractions of the same field is the drift
-          // surface network-policy-core exists to remove (#567 review, R1-M2).
-          const kind = classifyDnsError(err)
-          const code = dnsCodeOf(err)
-          if (kind !== 'transient' && !isPermanentDnsCode(code)) {
-            // Log before anything that can throw. writeExternalEgressStatus fails
-            // on a stale uid/generation or a rejected patch, and the isCurrent
-            // fence below returns without a word — either would swallow the very
-            // fault this branch exists to surface.
-            console.error(
-              `[NetPol] External egress reconcile fault on binding "${binding.dns}" for "${server.name}" (not a DNS condition):`,
-              err
-            )
-            // Recorded, not thrown: the throw is deferred to after the loop so
-            // cleanupExternalEgress still runs. It is the only place that deletes
-            // policies for bindings the operator removed from the spec, and
-            // desiredPolicyNames is only complete once the loop ends. Throwing
-            // here would leave a de-authorized destination allowed for as long as
-            // the fault persists — fail-loud paid for with fail-open.
-            //
-            // D4 fail-static, applied to a fault exactly as the transient branch
-            // applies it to a resolver outage: when there is a live policy, its
-            // rules are what is enforced right now, so report them and let the
-            // HCC-managed Deployment start on the last known-good egress. Read
-            // from the live object, not recomputed — recomputing is what faulted.
-            // Only HCC: consumers of ExternalEgressReady treat any False as
-            // terminal, so a dependent WRC recipe still fails (#577).
-            const verdict = this.judgeLiveExactHostEgress(server, name, binding, existingPolicy)
+        }
 
-            // Membership in `desiredPolicyNames` is the difference between "left
-            // untouched" and "revoked": cleanup deletes every external-egress
-            // policy NOT in this set, and it runs BEFORE the deferred throw, so a
-            // revocation actually happens rather than being skipped by the
-            // fail-loud exit. Revoking is fail-CLOSED — these are pure allow
-            // policies under the namespace L0 deny-all, so removing one closes
-            // that destination and cannot open one.
-            //
-            // Nothing here can rewrite a drifted policy instead: rebuilding means
-            // recomputing the CIDR set, and recomputing is what faulted.
-            //
-            // `none` is bootstrap, and there the add is dataplane-NEUTRAL: the
-            // policy came from `existingPolicies.find(...)`, cleanup filters that
-            // same list by name, and a name that was not found has no live object
-            // to delete. It stays explicit because the status has to tell "nothing
-            // was live" apart from "what was live got revoked" — an earlier
-            // revision of this branch asserted the opposite in a comment.
-            const revoked = verdict.state === 'drifted-shape' || verdict.state === 'drifted-cidr'
-            if (!revoked) desiredPolicyNames.add(name)
+        let fresh: FreshExternalEgressPolicy
+        try {
+          fresh = await this.readFreshExternalEgressPolicy(server, name)
+        } catch (policyReadError: unknown) {
+          await recordReconcileFault(binding, name, policyReadError)
+          continue
+        }
+        existingPolicy = fresh.policy
+        ownershipRepairRequired = fresh.repairRequired
+        const liveAnnotations = existingPolicy?.metadata?.annotations
 
-            if (verdict.state === 'intact') {
-              // Without this the binding vanishes from status.resolvedEgressIPs —
-              // the audit record an operator reads to learn what is allowed —
-              // while its /32s stay enforced. The status message would claim
-              // "accumulated egress left untouched" and the record would disagree.
-              resolvedEgressIPs.push({
+        if (resolverFailure) {
+          if (fresh.policy) freshPolicySnapshots.set(name, fresh.policy)
+          if (resolverFailure.kind === 'permanent') {
+            failures.push(
+              `failed to resolve hostname "${binding.dns}": ${this.errorMessage(resolverFailure.error)}`
+            )
+            continue
+          }
+          if (existingPolicy) {
+            const proof = this.judgeExactHostEgressPolicy(server, name, binding, existingPolicy)
+            if (proof.state !== 'intact') {
+              reconcileFaults.push({
                 dns: binding.dns,
-                ips: verdict.cidrs.map(cidr => cidr.replace(/\/32$/, '')),
-                resolvedAt,
+                err: new Error(
+                  `Fail-static proof failed for "${binding.dns}": ${LIVE_EGRESS_FAULT_TEXT[proof.state]}`
+                ),
+                live: proof.state,
               })
+              continue
             }
-            reconcileFaults.push({
-              // Inside `else if (binding.dns)`, so it is always a string here;
-              // a `??` fallback would be an unreachable branch pretending to be a guard.
-              dns: binding.dns,
-              err,
-              // Blocking unless there is a trustworthy live set to serve. A fault
-              // on a binding that has never been written has no frozen set behind
-              // it, so completing the pass would publish a server as reconciled
-              // while one of its declared destinations was never enforced at all.
-              blocking: verdict.state !== 'intact',
-              // The operator message reads off this. A status that describes the
-              // opposite of what the pass did is the same defect class this branch
-              // exists to close.
-              live: verdict.state,
-            })
-            continue
           }
           const accumulated = accumulateHostExactHostEgress({
             fqdn: binding.dns,
             port: binding.port,
             protocol,
-            resolution: { kind },
-            previousAnnotations,
+            resolution: { kind: 'transient' },
+            previousAnnotations: liveAnnotations,
             now,
             config: coreConfig,
           })
           if (accumulated.cidrs.length === 0) {
-            failures.push(`failed to resolve hostname "${binding.dns}": ${this.errorMessage(err)}`)
+            failures.push(
+              `failed to resolve hostname "${binding.dns}": ${this.errorMessage(resolverFailure.error)}`
+            )
             continue
           }
-          // Defense-in-depth (audit M3): rehydrated IPs (from the policy's own
-          // annotations) bypass the fresh-snapshot CIDR gate, so a tampered/corrupt
-          // state annotation could union a blocked/private IP. Re-validate the
-          // effective set against the blocked ranges before rendering.
           cidrs = accumulated.cidrs.filter(c => isAllowedExternalEgressCidr(c))
+          if (cidrs.length !== accumulated.cidrs.length) {
+            failures.push(
+              `persisted DNS state for hostname "${binding.dns}" contains a disallowed address`
+            )
+            continue
+          }
           stateAnnotations = accumulated.annotations
-          // A freeze keeps the SAME set as the live policy → changed=false → no
-          // write (no churn while DNS is failing); a genuine change still writes.
           egressRenewalDue = accumulated.renewalDue
           egressStateChanged = accumulated.changed
-          resolvedEgressIPs.push({
+          bindingDnsFailStatic = true
+          if (accumulated.resolvedAt) {
+            resolvedStatus = {
+              dns: binding.dns,
+              ips: cidrs.map(cidr => cidr.replace(/\/32$/, '')),
+              resolvedAt: accumulated.resolvedAt,
+            }
+          }
+          hccLogger.warn('external egress DNS failure', {
+            serverName: server.name,
             dns: binding.dns,
-            ips: cidrs.map(cidr => cidr.replace(/\/32$/, '')),
-            resolvedAt,
+            kind: resolverFailure.kind,
+            accumulatedIps: cidrs.length,
+            err: resolverFailure.error,
           })
-          console.warn(
-            `[NetPol] ${kind} DNS failure for "${binding.dns}"; serving ${cidrs.length} accumulated IP(s) (fail-static, issue #299): ${this.errorMessage(err)}`
-          )
+        }
+
+        if (records) {
+          try {
+            if (!isCurrent()) return
+            const uniqueIps = [...new Set(records.map(record => record.address))].sort()
+            if (uniqueIps.length === 0) {
+              if (existingPolicy) freshPolicySnapshots.set(name, existingPolicy)
+              failures.push(`hostname "${binding.dns}" resolved to no IPv4 addresses`)
+              continue
+            }
+            const invalidIps = uniqueIps.filter(ip => isIP(ip) !== 4)
+            if (invalidIps.length > 0) {
+              if (existingPolicy) freshPolicySnapshots.set(name, existingPolicy)
+              failures.push(
+                `hostname "${binding.dns}" resolved invalid IPv4 answer(s): ${invalidIps.join(', ')}`
+              )
+              continue
+            }
+            const freshCidrs = uniqueIps.map(ip => `${ip}/32`)
+            const disallowedCidrs = freshCidrs.filter(cidr => !isAllowedExternalEgressCidr(cidr))
+            if (disallowedCidrs.length > 0) {
+              if (existingPolicy) freshPolicySnapshots.set(name, existingPolicy)
+              failures.push(
+                `hostname "${binding.dns}" resolved disallowed address(es): ${disallowedCidrs.join(', ')}`
+              )
+              continue
+            }
+            const ttlSeconds = Math.min(...records.map(record => record.ttl))
+            if (ttlSeconds > 0) {
+              this.externalEgressMinObservedTtlMs = Math.min(
+                this.externalEgressMinObservedTtlMs,
+                ttlSeconds * 1000
+              )
+            }
+            const provenPrevious = this.provenPreviousDnsAnnotations(
+              server,
+              name,
+              binding,
+              existingPolicy
+            )
+            const accumulated = accumulateHostExactHostEgress({
+              fqdn: binding.dns,
+              port: binding.port,
+              protocol,
+              resolution: { kind: 'ok', ips: uniqueIps, ttlSeconds },
+              previousAnnotations: provenPrevious.annotations,
+              now,
+              config: coreConfig,
+            })
+            const allowedEntries = accumulated.entries.filter(entry =>
+              isAllowedExternalEgressCidr(`${entry.ip}/32`)
+            )
+            cidrs = allowedEntries.map(entry => `${entry.ip}/32`)
+            stateAnnotations =
+              allowedEntries.length === accumulated.entries.length
+                ? accumulated.annotations
+                : {
+                    ...serializeState({ entries: allowedEntries }),
+                    ...(accumulated.resolvedAt
+                      ? { [RESOLVED_AT_ANNOTATION]: accumulated.resolvedAt }
+                      : {}),
+                  }
+            egressRenewalDue = accumulated.renewalDue
+            egressStateChanged =
+              accumulated.changed ||
+              provenPrevious.contracted ||
+              allowedEntries.length !== accumulated.entries.length
+            resolvedStatus = {
+              dns: binding.dns,
+              ips: cidrs.map(cidr => cidr.replace(/\/32$/, '')),
+              resolvedAt,
+            }
+            if (accumulated.overCap) {
+              hccLogger.warn('external egress set hit the cap', {
+                serverName: server.name,
+                dns: binding.dns,
+                maxEntries: config.externalEgressMaxEntries,
+                evicted: accumulated.evicted,
+              })
+            }
+            hccLogger.info('external egress DNS resolved', {
+              serverName: server.name,
+              dns: binding.dns,
+              cidrs,
+            })
+          } catch (processingError: unknown) {
+            await recordReconcileFault(binding, name, processingError)
+            continue
+          }
         }
       } else {
         continue
       }
 
-      desiredPolicyNames.add(name)
+      if (!binding.dns) {
+        const fresh = await this.readFreshExternalEgressPolicy(server, name)
+        existingPolicy = fresh.policy
+        ownershipRepairRequired = fresh.repairRequired
+      }
 
       // Build the exact-host policy from #205's helper, then fold in the #299
       // sliding-window state annotations so the next reconcile rehydrates the
@@ -2483,6 +2696,7 @@ export class NetworkPolicyReconciler {
       if (stateAnnotations) {
         policy.metadata = { ...(policy.metadata ?? {}), annotations: stateAnnotations }
       }
+      if (existingPolicy) freshPolicySnapshots.set(name, existingPolicy)
 
       // Write only when the enforced rules changed / the policy is new / drifted
       // (audit F2 no-churn + L1 self-heal), OR when the DNS window is aging and
@@ -2490,6 +2704,7 @@ export class NetworkPolicyReconciler {
       // Route the write through applyOwnedPolicy so #205's ownership assertion
       // and isCurrent generation fence still guard the mutation.
       if (
+        ownershipRepairRequired ||
         this.externalEgressWriteNeeded(existingPolicy, policy) ||
         egressRenewalDue ||
         egressStateChanged
@@ -2498,16 +2713,32 @@ export class NetworkPolicyReconciler {
       } else {
         console.log(`[NetPol] External egress "${name}" unchanged — no-op (issue #299 no-churn)`)
       }
+      if (!isCurrent()) return
+      desiredPolicyNames.add(name)
+      if (resolvedStatus) resolvedEgressIPs.push(resolvedStatus)
+      if (bindingDnsFailStatic) dnsFailStatic = true
+    }
+
+    const cleanupCandidates = existingPolicies
+      .filter(policy => {
+        const name = policy.metadata?.name
+        return Boolean(name) && !desiredPolicyNames.has(name!)
+      })
+      .map(policy => freshPolicySnapshots.get(policy.metadata?.name ?? '') ?? policy)
+    for (const [name, snapshot] of freshPolicySnapshots) {
+      if (
+        !desiredPolicyNames.has(name) &&
+        !cleanupCandidates.some(policy => policy.metadata?.name === name)
+      ) {
+        cleanupCandidates.push(snapshot)
+      }
     }
 
     try {
       await this.cleanupExternalEgress(
         server.name,
         server.namespace,
-        existingPolicies.filter(policy => {
-          const name = policy.metadata?.name
-          return Boolean(name) && !desiredPolicyNames.has(name!)
-        }),
+        cleanupCandidates,
         async () => isCurrent(),
         options.onRevoked
       )
@@ -2531,12 +2762,7 @@ export class NetworkPolicyReconciler {
     // Reported only after cleanupExternalEgress above, so a binding removed from
     // the spec is still de-authorized on a pass that ends in a fault.
     if (reconcileFaults.length > 0) {
-      // The blocking fault is the one that propagates, so it is the one the
-      // status must name: reporting reconcileFaults[0] while throwing a different
-      // error hands the operator a condition and a log line about two different
-      // bindings. With no blocking fault, the first is the whole story.
-      const blocking = reconcileFaults.find(fault => fault.blocking)
-      const first = blocking ?? reconcileFaults[0]
+      const first = reconcileFaults[0]
       const parts = [
         `External egress reconciliation failed on binding "${first.dns}" with a non-DNS error ` +
           `(not a resolver condition, ${LIVE_EGRESS_FAULT_TEXT[first.live]}): ${this.errorMessage(
@@ -2545,6 +2771,11 @@ export class NetworkPolicyReconciler {
       ]
       if (reconcileFaults.length > 1) {
         parts.push(`and ${reconcileFaults.length - 1} more binding(s) faulted`)
+      }
+      if (first.verificationError) {
+        parts.push(
+          `live policy verification also failed: ${this.errorMessage(first.verificationError)}`
+        )
       }
       // `failures` has exactly one sink — the ExternalEgressRejected message
       // below — which this branch used to make unreachable. A pass carrying both
@@ -2560,20 +2791,10 @@ export class NetworkPolicyReconciler {
         parts.join('. '),
         isCurrent
       )
-      // Fail-static, not fail-stop. The throw reaches k8sClient's catch, which
-      // returns before the managed Deployment is created — so throwing for a
-      // fault that HAS a frozen set to serve takes a whole server's pod down over
-      // one binding, healthy siblings included, on a retry ladder that cannot fix
-      // a deterministic fault. Throw only when nothing could be served.
-      if (blocking) throw blocking.err
-      // Rejected input stays blocking as it always was, now that it has been said
-      // out loud in the message above.
-      if (failures.length > 0) {
-        throw new Error(
-          `External egress reconciliation failed for "${server.name}": ${failures.join('; ')}`
-        )
-      }
-      return
+      // The documented pre-start contract is fail-closed for controller faults:
+      // an exactly-proven policy may remain for already-running pods, but False
+      // never admits a new/update runtime and never completes the retry.
+      throw first.err
     }
 
     if (failures.length > 0) {
@@ -2593,10 +2814,12 @@ export class NetworkPolicyReconciler {
       server,
       this.sortResolvedEgressIPs(resolvedEgressIPs),
       'True',
-      'Reconciled',
-      bindings.some(binding => binding.egressClass === 'public-web')
-        ? 'External egress policies reconciled; public-web allows public TCP 80/443 with private and special ranges excluded'
-        : 'External egress policies reconciled',
+      dnsFailStatic ? 'FailStatic' : 'Reconciled',
+      dnsFailStatic
+        ? 'External egress retained from the last accepted DNS state while the resolver is temporarily unavailable'
+        : bindings.some(binding => binding.egressClass === 'public-web')
+          ? 'External egress policies reconciled; public-web allows public TCP 80/443 with private and special ranges excluded'
+          : 'External egress policies reconciled',
       isCurrent
     )
   }

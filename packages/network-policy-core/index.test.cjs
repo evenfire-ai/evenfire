@@ -415,6 +415,101 @@ test('#567: dnsCodeOf does NOT accept a bare code string, unlike classifyDnsErro
   assert.equal(core.isPermanentDnsCode(core.dnsCodeOf('ENOTFOUND')), false)
 })
 
+test('#567 remediation: classifyDnsRejection is total for falsy and non-Error values', () => {
+  for (const value of [undefined, null, false, 0, '', 'ENOTFOUND', new Error('no code')]) {
+    const verdict = core.classifyDnsRejection(value)
+    assert.equal(verdict.kind, 'fault', `${String(value)} must remain a fault`)
+    assert.equal(verdict.cause, value)
+  }
+  assert.deepEqual(core.classifyDnsRejection({ code: 7 }), {
+    kind: 'fault',
+    cause: { code: 7 },
+  })
+})
+
+test('#567 remediation: classifyDnsRejection distinguishes transient and negative DNS verdicts', () => {
+  assert.deepEqual(
+    core.classifyDnsRejection(Object.assign(new Error('servfail'), { code: 'ESERVFAIL' })),
+    { kind: 'transient', code: 'ESERVFAIL' }
+  )
+  assert.deepEqual(
+    core.classifyDnsRejection(Object.assign(new Error('not found'), { code: 'ENOTFOUND' })),
+    { kind: 'negative', reason: 'no-records', code: 'ENOTFOUND' }
+  )
+  assert.deepEqual(
+    core.classifyDnsRejection(Object.assign(new Error('bad name'), { code: 'EBADNAME' })),
+    { kind: 'negative', reason: 'invalid-name', code: 'EBADNAME' }
+  )
+})
+
+test('#567 remediation: unknown coded rejections remain faults with their code and cause', () => {
+  const err = Object.assign(new Error('bad family'), { code: 'EBADFAMILY' })
+  assert.deepEqual(core.classifyDnsRejection(err), {
+    kind: 'fault',
+    code: 'EBADFAMILY',
+    cause: err,
+  })
+})
+
+test('#567 remediation: parseStateStrict rejects absent, malformed, undeclared, duplicate, and over-cap state', () => {
+  assert.deepEqual(core.parseStateStrict({}, CFG), { kind: 'absent' })
+  assert.equal(core.parseStateStrict({ [core.STATE_ANNOTATION]: '{' }, CFG).kind, 'invalid')
+
+  const validEntry = {
+    ip: '1.2.3.4',
+    port: 443,
+    protocol: 'TCP',
+    fqdn: 'api.example.com',
+    expiresAt: 2000,
+    lastObservedAt: 1000,
+  }
+  const declaration = [{ fqdn: 'api.example.com', port: 443, protocol: 'TCP' }]
+  const undeclared = { ...validEntry, fqdn: 'other.example.com' }
+  assert.equal(
+    core.parseStateStrict(
+      { [core.STATE_ANNOTATION]: JSON.stringify([undeclared]) },
+      CFG,
+      declaration
+    ).kind,
+    'invalid'
+  )
+  assert.equal(
+    core.parseStateStrict(
+      { [core.STATE_ANNOTATION]: JSON.stringify([validEntry, validEntry]) },
+      CFG,
+      declaration
+    ).kind,
+    'invalid'
+  )
+  assert.equal(
+    core.parseStateStrict(
+      { [core.STATE_ANNOTATION]: JSON.stringify([validEntry, { ...validEntry, ip: '5.6.7.8' }]) },
+      { ...CFG, maxEntries: 1 },
+      declaration
+    ).kind,
+    'invalid'
+  )
+})
+
+test('#567 remediation: parseStateStrict returns normalized current state only', () => {
+  const entry = {
+    ip: '1.2.3.4',
+    port: 443,
+    protocol: 'TCP',
+    fqdn: 'api.example.com',
+    expiresAt: 2000,
+    lastObservedAt: 1000,
+  }
+  assert.deepEqual(
+    core.parseStateStrict(
+      { [core.STATE_ANNOTATION]: JSON.stringify([entry]) },
+      CFG,
+      [{ fqdn: 'api.example.com', port: 443 }]
+    ),
+    { kind: 'valid', state: { entries: [entry] } }
+  )
+})
+
 // ─── H-A: revocation/freeze keyed by (fqdn,port,protocol), not fqdn alone ──────
 // The state map is keyed by (fqdn,ip,port,protocol) but classification used to be
 // keyed by fqdn only, so an entry whose declared PORT was removed survived under

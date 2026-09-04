@@ -55,7 +55,9 @@ vi.mock('./metrics', () => ({
 function makeMockNetworkingApi() {
   return {
     createNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
-    readNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ metadata: { resourceVersion: '1' } }),
+    readNamespacedNetworkPolicy: vi
+      .fn()
+      .mockRejectedValue(Object.assign(new Error('not found'), { code: 404 })),
     replaceNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
     listNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ items: [] }),
     deleteNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
@@ -88,24 +90,45 @@ function makeReconciler(
     currentContext: 'test',
   })
   const reconciler = new NetworkPolicyReconciler(kc, new Map())
+  const normalizePolicy = (
+    policy: k8s.V1NetworkPolicy,
+    namespace: string,
+    index = 0
+  ): k8s.V1NetworkPolicy => {
+    const name = policy.metadata?.name ?? `unnamed-${index}`
+    return {
+      ...policy,
+      metadata: {
+        ...policy.metadata,
+        name,
+        namespace: policy.metadata?.namespace ?? namespace,
+        uid: policy.metadata?.uid ?? `${namespace}:${name}:uid`,
+        resourceVersion: policy.metadata?.resourceVersion ?? '1',
+      },
+    }
+  }
   const networkingApi = {
     ...mockApi,
     listNamespacedNetworkPolicy: async (args: { namespace: string }) => {
       const response = await mockApi.listNamespacedNetworkPolicy(args)
-      const items = (response.items ?? []).map((policy: k8s.V1NetworkPolicy, index: number) => {
-        const name = policy.metadata?.name ?? `unnamed-${index}`
-        return {
-          ...policy,
-          metadata: {
-            ...policy.metadata,
-            name,
-            namespace: policy.metadata?.namespace ?? args.namespace,
-            uid: policy.metadata?.uid ?? `${args.namespace}:${name}:uid`,
-            resourceVersion: policy.metadata?.resourceVersion ?? '1',
-          },
-        }
-      })
+      const items = (response.items ?? []).map((policy: k8s.V1NetworkPolicy, index: number) =>
+        normalizePolicy(policy, args.namespace, index)
+      )
       return { ...response, items }
+    },
+    readNamespacedNetworkPolicy: async (args: { name: string; namespace: string }) => {
+      try {
+        const direct = (await mockApi.readNamespacedNetworkPolicy(args)) as k8s.V1NetworkPolicy
+        if (direct.metadata?.name || direct.spec) return normalizePolicy(direct, args.namespace)
+      } catch (error: unknown) {
+        if ((error as { code?: unknown })?.code !== 404) throw error
+      }
+      const response = await mockApi.listNamespacedNetworkPolicy({ namespace: args.namespace })
+      const found = (response.items ?? []).find(
+        (policy: k8s.V1NetworkPolicy) => policy.metadata?.name === args.name
+      )
+      if (!found) throw Object.assign(new Error('not found'), { code: 404 })
+      return normalizePolicy(found, args.namespace)
     },
   }
   ;(reconciler as unknown as { networkingApi: unknown }).networkingApi = networkingApi
@@ -191,6 +214,9 @@ describe('R1-B1 regression: DNS timeout must fail-static (freeze), not prune', (
     // it issues no create/replace here.
     expect(result.outcome).toBe('resolved')
     expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(JSON.stringify(mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls)).toContain(
+      'FailStatic'
+    )
     // Defensive: should a future freeze ever re-persist instead of no-op'ing, any
     // write it makes must still carry the accumulated /32 (never a pruned body).
     const writes = [

@@ -187,6 +187,23 @@ function snippetRun(code = 'return { ok: true }') {
   return { type: 'snippet' as const, language: 'typescript' as const, code }
 }
 
+function egressStateAnnotations(
+  entries: Array<{ fqdn: string; ip: string; port: number }>
+): Record<string, string> {
+  const now = Date.now()
+  return {
+    'clerum.io/egress-fqdn-state': JSON.stringify(
+      entries.map(entry => ({
+        ...entry,
+        protocol: 'TCP',
+        expiresAt: now + 600_000,
+        lastObservedAt: now,
+      }))
+    ),
+    'clerum.io/egress-fqdn-resolved-at': new Date(now).toISOString(),
+  }
+}
+
 describe('WorkflowRecipeReconciler', () => {
   let reconciler: WorkflowRecipeReconciler
 
@@ -249,18 +266,28 @@ describe('WorkflowRecipeReconciler', () => {
     mockNetworkingApi.createNamespacedNetworkPolicy.mockReset()
     mockNetworkingApi.createNamespacedNetworkPolicy.mockResolvedValue({})
     mockNetworkingApi.readNamespacedNetworkPolicy.mockReset()
-    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(({ name }: { name: string }) =>
-      Promise.resolve({
-        metadata: {
-          name,
-          uid: `uid-${name}`,
-          resourceVersion: '1',
-          labels: {
-            'clerum.io/managed-by': 'wrc',
-            'clerum.io/recipe': name.replace(/-coordinator-to-gfs$/, ''),
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+      ({ name }: { name: string }) => {
+        if (
+          name.startsWith('ui-egress-') ||
+          name.startsWith('wl-egress-') ||
+          name.startsWith('ui-ingress-') ||
+          name.startsWith('wl-ingress-')
+        ) {
+          return Promise.reject({ code: 404 })
+        }
+        return Promise.resolve({
+          metadata: {
+            name,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/managed-by': 'wrc',
+              'clerum.io/recipe': name.replace(/-coordinator-to-gfs$/, ''),
+            },
           },
-        },
-      })
+        })
+      }
     )
     mockNetworkingApi.replaceNamespacedNetworkPolicy.mockReset()
     mockNetworkingApi.replaceNamespacedNetworkPolicy.mockResolvedValue({})
@@ -1683,16 +1710,28 @@ describe('WorkflowRecipeReconciler', () => {
 
   it('fails closed instead of replacing an existing non-WRC internal-dependency policy', async () => {
     mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 409 })
-    mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValueOnce({
-      metadata: {
-        resourceVersion: 'rv-hcc',
-        labels: {
-          'clerum.io/managed-by': 'host-capability-controller',
-          'clerum.io/policy-type': 'binding-allow',
-          'clerum.io/recipe': 'test-recipe',
-        },
-      },
-    })
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+      ({ name }: { name: string }) => {
+        if (
+          name.startsWith('ui-egress-') ||
+          name.startsWith('wl-egress-') ||
+          name.startsWith('ui-ingress-') ||
+          name.startsWith('wl-ingress-')
+        ) {
+          return Promise.reject({ code: 404 })
+        }
+        return Promise.resolve({
+          metadata: {
+            resourceVersion: 'rv-hcc',
+            labels: {
+              'clerum.io/managed-by': 'host-capability-controller',
+              'clerum.io/policy-type': 'binding-allow',
+              'clerum.io/recipe': 'test-recipe',
+            },
+          },
+        })
+      }
+    )
 
     const result = await reconciler.reconcile(
       makeRecipe({
@@ -2488,9 +2527,6 @@ describe('WorkflowRecipeReconciler', () => {
     resolve4Mock.mockRejectedValueOnce(
       Object.assign(new Error('queryA EBADFAMILY'), { code: 'EBADFAMILY' })
     )
-    resolve6Mock.mockRejectedValueOnce(
-      Object.assign(new Error('queryAaaa EBADFAMILY'), { code: 'EBADFAMILY' })
-    )
     const reconcilerWithLookup = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
       fqdnLookup: host => defaultFqdnLookup(host),
     })
@@ -2509,6 +2545,7 @@ describe('WorkflowRecipeReconciler', () => {
     // returning an error instead of throwing — leaves the test green, because
     // both routes end in `failed` with the code somewhere in the message.
     expect(result.message).not.toContain('egress resolution failed')
+    expect(resolve6Mock).not.toHaveBeenCalled()
 
     const egressPolicy = expect.objectContaining({
       body: expect.objectContaining({
@@ -2520,6 +2557,374 @@ describe('WorkflowRecipeReconciler', () => {
     expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
       expect.objectContaining({ name: 'wl-egress-test-recipe-worker' })
     )
+  })
+
+  it('#567 remediation: contracts a removed workload binding before a sibling lookup faults', async () => {
+    const policyName = 'wl-egress-test-recipe-worker'
+    let existing: k8s.V1NetworkPolicy = {
+      metadata: {
+        name: policyName,
+        namespace: 'sandbox-recipes',
+        uid: 'uid-workload-egress',
+        resourceVersion: '7',
+        labels: {
+          'clerum.io/managed-by': 'workflow-recipes',
+          'clerum.io/recipe': 'test-recipe',
+          'clerum.io/workload': 'worker',
+        },
+        annotations: egressStateAnnotations([
+          { fqdn: 'removed.example.com', ip: '93.184.216.10', port: 443 },
+          { fqdn: 'current.example.com', ip: '93.184.216.20', port: 443 },
+        ]),
+      },
+      spec: {
+        podSelector: {
+          matchLabels: { 'clerum.io/recipe': 'test-recipe', 'clerum.io/workload': 'worker' },
+        },
+        policyTypes: ['Egress'],
+        egress: ['93.184.216.10/32', '93.184.216.20/32'].map(cidr => ({
+          to: [{ ipBlock: { cidr } }],
+          ports: [{ port: 443, protocol: 'TCP' }],
+        })),
+      },
+    }
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+      ({ name }: { name: string }) =>
+        name === policyName ? Promise.resolve(existing) : Promise.reject({ code: 404 })
+    )
+    mockNetworkingApi.replaceNamespacedNetworkPolicy.mockImplementation(
+      ({ body }: { body: k8s.V1NetworkPolicy }) => {
+        existing = {
+          ...body,
+          metadata: {
+            ...body.metadata,
+            name: policyName,
+            namespace: 'sandbox-recipes',
+            uid: 'uid-workload-egress',
+            resourceVersion: '8',
+          },
+        }
+        return Promise.resolve(existing)
+      }
+    )
+    const rec = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+      fqdnLookup: async () => {
+        throw Object.assign(new Error('queryA EBADFAMILY'), { code: 'EBADFAMILY' })
+      },
+    })
+    const result = await rec.reconcile(
+      makeRecipe({
+        spec: {
+          contextRef: 'default',
+          workloads: [
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'worker:latest',
+              port: 8080,
+              egressBindings: [{ dns: 'current.example.com', port: 443 }],
+            },
+          ],
+        },
+      })
+    )
+
+    expect(result.phase).toBe('failed')
+    expect(result.message).toContain('EBADFAMILY')
+    const replacement = mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls.find(
+      call => call[0]?.name === policyName
+    )?.[0].body as k8s.V1NetworkPolicy
+    const cidrs = (replacement?.spec?.egress ?? []).flatMap(rule =>
+      (rule.to ?? []).map(peer => peer.ipBlock?.cidr)
+    )
+    if (replacement) {
+      expect(cidrs).toEqual(['93.184.216.20/32'])
+      expect(JSON.stringify(replacement.metadata?.annotations)).not.toContain('removed.example.com')
+    } else {
+      // If any hand-built live dimension cannot prove a subset, exact deletion
+      // is the safer contraction than retaining the removed binding.
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: policyName, namespace: 'sandbox-recipes' })
+      )
+    }
+  })
+
+  it('#567 remediation: contracts workload authorization before a UI lookup can fail', async () => {
+    const policyName = 'wl-egress-test-recipe-worker'
+    const ingressPolicyName = 'wl-ingress-test-recipe-worker'
+    const events: string[] = []
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+      ({ name }: { name: string }) =>
+        name === policyName || name === ingressPolicyName
+          ? Promise.resolve({
+              metadata: {
+                name,
+                namespace: 'sandbox-recipes',
+                uid:
+                  name === policyName ? 'uid-stale-workload-egress' : 'uid-stale-workload-ingress',
+                resourceVersion: '21',
+                labels: {
+                  'clerum.io/managed-by': 'workflow-recipes',
+                  'clerum.io/recipe': 'test-recipe',
+                },
+              },
+              spec:
+                name === policyName
+                  ? { podSelector: {}, policyTypes: ['Egress'], egress: [] }
+                  : { podSelector: {}, policyTypes: ['Ingress'], ingress: [] },
+            } satisfies k8s.V1NetworkPolicy)
+          : Promise.reject({ code: 404 })
+    )
+    mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(({ name }) => {
+      events.push(`${name}-delete`)
+      return Promise.resolve({})
+    })
+    const rec = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+      fqdnLookup: async () => {
+        events.push('ui-lookup')
+        return { kind: 'error', error: 'no A records', retryable: false }
+      },
+    })
+    const result = await rec.reconcile(
+      makeRecipe({
+        spec: {
+          workloads: [
+            { id: 'frontend', type: 'deployment', image: 'fe:1', port: 8080 },
+            { id: 'worker', type: 'deployment', image: 'worker:1', port: 3000 },
+          ],
+          ui: {
+            workloadRef: 'frontend',
+            port: 8080,
+            egress: { external: [{ fqdn: 'broken.example.com', port: 443 }] },
+          },
+        },
+      })
+    )
+
+    expect(result.phase).toBe('failed')
+    expect(events).toEqual([`${policyName}-delete`, `${ingressPolicyName}-delete`, 'ui-lookup'])
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: policyName,
+      namespace: 'sandbox-recipes',
+      body: {
+        preconditions: {
+          uid: 'uid-stale-workload-egress',
+          resourceVersion: '21',
+        },
+      },
+    })
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: ingressPolicyName,
+      namespace: 'sandbox-recipes',
+      body: {
+        preconditions: {
+          uid: 'uid-stale-workload-ingress',
+          resourceVersion: '21',
+        },
+      },
+    })
+  })
+
+  it('#567 remediation: treats a concurrent 404 contraction delete as already revoked', async () => {
+    const policyName = 'wl-egress-test-recipe-worker'
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+      ({ name }: { name: string }) =>
+        name === policyName
+          ? Promise.resolve({
+              metadata: {
+                name,
+                namespace: 'sandbox-recipes',
+                uid: 'uid-concurrent-delete',
+                resourceVersion: '31',
+                labels: {
+                  'clerum.io/managed-by': 'workflow-recipes',
+                  'clerum.io/recipe': 'test-recipe',
+                },
+              },
+              spec: { podSelector: {}, policyTypes: ['Egress'], egress: [] },
+            } satisfies k8s.V1NetworkPolicy)
+          : Promise.reject({ code: 404 })
+    )
+    mockNetworkingApi.deleteNamespacedNetworkPolicy.mockRejectedValueOnce({
+      code: 404,
+      message: 'already gone',
+    })
+
+    const result = await reconciler.reconcile(
+      makeRecipe({
+        spec: {
+          workloads: [{ id: 'worker', type: 'deployment', image: 'worker:1', port: 8080 }],
+        },
+      })
+    )
+
+    expect(result.phase).toBe('active')
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: policyName,
+      namespace: 'sandbox-recipes',
+      body: { preconditions: { uid: 'uid-concurrent-delete', resourceVersion: '31' } },
+    })
+  })
+
+  it('#567 remediation: treats a 404 contraction read-back as a safe concurrent revocation', async () => {
+    const policyName = 'wl-egress-test-recipe-worker'
+    let replaced = false
+    const existing: k8s.V1NetworkPolicy = {
+      metadata: {
+        name: policyName,
+        namespace: 'sandbox-recipes',
+        uid: 'uid-readback-race',
+        resourceVersion: '41',
+        labels: {
+          'clerum.io/managed-by': 'workflow-recipes',
+          'clerum.io/recipe': 'test-recipe',
+          'clerum.io/workload': 'worker',
+        },
+        annotations: egressStateAnnotations([
+          { fqdn: 'removed.example.com', ip: '93.184.216.10', port: 443 },
+          { fqdn: 'current.example.com', ip: '93.184.216.20', port: 443 },
+        ]),
+      },
+      spec: {
+        podSelector: {
+          matchLabels: { 'clerum.io/recipe': 'test-recipe', 'clerum.io/workload': 'worker' },
+        },
+        policyTypes: ['Egress'],
+        egress: ['93.184.216.10/32', '93.184.216.20/32'].map(cidr => ({
+          to: [{ ipBlock: { cidr } }],
+          ports: [{ port: 443, protocol: 'TCP' }],
+        })),
+      },
+    }
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+      ({ name }: { name: string }) => {
+        if (name !== policyName) return Promise.reject({ code: 404 })
+        return replaced ? Promise.reject({ code: 404 }) : Promise.resolve(existing)
+      }
+    )
+    mockNetworkingApi.replaceNamespacedNetworkPolicy.mockImplementation(() => {
+      replaced = true
+      return Promise.resolve({})
+    })
+    const rec = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+      fqdnLookup: async () => {
+        throw Object.assign(new Error('queryA EBADFAMILY'), { code: 'EBADFAMILY' })
+      },
+    })
+    const result = await rec.reconcile(
+      makeRecipe({
+        spec: {
+          workloads: [
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'worker:1',
+              port: 8080,
+              egressBindings: [{ dns: 'current.example.com', port: 443 }],
+            },
+          ],
+        },
+      })
+    )
+
+    expect(result.phase).toBe('failed')
+    expect(result.message).toContain('EBADFAMILY')
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+      expect.objectContaining({ name: policyName })
+    )
+  })
+
+  it('#567 remediation: uses fresh post-replace identity for same-pass revocation', async () => {
+    const policyName = 'wl-egress-test-recipe-worker'
+    const now = Date.now()
+    let live: k8s.V1NetworkPolicy = {
+      metadata: {
+        name: policyName,
+        namespace: 'sandbox-recipes',
+        uid: 'uid-workload-egress',
+        resourceVersion: '7',
+        labels: {
+          'clerum.io/managed-by': 'workflow-recipes',
+          'clerum.io/recipe': 'test-recipe',
+          'clerum.io/workload': 'worker',
+        },
+        annotations: {
+          'clerum.io/egress-fqdn-state': JSON.stringify(
+            [
+              ['removed.example.com', '93.184.216.10'],
+              ['current.example.com', '93.184.216.20'],
+            ].map(([fqdn, ip]) => ({
+              fqdn,
+              ip,
+              port: 443,
+              protocol: 'TCP',
+              expiresAt: now - 60_000,
+              lastObservedAt: now - 120_000,
+            }))
+          ),
+          'clerum.io/egress-fqdn-resolved-at': new Date(now - 120_000).toISOString(),
+        },
+      },
+      spec: {
+        podSelector: {
+          matchLabels: { 'clerum.io/recipe': 'test-recipe', 'clerum.io/workload': 'worker' },
+        },
+        policyTypes: ['Egress'],
+        egress: ['93.184.216.10/32', '93.184.216.20/32'].map(cidr => ({
+          to: [{ ipBlock: { cidr } }],
+          ports: [{ port: 443, protocol: 'TCP' }],
+        })),
+      },
+    }
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+      ({ name }: { name: string }) =>
+        name === policyName ? Promise.resolve(live) : Promise.reject({ code: 404 })
+    )
+    mockNetworkingApi.replaceNamespacedNetworkPolicy.mockImplementation(
+      ({ body }: { body: k8s.V1NetworkPolicy }) => {
+        live = {
+          ...body,
+          metadata: {
+            ...body.metadata,
+            name: policyName,
+            namespace: 'sandbox-recipes',
+            uid: 'uid-workload-egress',
+            resourceVersion: '8',
+          },
+        }
+        return Promise.resolve(live)
+      }
+    )
+    const rec = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+      fqdnLookup: async () => ({ kind: 'error', error: 'no A records', retryable: false }),
+    })
+    const result = await rec.reconcile(
+      makeRecipe({
+        spec: {
+          workloads: [
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'worker:1',
+              port: 8080,
+              egressBindings: [{ dns: 'current.example.com', port: 443 }],
+            },
+          ],
+        },
+      })
+    )
+
+    expect(result.phase).toBe('failed')
+    expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ name: policyName })
+    )
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: policyName,
+      namespace: 'sandbox-recipes',
+      body: {
+        preconditions: { uid: 'uid-workload-egress', resourceVersion: '8' },
+      },
+    })
   })
 
   it('returns failed phase when a workload egress binding uses wildcard DNS', async () => {
@@ -4033,9 +4438,6 @@ describe('WorkflowRecipeReconciler', () => {
     resolve4Mock.mockRejectedValueOnce(
       Object.assign(new Error('queryA EBADFAMILY'), { code: 'EBADFAMILY' })
     )
-    resolve6Mock.mockRejectedValueOnce(
-      Object.assign(new Error('queryAaaa EBADFAMILY'), { code: 'EBADFAMILY' })
-    )
     const kc = new k8s.KubeConfig()
     const rec = new WorkflowRecipeReconciler(kc, undefined, {
       fqdnLookup: host => defaultFqdnLookup(host),
@@ -4057,6 +4459,7 @@ describe('WorkflowRecipeReconciler', () => {
     // returning an error instead of throwing — leaves the test green, because
     // both routes end in `failed` with the code somewhere in the message.
     expect(result.message).not.toContain('egress resolution failed')
+    expect(resolve6Mock).not.toHaveBeenCalled()
 
     expect(createdPolicy('ui-egress-test-recipe')).toBeUndefined()
     expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
@@ -4069,6 +4472,285 @@ describe('WorkflowRecipeReconciler', () => {
     expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
       expect.objectContaining({ name: 'ui-egress-test-recipe' })
     )
+  })
+
+  it('#567 remediation: contracts a removed UI binding before a sibling lookup faults', async () => {
+    const policyName = 'ui-egress-test-recipe'
+    const existing: k8s.V1NetworkPolicy = {
+      metadata: {
+        name: policyName,
+        namespace: 'sandbox-ui',
+        uid: 'uid-ui-egress',
+        resourceVersion: '8',
+        labels: {
+          'clerum.io/managed-by': 'workflow-recipes',
+          'clerum.io/recipe': 'test-recipe',
+        },
+        annotations: egressStateAnnotations([
+          { fqdn: 'removed.example.com', ip: '93.184.216.10', port: 443 },
+          { fqdn: 'current.example.com', ip: '93.184.216.20', port: 443 },
+        ]),
+      },
+      spec: {
+        podSelector: { matchLabels: { 'clerum.io/sandbox-ui': 'true' } },
+        policyTypes: ['Egress'],
+        egress: ['93.184.216.10/32', '93.184.216.20/32'].map(cidr => ({
+          to: [{ ipBlock: { cidr } }],
+          ports: [{ port: 443, protocol: 'TCP' }],
+        })),
+      },
+    }
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+      ({ name }: { name: string }) =>
+        name === policyName ? Promise.resolve(existing) : Promise.reject({ code: 404 })
+    )
+    const rec = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+      fqdnLookup: async () => {
+        throw Object.assign(new Error('queryA EBADFAMILY'), { code: 'EBADFAMILY' })
+      },
+    })
+    const result = await rec.reconcile(
+      uiRecipeWithExternals([{ fqdn: 'current.example.com', port: 443 }])
+    )
+
+    expect(result.phase).toBe('failed')
+    expect(result.message).toContain('EBADFAMILY')
+    const replacement = mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls.find(
+      call => call[0]?.name === policyName
+    )?.[0].body as k8s.V1NetworkPolicy
+    const cidrs = (replacement?.spec?.egress ?? []).flatMap(rule =>
+      (rule.to ?? []).map(peer => peer.ipBlock?.cidr)
+    )
+    if (replacement) {
+      expect(cidrs).toEqual(['93.184.216.20/32'])
+      expect(JSON.stringify(replacement.metadata?.annotations)).not.toContain('removed.example.com')
+    } else {
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: policyName, namespace: 'sandbox-ui' })
+      )
+    }
+  })
+
+  it('#567 remediation: a transient lookup cannot promote annotation-only UI egress', async () => {
+    let transient = false
+    const rec = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+      fqdnLookup: async () =>
+        transient
+          ? { kind: 'error', error: 'ESERVFAIL', retryable: true }
+          : { kind: 'ok', ipv4: ['93.184.216.20'], ipv6: [], ttlSeconds: 300 },
+    })
+    const recipe = uiRecipeWithExternals([{ fqdn: 'current.example.com', port: 443 }])
+    await rec.reconcile(recipe)
+    const written = createdPolicy('ui-egress-test-recipe')!
+    let liveWithoutRule: k8s.V1NetworkPolicy = {
+      ...written,
+      metadata: {
+        ...written.metadata,
+        uid: 'uid-ui-egress',
+        resourceVersion: '10',
+      },
+      spec: { ...written.spec!, egress: [] },
+    }
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+      ({ name }: { name: string }) =>
+        name === 'ui-egress-test-recipe'
+          ? Promise.resolve(liveWithoutRule)
+          : Promise.reject({ code: 404 })
+    )
+    mockNetworkingApi.replaceNamespacedNetworkPolicy.mockImplementation(
+      ({ name, body }: { name: string; body: k8s.V1NetworkPolicy }) => {
+        if (name === 'ui-egress-test-recipe') {
+          liveWithoutRule = {
+            ...body,
+            metadata: {
+              ...body.metadata,
+              name,
+              namespace: 'sandbox-ui',
+              uid: 'uid-ui-egress',
+              resourceVersion: '11',
+            },
+          }
+          return Promise.resolve(liveWithoutRule)
+        }
+        return Promise.resolve({})
+      }
+    )
+    mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+    mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+    transient = true
+
+    const result = await rec.reconcile(recipe)
+    expect(result.phase).toBe('degraded')
+    const writtenBodies = [
+      ...mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.map(call => call[0]?.body),
+      ...mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls.map(call => call[0]?.body),
+    ].filter(body => body?.metadata?.name === 'ui-egress-test-recipe') as k8s.V1NetworkPolicy[]
+    for (const body of writtenBodies) {
+      const cidrs = (body.spec?.egress ?? []).flatMap(rule =>
+        (rule.to ?? []).map(peer => peer.ipBlock?.cidr)
+      )
+      expect(cidrs).not.toContain('93.184.216.20/32')
+      expect(body.metadata?.annotations?.['clerum.io/egress-fqdn-state']).toBe('[]')
+    }
+  })
+
+  it.each(['success', 'fault'] as const)(
+    '#567 remediation: re-contracts a UI policy widened during DNS %s latency',
+    async mode => {
+      let secondRound = false
+      let live: k8s.V1NetworkPolicy | undefined
+      const rec = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+        fqdnLookup: async () => {
+          if (secondRound && live) {
+            live = structuredClone(live)
+            live.spec!.egress!.push({
+              to: [{ ipBlock: { cidr: '8.8.8.8/32' } }],
+              ports: [{ port: 443, protocol: 'TCP' }],
+            })
+            if (mode === 'fault') {
+              throw Object.assign(new Error('post-list EBADFAMILY'), { code: 'EBADFAMILY' })
+            }
+          }
+          return { kind: 'ok', ipv4: ['93.184.216.20'], ipv6: [], ttlSeconds: 300 }
+        },
+      })
+      const recipe = uiRecipeWithExternals([{ fqdn: 'current.example.com', port: 443 }])
+      await rec.reconcile(recipe)
+      const written = createdPolicy('ui-egress-test-recipe')!
+      live = {
+        ...structuredClone(written),
+        metadata: {
+          ...written.metadata,
+          name: 'ui-egress-test-recipe',
+          namespace: 'sandbox-ui',
+          uid: 'uid-ui-dns-race',
+          resourceVersion: '50',
+        },
+      }
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+        ({ name }: { name: string }) =>
+          name === 'ui-egress-test-recipe' && live
+            ? Promise.resolve(live)
+            : Promise.reject({ code: 404 })
+      )
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mockImplementation(
+        ({ body }: { body: k8s.V1NetworkPolicy }) => {
+          live = {
+            ...body,
+            metadata: {
+              ...body.metadata,
+              name: 'ui-egress-test-recipe',
+              namespace: 'sandbox-ui',
+              uid: 'uid-ui-dns-race',
+              resourceVersion: '51',
+            },
+          }
+          return Promise.resolve(live)
+        }
+      )
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+      secondRound = true
+
+      const result = await rec.reconcile(recipe)
+
+      expect(result.phase).toBe(mode === 'fault' ? 'failed' : 'active')
+      const replacements = mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls
+        .filter(call => call[0]?.name === 'ui-egress-test-recipe')
+        .map(call => call[0]?.body as k8s.V1NetworkPolicy)
+      expect(replacements.length).toBeGreaterThan(0)
+      for (const replacement of replacements) {
+        expect(JSON.stringify(replacement.spec?.egress)).not.toContain('8.8.8.8')
+      }
+    }
+  )
+
+  it('#567 remediation: persists the prior resolved-at when a permanent failure narrows the policy', async () => {
+    let permanentFailure = false
+    let live: k8s.V1NetworkPolicy | undefined
+    const rec = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+      fqdnLookup: async () =>
+        permanentFailure
+          ? { kind: 'error', error: 'no A records', retryable: false }
+          : { kind: 'ok', ipv4: ['93.184.216.20'], ipv6: [], ttlSeconds: 30 },
+    })
+    const recipe = makeRecipe({
+      spec: {
+        workloads: [
+          { id: 'frontend', type: 'deployment', image: 'fe:1', port: 8080 },
+          { id: 'backend', type: 'deployment', image: 'backend:1', port: 8080 },
+        ],
+        ui: {
+          workloadRef: 'frontend',
+          port: 8080,
+          egress: {
+            internal: [{ workloadRef: 'backend', port: 8080 }],
+            external: [{ fqdn: 'api.example.com', port: 443 }],
+          },
+        },
+      },
+    })
+    await rec.reconcile(recipe)
+    const written = createdPolicy('ui-egress-test-recipe')!
+    const oldResolvedAt = '2000-01-01T00:00:00.000Z'
+    const state = JSON.parse(
+      written.metadata!.annotations!['clerum.io/egress-fqdn-state']
+    ) as Array<Record<string, unknown>>
+    for (const entry of state) entry.expiresAt = Date.now() + 600_000
+    live = {
+      ...structuredClone(written),
+      metadata: {
+        ...written.metadata,
+        name: 'ui-egress-test-recipe',
+        namespace: 'sandbox-ui',
+        uid: 'uid-ui-permanent-narrow',
+        resourceVersion: '60',
+        annotations: {
+          ...written.metadata!.annotations,
+          'clerum.io/egress-fqdn-state': JSON.stringify(state),
+          'clerum.io/egress-fqdn-resolved-at': oldResolvedAt,
+        },
+      },
+    }
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+      ({ name }: { name: string }) =>
+        name === 'ui-egress-test-recipe' && live
+          ? Promise.resolve(live)
+          : Promise.reject({ code: 404 })
+    )
+    mockNetworkingApi.replaceNamespacedNetworkPolicy.mockImplementation(
+      ({ name, body }: { name: string; body: k8s.V1NetworkPolicy }) => {
+        if (name === 'ui-egress-test-recipe') {
+          live = {
+            ...body,
+            metadata: {
+              ...body.metadata,
+              name,
+              namespace: 'sandbox-ui',
+              uid: 'uid-ui-permanent-narrow',
+              resourceVersion: '61',
+            },
+          }
+          return Promise.resolve(live)
+        }
+        return Promise.resolve({})
+      }
+    )
+    mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+    mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+    permanentFailure = true
+
+    const result = await rec.reconcile(recipe)
+
+    expect(result.phase).toBe('failed')
+    const replacement = mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls
+      .filter(call => call[0]?.name === 'ui-egress-test-recipe')
+      .at(-1)?.[0].body as k8s.V1NetworkPolicy
+    expect(replacement.metadata?.annotations?.['clerum.io/egress-fqdn-resolved-at']).toBe(
+      oldResolvedAt
+    )
+    expect(replacement.metadata?.annotations?.['clerum.io/egress-fqdn-state']).toBe('[]')
+    expect(JSON.stringify(replacement.spec?.egress)).not.toContain('93.184.216.20')
   })
 
   it('records the ui lane egress set with the exact enforced cidrs and ports', async () => {
@@ -4320,7 +5002,12 @@ describe('WorkflowRecipeReconciler', () => {
       mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
         metadata: {
           name: 'ui-egress-test-recipe',
+          uid: 'uid-ui-egress-test-recipe',
           resourceVersion: '1',
+          labels: {
+            'clerum.io/managed-by': 'workflow-recipes',
+            'clerum.io/recipe': 'test-recipe',
+          },
           annotations: { 'clerum.io/egress-fqdn-state': JSON.stringify(rehydrated) },
         },
       })
@@ -4341,7 +5028,9 @@ describe('WorkflowRecipeReconciler', () => {
       expect(cap.payloads()).toHaveLength(1)
       const recorded = cap.payloads()[0].cidrs as string[]
       expect(recorded).not.toContain('10.0.0.5/32')
-      expect(recorded).toEqual(['93.184.216.10/32', '93.184.216.99/32'])
+      // The prior public address existed only in the annotation, not in a live
+      // rule. Contraction must not promote it during the next successful round.
+      expect(recorded).toEqual(['93.184.216.99/32'])
     } finally {
       cap.restore()
     }
@@ -4384,17 +5073,22 @@ describe('WorkflowRecipeReconciler', () => {
       rendered!.metadata!.annotations!['clerum.io/egress-fqdn-state']
     ) as Array<Record<string, unknown>>
     const aging = persisted.map(e => ({ ...e, expiresAt: Date.now() + 30_000 }))
-    mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
-      ...rendered,
-      metadata: {
-        ...rendered!.metadata,
-        resourceVersion: '1',
-        annotations: {
-          ...rendered!.metadata!.annotations,
-          'clerum.io/egress-fqdn-state': JSON.stringify(aging),
-        },
-      },
-    })
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+      ({ name }: { name: string }) =>
+        name === 'ui-egress-test-recipe'
+          ? Promise.resolve({
+              ...rendered,
+              metadata: {
+                ...rendered!.metadata,
+                resourceVersion: '1',
+                annotations: {
+                  ...rendered!.metadata!.annotations,
+                  'clerum.io/egress-fqdn-state': JSON.stringify(aging),
+                },
+              },
+            })
+          : Promise.reject({ code: 404 })
+    )
 
     const cap = captureEgressRecords()
     const noOpSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
@@ -4435,22 +5129,33 @@ describe('WorkflowRecipeReconciler', () => {
     // below does — no hand-built fixture.
     const created = createdPolicy('ui-egress-test-recipe')
     expect(created).toBeDefined()
-    mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(created!)
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
+      ...created!,
+      metadata: {
+        ...created!.metadata,
+        uid: 'uid-ui-egress-test-recipe',
+        resourceVersion: '1',
+      },
+    })
 
     const cap = captureEgressRecords()
-    const noOpSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     try {
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
       await rec.reconcile(recipe)
 
       expect(cap.payloads()).toHaveLength(0)
-      // POSITIVE CONTROL. Without it this assertion also passes when the second
-      // reconcile never reached the egress path at all, which would make the
-      // test a tautology rather than a check of the change gate.
-      expect(noOpSpy).toHaveBeenCalledWith(
-        expect.stringContaining('ui-egress-test-recipe" in sandbox-ui egress set unchanged — no-op')
-      )
+      expect(
+        mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.some(
+          call => call[0]?.body?.metadata?.name === 'ui-egress-test-recipe'
+        )
+      ).toBe(false)
+      expect(
+        mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls.some(
+          call => call[0]?.name === 'ui-egress-test-recipe'
+        )
+      ).toBe(false)
     } finally {
-      noOpSpy.mockRestore()
       cap.restore()
     }
   })
@@ -4488,7 +5193,16 @@ describe('WorkflowRecipeReconciler', () => {
     // That policy is now live; the next reconcile renames the FQDN onto the SAME IP.
     mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(({ name }: { name: string }) =>
       Promise.resolve(
-        name === 'ui-egress-test-recipe' ? p1 : { metadata: { name, resourceVersion: '1' } }
+        name === 'ui-egress-test-recipe'
+          ? {
+              ...p1,
+              metadata: {
+                ...p1.metadata,
+                uid: 'uid-ui-egress-test-recipe',
+                resourceVersion: '1',
+              },
+            }
+          : { metadata: { name, resourceVersion: '1' } }
       )
     )
     mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
@@ -4828,6 +5542,19 @@ describe('WorkflowRecipeReconciler', () => {
   })
 
   it('R.8.24 — no ui-egress NetworkPolicy is created when spec.ui is unset', async () => {
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValueOnce({
+      metadata: {
+        name: 'ui-egress-test-recipe',
+        namespace: 'sandbox-ui',
+        uid: 'uid-ui-egress-test-recipe',
+        resourceVersion: '7',
+        labels: {
+          'clerum.io/managed-by': 'workflow-recipes',
+          'clerum.io/recipe': 'test-recipe',
+        },
+      },
+      spec: { podSelector: {}, policyTypes: ['Egress'], egress: [] },
+    })
     const recipe = makeRecipe({
       spec: {
         workloads: [{ id: 'app', type: 'deployment', image: 'app:1', port: 8080 }],
@@ -4835,8 +5562,8 @@ describe('WorkflowRecipeReconciler', () => {
     })
     await reconciler.reconcile(recipe)
     expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
-    // Convergence path: stale policy from a prior reconcile (when ui was set)
-    // is removed unconditionally. safeDelete swallows the 404 if none exists.
+    // Convergence path: an owned stale policy from a prior reconcile is removed
+    // with live identity preconditions.
     expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'ui-egress-test-recipe', namespace: 'sandbox-ui' })
     )
