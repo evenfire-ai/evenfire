@@ -1083,7 +1083,7 @@ test-contracts: test-e2e-deps ## Run contract tests only
 test-e2e-bash: ## Run bash-based E2E suites (scripts/e2e/*.sh)
 	@echo "Running bash E2E suites..."
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-workflow-runtime-gate.sh
-	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-internal-dependency-networkpolicy.sh
+	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-networkpolicy-live-convergence.sh
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-workflow-backend-compat.sh
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-sfs-legacy-job-cleanup.sh
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-sfs-security.sh
@@ -1097,6 +1097,11 @@ test-e2e-workflow-runtime: ## Run workflow runtime E2E gate
 test-e2e-wrc-internal-dependency-networkpolicy: ## Run issue #485 WRC internal-dependency NetworkPolicy E2E gate
 	@echo "Running WRC internal-dependency NetworkPolicy E2E gate..."
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-internal-dependency-networkpolicy.sh
+
+.PHONY: test-e2e-wrc-networkpolicy-live-convergence
+test-e2e-wrc-networkpolicy-live-convergence: ## Run all PR #580 WRC NetworkPolicy family, route, repair, owner, and no-churn E2E gates
+	@echo "Running WRC NetworkPolicy live-convergence E2E gate..."
+	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-networkpolicy-live-convergence.sh
 
 .PHONY: test-e2e-codex-subscription-network-boundary
 test-e2e-codex-subscription-network-boundary: ## Codex LLM proxy NetworkPolicy boundary (exit 3 before deploy)

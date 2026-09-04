@@ -5,7 +5,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
 source "${SCRIPT_DIR}/e2e-lib.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/_lib/wrc-networkpolicy-convergence.sh"
 
 raw_run_id="${E2E_RUN_ID:-$(date +%H%M%S)-$$}"
 RUN_ID="$(printf "%s" "$raw_run_id" | tr '[:upper:]' '[:lower:]' \
@@ -18,6 +21,7 @@ BACKEND_ID="${E2E_BACKEND_ID:-be-${RUN_ID}}"
 DENIED_POD="${E2E_DENIED_POD:-deny-${RUN_ID}}"
 BACKEND_PORT="${E2E_BACKEND_PORT:-8080}"
 CONNECT_TIMEOUT="${E2E_CONNECT_TIMEOUT:-6}"
+STABILITY_SECONDS="${E2E_NP_STABILITY_SECONDS:-20}"
 SOURCE_DEPLOYMENT="$SOURCE_ID"
 BACKEND_DEPLOYMENT="$BACKEND_ID"
 CREATED=0
@@ -265,6 +269,7 @@ assert_policy "$egress_ref" "egress" "$SOURCE_ID" "$BACKEND_ID"
 assert_policy "$ingress_ref" "ingress" "$BACKEND_ID" "$SOURCE_ID"
 
 header "Phase 4 - Positive packet flow"
+# shellcheck disable=SC2016
 positive_output="$(kctl exec "deploy/${SOURCE_DEPLOYMENT}" -n "$SANDBOX_NS" -- \
   sh -c 'wget -qO- --timeout='"$CONNECT_TIMEOUT"' --tries=1 "$TARGET_URL"' 2>/dev/null || true)"
 printf "%s" "$positive_output" | grep -Fq "issue485-ok" && \
@@ -273,7 +278,44 @@ printf "%s" "$positive_output" | grep -Fq "issue485-ok" && \
     exit 1
   }
 
-header "Phase 5 - Negative packet flow"
+header "Phase 5 - Live drift repair and steady no-churn"
+egress_ns="${egress_ref%%/*}"
+egress_name="${egress_ref#*/}"
+ingress_ns="${ingress_ref%%/*}"
+ingress_name="${ingress_ref#*/}"
+egress_hash="$(wrc_np_spec_hash "$egress_ns" "$egress_name")"
+ingress_hash="$(wrc_np_spec_hash "$ingress_ns" "$ingress_name")"
+
+wrc_inject_selector_drift "$egress_ns" "$egress_name"
+wrc_inject_selector_drift "$ingress_ns" "$ingress_name"
+wrc_trigger_recipe_reconcile "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" 120
+wrc_wait_for_np_spec_hash "$egress_ns" "$egress_name" "$egress_hash" 120
+wrc_wait_for_np_spec_hash "$ingress_ns" "$ingress_name" "$ingress_hash" 120
+
+# shellcheck disable=SC2016
+repaired_output="$(kctl exec "deploy/${SOURCE_DEPLOYMENT}" -n "$SANDBOX_NS" -- \
+  sh -c 'wget -qO- --timeout='"$CONNECT_TIMEOUT"' --tries=1 "$TARGET_URL"' 2>/dev/null || true)"
+printf "%s" "$repaired_output" | grep -Fq "issue485-ok" && \
+  ok "Internal dependency traffic recovered after live policy repair" || {
+    fail "Internal dependency traffic did not recover after policy repair"
+    exit 1
+  }
+
+egress_rv="$(wrc_np_resource_version "$egress_ns" "$egress_name")"
+ingress_rv="$(wrc_np_resource_version "$ingress_ns" "$ingress_name")"
+wrc_trigger_recipe_reconcile "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" 120
+sleep "$STABILITY_SECONDS"
+[ "$(wrc_np_resource_version "$egress_ns" "$egress_name")" = "$egress_rv" ] || {
+  fail "${egress_ref} churned after convergence"
+  exit 1
+}
+[ "$(wrc_np_resource_version "$ingress_ns" "$ingress_name")" = "$ingress_rv" ] || {
+  fail "${ingress_ref} churned after convergence"
+  exit 1
+}
+ok "Both internal-dependency policies stayed resourceVersion-stable"
+
+header "Phase 6 - Negative packet flow"
 kctl delete pod "$DENIED_POD" -n "$SANDBOX_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
 cat <<YAML | kctl apply -f - >/dev/null
 apiVersion: v1
@@ -313,7 +355,7 @@ if kctl exec "$DENIED_POD" -n "$SANDBOX_NS" -- wget -qO- \
 fi
 ok "Unlabeled pod cannot reach backend"
 
-header "Phase 6 - Cleanup"
+header "Phase 7 - Cleanup"
 cleanup
 CREATED=0
 kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" >/dev/null 2>&1 \

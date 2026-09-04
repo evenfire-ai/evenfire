@@ -175,6 +175,21 @@ describe('NetworkPolicy live convergence', () => {
     })
   })
 
+  it('does not repair a stale gateway owner when the WRC recipe identity labels drifted', () => {
+    const desired = gatewayPolicy('uid-new')
+    const wrongRecipe = gatewayPolicy('uid-old')
+    wrongRecipe.metadata!.labels!['clerum.io/recipe-name'] = 'another-recipe'
+
+    expect(classifyNetworkPolicyOwnership('webhook-gateway', desired, wrongRecipe)).toEqual({
+      kind: 'conflict',
+      reason: 'identity-label-mismatch',
+    })
+    expect(decideNetworkPolicyConvergence('webhook-gateway', desired, wrongRecipe)).toEqual({
+      action: 'conflict',
+      reason: 'identity-label-mismatch',
+    })
+  })
+
   it('refuses a gateway policy controlled by a different owner', () => {
     const desired = gatewayPolicy('uid-new')
     const foreign = gatewayPolicy('uid-new')

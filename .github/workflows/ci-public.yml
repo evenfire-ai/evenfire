@@ -545,6 +545,9 @@ jobs:
       - name: Test E2E Vitest node-unit public gate
         run: bash scripts/tests/test-e2e-vitest-node-unit-gate.sh
 
+      - name: Test WRC NetworkPolicy live-convergence E2E contract
+        run: bash scripts/tests/test-wrc-networkpolicy-live-convergence-e2e.sh
+
       - name: Test GFS real-Postgres Minikube runner contract
         run: bash scripts/tests/test-gfs-real-pg-minikube-gate.sh
 

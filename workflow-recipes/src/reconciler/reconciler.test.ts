@@ -1164,6 +1164,57 @@ describe('WorkflowRecipeReconciler', () => {
       expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
 
+    it('creates after a transient first read is followed by a confirmed 404', async () => {
+      const desired = plainPolicy()
+      mockNetworkingApi.readNamespacedNetworkPolicy
+        .mockRejectedValueOnce({ code: 500 })
+        .mockRejectedValueOnce({ code: 404 })
+
+      await apply(desired)
+
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('uses a supplied absent workload-egress snapshot without issuing another read', async () => {
+      const desired = plainPolicy()
+      desired.metadata!.name = 'wl-egress-r-w'
+
+      await apply(desired, 'workload-egress', null)
+
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    })
+
+    it('retries when a create-conflict winner is absent on the bounded re-read', async () => {
+      const desired = plainPolicy()
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 409 })
+
+      await expect(apply(desired)).rejects.toMatchObject({
+        name: 'RetryableReconcileError',
+        cause: { code: 409 },
+      })
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('retries instead of blind replacing a drifted live policy without resourceVersion', async () => {
+      const desired = plainPolicy()
+      const live = livePolicy(desired)
+      delete live.metadata!.resourceVersion
+      live.spec!.podSelector = {}
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(live)
+
+      await expect(apply(desired)).rejects.toMatchObject({
+        name: 'RetryableReconcileError',
+        message: expect.stringMatching(/has no resourceVersion/),
+      })
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
     it.each([404, 409])('classifies replace race status %s as retryable', async code => {
       const desired = plainPolicy()
       const live = livePolicy(desired)
@@ -1177,12 +1228,87 @@ describe('WorkflowRecipeReconciler', () => {
       })
     })
 
+    it.each([500, 'ETIMEDOUT'])('preserves replace infrastructure failure %s', async code => {
+      const desired = plainPolicy()
+      const live = livePolicy(desired)
+      live.spec!.podSelector = {}
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(live)
+      const apiError = Object.assign(new Error(`replace failed: ${code}`), { code })
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mockRejectedValueOnce(apiError)
+
+      await expect(apply(desired)).rejects.toMatchObject({
+        name: 'NetworkPolicyInfraError',
+        code,
+        cause: apiError,
+      })
+    })
+
+    it('propagates a permanent replace rejection without reclassifying it as transient', async () => {
+      const desired = plainPolicy()
+      const live = livePolicy(desired)
+      live.spec!.podSelector = {}
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(live)
+      const permanent = { code: 422, reason: 'Invalid' }
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mockRejectedValueOnce(permanent)
+
+      await expect(apply(desired)).rejects.toBe(permanent)
+    })
+
+    it('propagates a permanent create rejection without attempting a replace', async () => {
+      const desired = plainPolicy()
+      const permanent = { code: 422, reason: 'Invalid' }
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 404 })
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValueOnce(permanent)
+
+      await expect(apply(desired)).rejects.toBe(permanent)
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('propagates a permanent second-read rejection after the bounded retry', async () => {
+      const desired = plainPolicy()
+      const permanent = { code: 422, reason: 'Invalid' }
+      mockNetworkingApi.readNamespacedNetworkPolicy
+        .mockRejectedValueOnce({ code: 500 })
+        .mockRejectedValueOnce(permanent)
+
+      await expect(apply(desired)).rejects.toBe(permanent)
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
     it('refuses to create a gateway policy without a complete desired owner', async () => {
       const desired = gatewayPolicy('')
 
       await expect(apply(desired, 'webhook-gateway')).rejects.toMatchObject({
         name: 'NetworkPolicyOwnershipConflictError',
       })
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('refuses a desired gateway policy with multiple controller owners before I/O', async () => {
+      const desired = gatewayPolicy()
+      desired.metadata!.ownerReferences!.push({
+        apiVersion: 'apps/v1',
+        kind: 'Deployment',
+        name: 'second-controller',
+        uid: 'second-controller-uid',
+        controller: true,
+      })
+
+      await expect(apply(desired, 'webhook-gateway')).rejects.toMatchObject({
+        name: 'NetworkPolicyOwnershipConflictError',
+      })
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('refuses a desired policy without metadata.name before I/O', async () => {
+      const desired = plainPolicy()
+      delete desired.metadata!.name
+
+      await expect(apply(desired)).rejects.toThrow(/without metadata\.name/)
       expect(mockNetworkingApi.readNamespacedNetworkPolicy).not.toHaveBeenCalled()
       expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
