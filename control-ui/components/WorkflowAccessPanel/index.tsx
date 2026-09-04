@@ -682,7 +682,11 @@ function AccessUserSection({
       ) : (
         <RecordList className="cu-workflow-access__rows">
           {rows.map(user => (
-            <RecordListRow className="cu-workflow-access__row" key={user.id}>
+            <RecordListRow
+              className="cu-workflow-access__row"
+              data-access-id={user.id}
+              key={user.id}
+            >
               <div className="cu-workflow-access__row-main">
                 <span className="cu-workflow-access__row-title">{userLabel(user)}</span>
                 {(user.displayName || user.name) && (
@@ -779,7 +783,11 @@ function AccessTeamSection({
       ) : (
         <RecordList className="cu-workflow-access__rows">
           {rows.map(team => (
-            <RecordListRow className="cu-workflow-access__row" key={team.id}>
+            <RecordListRow
+              className="cu-workflow-access__row"
+              data-access-id={team.id}
+              key={team.id}
+            >
               <div className="cu-workflow-access__row-main">
                 <span className="cu-workflow-access__row-title">{teamLabel(team)}</span>
               </div>

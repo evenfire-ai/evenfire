@@ -462,6 +462,7 @@ export function GfsGrantPanel({
                 <RecordListRow
                   className="cu-gfs-existing-access__item"
                   data-testid={`gfs-access-row-${item.kind}-${item.id}`}
+                  data-access-id={item.id}
                   key={`${item.kind}:${item.id}`}
                 >
                   <span className="cu-gfs-existing-access__identity">

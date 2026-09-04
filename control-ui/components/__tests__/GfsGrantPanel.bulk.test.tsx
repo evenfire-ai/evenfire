@@ -200,6 +200,26 @@ describe('GfsGrantPanel bulk access', () => {
   })
 
   it('sorts access records by visible principal identity', async () => {
+    mockGetAdminUsers.mockResolvedValue({
+      items: [
+        {
+          id: '11111111-1111-1111-1111-111111111111',
+          email: 'ada@example.test',
+          name: 'Ada Lovelace',
+          displayName: 'Ada Lovelace',
+          picture: null,
+          activeTeamCount: 1,
+        },
+        {
+          id: '11111111-1111-1111-1111-111111111110',
+          email: 'ada-alt@example.test',
+          name: 'Ada Lovelace',
+          displayName: 'Ada Lovelace',
+          picture: null,
+          activeTeamCount: 1,
+        },
+      ],
+    })
     mockGetGfsGrants.mockResolvedValue({
       items: [
         {
@@ -218,17 +238,31 @@ describe('GfsGrantPanel bulk access', () => {
           permissions: ['read'],
           inherit: false,
         },
+        {
+          id: '22222222-2222-2222-2222-222222222222',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: { type: 'user', id: '11111111-1111-1111-1111-111111111110' },
+          permissions: ['read'],
+          inherit: false,
+        },
       ],
     })
     renderPanel()
 
     const list = await screen.findByRole('list', { name: 'Resource access' })
-    await waitFor(() => expect(within(list).getByText('Ada Lovelace')).toBeTruthy())
-    expect(
-      within(list)
-        .getAllByRole('listitem')
-        .map(row => row.textContent)
-    ).toEqual([expect.stringContaining('Ada Lovelace'), expect.stringContaining('Operator')])
+    await waitFor(() => expect(within(list).getAllByText('Ada Lovelace')).toHaveLength(2))
+    const rows = within(list).getAllByRole('listitem')
+    expect(rows.map(row => row.textContent)).toEqual([
+      expect.stringContaining('Ada Lovelace'),
+      expect.stringContaining('Ada Lovelace'),
+      expect.stringContaining('Operator'),
+    ])
+    expect(rows.map(row => row.getAttribute('data-access-id'))).toEqual([
+      '22222222-2222-2222-2222-222222222222',
+      '33333333-3333-3333-3333-333333333333',
+      '77777777-7777-7777-7777-777777777777',
+    ])
   })
 
   it('self-heals a row that another admin already revoked without hiding other errors', async () => {

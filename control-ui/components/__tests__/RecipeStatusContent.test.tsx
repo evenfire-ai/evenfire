@@ -725,6 +725,12 @@ describe('RecipeStatusContent — runId child resolution', () => {
             sizeBytes: 42,
             createdAt: '2026-05-06T00:00:00.000Z',
           },
+          {
+            name: 'audit-log.txt',
+            format: 'txt',
+            sizeBytes: 84,
+            createdAt: '2026-05-06T00:01:00.000Z',
+          },
         ],
       },
     } as unknown as Awaited<ReturnType<typeof getRecipe>>)
@@ -767,7 +773,17 @@ describe('RecipeStatusContent — runId child resolution', () => {
     )
     expect(downloadName).toBe('ABCD1234-custom-sdk-result.json')
     expect(screen.getByText('Clear All')).toBeInTheDocument()
-    expect(screen.getByRole('list', { name: 'Output artifacts' })).toBeInTheDocument()
+    const artifacts = screen.getByRole('list', { name: 'Output artifacts' })
+    expect(
+      within(artifacts)
+        .getAllByRole('listitem')
+        .map(row => row.textContent)
+    ).toEqual(['JSONcustom-sdk-result.json42 B⋮', 'TXTaudit-log.txt84 B⋮'])
+    expect(
+      within(artifacts)
+        .getAllByRole('listitem')
+        .map(row => row.getAttribute('data-artifact-name'))
+    ).toEqual(['custom-sdk-result.json', 'audit-log.txt'])
     expect(click).toHaveBeenCalled()
   })
 
