@@ -43,16 +43,16 @@ import { formatTeamRole, permissionsForTeamRole } from '../../../../lib/teamRole
 
 type Role = 'admin' | 'inviter' | 'member'
 
-type TeamTab = 'members' | 'contexts' | 'agents'
-const TEAM_TABS: TeamTab[] = ['members', 'contexts', 'agents']
+type TeamTab = 'members' | 'agents'
+const TEAM_TABS: TeamTab[] = ['members', 'agents']
 
 const TEAM_TAB_LABELS: Record<TeamTab, string> = {
   members: 'Members',
-  contexts: 'Contexts',
   agents: 'Agents',
 }
 
 function parseTeamTab(value: string | undefined): TeamTab {
+  if (value === 'contexts') return 'agents'
   return TEAM_TABS.includes(value as TeamTab) ? (value as TeamTab) : 'members'
 }
 
@@ -174,13 +174,11 @@ export default function TeamDetailsPage() {
   const [addingMember, setAddingMember] = useState(false)
   const [addMemberError, setAddMemberError] = useState('')
 
-  const [showAddContext, setShowAddContext] = useState(false)
   const [showAddAgent, setShowAddAgent] = useState(false)
 
   const [availableContextIds, setAvailableContextIds] = useState<string[]>([])
   const [assignedContextIds, setAssignedContextIds] = useState<string[]>([])
   const [deletedContextIds, setDeletedContextIds] = useState<string[]>([])
-  const [selectedContextIdsToAdd, setSelectedContextIdsToAdd] = useState<string[]>([])
   const [hosts, setHosts] = useState<HostResource[]>([])
   const [assignedAgentNames, setAssignedAgentNames] = useState<string[]>([])
   const [observedAgentNames, setObservedAgentNames] = useState<string[]>([])
@@ -463,44 +461,6 @@ export default function TeamDetailsPage() {
     }
   }
 
-  async function saveContexts(next: string[], message: string) {
-    if (isNew) return
-    setBusy(true)
-    setError('')
-    try {
-      const normalized = Array.from(new Set(next.map(v => v.trim()).filter(Boolean)))
-      const updated = await updateAdminTeamContexts(teamId, normalized)
-      const partition = partitionVisibleAccess(
-        updated.contextIds || [],
-        availableContextIds,
-        updated.deletedContextIds || []
-      )
-      setAssignedContextIds(partition.active)
-      setDeletedContextIds(partition.deleted)
-      setSelectedContextIdsToAdd([])
-      showToast(message, { tone: 'success' })
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to update team contexts')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function removeContextAccess(contextId: string) {
-    const shouldRemove = await confirm({
-      title: 'Remove Context Access',
-      message: `Remove ${teamName || 'this team'}'s access to ${contextId}?`,
-      confirmLabel: 'Remove access',
-      tone: 'danger',
-    })
-    if (!shouldRemove) return
-
-    await saveContexts(
-      assignedContextIds.filter(id => id !== contextId),
-      'Team contexts updated.'
-    )
-  }
-
   async function saveAgents(next: string[], message: string) {
     if (isNew) return
     setBusy(true)
@@ -568,13 +528,6 @@ export default function TeamDetailsPage() {
         })),
     [existingMemberIds, users]
   )
-  const availableContextOptions = useMemo(
-    () =>
-      availableContextIds
-        .filter(contextId => !assignedContextIds.includes(contextId))
-        .map(contextId => ({ value: contextId, label: contextId })),
-    [assignedContextIds, availableContextIds]
-  )
   const availableAgentOptions = useMemo(
     () =>
       hostNameOptions
@@ -612,15 +565,6 @@ export default function TeamDetailsPage() {
         disabled={busy}
       >
         Add member
-      </button>
-    ) : !isNew && activeTab === 'contexts' ? (
-      <button
-        type="button"
-        className="cu-btn cu-btn--primary cu-btn--sm"
-        onClick={() => setShowAddContext(true)}
-        disabled={busy}
-      >
-        Add context
       </button>
     ) : !isNew && activeTab === 'agents' ? (
       <button
@@ -694,7 +638,7 @@ export default function TeamDetailsPage() {
           ? 'Name the new team.'
           : initialLoading
             ? 'Loading team details...'
-            : 'Members, contexts, and agent access.'
+            : 'Members and agent access.'
       }
       tabAriaLabel="Team sections"
       tabs={
@@ -967,77 +911,6 @@ export default function TeamDetailsPage() {
                         </DataTable>
                       </div>
                     )}
-                  </>
-                )}
-              </>
-            )}
-
-            {activeTab === 'contexts' && (
-              <>
-                <p className="cu-muted cu-detail-section-copy">Contexts this team may access.</p>
-                {initialLoading ? (
-                  <div role="list">
-                    {[1, 2, 3].map(i => (
-                      <div key={i} className="cu-skeleton--row">
-                        <div
-                          className="cu-skeleton cu-skeleton--cell"
-                          style={{ width: '12rem' }}
-                        ></div>
-                        <div
-                          className="cu-skeleton cu-skeleton--cell"
-                          style={{ width: '4rem' }}
-                        ></div>
-                      </div>
-                    ))}
-                  </div>
-                ) : assignedContextIds.length === 0 ? (
-                  <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
-                    No contexts linked.
-                  </div>
-                ) : (
-                  <RecordList>
-                    {assignedContextIds.map(contextId => (
-                      <RecordListRow key={contextId} className="cu-access-row">
-                        <button
-                          type="button"
-                          className="cu-link"
-                          onClick={() => router.push(CONTROL_ROUTES.contexts.detail(contextId))}
-                        >
-                          {contextId}
-                        </button>
-                        <RowActionMenu
-                          ariaLabel={`Actions for context ${contextId}`}
-                          actions={[
-                            {
-                              key: 'view',
-                              label: 'View context details',
-                              onSelect: () =>
-                                router.push(CONTROL_ROUTES.contexts.detail(contextId)),
-                            },
-                            {
-                              key: 'remove',
-                              label: 'Remove context',
-                              danger: true,
-                              disabled: busy,
-                              onSelect: () => void removeContextAccess(contextId),
-                            },
-                          ]}
-                        />
-                      </RecordListRow>
-                    ))}
-                  </RecordList>
-                )}
-                {!initialLoading && deletedContextIds.length > 0 && (
-                  <>
-                    <p className="cu-muted cu-deleted-access-heading">Deleted contexts</p>
-                    <div role="list">
-                      {deletedContextIds.map(contextId => (
-                        <div key={contextId} className="cu-access-row" role="listitem">
-                          <span>{contextId}</span>
-                          <span className="cu-muted">Deleted</span>
-                        </div>
-                      ))}
-                    </div>
                   </>
                 )}
               </>
@@ -1317,90 +1190,6 @@ export default function TeamDetailsPage() {
                 </button>
               </div>
             ) : null}
-          </div>
-        </div>
-      )}
-
-      {showAddContext && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.6)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !busy) setShowAddContext(false)
-          }}
-        >
-          <div
-            className="cu-modal-panel cu-modal-panel--selection"
-            role="dialog"
-            aria-labelledby="add-context-title"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <strong id="add-context-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add context
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowAddContext(false)}
-                disabled={busy}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
-            </div>
-
-            <div className="cu-field">
-              <label htmlFor="team-context-picker">Contexts</label>
-              <SelectionDropdown
-                id="team-context-picker"
-                inline
-                value={selectedContextIdsToAdd}
-                onChange={setSelectedContextIdsToAdd}
-                options={availableContextOptions}
-                placeholder="Select contexts"
-                searchPlaceholder="Search contexts..."
-                selectionLabel="Selected contexts"
-                emptyLabel="No available contexts."
-                disabled={busy}
-              />
-            </div>
-
-            <div className="cu-modal-panel__foot">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setShowAddContext(false)}
-                disabled={busy}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={() => {
-                  void saveContexts(
-                    [...assignedContextIds, ...selectedContextIdsToAdd],
-                    selectedContextIdsToAdd.length === 1
-                      ? 'Team context updated.'
-                      : 'Team contexts updated.'
-                  )
-                  setShowAddContext(false)
-                }}
-                disabled={busy || selectedContextIdsToAdd.length === 0}
-              >
-                {selectedContextIdsToAdd.length > 1 ? 'Add contexts' : 'Add context'}
-              </button>
-            </div>
           </div>
         </div>
       )}

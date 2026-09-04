@@ -2,8 +2,9 @@
 
 import React, { useMemo, useState } from 'react'
 import { DataTable, TableRow, TableStateRow, TruncatedText } from '@clerum/frontend-components'
+import { canAssignConnectorToContext } from '../lib/connectorOAuthAccess'
 import type {
-  ConnectorContextBinding,
+  ConnectorAgentBinding,
   McpServerStatus,
   McpServerTableProps,
 } from './McpServerTable.types'
@@ -16,7 +17,7 @@ import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
 import { IconRefresh, IconX } from './icons'
 
-const ENABLED_TOOLTIP = 'Enabled controls whether this server is available to contexts and agents.'
+const ENABLED_TOOLTIP = 'Enabled controls whether this server is available to agents.'
 type ConnectorSortKey = 'name' | 'description' | 'managed' | 'enabled' | 'status'
 type SortDirection = 'asc' | 'desc'
 
@@ -82,11 +83,11 @@ function StatusBadge({ status }: { status?: McpServerStatus }) {
 export function McpServerTable({
   items,
   accessByConnectorKey,
-  contexts = [],
-  onOpenContext,
-  onAddToContexts,
-  onRemoveFromContext,
-  updatingContextMembershipKey,
+  agentBindingsByConnectorName = {},
+  agentTargets = [],
+  onAddToAgents,
+  onRemoveFromAgents,
+  updatingAgentAccessKey,
   onDelete,
   onEdit,
   deletingKey,
@@ -100,9 +101,9 @@ export function McpServerTable({
   const [searchQuery, setSearchQuery] = useState('')
   const [sortKey, setSortKey] = useState<ConnectorSortKey>('name')
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
-  const [serverKeyAddingContexts, setServerKeyAddingContexts] = useState<string | null>(null)
+  const [serverKeyAddingAgents, setServerKeyAddingAgents] = useState<string | null>(null)
   const [serverKeyViewingAccess, setServerKeyViewingAccess] = useState<string | null>(null)
-  const [selectedContextNamesToAdd, setSelectedContextNamesToAdd] = useState<string[]>([])
+  const [selectedAgentNamesToAdd, setSelectedAgentNamesToAdd] = useState<string[]>([])
   const accessDialogRef = React.useRef<HTMLElement | null>(null)
   const accessCloseButtonRef = React.useRef<HTMLButtonElement | null>(null)
   const accessOpenerRef = React.useRef<HTMLElement | null>(null)
@@ -232,19 +233,19 @@ export function McpServerTable({
     return column
   })
 
-  function contextsForConnector(name: string): ConnectorContextBinding[] {
-    return contexts.filter(context => context.mcpServers.includes(name))
+  function bindingsForConnector(name: string): ConnectorAgentBinding[] {
+    return agentBindingsByConnectorName[name] ?? []
   }
 
-  function openAddContexts(key: string) {
-    setSelectedContextNamesToAdd([])
-    setServerKeyAddingContexts(key)
+  function openAddAgents(key: string) {
+    setSelectedAgentNamesToAdd([])
+    setServerKeyAddingAgents(key)
   }
 
-  function closeAddContexts() {
-    if (updatingContextMembershipKey) return
-    setSelectedContextNamesToAdd([])
-    setServerKeyAddingContexts(null)
+  function closeAddAgents() {
+    if (updatingAgentAccessKey) return
+    setSelectedAgentNamesToAdd([])
+    setServerKeyAddingAgents(null)
   }
 
   function openAccessDetails(key: string) {
@@ -280,7 +281,7 @@ export function McpServerTable({
             />
           ) : null
         }
-        subtitle="Browse connector deployments and context bindings."
+        subtitle="Browse connector deployments and agent access."
         actionsClassName="cu-table-panel__actions--mcp"
         primaryAction={
           onInstallFromRegistry ? (
@@ -340,8 +341,8 @@ export function McpServerTable({
             ) : (
               filteredRows.map(({ key, namespace, name, item }) => {
                 const spec = item.spec || {}
-                const assignedContexts = contextsForConnector(name)
-                const contextMembershipBusy = updatingContextMembershipKey === key
+                const agentBindings = bindingsForConnector(name)
+                const agentAccessBusy = updatingAgentAccessKey === key
                 return (
                   <TableRow
                     className={onEdit ? 'cu-table__row cu-table__row--clickable' : undefined}
@@ -378,13 +379,13 @@ export function McpServerTable({
                                 },
                               ]
                             : []),
-                          ...(onAddToContexts
+                          ...(onAddToAgents
                             ? [
                                 {
-                                  key: 'add-contexts',
-                                  label: 'Add to contexts',
-                                  disabled: contextMembershipBusy,
-                                  onClick: () => openAddContexts(key),
+                                  key: 'add-agents',
+                                  label: 'Add to agents',
+                                  disabled: agentAccessBusy,
+                                  onClick: () => openAddAgents(key),
                                 },
                               ]
                             : []),
@@ -393,13 +394,16 @@ export function McpServerTable({
                             label: 'View access details',
                             onClick: () => openAccessDetails(key),
                           },
-                          ...(onRemoveFromContext
-                            ? assignedContexts.map(context => ({
-                                key: `remove-context-${context.name}`,
-                                label: `Remove from ${context.name}`,
-                                disabled: contextMembershipBusy,
+                          ...(onRemoveFromAgents
+                            ? agentBindings.map(binding => ({
+                                key: `remove-agents-${binding.contextRef}`,
+                                label:
+                                  binding.agents.length === 1
+                                    ? `Remove from ${binding.agents[0].label}`
+                                    : `Remove from ${binding.agents.length} agents`,
+                                disabled: agentAccessBusy,
                                 onClick: () =>
-                                  void onRemoveFromContext({ name, namespace }, context.name),
+                                  void onRemoveFromAgents({ name, namespace }, binding),
                               }))
                             : []),
                           ...(onDelete
@@ -423,44 +427,50 @@ export function McpServerTable({
           </tbody>
         </DataTable>
       </div>
-      {serverKeyAddingContexts
+      {serverKeyAddingAgents
         ? (() => {
-            const row = rows.find(candidate => candidate.key === serverKeyAddingContexts)
-            if (!row || !onAddToContexts) return null
-            const assignedNames = new Set(
-              contextsForConnector(row.name).map(context => context.name)
+            const row = rows.find(candidate => candidate.key === serverKeyAddingAgents)
+            if (!row || !onAddToAgents) return null
+            const boundAgentNames = new Set(
+              bindingsForConnector(row.name).flatMap(binding =>
+                binding.agents.map(agent => agent.id)
+              )
             )
-            const contextOptions = contexts
-              .filter(context => !assignedNames.has(context.name))
-              .map(context => ({
-                value: context.name,
-                label: context.name,
-                description: context.description || undefined,
+            const agentOptions = agentTargets
+              .filter(
+                target =>
+                  !boundAgentNames.has(target.name) &&
+                  canAssignConnectorToContext(row.item.spec, target.contextRef)
+              )
+              .map(target => ({
+                value: target.name,
+                label: target.label,
+                description: target.name,
               }))
-            const busy = updatingContextMembershipKey === row.key
+            const busy = updatingAgentAccessKey === row.key
             return (
               <div
                 className="cu-modal-backdrop"
                 role="presentation"
                 onClick={event => {
-                  if (event.target === event.currentTarget && !busy) closeAddContexts()
+                  if (event.target === event.currentTarget && !busy) closeAddAgents()
                 }}
               >
                 <div
                   className="cu-modal-panel cu-modal-panel--selection"
                   role="dialog"
                   aria-modal="true"
-                  aria-labelledby="add-connector-context-title"
+                  aria-labelledby="add-connector-agents-title"
                   onClick={event => event.stopPropagation()}
                 >
                   <div className="cu-modal-panel__head">
-                    <h3 id="add-connector-context-title" className="cu-modal-panel__title">
-                      Add connector to contexts
+                    <h3 id="add-connector-agents-title" className="cu-modal-panel__title">
+                      Give agents access to this connector
                     </h3>
                     <button
                       type="button"
                       className="cu-btn cu-btn--icon cu-btn--ghost"
-                      onClick={closeAddContexts}
+                      onClick={closeAddAgents}
                       disabled={busy}
                       aria-label="Close"
                     >
@@ -469,17 +479,17 @@ export function McpServerTable({
                   </div>
 
                   <div className="cu-field">
-                    <label htmlFor="connector-context-picker">Contexts</label>
+                    <label htmlFor="connector-agent-picker">Agents</label>
                     <SelectionDropdown
-                      id="connector-context-picker"
+                      id="connector-agent-picker"
                       inline
-                      value={selectedContextNamesToAdd}
-                      onChange={setSelectedContextNamesToAdd}
-                      options={contextOptions}
-                      placeholder="Select contexts"
-                      searchPlaceholder="Search contexts..."
-                      selectionLabel="Selected contexts"
-                      emptyLabel="No available contexts."
+                      value={selectedAgentNamesToAdd}
+                      onChange={setSelectedAgentNamesToAdd}
+                      options={agentOptions}
+                      placeholder="Select agents"
+                      searchPlaceholder="Search agents..."
+                      selectionLabel="Selected agents"
+                      emptyLabel="No other agents available."
                       disabled={busy}
                     />
                   </div>
@@ -488,7 +498,7 @@ export function McpServerTable({
                     <button
                       type="button"
                       className="cu-btn cu-btn--ghost cu-btn--sm"
-                      onClick={closeAddContexts}
+                      onClick={closeAddAgents}
                       disabled={busy}
                     >
                       Cancel
@@ -497,17 +507,23 @@ export function McpServerTable({
                       type="button"
                       className="cu-btn cu-btn--primary"
                       onClick={async () => {
-                        if (selectedContextNamesToAdd.length === 0) return
-                        await onAddToContexts(
-                          { namespace: row.namespace, name: row.name },
-                          selectedContextNamesToAdd
+                        if (selectedAgentNamesToAdd.length === 0) return
+                        const selected = agentTargets.filter(target =>
+                          selectedAgentNamesToAdd.includes(target.name)
                         )
-                        setSelectedContextNamesToAdd([])
-                        setServerKeyAddingContexts(null)
+                        await onAddToAgents(
+                          { namespace: row.namespace, name: row.name },
+                          selected.map(target => ({
+                            name: target.name,
+                            contextRef: target.contextRef,
+                          }))
+                        )
+                        setSelectedAgentNamesToAdd([])
+                        setServerKeyAddingAgents(null)
                       }}
-                      disabled={busy || selectedContextNamesToAdd.length === 0}
+                      disabled={busy || selectedAgentNamesToAdd.length === 0}
                     >
-                      {selectedContextNamesToAdd.length > 1 ? 'Add to contexts' : 'Add to context'}
+                      {selectedAgentNamesToAdd.length > 1 ? 'Add to agents' : 'Add to agent'}
                     </button>
                   </div>
                 </div>
@@ -520,17 +536,12 @@ export function McpServerTable({
             const row = rows.find(candidate => candidate.key === serverKeyViewingAccess)
             if (!row) return null
             const access = accessByConnectorKey?.[row.key]
-            const linkedContexts = contextsForConnector(row.name)
+            const linkedAgents = bindingsForConnector(row.name).flatMap(binding => binding.agents)
             const groups = [
-              {
-                key: 'contexts',
-                label: 'Contexts',
-                items: linkedContexts.map(item => ({ key: item.name, label: item.name })),
-              },
               {
                 key: 'agents',
                 label: 'Agents',
-                items: (access?.agents ?? []).map(item => ({ key: item.id, label: item.label })),
+                items: linkedAgents.map(item => ({ key: item.id, label: item.label })),
               },
               {
                 key: 'teams',
@@ -573,19 +584,7 @@ export function McpServerTable({
                         {group.items.length ? (
                           <ul className="cu-registry-context-access__list">
                             {group.items.map(item => (
-                              <li key={item.key}>
-                                {group.key === 'contexts' && onOpenContext ? (
-                                  <button
-                                    className="cu-link"
-                                    onClick={() => onOpenContext(item.label)}
-                                    type="button"
-                                  >
-                                    {item.label}
-                                  </button>
-                                ) : (
-                                  item.label
-                                )}
-                              </li>
+                              <li key={item.key}>{item.label}</li>
                             ))}
                           </ul>
                         ) : (

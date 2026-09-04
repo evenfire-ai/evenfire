@@ -74,6 +74,10 @@ function makeContextBinding(options: {
   }
 }
 
+function makeAgentBinding(contextRef: string, agents: Array<{ id: string; label: string }>) {
+  return { contextRef, agents }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // StatusBadge precedence
 // ─────────────────────────────────────────────────────────────────────────────
@@ -263,16 +267,21 @@ describe('McpServerTable — connector access summaries', () => {
     render(
       <McpServerTable
         items={items}
-        accessByConnectorKey={{
-          'mcp-server/airtable-server': {
-            agents: [
+        agentBindingsByConnectorName={{
+          'airtable-server': [
+            makeAgentBinding('ctx-alpha', [
               { id: 'agent-alpha', label: 'agent-alpha' },
               { id: 'bravo', label: 'bravo' },
               { id: 'charlie', label: 'charlie' },
               { id: 'delta', label: 'delta' },
               { id: 'echo', label: 'echo' },
               { id: 'foxtrot', label: 'foxtrot' },
-            ],
+            ]),
+          ],
+        }}
+        accessByConnectorKey={{
+          'mcp-server/airtable-server': {
+            agents: [],
             users: [{ id: 'user-1', label: 'Ada Lovelace' }],
             teams: [{ id: 'team-1', label: 'Research' }],
           },
@@ -302,13 +311,15 @@ describe('McpServerTable — connector access summaries', () => {
     }
   })
 
-  it('preserves context navigation and accessible access-dialog focus behavior', () => {
-    const onOpenContext = vi.fn()
+  it('preserves accessible access-dialog focus behavior without context links', () => {
     render(
       <McpServerTable
         items={[makeItem({ name: 'airtable-server' })]}
-        contexts={[makeContextBinding({ name: 'research', mcpServers: ['airtable-server'] })]}
-        onOpenContext={onOpenContext}
+        agentBindingsByConnectorName={{
+          'airtable-server': [
+            makeAgentBinding('research', [{ id: 'agent-alpha', label: 'agent-alpha' }]),
+          ],
+        }}
       />
     )
 
@@ -319,14 +330,12 @@ describe('McpServerTable — connector access summaries', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'View access details' }))
 
     const close = screen.getByRole('button', { name: 'Close' })
-    const contextLink = screen.getByRole('button', { name: 'research' })
+    const agentLabel = screen.getByText('agent-alpha')
     expect(close).toHaveFocus()
     fireEvent.keyDown(window, { key: 'Tab' })
-    expect(contextLink).toHaveFocus()
+    expect(agentLabel).toBeInTheDocument()
     fireEvent.keyDown(window, { key: 'Tab', shiftKey: true })
     expect(close).toHaveFocus()
-    fireEvent.click(contextLink)
-    expect(onOpenContext).toHaveBeenCalledWith('research')
 
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(screen.queryByRole('dialog', { name: 'Access for airtable-server' })).toBeNull()
@@ -410,15 +419,11 @@ describe('McpServerTable — connector access summaries', () => {
   })
 })
 
-describe('McpServerTable — context membership', () => {
+describe('McpServerTable — agent membership', () => {
   it('does not display a stale legacy contextRef without authoritative allowlist membership', () => {
     render(
       <McpServerTable
         items={[makeItem({ name: 'airtable-server', contextRef: 'removed-context' })]}
-        contexts={[
-          makeContextBinding({ name: 'removed-context' }),
-          makeContextBinding({ name: 'active-context', mcpServers: ['another-server'] }),
-        ]}
         accessByConnectorKey={{}}
       />
     )
@@ -427,72 +432,73 @@ describe('McpServerTable — context membership', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'View access details' }))
 
     expect(screen.queryByText('removed-context')).not.toBeInTheDocument()
-    expect(screen.getByText('No contexts linked.')).toBeInTheDocument()
     expect(screen.getByText('No agents linked.')).toBeInTheDocument()
     expect(screen.getByText('No teams linked.')).toBeInTheDocument()
     expect(screen.getByText('No users linked.')).toBeInTheDocument()
   })
 
-  it('shows attached contexts and lets an operator remove the connector from one', async () => {
-    const onRemoveFromContext = vi.fn().mockResolvedValue(undefined)
+  it('shows attached agents and lets an operator remove the connector from one binding', async () => {
+    const onRemoveFromAgents = vi.fn().mockResolvedValue(undefined)
     const items = [makeItem({ name: 'airtable-server' })]
     render(
       <McpServerTable
         items={items}
-        contexts={[
-          makeContextBinding({
-            name: 'research',
-            description: 'Research tools',
-            mcpServers: ['airtable-server'],
-          }),
-          makeContextBinding({ name: 'sales' }),
-        ]}
-        onAddToContexts={vi.fn().mockResolvedValue(undefined)}
-        onRemoveFromContext={onRemoveFromContext}
+        agentBindingsByConnectorName={{
+          'airtable-server': [
+            makeAgentBinding('research', [{ id: 'agent-alpha', label: 'Agent Alpha' }]),
+          ],
+        }}
+        onAddToAgents={vi.fn().mockResolvedValue(undefined)}
+        onRemoveFromAgents={onRemoveFromAgents}
       />
     )
 
     fireEvent.click(screen.getByRole('button', { name: 'Actions for connector airtable-server' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove from research' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove from Agent Alpha' }))
 
-    expect(onRemoveFromContext).toHaveBeenCalledWith(
+    expect(onRemoveFromAgents).toHaveBeenCalledWith(
       { namespace: 'mcp-server', name: 'airtable-server' },
-      'research'
+      makeAgentBinding('research', [{ id: 'agent-alpha', label: 'Agent Alpha' }])
     )
   })
 
-  it('uses the Context detail selection modal to add the connector to more contexts', async () => {
-    const onAddToContexts = vi.fn().mockResolvedValue(undefined)
+  it('uses the agent selection modal to add the connector to more agents', async () => {
+    const onAddToAgents = vi.fn().mockResolvedValue(undefined)
     const items = [makeItem({ name: 'airtable-server' })]
     render(
       <McpServerTable
         items={items}
-        contexts={[
-          makeContextBinding({ name: 'research', mcpServers: ['airtable-server'] }),
-          makeContextBinding({ name: 'sales', description: 'Sales tools' }),
+        agentBindingsByConnectorName={{
+          'airtable-server': [
+            makeAgentBinding('research', [{ id: 'agent-alpha', label: 'Agent Alpha' }]),
+          ],
+        }}
+        agentTargets={[
+          { name: 'agent-alpha', label: 'Agent Alpha', contextRef: 'research' },
+          { name: 'sales', label: 'Sales', contextRef: 'sales-context' },
         ]}
-        onAddToContexts={onAddToContexts}
-        onRemoveFromContext={vi.fn().mockResolvedValue(undefined)}
+        onAddToAgents={onAddToAgents}
+        onRemoveFromAgents={vi.fn().mockResolvedValue(undefined)}
       />
     )
 
     fireEvent.click(screen.getByRole('button', { name: 'Actions for connector airtable-server' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Add to contexts' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Add to agents' }))
 
-    const dialog = screen.getByRole('dialog', { name: 'Add connector to contexts' })
+    const dialog = screen.getByRole('dialog', { name: 'Give agents access to this connector' })
     expect(dialog).toBeInTheDocument()
     expect(dialog).toHaveAttribute('aria-modal', 'true')
     expect(dialog.parentElement).toHaveClass('cu-modal-backdrop')
-    expect(screen.getByLabelText('Contexts')).toBeInTheDocument()
-    expect(screen.queryByText('No available contexts.')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Agents')).toBeInTheDocument()
+    expect(screen.queryByText('No other agents available.')).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('option', { name: 'sales' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Add to context' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Sales' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add to agent' }))
 
     await waitFor(() =>
-      expect(onAddToContexts).toHaveBeenCalledWith(
+      expect(onAddToAgents).toHaveBeenCalledWith(
         { namespace: 'mcp-server', name: 'airtable-server' },
-        ['sales']
+        [{ name: 'sales', contextRef: 'sales-context' }]
       )
     )
   })

@@ -168,8 +168,8 @@ describe('HostTable providers column rendering', () => {
 })
 
 // UT-9 — the row shows the editable display name (spec.host) as the primary
-// label, with the immutable identifier (metadata.name / slug) as visible
-// secondary text; the search haystack matches BOTH.
+// label. The immutable identifier (metadata.name / slug) remains searchable
+// without restoring a visible identifier column.
 describe('HostTable display name column (UT-9)', () => {
   function makeDisplayHost(name: string, displayName: string): HostItem {
     return {
@@ -182,20 +182,19 @@ describe('HostTable display name column (UT-9)', () => {
     }
   }
 
-  it('renders the display name as primary and the slug as secondary', () => {
+  it('renders the display name as the primary row label without an identifier column', () => {
     renderHostTable([makeDisplayHost('prod-x', 'Prod X')])
 
     const row = screen.getByLabelText('Open agent prod-x')
     expect(within(row).getByText('Prod X')).toBeInTheDocument()
-    expect(within(row).getByText('prod-x')).toBeInTheDocument()
+    expect(within(row).queryByText('prod-x')).not.toBeInTheDocument()
   })
 
   it('falls back to the slug as the primary label when spec.host is blank', () => {
     renderHostTable([makeDisplayHost('prod-x', '   ')])
 
     const row = screen.getByLabelText('Open agent prod-x')
-    // The fallback is visible in the primary and explicit identifier columns.
-    expect(within(row).getAllByText('prod-x')).toHaveLength(2)
+    expect(within(row).getAllByText('prod-x')).toHaveLength(1)
   })
 
   it('filters rows by the display name', () => {
