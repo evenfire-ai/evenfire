@@ -9144,11 +9144,11 @@ td.cu-registry-description {
 
 .cu-diagnostic-record-list__row {
   min-width: 0;
-  font-size: 0.82rem;
+  font-size: var(--cu-font-size-sm);
 }
 
 .cu-diagnostic-record-list__row--workload {
-  font-size: 0.85rem;
+  font-size: var(--cu-font-size-md);
 }
 
 .cu-recipe-inline-error {
