@@ -299,7 +299,7 @@ header "Phase 5 — terminating race self-heals without another parent event"
 terminating_uid="$(wrc_np_uid "$SANDBOX_NS" "$WL_INGRESS_POLICY")"
 terminating_generation="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" -o jsonpath='{.metadata.generation}')"
 kctl patch networkpolicy "$WL_INGRESS_POLICY" -n "$SANDBOX_NS" --type=merge \
-  -p '{"metadata":{"finalizers":["e2e.evenfire.ai/hold-deletion"]}}' >/dev/null
+  -p '{"metadata":{"finalizers":["e2e.invalid/hold-deletion"]}}' >/dev/null
 HELD_POLICY_FINALIZER=1
 kctl delete networkpolicy "$WL_INGRESS_POLICY" -n "$SANDBOX_NS" --wait=false >/dev/null
 wrc_trigger_recipe_reconcile "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" 120
