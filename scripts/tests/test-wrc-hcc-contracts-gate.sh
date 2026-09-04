@@ -89,6 +89,8 @@ if grep -Fq 'CONTEXT_MAPPER_NETPOL_RESYNC_SEC=${RESYNC_SECONDS}' "$RUNTIME_GATE"
    grep -Fq 'kctl delete networkpolicy "$CONTEXT_POLICY"' "$RUNTIME_GATE" &&
    grep -Fq 'probe_mcp_tcp_connectivity' "$RUNTIME_GATE" &&
    grep -Fq 'mcp_runtime_still_ready' "$RUNTIME_GATE" &&
+   grep -Fq 'mcp_data_plane_is_policy_blocked' "$RUNTIME_GATE" &&
+   grep -Fq 'limits: {cpu: 50m, memory: 128Mi}' "$RUNTIME_GATE" &&
    grep -Fq 'context_policy_recreated_from_snapshot' "$RUNTIME_GATE" &&
    grep -Fq 'hcc_identity_is_stable' "$RUNTIME_GATE" &&
    grep -Fq 'restore_hcc_resync_config' "$RUNTIME_GATE"; then

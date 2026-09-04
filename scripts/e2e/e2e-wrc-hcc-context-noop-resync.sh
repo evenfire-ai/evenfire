@@ -297,6 +297,12 @@ probe_mcp_tcp_connectivity() {
     ' "${MCP_NAME}.${MCP_NS}.svc.cluster.local" >/dev/null 2>&1
 }
 
+mcp_data_plane_is_policy_blocked() {
+  resource_absent networkpolicy "$CONTEXT_POLICY" "$MCP_NS" &&
+    mcp_runtime_still_ready &&
+    ! probe_mcp_tcp_connectivity
+}
+
 probe_mcp_business_signal() {
   # shellcheck disable=SC2016 # JavaScript is intentionally literal.
   kctl exec deployment/"$PROBE_NAME" -n "$HOST_NS" -c probe -- \
@@ -586,10 +592,10 @@ spec:
         - name: probe
           image: ${HCC_IMAGE}
           imagePullPolicy: IfNotPresent
-          command: [node, -e, "setInterval(()=>{},60000)"]
+          command: [sh, -c, "exec tail -f /dev/null"]
           resources:
-            requests: {cpu: 5m, memory: 16Mi}
-            limits: {cpu: 50m, memory: 48Mi}
+            requests: {cpu: 5m, memory: 24Mi}
+            limits: {cpu: 50m, memory: 128Mi}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: {drop: [ALL]}
@@ -671,13 +677,9 @@ ORIGINAL_POLICY_SNAPSHOT="$(context_policy_snapshot)" ||
 kctl delete networkpolicy "$CONTEXT_POLICY" -n "$MCP_NS" --wait=true --timeout=60s >/dev/null
 resource_absent networkpolicy "$CONTEXT_POLICY" "$MCP_NS" ||
   die "fault injection did not remove the Context ingress policy"
-if probe_mcp_tcp_connectivity; then
-  die "MCP data plane remained reachable after deleting its only Context ingress policy"
-fi
-resource_absent networkpolicy "$CONTEXT_POLICY" "$MCP_NS" ||
-  die "Context ingress policy was recreated before the isolation failure could be attributed"
-mcp_runtime_still_ready ||
-  die "MCP workload or Service endpoints became unhealthy during the policy fault"
+wait_until 30 "Calico to enforce the missing Context ingress policy while MCP stays Ready" \
+  mcp_data_plane_is_policy_blocked ||
+  die "MCP did not become policy-isolated while its workload and Service endpoints stayed Ready"
 ok "policy deletion produced a real fail-closed MCP data-plane interruption"
 
 wait_until "$RESYNC_TIMEOUT_SECONDS" \
