@@ -43,6 +43,7 @@ command -v node >/dev/null 2>&1 || {
 HCC_NS="${HCC_NS:-control-plane}"
 HCC_DEPLOY="${HCC_DEPLOY:-host-context-controller}"
 WRC_DEPLOY="${WRC_DEPLOY:-workflow-recipes}"
+WRC_CONTAINER="${WRC_CONTAINER:-workflow-recipes}"
 MCP_NS="${MCP_SERVER_NAMESPACE:-mcp-server}"
 HOST_NS="${MCP_HOST_NS:-mcp-host}"
 RPC_PROXY_NS="${RPC_PROXY_NS:-rpc-proxy}"
@@ -63,17 +64,21 @@ RPC_EGRESS_POLICY="rpc-egress-${CONTEXT_NAME}-${MCP_NAME}"
 SECOND_CONTEXT_POLICY="ctx-${CONTEXT_NAME}-${SECOND_MCP_NAME}"
 SECOND_CONTEXT_EGRESS_POLICY="${SECOND_CONTEXT_POLICY}-egress"
 SECOND_RPC_EGRESS_POLICY="rpc-egress-${CONTEXT_NAME}-${SECOND_MCP_NAME}"
+METADATA_DRAIN_SERVER="$(truncate_rfc1123 "e2e-drain-${RUN_LABEL}")"
+METADATA_DRAIN_POLICY="rpc-egress-${CONTEXT_NAME}-${METADATA_DRAIN_SERVER}"
 WORKLOAD_SELECTOR="clerum.io/recipe=${RECIPE_NAME},clerum.io/workload=mock-tools"
 SECOND_WORKLOAD_SELECTOR="clerum.io/recipe=${RECIPE_NAME},clerum.io/workload=mock-tools-2"
 WRC_CLEANUP_KINDS="deployment,statefulset,daemonset,job,cronjob,replicaset,pod,service,serviceaccount,role,rolebinding,configmap,secret,persistentvolumeclaim,networkpolicy"
 RESYNC_SECONDS="${E2E_WRC_HCC_NETPOL_RESYNC_SEC:-120}"
 RESYNC_TIMEOUT_SECONDS="${E2E_WRC_HCC_RESYNC_TIMEOUT_SEC:-360}"
 
-[[ "$RESYNC_SECONDS" =~ ^[1-9][0-9]*$ ]] && [ "$RESYNC_SECONDS" -ge 30 ] &&
+[[ "$RESYNC_SECONDS" =~ ^[1-9][0-9]*$ ]] && [ "$RESYNC_SECONDS" -ge 60 ] &&
   [ "$RESYNC_SECONDS" -le 120 ] || {
-  echo "E2E_WRC_HCC_NETPOL_RESYNC_SEC must be an integer from 30 through 120." >&2
+  echo "E2E_WRC_HCC_NETPOL_RESYNC_SEC must be an integer from 60 through 120." >&2
   exit 1
 }
+FAULT_WINDOW_SECONDS=$((RESYNC_SECONDS / 3))
+[ "$FAULT_WINDOW_SECONDS" -le 30 ] || FAULT_WINDOW_SECONDS=30
 [[ "$RESYNC_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] &&
   [ "$RESYNC_TIMEOUT_SECONDS" -gt "$RESYNC_SECONDS" ] || {
   echo "E2E_WRC_HCC_RESYNC_TIMEOUT_SEC must be an integer greater than the resync interval." >&2
@@ -88,6 +93,10 @@ ORIGINAL_RESYNC_PRESENT=0
 ORIGINAL_RESYNC_VALUE=""
 HCC_CONFIG_CAPTURED=0
 HCC_ENV_MUTATED=0
+ORIGINAL_WRC_LOG_LEVEL_PRESENT=0
+ORIGINAL_WRC_LOG_LEVEL_VALUE=""
+WRC_CONFIG_CAPTURED=0
+WRC_ENV_MUTATED=0
 RECIPE_CREATED=0
 CONTEXT_CREATED=0
 PROBE_CREATED=0
@@ -102,6 +111,7 @@ SECOND_MCP_BASELINE_IDENTITY=""
 ORIGINAL_POLICY_UID=""
 ORIGINAL_POLICY_SNAPSHOT=""
 FINAL_SUMMARY=""
+FINAL_SUMMARY_PATH=""
 # Read and mutated by the sourced compare-and-swap lock helper.
 # shellcheck disable=SC2034
 HCC_GATE_LOCK_ACQUIRED=0
@@ -318,7 +328,8 @@ expanded_context_projection_converged() {
 
 wrc_reconcile_count() {
   local logs
-  logs="$(kctl logs deployment/"$WRC_DEPLOY" -n "$HCC_NS" --since=15m 2>/dev/null)" || return 1
+  logs="$(kctl logs deployment/"$WRC_DEPLOY" -n "$HCC_NS" -c "$WRC_CONTAINER" \
+    --since=15m 2>/dev/null)" || return 1
   grep -Fc "[WR-Reconciler] Reconciling \"${RECIPE_NAME}\"" <<<"$logs" || true
 }
 
@@ -326,6 +337,55 @@ wrc_reconciled_after() {
   local before=$1 current
   current="$(wrc_reconcile_count)" || return 1
   [ "$current" -gt "$before" ]
+}
+
+wrc_context_decision_counts_since() {
+  local since_time=$1 logs starts skips writes
+  logs="$(kctl logs deployment/"$WRC_DEPLOY" -n "$HCC_NS" -c "$WRC_CONTAINER" \
+    --since-time="$since_time" 2>/dev/null)" || return 1
+  starts="$(grep -Fc "[WR-Reconciler] Reconciling \"${RECIPE_NAME}\"" <<<"$logs" || true)"
+  skips="$(jq -Rr --arg recipe "$RECIPE_NAME" --arg context "$CONTEXT_NAME" '
+    fromjson? |
+    select(.recipeName == $recipe and .contextName == $context and
+      .msg == "Context unchanged; skipping update") |
+    1
+  ' <<<"$logs" | awk 'NF { count++ } END { print count + 0 }')"
+  writes="$(jq -Rr --arg recipe "$RECIPE_NAME" --arg context "$CONTEXT_NAME" '
+    fromjson? |
+    select(.recipeName == $recipe and .contextName == $context and
+      (.msg == "Created per-recipe Context" or .msg == "Updated per-recipe Context")) |
+    1
+  ' <<<"$logs" | awk 'NF { count++ } END { print count + 0 }')"
+  printf '%s %s %s\n' "$starts" "$skips" "$writes"
+}
+
+wait_for_wrc_context_noop_completion() {
+  local timeout=$1 since_time=$2 deadline counts starts skips writes
+  deadline=$(( $(date +%s) + timeout ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    counts="$(wrc_context_decision_counts_since "$since_time")" || return 1
+    read -r starts skips writes <<<"$counts"
+    if [ "$writes" -gt 0 ] || [ "$starts" -gt 1 ] || [ "$skips" -gt 2 ]; then
+      echo "WRC activity outside one two-decision no-op made attribution inconclusive" >&2
+      return 2
+    fi
+    if [ "$starts" = 1 ] && [ "$skips" = 2 ] && [ "$writes" = 0 ]; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Timed out after ${timeout}s waiting for both WRC Context no-op decisions" >&2
+  return 1
+}
+
+wrc_activity_stays_absent() {
+  local since_time=$1 seconds=$2 deadline counts
+  deadline=$(( $(date +%s) + seconds ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    counts="$(wrc_context_decision_counts_since "$since_time")" || return 1
+    [ "$counts" = "0 0 0" ] || return 1
+    sleep 1
+  done
 }
 
 host_runtime_ready() {
@@ -528,6 +588,14 @@ netpol_watch_recovery_count_since() {
     <<<"$logs" || true
 }
 
+netpol_full_pass_count_since() {
+  local since_time=$1 logs
+  logs="$(kctl logs deployment/"$HCC_DEPLOY" -n "$HCC_NS" \
+    --since-time="$since_time" 2>/dev/null)" || return 1
+  grep -Fc '[K8s] Running initial NetworkPolicy background reconciliation...' \
+    <<<"$logs" || true
+}
+
 hcc_host_urgent_success_count() {
   hcc_metric_value clerum_hcc_host_reconcile_duration_seconds_count \
     'source="urgent"|outcome="success"'
@@ -572,6 +640,16 @@ host_activity_stays() {
     urgent="$(hcc_host_urgent_success_count)" || return 1
     [ "$witnesses" = "$expected_witnesses" ] || return 1
     [ "$urgent" = "$expected_urgent" ] || return 1
+    sleep 1
+  done
+}
+
+host_witness_count_stays() {
+  local expected=$1 seconds=$2 deadline current
+  deadline=$(( $(date +%s) + seconds ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    current="$(host_reconcile_witness_count)" || return 1
+    [ "$current" = "$expected" ] || return 1
     sleep 1
   done
 }
@@ -759,6 +837,67 @@ restore_hcc_resync_config() {
     hcc_resync_config_is_original
 }
 
+wrc_log_level_is_expected() {
+  local deployment
+  deployment="$(kctl get deployment "$WRC_DEPLOY" -n "$HCC_NS" -o json)" || return 1
+  jq -e --arg container "$WRC_CONTAINER" '
+    [.spec.template.spec.containers[] | select(.name == $container) |
+      .env[]? | select(.name == "LOG_LEVEL") | .value] == ["debug"] and
+    (.status.readyReplicas // 0) == 1
+  ' <<<"$deployment" >/dev/null
+}
+
+wrc_log_level_is_original() {
+  local deployment count value
+  deployment="$(kctl get deployment "$WRC_DEPLOY" -n "$HCC_NS" -o json)" || return 1
+  count="$(jq -r --arg container "$WRC_CONTAINER" '
+    [.spec.template.spec.containers[] | select(.name == $container) |
+      .env[]? | select(.name == "LOG_LEVEL")] | length
+  ' <<<"$deployment")" || return 1
+  [ "$count" = "$ORIGINAL_WRC_LOG_LEVEL_PRESENT" ] || return 1
+  if [ "$ORIGINAL_WRC_LOG_LEVEL_PRESENT" = 1 ]; then
+    value="$(jq -r --arg container "$WRC_CONTAINER" '
+      [.spec.template.spec.containers[] | select(.name == $container) |
+        .env[]? | select(.name == "LOG_LEVEL") | .value][0] // ""
+    ' <<<"$deployment")" || return 1
+    [ "$value" = "$ORIGINAL_WRC_LOG_LEVEL_VALUE" ] || return 1
+  fi
+  [ "$(jq -r '.status.readyReplicas // 0' <<<"$deployment")" = 1 ]
+}
+
+enable_wrc_debug_logging() {
+  if [ "$ORIGINAL_WRC_LOG_LEVEL_PRESENT" != 1 ] ||
+    [ "$ORIGINAL_WRC_LOG_LEVEL_VALUE" != debug ]; then
+    WRC_ENV_MUTATED=1
+    kctl set env deployment/"$WRC_DEPLOY" -n "$HCC_NS" --containers="$WRC_CONTAINER" \
+      LOG_LEVEL=debug >/dev/null || return 1
+  fi
+  # Always force a fresh process so no pre-window reconcile can contribute a
+  # late planner decision without its matching start line in the same log set.
+  kctl rollout restart deployment/"$WRC_DEPLOY" -n "$HCC_NS" >/dev/null || return 1
+  kctl rollout status deployment/"$WRC_DEPLOY" -n "$HCC_NS" --timeout=240s >/dev/null ||
+    return 1
+  wait_until 60 "WRC readiness with debug Context decision logging" wrc_log_level_is_expected
+}
+
+restore_wrc_log_level_config() {
+  [ "$WRC_CONFIG_CAPTURED" = 1 ] || return 0
+  if [ "$WRC_ENV_MUTATED" != 1 ]; then
+    wrc_log_level_is_original
+    return
+  fi
+  if [ "$ORIGINAL_WRC_LOG_LEVEL_PRESENT" = 1 ]; then
+    kctl set env deployment/"$WRC_DEPLOY" -n "$HCC_NS" --containers="$WRC_CONTAINER" \
+      "LOG_LEVEL=${ORIGINAL_WRC_LOG_LEVEL_VALUE}" >/dev/null || return 1
+  else
+    kctl set env deployment/"$WRC_DEPLOY" -n "$HCC_NS" --containers="$WRC_CONTAINER" \
+      LOG_LEVEL- >/dev/null || return 1
+  fi
+  kctl rollout status deployment/"$WRC_DEPLOY" -n "$HCC_NS" --timeout=240s >/dev/null ||
+    return 1
+  wait_until 60 "WRC readiness after restoring LOG_LEVEL" wrc_log_level_is_original
+}
+
 fixture_resources_absent() {
   resource_absent workflowrecipe "$RECIPE_NAME" "$WORKFLOW_NS" &&
     resource_absent context "$CONTEXT_NAME" "$MCP_NS" &&
@@ -782,6 +921,7 @@ fixture_resources_absent() {
     resource_absent networkpolicy "$SECOND_CONTEXT_POLICY" "$MCP_NS" &&
     resource_absent networkpolicy "$SECOND_CONTEXT_EGRESS_POLICY" "$HOST_NS" &&
     resource_absent networkpolicy "$SECOND_RPC_EGRESS_POLICY" "$RPC_PROXY_NS" &&
+    resource_absent networkpolicy "$METADATA_DRAIN_POLICY" "$RPC_PROXY_NS" &&
     wrc_managed_resources_absent &&
     host_managed_resources_absent
 }
@@ -807,6 +947,7 @@ print_repair_instructions() {
 WRC/HCC Context no-op resync gate cleanup could not restore a verified clean state.
 Context: ${E2E_KUBECONTEXT}
 HCC: ${HCC_NS}/${HCC_DEPLOY}
+WRC: ${HCC_NS}/${WRC_DEPLOY}
 Fixture: ${WORKFLOW_NS}/${RECIPE_NAME}, ${MCP_NS}/${CONTEXT_NAME}, ${MCP_NS}/${MCP_NAME}, ${HOST_NS}/${HOST_NAME}
 
 Inspect before changing anything:
@@ -814,8 +955,27 @@ Inspect before changing anything:
   kubectl --context=${E2E_KUBECONTEXT} get workflowrecipe,context,mcpserver -A -l e2e.clerum.io/suite=${SUITE_NAME}
   kubectl --context=${E2E_KUBECONTEXT} get deployment,service,networkpolicy -A -l e2e.clerum.io/suite=${SUITE_NAME}
 
-Do not remove the HCC gate lock until the HCC config, readiness, and fixture cleanup are verified.
+Do not remove the HCC gate lock until HCC/WRC config, readiness, and fixture cleanup are verified.
 EOF
+}
+
+persist_final_summary() {
+  local repo_root evidence_dir target tmp
+  [ -n "$FINAL_SUMMARY" ] || return 1
+  repo_root="$(cd "${SCRIPT_DIR}/../.." && pwd -P)" || return 1
+  evidence_dir="${repo_root}/.local-notes/infra/runs/wrc-hcc-context-noop-resync"
+  target="${evidence_dir}/${RUN_LABEL}.json"
+  tmp="${target}.tmp.$$"
+  umask 077
+  [ ! -L "$evidence_dir" ] || return 1
+  mkdir -p "$evidence_dir" || return 1
+  chmod 700 "$evidence_dir" || return 1
+  [ ! -e "$target" ] && [ ! -L "$target" ] || return 1
+  [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || return 1
+  printf '%s\n' "$FINAL_SUMMARY" >"$tmp" || return 1
+  chmod 600 "$tmp" || return 1
+  mv -- "$tmp" "$target" || return 1
+  FINAL_SUMMARY_PATH="$target"
 }
 
 cleanup() {
@@ -870,11 +1030,14 @@ cleanup() {
       --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || cleanup_failed=1
     kctl delete networkpolicy "$SECOND_RPC_EGRESS_POLICY" -n "$RPC_PROXY_NS" \
       --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || cleanup_failed=1
+    kctl delete networkpolicy "$METADATA_DRAIN_POLICY" -n "$RPC_PROXY_NS" \
+      --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || cleanup_failed=1
     kctl delete "$WRC_CLEANUP_KINDS" -A -l "clerum.io/recipe=${RECIPE_NAME}" \
       --ignore-not-found --wait=true --timeout=120s >/dev/null 2>&1 || cleanup_failed=1
     wait_until 90 "all WRC/HCC Context no-op fixtures to disappear" fixture_resources_absent \
       >/dev/null 2>&1 || cleanup_failed=1
   fi
+  restore_wrc_log_level_config >/dev/null 2>&1 || restore_ok=0
   restore_hcc_resync_config >/dev/null 2>&1 || restore_ok=0
 
   if ! finalize_hcc_watch_gate_lock "$cleanup_failed" "$restore_ok"; then
@@ -885,8 +1048,15 @@ cleanup() {
     [ "$status" = 0 ] && status=1
   fi
   if [ "$status" = 0 ] && [ "$cleanup_failed" = 0 ] && [ "$restore_ok" = 1 ]; then
+    if ! persist_final_summary; then
+      echo "Failed to persist the sanitized WRC/HCC runtime summary." >&2
+      status=1
+    fi
+  fi
+  if [ "$status" = 0 ] && [ "$cleanup_failed" = 0 ] && [ "$restore_ok" = 1 ]; then
     header "WRC/HCC Context no-op and periodic resync gate passed"
     echo "$FINAL_SUMMARY"
+    echo "evidence=${FINAL_SUMMARY_PATH}"
     print_results
   fi
   exit "$status"
@@ -929,6 +1099,24 @@ HCC_PORT="$(jq -r '
 ' <<<"$hcc_deployment")"
 [ -n "$HCC_IMAGE" ] || die "could not resolve HCC image for the data-plane probe"
 [[ "$HCC_PORT" =~ ^[0-9]+$ ]] || die "could not resolve HCC HTTP port"
+
+wrc_deployment="$(kctl get deployment "$WRC_DEPLOY" -n "$HCC_NS" -o json)"
+[ "$(jq -r --arg container "$WRC_CONTAINER" \
+  '[.spec.template.spec.containers[] | select(.name == $container)] | length' \
+  <<<"$wrc_deployment")" = 1 ] ||
+  die "WRC Deployment does not contain exactly one ${WRC_CONTAINER} container"
+wrc_log_level_entries="$(jq -c --arg container "$WRC_CONTAINER" '
+  [.spec.template.spec.containers[] | select(.name == $container) |
+    .env[]? | select(.name == "LOG_LEVEL")]
+' <<<"$wrc_deployment")"
+ORIGINAL_WRC_LOG_LEVEL_PRESENT="$(jq -r 'length' <<<"$wrc_log_level_entries")"
+[ "$ORIGINAL_WRC_LOG_LEVEL_PRESENT" -le 1 ] || die "WRC Deployment has duplicate LOG_LEVEL entries"
+if [ "$ORIGINAL_WRC_LOG_LEVEL_PRESENT" = 1 ]; then
+  jq -e '.[0].value | type == "string"' <<<"$wrc_log_level_entries" >/dev/null ||
+    die "WRC LOG_LEVEL uses valueFrom or a non-string shape that this gate cannot restore"
+  ORIGINAL_WRC_LOG_LEVEL_VALUE="$(jq -r '.[0].value' <<<"$wrc_log_level_entries")"
+fi
+WRC_CONFIG_CAPTURED=1
 
 wait_until 60 "baseline HCC /ready" probe_hcc_ready ||
   die "HCC /ready was unavailable before the cross-controller fixture"
@@ -1119,6 +1307,11 @@ wait_until 60 "second MCP add(19,23) signal from the real Host after the change"
 probe_hcc_ready || die "HCC lost readiness after the real Context change"
 ok "real WRC Context change fanned out to a stable, Ready Host and both MCP tools returned 42"
 
+enable_wrc_debug_logging ||
+  die "could not enable temporary WRC debug logging for the runtime no-replace witness"
+wrc_quiet_window_start="$(utc_now)" || die "could not timestamp WRC quiescence"
+wrc_activity_stays_absent "$wrc_quiet_window_start" 5 ||
+  die "WRC did not reach a quiet Context-decision baseline after enabling debug logging"
 ORIGINAL_CONTEXT_RV="$(kctl get context "$CONTEXT_NAME" -n "$MCP_NS" \
   -o jsonpath='{.metadata.resourceVersion}')"
 ORIGINAL_CONTEXT_GENERATION="$(kctl get context "$CONTEXT_NAME" -n "$MCP_NS" \
@@ -1127,21 +1320,50 @@ ORIGINAL_MCP_GENERATION="$(kctl get mcpserver "$MCP_NAME" -n "$MCP_NS" \
   -o jsonpath='{.metadata.generation}')"
 ORIGINAL_SECOND_MCP_GENERATION="$(kctl get mcpserver "$SECOND_MCP_NAME" -n "$MCP_NS" \
   -o jsonpath='{.metadata.generation}')"
-reconciles_before="$(wrc_reconcile_count)" || die "could not establish WRC reconcile log baseline"
 description_patch="$(jq -cn --arg description \
   'PR 568 no-op projection after a real recipe-only change.' '{spec:{description:$description}}')"
+wrc_noop_window_start="$(utc_now)" || die "could not timestamp the WRC no-op window"
 kctl patch workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_NS" --type=merge \
   -p "$description_patch" >/dev/null
-wait_until 90 "WRC to process the recipe-only description change" \
-  wrc_reconciled_after "$reconciles_before" ||
-  die "WRC did not visibly reconcile the recipe-only change"
+wait_for_wrc_context_noop_completion 120 "$wrc_noop_window_start" ||
+  die "WRC did not complete exactly one reconcile with both Context planners skipping replace"
+wrc_noop_counts="$(wrc_context_decision_counts_since "$wrc_noop_window_start")" ||
+  die "could not capture the completed WRC no-op decision counts"
+read -r wrc_noop_reconciles wrc_noop_skips wrc_noop_writes <<<"$wrc_noop_counts"
 context_identity_is_original ||
-  die "a recipe-only change emitted a no-op Context PUT"
+  die "a completed recipe-only reconcile changed persisted Context identity"
 mcp_generation_is_original ||
   die "a recipe-only change unexpectedly changed McpServer desired generation"
 hcc_identity_is_stable || die "HCC restarted during the WRC no-op projection proof"
 host_runtime_ready || die "the bound Host degraded during the WRC no-op projection proof"
-ok "WRC processed a recipe-only change without moving Context resourceVersion"
+ok "both WRC Context planners completed without replace or persisted Context mutation"
+
+# Isolate the metadata-only proof from the separately tested periodic healer.
+# A fresh HCC pod with the timer disabled eliminates a pass that started before
+# the fixture timestamp; the post-window log guard rejects any later full pass.
+HCC_ENV_MUTATED=1
+kctl set env deployment/"$HCC_DEPLOY" -n "$HCC_NS" \
+  CONTEXT_MAPPER_NETPOL_RESYNC_SEC=0 >/dev/null
+kctl rollout restart deployment/"$HCC_DEPLOY" -n "$HCC_NS" >/dev/null
+kctl rollout status deployment/"$HCC_DEPLOY" -n "$HCC_NS" --timeout=240s >/dev/null ||
+  die "HCC did not restart into the isolated metadata-only proof"
+wait_until 60 "HCC /ready before metadata-only proof" probe_hcc_ready ||
+  die "HCC was not Ready after isolating the metadata-only proof"
+wait_until 180 "isolated HCC startup NetworkPolicy pass" \
+  hcc_log_contains "[NetPol] Full reconciliation complete" ||
+  die "HCC startup NetworkPolicy pass did not drain before metadata-only proof"
+read -r HCC_UID HCC_RESTARTS <<<"$(
+  kctl get pod "$(running_hcc_pod)" -n "$HCC_NS" \
+    -o jsonpath='{.metadata.uid}{" "}{.status.containerStatuses[?(@.name=="host-context-controller")].restartCount}'
+)"
+[ -n "$HCC_UID" ] && [ -n "$HCC_RESTARTS" ] ||
+  die "could not capture isolated HCC identity before metadata-only proof"
+metadata_host_reconciles="$(host_reconcile_witness_count)" ||
+  die "could not capture Host activity before metadata-only proof"
+host_witness_count_stays "$metadata_host_reconciles" 5 ||
+  die "Host reconciliation did not quiesce before metadata-only proof"
+context_identity_is_original || die "isolating metadata-only proof changed Context identity"
+mcp_generation_is_original || die "isolating metadata-only proof changed McpServer generation"
 
 metadata_events_before="$(hcc_metadata_only_event_count)" ||
   die "could not establish the HCC metadata-only counter baseline"
@@ -1155,6 +1377,16 @@ metadata_policy_snapshot="$(policy_snapshot "$RPC_PROXY_NS" "$SECOND_RPC_EGRESS_
   die "could not capture the metadata-only scoped NetworkPolicy fixture"
 [ -n "$metadata_policy_uid" ] && [ -n "$metadata_policy_snapshot" ] ||
   die "metadata-only scoped NetworkPolicy fixture was empty"
+kctl get networkpolicy "$SECOND_RPC_EGRESS_POLICY" -n "$RPC_PROXY_NS" -o json |
+  jq --arg name "$METADATA_DRAIN_POLICY" --arg server "$METADATA_DRAIN_SERVER" '
+    del(.metadata.annotations,.metadata.creationTimestamp,.metadata.generation,
+      .metadata.managedFields,.metadata.resourceVersion,.metadata.uid,.status) |
+    .metadata.name = $name |
+    .metadata.labels["clerum.io/mcpserver"] = $server
+  ' | kctl apply -f - >/dev/null
+policy_has_identity "$RPC_PROXY_NS" "$METADATA_DRAIN_POLICY" rpc-proxy-egress \
+  "$METADATA_DRAIN_SERVER" ||
+  die "could not create the final-lane scoped reconcile drain sentinel"
 kctl delete networkpolicy "$SECOND_RPC_EGRESS_POLICY" -n "$RPC_PROXY_NS" \
   --wait=true --timeout=60s >/dev/null
 resource_absent networkpolicy "$SECOND_RPC_EGRESS_POLICY" "$RPC_PROXY_NS" ||
@@ -1171,6 +1403,11 @@ wait_until 90 "metadata-only scoped NetworkPolicy repair" \
   policy_recreated_from_snapshot "$RPC_PROXY_NS" "$SECOND_RPC_EGRESS_POLICY" \
     "$metadata_policy_uid" "$metadata_policy_snapshot" ||
   die "metadata-only Context MODIFIED did not complete its scoped NetworkPolicy repair"
+wait_until 90 "metadata-only scoped reconcile final-lane drain sentinel" \
+  resource_absent networkpolicy "$METADATA_DRAIN_POLICY" "$RPC_PROXY_NS" ||
+  die "metadata-only scoped reconciliation did not finish its final cleanup lane"
+[ "$(netpol_full_pass_count_since "$metadata_window_start")" = 0 ] ||
+  die "a full NetworkPolicy pass made metadata-only completion attribution inconclusive"
 read -r metadata_context_after_rv metadata_context_after_generation <<<"$(
   kctl get context "$CONTEXT_NAME" -n "$MCP_NS" \
     -o jsonpath='{.metadata.resourceVersion}{" "}{.metadata.generation}'
@@ -1209,17 +1446,10 @@ ORIGINAL_CONTEXT_RV="$(kctl get context "$CONTEXT_NAME" -n "$MCP_NS" \
 ORIGINAL_CONTEXT_GENERATION="$(kctl get context "$CONTEXT_NAME" -n "$MCP_NS" \
   -o jsonpath='{.metadata.generation}')"
 
-# Arm the timer only after the WRC no-op proof. A final rollout to the requested
+# Arm the timer only after the WRC no-op and metadata-only proofs. A rollout to the requested
 # interval creates a fresh, bounded observation window for the policy-delete
 # phase before periodic convergence runs.
 HCC_ENV_MUTATED=1
-if [ "$ORIGINAL_RESYNC_PRESENT" = 1 ] && [ "$ORIGINAL_RESYNC_VALUE" = "$RESYNC_SECONDS" ]; then
-  arm_interval=$((RESYNC_SECONDS + 1))
-  kctl set env deployment/"$HCC_DEPLOY" -n "$HCC_NS" \
-    "CONTEXT_MAPPER_NETPOL_RESYNC_SEC=${arm_interval}" >/dev/null
-  kctl rollout status deployment/"$HCC_DEPLOY" -n "$HCC_NS" --timeout=240s >/dev/null ||
-    die "HCC did not complete the timer re-arm rollout"
-fi
 kctl set env deployment/"$HCC_DEPLOY" -n "$HCC_NS" \
   "CONTEXT_MAPPER_NETPOL_RESYNC_SEC=${RESYNC_SECONDS}" >/dev/null
 kctl rollout status deployment/"$HCC_DEPLOY" -n "$HCC_NS" --timeout=240s >/dev/null ||
@@ -1270,22 +1500,22 @@ probe_host_mcp_business_signal "$MCP_NAME" ||
 
 timer_now_epoch="$(date +%s)"
 [ "$timer_arm_epoch" -le "$timer_now_epoch" ] || die "NetworkPolicy timer timestamp is in the future"
-timer_tick_due_epoch=$((
-  timer_arm_epoch + (((timer_now_epoch - timer_arm_epoch) / RESYNC_SECONDS) + 1) * RESYNC_SECONDS
-))
-if [ $((timer_tick_due_epoch - timer_now_epoch)) -lt 30 ]; then
+timer_window_attempt=0
+while :; do
+  timer_now_epoch="$(date +%s)"
+  timer_tick_due_epoch=$((
+    timer_arm_epoch + (((timer_now_epoch - timer_arm_epoch) / RESYNC_SECONDS) + 1) * RESYNC_SECONDS
+  ))
+  [ $((timer_tick_due_epoch - timer_now_epoch)) -ge "$FAULT_WINDOW_SECONDS" ] && break
+  timer_window_attempt=$((timer_window_attempt + 1))
+  [ "$timer_window_attempt" -le 3 ] ||
+    die "NetworkPolicy timer could not provide a ${FAULT_WINDOW_SECONDS}s fault window after three passes"
   timer_window_passes="$(hcc_netpol_certified_count)" ||
     die "could not capture a NetworkPolicy pass before opening a fresh timer window"
   wait_until "$RESYNC_TIMEOUT_SECONDS" "the imminent timer pass to finish before fault injection" \
     hcc_netpol_certified_after "$timer_window_passes" ||
     die "could not establish a fresh post-pass timer window"
-  timer_now_epoch="$(date +%s)"
-  timer_tick_due_epoch=$((
-    timer_arm_epoch + (((timer_now_epoch - timer_arm_epoch) / RESYNC_SECONDS) + 1) * RESYNC_SECONDS
-  ))
-fi
-[ $((timer_tick_due_epoch - timer_now_epoch)) -ge 30 ] ||
-  die "NetworkPolicy timer did not leave a 30-second fault-injection window"
+done
 netpol_certified_before_fault="$(hcc_netpol_certified_count)" ||
   die "could not capture the certified NetworkPolicy pass baseline"
 netpol_last_success_before_fault="$(hcc_netpol_last_success_epoch)" ||
@@ -1367,6 +1597,9 @@ ok "the restored data plane again returned 42 from the MCP add tool"
 FINAL_SUMMARY="$(jq -cn \
   --arg recipe "$RECIPE_NAME" --arg context "$CONTEXT_NAME" --arg server "$MCP_NAME" \
   --arg secondServer "$SECOND_MCP_NAME" --arg host "$HOST_NAME" \
+  --arg kubeContext "$E2E_KUBECONTEXT" \
+  --arg gitHead "$(git -C "${SCRIPT_DIR}/../.." rev-parse HEAD)" \
+  --arg metadataDrainPolicy "$METADATA_DRAIN_POLICY" \
   --arg oldPolicyUid "$ORIGINAL_POLICY_UID" \
   --arg newPolicyUid "$(kctl get networkpolicy "$CONTEXT_POLICY" -n "$MCP_NS" -o jsonpath='{.metadata.uid}')" \
   --arg contextResourceVersion "$ORIGINAL_CONTEXT_RV" \
@@ -1380,8 +1613,15 @@ FINAL_SUMMARY="$(jq -cn \
   --argjson policyRecoveryElapsedSeconds "$policy_recovery_elapsed" \
   --argjson netpolCertifiedBeforeFault "$netpol_certified_before_fault" \
   --argjson netpolCertifiedAfterFault "$netpol_certified_after_fault" \
-  '{recipe:$recipe,context:$context,servers:[$server,$secondServer],host:$host,
-    resyncSeconds:$resyncSeconds,metadataOnlyBefore:$metadataOnlyBefore,
+  --argjson faultWindowSeconds "$FAULT_WINDOW_SECONDS" \
+  --argjson wrcNoopReconciles "$wrc_noop_reconciles" \
+  --argjson wrcNoopSkips "$wrc_noop_skips" \
+  --argjson wrcNoopWrites "$wrc_noop_writes" \
+  '{gitHead:$gitHead,kubeContext:$kubeContext,recipe:$recipe,context:$context,
+    servers:[$server,$secondServer],host:$host,
+    resyncSeconds:$resyncSeconds,faultWindowSeconds:$faultWindowSeconds,
+    wrcNoop:{reconciles:$wrcNoopReconciles,skips:$wrcNoopSkips,writes:$wrcNoopWrites},
+    metadataDrainPolicy:$metadataDrainPolicy,metadataOnlyBefore:$metadataOnlyBefore,
     metadataOnlyAfter:$metadataOnlyAfter,hostReconcilesAfterRealChange:$hostReconcilesAfterRealChange,
     hostUrgentBeforeRealChange:$hostUrgentBeforeRealChange,
     hostUrgentAfterRealChange:$hostUrgentAfterRealChange,timerTickDueEpoch:$timerTickDueEpoch,

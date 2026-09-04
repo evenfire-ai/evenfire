@@ -49,17 +49,22 @@ fi
 runtime_acquire_line="$(grep -nF 'acquire_hcc_watch_gate_lock ||' "$RUNTIME_GATE" | cut -d: -f1)"
 runtime_fixture_mutation_line="$(grep -nF 'CONTEXT_CREATED=1' "$RUNTIME_GATE" | tail -1 | cut -d: -f1)"
 runtime_hcc_mutation_line="$(grep -nF 'HCC_ENV_MUTATED=1' "$RUNTIME_GATE" | tail -1 | cut -d: -f1)"
+runtime_wrc_restore_line="$(grep -nF 'restore_wrc_log_level_config >/dev/null' "$RUNTIME_GATE" | cut -d: -f1)"
 runtime_restore_line="$(grep -nF 'restore_hcc_resync_config >/dev/null' "$RUNTIME_GATE" | cut -d: -f1)"
 runtime_finalize_line="$(grep -nF 'finalize_hcc_watch_gate_lock "$cleanup_failed" "$restore_ok"' "$RUNTIME_GATE" | cut -d: -f1)"
+runtime_summary_line="$(grep -nF 'if ! persist_final_summary; then' "$RUNTIME_GATE" | cut -d: -f1)"
 runtime_pass_line="$(grep -nF 'header "WRC/HCC Context no-op and periodic resync gate passed"' "$RUNTIME_GATE" | cut -d: -f1)"
 if [ -n "$runtime_acquire_line" ] && [ -n "$runtime_fixture_mutation_line" ] &&
    [ -n "$runtime_hcc_mutation_line" ] &&
    [ "$runtime_acquire_line" -lt "$runtime_fixture_mutation_line" ] &&
    [ "$runtime_acquire_line" -lt "$runtime_hcc_mutation_line" ] &&
-   [ -n "$runtime_restore_line" ] && [ -n "$runtime_finalize_line" ] &&
+   [ -n "$runtime_wrc_restore_line" ] && [ -n "$runtime_restore_line" ] &&
+   [ -n "$runtime_finalize_line" ] && [ -n "$runtime_summary_line" ] &&
    [ -n "$runtime_pass_line" ] &&
+   [ "$runtime_wrc_restore_line" -lt "$runtime_finalize_line" ] &&
    [ "$runtime_restore_line" -lt "$runtime_finalize_line" ] &&
-   [ "$runtime_finalize_line" -lt "$runtime_pass_line" ]; then
+   [ "$runtime_finalize_line" -lt "$runtime_summary_line" ] &&
+   [ "$runtime_summary_line" -lt "$runtime_pass_line" ]; then
   pass "WRC-HCC runtime gate acquires before mutation and restores/finalizes before PASS"
 else
   fail "WRC-HCC runtime gate mutation, restoration, lock, or PASS ordering is unsafe"
@@ -97,9 +102,15 @@ else
 fi
 
 if grep -Fq 'kctl annotate context "$CONTEXT_NAME"' "$RUNTIME_GATE" &&
+   grep -Fq 'CONTEXT_MAPPER_NETPOL_RESYNC_SEC=0' "$RUNTIME_GATE" &&
+   grep -Fq 'kctl rollout restart deployment/"$HCC_DEPLOY"' "$RUNTIME_GATE" &&
+   grep -Fq 'HCC startup NetworkPolicy pass did not drain before metadata-only proof' "$RUNTIME_GATE" &&
    grep -Fq 'hcc_metadata_only_event_after "$metadata_events_before"' "$RUNTIME_GATE" &&
    grep -Fq 'kctl delete networkpolicy "$SECOND_RPC_EGRESS_POLICY"' "$RUNTIME_GATE" &&
    grep -Fq 'policy_recreated_from_snapshot "$RPC_PROXY_NS" "$SECOND_RPC_EGRESS_POLICY"' "$RUNTIME_GATE" &&
+   grep -Fq 'METADATA_DRAIN_POLICY="rpc-egress-${CONTEXT_NAME}-${METADATA_DRAIN_SERVER}"' "$RUNTIME_GATE" &&
+   grep -Fq 'metadata-only scoped reconcile final-lane drain sentinel' "$RUNTIME_GATE" &&
+   grep -Fq 'netpol_full_pass_count_since "$metadata_window_start"' "$RUNTIME_GATE" &&
    grep -Fq 'target_host_activity_stays_absent "$metadata_window_start" 30' "$RUNTIME_GATE" &&
    grep -Fq 'host_reconcile_witness_count_since "$metadata_window_start" "$HOST_NAME"' "$RUNTIME_GATE" &&
    grep -Fq 'metadata_context_after_generation" = "$metadata_context_before_generation' "$RUNTIME_GATE" &&
@@ -111,12 +122,18 @@ else
   fail "WRC-HCC runtime gate can miss or misattribute the metadata-only Host skip boundary"
 fi
 
-if grep -Fq 'wrc_reconciled_after "$reconciles_before"' "$RUNTIME_GATE" &&
+if grep -Fq 'enable_wrc_debug_logging' "$RUNTIME_GATE" &&
+   grep -Fq 'kctl rollout restart deployment/"$WRC_DEPLOY"' "$RUNTIME_GATE" &&
+   grep -Fq 'wait_for_wrc_context_noop_completion 120 "$wrc_noop_window_start"' "$RUNTIME_GATE" &&
+   grep -Fq 'starts" = 1' "$RUNTIME_GATE" &&
+   grep -Fq 'skips" = 2' "$RUNTIME_GATE" &&
+   grep -Fq 'writes" = 0' "$RUNTIME_GATE" &&
    grep -Fq 'context_identity_is_original' "$RUNTIME_GATE" &&
-   grep -Fq 'a recipe-only change emitted a no-op Context PUT' "$RUNTIME_GATE"; then
-  pass "WRC-HCC runtime gate proves WRC ran while Context resourceVersion stayed fixed"
+   grep -Fq 'both WRC Context planners completed without replace or persisted Context mutation' "$RUNTIME_GATE" &&
+   grep -Fq 'restore_wrc_log_level_config' "$RUNTIME_GATE"; then
+  pass "WRC-HCC runtime gate observes both completed WRC planner skips and stable persisted Context identity"
 else
-  fail "WRC-HCC runtime gate can claim no-op without proving the reconcile ran or RV stayed fixed"
+  fail "WRC-HCC runtime gate can claim no-op before both planners complete or without restoring WRC logging"
 fi
 
 if grep -Fq 'CONTEXT_MAPPER_NETPOL_RESYNC_SEC=${RESYNC_SECONDS}' "$RUNTIME_GATE" &&
@@ -131,7 +148,9 @@ if grep -Fq 'CONTEXT_MAPPER_NETPOL_RESYNC_SEC=${RESYNC_SECONDS}' "$RUNTIME_GATE"
    grep -Fq 'SECOND_MCP_BASELINE_IDENTITY="$(selector_runtime_identity' "$RUNTIME_GATE" &&
    grep -Fq 'mcp_data_plane_is_policy_blocked' "$RUNTIME_GATE" &&
    grep -Fq 'timer_tick_due_epoch=' "$RUNTIME_GATE" &&
-   grep -Fq 'timer_tick_due_epoch - timer_now_epoch)) -lt 30' "$RUNTIME_GATE" &&
+   grep -Fq 'FAULT_WINDOW_SECONDS=$((RESYNC_SECONDS / 3))' "$RUNTIME_GATE" &&
+   grep -Fq 'timer_window_attempt" -le 3' "$RUNTIME_GATE" &&
+   grep -Fq 'timer_tick_due_epoch - timer_now_epoch)) -ge "$FAULT_WINDOW_SECONDS"' "$RUNTIME_GATE" &&
    grep -Fq 'context_policy_recreated_from_snapshot' "$RUNTIME_GATE" &&
    grep -Fq 'hcc_netpol_certified_after "$netpol_certified_before_fault"' "$RUNTIME_GATE" &&
    grep -Fq 'netpol_desired_inventory_snapshot' "$RUNTIME_GATE" &&
@@ -157,19 +176,24 @@ fi
 
 real_change_line="$(grep -nF 'kctl patch workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_NS" --type=json' "$RUNTIME_GATE" | tail -1 | cut -d: -f1)"
 positive_host_line="$(grep -nF 'wait_for_positive_host_fanout 90 "$fanout_window_start" "$host_urgent_before"' "$RUNTIME_GATE" | tail -1 | cut -d: -f1)"
+noop_completion_line="$(grep -nF 'wait_for_wrc_context_noop_completion 120 "$wrc_noop_window_start"' "$RUNTIME_GATE" | tail -1 | cut -d: -f1)"
 metadata_event_line="$(grep -nF 'kctl annotate context "$CONTEXT_NAME"' "$RUNTIME_GATE" | tail -1 | cut -d: -f1)"
+metadata_drain_line="$(grep -nF 'metadata-only scoped reconcile final-lane drain sentinel' "$RUNTIME_GATE" | tail -1 | cut -d: -f1)"
 metadata_guard_line="$(grep -nF 'target_host_activity_stays_absent "$metadata_window_start" 30' "$RUNTIME_GATE" | tail -1 | cut -d: -f1)"
 fault_line="$(grep -nF 'kctl delete networkpolicy "$CONTEXT_POLICY"' "$RUNTIME_GATE" | tail -1 | cut -d: -f1)"
 blocked_line="$(grep -nF 'mcp_data_plane_is_policy_blocked ||' "$RUNTIME_GATE" | tail -1 | cut -d: -f1)"
 recovery_line="$(grep -nF 'context_policy_recreated_from_snapshot ||' "$RUNTIME_GATE" | tail -1 | cut -d: -f1)"
 certified_line="$(grep -nF 'hcc_netpol_certified_after "$netpol_certified_before_fault"' "$RUNTIME_GATE" | tail -1 | cut -d: -f1)"
 if [ -n "$real_change_line" ] && [ -n "$positive_host_line" ] &&
-   [ -n "$metadata_event_line" ] && [ -n "$metadata_guard_line" ] &&
+   [ -n "$noop_completion_line" ] && [ -n "$metadata_event_line" ] &&
+   [ -n "$metadata_drain_line" ] && [ -n "$metadata_guard_line" ] &&
    [ -n "$fault_line" ] && [ -n "$blocked_line" ] &&
    [ -n "$recovery_line" ] && [ -n "$certified_line" ] &&
    [ "$real_change_line" -lt "$positive_host_line" ] &&
-   [ "$positive_host_line" -lt "$metadata_event_line" ] &&
-   [ "$metadata_event_line" -lt "$metadata_guard_line" ] &&
+   [ "$positive_host_line" -lt "$noop_completion_line" ] &&
+   [ "$noop_completion_line" -lt "$metadata_event_line" ] &&
+   [ "$metadata_event_line" -lt "$metadata_drain_line" ] &&
+   [ "$metadata_drain_line" -lt "$metadata_guard_line" ] &&
    [ "$metadata_guard_line" -lt "$fault_line" ] &&
    [ "$fault_line" -lt "$blocked_line" ] &&
    [ "$blocked_line" -lt "$recovery_line" ] &&
@@ -184,8 +208,11 @@ if grep -Fq -- '--ignore-not-found -o name' "$RUNTIME_GATE" &&
    grep -Fq 'resource_collection_absent replicaset "$MCP_NS" "$SECOND_WORKLOAD_SELECTOR"' "$RUNTIME_GATE" &&
    grep -Fq 'resource_collection_absent pod "$HOST_NS" "app=${PROBE_NAME}"' "$RUNTIME_GATE" &&
    grep -Fq 'wrc_managed_resources_absent' "$RUNTIME_GATE" &&
+   grep -Fq 'resource_absent networkpolicy "$METADATA_DRAIN_POLICY"' "$RUNTIME_GATE" &&
    grep -Fq 'clerum.io/recipe=${RECIPE_NAME}' "$RUNTIME_GATE" &&
-   grep -Fq 'deployment,replicaset,pod,service,serviceaccount' "$RUNTIME_GATE"; then
+   grep -Fq 'deployment,replicaset,pod,service,serviceaccount' "$RUNTIME_GATE" &&
+   grep -Fq '.local-notes/infra/runs/wrc-hcc-context-noop-resync' "$RUNTIME_GATE" &&
+   grep -Fq 'chmod 600 "$tmp"' "$RUNTIME_GATE"; then
   pass "WRC-HCC runtime absence and cleanup checks fail closed across dependent workloads"
 else
   fail "WRC-HCC runtime cleanup can hide API errors or leave dependent Pods/ReplicaSets"
