@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { requireActionOperationId } from '@clerum/action-context-contracts'
 import { sendPublicApiError } from '../../http/publicApiError.js'
 import type { K8sGateway } from '../../k8s.js'
+import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import {
   type ExternalAuthedRequest,
   requireExternalSessionRateLimitContext,
@@ -22,7 +23,6 @@ import { canonicalEnvironmentId } from '../../services/access/operationalAccessP
 import { canonicalResourceIdentity } from '../../services/access/resourceIdentity.js'
 import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAccessRuntimePolicy.js'
 import { issueUserDelegationV2 } from '../../utils/auth/userDelegationV2Token.js'
-import { attachAccessExecutionBudget } from './access.js'
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
