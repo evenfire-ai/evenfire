@@ -38,6 +38,19 @@ async function flushMicrotasks(turns = 8): Promise<void> {
   }
 }
 
+/**
+ * How many Context MODIFIED events HCC has absorbed as metadata-only. Read from
+ * the real registry rather than a spy, because this is also the signal an
+ * operator watches for the #460 storm returning — a test that asserted on a mock
+ * would not tell us the metric is actually registered and named.
+ */
+async function metadataOnlyEventCount(): Promise<number> {
+  const metric = registry.getSingleMetric('clerum_hcc_context_metadata_only_events_total')
+  if (!metric) throw new Error('clerum_hcc_context_metadata_only_events_total is not registered')
+  const snapshot = await metric.get()
+  return snapshot.values[0]?.value ?? 0
+}
+
 async function readInitialConvergenceMetric(
   name:
     | 'clerum_hcc_initial_convergence_retries_total'
@@ -2031,12 +2044,9 @@ describe('McpServerWatcher startup', () => {
     }
   })
 
-  it('recovers when a Context delta loses the delete fence with no certificate to withhold', async () => {
-    // A MODIFIED that does not move the desired revision — a status or label
-    // write by another controller — still runs a scoped revocation, but builds
-    // no delta certificate. Nothing reads the returned boolean there, so a lost
-    // delete fence must stay loud and reach the convergence retry instead of
-    // leaving a stale allow live with no NetworkPolicy resync to recover it.
+  it('does not fan out Host/SFS on a Context MODIFIED that does not move desired revision (#460 Phase 2)', async () => {
+    // Metadata-only MODIFIED still runs scoped NP revoke (lost-fence can
+    // throw). Host/SFS fan-out is the Loop A storm and stays skipped.
     let contextWatchCallback:
       | ((
           type: string,
@@ -2064,11 +2074,78 @@ describe('McpServerWatcher startup', () => {
       generation: 4,
       spec: { contextId: 'steady-context', mcpServers: [] },
     })
+    ;(watcher as any).hosts.set('bound-host', {
+      name: 'bound-host',
+      namespace: 'mcp-host',
+      spec: { host: 'bound-host', contextRef: 'steady-context', secretRef: 'host-secret' },
+    })
     markNetworkPolicyRevocationAuthoritative(watcher)
     const passesBefore = mocks.netPolFullReconcile.mock.calls.length
-    // With honorsLostFence false the real reconciler throws the 409 rather than
-    // reporting it, which is the whole point: the throw is what reaches the
-    // convergence retry below.
+    const hostReconcile = vi.spyOn(watcher.getHostReconciler(), 'reconcile')
+    const sfsPropagate = vi.spyOn(watcher as any, 'reconcileSharedFileSystemsReferencedByContext')
+    const cachedBefore = (watcher as any).contexts.get('steady-context')
+
+    try {
+      await contextWatchCallback!('MODIFIED', {
+        metadata: {
+          name: 'steady-context',
+          namespace: 'mcp-server',
+          uid: 'steady-context-uid',
+          generation: 4,
+        },
+        spec: { contextId: 'steady-context', mcpServers: [] },
+      })
+
+      expect((watcher as any).contexts.get('steady-context')).toBe(cachedBefore)
+      expect((watcher as any).netPolReconciler.reconcileContext).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'steady-context', generation: 4 }),
+        expect.objectContaining({ honorsLostFence: false })
+      )
+      expect(hostReconcile).not.toHaveBeenCalled()
+      expect(sfsPropagate).not.toHaveBeenCalled()
+      expect(mocks.netPolFullReconcile.mock.calls.length).toBe(passesBefore)
+    } finally {
+      await watcher.stop()
+    }
+  })
+
+  it('retries convergence when a metadata-only Context MODIFIED loses the delete fence', async () => {
+    let contextWatchCallback:
+      | ((
+          type: string,
+          apiObj: {
+            metadata: { name: string; namespace: string; uid: string; generation?: number }
+            spec: { contextId: string; mcpServers: string[] }
+          }
+        ) => Promise<void>)
+      | undefined
+    mocks.watch.mockImplementationOnce(async (path, _options, callback) => {
+      if (path.endsWith('/contexts')) contextWatchCallback = callback
+      return { abort: vi.fn() }
+    })
+
+    const watcher = new McpServerWatcher()
+    await (watcher as any).startContextWatch('lost-fence-metadata-only-rv')
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).hostCacheSynced = true
+    ;(watcher as any).mcpWatchGeneration = 1
+    ;(watcher as any).contexts.set('steady-context', {
+      name: 'steady-context',
+      namespace: 'mcp-server',
+      uid: 'steady-context-uid',
+      generation: 4,
+      spec: { contextId: 'steady-context', mcpServers: [] },
+    })
+    ;(watcher as any).hosts.set('bound-host', {
+      name: 'bound-host',
+      namespace: 'mcp-host',
+      spec: { host: 'bound-host', contextRef: 'steady-context', secretRef: 'host-secret' },
+    })
+    markNetworkPolicyRevocationAuthoritative(watcher)
+    const passesBefore = mocks.netPolFullReconcile.mock.calls.length
+    const hostReconcile = vi.spyOn(watcher.getHostReconciler(), 'reconcile')
+    const sfsPropagate = vi.spyOn(watcher as any, 'reconcileSharedFileSystemsReferencedByContext')
     ;(watcher as any).netPolReconciler.reconcileContext.mockRejectedValueOnce(
       Object.assign(new Error('the UID in the precondition does not match'), { code: 409 })
     )
@@ -2084,10 +2161,82 @@ describe('McpServerWatcher startup', () => {
         spec: { contextId: 'steady-context', mcpServers: [] },
       })
 
-      // This lane cannot act on the boolean, so it must not have opted into the
-      // reported outcome.
       expect((watcher as any).netPolReconciler.reconcileContext).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'steady-context' }),
+        expect.objectContaining({ honorsLostFence: false })
+      )
+      // Which of the two negative assertions below actually pins the gate, by
+      // mutation rather than by reading (#568 review, jozer-rami #3):
+      //
+      //   remove ONLY the `if (metadataOnlyModified) return`  -> this test STAYS GREEN
+      //   remove ONLY the `if (!metadataOnlyModified)` SFS skip -> this test DIES
+      //
+      // So `sfsPropagate` is the load-bearing one, and it is load-bearing because
+      // the SFS skip happens earlier, outside the try. `hostReconcile` is NOT
+      // pinning the gate on this input: the 409 is caught, the catch calls
+      // runInitialNetworkPolicyConvergence and RETURNS, and both the gate's early
+      // return and reconcileHostsReferencingContext are downstream of that return.
+      // The two are redundant here and no assertion in this test can tell them
+      // apart. Kept as a cheap regression guard on the catch's ordering — if the
+      // catch stopped returning, the gate would still have to hold the line — but
+      // the Host-skip itself is pinned by the two non-rejecting tests (T4 and the
+      // #460 Phase 2 test), which are the ones the first mutation kills.
+      expect(hostReconcile).not.toHaveBeenCalled()
+      expect(sfsPropagate).not.toHaveBeenCalled()
+      await vi.waitFor(() =>
+        expect(mocks.netPolFullReconcile.mock.calls.length).toBeGreaterThan(passesBefore)
+      )
+    } finally {
+      await watcher.stop()
+    }
+  })
+
+  it('still retries convergence when a desired-state Context MODIFIED loses the delete fence', async () => {
+    let contextWatchCallback:
+      | ((
+          type: string,
+          apiObj: {
+            metadata: { name: string; namespace: string; uid: string; generation?: number }
+            spec: { contextId: string; mcpServers: string[] }
+          }
+        ) => Promise<void>)
+      | undefined
+    mocks.watch.mockImplementationOnce(async (path, _options, callback) => {
+      if (path.endsWith('/contexts')) contextWatchCallback = callback
+      return { abort: vi.fn() }
+    })
+
+    const watcher = new McpServerWatcher()
+    await (watcher as any).startContextWatch('lost-fence-desired-state-rv')
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).hostCacheSynced = true
+    ;(watcher as any).mcpWatchGeneration = 1
+    ;(watcher as any).contexts.set('steady-context', {
+      name: 'steady-context',
+      namespace: 'mcp-server',
+      uid: 'steady-context-uid',
+      generation: 4,
+      spec: { contextId: 'steady-context', mcpServers: [] },
+    })
+    const passesBefore = mocks.netPolFullReconcile.mock.calls.length
+    ;(watcher as any).netPolReconciler.reconcileContext.mockRejectedValueOnce(
+      Object.assign(new Error('the UID in the precondition does not match'), { code: 409 })
+    )
+
+    try {
+      await contextWatchCallback!('MODIFIED', {
+        metadata: {
+          name: 'steady-context',
+          namespace: 'mcp-server',
+          uid: 'steady-context-uid',
+          generation: 5,
+        },
+        spec: { contextId: 'steady-context', mcpServers: ['new-server'] },
+      })
+
+      expect((watcher as any).netPolReconciler.reconcileContext).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'steady-context', generation: 5 }),
         expect.objectContaining({ honorsLostFence: false })
       )
       await vi.waitFor(() =>
@@ -2615,6 +2764,161 @@ describe('McpServerWatcher startup', () => {
 
     await contextWatchCallback!('DELETED', modified)
     expect((watcher as any).contextDesiredRevision).toBe(3)
+
+    await watcher.stop()
+  })
+
+  it('T4 — skips Host/SFS fan-out on metadata-only MODIFIED (same uid/generation/spec)', async () => {
+    const watcher = new McpServerWatcher()
+    let contextWatchCallback:
+      | ((
+          type: string,
+          apiObj: {
+            metadata: { name: string; namespace: string; uid?: string; generation?: number }
+            spec: { contextId: string; mcpServers: string[] }
+          }
+        ) => Promise<void>)
+      | undefined
+    mocks.watch.mockImplementationOnce(async (_path, _options, callback) => {
+      contextWatchCallback = callback
+      return { abort: vi.fn() }
+    })
+    await (watcher as any).startContextWatch('context-t4-rv')
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).hostCacheSynced = true
+    ;(watcher as any).hosts.set('bound-host', {
+      name: 'bound-host',
+      namespace: 'mcp-host',
+      spec: { host: 'bound-host', contextRef: 'shared-context', secretRef: 'host-secret' },
+    })
+
+    const added = {
+      metadata: {
+        name: 'shared-context',
+        namespace: 'mcp-server',
+        uid: 'ctx-uid-1',
+        generation: 1011,
+      },
+      spec: { contextId: 'shared-context', mcpServers: ['server-a'] },
+    }
+    await contextWatchCallback!('ADDED', added)
+    await flushMicrotasks()
+
+    const netPol = (watcher as any).netPolReconciler
+    const hostReconcile = vi.spyOn(watcher.getHostReconciler(), 'reconcile')
+    const sfsPropagate = vi.spyOn(watcher as any, 'reconcileSharedFileSystemsReferencedByContext')
+    netPol.reconcileContext.mockClear()
+    hostReconcile.mockClear()
+    sfsPropagate.mockClear()
+
+    const changeSpy = vi.fn()
+    watcher.onChange(changeSpy)
+    const metadataOnlyBefore = await metadataOnlyEventCount()
+
+    const revisionBefore = (watcher as any).contextDesiredRevision
+    const cachedBefore = (watcher as any).contexts.get('shared-context')
+    await contextWatchCallback!('MODIFIED', added)
+    await flushMicrotasks()
+
+    expect((watcher as any).contexts.get('shared-context')).toBe(cachedBefore)
+    expect((watcher as any).contexts.get('shared-context')).toEqual(
+      expect.objectContaining({
+        name: 'shared-context',
+        generation: 1011,
+        spec: added.spec,
+      })
+    )
+    expect((watcher as any).contextDesiredRevision).toBe(revisionBefore)
+    expect(netPol.reconcileContext).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'shared-context', generation: 1011 }),
+      expect.objectContaining({ honorsLostFence: false })
+    )
+    expect(hostReconcile).not.toHaveBeenCalled()
+    expect(sfsPropagate).not.toHaveBeenCalled()
+
+    // The quiet path notifies nobody. An earlier revision called changeCallback
+    // here — the one event where nothing changed, and where this same commit
+    // deliberately does not even replace the cache entry — while a real
+    // desired-state change on this watch still did not call it. The only
+    // subscriber is a console.log in main.ts reporting the MCPSERVER cache, so
+    // for a Context event the line was wrong, and the getAllServers() behind it
+    // is an O(n) rebuild on the hot path this PR removes work from
+    // (#568 review: jozer-rami #2 / zach88 R1-M1, both independently).
+    expect(changeSpy).not.toHaveBeenCalled()
+
+    // …but the absorption is not invisible. The counter is the witness that this
+    // branch ran, which is also what makes the negative assertions above mean
+    // "correctly skipped" rather than "never executed", and it is what an
+    // operator watches to see the Loop A storm return.
+    expect(await metadataOnlyEventCount()).toBe(metadataOnlyBefore + 1)
+
+    await watcher.stop()
+  })
+
+  it('T5 — still fans out on Context MODIFIED when spec or generation changes', async () => {
+    const watcher = new McpServerWatcher()
+    let contextWatchCallback:
+      | ((
+          type: string,
+          apiObj: {
+            metadata: { name: string; namespace: string; uid?: string; generation?: number }
+            spec: { contextId: string; mcpServers: string[] }
+          }
+        ) => Promise<void>)
+      | undefined
+    mocks.watch.mockImplementationOnce(async (_path, _options, callback) => {
+      contextWatchCallback = callback
+      return { abort: vi.fn() }
+    })
+    await (watcher as any).startContextWatch('context-t5-rv')
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).hostCacheSynced = true
+    ;(watcher as any).hosts.set('bound-host', {
+      name: 'bound-host',
+      namespace: 'mcp-host',
+      spec: { host: 'bound-host', contextRef: 'shared-context', secretRef: 'host-secret' },
+    })
+
+    const added = {
+      metadata: {
+        name: 'shared-context',
+        namespace: 'mcp-server',
+        uid: 'ctx-uid-1',
+        generation: 1011,
+      },
+      spec: { contextId: 'shared-context', mcpServers: ['server-a'] },
+    }
+    await contextWatchCallback!('ADDED', added)
+    await flushMicrotasks()
+
+    const netPol = (watcher as any).netPolReconciler
+    const hostReconcile = vi.spyOn(watcher.getHostReconciler(), 'reconcile')
+    const sfsPropagate = vi.spyOn(watcher as any, 'reconcileSharedFileSystemsReferencedByContext')
+    netPol.reconcileContext.mockClear()
+    hostReconcile.mockClear()
+    sfsPropagate.mockClear()
+
+    const revisionBefore = (watcher as any).contextDesiredRevision
+    await contextWatchCallback!('MODIFIED', {
+      ...added,
+      metadata: { ...added.metadata, generation: 1012 },
+      spec: { ...added.spec, mcpServers: ['server-a', 'server-b'] },
+    })
+    await flushMicrotasks()
+
+    expect((watcher as any).contextDesiredRevision).toBe(revisionBefore + 1)
+    expect(sfsPropagate).toHaveBeenCalled()
+    expect(hostReconcile).toHaveBeenCalledWith(expect.objectContaining({ name: 'bound-host' }))
+    expect(netPol.reconcileContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'shared-context',
+        generation: 1012,
+        spec: expect.objectContaining({ mcpServers: ['server-a', 'server-b'] }),
+      }),
+      expect.objectContaining({ isCurrent: expect.any(Function) })
+    )
 
     await watcher.stop()
   })

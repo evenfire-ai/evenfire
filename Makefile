@@ -1279,6 +1279,14 @@ test-e2e-hcc-mcp-context-readiness: ## Prove HCC readiness during exact MCP/Cont
 	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
 	E2E_HCC_MCP_READINESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-mcp-context-readiness.sh
 
+.PHONY: test-e2e-wrc-hcc-context-noop-resync
+test-e2e-wrc-hcc-context-noop-resync: ## Prove WRC Context no-op plus HCC periodic policy self-heal (PR #568 T14)
+	@echo "Running WRC/HCC Context no-op and periodic NetworkPolicy resync gate..."
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	E2E_WRC_HCC_CONTEXT_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" \
+	  MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) \
+	  bash scripts/e2e/e2e-wrc-hcc-context-noop-resync.sh
+
 .PHONY: test-e2e-hcc-rollout-readiness
 test-e2e-hcc-rollout-readiness: ## Measure the HCC Recreate rollout window (D1/c4). EXPECT_STUCK=1 reproduces the D1b outage; EXPECT_RECOVERY=1 proves the evenfire#391 rollout-undo path. The two flags are EXCLUSIVE; default both 0 = healthy measurement.
 	@echo "Running HCC rollout readiness gate..."

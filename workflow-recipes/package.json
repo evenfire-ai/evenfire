@@ -1,6 +1,6 @@
 {
   "name": "workload-recipes-controller",
-  "version": "0.1.339",
+  "version": "0.1.344",
   "description": "Workload Recipes Controller (WRC) - WorkloadRecipe lifecycle management and MCP server interface",
   "main": "dist/main.js",
   "engines": {
@@ -29,8 +29,8 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1009.0",
     "@clerum/codex-catalog-projection": "file:../packages/codex-catalog-projection",
-    "@clerum/llm-provider-attempt-contract": "file:../packages/llm-provider-attempt-contract",
     "@clerum/image-policy": "file:../packages/image-policy",
+    "@clerum/llm-provider-attempt-contract": "file:../packages/llm-provider-attempt-contract",
     "@clerum/llm-providers": "file:../packages/llm-providers",
     "@clerum/network-policy-core": "file:../packages/network-policy-core",
     "@clerum/workflow-recipe-capability-policy": "file:../packages/workflow-recipe-capability-policy",
@@ -49,6 +49,7 @@
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^20.10.0",
     "@types/pg": "^8.20.0",
+    "fast-check": "^4.9.0",
     "js-yaml": "^4.1.1",
     "ts-node": "^10.9.2",
     "vitest": "^3.0.0"
