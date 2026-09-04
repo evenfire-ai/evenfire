@@ -36,7 +36,7 @@ async function snapshot(
   const query = vi.fn(async (sql: string, values: unknown[]) => {
     const representationJti = values[3]
     const requestedVersion = values[4]
-    const logicalCheckpoint = values[10] === true
+    const logicalCheckpoint = values[11] === true
     const sessionLive =
       requestedVersion === stored.version &&
       !stored.revoked &&
@@ -47,7 +47,7 @@ async function snapshot(
     expect(sql).toContain('s.idle_expires_at > NOW()')
     expect(sql).toContain('s.absolute_expires_at > NOW()')
     expect(sql).toContain('s.session_version = $5')
-    expect(sql).toContain('$11::boolean')
+    expect(sql).toContain('$12::boolean')
     return {
       rows: [
         {
@@ -102,7 +102,7 @@ describe('logical-session checkpoint authority', () => {
   ] as const)('denies a %s logical session', async (_label, stored) => {
     const { result, values } = await snapshot(stored, logical())
     expect(result?.sessionLive).toBe(false)
-    expect(values[10]).toBe(true)
+    expect(values[11]).toBe(true)
     expect(values[3]).toBeNull()
   })
 
@@ -128,7 +128,7 @@ describe('logical-session checkpoint authority', () => {
       sessionVersion: live.version,
     })
     expect(wrong.result?.sessionLive).toBe(false)
-    expect(wrong.values[10]).toBe(false)
+    expect(wrong.values[11]).toBe(false)
     expect(wrong.values[3]).not.toBeNull()
 
     const current = await snapshot(live, {

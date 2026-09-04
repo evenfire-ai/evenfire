@@ -128,7 +128,7 @@ export async function loadPrincipalAuthoritySnapshot(input: {
                    AND s.idle_expires_at > NOW()
                    AND s.absolute_expires_at > NOW()
                    AND (
-                     $11::boolean
+                     $12::boolean
                      OR s.current_jti::text = $4
                      OR (
                        s.prior_jti::text = $4
