@@ -279,11 +279,15 @@
   line-height: 1;
   width: 1.75rem;
 }
-.eft-row-actions__trigger:hover,
+.eft-row-actions__trigger:hover:not(:disabled),
 .eft-row-actions__trigger[aria-expanded='true'] {
   background: var(--eft-surface-muted);
   border-color: var(--eft-border);
   color: var(--eft-text);
+}
+.eft-row-actions__trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 .eft-row-actions__menu {
   background: var(--eft-surface);
