@@ -69,10 +69,12 @@ if grep -Fq 'kind: WorkflowRecipe' "$RUNTIME_GATE" &&
    grep -Fq 'contextRef: ${CONTEXT_NAME}' "$RUNTIME_GATE" &&
    grep -Fq 'transport:' "$RUNTIME_GATE" &&
    grep -Fq 'context_projection_converged' "$RUNTIME_GATE" &&
+   grep -Fq 'WORKLOAD_SELECTOR="clerum.io/recipe=${RECIPE_NAME},clerum.io/workload=mock-tools"' "$RUNTIME_GATE" &&
+   grep -Fq 'mcp_workload_deployment_json' "$RUNTIME_GATE" &&
    ! grep -Fq 'kctl patch context' "$RUNTIME_GATE"; then
-  pass "WRC-HCC runtime gate reaches Context state through a real WorkflowRecipe, not a direct Context patch"
+  pass "WRC-HCC runtime gate follows the real WorkflowRecipe projection and its assigned workload identity"
 else
-  fail "WRC-HCC runtime gate bypasses the real WRC to Context transition"
+  fail "WRC-HCC runtime gate bypasses WRC or invents the assigned workload identity"
 fi
 
 if grep -Fq 'wrc_reconciled_after "$reconciles_before"' "$RUNTIME_GATE" &&

@@ -57,6 +57,7 @@ PROBE_NAME="$(truncate_rfc1123 "e2e-pr568-probe-${RUN_LABEL}")"
 CONTEXT_POLICY="ctx-${CONTEXT_NAME}-${MCP_NAME}"
 CONTEXT_EGRESS_POLICY="${CONTEXT_POLICY}-egress"
 RPC_EGRESS_POLICY="rpc-egress-${CONTEXT_NAME}-${MCP_NAME}"
+WORKLOAD_SELECTOR="clerum.io/recipe=${RECIPE_NAME},clerum.io/workload=mock-tools"
 RESYNC_SECONDS="${E2E_WRC_HCC_NETPOL_RESYNC_SEC:-120}"
 RESYNC_TIMEOUT_SECONDS="${E2E_WRC_HCC_RESYNC_TIMEOUT_SEC:-360}"
 
@@ -123,6 +124,13 @@ resource_absent() {
   ! kctl get "$kind" "$name" -n "$namespace" >/dev/null 2>&1
 }
 
+resource_collection_absent() {
+  local kind=$1 namespace=$2 selector=$3 count
+  count="$(kctl get "$kind" -n "$namespace" -l "$selector" -o json 2>/dev/null |
+    jq -r '.items | length')" || return 1
+  [ "$count" = 0 ]
+}
+
 running_hcc_pod() {
   ready_pod_name "$HCC_NS" "app=${HCC_DEPLOY}"
 }
@@ -179,11 +187,18 @@ mcpserver_current_ready() {
     ' >/dev/null
 }
 
+mcp_workload_deployment_json() {
+  local deployments
+  deployments="$(kctl get deployments -n "$MCP_NS" -l "$WORKLOAD_SELECTOR" -o json 2>/dev/null)" ||
+    return 1
+  jq -ce 'if (.items | length) == 1 then .items[0] else empty end' <<<"$deployments"
+}
+
 mcp_runtime_still_ready() {
-  local deployment_ready endpoint_addresses
+  local deployment deployment_ready endpoint_addresses
   mcpserver_current_ready || return 1
-  deployment_ready="$(kctl get deployment "$MCP_NAME" -n "$MCP_NS" \
-    -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" || return 1
+  deployment="$(mcp_workload_deployment_json)" || return 1
+  deployment_ready="$(jq -r '.status.readyReplicas // 0' <<<"$deployment")" || return 1
   [ "${deployment_ready:-0}" -ge 1 ] || return 1
   endpoint_addresses="$(kctl get endpoints "$MCP_NAME" -n "$MCP_NS" \
     -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null)" || return 1
@@ -205,7 +220,7 @@ policy_has_identity() {
 }
 
 context_projection_converged() {
-  local context deployment_ready
+  local context deployment deployment_ready
   context="$(kctl get context "$CONTEXT_NAME" -n "$MCP_NS" -o json 2>/dev/null)" || return 1
   jq -e --arg server "$MCP_NAME" '
     .spec.contextId == .metadata.name and
@@ -216,8 +231,8 @@ context_projection_converged() {
   kctl get mcpserver "$MCP_NAME" -n "$MCP_NS" -o json 2>/dev/null |
     jq -e --arg context "$CONTEXT_NAME" '.spec.contextRef == $context' >/dev/null || return 1
   mcpserver_current_ready || return 1
-  deployment_ready="$(kctl get deployment "$MCP_NAME" -n "$MCP_NS" \
-    -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" || return 1
+  deployment="$(mcp_workload_deployment_json)" || return 1
+  deployment_ready="$(jq -r '.status.readyReplicas // 0' <<<"$deployment")" || return 1
   [ "${deployment_ready:-0}" -ge 1 ] || return 1
   kctl get service "$MCP_NAME" -n "$MCP_NS" >/dev/null 2>&1 || return 1
   policy_has_identity "$MCP_NS" "$CONTEXT_POLICY" context-allow || return 1
@@ -368,7 +383,7 @@ fixture_resources_absent() {
   resource_absent workflowrecipe "$RECIPE_NAME" "$WORKFLOW_NS" &&
     resource_absent context "$CONTEXT_NAME" "$MCP_NS" &&
     resource_absent mcpserver "$MCP_NAME" "$MCP_NS" &&
-    resource_absent deployment "$MCP_NAME" "$MCP_NS" &&
+    resource_collection_absent deployment "$MCP_NS" "$WORKLOAD_SELECTOR" &&
     resource_absent service "$MCP_NAME" "$MCP_NS" &&
     resource_absent deployment "$PROBE_NAME" "$HOST_NS" &&
     resource_absent networkpolicy "$CONTEXT_POLICY" "$MCP_NS" &&
@@ -414,7 +429,7 @@ cleanup() {
   if [ "$RECIPE_CREATED" = 1 ] || [ "$CONTEXT_CREATED" = 1 ]; then
     kctl delete mcpserver "$MCP_NAME" -n "$MCP_NS" --ignore-not-found \
       --wait=true --timeout=60s >/dev/null 2>&1 || cleanup_failed=1
-    kctl delete deployment "$MCP_NAME" -n "$MCP_NS" --ignore-not-found \
+    kctl delete deployment -n "$MCP_NS" -l "$WORKLOAD_SELECTOR" --ignore-not-found \
       --wait=true --timeout=60s >/dev/null 2>&1 || cleanup_failed=1
     kctl delete service "$MCP_NAME" -n "$MCP_NS" --ignore-not-found \
       --wait=true --timeout=60s >/dev/null 2>&1 || cleanup_failed=1
