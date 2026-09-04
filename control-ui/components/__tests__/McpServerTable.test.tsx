@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { buildContextResource } from '../../test/fixtures/contextResource'
 import { McpServerTable } from '../McpServerTable'
 
 afterEach(() => {
@@ -56,22 +55,6 @@ function makeItem(overrides: {
     item.status = { conditions: overrides.conditions }
   }
   return item
-}
-
-function makeContextBinding(options: {
-  name: string
-  description?: string
-  mcpServers?: string[]
-}) {
-  const context = buildContextResource({
-    metadata: { name: options.name },
-    spec: { description: options.description ?? '', mcpServers: options.mcpServers ?? [] },
-  })
-  return {
-    name: context.metadata.name,
-    description: context.spec.description,
-    mcpServers: context.spec.mcpServers,
-  }
 }
 
 function makeAgentBinding(contextRef: string, agents: Array<{ id: string; label: string }>) {
