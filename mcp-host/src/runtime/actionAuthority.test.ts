@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { TrustedEdgeActionContextV2 } from '@clerum/action-context-contracts'
-import { RuntimeActionAuthorityError, executeRuntimeEffect } from './actionAuthority'
+import {
+  RuntimeActionAuthorityError,
+  authorityBindingFromTrustedEdge,
+  executeRuntimeEffect,
+  withRuntimeActionAuthority,
+  withRuntimeActionAuthorityForContextManager,
+  withRuntimeActionAuthorityForLlmPort,
+} from './actionAuthority'
 
 function context(): TrustedEdgeActionContextV2 {
   return {
@@ -82,5 +89,63 @@ describe('executeRuntimeEffect', () => {
     })
     expect(result).toBe('ok')
     expect(order).toEqual(['checkpoint', 'provider'])
+  })
+})
+
+describe('runtime effect adapters', () => {
+  it('rechecks before every reasoning attempt and blocks the provider after revocation', async () => {
+    const provider = vi.fn().mockResolvedValue({ type: 'text', content: 'contacted' })
+    const delegate = {
+      respondWithTools: provider,
+      continueWithToolResults: provider,
+    }
+    const checkpoint = vi.fn().mockResolvedValueOnce('allowed').mockResolvedValueOnce('denied')
+    const guarded = withRuntimeActionAuthority(
+      delegate,
+      authorityBindingFromTrustedEdge(context()),
+      checkpoint
+    )
+    const reasoningContext = { messages: [], available_tools: [] }
+
+    await expect(guarded.respondWithTools(reasoningContext)).resolves.toMatchObject({
+      type: 'text',
+    })
+    await expect(guarded.respondWithTools(reasoningContext)).rejects.toMatchObject({
+      code: 'access_path_stale',
+    })
+    expect(checkpoint).toHaveBeenCalledTimes(2)
+    expect(provider).toHaveBeenCalledTimes(1)
+  })
+
+  it('blocks a fallback provider attempt when live authority is unavailable', async () => {
+    const complete = vi.fn().mockResolvedValue({ content: 'contacted' })
+    const guarded = withRuntimeActionAuthorityForLlmPort(
+      {
+        complete,
+        completeWithTools: vi.fn(),
+        modelName: () => 'test-model',
+      },
+      authorityBindingFromTrustedEdge(context()),
+      vi.fn().mockRejectedValue(new Error('checkpoint offline'))
+    )
+
+    await expect(guarded.complete({ messages: [] })).rejects.toMatchObject({
+      code: 'authority_unavailable',
+    })
+    expect(complete).not.toHaveBeenCalled()
+  })
+
+  it('blocks context management and its side effects when live authority is denied', async () => {
+    const manage = vi.fn().mockResolvedValue([])
+    const guarded = withRuntimeActionAuthorityForContextManager(
+      { manage },
+      authorityBindingFromTrustedEdge(context()),
+      vi.fn().mockResolvedValue('denied')
+    )
+
+    await expect(
+      guarded.manage([], { pending_approval: undefined } as never)
+    ).rejects.toMatchObject({ code: 'access_path_stale' })
+    expect(manage).not.toHaveBeenCalled()
   })
 })
