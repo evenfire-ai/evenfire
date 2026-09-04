@@ -34,6 +34,11 @@ const FRESH_TABLE_INDEXES = Object.freeze([
   'invitation_delivery_commands_invitation_idx',
 ])
 
+const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
+  '0107_llm_provider_attempts_sdk_link',
+  '0108_llm_provider_attempts_sdk_link_on_delete_set_null',
+] as const)
+
 function databaseUrl(baseUrl: string, database: string): string {
   const value = new URL(baseUrl)
   value.pathname = `/${database}`
@@ -314,17 +319,26 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
 
   it('cancels and rolls back one ordinary migration statement within 15 seconds', async () => {
     const client = await databasePool.connect()
-    const appliedVersions = new Set(PR1_MIGRATION_VERSIONS.slice(0, 3))
+    const appliedVersions = new Set([
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR1_MIGRATION_VERSIONS.slice(0, 3),
+    ])
     const recordTable = `d34_record_${randomBytes(4).toString('hex')}`
     await client.query(`CREATE TEMP TABLE ${recordTable}(version text PRIMARY KEY)`)
-    const migrations = PR1_MIGRATION_VERSIONS.map(version => ({
-      version,
-      apply: async (db: DbClient) => {
-        if (version === '010c_composable_catalog_revisions') {
-          await db.query('SELECT pg_sleep(20)')
-        }
-      },
-    }))
+    const migrations = [
+      ...DEV_POST_0106_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: async () => undefined,
+      })),
+      ...PR1_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: async (db: DbClient) => {
+          if (version === '010c_composable_catalog_revisions') {
+            await db.query('SELECT pg_sleep(20)')
+          }
+        },
+      })),
+    ]
     const started = Date.now()
     try {
       await expect(
