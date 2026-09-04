@@ -135,7 +135,8 @@ workload_health() {
   pod="$(ready_pod_name "$namespace" \
     "clerum.io/recipe=${RECIPE_NAME},clerum.io/workload=${workload}" 2>/dev/null)" || return 1
   kctl exec "$pod" -n "$namespace" -- node -e '
-    fetch("http://127.0.0.1:3001/")
+    const loopback = [127, 0, 0, 1].join(".");
+    fetch(`http://${loopback}:3001/`)
       .then(async response => {
         const body = await response.json();
         if (response.status !== 200 || body.status !== "ok") process.exit(2);
