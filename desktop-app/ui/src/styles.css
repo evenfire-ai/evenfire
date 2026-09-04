@@ -1930,10 +1930,10 @@ h3 {
   background: var(--list-item-hover-bg);
 }
 
-.nav-link--with-toggle .nav-link-main.ui-nav-item,
+.nav-link .nav-link-main.ui-nav-item,
 .nav-link--with-toggle .nav-link-session-toggle.ui-icon-button,
 .nav-link--with-toggle .nav-link-new-chat.ui-icon-button,
-.nav-link--with-toggle .nav-link-main.ui-nav-item:hover:enabled,
+.nav-link .nav-link-main.ui-nav-item:hover:enabled,
 .nav-link--with-toggle .nav-link-session-toggle.ui-icon-button:hover:enabled,
 .nav-link--with-toggle .nav-link-new-chat.ui-icon-button:hover:enabled {
   background: transparent;
@@ -4061,6 +4061,10 @@ h3 {
   align-content: start;
 }
 
+.agent-workspace-shell .chat-thread-dedicated {
+  padding-inline: 0;
+}
+
 .agent-workspace-shell .chat-empty-state {
   min-height: 0;
   padding: 32px 0 20px;
@@ -4107,7 +4111,7 @@ h3 {
 
 .agent-workspace-shell .agent-dedicated-session-row {
   min-height: 36px;
-  padding: var(--space-1) var(--space-2);
+  padding: var(--space-1-5) var(--space-2);
   border-radius: var(--radius-sm);
   border-color: rgba(var(--edge-rgb), 0.2);
   background: rgba(var(--panel-rgb), 0.5);
@@ -4196,26 +4200,18 @@ h3 {
   color: var(--text);
 }
 
-.agent-workspace-greeting {
-  margin: 0;
-  color: var(--text);
-  font-size: var(--font-size-2xl);
-  font-weight: 700;
-  line-height: 1.1;
+/* ── New-chat landing ────────────────────────────────────────────────────── */
+
+.agent-workspace-new-chat {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
 }
 
-.agent-workspace-greeting-inline {
-  width: min(100%, 1120px);
-  max-width: min(100%, 1120px);
-  margin: 0 auto;
-  padding: 50px 0 var(--space-1);
-}
-
-/* Greeting-as-title-row: "Welcome back {name}! New chat with [agent ▾]".
- * The agent selector (ResourceBreadcrumbSwitcher) rides inline on the SAME
- * baseline as the title text — it must never wrap to its own line.
- * `nowrap` + `inline-flex` keep title and selector on one row; the title
- * shrinks (ellipsis) if space is tight rather than pushing the selector down. */
 .agent-workspace-greeting-row {
   width: min(100%, 1120px);
   max-width: min(100%, 1120px);
@@ -4224,14 +4220,17 @@ h3 {
   display: flex;
   flex-wrap: nowrap;
   align-items: baseline;
+  justify-content: center;
   gap: var(--space-1-5);
   min-width: 0;
 }
 
 .agent-workspace-greeting-row .agent-workspace-greeting {
-  /* Title text shares the row with the selector; let it shrink if needed. */
-  padding: 0;
   margin: 0;
+  color: var(--text);
+  font-size: var(--font-size-2xl);
+  font-weight: 700;
+  line-height: 1.1;
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -4240,15 +4239,12 @@ h3 {
 }
 
 .agent-workspace-greeting-row .agent-title-selector {
-  /* Selector pinned to the title baseline; never wraps, never shrinks. */
   flex: 0 0 auto;
   align-self: center;
 }
 
-/* The trigger must inherit the title's typography (2xl / 700). The base
- * .ui-button--sm rule (font-size-sm) has equal specificity but loads later in
- * the file, so we scope to the greeting row AND chain the size class to win.
- * Keep the pill padding (from .agent-title-selector-trigger) intact. */
+/* Keep the new-chat title and selector identical to the origin/dev greeting
+ * row while retaining the current composer and sessions layout below it. */
 .agent-workspace-greeting-row .agent-title-selector-trigger.ui-button,
 .agent-workspace-greeting-row .agent-title-selector-trigger.ui-button--sm {
   font-size: var(--font-size-2xl);
@@ -4257,26 +4253,31 @@ h3 {
   min-height: 0;
 }
 
+.agent-workspace-greeting-row .agent-title-selector-trigger.ui-button--text.ui-button--transparent {
+  color: var(--brand-deep-blue);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  transition: color 120ms ease;
+}
+
+.agent-workspace-greeting-row
+  .agent-title-selector-trigger.ui-button--text.ui-button--transparent:hover,
+.agent-workspace-greeting-row
+  .agent-title-selector-trigger.ui-button--text.ui-button--transparent:focus-visible,
+.agent-workspace-greeting-row
+  .agent-title-selector-trigger.ui-button--text.ui-button--transparent[aria-expanded='true'] {
+  color: var(--accent);
+  outline: none;
+  text-decoration: none;
+}
+
 .agent-workspace-greeting-row .agent-title-selector-trigger svg {
   width: 18px;
   height: 18px;
-}
-
-/* Leading agent icon in the trigger label (the title text only — NOT in the
- * dropdown rows). Fixed at 16px so it matches the SidebarNav "Agents" item
- * exactly. Inherits the trigger's color so it shares the same blue as the
- * agent name + chevron (IconAgents is fill=currentColor). */
-.agent-title-selector-trigger-icon {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  color: inherit;
-}
-
-.agent-title-selector-trigger-icon svg,
-.agent-workspace-greeting-row .agent-title-selector-trigger-icon svg {
-  width: 16px;
-  height: 16px;
 }
 
 /* ── Agent title selector dropdown ──
@@ -4289,37 +4290,6 @@ h3 {
   align-items: center;
 }
 
-/* All three pieces — icon, agent name, chevron — share the same darker blue
- * at rest (currentColor), so they read as one linked element distinct from the
- * bold black "Welcome back" title text.
- *
- * Specificity note: the Button renders as .ui-button--text.ui-button--transparent
- * which forces `color: inherit` at (0,3,0). To beat that we need (0,4,0):
- * greeting-row + trigger + two chained button-variant classes. */
-.agent-workspace-greeting-row .agent-title-selector-trigger.ui-button--text.ui-button--transparent {
-  color: var(--brand-deep-blue);
-  background: transparent;
-  border: 0;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  transition: color 120ms ease;
-}
-
-/* Hover/focus/open lightens toward the brand blue across all three (icon +
- * name + chevron) since they all inherit currentColor. */
-.agent-workspace-greeting-row
-  .agent-title-selector-trigger.ui-button--text.ui-button--transparent:hover,
-.agent-workspace-greeting-row
-  .agent-title-selector-trigger.ui-button--text.ui-button--transparent:focus-visible,
-.agent-workspace-greeting-row
-  .agent-title-selector-trigger.ui-button--text.ui-button--transparent[aria-expanded='true'] {
-  color: var(--accent);
-  outline: none;
-  text-decoration: none;
-}
-
 .agent-title-selector-trigger:focus-visible {
   box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.26);
 }
@@ -4330,12 +4300,11 @@ h3 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  /* Inherits the trigger's blue at rest and the deeper blue on hover. */
+  /* Keep the label aligned with the trigger's current color state. */
 }
 
-/* The chevron svg uses stroke; point it at currentColor so it picks up the
- * trigger's blue at rest (and the deeper blue on hover) just like the filled
- * IconAgents glyph, which already inherits via fill=currentColor. */
+/* The chevron svg uses stroke; point it at currentColor so it follows the
+ * trigger's current color state. */
 .agent-title-selector-trigger svg {
   fill: none;
   stroke: currentColor;
@@ -5550,6 +5519,16 @@ h3 {
   margin-right: auto;
 }
 
+.agent-workspace-body-slot > .agent-workspace-new-chat > .composer-inline,
+.agent-workspace-shell .agent-dedicated-sessions-card-inline {
+  width: min(100%, 920px);
+  max-width: min(100%, 920px);
+}
+
+.agent-workspace-body-slot > .agent-workspace-new-chat > .composer-inline {
+  padding-top: var(--space-3);
+}
+
 .agent-dedicated-sessions-header {
   display: flex;
   align-items: center;
@@ -5694,8 +5673,8 @@ h3 {
 
 .agent-dedicated-session-time {
   font-size: var(--font-size-xs);
-  font-weight: 600;
-  color: var(--text);
+  font-weight: var(--font-weight-regular);
+  color: var(--text-dim);
   white-space: nowrap;
 }
 
@@ -6994,6 +6973,7 @@ h3 {
   border: 1px solid rgba(var(--edge-rgb), 0.22);
   border-radius: var(--radius-md);
   background: var(--surface-soft);
+  box-shadow: 0 1px 6px rgba(var(--overlay-rgb), 0.08);
 }
 
 .composer-textarea-viewport {
@@ -7051,7 +7031,7 @@ h3 {
   gap: var(--space-1);
   min-width: 0;
   padding: var(--space-1-5);
-  border-top: 1px solid rgba(var(--edge-rgb), 0.16);
+  border-top: 1px solid transparent;
 }
 
 .composer textarea::placeholder {
