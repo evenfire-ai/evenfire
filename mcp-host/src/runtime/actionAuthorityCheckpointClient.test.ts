@@ -9,6 +9,7 @@ import {
   McpHostActionAuthorityCheckpointError,
   checkpointMcpHostActionAuthority,
   mcpHostActionAuthorityCheckpointRequest,
+  runtimeActionCheckpointDecision,
 } from './actionAuthorityCheckpointClient'
 
 const runtimeAuth = vi.hoisted(() => ({ refreshWithRecovery: vi.fn() }))
@@ -131,5 +132,18 @@ describe('mcp-host action-authority checkpoint client', () => {
     await expect(checkpointMcpHostActionAuthority(binding, auth(), fetchImpl)).rejects.toEqual(
       new McpHostActionAuthorityCheckpointError('authority_unavailable')
     )
+  })
+})
+
+describe('runtimeActionCheckpointDecision', () => {
+  it.each([
+    ['allowed', 'allowed'],
+    ['denied', 'denied'],
+    ['not_found', 'denied'],
+    ['access_path_stale', 'denied'],
+    ['authority_unavailable', 'unavailable'],
+    ['invalid_binding', 'denied'],
+  ] as const)('maps %s to %s', (status, expected) => {
+    expect(runtimeActionCheckpointDecision({ status } as never)).toBe(expected)
   })
 })

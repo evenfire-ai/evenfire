@@ -9,6 +9,26 @@ import { type McpHostRuntimeAuth, refreshWithRecovery } from '../workflow/userAp
 
 const CHECKPOINT_TIMEOUT_MS = 5_000
 
+export function runtimeActionCheckpointDecision(
+  response: ActionAuthorityCheckpointResponseV2
+): 'allowed' | 'denied' | 'unavailable' {
+  switch (response.status) {
+    case 'allowed':
+      return 'allowed'
+    case 'authority_unavailable':
+      return 'unavailable'
+    case 'denied':
+    case 'not_found':
+    case 'access_path_stale':
+    case 'invalid_binding':
+      return 'denied'
+    default: {
+      const exhaustive: never = response
+      return exhaustive
+    }
+  }
+}
+
 export class McpHostActionAuthorityCheckpointError extends Error {
   constructor(readonly code: 'authority_unavailable') {
     super(code)
