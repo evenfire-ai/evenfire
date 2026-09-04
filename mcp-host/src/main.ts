@@ -114,6 +114,10 @@ import { sanitizeError } from './progress/intentExtraction'
 import { progressReporterRegistry } from './progress/sseProgressReporter'
 import { MessageQueue, Task } from './queue'
 import { ResultStore } from './resultStore'
+import {
+  checkpointMcpHostActionAuthority,
+  runtimeActionCheckpointDecision,
+} from './runtime/actionAuthorityCheckpointClient'
 import { markFileAttachmentsDelivered } from './runtime/fileAttachmentDelivery'
 import { isUndeliveredResult, markResultDelivered } from './runtime/resultDelivery'
 import { dispatchMcpHostRuntime } from './runtimeDispatch'
@@ -1680,6 +1684,12 @@ async function initializeAgent(): Promise<void> {
   // print the value gets it redacted before it leaves mcp-host.
   agent.setDynamicEnvProvider(() => agentToolEnvProvider(configStore))
   agent.setSecretEntriesProvider(() => configStore?.listSecretEntries() ?? [])
+  agent.setActionAuthorityCheckpoint(async binding => {
+    const auth = runtimeAuth
+    if (!auth) return 'unavailable'
+    const result = await checkpointMcpHostActionAuthority(binding, auth)
+    return runtimeActionCheckpointDecision(result)
+  })
 
   // Phase 7–8: Create WorkspaceService when memory is enabled
   const memoryCfg = currentHost?.spec.memory || config.memory

@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type {
+  AuthorityBindingV2,
+  TrustedEdgeActionContextV2,
+} from '@clerum/action-context-contracts'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { LlmError, LlmErrorCode } from '../../core/errors'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
@@ -13,6 +17,7 @@ import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { anthropicApiError } from '../../llm/__tests__/sdkErrorFixtures'
 import { ClaudeProvider } from '../../llm/claude'
 import type { Task, TaskError, TaskSource } from '../../queue/types'
+import { authorityBindingFromTrustedEdge } from '../../runtime/actionAuthority'
 import { resolveProviderWorkflowCallerContext } from '../../workflow/providerWorkflowCallerContextClient'
 import { TaskExecutor, type TaskExecutorDeps, executionModeForSource } from '../taskExecutor'
 
@@ -79,6 +84,48 @@ function createTask(content: string = 'Test', sender: string = 'user-1'): Task {
     responseCallback: vi.fn(async () => {}),
     createdAt: new Date(),
   }
+}
+
+function runtimeAuthority(): AuthorityBindingV2 {
+  const context: TrustedEdgeActionContextV2 = {
+    version: 2,
+    userId: '11111111-1111-4111-8111-111111111111',
+    sid: '22222222-2222-4222-8222-222222222222',
+    sessionVersion: 3,
+    delegationJti: '33333333-3333-4333-8333-333333333333',
+    operationId: 'chat.message.invoke',
+    resource: {
+      environmentId: 'cluster.local/evenfire',
+      type: 'host',
+      canonicalId: 'host:mcp-host/chatllm',
+      logicalId: 'mcp-host/chatllm',
+      displayName: 'chatllm',
+    },
+    target: {
+      hostRef: 'mcp-host/chatllm',
+      channelType: 'rpc',
+      channelId: 'chatllm',
+      messageId: '44444444-4444-4444-8444-444444444444',
+    },
+    targetHash: `ath2_${'a'.repeat(43)}`,
+    accessPathId: `ap1_${'b'.repeat(43)}`,
+    authorizationRevision: `ar1_${'c'.repeat(43)}`,
+    pathKind: 'direct',
+    effectiveTeamId: null,
+    behaviorBindingHash: `bh2_${'d'.repeat(43)}`,
+    behavior: {
+      budget: { state: 'known', value: 'direct-budget' },
+      credentialPolicy: { state: 'known', value: null },
+      approvalPolicy: { state: 'known', value: null },
+      filesystemScope: { state: 'known', value: null },
+      runtime: { state: 'known', value: 'runtime-a' },
+      providerModelPolicy: { state: 'known', value: 'model-policy-a' },
+      audit: { state: 'known', value: 'audit-a' },
+    },
+    checkedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  }
+  return authorityBindingFromTrustedEdge(context)
 }
 
 function createDeps(overrides?: Partial<TaskExecutorDeps>): TaskExecutorDeps {
@@ -213,6 +260,51 @@ describe('TaskExecutor', () => {
     expect(registerDesktopTools).toHaveBeenCalledTimes(1)
     expect(deps.onComplete).toHaveBeenCalledWith(task)
     expect(task.responseCallback).toHaveBeenCalled()
+  })
+
+  it('fails closed before a v2 provider call when live authority was revoked', async () => {
+    const providerCall = vi.fn().mockResolvedValue({
+      content: 'must not be returned',
+      tool_calls: null,
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      finish_reason: 'stop',
+    })
+    vi.mocked(runToolUseLoop).mockImplementationOnce(async config => {
+      await config.reasoning.respondWithTools({
+        messages: [],
+        available_tools: [],
+      })
+      return {
+        type: 'response',
+        content: 'must not be returned',
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      }
+    })
+    const checkpoint = vi.fn().mockResolvedValue('denied' as const)
+    const task = createTask('Hello', runtimeAuthority().userId)
+    task.sourceMessage!.channelType = 'rpc'
+    task.sourceMessage!.authorityV2 = runtimeAuthority()
+    const deps = createDeps({
+      llmProvider: {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: providerCall,
+        getProviderType: () => 'openai' as const,
+      } as any,
+      actionAuthorityCheckpoint: checkpoint,
+    })
+
+    await new TaskExecutor(task, deps).run()
+
+    expect(checkpoint).toHaveBeenCalledWith(runtimeAuthority())
+    expect(providerCall).not.toHaveBeenCalled()
+    expect(deps.onFail).toHaveBeenCalledWith(
+      task,
+      expect.objectContaining({
+        code: 'access_path_stale',
+        retryable: false,
+        provider: 'unknown',
+      })
+    )
   })
 
   it('enriches channel trace context with the persisted conversation id', async () => {
