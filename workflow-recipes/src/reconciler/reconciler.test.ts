@@ -476,6 +476,85 @@ describe('WorkflowRecipeReconciler', () => {
     })
   })
 
+  it.each([
+    { code: 503, failureClass: 'transient', conditionStatus: 'Unknown' },
+    { code: 422, failureClass: 'permanent', conditionStatus: 'True' },
+  ] as const)(
+    'keeps an active SDK-only recipe available on reap-only HTTP $code',
+    async ({ code, failureClass, conditionStatus }) => {
+      const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
+        phase: 'active',
+        message: 'Plugin Workload SDK mcp-host registered',
+        pluginWorkloadSdkBootstrapProof: {
+          ready: true,
+          contractVersion: 2,
+          podUid: 'sdk-pod-uid',
+          provider: 'zai',
+          model: 'glm-4.7',
+          policyReady: true,
+          verifiedAt: '2026-09-04T00:00:00.000Z',
+        },
+      })
+      ;(
+        reconciler as unknown as {
+          config: { pluginWorkloadSdkEnabled: boolean }
+          workflowReconciler: {
+            reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+          }
+        }
+      ).config.pluginWorkloadSdkEnabled = true
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: {
+            reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+          }
+        }
+      ).workflowReconciler = { reconcilePluginWorkloadSdkOnly }
+      mockNetworkingApi.listNamespacedNetworkPolicy.mockImplementation(
+        ({ namespace }: { namespace: string }) =>
+          Promise.resolve({
+            items:
+              namespace === 'sandbox-recipes'
+                ? [
+                    {
+                      metadata: {
+                        name: 'wl-egress-test-recipe-retired',
+                        uid: 'uid-retired',
+                        resourceVersion: 'rv-retired',
+                      },
+                    },
+                  ]
+                : [],
+          })
+      )
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(
+        ({ name }: { name: string }) =>
+          name === 'wl-egress-test-recipe-retired' ? Promise.reject({ code }) : Promise.resolve({})
+      )
+
+      const result = await reconciler.reconcile(
+        makeRecipe({
+          spec: {
+            agent: { provider: 'zai', model: 'glm-4.7' },
+            workloads: [
+              { id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 },
+            ],
+            pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+          },
+          status: { phase: 'active', message: 'All workloads deployed' },
+        })
+      )
+
+      expect(reconcilePluginWorkloadSdkOnly).toHaveBeenCalled()
+      expect(result.phase).toBe('active')
+      expect(result.message).toBe('All workloads deployed')
+      expect(result.networkPolicyReapProjection).toMatchObject({
+        failureClass,
+        condition: { status: conditionStatus },
+      })
+    }
+  )
+
   it('preserves a clean reap projection when a downstream SDK-only adapter throws', async () => {
     const reconcilePluginWorkloadSdkOnly = vi
       .fn()
@@ -2175,9 +2254,13 @@ describe('WorkflowRecipeReconciler', () => {
   })
 
   it('reconcileDelete prunes WRC internal-dependency policies across WRC namespaces', async () => {
+    const inventoryReads = new Map<string, number>()
     mockNetworkingApi.listNamespacedNetworkPolicy.mockImplementation(
-      ({ namespace }: { namespace: string }) =>
-        Promise.resolve({
+      ({ namespace }: { namespace: string }) => {
+        const read = inventoryReads.get(namespace) ?? 0
+        inventoryReads.set(namespace, read + 1)
+        if (read > 0) return Promise.resolve({ items: [] })
+        return Promise.resolve({
           items:
             namespace === 'sandbox-recipes'
               ? [
@@ -2211,6 +2294,7 @@ describe('WorkflowRecipeReconciler', () => {
                     ]
                   : [],
         })
+      }
     )
     const recipe = makeRecipe({
       spec: {
@@ -5370,10 +5454,10 @@ describe('WorkflowRecipeReconciler', () => {
       }
     })
 
-    it('T7c degrades and retries on a transient delete failure', async () => {
-      // A 5xx must reach the caller as RetryableReconcileError specifically. A
-      // bare Error lands in the default arm, which sets phase failed PLUS
-      // workflowPhase failed — the outcome a transient blip must never produce.
+    it('T7c keeps a healthy recipe active and retries on a transient reap-only delete failure', async () => {
+      // Desired policies have already converged; only stale cleanup failed. A
+      // 5xx must remain observable/retryable without using recipe phase as an
+      // incomplete security fence that blocks otherwise healthy consumers.
       liveIn('sandbox-recipes', 'wl-egress-test-recipe-worker')
       // Only the policy under test fails; the ui-egress inline delete must not
       // absorb the rejection.
@@ -5384,16 +5468,55 @@ describe('WorkflowRecipeReconciler', () => {
             : Promise.resolve({})
       )
 
-      const result = await reconciler.reconcile(makeRecipe())
+      const result = await reconciler.reconcile(
+        makeRecipe({
+          status: {
+            phase: 'active',
+            message: 'All workloads deployed',
+            workloads: [{ id: 'worker', type: 'deployment', phase: 'deployed', ready: true }],
+          },
+        })
+      )
 
       // Liveness witness: the prune ran and attempted this exact delete.
       expect(allDeletedNames()).toContain('wl-egress-test-recipe-worker')
-      // The EXACT phase, not merely "not active". A bare Error carrying the same
-      // message falls through to the terminal arm and yields `failed`, whose
-      // `String(error)` also contains "failed transiently" — so a looser
-      // assertion passes for both and the mutation survives (it did, once).
-      expect(result.phase).toBe('degraded')
-      expect(result.message).toContain('NetworkPolicy reap incomplete')
+      expect(result.phase).toBe('active')
+      expect(result.message).toBe('All workloads deployed')
+      expect(result.networkPolicyReapProjection).toMatchObject({
+        failureClass: 'transient',
+        requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+        requeueFixedInterval: false,
+        condition: { status: 'Unknown', reason: 'ReapRetrying' },
+      })
+    })
+
+    it('does not publish clean while an accepted stale-policy delete is still terminating', async () => {
+      const name = 'wl-egress-test-recipe-worker'
+      liveIn('sandbox-recipes', name)
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+        ({ name: requested }: { name: string }) =>
+          requested === name
+            ? Promise.resolve({
+                metadata: {
+                  name,
+                  uid: `uid-${name}`,
+                  resourceVersion: `rv-${name}-terminating`,
+                  deletionTimestamp: '2026-09-04T00:00:00.000Z',
+                },
+              })
+            : Promise.reject({ code: 404 })
+      )
+
+      const result = await reconciler.reconcile(
+        makeRecipe({ status: { phase: 'active', message: 'All workloads deployed' } })
+      )
+
+      expect(result.phase).toBe('active')
+      expect(result.networkPolicyReapProjection).toMatchObject({
+        failureClass: 'transient',
+        requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+        condition: { status: 'Unknown', reason: 'ReapRetrying' },
+      })
     })
 
     it('reaps completed families even when internal-dependency validation fails later', async () => {
@@ -5515,6 +5638,195 @@ describe('WorkflowRecipeReconciler', () => {
       expect(result.message).not.toContain('[object Object]')
     })
 
+    it.each([
+      {
+        branch: 'awaiting-trigger',
+        code: 503,
+        failureClass: 'transient',
+        conditionStatus: 'Unknown',
+        recipe: () =>
+          makeRecipe({
+            spec: {
+              workloads: [],
+              steps: [{ id: 'run', instruction: 'Run after an on-demand trigger.' }],
+              triggers: { onDemand: { allowedActors: ['user'] } },
+            },
+            status: { phase: 'active' },
+          }),
+      },
+      {
+        branch: 'awaiting-trigger',
+        code: 422,
+        failureClass: 'permanent',
+        conditionStatus: 'True',
+        recipe: () =>
+          makeRecipe({
+            spec: {
+              workloads: [],
+              steps: [{ id: 'run', instruction: 'Run after an on-demand trigger.' }],
+              triggers: { onDemand: { allowedActors: ['user'] } },
+            },
+            status: { phase: 'active' },
+          }),
+      },
+      {
+        branch: 'running',
+        code: 503,
+        failureClass: 'transient',
+        conditionStatus: 'Unknown',
+        recipe: () =>
+          makeRecipe({
+            metadata: {
+              name: 'test-recipe',
+              namespace: 'sandbox-recipes',
+              uid: 'uid-123',
+              labels: { 'clerum.io/workflow-run-id': 'run-123' },
+            },
+            spec: { workloads: [], steps: [{ id: 'run', instruction: 'Run now.' }] },
+            status: { phase: 'active', workflowExecution: { phase: 'running' } },
+          }),
+      },
+      {
+        branch: 'running',
+        code: 422,
+        failureClass: 'permanent',
+        conditionStatus: 'True',
+        recipe: () =>
+          makeRecipe({
+            metadata: {
+              name: 'test-recipe',
+              namespace: 'sandbox-recipes',
+              uid: 'uid-123',
+              labels: { 'clerum.io/workflow-run-id': 'run-123' },
+            },
+            spec: { workloads: [], steps: [{ id: 'run', instruction: 'Run now.' }] },
+            status: { phase: 'active', workflowExecution: { phase: 'running' } },
+          }),
+      },
+      {
+        branch: 'completed',
+        code: 503,
+        failureClass: 'transient',
+        conditionStatus: 'Unknown',
+        recipe: () =>
+          makeRecipe({
+            metadata: {
+              name: 'test-recipe',
+              namespace: 'sandbox-recipes',
+              uid: 'uid-123',
+              labels: { 'clerum.io/workflow-run-id': 'run-123' },
+            },
+            spec: { workloads: [], steps: [{ id: 'run', instruction: 'Run now.' }] },
+            status: {
+              phase: 'active',
+              message: 'Workflow completed',
+              workflowExecution: { phase: 'completed' },
+            },
+          }),
+      },
+      {
+        branch: 'completed',
+        code: 422,
+        failureClass: 'permanent',
+        conditionStatus: 'True',
+        recipe: () =>
+          makeRecipe({
+            metadata: {
+              name: 'test-recipe',
+              namespace: 'sandbox-recipes',
+              uid: 'uid-123',
+              labels: { 'clerum.io/workflow-run-id': 'run-123' },
+            },
+            spec: { workloads: [], steps: [{ id: 'run', instruction: 'Run now.' }] },
+            status: {
+              phase: 'active',
+              message: 'Workflow completed',
+              workflowExecution: { phase: 'completed' },
+            },
+          }),
+      },
+    ] as const)(
+      'keeps the $branch workflow result intact on reap-only HTTP $code',
+      async ({ code, failureClass, conditionStatus, recipe: makeWorkflowRecipe }) => {
+        const recipe = makeWorkflowRecipe()
+        liveIn('sandbox-recipes', 'wl-egress-test-recipe-retired')
+        const baseline = await reconciler.reconcile(recipe)
+
+        mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(
+          ({ name }: { name: string }) =>
+            name === 'wl-egress-test-recipe-retired'
+              ? Promise.reject({ code })
+              : Promise.resolve({})
+        )
+        const pending = await reconciler.reconcile(recipe)
+
+        expect(pending.phase).toBe(baseline.phase)
+        expect(pending.message).toBe(baseline.message)
+        expect(pending.workloadStatuses).toEqual(baseline.workloadStatuses)
+        expect(pending.workflowPhase).toBe(baseline.workflowPhase)
+        expect(pending.workflowPhase).not.toBe('failed')
+        expect(pending.skipStatusPatch).toBe(false)
+        expect(pending.networkPolicyReapProjection).toMatchObject({
+          failureClass,
+          condition: { status: conditionStatus },
+        })
+      }
+    )
+
+    it.each([
+      { code: 503, failureClass: 'transient', conditionStatus: 'Unknown' },
+      { code: 422, failureClass: 'permanent', conditionStatus: 'True' },
+    ] as const)(
+      'continues first workflow deployment after a reap-only HTTP $code',
+      async ({ code, failureClass, conditionStatus }) => {
+        liveIn('sandbox-recipes', 'wl-egress-test-recipe-retired')
+        mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(
+          ({ name }: { name: string }) =>
+            name === 'wl-egress-test-recipe-retired'
+              ? Promise.reject({ code })
+              : Promise.resolve({})
+        )
+        const workflowReconcile = vi.fn().mockResolvedValue({
+          phase: 'deploying',
+          message: 'Workflow infrastructure created',
+          workflowPhase: 'initializing',
+        })
+        ;(
+          reconciler as unknown as {
+            workflowReconciler: {
+              reconcile: typeof workflowReconcile
+              validateWorkflowSpec: () => undefined
+              setCodexReconcileContext: () => undefined
+            }
+          }
+        ).workflowReconciler = {
+          reconcile: workflowReconcile,
+          validateWorkflowSpec: () => undefined,
+          setCodexReconcileContext: () => undefined,
+        }
+
+        const result = await reconciler.reconcile(
+          makeRecipe({
+            spec: {
+              workloads: [
+                { id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 },
+              ],
+              steps: [{ id: 'run', instruction: 'Run the workflow.' }],
+            },
+            status: { phase: 'candidate' },
+          })
+        )
+
+        expect(workflowReconcile).toHaveBeenCalled()
+        expect(result.phase).toBe('deploying')
+        expect(result.workflowPhase).toBe('initializing')
+        expect(result.networkPolicyReapProjection).toMatchObject({
+          failureClass,
+          condition: { status: conditionStatus },
+        })
+      }
+    )
+
     it('preserves a clean projection when the inner workflow reconcile throws after deploy', async () => {
       liveIn('sandbox-recipes', 'wl-egress-test-recipe-retired')
       const workflowReconcile = vi
@@ -5622,17 +5934,28 @@ describe('WorkflowRecipeReconciler', () => {
       expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
 
-    it('classifies a permanent delete 422 as terminal rather than transient', async () => {
+    it('classifies a permanent reap-only delete 422 without terminalizing a healthy recipe', async () => {
       liveIn('sandbox-recipes', 'wl-egress-test-recipe-gone')
       mockNetworkingApi.deleteNamespacedNetworkPolicy.mockRejectedValue({ code: 422 })
 
-      const result = await reconciler.reconcile(makeRecipe())
+      const result = await reconciler.reconcile(
+        makeRecipe({
+          status: {
+            phase: 'active',
+            message: 'All workloads deployed',
+            workloads: [{ id: 'worker', type: 'deployment', phase: 'deployed', ready: true }],
+          },
+        })
+      )
 
-      expect(result.phase).toBe('failed')
+      expect(result.phase).toBe('active')
+      expect(result.message).toBe('All workloads deployed')
       expect(result.networkPolicyReapProjection).toMatchObject({
         failureClass: 'permanent',
+        requeueAfterMs: 60_000,
+        requeueFixedInterval: true,
+        condition: { status: 'True', reason: 'PermanentReapFailure' },
       })
-      expect(result.message).not.toContain('failed transiently')
     })
 
     it('attaches deterministic retry work to transient and authorization reap failures', async () => {
@@ -5641,7 +5964,7 @@ describe('WorkflowRecipeReconciler', () => {
 
       const transient = await reconciler.reconcile(makeRecipe())
 
-      expect(transient.phase).toBe('degraded')
+      expect(transient.phase).toBe('active')
       expect(transient.networkPolicyReapProjection).toMatchObject({
         failureClass: 'transient',
         requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
@@ -5674,6 +5997,45 @@ describe('WorkflowRecipeReconciler', () => {
       await expect(reconciler.reconcileDelete(makeRecipe())).rejects.toThrow(
         /NetworkPolicy cleanup incomplete/
       )
+    })
+
+    it('keeps the recipe finalizer while an accepted NetworkPolicy delete is still pending', async () => {
+      liveIn('sandbox-recipes', 'wr-intdep-egress-test-recipe-old')
+      let confirmations = 0
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+        ({ name }: { name: string }) => {
+          if (name !== 'wr-intdep-egress-test-recipe-old') return Promise.reject({ code: 404 })
+          confirmations += 1
+          return confirmations === 1
+            ? Promise.resolve({
+                metadata: {
+                  name,
+                  uid: `uid-${name}`,
+                  resourceVersion: `rv-${name}-terminating`,
+                  deletionTimestamp: '2026-09-04T00:00:00.000Z',
+                },
+              })
+            : Promise.reject({ code: 404 })
+        }
+      )
+
+      await expect(reconciler.reconcileDelete(makeRecipe())).rejects.toThrow(
+        /NetworkPolicy cleanup incomplete/
+      )
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'wr-intdep-egress-test-recipe-old',
+          body: {
+            preconditions: {
+              uid: 'uid-wr-intdep-egress-test-recipe-old',
+              resourceVersion: 'rv-wr-intdep-egress-test-recipe-old',
+            },
+          },
+        })
+      )
+
+      await expect(reconciler.reconcileDelete(makeRecipe())).resolves.toBeUndefined()
+      expect(confirmations).toBe(2)
     })
 
     it('refuses to replace a same-name recipe policy owned by another recipe', async () => {
@@ -5737,11 +6099,41 @@ describe('WorkflowRecipeReconciler', () => {
       // Widening it to all six families is what closes the 47 orphan policies of
       // deleted recipes, and it needs its own failure contract — a finalizer
       // that throws can wedge a recipe in Terminating. Separate PR.
-      liveIn(
-        'sandbox-recipes',
-        'wr-intdep-egress-test-recipe-app',
-        'wl-egress-test-recipe-worker',
-        'ui-ingress-test-recipe-app'
+      let sandboxInventories = 0
+      mockNetworkingApi.listNamespacedNetworkPolicy.mockImplementation(
+        ({ namespace }: { namespace: string }) =>
+          Promise.resolve({
+            items:
+              namespace === 'sandbox-recipes'
+                ? [
+                    ...(sandboxInventories++ === 0
+                      ? [
+                          {
+                            metadata: {
+                              name: 'wr-intdep-egress-test-recipe-app',
+                              uid: 'uid-wr-intdep',
+                              resourceVersion: 'rv-wr-intdep',
+                            },
+                          },
+                        ]
+                      : []),
+                    {
+                      metadata: {
+                        name: 'wl-egress-test-recipe-worker',
+                        uid: 'uid-wl-egress',
+                        resourceVersion: 'rv-wl-egress',
+                      },
+                    },
+                    {
+                      metadata: {
+                        name: 'ui-ingress-test-recipe-app',
+                        uid: 'uid-ui-ingress',
+                        resourceVersion: 'rv-ui-ingress',
+                      },
+                    },
+                  ]
+                : [],
+          })
       )
 
       await reconciler.reconcileDelete(makeRecipe())
@@ -6012,20 +6404,54 @@ describe('WorkflowRecipeReconciler', () => {
     })
 
     it.each([
-      { code: 409, phase: 'degraded', failureClass: 'transient' },
-      { code: 503, phase: 'degraded', failureClass: 'transient' },
-      { code: 422, phase: 'failed', failureClass: 'permanent' },
+      { code: 409, failureClass: 'transient', status: 'Unknown', reason: 'ReapRetrying' },
+      { code: 503, failureClass: 'transient', status: 'Unknown', reason: 'ReapRetrying' },
+      {
+        code: 422,
+        failureClass: 'permanent',
+        status: 'True',
+        reason: 'PermanentReapFailure',
+      },
     ] as const)(
-      'classifies LIST $code as $failureClass and returns $phase',
-      async ({ code, phase, failureClass }) => {
+      'classifies reap-only LIST $code as $failureClass without replacing the healthy phase',
+      async ({ code, failureClass, status, reason }) => {
         mockNetworkingApi.listNamespacedNetworkPolicy.mockRejectedValue({ code })
 
-        const result = await reconciler.reconcile(makeRecipe())
+        const result = await reconciler.reconcile(
+          makeRecipe({ status: { phase: 'active', message: 'All workloads deployed' } })
+        )
 
-        expect(result.phase).toBe(phase)
-        expect(result.networkPolicyReapProjection).toMatchObject({ failureClass })
+        expect(result.phase).toBe('active')
+        expect(result.networkPolicyReapProjection).toMatchObject({
+          failureClass,
+          condition: { status, reason },
+        })
       }
     )
+
+    it('keeps phase orthogonal when mixed reap-only failures span namespaces', async () => {
+      mockNetworkingApi.listNamespacedNetworkPolicy.mockImplementation(
+        ({ namespace }: { namespace: string }) => {
+          if (namespace === 'sandbox-recipes') return Promise.reject({ code: 503 })
+          if (namespace === 'sandbox-ui') return Promise.reject({ code: 403 })
+          return Promise.reject({ code: 422 })
+        }
+      )
+
+      const result = await reconciler.reconcile(
+        makeRecipe({ status: { phase: 'active', message: 'All workloads deployed' } })
+      )
+
+      expect(result.phase).toBe('active')
+      expect(result.message).toBe('All workloads deployed')
+      expect(result.networkPolicyReapProjection).toMatchObject({
+        failureClass: 'permanent',
+        requeueAfterMs: 60_000,
+        requeueFixedInterval: true,
+        condition: { status: 'True', reason: 'PermanentReapFailure' },
+      })
+      expect(result.networkPolicyReapProjection?.condition?.message).toContain('3 place(s)')
+    })
 
     it('M-4 · a 401 is permanent, not transient: signalled like a 403', async () => {
       // An expired ServiceAccount token never clears by retrying. Treating it as

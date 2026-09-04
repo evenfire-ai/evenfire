@@ -370,9 +370,15 @@ policies (they carry no `clerum.io/recipe` label), the workflow run lane's, the
 - **Logs:** `Deleted stale <family> NetworkPolicy "<name>" in <ns> (not in desired set)`
   appears only on an actual deletion. There is deliberately no per-pass line — at three
   namespaces × 19 recipes × ~206 passes/hour that would be ~12 k lines/hour.
-- **A denied reap does not fail the recipe.** RBAC `401`/`403` — both permanent — leave
-  stale policies **enforced** and are reported three ways: an error log naming what could
-  not be removed, the `NetworkPolicyReapFailed` condition on the recipe (written in both
+- **An incomplete reap does not change recipe phase.** At this point every desired policy
+  family was already built and applied; only inventory/deletion of the stale live set is
+  incomplete. Reusing `phase` as a cleanup signal would block correctly configured
+  consumers without fencing running workloads or closing the residual allow. The
+  `NetworkPolicyReapFailed` condition plus deterministic retry owns this orthogonal
+  lifecycle instead.
+
+  RBAC `401`/`403` leaves stale policies **enforced** and is reported three ways: an error
+  log naming what could not be removed, the condition on the recipe (written in both
   directions, so it clears on the next clean pass), and the
   `clerum_wrc_networkpolicy_reap_denied_total` counter, labelled by `family` and by
   `operation`. The counter is monotonic event history, not current state: alert on
@@ -385,24 +391,23 @@ policies (they carry no `clerum.io/recipe` label), the workflow run lane's, the
   any family was reaped there. A denied `LIST` skips that namespace and continues with
   the others rather than failing the pass.
 
-  The recipe `phase` is deliberately untouched. Failing it would take a working recipe
-  out of service — `control-api` gates Sandbox UI access and workflow invocation on
-  `phase === 'active'` — over a residual object, and the transient-latch self-heal only
-  clears messages that look like infrastructure faults, which an authorization failure
-  does not.
+  Transient reap-only failures (`409`, `429`, 5xx, timeout or transport) publish
+  `Unknown/ReapRetrying` and use bounded exponential backoff. Permanent request failures
+  (for example `400`/`405`/`422`) publish `True/PermanentReapFailure` and use a slow fixed
+  recheck. Neither replaces the recipe phase/message/workload status. A failure while
+  building or applying a **desired** policy remains a separate `laneError` and retains its
+  existing fail/retry/preserve semantics because desired enforcement may not exist.
 
-- **A transient failure (5xx, timeout, transport fault) degrades and retries** on the next
-  pass, using the same contract as any other transient infrastructure fault. This applies
-  to both the `LIST` and the `DELETE`.
-- **A permanent request failure (for example 400/405/422) fails the reconcile** rather
-  than being mislabeled transient. It remains visible through
-  `NetworkPolicyReapFailed` and is rechecked at a slow operator cadence.
 - **Destructive freshness:** immediately before pruning, WRC rechecks the recipe UID and
   generation after the complete LIST. Every DELETE carries the listed policy
   UID/resourceVersion as Kubernetes preconditions. The `ui-egress`/`wl-egress` no-op gate
   also advances `clerum.io/recipe-generation` (and therefore resourceVersion) once per
   recipe generation even when the enforced rules are unchanged. Together these prevent
   an obsolete reconcile or changed object from being deleted blindly.
+- **Deletion confirmation:** a successful DELETE response is only acceptance. WRC reads
+  each accepted target and reports the reap incomplete until that exact name returns 404;
+  this prevents `False/Reaped` or finalizer removal while admission or a child finalizer
+  still keeps the NetworkPolicy in `Terminating`.
 - **RBAC invariant.** The prune queries exactly `sandbox-recipes`, `mcp-server` and
   `sandbox-ui`, because `resolveWorkloadNamespace` can return no others. The
   `workflow-recipes` ServiceAccount holds `list` and `delete` on `networkpolicies` in all
@@ -425,6 +430,28 @@ npm test -- recipeValidator RecipesTab RecipeEditor RecipeDefaultsPanel RecipeSt
 
 Recipe unit tests live in `control-ui/lib/__tests__/recipeValidator.test.ts` and
 `control-ui/components/__tests__/Recipe*.test.tsx`.
+
+### WRC live-set and finalizer E2E
+
+Run this only against an explicitly verified, branch-owned Kubernetes context:
+
+```bash
+MINIKUBE_PROFILE=<verified-profile> \
+E2E_KUBECONTEXT=<verified-context> \
+make test-e2e-wrc-internal-dependency-networkpolicy
+```
+
+The synthetic fixture has one source and two healthy backend routes. It first proves both
+routes and their inferred policies, then reapplies the WorkflowRecipe without only the
+`DROP_URL` dependency. Acceptance requires the DROP route/policy to disappear, the KEEP
+route to remain reachable, the recipe to remain active, and
+`NetworkPolicyReapFailed=False/Reaped` to survive natural rollout status patches.
+
+Finalization installs a test-only deletion barrier on one owned NetworkPolicy. WRC must
+request that deletion while retaining `clerum.io/workload-cleanup` on the terminating
+recipe; only after the barrier is released and the policy is absent may the recipe
+disappear. Direct NetworkPolicy deletion exists only in emergency cleanup after the gate
+has already failed, so it cannot make the success path green.
 
 ### Playwright E2E (currently BLOCKED — does not run)
 

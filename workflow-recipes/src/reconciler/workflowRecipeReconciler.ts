@@ -2791,26 +2791,12 @@ export class WorkflowRecipeReconciler {
           networkPolicyReapProjection,
         }
       }
-      if (networkPolicyReapProjection?.failureClass === 'transient') {
-        return {
-          phase: 'degraded',
-          message: networkPolicyReapProjection.condition?.message ?? 'NetworkPolicy reap retrying',
-          workloadStatuses: [],
-          internalDependencyConditions,
-          networkPolicyReapProjection,
-        }
-      }
-      if (networkPolicyReapProjection?.failureClass === 'permanent') {
-        return {
-          phase: 'failed',
-          message:
-            networkPolicyReapProjection.condition?.message ??
-            'Permanent NetworkPolicy reap failure',
-          workloadStatuses: [],
-          internalDependencyConditions,
-          networkPolicyReapProjection,
-        }
-      }
+      // A failureClass here belongs exclusively to pruning the stale live set:
+      // every desired family was already built and applied, and laneError is
+      // empty. Keep that operational signal orthogonal to recipe lifecycle.
+      // Changing phase would block correctly configured Sandbox UI/workflow
+      // consumers without fencing already-running workloads or closing the
+      // residual allow. The condition plus retry owns convergence instead.
 
       // Step 9a: MCP delegation — finalize (Context patch + ensure McpServer CRDs).
       // McpServer CRDs were already created in Step 7b (pre-deploy handshake).
@@ -3665,24 +3651,9 @@ export class WorkflowRecipeReconciler {
         internalDependencyConditions
       )
     }
-    if (networkPolicyReapProjection?.failureClass === 'transient') {
-      throw new NetworkPolicyPassError(
-        new RetryableReconcileError(
-          networkPolicyReapProjection.condition?.message ?? 'NetworkPolicy reap retrying'
-        ),
-        networkPolicyReapProjection,
-        internalDependencyConditions
-      )
-    }
-    if (networkPolicyReapProjection?.failureClass === 'permanent') {
-      throw new NetworkPolicyPassError(
-        new Error(
-          networkPolicyReapProjection.condition?.message ?? 'Permanent NetworkPolicy reap failure'
-        ),
-        networkPolicyReapProjection,
-        internalDependencyConditions
-      )
-    }
+    // Reap-only failures do not invalidate desired workflow infrastructure.
+    // Carry their condition/retry projection through the normal workflow path;
+    // only laneError (desired policy calculation/apply) may alter lifecycle.
 
     // MCP delegation — finalize Context allowlist and McpServer CRDs.
     // Children live in `mcp-server` (mcpBatchNs), not the recipe's own ns.
@@ -4582,31 +4553,14 @@ export class WorkflowRecipeReconciler {
         networkPolicyReapProjection: projection,
       }
     }
-    if (projection?.failureClass === 'transient') {
-      return {
-        phase: 'degraded',
-        message: projection.condition?.message ?? 'NetworkPolicy reap retrying',
-        workloadStatuses: baseResult.workloadStatuses,
-        internalDependencyConditions,
-        networkPolicyReapProjection: projection,
-      }
-    }
-    if (projection?.failureClass === 'permanent') {
-      return {
-        phase: 'failed',
-        message: projection.condition?.message ?? 'Permanent NetworkPolicy reap failure',
-        workloadStatuses: baseResult.workloadStatuses,
-        internalDependencyConditions,
-        networkPolicyReapProjection: projection,
-      }
-    }
-
     return {
       ...baseResult,
       // Preserve the historical fast-path skip unless this pass has an actual
-      // reap transition to publish. A clean projection over a legacy recipe that
-      // never carried the condition need not create status churn; clean MUST,
-      // however, clear a persisted True/Unknown signal.
+      // reap transition to publish. Failure projections are deliberately an
+      // overlay too: they must publish/retry without replacing a healthy base
+      // phase. A clean projection over a legacy recipe that never carried the
+      // condition need not create status churn; clean MUST clear a persisted
+      // True/Unknown signal.
       skipStatusPatch:
         baseResult.skipStatusPatch === true &&
         !this.workflowFastPathReapConditionNeedsPatch(recipe, projection?.condition) &&
@@ -5163,6 +5117,7 @@ export class WorkflowRecipeReconciler {
       resourceVersion: string
       recipeGeneration?: string
     }> = []
+    const acceptedDeleteCandidates: typeof deleteCandidates = []
     const log = createLogger('wrc', recipe.metadata.name)
     const classifyFailure = (error: unknown): NetworkPolicyReapFailureClass => {
       const code = getErrorCode(error)
@@ -5261,7 +5216,8 @@ export class WorkflowRecipeReconciler {
       }
     }
 
-    for (const { name, namespace, family, uid, resourceVersion } of deleteCandidates) {
+    for (const candidate of deleteCandidates) {
+      const { name, namespace, family, uid, resourceVersion } = candidate
       try {
         await this.networkingApi.deleteNamespacedNetworkPolicy({
           name,
@@ -5269,6 +5225,7 @@ export class WorkflowRecipeReconciler {
           body: { preconditions: { uid, resourceVersion } },
         })
         deleted += 1
+        acceptedDeleteCandidates.push(candidate)
         log.info('Deleted stale NetworkPolicy', {
           operation: 'delete',
           context: options.context,
@@ -5301,6 +5258,59 @@ export class WorkflowRecipeReconciler {
           failureClass,
           code,
           message: `DELETE failed${code === undefined ? '' : ` with HTTP ${code}`}`,
+        })
+      }
+    }
+
+    // Kubernetes DELETE is an accepted request, not proof that an object is
+    // absent: admission/finalizers can leave it in Terminating after a 2xx. A
+    // targeted read keeps both active condition semantics and CR-finalizer
+    // cleanup honest without adding LIST traffic to steady-state passes.
+    if (failures.length === 0) {
+      for (const { name, namespace, family } of acceptedDeleteCandidates) {
+        try {
+          await this.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
+        } catch (error) {
+          const code = getErrorCode(error)
+          if (code === 404) continue
+          const failureClass = classifyFailure(error)
+          failures.push({
+            operation: 'delete',
+            name,
+            namespace,
+            family,
+            failureClass,
+            code,
+            message: `post-delete confirmation failed${
+              code === undefined ? '' : ` with HTTP ${code}`
+            }`,
+          })
+          log.error('NetworkPolicy deletion confirmation failed', {
+            operation: 'delete',
+            context: options.context,
+            namespace,
+            family,
+            policy: name,
+            code,
+            failureClass,
+            errorClass: error instanceof Error ? error.name : 'KubernetesApiError',
+          })
+          continue
+        }
+        failures.push({
+          operation: 'delete',
+          name,
+          namespace,
+          family,
+          failureClass: 'transient',
+          message: 'deletion accepted but object is still present',
+        })
+        log.warn('NetworkPolicy deletion still pending', {
+          operation: 'delete',
+          context: options.context,
+          namespace,
+          family,
+          policy: name,
         })
       }
     }

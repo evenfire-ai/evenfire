@@ -158,6 +158,38 @@ describe('GET /api/v1/internal/sandbox-ui/registry/:ns/:name', () => {
     })
   })
 
+  it('keeps an active UI routable while NetworkPolicy reap cleanup is pending', async () => {
+    const gateway = new MockGateway()
+    await seedRecipe(gateway, {
+      name: 'r1',
+      spec: {
+        workloads: [{ id: 'web', type: 'deployment', image: 'web:1', port: 8080 }],
+        ui: { workloadRef: 'web', port: 8080 },
+      },
+      status: {
+        phase: 'active',
+        conditions: [
+          {
+            type: 'NetworkPolicyReapFailed',
+            status: 'Unknown',
+            reason: 'ReapRetrying',
+            message: 'stale policy cleanup is retrying',
+          },
+        ],
+      },
+    })
+    seedReadyEndpoints(gateway, 'web')
+
+    const app = createApp(gateway as never)
+    const res = await authed(app, config.sandboxNamespace, 'r1').expect(200)
+
+    expect(res.body).toMatchObject({
+      appRef: `${config.sandboxNamespace}/r1`,
+      service: { name: 'web', namespace: config.sandboxUiNamespace, port: 8080 },
+      ready: true,
+    })
+  })
+
   it('uses status.workloadInstances to resolve the deterministic Service name', async () => {
     const gateway = new MockGateway()
     await seedRecipe(gateway, {
