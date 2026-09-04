@@ -256,34 +256,19 @@ wrc_assert_http_allowed "Opted-in background workload reaches OAuth broker" \
 create_background_probe
 # Establish reachability from this exact pod before removing the one temporary
 # egress permission. The negative then isolates OAuth egress, not API ingress.
-cat <<YAML | kctl create --dry-run=client -f - -o json | wrc_create_owned
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: ${BACKGROUND_PROBE_POD}
-  namespace: ${WORKFLOW_RECIPE_NS}
-spec:
-  podSelector:
-    matchLabels:
-      e2e.clerum.io/probe: ${BACKGROUND_PROBE_POD}
-  policyTypes: [Egress]
-  egress:
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: ${CONTROL_NS}
-          podSelector:
-            matchLabels:
-              app: control-api
-      ports:
-        - protocol: TCP
-          port: 8090
-YAML
+probe_selector="$(jq -cn --arg probe "$BACKGROUND_PROBE_POD" '{"e2e.clerum.io/probe":$probe}')"
+wrc_create_connection_policy "$BACKGROUND_PROBE_POD" Egress "$WORKFLOW_RECIPE_NS" \
+  "$probe_selector" "$CONTROL_NS" '{"app":"control-api"}' 8090
 wrc_assert_http_allowed "OAuth negative probe reaches the same broker with temporary egress" \
   "$WORKFLOW_RECIPE_NS" "$BACKGROUND_PROBE_POD" "$control_api_ip" 8090
 wrc_delete_owned "$WORKFLOW_RECIPE_NS" networkpolicy "$BACKGROUND_PROBE_POD"
 wrc_assert_http_blocked "Probe without recipe/workload labels cannot use OAuth egress" \
   "$WORKFLOW_RECIPE_NS" "$BACKGROUND_PROBE_POD" "$control_api_ip" 8090
+wrc_create_connection_policy "$BACKGROUND_PROBE_POD" Egress "$WORKFLOW_RECIPE_NS" \
+  "$probe_selector" "$CONTROL_NS" '{"app":"control-api"}' 8090
+wrc_assert_http_allowed "The same OAuth negative probe remains healthy after denial" \
+  "$WORKFLOW_RECIPE_NS" "$BACKGROUND_PROBE_POD" "$control_api_ip" 8090
+wrc_delete_owned "$WORKFLOW_RECIPE_NS" networkpolicy "$BACKGROUND_PROBE_POD"
 wrc_assert_http_allowed "OAuth broker remains reachable after the negative" \
   "$WORKFLOW_RECIPE_NS" "deploy/${BACKGROUND_DEPLOYMENT}" "$control_api_ip" 8090
 

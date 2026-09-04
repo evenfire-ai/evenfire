@@ -12,7 +12,7 @@ trap 'rm -rf -- "$FIXTURE_ROOT"' EXIT
 source "$ROOT/scripts/e2e/_lib/wrc-networkpolicy-convergence.sh"
 
 FAIL=0
-POLL_INTERVAL=1
+export POLL_INTERVAL=1
 export E2E_PROBE_TIMEOUT=2
 export PROBE_SCENARIO=http
 export PROBE_SEQUENCE_COUNTER="$FIXTURE_ROOT/nc-counter"
@@ -227,5 +227,63 @@ expect_pass 'complete no-write window with an exact active reconcile and stable 
 for scenario in write-before write-after delayed-write wrong-family missing-witness old-logs observer-changed pretrigger-rv-drift; do
   expect_reject "$scenario despite a completed parent reconcile" observe "$scenario"
 done
+
+# Exercise the actual OAuth caller sequence as well as the shared assertions.
+# A healthy authorised workload cannot substitute for the negative source's
+# post-control when that source has an independent persistent route failure.
+sed -n '/^wrc_assert_http_allowed "OAuth negative probe reaches/,/^oauth_policy_hash=/p' \
+  "$ROOT/scripts/e2e/e2e-sandbox-ui-oauth.sh" | sed '$d' > "$FIXTURE_ROOT/oauth-flow"
+cat > "$FIXTURE_ROOT/oauth-runner.sh" <<'OAUTH'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$1/scripts/e2e/_lib/wrc-networkpolicy-convergence.sh"
+scenario=$2
+flow=$3
+WORKFLOW_RECIPE_NS=sandbox-recipes
+CONTROL_NS=control-plane
+BACKGROUND_PROBE_POD=probe
+BACKGROUND_DEPLOYMENT=healthy-background
+control_api_ip=192.0.2.1
+probe_selector='{"e2e.clerum.io/probe":"probe"}'
+E2E_PROBE_TIMEOUT=2
+POLL_INTERVAL=1
+unset SECONDS
+SECONDS=0
+control_present=1
+permission_removed=0
+sleep() { SECONDS=$((SECONDS + $1)); }
+ok() { :; }
+fail() { printf '%s\n' "$*" >&2; }
+wrc_delete_owned() { control_present=0; permission_removed=1; }
+wrc_create_connection_policy() { control_present=1; }
+wrc_http_probe() {
+  if [ "$2" = probe ] && { [ "$control_present" = 0 ] ||
+       { [ "$permission_removed" = 1 ] && [ "$scenario" = source-outage ]; }; }; then
+    printf '{"outcome":"timeout","body":""}\n'
+  else
+    printf '{"outcome":"http","body":"SFRUUC8xLjEgMjAwIE9LDQoNCm9r"}\n'
+  fi
+}
+source "$flow"
+[ "$permission_removed" = 1 ] && [ "$control_present" = 0 ]
+OAUTH
+
+check_oauth_flow() {
+  local flow=$1
+  [ -s "$flow" ] || return 1
+  bash "$FIXTURE_ROOT/oauth-runner.sh" "$ROOT" healthy "$flow" || return 1
+  if bash "$FIXTURE_ROOT/oauth-runner.sh" "$ROOT" source-outage "$flow"; then
+    printf 'OAuth flow accepted a persistent outage of its negative source\n' >&2
+    return 1
+  fi
+}
+expect_pass 'OAuth actual caller validates the same probe after its denial' check_oauth_flow "$FIXTURE_ROOT/oauth-flow"
+awk '
+  /^wrc_create_connection_policy / { skip=1 }
+  /^wrc_assert_http_allowed "OAuth broker remains reachable/ { skip=0 }
+  !skip { print }
+' "$FIXTURE_ROOT/oauth-flow" > "$FIXTURE_ROOT/oauth-mutated-flow"
+expect_reject 'OAuth mutation that replaces the source post-control with a healthy background workload' \
+  check_oauth_flow "$FIXTURE_ROOT/oauth-mutated-flow"
 
 exit "$FAIL"
