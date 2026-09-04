@@ -146,6 +146,28 @@ export const rules = [
     },
   },
   {
+    id: 'web-no-app-local-table-viewport',
+    severity: 'error',
+    description:
+      'Control UI and Profile UI production views must render standardized table viewports through TableViewport.',
+    applies(file) {
+      return isWebProductionSource(file)
+    },
+    check({ lines }) {
+      const violations = []
+      lines.forEach((line, i) => {
+        if (/\beft-table-viewport(?:--[a-z0-9-]+)?\b/.test(line)) {
+          violations.push({
+            line: i + 1,
+            message:
+              'direct viewport-class authorship bypasses the shared boundary — use @clerum/frontend-components TableViewport',
+          })
+        }
+      })
+      return violations
+    },
+  },
+  {
     id: 'web-no-retired-table-pattern',
     severity: 'error',
     description:

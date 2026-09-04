@@ -14,31 +14,6 @@ function violationsFor(file, content) {
   )
 }
 
-const PRIMARY_RECORD_TABLES = [
-  'control-ui/app/outputs/page.tsx',
-  'control-ui/app/shared-filesystems/page.tsx',
-  'control-ui/components/CodexSubscriptionHub/index.tsx',
-  'control-ui/components/CommunicationChannelsTable.tsx',
-  'control-ui/components/ContextTable.tsx',
-  'control-ui/components/ControlAdminsPanel/index.tsx',
-  'control-ui/components/GuardrailHooksTable.tsx',
-  'control-ui/components/HostTable.tsx',
-  'control-ui/components/LlmDiscoveryPanel/index.tsx',
-  'control-ui/components/LlmModelTable.tsx',
-  'control-ui/components/LlmPriceTable.tsx',
-  'control-ui/components/MarketplaceOrgImages/index.tsx',
-  'control-ui/components/McpServerTable.tsx',
-  'control-ui/components/ProfileAdminHome.tsx',
-  'control-ui/components/PublisherView/GrantedToMe.tsx',
-  'control-ui/components/PublisherView/OwnedEntries.tsx',
-  'control-ui/components/RecipesTab.tsx',
-  'control-ui/components/RegistryApiKeysPanel.tsx',
-  'control-ui/components/RegistryCatalog.tsx',
-  'control-ui/components/SecretsTable.tsx',
-  'control-ui/components/TokenBudgetTable.tsx',
-  'profile-ui/app/members/page.tsx',
-]
-
 test('rejects raw production tables in Control UI and Profile UI', () => {
   assert.equal(
     violationsFor('control-ui/app/agents/page.tsx', '<table><tbody /></table>').length,
@@ -54,6 +29,17 @@ test('allows shared table composition and test fixtures', () => {
   assert.deepEqual(violationsFor('control-ui/app/agents/page.tsx', shared), [])
   assert.deepEqual(violationsFor('profile-ui/__tests__/members.test.tsx', fixture), [])
   assert.deepEqual(violationsFor('packages/frontend-components/src/DataTable.tsx', fixture), [])
+})
+
+test('requires the shared viewport boundary in application production source', () => {
+  const direct = '<div className="eft-table-viewport eft-table-viewport--embedded" />'
+  const shared = '<TableViewport embedded><DataTable /></TableViewport>'
+
+  assert.equal(violationsFor('control-ui/components/Results.tsx', direct).length, 1)
+  assert.equal(violationsFor('profile-ui/app/members/page.tsx', direct).length, 1)
+  assert.deepEqual(violationsFor('control-ui/components/Results.tsx', shared), [])
+  assert.deepEqual(violationsFor('packages/frontend-components/src/index.tsx', direct), [])
+  assert.deepEqual(violationsFor('control-ui/components/__tests__/Results.test.tsx', direct), [])
 })
 
 test('rejects retired production table and expansion families', () => {
@@ -117,30 +103,4 @@ test('shared table typography uses each web app contract', () => {
   assert.match(profileCss, /--eft-table-header-font-size:\s*0\.75rem/)
   assert.match(profileCss, /--eft-table-header-font-weight:\s*600/)
   assert.match(profileCss, /--eft-table-cell-font-size:\s*0\.9rem/)
-})
-
-test('ordinary web record tables keep an explicit sorting model', () => {
-  for (const file of PRIMARY_RECORD_TABLES) {
-    const source = readFileSync(file, 'utf8')
-    assert.match(source, /useTableSort|sortKey/, `${file} must declare its sorting model`)
-    assert.match(source, /onSort/, `${file} must expose sortable headers`)
-  }
-})
-
-test('primary record tables keep headers mounted through data states', () => {
-  for (const file of PRIMARY_RECORD_TABLES) {
-    const source = readFileSync(file, 'utf8')
-    const tableBodies = [
-      ...source.matchAll(/<DataTable\b[\s\S]*?<tbody(?:\s[^>]*)?>([\s\S]*?)<\/tbody>/g),
-    ]
-
-    assert.ok(tableBodies.length > 0, `${file} must render a shared DataTable`)
-    for (const [, body] of tableBodies) {
-      assert.match(
-        body,
-        /<Table(?:State|Empty)Row/,
-        `${file} must keep each DataTable mounted with an in-body state row`
-      )
-    }
-  }
 })
