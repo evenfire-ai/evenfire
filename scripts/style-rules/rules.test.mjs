@@ -52,6 +52,8 @@ test('rejects retired production table and expansion families', () => {
     ['profile-ui/app/settings/page.tsx', "import EditableList from './EditableList'"],
     ['control-ui/app/secrets/page.tsx', '<LlmSecretsSubTabs />'],
     ['control-ui/components/Hosts.tsx', "import RowActions from './RowActions'"],
+    ['control-ui/components/RecipeGrants.tsx', "import GrantsPanel from './GrantsPanel'"],
+    ['control-ui/app/agents/page.tsx', "import { sortRows } from '../../lib/tableSort'"],
   ]
 
   for (const [file, content] of examples) {
@@ -65,6 +67,24 @@ test('does not confuse RowActionsMenu with the retired RowActions component', ()
       'control-ui/components/Hosts.tsx',
       "import { RowActionsMenu } from '@evenfire/frontend-components'\n<RowActionsMenu />"
     ),
+    []
+  )
+})
+
+test('allows shared sorting helpers and similarly named non-retired table symbols', () => {
+  assert.deepEqual(
+    violationsFor(
+      'control-ui/app/agents/page.tsx',
+      "import { createStringComparator } from '@clerum/frontend-components'"
+    ),
+    []
+  )
+  assert.deepEqual(
+    violationsFor('control-ui/components/GrantPanelSummary.tsx', '<GrantPanelSummary />'),
+    []
+  )
+  assert.deepEqual(
+    violationsFor('control-ui/components/__tests__/GrantsPanel.test.tsx', '<GrantsPanel />'),
     []
   )
 })

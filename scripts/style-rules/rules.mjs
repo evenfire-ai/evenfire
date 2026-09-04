@@ -51,6 +51,14 @@ const WEB_LEGACY_TABLE_PATTERNS = [
     pattern: /(?:from\s+['"][^'"]*\/RowActions['"]|<RowActions(?:\s|\/|>))/,
     message: 'retired Control UI RowActions component',
   },
+  {
+    pattern: /(?:from\s+['"][^'"]*\/GrantsPanel['"]|<GrantsPanel(?:\s|\/|>))/,
+    message: 'retired Control UI GrantsPanel component',
+  },
+  {
+    pattern: /from\s+['"][^'"]*\/tableSort['"]/,
+    message: 'retired app-local tableSort helper',
+  },
 ]
 
 // Files where defining hex color tokens is the whole point.
