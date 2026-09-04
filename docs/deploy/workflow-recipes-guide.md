@@ -329,6 +329,9 @@ it cannot hide later drift.
   WRC logger. In steady state expect `network policy unchanged; skipping update` or
   `network policy egress set unchanged; skipping live apply` with `policy`, `namespace`
   and `family` fields. Re-baseline alerts keyed on the old `Updated …` console line.
+  `recipe reconciliation completed` records recipe UID, generation, outcome and retry
+  delay only after the reconciliation result is ready; entering a reconcile is not its
+  completion signal.
 - **NetworkPolicy drift is auto-reverted.** A live change to `podSelector`,
   `policyTypes`, `ingress`, `egress`, WRC-authored metadata or the gateway controller
   owner forces one optimistic-concurrency replace using the `resourceVersion` from the
@@ -338,6 +341,11 @@ it cannot hide later drift.
   whose winner disappears, missing live `resourceVersion`, replace 404/409 or transient
   API failure re-enqueues the parent with bounded backoff. A status-only update is not
   treated as the retry trigger.
+- **Metadata ownership applies to writes too.** Replacing a policy preserves external
+  labels, annotations and finalizers from the validated snapshot. Desired WRC keys win;
+  retired egress state and the legacy spec-hash are removed. Additional foreign lifecycle
+  owners are rejected, not silently dropped or adopted. The workload-egress pre-read uses
+  the same transient-error classification as the downstream apply path.
 - **Other spec-hash-managed objects retain their existing drift contract.** For example,
   a manually scaled recipe Deployment is not reverted until the desired manifest changes;
   its replica-health drift remains visible in recipe status.
@@ -352,7 +360,8 @@ it cannot hide later drift.
 ### WRC NetworkPolicy live-convergence E2E
 
 NetworkPolicy changes must run the aggregate gate against an isolated development
-cluster with an explicit context:
+cluster with an explicit context. Its Make target acquires the existing profile mutation
+lease; individual suites require that same inherited lease:
 
 ```bash
 E2E_KUBECONTEXT=<branch-owned-context> \
@@ -363,10 +372,11 @@ The aggregate fails unless all four executable suites run. Together they cover e
 NetworkPolicy family routed through the live-convergence helper:
 
 - `ui-ingress`, `workload-ingress` and `workload-egress`: correctly configured UI→API
-  and API→sibling traffic, unlabelled negative controls, forced live-spec drift, a real
+  and API→sibling traffic, isolated ingress and undeclared-sibling egress controls,
+  forced live-spec drift, a real
   parent recipe reconcile, repair, a terminating-policy race that self-heals through the
   scheduled retry without a second parent event, and a post-repair no-op witness plus
-  resourceVersion stability window;
+  pre-trigger UID/resourceVersion baseline and full observation window;
 - `internal-dependency`: inferred source→backend traffic, an unlabelled denied pod,
   two-sided policy repair and no-churn;
 - `oauth-broker-egress`: opted-in workload→Control API reachability, an unlabelled
@@ -374,13 +384,30 @@ NetworkPolicy family routed through the live-convergence helper:
 - `webhook-gateway`: all three policies, a signed public webhook business signal,
   spec drift, stale/missing owner repair, route recovery and no-churn.
 
-Every no-churn assertion requires both a policy/family-bound structured WRC no-op log and
-an unchanged `resourceVersion`; observing only the generic parent-reconcile log is not
-sufficient. The public CI runner cannot provide this Calico-backed cluster. It therefore
-runs the fail-loud composition/syntax contract, while the real dataplane result is
-recorded by the exact-head local T2/pre-merge evidence lane. Missing prerequisites, a
-missing family suite, incomplete cleanup or zero executed suites are failures, never
-skips.
+Negative controls first prove reachability from the same probe with a narrow temporary
+permission, remove only that permission, observe a remotely executed connection timeout,
+and prove reachability again. Complementary permissions isolate ingress from egress.
+An exec, authorization, missing-tool or malformed-response error fails the test instead
+of counting as a policy denial. Condition-based polling accommodates CNI propagation.
+
+Every no-churn observation begins before the parent trigger. It requires the exact
+UID/generation completion receipt, every policy/family no-op witness, unchanged policy
+UID/resourceVersion, stable controller replica/container identities, and no observed
+policy write during the entire window. A no-op followed by a write fails even when the
+resourceVersion does not change. Exact API-call counts are asserted separately in unit
+tests; the runtime logs are not a substitute for exhaustive Kubernetes audit accounting.
+
+Fixtures use unique run IDs, collision-safe creation, UID-preconditioned deletion and
+owned dynamic port-forwards. Cleanup never enrolls an existing sample by name, and a
+cleanup failure fails the suite. `E2E_KEEP_RESOURCES=1` explicitly retains run
+resources for inspection, while still stopping owned port-forwards.
+
+The public CI runner cannot provide this Calico-backed cluster. It runs
+`make test-wrc-networkpolicy-contracts`: the actual aggregate against instrumented child
+processes, every child failure/missing-child case, helper fault injection, and fixture
+ownership/cleanup tests. Skipping the child invocation or swallowing a child error fails
+this contract. The real dataplane result remains a separate local T2/pre-merge evidence
+lane. Missing prerequisites, incomplete observations and zero execution are failures.
 
 ### Unit tests (vitest + @testing-library/react)
 

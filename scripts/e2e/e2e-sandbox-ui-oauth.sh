@@ -31,22 +31,29 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/e2e-lib.sh"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/_lib/wrc-networkpolicy-convergence.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/_lib/wrc-fixtures.sh"
+
+if [ "${1:-}" = "--cleanup-only" ]; then
+  echo "Cleanup requires the current run ownership ledger; use normal EXIT cleanup." >&2
+  exit 1
+fi
+wrc_fixture_init
 
 RECIPE_FILE="workflow-recipes/samples/sandbox-ui-oauth-hello.yaml"
-RECIPE_NAME="sandbox-ui-oauth-hello"
+RECIPE_NAME="e2e-oauth-${E2E_RUN_ID}"
 WORKLOAD_ID="hello"
 SANDBOX_UI_NS="sandbox-ui"
-OAUTH_SECRET_NAME="slack-oauth-creds"
-BACKGROUND_RECIPE_NAME="e2e-wrc-oauth-broker"
+OAUTH_SECRET_NAME="e2e-oauth-secret-${E2E_RUN_ID}"
+BACKGROUND_RECIPE_NAME="e2e-broker-${E2E_RUN_ID}"
 BACKGROUND_WORKLOAD_ID="background-worker"
 BACKGROUND_POLICY_NAME="wf-${BACKGROUND_RECIPE_NAME}-oauth-broker-egress"
-BACKGROUND_PROBE_POD="e2e-wrc-oauth-unlabelled"
+BACKGROUND_PROBE_POD="e2e-probe-${E2E_RUN_ID}"
 STABILITY_SECONDS="${E2E_NP_STABILITY_SECONDS:-20}"
 TIMEOUT_RECIPE_ACTIVE="${TIMEOUT_RECIPE_ACTIVE:-180}"
 UI_DEPLOYMENT=""
 BACKGROUND_DEPLOYMENT=""
-UI_PORT_FWD_PORT="${E2E_OAUTH_UI_PORT:-18096}"
-UI_PORT_FWD_PID=""
+# Local UI port is allocated by the owned kubectl child.
 CREATED=0
 
 wait_for_recipe_phase() {
@@ -78,21 +85,18 @@ wait_for_workload_instance() {
   return 1
 }
 
-http_response_from_target() {
-  local target=$1 host=$2 port=$3
-  # shellcheck disable=SC2016
-  kctl exec "$target" -n "$WORKFLOW_RECIPE_NS" -- sh -c 'printf "GET /health HTTP/1.0\r\nHost: e2e\r\nConnection: close\r\n\r\n" | nc -w 6 "$1" "$2"' -- "$host" "$port" 2>/dev/null || true
-}
-
 create_background_probe() {
-  cat <<YAML | kctl apply -f - >/dev/null
+  # This label satisfies Control API's independent ingress policy. The pod
+  # deliberately has no recipe/workload labels selected by OAuth egress.
+  cat <<YAML | kctl create --dry-run=client -f - -o json | wrc_create_owned
 apiVersion: v1
 kind: Pod
 metadata:
   name: ${BACKGROUND_PROBE_POD}
   namespace: ${WORKFLOW_RECIPE_NS}
   labels:
-    e2e.clerum.io/probe: wrc-oauth-unlabelled
+    e2e.clerum.io/probe: ${BACKGROUND_PROBE_POD}
+    clerum.io/oauth-broker-client: "true"
 spec:
   restartPolicy: Never
   securityContext:
@@ -110,50 +114,13 @@ spec:
         capabilities:
           drop: ["ALL"]
 YAML
-  wait_for_pod "$WORKFLOW_RECIPE_NS" "e2e.clerum.io/probe=wrc-oauth-unlabelled" 60
+  wait_for_pod "$WORKFLOW_RECIPE_NS" "e2e.clerum.io/probe=${BACKGROUND_PROBE_POD}" 60
 }
 
 cleanup() {
   local cleanup_status=0
-  header "Cleanup"
-  if [ -n "$UI_PORT_FWD_PID" ]; then
-    if kill -0 "$UI_PORT_FWD_PID" 2>/dev/null; then
-      kill "$UI_PORT_FWD_PID" 2>/dev/null || cleanup_status=1
-    fi
-    wait "$UI_PORT_FWD_PID" 2>/dev/null || true
-    UI_PORT_FWD_PID=""
-  fi
-  kctl delete pod "$BACKGROUND_PROBE_POD" -n "$WORKFLOW_RECIPE_NS" --ignore-not-found \
-    --wait=true --timeout=60s >/dev/null 2>&1 || cleanup_status=1
-  kctl delete workflowrecipe "$BACKGROUND_RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" \
-    --ignore-not-found --wait=false >/dev/null 2>&1 || cleanup_status=1
-  kctl delete workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" \
-    --ignore-not-found --wait=false >/dev/null 2>&1 || cleanup_status=1
-  wait_for_workflowrecipe_deleted "$WORKFLOW_RECIPE_NS" "$BACKGROUND_RECIPE_NAME" \
-    "$TIMEOUT_DELETE" >/dev/null 2>&1 || cleanup_status=1
-  wait_for_workflowrecipe_deleted "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" \
-    "$TIMEOUT_DELETE" >/dev/null 2>&1 || cleanup_status=1
-  # WRC GC follows ownerReferences inside the recipe namespace, but UI
-  # workloads are reconciled cross-namespace (sandbox-recipes →
-  # sandbox-ui) so K8s GC can't follow the link. Force-delete leftovers.
-  if [ -n "$UI_DEPLOYMENT" ]; then
-    kctl delete deployment "$UI_DEPLOYMENT" -n "$SANDBOX_UI_NS" \
-      --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
-    kctl delete svc "$UI_DEPLOYMENT" -n "$SANDBOX_UI_NS" \
-      --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
-  fi
-  kctl delete deployment,service -n "$SANDBOX_UI_NS" -l "clerum.io/recipe=${RECIPE_NAME}" \
-    --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
-  kctl delete deployment,service,networkpolicy -n "$WORKFLOW_RECIPE_NS" \
-    -l "clerum.io/recipe=${BACKGROUND_RECIPE_NAME}" --ignore-not-found \
-    >/dev/null 2>&1 || cleanup_status=1
-  kctl delete networkpolicy "ui-egress-${RECIPE_NAME}" -n "$SANDBOX_UI_NS" \
-    --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
-  kctl delete networkpolicy "$BACKGROUND_POLICY_NAME" -n "$WORKFLOW_RECIPE_NS" \
-    --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
-  kctl delete secret "$OAUTH_SECRET_NAME" -n "$WORKFLOW_RECIPE_NS" \
-    --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
-
+  wrc_stop_port_forward || cleanup_status=1
+  wrc_cleanup_owned || cleanup_status=1
   return "$cleanup_status"
 }
 
@@ -161,6 +128,7 @@ on_exit() {
   local status=$? cleanup_status=0
   trap - EXIT INT TERM
   if [ "${E2E_KEEP_RESOURCES:-0}" = "1" ]; then
+    wrc_stop_port_forward || status=1
     warn "E2E_KEEP_RESOURCES=1; preserving OAuth fixtures for inspection"
     exit "$status"
   fi
@@ -178,10 +146,7 @@ on_exit() {
   exit "$status"
 }
 
-if [[ "${1:-}" == "--cleanup-only" ]]; then
-  cleanup
-  exit $?
-fi
+# Resources are cleaned only through this process's ownership ledger.
 
 trap on_exit EXIT
 trap 'exit 130' INT
@@ -191,8 +156,7 @@ trap 'exit 143' TERM
 check_prerequisites
 
 # ─── Phase 1: Clean Slate ────────────────────────────────────────────
-header "Phase 1 — Clean Slate"
-cleanup >/dev/null 2>&1 || true
+header "Phase 1 — Isolated run ${E2E_RUN_ID}"
 CREATED=1
 
 # ─── Phase 2: Create dummy OAuth credentials Secret ──────────────────
@@ -201,12 +165,17 @@ kctl create secret generic "$OAUTH_SECRET_NAME" \
   -n "$WORKFLOW_RECIPE_NS" \
   --from-literal=client-id="dummy-client-id-for-platform-test" \
   --from-literal=client-secret="dummy-client-secret-for-platform-test" \
-  >/dev/null
+  --dry-run=client -o json | wrc_create_owned
 ok "Secret '${OAUTH_SECRET_NAME}' created in '${WORKFLOW_RECIPE_NS}'"
 
 # ─── Phase 3: Apply Recipe ───────────────────────────────────────────
-apply_recipe "$RECIPE_FILE" "$RECIPE_NAME"
-cat <<YAML | kctl apply -f - >/dev/null
+kctl create --dry-run=client -f "${SCRIPT_DIR}/../../${RECIPE_FILE}" -o json |
+  jq --arg name "$RECIPE_NAME" --arg ns "$WORKFLOW_RECIPE_NS" --arg secret "$OAUTH_SECRET_NAME" '
+    .metadata.name=$name | .metadata.namespace=$ns |
+    .spec.oauthClients[].clientIdRef.name=$secret |
+    .spec.oauthClients[].clientSecretRef.name=$secret' > "$WRC_FIXTURE_DIR/ui-recipe.json"
+wrc_create_owned < "$WRC_FIXTURE_DIR/ui-recipe.json"
+cat <<YAML | kctl create --dry-run=client -f - -o json | wrc_create_owned
 apiVersion: clerum.io/v1alpha1
 kind: WorkflowRecipe
 metadata:
@@ -281,36 +250,53 @@ control_api_ip="$(kctl get service control-api -n "$CONTROL_NS" -o jsonpath='{.s
   exit 1
 }
 
-response="$(http_response_from_target "deploy/${BACKGROUND_DEPLOYMENT}" "$control_api_ip" 8090)"
-if printf '%s' "$response" | grep -Eq 'HTTP/1\.[01] [2345][0-9][0-9]'; then
-  ok "Opted-in background workload reaches the OAuth broker network boundary"
-else
-    fail "Opted-in background workload cannot reach the OAuth broker network boundary"
-    exit 1
-fi
+wrc_assert_http_allowed "Opted-in background workload reaches OAuth broker" \
+  "$WORKFLOW_RECIPE_NS" "deploy/${BACKGROUND_DEPLOYMENT}" "$control_api_ip" 8090
 
 create_background_probe
-response="$(http_response_from_target "$BACKGROUND_PROBE_POD" "$control_api_ip" 8090)"
-if printf '%s' "$response" | grep -Eq 'HTTP/1\.[01] [2345][0-9][0-9]'; then
-  fail "Unlabelled sandbox workload reached Control API through the OAuth policy"
-  exit 1
-fi
-ok "Unlabelled sandbox workload cannot use the OAuth broker egress"
+# Establish reachability from this exact pod before removing the one temporary
+# egress permission. The negative then isolates OAuth egress, not API ingress.
+cat <<YAML | kctl create --dry-run=client -f - -o json | wrc_create_owned
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ${BACKGROUND_PROBE_POD}
+  namespace: ${WORKFLOW_RECIPE_NS}
+spec:
+  podSelector:
+    matchLabels:
+      e2e.clerum.io/probe: ${BACKGROUND_PROBE_POD}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ${CONTROL_NS}
+          podSelector:
+            matchLabels:
+              app: control-api
+      ports:
+        - protocol: TCP
+          port: 8090
+YAML
+wrc_assert_http_allowed "OAuth negative probe reaches the same broker with temporary egress" \
+  "$WORKFLOW_RECIPE_NS" "$BACKGROUND_PROBE_POD" "$control_api_ip" 8090
+wrc_delete_owned "$WORKFLOW_RECIPE_NS" networkpolicy "$BACKGROUND_PROBE_POD"
+wrc_assert_http_blocked "Probe without recipe/workload labels cannot use OAuth egress" \
+  "$WORKFLOW_RECIPE_NS" "$BACKGROUND_PROBE_POD" "$control_api_ip" 8090
+wrc_assert_http_allowed "OAuth broker remains reachable after the negative" \
+  "$WORKFLOW_RECIPE_NS" "deploy/${BACKGROUND_DEPLOYMENT}" "$control_api_ip" 8090
 
 oauth_policy_hash="$(wrc_np_spec_hash "$WORKFLOW_RECIPE_NS" "$BACKGROUND_POLICY_NAME")"
 wrc_inject_selector_drift "$WORKFLOW_RECIPE_NS" "$BACKGROUND_POLICY_NAME"
 wrc_trigger_recipe_reconcile "$WORKFLOW_RECIPE_NS" "$BACKGROUND_RECIPE_NAME" 120
 wrc_wait_for_np_spec_hash "$WORKFLOW_RECIPE_NS" "$BACKGROUND_POLICY_NAME" "$oauth_policy_hash" 120
-response="$(http_response_from_target "deploy/${BACKGROUND_DEPLOYMENT}" "$control_api_ip" 8090)"
-if printf '%s' "$response" | grep -Eq 'HTTP/1\.[01] [2345][0-9][0-9]'; then
-  ok "OAuth broker route recovered after live NetworkPolicy repair"
-else
-    fail "OAuth broker route did not recover after live NetworkPolicy repair"
-    exit 1
-fi
+wrc_assert_http_allowed "OAuth broker route recovered after policy repair" \
+  "$WORKFLOW_RECIPE_NS" "deploy/${BACKGROUND_DEPLOYMENT}" "$control_api_ip" 8090
+wrc_begin_np_observation
+wrc_track_np "$WORKFLOW_RECIPE_NS" "$BACKGROUND_POLICY_NAME" oauth-broker-egress apply
 wrc_trigger_recipe_reconcile "$WORKFLOW_RECIPE_NS" "$BACKGROUND_RECIPE_NAME" 120
-wrc_wait_for_np_noop_witness "$WORKFLOW_RECIPE_NS" "$BACKGROUND_POLICY_NAME" oauth-broker-egress apply 120
-wrc_assert_np_stable "$WORKFLOW_RECIPE_NS" "$BACKGROUND_POLICY_NAME" "$STABILITY_SECONDS"
+wrc_assert_np_observation_clean "$STABILITY_SECONDS" 120
 
 # ─── Phase 5: spec.oauthClients[] survives the round-trip ────────────
 header "Phase 5 — spec.oauthClients[] preserved on the WorkflowRecipe"
@@ -366,10 +352,8 @@ else
   fail "Service '${UI_DEPLOYMENT}' not found in '${SANDBOX_UI_NS}'"
 fi
 
-kctl port-forward -n "$SANDBOX_UI_NS" "service/${UI_DEPLOYMENT}" \
-  "${UI_PORT_FWD_PORT}:8080" >/dev/null 2>&1 &
-UI_PORT_FWD_PID=$!
-ui_base_url="http://127.0.0.1:${UI_PORT_FWD_PORT}"
+wrc_start_port_forward "$SANDBOX_UI_NS" "$UI_DEPLOYMENT" 8080
+ui_base_url="http://127.0.0.1:${WRC_PORT_FORWARD_PORT}"
 elapsed=0
 while [ "$elapsed" -lt 30 ]; do
   if curl -fsS --max-time 2 "${ui_base_url}/" >/dev/null 2>&1; then
@@ -378,11 +362,12 @@ while [ "$elapsed" -lt 30 ]; do
   sleep "$POLL_INTERVAL"
   elapsed=$((elapsed + POLL_INTERVAL))
 done
-if ! kill -0 "$UI_PORT_FWD_PID" 2>/dev/null ||
+if ! wrc_assert_port_forward ||
    ! curl -fsS --max-time 2 "${ui_base_url}/" >/dev/null 2>&1; then
   fail "Scoped OAuth UI Service did not become reachable through its port-forward"
   exit 1
 fi
+wrc_assert_port_forward
 ok "Scoped OAuth UI Service serves its visible route"
 
 # ─── Phase 7: UI lifecycle assets serve correctly ────────────────────

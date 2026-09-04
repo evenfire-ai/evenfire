@@ -859,6 +859,134 @@ describe('WorkflowRecipeReconciler', () => {
       },
     })
 
+    const families: NetworkPolicyFamily[] = [
+      'ui-ingress',
+      'workload-ingress',
+      'workload-egress',
+      'internal-dependency',
+      'oauth-broker-egress',
+      'webhook-gateway',
+    ]
+    const policyForFamily = (family: NetworkPolicyFamily) =>
+      family === 'webhook-gateway'
+        ? gatewayPolicy()
+        : family === 'internal-dependency'
+          ? intdepPolicy()
+          : plainPolicy()
+
+    it.each(families)(
+      'preserves external metadata while repairing real %s spec drift',
+      async family => {
+        const desired = policyForFamily(family)
+        desired.metadata!.labels!['clerum.io/test-contract'] = 'current'
+        desired.metadata!.annotations = {
+          'clerum.io/test-contract': 'current',
+          [SPEC_HASH]: 'obsolete',
+        }
+        const live = livePolicy(desired)
+        live.metadata!.labels!['clerum.io/test-contract'] = 'stale'
+        live.metadata!.labels!['admission.example/tier'] = 'audited'
+        live.metadata!.annotations = {
+          'admission.example/audit': 'keep',
+          'clerum.io/test-contract': 'stale',
+          [SPEC_HASH]: 'legacy',
+          'clerum.io/egress-fqdn-state': 'stale-state',
+          'clerum.io/egress-fqdn-targets': 'stale-targets',
+          'clerum.io/egress-fqdn-resolved-at': 'stale-time',
+        }
+        live.metadata!.finalizers = ['admission.example/cleanup']
+        live.spec!.podSelector = {}
+        const desiredBefore = clone(desired)
+        const liveBefore = clone(live)
+        mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(live)
+
+        await apply(desired, family)
+
+        expect(mockNetworkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+        expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+        const body = mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls[0][0].body
+        expect(body.metadata.labels).toEqual({
+          ...desired.metadata!.labels,
+          'admission.example/tier': 'audited',
+        })
+        expect(body.metadata.annotations).toEqual({
+          'admission.example/audit': 'keep',
+          'clerum.io/test-contract': 'current',
+        })
+        expect(body.metadata.finalizers).toEqual(['admission.example/cleanup'])
+        expect(body.metadata.ownerReferences).toEqual(desired.metadata!.ownerReferences)
+        expect(body.metadata.resourceVersion).toBe('9')
+        expect(body.spec).toEqual(desired.spec)
+        expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+        expect(desired).toEqual(desiredBefore)
+        expect(live).toEqual(liveBefore)
+      }
+    )
+
+    it.each(families)(
+      'performs zero create/replace calls for equivalent %s with external metadata',
+      async family => {
+        const desired = policyForFamily(family)
+        const live = livePolicy(desired)
+        live.metadata!.labels!['admission.example/tier'] = 'audited'
+        live.metadata!.annotations = { 'admission.example/audit': 'keep', [SPEC_HASH]: 'legacy' }
+        live.metadata!.finalizers = ['admission.example/cleanup']
+        mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(live)
+
+        await apply(desired, family)
+
+        expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+        expect(mockNetworkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+        expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+      }
+    )
+
+    it('vetoes an additional non-controller owner instead of removing it on gateway replace', async () => {
+      const desired = gatewayPolicy()
+      const live = livePolicy(desired)
+      live.metadata!.ownerReferences!.push({
+        apiVersion: 'v1',
+        kind: 'ConfigMap',
+        name: 'foreign',
+        uid: 'foreign',
+      })
+      live.spec!.podSelector = {}
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(live)
+
+      await expect(apply(desired, 'webhook-gateway')).rejects.toMatchObject({
+        name: 'NetworkPolicyOwnershipConflictError',
+      })
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+    })
+
+    it('removes retired workload-egress state once without churning external metadata', async () => {
+      const desired = plainPolicy()
+      desired.metadata!.name = 'wl-egress-r-w'
+      const live = livePolicy(desired, {
+        annotations: {
+          'admission.example/audit': 'keep',
+          'clerum.io/egress-fqdn-state': 'retired',
+          'clerum.io/egress-fqdn-targets': 'retired',
+          'clerum.io/egress-fqdn-resolved-at': 'retired',
+        },
+      })
+      const priv = reconciler as unknown as {
+        egressWriteNeeded: (existing: k8s.V1NetworkPolicy, desired: k8s.V1NetworkPolicy) => boolean
+      }
+      expect(priv.egressWriteNeeded(live, desired)).toBe(true)
+      await apply(desired, 'workload-egress', live)
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      const updated = mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls[0][0].body
+      expect(updated.metadata.annotations).toEqual({ 'admission.example/audit': 'keep' })
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+
+      expect(priv.egressWriteNeeded(updated, desired)).toBe(false)
+      await apply(desired, 'workload-egress', updated)
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+    })
+
     function captureNetworkPolicyLogs(): {
       entries: Array<Record<string, unknown>>
       restore: () => void
@@ -1080,7 +1208,7 @@ describe('WorkflowRecipeReconciler', () => {
         expect(warning).toEqual(
           expect.objectContaining({
             level: 'warn',
-            errorName: 'UnknownError',
+            errorName: 'NetworkPolicyInfraError',
             errorCode: 500,
             retryable: true,
           })
@@ -3053,6 +3181,136 @@ describe('WorkflowRecipeReconciler', () => {
           metadata: expect.objectContaining({ name: 'wl-egress-test-recipe-worker' }),
         }),
       })
+    )
+  })
+
+  describe('workload egress pre-read infrastructure failures', () => {
+    it.each([
+      { workflow: true, code: 503 },
+      { workflow: true, code: 'ECONNRESET' },
+      { workflow: false, code: 503 },
+      { workflow: false, code: 'ECONNRESET' },
+      { workflow: true, code: 403 },
+      { workflow: false, code: 403 },
+    ])('classifies $code after successful DNS (workflow=$workflow)', async ({ workflow, code }) => {
+      const recipe = makeRecipe({
+        spec: {
+          workloads: [
+            {
+              id: 'worker',
+              type: 'deployment',
+              image: 'worker:latest',
+              port: 8080,
+              egressBindings: [{ dns: 'api.example.com', port: 443 }],
+            },
+          ],
+          ...(workflow ? { steps: [{ id: 'run', run: snippetRun() }] } : {}),
+        },
+        ...(!workflow
+          ? {
+              status: {
+                phase: 'active' as const,
+                message: 'Healthy before read failure',
+                workloads: [],
+              },
+            }
+          : {}),
+      })
+      const lookup = vi.fn(async () => ({
+        kind: 'ok' as const,
+        ipv4: ['93.184.216.10'],
+        ipv6: [],
+        ttlSeconds: 300,
+      }))
+      const rec = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+        fqdnLookup: lookup,
+      })
+      const workflowReconcile = vi.fn()
+      ;(rec as unknown as { workflowReconciler: unknown }).workflowReconciler = {
+        reconcile: workflowReconcile,
+        validateWorkflowSpec: () => undefined,
+      }
+      const failure = { code }
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(async ({ name }) => {
+        if (name === 'wl-egress-test-recipe-worker') {
+          expect(lookup).toHaveBeenCalled()
+          throw failure
+        }
+        throw { code: 404 }
+      })
+
+      const result = await rec.reconcile(recipe)
+
+      expect(lookup).toHaveBeenCalledTimes(1)
+      if (code === 403) {
+        expect(result.phase).toBe('failed')
+        expect(result.requeueAfterMs).toBeUndefined()
+      } else {
+        expect(result.phase).toBe(workflow ? 'degraded' : 'active')
+        expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+        if (!workflow) expect(result.skipStatusPatch).toBe(true)
+      }
+      expect(workflowReconcile).not.toHaveBeenCalled()
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+    })
+  })
+
+  describe('reconciliation completion receipt', () => {
+    it.each(['success', 'reconcile-throw', 'projection-throw'] as const)(
+      'emits completion only after the full pipeline returns (%s)',
+      async outcome => {
+        const recipe = makeRecipe()
+        recipe.metadata.generation = 7
+        const previousLevel = process.env.LOG_LEVEL
+        process.env.LOG_LEVEL = 'info'
+        const receipts: Array<Record<string, unknown>> = []
+        const write = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+          for (const line of String(chunk).split('\n')) {
+            if (!line.startsWith('{')) continue
+            const record = JSON.parse(line)
+            if (record.msg === 'recipe reconciliation completed') receipts.push(record)
+          }
+          return true
+        }) as typeof process.stdout.write)
+        const priv = reconciler as unknown as {
+          reconcileInternal: () => Promise<unknown>
+          projectPluginWorkloadSdk: () => unknown
+        }
+        const failure = new Error('pipeline failure')
+        const injected =
+          outcome === 'reconcile-throw'
+            ? vi.spyOn(priv, 'reconcileInternal').mockRejectedValue(failure)
+            : outcome === 'projection-throw'
+              ? vi.spyOn(priv, 'projectPluginWorkloadSdk').mockImplementation(() => {
+                  throw failure
+                })
+              : undefined
+        try {
+          if (outcome === 'success') {
+            const result = await reconciler.reconcile(recipe)
+            expect(result.phase).toBe('active')
+            expect(receipts).toEqual([
+              expect.objectContaining({
+                recipe: 'test-recipe',
+                namespace: 'sandbox-recipes',
+                uid: 'uid-123',
+                generation: 7,
+                phase: 'active',
+                requeueAfterMs: 0,
+              }),
+            ])
+          } else {
+            await expect(reconciler.reconcile(recipe)).rejects.toBe(failure)
+            expect(receipts).toEqual([])
+          }
+        } finally {
+          injected?.mockRestore()
+          write.mockRestore()
+          if (previousLevel === undefined) delete process.env.LOG_LEVEL
+          else process.env.LOG_LEVEL = previousLevel
+        }
+      }
     )
   })
 

@@ -6,6 +6,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${KUBECONTEXT:?KUBECONTEXT is required for WRC NetworkPolicy E2E}"
+# shellcheck source=scripts/e2e/_lib/wrc-networkpolicy-convergence.sh
+source "${SCRIPT_DIR}/_lib/wrc-networkpolicy-convergence.sh"
+wrc_require_networkpolicy_lease
 
 suites=(
   e2e-wrc-networkpolicy-service-routes.sh

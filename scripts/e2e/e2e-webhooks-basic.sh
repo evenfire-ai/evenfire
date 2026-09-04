@@ -5,7 +5,7 @@
 # resources → public POST → verify → forward → handler responds 200.
 #
 # Phases:
-#   1. Clean slate (delete any leftover from prior runs).
+#   1. Allocate isolated run fixtures and preserve sample resources.
 #   2. Create the signing-secret Secret in sandbox-recipes.
 #   3. Apply samples/webhook-hello.yaml.
 #   4. Wait for the per-recipe webhook-gateway Deployment to be Ready.
@@ -31,20 +31,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/e2e-lib.sh"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/_lib/wrc-networkpolicy-convergence.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/_lib/wrc-fixtures.sh"
 
-require_safe_kube_context
+if [ "${1:-}" = "--cleanup-only" ]; then
+  echo "Cleanup requires the current run ownership ledger; use normal EXIT cleanup." >&2
+  exit 1
+fi
+wrc_fixture_init
+
+# The fixture initializer requires the branch mutation lease.
 
 RECIPE_FILE="workflow-recipes/samples/webhook-hello.yaml"
-RECIPE_NAME="webhook-hello"
+RECIPE_NAME="e2e-hook-${E2E_RUN_ID}"
 WEBHOOK_ID="hello"
-SECRET_NAME="webhook-hello-creds"
+SECRET_NAME="e2e-hook-secret-${E2E_RUN_ID}"
 SECRET_KEY="signing-secret"
 SECRET_VALUE="e2e-fireflies-test-secret"
 
 GATEWAY_NAME="wf-${RECIPE_NAME}-webhook-gateway"
 GATEWAY_NS="sandbox-recipes"
 PROXY_NS="webhook-ingress"
-PROXY_DEPLOYMENT="webhook-proxy"
+PROXY_SERVICE="webhook-proxy"
 PROXY_PORT=8095
 STABILITY_SECONDS="${E2E_NP_STABILITY_SECONDS:-20}"
 
@@ -52,8 +60,7 @@ PROXY_INGRESS_POLICY="allow-webhook-proxy-ingress-wf-${RECIPE_NAME}"
 HANDLER_EGRESS_POLICY="allow-gateway-egress-to-handler-wf-${RECIPE_NAME}"
 HANDLER_INGRESS_POLICY="allow-gateway-ingress-to-handler-wf-${RECIPE_NAME}"
 
-PORT_FWD_PORT=18095
-PORT_FWD_PID=""
+PORT_FWD_PORT=""
 HANDLER_DEPLOYMENT=""
 CREATED=0
 
@@ -91,36 +98,8 @@ wait_for_recipe_active() {
 
 cleanup() {
   local cleanup_status=0
-  if [ -n "$PORT_FWD_PID" ]; then
-    if kill -0 "$PORT_FWD_PID" 2>/dev/null; then
-      kill "$PORT_FWD_PID" 2>/dev/null || cleanup_status=1
-    fi
-    wait "$PORT_FWD_PID" 2>/dev/null || true
-    PORT_FWD_PID=""
-  fi
-  kctl -n "$GATEWAY_NS" delete workflowrecipe "$RECIPE_NAME" \
-    --ignore-not-found --wait=false >/dev/null 2>&1 || cleanup_status=1
-  wait_for_workflowrecipe_deleted "$GATEWAY_NS" "$RECIPE_NAME" "$TIMEOUT_DELETE" \
-    >/dev/null 2>&1 || cleanup_status=1
-  if [ -n "$HANDLER_DEPLOYMENT" ]; then
-    kctl -n "$GATEWAY_NS" delete deployment "$HANDLER_DEPLOYMENT" \
-      --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
-    kctl -n "$GATEWAY_NS" delete service "$HANDLER_DEPLOYMENT" \
-      --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
-  fi
-  kctl -n "$GATEWAY_NS" delete deployment,service -l "clerum.io/recipe=${RECIPE_NAME}" \
-    --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
-  kctl -n "$GATEWAY_NS" delete deployment "$GATEWAY_NAME" \
-    --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
-  kctl -n "$GATEWAY_NS" delete service "$GATEWAY_NAME" \
-    --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
-  kctl -n "$GATEWAY_NS" delete configmap "wf-${RECIPE_NAME}-webhook-gateway-config" \
-    --ignore-not-found >/dev/null 2>&1 || cleanup_status=1
-  kctl -n "$GATEWAY_NS" delete networkpolicy "$PROXY_INGRESS_POLICY" \
-    "$HANDLER_EGRESS_POLICY" "$HANDLER_INGRESS_POLICY" --ignore-not-found \
-    >/dev/null 2>&1 || cleanup_status=1
-  kctl -n "$GATEWAY_NS" delete secret "$SECRET_NAME" --ignore-not-found \
-    >/dev/null 2>&1 || cleanup_status=1
+  wrc_stop_port_forward || cleanup_status=1
+  wrc_cleanup_owned || cleanup_status=1
   return "$cleanup_status"
 }
 
@@ -128,6 +107,7 @@ on_exit() {
   local status=$? cleanup_status=0
   trap - EXIT INT TERM
   if [ "${E2E_KEEP_RESOURCES:-0}" = "1" ]; then
+    wrc_stop_port_forward || status=1
     warn "E2E_KEEP_RESOURCES=1; preserving webhook fixtures for inspection"
     exit "$status"
   fi
@@ -145,27 +125,20 @@ on_exit() {
   exit "$status"
 }
 
-if [ "${1:-}" = "--cleanup-only" ]; then
-  cleanup
-  exit $?
-fi
+# Resources are cleaned only through this process's ownership ledger.
 
 trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # ─── Phase 1: clean slate ───────────────────────────────────────────
-header "Phase 1 — clean slate"
-cleanup >/dev/null 2>&1 || true
+header "Phase 1 — Isolated run ${E2E_RUN_ID}"
 CREATED=1
-log "leftover state cleared"
 
 # ─── Phase 2: create signing-secret ─────────────────────────────────
 header "Phase 2 — provision signing-secret Secret"
 if kctl -n "$GATEWAY_NS" create secret generic "$SECRET_NAME" \
-    --from-literal="${SECRET_KEY}=${SECRET_VALUE}" >/dev/null 2>&1; then
-  kctl -n "$GATEWAY_NS" label secret "$SECRET_NAME" \
-    "clerum.io/owner-recipe=${RECIPE_NAME}" --overwrite >/dev/null
+    --from-literal="${SECRET_KEY}=${SECRET_VALUE}" --dry-run=client -o json | wrc_create_owned; then
   ok "Secret $SECRET_NAME/$SECRET_KEY created in $GATEWAY_NS"
 else
   fail "Secret create failed"
@@ -173,9 +146,13 @@ else
 fi
 
 # ─── Phase 3: apply recipe ──────────────────────────────────────────
-header "Phase 3 — apply WorkflowRecipe"
-if kctl apply -f "${SCRIPT_DIR}/../../${RECIPE_FILE}" >/dev/null; then
-  ok "WorkflowRecipe applied"
+header "Phase 3 — create isolated WorkflowRecipe"
+kctl create --dry-run=client -f "${SCRIPT_DIR}/../../${RECIPE_FILE}" -o json |
+  jq --arg name "$RECIPE_NAME" --arg ns "$GATEWAY_NS" --arg secret "$SECRET_NAME" '
+    .metadata.name=$name | .metadata.namespace=$ns |
+    .spec.webhooks[].verification.secretRef.name=$secret' > "$WRC_FIXTURE_DIR/webhook-recipe.json"
+if wrc_create_owned < "$WRC_FIXTURE_DIR/webhook-recipe.json"; then
+  ok "Isolated WorkflowRecipe created"
 else
   fail "WorkflowRecipe apply failed"
   exit 1
@@ -233,12 +210,11 @@ fi
 
 # ─── Phase 6: POST a signed payload via webhook-proxy ───────────────
 header "Phase 6 — port-forward webhook-proxy and POST signed payload"
-kctl -n "$PROXY_NS" port-forward "deploy/${PROXY_DEPLOYMENT}" "${PORT_FWD_PORT}:${PROXY_PORT}" \
-  >/dev/null 2>&1 &
-PORT_FWD_PID=$!
+wrc_start_port_forward "$PROXY_NS" "$PROXY_SERVICE" "$PROXY_PORT"
+PORT_FWD_PORT="$WRC_PORT_FORWARD_PORT"
 proxy_ready=0
 for _ in $(seq 1 30); do
-  kill -0 "$PORT_FWD_PID" 2>/dev/null || break
+  wrc_assert_port_forward || break
   if curl -sf --max-time 2 "http://127.0.0.1:${PORT_FWD_PORT}/healthz" >/dev/null; then
     proxy_ready=1
     break
@@ -246,6 +222,7 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 if [ "$proxy_ready" = "1" ]; then
+  wrc_assert_port_forward
   ok "webhook-proxy /healthz reachable via port-forward"
 else
   fail "webhook-proxy /healthz unreachable"
@@ -265,12 +242,14 @@ SIG="sha256=$(sign "$SECRET_VALUE" "$PAYLOAD")"
 
 http_status() {
   local method=$1 path=$2 sig=${3:-} body=${4:-}
-  local args=(-s -o /dev/null -w '%{http_code}' -X "$method"
+  wrc_assert_port_forward || return 1
+  local args=(-s --max-time 15 -o "$WRC_FIXTURE_DIR/webhook-response" -w '%{http_code}' -X "$method"
     "http://127.0.0.1:${PORT_FWD_PORT}${path}"
     -H "content-type: application/json")
   [ -n "$sig" ] && args+=(-H "x-hub-signature-256: ${sig}")
   [ -n "$body" ] && args+=(--data "$body")
-  curl "${args[@]}"
+  curl "${args[@]}" || return 1
+  wrc_assert_port_forward
 }
 
 wait_for_policy_owner_uid() {
@@ -288,7 +267,7 @@ wait_for_policy_owner_uid() {
 }
 
 status=$(http_status POST "$PUBLIC_PATH" "$SIG" "$PAYLOAD")
-if [ "$status" = "200" ]; then
+if [ "$status" = "200" ] && [ "$(cat "$WRC_FIXTURE_DIR/webhook-response")" = "webhook-ok" ]; then
   ok "POST with valid signature → 200"
 else
   fail "POST with valid signature → ${status} (expected 200)"
@@ -310,7 +289,7 @@ fi
 
 # 7.2 Oversize body via Content-Length. Stream it so the fixture never places a
 # multi-megabyte value in argv (which exceeds ARG_MAX on macOS/Linux runners).
-status=$(head -c 2000000 </dev/zero | tr '\0' 'x' | curl -s -o /dev/null -w '%{http_code}' \
+status=$(head -c 2000000 </dev/zero | tr '\0' 'x' | curl -s --max-time 15 -o /dev/null -w '%{http_code}' \
   -X POST "http://127.0.0.1:${PORT_FWD_PORT}${PUBLIC_PATH}" \
   -H "content-type: application/json" \
   -H "content-length: 2000000" \
@@ -374,24 +353,19 @@ wait_for_policy_owner_uid "$HANDLER_INGRESS_POLICY" "$recipe_uid" 120
 ok "Webhook gateway policies repaired spec drift, stale owner and missing owner"
 
 status=$(http_status POST "$PUBLIC_PATH" "$SIG" "$PAYLOAD")
-if [ "$status" = "200" ]; then
+if [ "$status" = "200" ] && [ "$(cat "$WRC_FIXTURE_DIR/webhook-response")" = "webhook-ok" ]; then
   ok "Signed webhook route recovered after policy repair"
 else
   fail "Signed webhook route returned ${status} after policy repair"
 fi
 
-proxy_rv="$(wrc_np_resource_version "$GATEWAY_NS" "$PROXY_INGRESS_POLICY")"
-handler_egress_rv="$(wrc_np_resource_version "$GATEWAY_NS" "$HANDLER_EGRESS_POLICY")"
-handler_ingress_rv="$(wrc_np_resource_version "$GATEWAY_NS" "$HANDLER_INGRESS_POLICY")"
+wrc_begin_np_observation
+wrc_track_np "$GATEWAY_NS" "$PROXY_INGRESS_POLICY" webhook-gateway apply
+wrc_track_np "$GATEWAY_NS" "$HANDLER_EGRESS_POLICY" webhook-gateway apply
+wrc_track_np "$GATEWAY_NS" "$HANDLER_INGRESS_POLICY" webhook-gateway apply
 wrc_trigger_recipe_reconcile "$GATEWAY_NS" "$RECIPE_NAME" 120
-wrc_wait_for_np_noop_witness "$GATEWAY_NS" "$PROXY_INGRESS_POLICY" webhook-gateway apply 120
-wrc_wait_for_np_noop_witness "$GATEWAY_NS" "$HANDLER_EGRESS_POLICY" webhook-gateway apply 120
-wrc_wait_for_np_noop_witness "$GATEWAY_NS" "$HANDLER_INGRESS_POLICY" webhook-gateway apply 120
-sleep "$STABILITY_SECONDS"
-[ "$(wrc_np_resource_version "$GATEWAY_NS" "$PROXY_INGRESS_POLICY")" = "$proxy_rv" ] || fail "${PROXY_INGRESS_POLICY} churned"
-[ "$(wrc_np_resource_version "$GATEWAY_NS" "$HANDLER_EGRESS_POLICY")" = "$handler_egress_rv" ] || fail "${HANDLER_EGRESS_POLICY} churned"
-[ "$(wrc_np_resource_version "$GATEWAY_NS" "$HANDLER_INGRESS_POLICY")" = "$handler_ingress_rv" ] || fail "${HANDLER_INGRESS_POLICY} churned"
-ok "All three webhook gateway policies stayed resourceVersion-stable"
+wrc_assert_np_observation_clean "$STABILITY_SECONDS" 120
+ok "All three webhook policies witnessed no-op and stable UID/resourceVersion across the observation"
 
 # ─── Summary ────────────────────────────────────────────────────────
 header "Summary"

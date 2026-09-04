@@ -91,6 +91,7 @@ import {
 } from './mcpDelegation'
 import {
   type NetworkPolicyFamily,
+  buildNetworkPolicyReplacement,
   decideNetworkPolicyConvergence,
   networkPolicyMetadataMatchesDesired,
 } from './networkPolicyConvergence'
@@ -1425,6 +1426,14 @@ export class WorkflowRecipeReconciler {
     // both consumers treat as "no SDK opinion this pass".
     const result = await this.reconcileInternal(recipe)
     result.pluginWorkloadSdkProjection = this.projectPluginWorkloadSdk(recipe, result)
+    createLogger('wrc', recipe.metadata.name).info('recipe reconciliation completed', {
+      recipe: recipe.metadata.name,
+      namespace: recipe.metadata.namespace,
+      uid: recipe.metadata.uid,
+      generation: recipe.metadata.generation,
+      phase: result.phase,
+      requeueAfterMs: result.requeueAfterMs ?? 0,
+    })
     return result
   }
 
@@ -4759,6 +4768,14 @@ export class WorkflowRecipeReconciler {
       return await this.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
     } catch (error: unknown) {
       if (getErrorCode(error) === 404) return null
+      if (isRetryableInfraError(error)) {
+        const safe = this.safeInfrastructureErrorFields(error)
+        throw new NetworkPolicyInfraError(
+          `NetworkPolicy "${name}" in ${namespace} read temporarily unavailable (${safe.errorCode ?? safe.errorName})`,
+          error,
+          safe.errorCode
+        )
+      }
       throw error
     }
   }
@@ -5011,12 +5028,12 @@ export class WorkflowRecipeReconciler {
         `NetworkPolicy "${policyName}" in ${namespace} has no resourceVersion`
       )
     }
-    desired.metadata.resourceVersion = resourceVersion
+    const replacement = buildNetworkPolicyReplacement(desired, existing)
     try {
       await this.networkingApi.replaceNamespacedNetworkPolicy({
         name: policyName,
         namespace,
-        body: desired,
+        body: replacement,
       })
       log.info('network policy replaced', {
         ...fields,
@@ -5073,22 +5090,11 @@ export class WorkflowRecipeReconciler {
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
         return {
-          existing: await this.networkingApi.readNamespacedNetworkPolicy({ name, namespace }),
+          existing: await this.readNetworkPolicyOrNull(name, namespace),
           recoveredFromReadFailure: attempt > 1,
         }
       } catch (error: unknown) {
-        if (getErrorCode(error) === 404) {
-          return { existing: null, recoveredFromReadFailure: attempt > 1 }
-        }
         if (attempt === 2) {
-          if (isRetryableInfraError(error)) {
-            const safe = this.safeInfrastructureErrorFields(error)
-            throw new NetworkPolicyInfraError(
-              `NetworkPolicy "${name}" in ${namespace} read temporarily unavailable (${safe.errorCode ?? safe.errorName})`,
-              error,
-              safe.errorCode
-            )
-          }
           throw error
         }
         log.warn('network policy read unavailable; retrying once', {

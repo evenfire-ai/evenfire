@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
-set -u
+# Hermetic orchestration contract. These receipts prove aggregate execution and
+# failure propagation, not NetworkPolicy convergence or real dataplane traffic.
+set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 AGGREGATE="${ROOT}/scripts/e2e/e2e-wrc-networkpolicy-live-convergence.sh"
-ROUTES="${ROOT}/scripts/e2e/e2e-wrc-networkpolicy-service-routes.sh"
-INTDEP="${ROOT}/scripts/e2e/e2e-wrc-internal-dependency-networkpolicy.sh"
-OAUTH="${ROOT}/scripts/e2e/e2e-sandbox-ui-oauth.sh"
-WEBHOOK="${ROOT}/scripts/e2e/e2e-webhooks-basic.sh"
-HELPER="${ROOT}/scripts/e2e/_lib/wrc-networkpolicy-convergence.sh"
+FIXTURE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wrc-np-aggregate-contract.XXXXXX")"
+trap 'rm -rf -- "$FIXTURE_ROOT"' EXIT
+
+suites=(
+  e2e-wrc-networkpolicy-service-routes.sh
+  e2e-wrc-internal-dependency-networkpolicy.sh
+  e2e-sandbox-ui-oauth.sh
+  e2e-webhooks-basic.sh
+)
+CONTEXT='owned-profile-contract'
 FAIL=0
 
 pass() { printf 'PASS: %s\n' "$1"; }
-fail() { printf 'FAIL: %s\n' "$1"; FAIL=1; }
+fail() { printf 'FAIL: %s\n' "$1" >&2; FAIL=1; }
 
-for script in "$AGGREGATE" "$ROUTES" "$INTDEP" "$OAUTH" "$WEBHOOK" "$HELPER"; do
+for script in "$AGGREGATE" "${suites[@]/#/${ROOT}/scripts/e2e/}" \
+  "${ROOT}/scripts/e2e/_lib/wrc-networkpolicy-convergence.sh"; do
   if bash -n "$script"; then
     pass "$(basename "$script") has valid bash syntax"
   else
@@ -21,128 +29,132 @@ for script in "$AGGREGATE" "$ROUTES" "$INTDEP" "$OAUTH" "$WEBHOOK" "$HELPER"; do
   fi
 done
 
-for suite in \
-  e2e-wrc-networkpolicy-service-routes.sh \
-  e2e-wrc-internal-dependency-networkpolicy.sh \
-  e2e-sandbox-ui-oauth.sh \
-  e2e-webhooks-basic.sh; do
-  grep -Fq "$suite" "$AGGREGATE" || fail "aggregate omits $suite"
-done
-if grep -Fq 'WRC_NETWORKPOLICY_E2E_PASS' "$AGGREGATE" &&
-   grep -Fq 'set -euo pipefail' "$AGGREGATE"; then
-  pass "aggregate is fail-loud and emits a terminal suite count"
-else
-  fail "aggregate can pass without executing every suite"
-fi
-
+# This is a static wiring check only. Behaviour is exercised below.
 if grep -Fq 'e2e-wrc-networkpolicy-live-convergence.sh' "${ROOT}/Makefile"; then
-  pass "canonical Make E2E aggregate includes the WRC NetworkPolicy gate"
+  pass 'Makefile references the aggregate entry point (static wiring)'
 else
-  fail "canonical Make E2E aggregate omits the WRC NetworkPolicy gate"
+  fail 'Makefile does not reference the aggregate entry point'
 fi
 
-if grep -Fq 'patch workflowrecipe' "$HELPER" &&
-   grep -Fq 'metadata.generation' "$HELPER" &&
-   grep -Fq 'deployment/${controller_deployment}' "$HELPER"; then
-  pass "reconcile trigger advances the parent spec and observes the real WRC pass"
-else
-  fail "reconcile trigger does not prove a parent recipe reconcile"
-fi
+mkdir -p "$FIXTURE_ROOT/scripts/e2e/_lib"
+cp "$AGGREGATE" "$FIXTURE_ROOT/aggregate-original.sh"
 
-if grep -Fq 'network policy unchanged; skipping update' "$HELPER" &&
-   grep -Fq 'network policy egress set unchanged; skipping live apply' "$HELPER" &&
-   grep -Fq '.policy == $policy' "$HELPER" &&
-   grep -Fq '.namespace == $namespace' "$HELPER" &&
-   grep -Fq '.family == $family' "$HELPER"; then
-  pass "no-churn witness binds structured WRC output to one policy and family"
-else
-  fail "no-churn witness can pass without proving the named policy reached its no-op path"
-fi
+# Only the fixture copy substitutes the external runtime/lease boundary. The
+# production aggregate has no flag or environment variable to bypass it.
+cat > "$FIXTURE_ROOT/scripts/e2e/_lib/wrc-networkpolicy-convergence.sh" <<'STUB'
+wrc_require_networkpolicy_lease() {
+  : "${KUBECONTEXT:?KUBECONTEXT is required}"
+  printf 'lease|%s\n' "$KUBECONTEXT" >> "$CONTRACT_RECEIPTS"
+  return "${CONTRACT_LEASE_EXIT:-0}"
+}
+STUB
 
-for entry in \
-  "$ROUTES:service-route" \
-  "$INTDEP:internal-dependency" \
-  "$OAUTH:OAuth broker" \
-  "$WEBHOOK:webhook"; do
-  script=${entry%%:*}
-  label=${entry#*:}
-  trigger_count=$(grep -Fc 'wrc_trigger_recipe_reconcile' "$script" || true)
-  if [ "$trigger_count" -ge 2 ]; then
-    pass "${label} E2E drives both repair and equivalent no-op reconciles"
+write_children() {
+  local suite
+  for suite in "${suites[@]}"; do
+    cat > "$FIXTURE_ROOT/scripts/e2e/$suite" <<'CHILD'
+#!/usr/bin/env bash
+set -euo pipefail
+suite="${0##*/}"
+printf 'child|%s|%s\n' "$suite" "${KUBECONTEXT-<missing>}" >> "$CONTRACT_RECEIPTS"
+if [ "$suite" = "${CONTRACT_FAIL_SUITE:-}" ]; then
+  exit "$CONTRACT_CHILD_EXIT"
+fi
+CHILD
+  done
+}
+
+# Verify the exact receipts, not a name or counter appearing in source/output.
+# Prefix length also proves no child after a failed/missing child was executed.
+check_run() {
+  local variant="$1" label="$2" expected_status="$3" child_count="$4" context_mode="$5"
+  local failed_suite="${6:-}" child_exit="${7:-0}" lease_exit="${8:-0}" status=0 index marker_count
+  : > "$FIXTURE_ROOT/receipts"
+  : > "$FIXTURE_ROOT/expected"
+  if [ "$context_mode" = 'present' ]; then
+    printf 'lease|%s\n' "$CONTEXT" >> "$FIXTURE_ROOT/expected"
+    for ((index = 0; index < child_count; index++)); do
+      printf 'child|%s|%s\n' "${suites[$index]}" "$CONTEXT" >> "$FIXTURE_ROOT/expected"
+    done
+  fi
+
+  local environment=(
+    env -i PATH=/usr/bin:/bin
+    "CONTRACT_RECEIPTS=$FIXTURE_ROOT/receipts"
+    "CONTRACT_FAIL_SUITE=$failed_suite" "CONTRACT_CHILD_EXIT=$child_exit"
+    "CONTRACT_LEASE_EXIT=$lease_exit"
+  )
+  case "$context_mode" in
+    present) environment+=("KUBECONTEXT=$CONTEXT") ;;
+    empty) environment+=(KUBECONTEXT=) ;;
+    absent) ;;
+    *) printf 'invalid contract context mode\n' >&2; return 1 ;;
+  esac
+  "${environment[@]}" bash "$FIXTURE_ROOT/scripts/e2e/e2e-wrc-networkpolicy-live-convergence.sh" \
+    > "$FIXTURE_ROOT/output" 2>&1 || status=$?
+
+  marker_count="$(awk '/WRC_NETWORKPOLICY_E2E_PASS/ { count++ } END { print count+0 }' "$FIXTURE_ROOT/output")"
+  if [ "$status" -ne "$expected_status" ] ||
+    ! cmp -s "$FIXTURE_ROOT/expected" "$FIXTURE_ROOT/receipts" ||
+    { [ "$expected_status" -eq 0 ] &&
+      { [ "$marker_count" -ne 1 ] || [ "$(tail -n 1 "$FIXTURE_ROOT/output")" != 'WRC_NETWORKPOLICY_E2E_PASS suites=4' ]; }; } ||
+    { [ "$expected_status" -ne 0 ] && [ "$marker_count" -ne 0 ]; }; then
+    if [ "$variant" = original ]; then
+      printf 'FAIL: %s (exit=%s expected=%s, PASS markers=%s)\n' "$label" "$status" "$expected_status" "$marker_count" >&2
+      diff -u "$FIXTURE_ROOT/expected" "$FIXTURE_ROOT/receipts" >&2 || true
+    fi
+    return 1
+  fi
+  if [ "$variant" = original ]; then pass "$label"; fi
+}
+
+verify_aggregate() {
+  local variant="$1" rejected=0 index child_exit
+  cp "$FIXTURE_ROOT/aggregate-$variant.sh" "$FIXTURE_ROOT/scripts/e2e/e2e-wrc-networkpolicy-live-convergence.sh"
+  write_children
+  check_run "$variant" 'lease then four unique suites execute in order with the explicit context' 0 4 present || rejected=1
+  for ((index = 0; index < ${#suites[@]}; index++)); do
+    child_exit=$((41 + index))
+    check_run "$variant" "child $((index + 1)) failure preserves exit $child_exit and prevents later children/PASS" \
+      "$child_exit" "$((index + 1))" present "${suites[$index]}" "$child_exit" || rejected=1
+  done
+  for ((index = 0; index < ${#suites[@]}; index++)); do
+    rm -- "$FIXTURE_ROOT/scripts/e2e/${suites[$index]}"
+    check_run "$variant" "missing child $((index + 1)) fails before later children/PASS" 1 "$index" present || rejected=1
+    write_children
+  done
+  check_run "$variant" 'absent context fails before the lease or any child' 1 0 absent || rejected=1
+  check_run "$variant" 'empty context fails before the lease or any child' 1 0 empty || rejected=1
+  check_run "$variant" 'lease rejection propagates before any child or PASS' 67 0 present '' 0 67 || rejected=1
+  return "$rejected"
+}
+
+if ! verify_aggregate original; then fail 'real aggregate violates its execution contract'; fi
+
+# Mutation controls prove the contract cannot be fooled by keeping the suite
+# names, executed counter, set -e, and terminal PASS text while removing the work
+# or masking child failure. They mutate only a disposable aggregate copy.
+for mutation in skipped-child ignored-error; do
+  if ! awk -v mutation="$mutation" '
+    /KUBECONTEXT="\$KUBECONTEXT" bash "\$path"/ {
+      count++
+      if (mutation == "skipped-child") {
+        sub(/KUBECONTEXT="\$KUBECONTEXT" bash "\$path"/, ": # skipped child")
+      } else {
+        sub(/KUBECONTEXT="\$KUBECONTEXT" bash "\$path"/, "KUBECONTEXT=\"$KUBECONTEXT\" bash \"$path\" || true")
+      }
+    }
+    { print }
+    END { if (count != 1) exit 1 }
+  ' "$FIXTURE_ROOT/aggregate-original.sh" > "$FIXTURE_ROOT/aggregate-$mutation.sh"; then
+    fail "cannot construct $mutation mutation; update its injection site"
+    continue
+  fi
+  if verify_aggregate "$mutation"; then
+    fail "contract accepted $mutation despite preserved names/counter/PASS"
   else
-    fail "${label} E2E does not drive both required reconciles"
+    pass "contract rejects $mutation despite preserved names/counter/PASS"
   fi
 done
-
-for entry in \
-  "$ROUTES:3:service-route" \
-  "$INTDEP:2:internal-dependency" \
-  "$OAUTH:1:OAuth broker" \
-  "$WEBHOOK:3:webhook"; do
-  script=${entry%%:*}
-  remainder=${entry#*:}
-  minimum=${remainder%%:*}
-  label=${remainder#*:}
-  witness_count=$(grep -Fc 'wrc_wait_for_np_noop_witness' "$script" || true)
-  if [ "$witness_count" -ge "$minimum" ]; then
-    pass "${label} E2E requires a no-op witness for every in-scope policy"
-  else
-    fail "${label} E2E has ${witness_count}/${minimum} required no-op witnesses"
-  fi
-done
-
-for entry in "$OAUTH:OAuth broker" "$WEBHOOK:webhook"; do
-  script=${entry%%:*}
-  label=${entry#*:}
-  if grep -Fq 'cleanup_status=1' "$script" &&
-     grep -Fq 'cleanup also failed' "$script" &&
-     grep -Fq 'status=1' "$script"; then
-    pass "${label} E2E makes cleanup failure fail the aggregate"
-  else
-    fail "${label} E2E cleanup can be silently ignored"
-  fi
-done
-
-for family in UI_INGRESS_POLICY WL_EGRESS_POLICY WL_INGRESS_POLICY; do
-  grep -Fq "$family" "$ROUTES" || fail "service-route E2E omits $family"
-done
-if grep -Fq 'correctly configured positive routes' "$ROUTES" &&
-   grep -Fq 'negative controls' "$ROUTES" &&
-   grep -Fq 'live drift repair' "$ROUTES" &&
-   grep -Fq 'terminating race self-heals' "$ROUTES" &&
-   grep -Fq 'wrc_wait_for_np_recreated' "$ROUTES" &&
-   grep -Fq 'unexpected second parent spec event' "$ROUTES" &&
-   grep -Fq 'steady-state no-churn' "$ROUTES"; then
-  pass "UI/workload route E2E proves positive, negative, repair, scheduled retry, and no-churn signals"
-else
-  fail "UI/workload route E2E is missing a required signal"
-fi
-
-if grep -Fq 'Live drift repair and steady no-churn' "$INTDEP" &&
-   grep -Fq 'Internal dependency traffic recovered' "$INTDEP"; then
-  pass "internal-dependency E2E proves live repair and restored traffic"
-else
-  fail "internal-dependency E2E lacks repair or traffic evidence"
-fi
-
-if grep -Fq 'BACKGROUND_POLICY_NAME' "$OAUTH" &&
-   grep -Fq 'Opted-in background workload reaches' "$OAUTH" &&
-   grep -Fq 'Unlabelled sandbox workload cannot use' "$OAUTH" &&
-   grep -Fq 'OAuth broker route recovered' "$OAUTH"; then
-  pass "OAuth broker E2E proves allow, deny, repair, and no-churn behavior"
-else
-  fail "OAuth broker E2E lacks a required dataplane signal"
-fi
-
-for policy in PROXY_INGRESS_POLICY HANDLER_EGRESS_POLICY HANDLER_INGRESS_POLICY; do
-  grep -Fq "$policy" "$WEBHOOK" || fail "webhook E2E omits $policy"
-done
-if grep -Fq 'live drift and owner repair' "$WEBHOOK" &&
-   grep -Fq 'Signed webhook route recovered' "$WEBHOOK" &&
-   grep -Fq 'stayed resourceVersion-stable' "$WEBHOOK"; then
-  pass "webhook E2E proves all three policies, owner repair, route recovery, and no churn"
-else
-  fail "webhook E2E lacks a required convergence signal"
-fi
 
 exit "$FAIL"

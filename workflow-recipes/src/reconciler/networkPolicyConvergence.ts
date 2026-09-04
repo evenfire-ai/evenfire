@@ -1,4 +1,9 @@
 import * as k8s from '@kubernetes/client-node'
+import {
+  RESOLVED_AT_ANNOTATION,
+  STATE_ANNOTATION,
+  TARGETS_ANNOTATION,
+} from '@clerum/network-policy-core'
 import { SPEC_HASH_ANNOTATION } from './specHash'
 
 export type NetworkPolicyFamily =
@@ -41,6 +46,64 @@ const GATEWAY_IDENTITY_LABELS = [
   'clerum.io/webhook-gateway',
 ] as const
 
+// These keys remain WRC-owned when external egress is removed from desired.
+// Other annotation namespaces are not ownership boundaries: preserve every
+// unauthored key, including keys authored by other clerum.io controllers.
+const EGRESS_STATE_ANNOTATIONS = new Set([
+  RESOLVED_AT_ANNOTATION,
+  STATE_ANNOTATION,
+  TARGETS_ANNOTATION,
+])
+
+function projectOwnedAnnotations(
+  desired: Record<string, string> | undefined,
+  existing: Record<string, string> | undefined,
+  temporal = false
+): Record<string, string> {
+  const keys = new Set([...Object.keys(desired ?? {}), ...EGRESS_STATE_ANNOTATIONS])
+  return Object.fromEntries(
+    [...keys].flatMap(key => {
+      if (key === SPEC_HASH_ANNOTATION) return []
+      // The accumulator owns renewal cadence for present temporal state. Its
+      // removal still has to reach apply, even when the enforced rules match.
+      if (temporal && EGRESS_STATE_ANNOTATIONS.has(key) && desired?.[key] !== undefined) return []
+      return existing?.[key] === undefined ? [] : [[key, existing[key]]]
+    })
+  )
+}
+
+/** Build a PUT from the same live snapshot used for ownership and drift checks. */
+export function buildNetworkPolicyReplacement(
+  desired: k8s.V1NetworkPolicy,
+  existing: k8s.V1NetworkPolicy
+): k8s.V1NetworkPolicy {
+  const replacement = structuredClone(desired)
+  const liveMetadata = existing.metadata ?? {}
+  const annotations = { ...liveMetadata.annotations }
+  for (const key of EGRESS_STATE_ANNOTATIONS) delete annotations[key]
+  Object.assign(annotations, desired.metadata?.annotations)
+  delete annotations[SPEC_HASH_ANNOTATION]
+  replacement.metadata = {
+    ...replacement.metadata,
+    labels: { ...liveMetadata.labels, ...replacement.metadata?.labels },
+    annotations,
+    ...(liveMetadata.finalizers?.length || replacement.metadata?.finalizers?.length
+      ? {
+          finalizers: [
+            ...new Set([
+              ...(liveMetadata.finalizers ?? []),
+              ...(replacement.metadata?.finalizers ?? []),
+            ]),
+          ],
+        }
+      : {}),
+    resourceVersion: liveMetadata.resourceVersion,
+  }
+  // ownerReferences intentionally come only from desired after the ownership
+  // veto. Foreign lifecycle owners must not be adopted, retained, or erased.
+  return replacement
+}
+
 function canonicalizeValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalizeValue)
   if (value && typeof value === 'object') {
@@ -54,13 +117,12 @@ function canonicalizeValue(value: unknown): unknown {
 
 function projectAuthoredMap(
   desired: Record<string, string> | undefined,
-  existing: Record<string, string> | undefined,
-  excludedKeys: ReadonlySet<string> = new Set()
+  existing: Record<string, string> | undefined
 ): Record<string, string> {
   return Object.fromEntries(
-    Object.keys(desired ?? {})
-      .filter(key => !excludedKeys.has(key))
-      .flatMap(key => (existing?.[key] === undefined ? [] : [[key, existing[key]]]))
+    Object.keys(desired ?? {}).flatMap(key =>
+      existing?.[key] === undefined ? [] : [[key, existing[key]]]
+    )
   )
 }
 
@@ -77,10 +139,9 @@ function projectNetworkPolicyForComparison(
       name: candidateMetadata.name,
       namespace: candidateMetadata.namespace,
       labels: projectAuthoredMap(desiredMetadata.labels, candidateMetadata.labels),
-      annotations: projectAuthoredMap(
+      annotations: projectOwnedAnnotations(
         desiredMetadata.annotations,
-        candidateMetadata.annotations,
-        new Set([SPEC_HASH_ANNOTATION])
+        candidateMetadata.annotations
       ),
       ...(desiredMetadata.ownerReferences?.length
         ? { ownerReferences: candidateMetadata.ownerReferences }
@@ -145,8 +206,8 @@ export function networkPolicyMatchesDesired(
 
 /**
  * Compare the stable identity metadata that the workload-egress prefilter must
- * never hide. Temporal DNS/state annotations are intentionally excluded: their
- * persistence cadence is decided separately by the accumulator, while labels,
+ * never hide. Present temporal DNS/state values follow the accumulator's
+ * persistence cadence; retired state keys, stable annotations, labels,
  * lifecycle owner and a terminating object must still reach the live apply.
  */
 export function networkPolicyMetadataMatchesDesired(
@@ -164,6 +225,11 @@ export function networkPolicyMetadataMatchesDesired(
       name: policy.metadata?.name,
       namespace: policy.metadata?.namespace,
       labels: projectAuthoredMap(desired.metadata?.labels, policy.metadata?.labels),
+      annotations: projectOwnedAnnotations(
+        desired.metadata?.annotations,
+        policy.metadata?.annotations,
+        true
+      ),
       ownerReferences: desired.metadata?.ownerReferences?.length
         ? policy.metadata?.ownerReferences
         : undefined,
@@ -218,6 +284,24 @@ export function classifyNetworkPolicyOwnership(
 
   const desiredOwner = desiredOwners[0]
   if (!desiredOwner.uid) return { kind: 'conflict', reason: 'desired-owner-uid-missing' }
+
+  // Admission metadata may coexist, but an additional lifecycle owner changes
+  // garbage-collection authority. Only explicitly desired non-controller refs
+  // are permitted; never silently drop an unexpected owner during replacement.
+  const desiredOtherOwners = (desired.metadata?.ownerReferences ?? []).filter(
+    owner => owner.controller !== true
+  )
+  const existingOtherOwners = (existing.metadata?.ownerReferences ?? []).filter(
+    owner => owner.controller !== true
+  )
+  if (
+    existingOtherOwners.length !== desiredOtherOwners.length ||
+    existingOtherOwners.some(
+      owner => !desiredOtherOwners.some(wanted => exactOwnerMatch(wanted, owner))
+    )
+  ) {
+    return { kind: 'conflict', reason: 'owner-reference-mismatch' }
+  }
 
   if (existingOwners.length === 1 && exactOwnerMatch(desiredOwner, existingOwners[0])) {
     return { kind: 'owned' }

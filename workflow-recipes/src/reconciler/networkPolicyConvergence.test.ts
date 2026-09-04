@@ -133,6 +133,7 @@ describe('NetworkPolicy live convergence', () => {
   it('makes workload-egress metadata drift bypass its temporal prefilter', () => {
     const desired = policy()
     const live = structuredClone(desired)
+    desired.metadata!.annotations = { 'clerum.io/egress-fqdn-resolved-at': 'new-timestamp' }
     live.metadata!.annotations = { 'clerum.io/egress-fqdn-resolved-at': 'old-timestamp' }
 
     expect(networkPolicyMetadataMatchesDesired(desired, live)).toBe(true)
@@ -155,6 +156,21 @@ describe('NetworkPolicy live convergence', () => {
       },
     ]
     expect(networkPolicyMetadataMatchesDesired(desired, live)).toBe(false)
+  })
+
+  it('compares stable workload-egress annotations and removal of owned state', () => {
+    const desired = policy()
+    desired.metadata!.annotations = { 'clerum.io/test-contract': 'current' }
+    const live = structuredClone(desired)
+    live.metadata!.annotations!['clerum.io/test-contract'] = 'stale'
+    expect(networkPolicyMetadataMatchesDesired(desired, live)).toBe(false)
+
+    live.metadata!.annotations = {
+      ...desired.metadata!.annotations,
+      'clerum.io/egress-fqdn-state': 'stale',
+    }
+    expect(networkPolicyMetadataMatchesDesired(desired, live)).toBe(false)
+    expect(networkPolicyMatchesDesired(desired, live)).toBe(false)
   })
 
   it('repairs a stale or missing gateway owner only for the same WRC recipe identity', () => {
