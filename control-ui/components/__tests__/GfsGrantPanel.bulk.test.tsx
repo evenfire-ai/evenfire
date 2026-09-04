@@ -184,15 +184,8 @@ describe('GfsGrantPanel bulk access', () => {
     expect(within(existing).getByText('Direct grant · user')).toBeTruthy()
     expect(within(existing).getByText('Read')).toBeTruthy()
     expect(within(existing).getByText('Write')).toBeTruthy()
-    expect(within(existing).getByText('X')).toBeTruthy()
-    expect(
-      within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
-        .className
-    ).toContain('cu-gfs-existing-access__revoke')
-
-    fireEvent.click(
-      within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
-    )
+    fireEvent.click(within(existing).getByRole('button', { name: 'Actions for Ada Lovelace' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
     const dialog = await screen.findByRole('alertdialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove access' }))
 
@@ -204,6 +197,38 @@ describe('GfsGrantPanel bulk access', () => {
     )
     expect(mockGetGfsGrants).toHaveBeenCalledTimes(2)
     expect(mockGetGfsShares).toHaveBeenCalledTimes(2)
+  })
+
+  it('sorts access records by visible principal identity', async () => {
+    mockGetGfsGrants.mockResolvedValue({
+      items: [
+        {
+          id: '77777777-7777-7777-7777-777777777777',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: { type: 'operator' },
+          permissions: ['read'],
+          inherit: false,
+        },
+        {
+          id: '33333333-3333-3333-3333-333333333333',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: userSubject,
+          permissions: ['read'],
+          inherit: false,
+        },
+      ],
+    })
+    renderPanel()
+
+    const list = await screen.findByRole('list', { name: 'Resource access' })
+    await waitFor(() => expect(within(list).getByText('Ada Lovelace')).toBeTruthy())
+    expect(
+      within(list)
+        .getAllByRole('listitem')
+        .map(row => row.textContent)
+    ).toEqual([expect.stringContaining('Ada Lovelace'), expect.stringContaining('Operator')])
   })
 
   it('self-heals a row that another admin already revoked without hiding other errors', async () => {
@@ -229,9 +254,8 @@ describe('GfsGrantPanel bulk access', () => {
     )
     renderPanel()
     const existing = await screen.findByRole('region', { name: 'Who has access' })
-    fireEvent.click(
-      within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
-    )
+    fireEvent.click(within(existing).getByRole('button', { name: 'Actions for Ada Lovelace' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
     const dialog = await screen.findByRole('alertdialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove access' }))
 
@@ -264,9 +288,8 @@ describe('GfsGrantPanel bulk access', () => {
     )
     renderPanel()
     const existing = await screen.findByRole('region', { name: 'Who has access' })
-    fireEvent.click(
-      within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
-    )
+    fireEvent.click(within(existing).getByRole('button', { name: 'Actions for Ada Lovelace' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
     const dialog = await screen.findByRole('alertdialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove access' }))
 

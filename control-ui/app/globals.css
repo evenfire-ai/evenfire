@@ -13365,34 +13365,6 @@ button.cu-gfs-tree__button:focus-visible,
   flex: 0 0 var(--cu-space-2);
 }
 
-.cu-gfs-existing-access__item > .cu-btn {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
-.cu-gfs-existing-access__revoke.cu-btn {
-  min-width: 1.5rem;
-  min-height: 1.5rem;
-  padding: 0;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--cu-danger);
-  font-size: 0.9rem;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.cu-gfs-existing-access__revoke.cu-btn:hover:not(:disabled) {
-  border-color: transparent;
-  background: transparent;
-  color: var(--cu-danger-hover);
-}
-
-.cu-gfs-existing-access__revoke.cu-btn:focus-visible {
-  border-color: transparent;
-}
-
 .cu-gfs-existing-access__error {
   display: flex;
   align-items: center;

@@ -211,9 +211,8 @@ export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> 
           response.request().method() === 'DELETE' &&
           response.url().includes('/control-api/api/v1/gfs/grants/')
       )
-      await existingAccess
-        .getByRole('button', { name: `Remove grant access for ${E2E_TEST_NAME}` })
-        .click()
+      await existingAccess.getByRole('button', { name: `Actions for ${E2E_TEST_NAME}` }).click()
+      await page.getByRole('menuitem', { name: 'Remove access' }).click()
       const confirmation = page.getByRole('alertdialog')
       await expect(confirmation).toContainText('Remove access?')
       await confirmation.getByRole('button', { name: 'Remove access' }).click()
