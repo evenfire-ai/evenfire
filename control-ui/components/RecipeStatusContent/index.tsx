@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
@@ -300,6 +300,18 @@ function WorkflowAccessEditor({ namespace, recipeName, activeSection }: GrantsRe
   )
 }
 
+function readonlyUserLabel(user: WorkflowGrantUser): string {
+  return user.displayName || user.name || user.email
+}
+
+function readonlyTeamLabel(team: WorkflowGrantTeam | WorkflowApprovalAllowedTeam): string {
+  return team.name || team.id
+}
+
+function compareReadonlyIdentity(left: string, right: string): number {
+  return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
+}
+
 function WorkflowAccessReadonly({ namespace, recipeName }: GrantsReadonlyPanelProps) {
   const [grants, setGrants] = useState<WorkflowGrantUser[] | null>(null)
   const [teamGrants, setTeamGrants] = useState<WorkflowGrantTeam[] | null>(null)
@@ -329,6 +341,34 @@ function WorkflowAccessReadonly({ namespace, recipeName }: GrantsReadonlyPanelPr
     }
   }, [namespace, recipeName])
 
+  const sortedGrants = useMemo(
+    () =>
+      grants?.toSorted(
+        (left, right) =>
+          compareReadonlyIdentity(readonlyUserLabel(left), readonlyUserLabel(right)) ||
+          compareReadonlyIdentity(left.id, right.id)
+      ),
+    [grants]
+  )
+  const sortedTeamGrants = useMemo(
+    () =>
+      teamGrants?.toSorted(
+        (left, right) =>
+          compareReadonlyIdentity(readonlyTeamLabel(left), readonlyTeamLabel(right)) ||
+          compareReadonlyIdentity(left.id, right.id)
+      ),
+    [teamGrants]
+  )
+  const sortedApprovalTeams = useMemo(
+    () =>
+      approvalTeams?.toSorted(
+        (left, right) =>
+          compareReadonlyIdentity(readonlyTeamLabel(left), readonlyTeamLabel(right)) ||
+          compareReadonlyIdentity(left.id, right.id)
+      ),
+    [approvalTeams]
+  )
+
   return (
     <div className="cu-workflow-access" data-testid="grants-readonly-panel">
       <div className="cu-workflow-access__readonly-header">
@@ -345,19 +385,19 @@ function WorkflowAccessReadonly({ namespace, recipeName }: GrantsReadonlyPanelPr
         emptyText="No users authorized to trigger this recipe yet."
         loaded={grants !== null}
       >
-        {grants && grants.length > 0 && (
-          <div className="cu-workflow-access__rows">
-            {grants.map(g => (
-              <div className="cu-workflow-access__row" key={g.id}>
+        {sortedGrants && sortedGrants.length > 0 && (
+          <RecordList className="cu-workflow-access__rows" aria-label="Trigger users">
+            {sortedGrants.map(g => (
+              <RecordListRow className="cu-workflow-access__row" data-access-id={g.id} key={g.id}>
                 <span className="cu-workflow-access__row-title">
                   {g.displayName || g.name || g.email}
                 </span>
                 {(g.displayName || g.name) && (
                   <span className="cu-workflow-access__row-meta">({g.email})</span>
                 )}
-              </div>
+              </RecordListRow>
             ))}
-          </div>
+          </RecordList>
         )}
       </ReadonlyAccessGroup>
 
@@ -366,16 +406,20 @@ function WorkflowAccessReadonly({ namespace, recipeName }: GrantsReadonlyPanelPr
         emptyText="No teams authorized to trigger this recipe yet."
         loaded={teamGrants !== null}
       >
-        {teamGrants && teamGrants.length > 0 && (
-          <div className="cu-workflow-access__rows">
-            {teamGrants.map(team => (
-              <div className="cu-workflow-access__row" key={team.id}>
+        {sortedTeamGrants && sortedTeamGrants.length > 0 && (
+          <RecordList className="cu-workflow-access__rows" aria-label="Trigger teams">
+            {sortedTeamGrants.map(team => (
+              <RecordListRow
+                className="cu-workflow-access__row"
+                data-access-id={team.id}
+                key={team.id}
+              >
                 <div className="cu-workflow-access__row-main">
                   <span className="cu-workflow-access__row-title">{team.name}</span>
                 </div>
-              </div>
+              </RecordListRow>
             ))}
-          </div>
+          </RecordList>
         )}
       </ReadonlyAccessGroup>
 
@@ -384,16 +428,20 @@ function WorkflowAccessReadonly({ namespace, recipeName }: GrantsReadonlyPanelPr
         emptyText="No teams allowed as approval targets yet."
         loaded={approvalTeams !== null}
       >
-        {approvalTeams && approvalTeams.length > 0 && (
-          <div className="cu-workflow-access__rows">
-            {approvalTeams.map(team => (
-              <div className="cu-workflow-access__row" key={team.id}>
+        {sortedApprovalTeams && sortedApprovalTeams.length > 0 && (
+          <RecordList className="cu-workflow-access__rows" aria-label="Approval target teams">
+            {sortedApprovalTeams.map(team => (
+              <RecordListRow
+                className="cu-workflow-access__row"
+                data-access-id={team.id}
+                key={team.id}
+              >
                 <div className="cu-workflow-access__row-main">
                   <span className="cu-workflow-access__row-title">{team.name}</span>
                 </div>
-              </div>
+              </RecordListRow>
             ))}
-          </div>
+          </RecordList>
         )}
       </ReadonlyAccessGroup>
     </div>

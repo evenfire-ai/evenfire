@@ -550,6 +550,77 @@ describe('RecipeStatusContent — GrantsReadonlyPanel', () => {
     expect(screen.queryByText('team-approval')).not.toBeInTheDocument()
   })
 
+  it('sorts readonly access groups by visible identity with stable id tie-breaks', async () => {
+    mockListGrants.mockResolvedValueOnce({
+      items: [
+        { id: 'u-z', email: 'zed@example.com', name: 'Zed', displayName: null },
+        { id: 'u-10', email: 'same-10@example.com', name: 'Same', displayName: null },
+        { id: 'u-2', email: 'same-2@example.com', name: 'Same', displayName: null },
+        { id: 'u-a', email: 'alpha@example.com', name: null, displayName: 'Alpha' },
+      ],
+    })
+    mockListTeamGrants.mockResolvedValueOnce({
+      items: [
+        { id: 'team-z', name: 'Zulu' },
+        { id: 'team-10', name: 'Same Team' },
+        { id: 'team-2', name: 'Same Team' },
+        { id: 'team-a', name: 'Alpha Team' },
+      ],
+    })
+    mockListApprovalAllowedTeams.mockResolvedValueOnce({
+      items: [
+        { id: 'approval-z', name: 'Zulu Approval', createdAt: '2026-05-21T00:00:00Z' },
+        { id: 'approval-10', name: 'Same Approval', createdAt: '2026-05-21T00:00:00Z' },
+        { id: 'approval-2', name: 'Same Approval', createdAt: '2026-05-21T00:00:00Z' },
+        { id: 'approval-a', name: 'Alpha Approval', createdAt: '2026-05-21T00:00:00Z' },
+      ],
+    })
+
+    render(<RecipeStatusContent {...DEFAULT_PROPS} />)
+
+    const triggerUsers = await screen.findByRole('list', { name: 'Trigger users' })
+    const triggerTeams = await screen.findByRole('list', { name: 'Trigger teams' })
+    const approvalTargetTeams = await screen.findByRole('list', {
+      name: 'Approval target teams',
+    })
+
+    expect(
+      within(triggerUsers)
+        .getAllByRole('listitem')
+        .map(row => row.textContent)
+    ).toEqual([
+      'Alpha(alpha@example.com)',
+      'Same(same-2@example.com)',
+      'Same(same-10@example.com)',
+      'Zed(zed@example.com)',
+    ])
+    expect(
+      within(triggerUsers)
+        .getAllByRole('listitem')
+        .map(row => row.getAttribute('data-access-id'))
+    ).toEqual(['u-a', 'u-2', 'u-10', 'u-z'])
+    expect(
+      within(triggerTeams)
+        .getAllByRole('listitem')
+        .map(row => row.textContent)
+    ).toEqual(['Alpha Team', 'Same Team', 'Same Team', 'Zulu'])
+    expect(
+      within(triggerTeams)
+        .getAllByRole('listitem')
+        .map(row => row.getAttribute('data-access-id'))
+    ).toEqual(['team-a', 'team-2', 'team-10', 'team-z'])
+    expect(
+      within(approvalTargetTeams)
+        .getAllByRole('listitem')
+        .map(row => row.textContent)
+    ).toEqual(['Alpha Approval', 'Same Approval', 'Same Approval', 'Zulu Approval'])
+    expect(
+      within(approvalTargetTeams)
+        .getAllByRole('listitem')
+        .map(row => row.getAttribute('data-access-id'))
+    ).toEqual(['approval-a', 'approval-2', 'approval-10', 'approval-z'])
+  })
+
   it('ignores stale grants responses after switching recipes', async () => {
     const first = createDeferred<Awaited<ReturnType<typeof listWorkflowGrants>>>()
     const second = createDeferred<Awaited<ReturnType<typeof listWorkflowGrants>>>()
