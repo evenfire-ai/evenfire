@@ -50,3 +50,35 @@ export const rootFormatTargets = [
   'scripts/precommit',
   'scripts/prettier',
 ]
+
+// CI intentionally has a wider allowlist than the local staged and repository-wide
+// formatters above. It checks only files in the incoming Git diff, so adding active
+// build roots here does not make `npm run format` traverse legacy formatting debt.
+export const ciProjectRoots = [
+  ...projectRoots,
+  'gfs-controller',
+  'nginx-egress-proxy',
+  'packages/image-policy',
+  'packages/llm-providers',
+  'packages/network-policy-core',
+  'packages/workflow-recipe-capability-policy',
+  'packages/workflow-runtime-core',
+  'webhook-gateway',
+  'webhook-proxy',
+  'workflow-approval-request-reader',
+  'workspace-files-controller',
+]
+
+export const ciRootFormatTargets = [...rootFormatTargets, '.github/workflows', 'scripts']
+
+// Only checked when the candidate extension is YAML. The generated minikube
+// API-IP patch is excluded explicitly even though it is normally Git-ignored;
+// its tracked `.yaml.template` producer is also rejected by the extension gate.
+export const ciYamlRoots = [
+  'deploy/base',
+  'deploy/components',
+  'deploy/overlays',
+  'deploy/security',
+]
+
+export const ciExcludedPaths = ['deploy/overlays/minikube/patches/k8s-api-ip.yaml']

@@ -17,7 +17,12 @@ VERSION="${RELEASE_REF#v}"
 # a v-prefixed image tag downstream, so promoting to a bare :0.6.0 would
 # produce a tag nothing ever pulls.
 TAG="v${VERSION}"
-TAG_SHA="$(git rev-parse "$RELEASE_REF^{commit}")"
+TAG_SHA="${TAG_SHA:-$(git rev-parse --verify --end-of-options "$RELEASE_REF^{commit}")}"
+
+if [[ ! "$TAG_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || ! git cat-file -e "${TAG_SHA}^{commit}"; then
+  echo "::error::TAG_SHA must identify an available full commit SHA" >&2
+  exit 1
+fi
 
 # :stable moves only for a strict release. A v0.6.0-rc dry run must not
 # re-point the tag the documentation tells people to use.

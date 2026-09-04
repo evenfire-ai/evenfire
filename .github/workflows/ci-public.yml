@@ -2,12 +2,23 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [dev, main, master]
   pull_request:
 
 jobs:
+  prettier:
+    name: Prettier (incoming source)
+    permissions:
+      contents: read
+    uses: ./.github/workflows/prettier-source-preflight.yml
+    with:
+      base_sha: ${{ github.event.pull_request.base.sha || github.event.before }}
+      head_sha: ${{ github.event.pull_request.head.sha || github.sha }}
+      mode: ${{ github.event_name == 'pull_request' && 'merge-base' || 'direct' }}
+
   repo-hygiene:
     name: Repo hygiene (no internal working artifacts)
+    needs: prettier
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -38,6 +49,7 @@ jobs:
 
   test:
     name: Build / test / typecheck (${{ matrix.service }})
+    needs: prettier
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -149,6 +161,7 @@ jobs:
   # paths-filter): correctness over CI minutes on a low-volume repo.
   control-api-migration:
     name: Real Postgres integration (Postgres 16)
+    needs: prettier
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -277,6 +290,7 @@ jobs:
   # CI. A production `next build` still runs the app TypeScript typecheck + ESLint.
   control-ui-build:
     name: Build (control-ui)
+    needs: prettier
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -316,6 +330,7 @@ jobs:
   # instead of failing, exactly like the monorepo gate.
   registry-contract:
     name: Registry contract (consumer → registry)
+    needs: prettier
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -407,11 +422,36 @@ jobs:
   # generated-manifest and gate-orchestration contracts.
   shell-syntax:
     name: Shell script syntax (bash -n)
+    needs: prettier
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked root test dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Test incoming-diff Prettier selection
+        run: bash scripts/tests/test-prettier-run-on-diff.sh
+
+      - name: Test exact-SHA CI provenance
+        run: node --test scripts/tests/require-successful-ci-run.test.mjs
+
+      - name: Test publication source-preflight wiring
+        run: bash scripts/tests/test-publication-source-preflight.sh
+
+      - name: Validate reusable-workflow contracts
+        run: bash scripts/tests/test-workflow-contracts.sh
+
+      - name: Test trusted release executable source
+        run: bash scripts/tests/test-trusted-release-source.sh
 
       - name: Run bash -n on all .sh files
         run: |
@@ -597,6 +637,7 @@ jobs:
   # ─── Platform NGINX image guard (CVE baseline) ────────────────────────────
   nginx-image-guard:
     name: Validate platform NGINX images
+    needs: prettier
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -606,6 +647,7 @@ jobs:
   # ─── Cf-Access header-read guard ──────────────────────────────────────────
   cf-access-header-guard:
     name: Validate Cf-Access header reads
+    needs: prettier
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -618,6 +660,7 @@ jobs:
   # an agent shells out. Assert the dependency is declared, not inherited.
   dockerfile-ca-guard:
     name: Validate Dockerfile CA bundles
+    needs: prettier
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -631,6 +674,7 @@ jobs:
   # that are checkable without the gcp overlays.
   deploy-manifest-check:
     name: Deploy Manifest Check
+    needs: prettier
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -724,6 +768,7 @@ jobs:
   # node_modules) and matches the .gitleaks.toml calibration.
   leak-guards:
     name: Leak guards (identifiers + secrets)
+    needs: prettier
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
