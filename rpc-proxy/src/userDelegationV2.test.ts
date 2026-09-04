@@ -12,7 +12,7 @@ import { tokenDeclaresV2, verifyUserDelegationV2 } from './userDelegationV2.js'
 
 const KEYPAIR = generateKeyPairSync('rsa', { modulusLength: 2048 })
 const OTHER_KEYPAIR = generateKeyPairSync('rsa', { modulusLength: 2048 })
-const PRIVATE_KEY = KEYPAIR.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+const SIGNING_KEY_PEM = KEYPAIR.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
 const PUBLIC_KEY = KEYPAIR.publicKey.export({ type: 'spki', format: 'pem' }).toString()
 const NOW = 1_800_000_000
 
@@ -57,7 +57,7 @@ function sign(
   overrides: Record<string, unknown> = {},
   options: { audience?: string; privateKey?: string } = {}
 ): string {
-  return jwt.sign({ ...claims(), ...overrides }, options.privateKey ?? PRIVATE_KEY, {
+  return jwt.sign({ ...claims(), ...overrides }, options.privateKey ?? SIGNING_KEY_PEM, {
     algorithm: 'RS256',
     issuer: 'control-api',
     audience: options.audience ?? 'rpc-proxy',
