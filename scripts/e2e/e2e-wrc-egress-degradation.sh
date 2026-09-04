@@ -134,6 +134,9 @@ workload_health() {
   local pod
   pod="$(ready_pod_name "$namespace" \
     "clerum.io/recipe=${RECIPE_NAME},clerum.io/workload=${workload}" 2>/dev/null)" || return 1
+  # loopback is intentionally assembled inside JavaScript for the repository's
+  # public/private evidence boundary; no shell expansion belongs in this body.
+  # shellcheck disable=SC2016
   kctl exec "$pod" -n "$namespace" -- node -e '
     const loopback = [127, 0, 0, 1].join(".");
     fetch(`http://${loopback}:3001/`)

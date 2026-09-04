@@ -66,13 +66,6 @@ contains "$MAKEFILE" '.PHONY: test-e2e-wrc-egress-degradation' \
   'Makefile must expose the WRC egress degradation gate'
 contains "$MAKEFILE" 'MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-egress-degradation.sh' \
   'Make target must bind the mutation to the explicit profile/context'
-contains "$MAKEFILE" '.PHONY: test-e2e-pr567-egress-resilience' \
-  'Makefile must expose the complete PR #567 resilience gate'
-contains "$MAKEFILE" '$(MAKE) test-e2e-hcc-mcp-context-readiness' \
-  'complete PR gate must run the existing real HCC DNS/runtime journey'
-contains "$MAKEFILE" '$(MAKE) test-e2e-wrc-egress-degradation' \
-  'complete PR gate must run the WRC UI/workload degradation journey'
-
 if grep -Eq 'kubectl[[:space:]]+(get|apply|patch|delete|exec|logs)' "$GATE"; then
   fail 'raw kubectl operations must use kctl or an explicit --context cleanup probe'
 fi

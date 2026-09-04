@@ -1267,12 +1267,6 @@ test-e2e-wrc-egress-degradation: ## Prove valid UI/workload services survive tra
 	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
 	E2E_WRC_EGRESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-egress-degradation.sh
 
-.PHONY: test-e2e-pr567-egress-resilience
-test-e2e-pr567-egress-resilience: ## Run the exact-head HCC + WRC external-egress resilience journeys sequentially
-	@echo "Running PR #567 external-egress resilience gates..."
-	$(MAKE) test-e2e-hcc-mcp-context-readiness E2E_KUBECONTEXT=$(E2E_KUBECONTEXT) E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)"
-	$(MAKE) test-e2e-wrc-egress-degradation E2E_KUBECONTEXT=$(E2E_KUBECONTEXT) E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)"
-
 .PHONY: test-e2e-hcc-readiness-bootstrap
 test-e2e-hcc-readiness-bootstrap: ## Prove HCC readiness while its initial Host fleet pass remains active
 	@echo "Running HCC initial-fleet readiness gate..."
