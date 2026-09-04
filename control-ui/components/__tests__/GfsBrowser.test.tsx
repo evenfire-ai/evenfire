@@ -975,6 +975,28 @@ describe('GfsBrowser', () => {
     ])
   })
 
+  it('shows share and rename actions on both folder and file rows', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('archive', 'directory', 1), child('report.md', 'file', 2)],
+      nextCursor: null,
+    })
+    renderBrowser()
+
+    const currentResources = await screen.findByRole('list', { name: 'Current folder resources' })
+    const folderRow = within(currentResources).getByText('archive').closest('li')
+    const fileRow = within(currentResources).getByText('report.md').closest('li')
+    expect(folderRow).not.toBeNull()
+    expect(fileRow).not.toBeNull()
+
+    expect(within(folderRow!).getByRole('button', { name: 'Share archive' })).toBeTruthy()
+    expect(within(folderRow!).getByRole('button', { name: 'Rename archive' })).toBeTruthy()
+    expect(within(folderRow!).queryByRole('button', { name: 'Download archive' })).toBeNull()
+
+    expect(within(fileRow!).getByRole('button', { name: 'Share report.md' })).toBeTruthy()
+    expect(within(fileRow!).getByRole('button', { name: 'Download report.md' })).toBeTruthy()
+    expect(within(fileRow!).getByRole('button', { name: 'Rename report.md' })).toBeTruthy()
+  })
+
   it('surfaces download failures through the toast stack', async () => {
     mockApiGet.mockResolvedValueOnce({
       items: [child('report.md', 'file', 2)],

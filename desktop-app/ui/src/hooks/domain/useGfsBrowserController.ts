@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
 import type { GfsGrantListItem, GfsShareListItem } from '@/gfs/delegation.types'
 import { desktopQueryKeys } from './queryKeys'
@@ -346,37 +352,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     },
     [revokeAccess]
   )
-  // Query-surfaced authorization failures (a refetch after revocation is the
-  // normal way the loss is discovered under Infinity staleTime). Discovery is
-  // the session/authority boundary; per-resource verdicts stay local.
-  const queryAuthorizationError = [
-    accessibleQuery.error
-      ? { message: toMessage(accessibleQuery.error), surface: 'discovery' as const }
-      : null,
-    childrenQuery.error
-      ? { message: toMessage(childrenQuery.error), surface: 'operation' as const }
-      : null,
-    affordancesQuery.error
-      ? { message: toMessage(affordancesQuery.error), surface: 'operation' as const }
-      : null,
-    rowAffordancesQuery.error
-      ? { message: toMessage(rowAffordancesQuery.error), surface: 'operation' as const }
-      : null,
-    grantsQuery.error
-      ? { message: toMessage(grantsQuery.error), surface: 'operation' as const }
-      : null,
-    sharesQuery.error
-      ? { message: toMessage(sharesQuery.error), surface: 'operation' as const }
-      : null,
-  ]
-    .filter(
-      (entry): entry is { message: string; surface: 'discovery' | 'operation' } => entry !== null
-    )
-    .find(entry => isGfsSessionAuthorityFailure(entry.message, entry.surface))
-  useEffect(() => {
-    if (!queryAuthorizationError || accessState === 'revoked') return
-    revokeAccess()
-  }, [accessState, queryAuthorizationError, revokeAccess])
   // All GFS mutations share the central fail-closed boundary: an authority
   // rejection (401 / typed lifecycle code) revokes the session even when the
   // caller would only have toasted. Policy verdicts (403/412) stay local.
@@ -486,6 +461,78 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     () => (authorityPending ? [] : (childrenQuery.data?.pages ?? []).flatMap(page => page.items)),
     [authorityPending, childrenQuery.data]
   )
+  /**
+   * Children listings deliberately contain no permission bits. Resolve the
+   * caller's affordances for every visible child so row-level Share, Rename,
+   * and Delete controls are consistent across files and folders instead of
+   * only appearing after that row's overflow menu has been opened.
+   *
+   * The query keys are shared with the selected-row observer above. That keeps
+   * the overflow menu and Manage dialog on the same cache entry while the
+   * per-row queries remain fail-closed until their own server verdict arrives.
+   */
+  const rowAffordancesQueries = useQueries({
+    queries: items.map(item => ({
+      queryKey: desktopQueryKeys.gfsAffordances(
+        sessionScope ?? 'anonymous',
+        item.resourceId,
+        DRIVE
+      ),
+      queryFn: () => window.clerum.gfs.affordances(item.resourceId, DRIVE),
+      enabled:
+        Boolean(sessionScope) &&
+        Boolean(current) &&
+        currentIsDirectory &&
+        !authorityPending &&
+        accessState === 'active',
+      // Permission changes made outside this page must not leave row actions
+      // stale when a folder is revisited.
+      refetchOnMount: 'always' as const,
+    })),
+  })
+  const rowAffordancesByResourceId = useMemo(() => {
+    const byResourceId: Record<string, GfsBrowserAffordances> = {}
+    if (authorityPending || accessState === 'revoked') return byResourceId
+    items.forEach((item, index) => {
+      const data = rowAffordancesQueries[index]?.data
+      if (data) byResourceId[item.resourceId] = data as GfsBrowserAffordances
+    })
+    return byResourceId
+  }, [accessState, authorityPending, items, rowAffordancesQueries])
+  // Query-surfaced authorization failures (a refetch after revocation is the
+  // normal way the loss is discovered under Infinity staleTime). Discovery is
+  // the session/authority boundary; per-resource verdicts stay local.
+  const queryAuthorizationError = [
+    accessibleQuery.error
+      ? { message: toMessage(accessibleQuery.error), surface: 'discovery' as const }
+      : null,
+    childrenQuery.error
+      ? { message: toMessage(childrenQuery.error), surface: 'operation' as const }
+      : null,
+    affordancesQuery.error
+      ? { message: toMessage(affordancesQuery.error), surface: 'operation' as const }
+      : null,
+    rowAffordancesQuery.error
+      ? { message: toMessage(rowAffordancesQuery.error), surface: 'operation' as const }
+      : null,
+    ...rowAffordancesQueries.map(query =>
+      query.error ? { message: toMessage(query.error), surface: 'operation' as const } : null
+    ),
+    grantsQuery.error
+      ? { message: toMessage(grantsQuery.error), surface: 'operation' as const }
+      : null,
+    sharesQuery.error
+      ? { message: toMessage(sharesQuery.error), surface: 'operation' as const }
+      : null,
+  ]
+    .filter(
+      (entry): entry is { message: string; surface: 'discovery' | 'operation' } => entry !== null
+    )
+    .find(entry => isGfsSessionAuthorityFailure(entry.message, entry.surface))
+  useEffect(() => {
+    if (!queryAuthorizationError || accessState === 'revoked') return
+    revokeAccess()
+  }, [accessState, queryAuthorizationError, revokeAccess])
   const accessibleResources = useMemo<GfsAccessibleResource[]>(
     () =>
       authorityPending
@@ -684,6 +731,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         : ((affordancesQuery.data as GfsBrowserAffordances | undefined) ?? null),
     affordancesError: affordancesQuery.error ? toMessage(affordancesQuery.error) : null,
     loadingAffordances: affordancesQuery.isFetching,
+    rowAffordancesByResourceId,
     rowAffordancesResourceId,
     setRowAffordancesResourceId,
     rowAffordances:

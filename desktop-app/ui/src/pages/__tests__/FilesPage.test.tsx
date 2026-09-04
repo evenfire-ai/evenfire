@@ -28,6 +28,7 @@ function baseController() {
     loadingAffordances: false,
     rowAffordancesResourceId: null,
     setRowAffordancesResourceId: vi.fn(),
+    rowAffordancesByResourceId: {},
     rowAffordances: null,
     rowAffordancesError: null,
     loadingAccessible: false,
@@ -263,6 +264,94 @@ describe('FilesPage', () => {
       'Rename report.txt',
       'Options for report.txt',
     ])
+  })
+
+  it('shows permission-backed share and rename actions for folder and file children', () => {
+    const folder = {
+      resourceId: 'folder-child',
+      rid: 'folder-child',
+      gfsUri: 'gfs://main/folder-child',
+      drive: 'main',
+      parentResourceId: 'parent-1',
+      name: 'Assets',
+      kind: 'directory' as const,
+      path: '/Workspace/Assets',
+      version: 2,
+      bytes: 0,
+    }
+    const file = {
+      resourceId: 'file-child',
+      rid: 'file-child',
+      gfsUri: 'gfs://main/file-child',
+      drive: 'main',
+      parentResourceId: 'parent-1',
+      name: 'report.txt',
+      kind: 'file' as const,
+      path: '/Workspace/report.txt',
+      version: 3,
+      bytes: 12,
+    }
+    const readonlyFile = {
+      ...file,
+      resourceId: 'readonly-child',
+      rid: 'readonly-child',
+      gfsUri: 'gfs://main/readonly-child',
+      name: 'readonly.txt',
+    }
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'parent-1',
+        gfsUri: 'gfs://main/parent-1',
+        name: 'Workspace',
+        kind: 'directory',
+        version: 1,
+        bytes: 0,
+      },
+      items: [folder, file, readonlyFile],
+      rowAffordancesByResourceId: {
+        'folder-child': {
+          held: ['read', 'write', 'manage_acl'],
+          canDelegate: false,
+          grantableBits: [],
+          canCreateShare: false,
+        },
+        'file-child': {
+          held: ['read', 'write', 'manage_acl'],
+          canDelegate: false,
+          grantableBits: [],
+          canCreateShare: false,
+        },
+        'readonly-child': {
+          held: ['read'],
+          canDelegate: false,
+          grantableBits: [],
+          canCreateShare: false,
+        },
+      },
+    })
+
+    renderFilesPage()
+
+    const folderRow = screen.getByRole('button', { name: 'Open Assets' }).closest('.da-grid__row')
+    const fileRow = screen.getByRole('button', { name: 'Open report.txt' }).closest('.da-grid__row')
+    const readonlyRow = screen
+      .getByRole('button', { name: 'Open readonly.txt' })
+      .closest('.da-grid__row')
+    expect(folderRow).not.toBeNull()
+    expect(fileRow).not.toBeNull()
+    expect(readonlyRow).not.toBeNull()
+
+    expect(within(folderRow!).getByRole('button', { name: 'Share Assets' })).toBeTruthy()
+    expect(within(folderRow!).getByRole('button', { name: 'Rename Assets' })).toBeTruthy()
+    expect(within(folderRow!).queryByRole('button', { name: 'Download Assets' })).toBeNull()
+
+    expect(within(fileRow!).getByRole('button', { name: 'Share report.txt' })).toBeTruthy()
+    expect(within(fileRow!).getByRole('button', { name: 'Download report.txt' })).toBeTruthy()
+    expect(within(fileRow!).getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
+
+    expect(within(readonlyRow!).queryByRole('button', { name: 'Share readonly.txt' })).toBeNull()
+    expect(within(readonlyRow!).queryByRole('button', { name: 'Rename readonly.txt' })).toBeNull()
   })
 
   it('orders directories before files, both alphabetically by name', async () => {

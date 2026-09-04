@@ -911,42 +911,37 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   }
 
   /**
-   * Delete gate for list rows. Root "shared with me" rows already carry their
-   * permission bits; folder children don't, so their gate resolves lazily from
-   * the affordances of the one row whose ⋯ menu is open.
+   * Folder children do not carry permission bits in the listing payload. The
+   * controller resolves each visible row independently; retain the selected
+   * row fallback for older controller shapes and while an overflow query is
+   * transitioning.
    */
+  const rowAffordancesFor = (resource: GfsDriveResource) => {
+    if (!currentIsFolder) return null
+    return (
+      ctrl.rowAffordancesByResourceId?.[resource.resourceId] ??
+      (ctrl.rowAffordancesResourceId === resource.resourceId ? ctrl.rowAffordances : null)
+    )
+  }
+
+  /** Delete gate for list rows. Shared-with-me rows carry their permission
+   * bits directly; child rows use their own server-computed affordances. */
   const rowCanDelete = (resource: GfsDriveResource): boolean => {
-    if (currentIsFolder) {
-      return (
-        ctrl.rowAffordancesResourceId === resource.resourceId &&
-        Boolean(ctrl.rowAffordances?.held.includes('delete'))
-      )
-    }
+    if (currentIsFolder) return hasBit(rowAffordancesFor(resource), 'delete')
     return Boolean(resource.permissions?.includes('delete'))
   }
 
-  /** Rename gate: same lazy resolution as rowCanDelete, but on the write bit
-   *  (rename needs `write` on the resource itself). */
+  /** Rename needs `write` on the resource itself. */
   const rowCanRename = (resource: GfsDriveResource): boolean => {
-    if (currentIsFolder) {
-      return (
-        ctrl.rowAffordancesResourceId === resource.resourceId &&
-        Boolean(ctrl.rowAffordances?.held.includes('write'))
-      )
-    }
+    if (currentIsFolder) return hasBit(rowAffordancesFor(resource), 'write')
     return Boolean(resource.permissions?.includes('write'))
   }
 
   /** Manage gate: the ACL modal needs `manage_acl` (view-ACL = manage-ACL
-   *  server-side). Same lazy row resolution as delete/rename — a read-only
-   *  row must not offer a Manage entry that would only 403 on open. */
+   *  server-side). A read-only row must not offer a Manage entry that would
+   *  only 403 on open. */
   const rowCanManage = (resource: GfsDriveResource): boolean => {
-    if (currentIsFolder) {
-      return (
-        ctrl.rowAffordancesResourceId === resource.resourceId &&
-        Boolean(ctrl.rowAffordances?.held.includes('manage_acl'))
-      )
-    }
+    if (currentIsFolder) return hasBit(rowAffordancesFor(resource), 'manage_acl')
     return Boolean(resource.permissions?.includes('manage_acl'))
   }
 
