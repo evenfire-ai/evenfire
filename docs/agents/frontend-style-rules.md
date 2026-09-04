@@ -87,6 +87,10 @@ application guidance that must be combined with this shared document.
   `DataViewHeader`, `TableSearch`, `TableViewport`, `DataTable`, `TableRow`,
   table cells/state rows, `RecordList`, `RecordListRow`, `RowActionMenu`, and
   sorting helpers instead of creating an application-local table system.
+- Render standardized Control UI and Profile UI table viewports through the
+  shared `TableViewport` component. Application production code must not
+  author `eft-table-viewport` or its modifier classes directly; pass supported
+  modifiers and domain layout hooks through the component instead.
 - Use a semantic `DataTable` for comparable columns and `RecordList` for a
   repeated record layout that does not need column headers. Do not write raw
   production `<table>` markup in either web application. Choose the standard,
