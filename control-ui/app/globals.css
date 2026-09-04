@@ -9153,7 +9153,7 @@ td.cu-registry-description {
 
 .cu-recipe-inline-error {
   color: var(--cu-danger);
-  font-size: 0.75rem;
+  font-size: var(--cu-font-size-xs);
 }
 
 .cu-recipe-manifest-editor {
@@ -9176,7 +9176,7 @@ td.cu-registry-description {
   font-family:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
     monospace;
-  font-size: 0.85rem;
+  font-size: var(--cu-font-size-md);
   resize: vertical;
 }
 
