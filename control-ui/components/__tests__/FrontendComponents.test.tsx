@@ -8,6 +8,7 @@ import {
   TableHeaderCell,
   TableRow,
   TableStateRow,
+  TableViewport,
   TruncatedText,
   stableSortRows,
 } from '@clerum/frontend-components'
@@ -20,6 +21,20 @@ function cssRule(css: string, selector: string) {
 }
 
 describe('shared frontend components', () => {
+  it('owns the canonical viewport class and preserves semantic modifiers', () => {
+    render(
+      <TableViewport aria-label="Embedded results" className="cu-table-wrap" embedded>
+        Results
+      </TableViewport>
+    )
+
+    expect(screen.getByLabelText('Embedded results')).toHaveClass(
+      'eft-table-viewport',
+      'eft-table-viewport--embedded',
+      'cu-table-wrap'
+    )
+  })
+
   it('exposes sortable header state and a keyboard sort control', () => {
     const onSort = vi.fn()
     render(
@@ -157,7 +172,7 @@ describe('shared frontend components', () => {
     unmount()
 
     render(
-      <div className="eft-table-viewport">
+      <TableViewport>
         <DataTable>
           <thead>
             <tr>
@@ -166,7 +181,7 @@ describe('shared frontend components', () => {
             </tr>
           </thead>
         </DataTable>
-      </div>
+      </TableViewport>
     )
 
     await waitFor(() => {

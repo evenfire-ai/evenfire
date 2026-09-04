@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-components'
+import { DataTable, TableStateRow, TableViewport, useTableSort } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { GrantedToMeItem } from '../../lib/api'
 import type { InboundGrantsStatus } from '../../lib/hooks/useInboundGrants'
@@ -50,7 +50,7 @@ export function GrantedToMe({
     onSort: () => grantSort.sortBy(column.key as 'plugin' | 'owner' | 'since'),
   }))
   return (
-    <div className="eft-table-viewport cu-table-wrap">
+    <TableViewport className="cu-table-wrap">
       <DataTable className="eft-table cu-table">
         <thead>
           <TableHeaderRow columns={columns} />
@@ -102,6 +102,6 @@ export function GrantedToMe({
           )}
         </tbody>
       </DataTable>
-    </div>
+    </TableViewport>
   )
 }

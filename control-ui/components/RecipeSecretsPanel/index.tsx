@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type RecipeSecretItem,
@@ -213,7 +213,7 @@ export function RecipeSecretsPanel({
             : 'This recipe declares no API-key Secret references.'}
         </div>
       ) : (
-        <div className="eft-table-viewport cu-table-wrap">
+        <TableViewport className="cu-table-wrap">
           <DataTable className="eft-table cu-table">
             <thead>
               <tr>
@@ -314,7 +314,7 @@ export function RecipeSecretsPanel({
               ))}
             </tbody>
           </DataTable>
-        </div>
+        </TableViewport>
       )}
 
       {missingCount > 0 ? (

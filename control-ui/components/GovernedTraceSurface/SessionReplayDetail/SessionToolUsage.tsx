@@ -1,4 +1,4 @@
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { GovernedTraceToolUsage } from '@lib/governedTrace'
 import { formatTraceTimestamp } from '../formatters'
@@ -14,7 +14,7 @@ export function SessionToolUsage({ tools }: { tools: readonly GovernedTraceToolU
         </div>
         <span>{tools.length} loaded</span>
       </div>
-      <div className="eft-table-viewport cu-table-wrap">
+      <TableViewport className="cu-table-wrap">
         <DataTable className="eft-table cu-table cu-table--header-band cu-trace-detail-table">
           <thead>
             <TableHeaderRow columns={SESSION_TOOL_COLUMNS} />
@@ -49,7 +49,7 @@ export function SessionToolUsage({ tools }: { tools: readonly GovernedTraceToolU
             ) : null}
           </tbody>
         </DataTable>
-      </div>
+      </TableViewport>
     </section>
   )
 }

@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useEffect, useMemo, useState } from 'react'
-import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-components'
+import { DataTable, TableStateRow, TableViewport, useTableSort } from '@clerum/frontend-components'
 import type { LlmAllowedModel } from '@lib/api'
 import { catalogGroupKey, formatContextWindow, getProviderDisplayLabel } from '@lib/llm'
 import { isUnpricedAllowedModel } from '@lib/llmModelUnpriced'
@@ -297,7 +297,7 @@ export function LlmModelTable({
         }
       />
       {navigation}
-      <div className="eft-table-viewport cu-table-wrap cu-table-wrap--sticky-header">
+      <TableViewport className="cu-table-wrap cu-table-wrap--sticky-header">
         <DataTable className="eft-table cu-table cu-table--header-band cu-llm-model-table">
           <thead>
             <TableHeaderRow columns={modelColumns} />
@@ -432,7 +432,7 @@ export function LlmModelTable({
             )}
           </tbody>
         </DataTable>
-      </div>
+      </TableViewport>
     </div>
   )
 }

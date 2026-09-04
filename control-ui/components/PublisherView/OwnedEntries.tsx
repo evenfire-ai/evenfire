@@ -2,7 +2,13 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-components'
+import {
+  DataTable,
+  TableRow,
+  TableStateRow,
+  TableViewport,
+  useTableSort,
+} from '@clerum/frontend-components'
 import { MARKETPLACE_ENTRY_TYPE_LABELS } from '@constants/marketplaceEntryTypes'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
@@ -263,7 +269,7 @@ export function OwnedEntries({
             </button>
           </p>
         ) : null}
-        <div className="eft-table-viewport cu-table-wrap">
+        <TableViewport className="cu-table-wrap">
           <DataTable className="eft-table cu-table">
             <thead>
               <TableHeaderRow columns={columns} />
@@ -386,7 +392,7 @@ export function OwnedEntries({
               )}
             </tbody>
           </DataTable>
-        </div>
+        </TableViewport>
       </div>
     </>
   )

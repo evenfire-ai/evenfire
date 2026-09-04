@@ -1,7 +1,13 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-components'
+import {
+  DataTable,
+  TableRow,
+  TableStateRow,
+  TableViewport,
+  useTableSort,
+} from '@clerum/frontend-components'
 import type { TokenBudget } from '@lib/api'
 import {
   budgetProgressPercent,
@@ -147,7 +153,7 @@ export function TokenBudgetTable({
           />
         }
       />
-      <div className="eft-table-viewport cu-table-wrap">
+      <TableViewport className="cu-table-wrap">
         <DataTable className="eft-table cu-table cu-table--header-band">
           <thead>
             <TableHeaderRow columns={columns} />
@@ -176,7 +182,7 @@ export function TokenBudgetTable({
             )}
           </tbody>
         </DataTable>
-      </div>
+      </TableViewport>
     </div>
   )
 }

@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { RowActionsMenu } from '@components/RowActionsMenu'
 import { SelectionModal } from '@components/SelectionModal'
@@ -307,7 +307,7 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
           )}
         </div>
 
-        <div className="eft-table-viewport cu-table-wrap">
+        <TableViewport className="cu-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <tr>
@@ -412,7 +412,7 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
               )}
             </tbody>
           </DataTable>
-        </div>
+        </TableViewport>
       </div>
 
       {showAddUser ? (

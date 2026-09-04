@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import {
   type UserGrant,
   type WorkflowRecipeResource,
@@ -276,7 +276,7 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
           .
         </div>
       ) : (
-        <div className="eft-table-viewport cu-table-wrap">
+        <TableViewport className="cu-table-wrap">
           <DataTable className="eft-table cu-table">
             <thead>
               <tr>
@@ -353,7 +353,7 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
               })}
             </tbody>
           </DataTable>
-        </div>
+        </TableViewport>
       )}
       {activeGrantsClientId
         ? (() => {
@@ -405,7 +405,7 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
                     <div className="cu-empty">No user grants for this client.</div>
                   ) : null}
                   {grants.loadState === 'ready' && grants.users.length > 0 ? (
-                    <div className="eft-table-viewport cu-table-wrap">
+                    <TableViewport className="cu-table-wrap">
                       <DataTable className="eft-table cu-table" variant="embedded">
                         <thead>
                           <tr>
@@ -443,7 +443,7 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
                           })}
                         </tbody>
                       </DataTable>
-                    </div>
+                    </TableViewport>
                   ) : null}
                   <div className="cu-create-actions">
                     <button

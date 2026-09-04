@@ -1,7 +1,7 @@
 'use client'
 
 import React from 'react'
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { RowActionsMenu } from '@components/RowActionsMenu'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
@@ -119,7 +119,7 @@ export function GrantsView({
           </div>
         </div>
       ) : null}
-      <div className="eft-table-viewport cu-table-wrap">
+      <TableViewport className="cu-table-wrap">
         <DataTable className="eft-table cu-table cu-plugin-sdk-grants-table">
           <thead>
             <TableHeaderRow columns={GRANT_COLUMNS} />
@@ -192,7 +192,7 @@ export function GrantsView({
             })}
           </tbody>
         </DataTable>
-      </div>
+      </TableViewport>
     </>
   )
 }
@@ -275,7 +275,7 @@ export function InvocationsView({
           <div className="cu-empty">No invocations match these filters.</div>
         </div>
       ) : (
-        <div className="eft-table-viewport cu-table-wrap">
+        <TableViewport className="cu-table-wrap">
           <DataTable className="eft-table cu-table">
             <thead>
               <TableHeaderRow columns={INVOCATION_COLUMNS} />
@@ -300,7 +300,7 @@ export function InvocationsView({
               ))}
             </tbody>
           </DataTable>
-        </div>
+        </TableViewport>
       )}
     </>
   )

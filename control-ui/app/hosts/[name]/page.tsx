@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
 import { SelectionDropdown } from '@components/SelectionDropdown'
@@ -1322,7 +1322,7 @@ export default function HostDetailsPage() {
                 </button>
               </div>
             </div>
-            <div className="eft-table-viewport cu-table-wrap">
+            <TableViewport className="cu-table-wrap">
               <DataTable className="eft-table cu-table cu-table--header-band cu-table--static-rows cu-agent-connectors-table">
                 <thead>
                   <tr>
@@ -1371,7 +1371,7 @@ export default function HostDetailsPage() {
                   )}
                 </tbody>
               </DataTable>
-            </div>
+            </TableViewport>
           </>
         )}
 

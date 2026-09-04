@@ -2,7 +2,13 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-components'
+import {
+  DataTable,
+  TableRow,
+  TableStateRow,
+  TableViewport,
+  useTableSort,
+} from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   AdminPendingInvitationListItem,
@@ -575,7 +581,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
               onLoadingChange={handleAdminLoadingChange}
             />
           ) : activeTab === 'teams' ? (
-            <div className="eft-table-viewport cu-table-wrap">
+            <TableViewport className="cu-table-wrap">
               <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
                 <thead>
                   <TableHeaderRow columns={teamColumns} />
@@ -672,13 +678,13 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                   )}
                 </tbody>
               </DataTable>
-            </div>
+            </TableViewport>
           ) : (
             <>
               {showPendingInvitations ? (
                 <div className="cu-profile-section">
                   <p className="cu-profile-section__label">Pending invitations</p>
-                  <div className="eft-table-viewport cu-table-wrap">
+                  <TableViewport className="cu-table-wrap">
                     <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
                       <thead>
                         <tr>
@@ -770,10 +776,10 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                         )}
                       </tbody>
                     </DataTable>
-                  </div>
+                  </TableViewport>
                 </div>
               ) : null}
-              <div className="eft-table-viewport cu-table-wrap">
+              <TableViewport className="cu-table-wrap">
                 <DataTable className="eft-table cu-table cu-table--profile cu-table--header-band">
                   <thead>
                     <TableHeaderRow columns={memberColumns} />
@@ -890,7 +896,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                     )}
                   </tbody>
                 </DataTable>
-              </div>
+              </TableViewport>
             </>
           )}
           {error ? (

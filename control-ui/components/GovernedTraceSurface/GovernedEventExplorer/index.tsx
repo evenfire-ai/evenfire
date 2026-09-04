@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
@@ -187,7 +187,7 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
         {loading ? (
           <div className="cu-empty">Loading governed events...</div>
         ) : invalidRange ? null : (
-          <div className="eft-table-viewport cu-table-wrap cu-table-wrap--sticky-header">
+          <TableViewport className="cu-table-wrap cu-table-wrap--sticky-header">
             <DataTable className="eft-table cu-table cu-table--header-band cu-trace-explorer-table">
               <thead>
                 <TableHeaderRow columns={columns} />
@@ -207,7 +207,7 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
                 ) : null}
               </tbody>
             </DataTable>
-          </div>
+          </TableViewport>
         )}
         {family === 'infrastructure_telemetry' && !loading ? (
           <InfrastructureOperationalSnapshot events={events} />

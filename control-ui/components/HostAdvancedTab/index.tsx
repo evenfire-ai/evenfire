@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState } from 'react'
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { HostApprovalSection } from '@components/HostApprovalSection'
 import { HostEnvTable } from '@components/HostEnvTable'
 import { HostGuardrailsSection } from '@components/HostGuardrailsSection'
@@ -75,11 +75,7 @@ export function HostAdvancedTab({
 
 function ApprovalToolsSkeleton() {
   return (
-    <div
-      className="eft-table-viewport cu-table-wrap"
-      role="status"
-      aria-label="Loading approval tools"
-    >
+    <TableViewport className="cu-table-wrap" role="status" aria-label="Loading approval tools">
       <DataTable className="eft-table cu-table cu-table--header-band cu-table--static-rows">
         <thead>
           <tr>
@@ -102,6 +98,6 @@ function ApprovalToolsSkeleton() {
           ))}
         </tbody>
       </DataTable>
-    </div>
+    </TableViewport>
   )
 }

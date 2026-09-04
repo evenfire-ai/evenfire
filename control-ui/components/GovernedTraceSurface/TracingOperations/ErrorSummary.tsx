@@ -1,4 +1,4 @@
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { formatTraceTimestamp } from '../formatters'
@@ -28,7 +28,7 @@ export function ErrorSummary({ errors }: ErrorSummaryProps) {
         <strong>Operational errors</strong>
         <span>Recorded occurrences since control-api restart</span>
       </div>
-      <div className="eft-table-viewport cu-table-wrap">
+      <TableViewport className="cu-table-wrap">
         <DataTable className="eft-table cu-table cu-table--header-band cu-trace-ops-table">
           <thead>
             <TableHeaderRow columns={COLUMNS} />
@@ -72,7 +72,7 @@ export function ErrorSummary({ errors }: ErrorSummaryProps) {
             ) : null}
           </tbody>
         </DataTable>
-      </div>
+      </TableViewport>
     </section>
   )
 }

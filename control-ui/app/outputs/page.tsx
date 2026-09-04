@@ -6,6 +6,7 @@ import {
   DataTable,
   TableHeaderCell,
   TableStateRow,
+  TableViewport,
   useTableSort,
 } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
@@ -252,7 +253,7 @@ function OutputsPageContent() {
 
         <div className="cu-card__body cu-outputs-content">
           {activeTab === 'workflow' ? (
-            <div className="eft-table-viewport cu-table-wrap">
+            <TableViewport className="cu-table-wrap">
               <DataTable className="eft-table cu-table cu-table--header-band">
                 <thead>
                   <tr>
@@ -336,9 +337,9 @@ function OutputsPageContent() {
                   )}
                 </tbody>
               </DataTable>
-            </div>
+            </TableViewport>
           ) : (
-            <div className="eft-table-viewport cu-table-wrap">
+            <TableViewport className="cu-table-wrap">
               <DataTable className="eft-table cu-table cu-table--header-band">
                 <thead>
                   <tr>
@@ -426,7 +427,7 @@ function OutputsPageContent() {
                   )}
                 </tbody>
               </DataTable>
-            </div>
+            </TableViewport>
           )}
         </div>
       </div>

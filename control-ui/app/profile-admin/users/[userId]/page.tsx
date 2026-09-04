@@ -3,7 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
 import { RowActionsMenu } from '@components/RowActionsMenu'
@@ -865,7 +865,7 @@ export default function UserDetailsPage() {
           ) : userCommunicationConversations.length === 0 ? (
             <div className="cu-empty">No connected communication channel conversations.</div>
           ) : (
-            <div className="eft-table-viewport cu-table-wrap">
+            <TableViewport className="cu-table-wrap">
               <DataTable className="eft-table cu-table">
                 <thead>
                   <tr>
@@ -901,7 +901,7 @@ export default function UserDetailsPage() {
                   ))}
                 </tbody>
               </DataTable>
-            </div>
+            </TableViewport>
           )}
         </>
       )}
@@ -910,7 +910,7 @@ export default function UserDetailsPage() {
         <>
           <p className="cu-muted cu-detail-section-copy">Team memberships and roles.</p>
           {initialLoading ? (
-            <div className="eft-table-viewport cu-table-wrap">
+            <TableViewport className="cu-table-wrap">
               <DataTable className="eft-table cu-table">
                 <thead>
                   <tr>
@@ -953,13 +953,13 @@ export default function UserDetailsPage() {
                   ))}
                 </tbody>
               </DataTable>
-            </div>
+            </TableViewport>
           ) : userTeams.length === 0 ? (
             <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
               Not a member of any team yet.
             </div>
           ) : (
-            <div className="eft-table-viewport cu-table-wrap">
+            <TableViewport className="cu-table-wrap">
               <DataTable className="eft-table cu-table">
                 <thead>
                   <tr>
@@ -1041,7 +1041,7 @@ export default function UserDetailsPage() {
                   })}
                 </tbody>
               </DataTable>
-            </div>
+            </TableViewport>
           )}
         </>
       )}
@@ -1050,7 +1050,7 @@ export default function UserDetailsPage() {
         <>
           <p className="cu-muted cu-detail-section-copy">Agents this member may use.</p>
           {initialLoading ? (
-            <div className="eft-table-viewport cu-table-wrap">
+            <TableViewport className="cu-table-wrap">
               <DataTable className="eft-table cu-table">
                 <thead>
                   <tr>
@@ -1072,13 +1072,13 @@ export default function UserDetailsPage() {
                   ))}
                 </tbody>
               </DataTable>
-            </div>
+            </TableViewport>
           ) : assignedAgentNames.length === 0 ? (
             <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
               No agent access yet.
             </div>
           ) : (
-            <div className="eft-table-viewport cu-table-wrap">
+            <TableViewport className="cu-table-wrap">
               <DataTable className="eft-table cu-table">
                 <thead>
                   <tr>
@@ -1121,7 +1121,7 @@ export default function UserDetailsPage() {
                   ))}
                 </tbody>
               </DataTable>
-            </div>
+            </TableViewport>
           )}
         </>
       )}

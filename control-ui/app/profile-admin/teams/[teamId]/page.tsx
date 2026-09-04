@@ -2,7 +2,13 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { DataTable, RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
+import {
+  DataTable,
+  RecordList,
+  RecordListRow,
+  RowActionMenu,
+  TableViewport,
+} from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
 import { SelectionDropdown } from '@components/SelectionDropdown'
@@ -687,7 +693,7 @@ export default function TeamDetailsPage() {
               <>
                 <p className="cu-muted cu-detail-section-copy">Team members and their roles.</p>
                 {initialLoading ? (
-                  <div className="eft-table-viewport cu-table-wrap">
+                  <TableViewport className="cu-table-wrap">
                     <DataTable className="eft-table cu-table">
                       <thead>
                         <tr>
@@ -737,7 +743,7 @@ export default function TeamDetailsPage() {
                         ))}
                       </tbody>
                     </DataTable>
-                  </div>
+                  </TableViewport>
                 ) : (
                   <>
                     {pendingInvitations.length > 0 && (
@@ -754,7 +760,7 @@ export default function TeamDetailsPage() {
                         >
                           Pending invitations
                         </p>
-                        <div className="eft-table-viewport cu-table-wrap">
+                        <TableViewport className="cu-table-wrap">
                           <DataTable className="eft-table cu-table">
                             <thead>
                               <tr>
@@ -819,7 +825,7 @@ export default function TeamDetailsPage() {
                               ))}
                             </tbody>
                           </DataTable>
-                        </div>
+                        </TableViewport>
                       </div>
                     )}
                     {members.length === 0 ? (
@@ -829,7 +835,7 @@ export default function TeamDetailsPage() {
                           : 'No members yet.'}
                       </div>
                     ) : (
-                      <div className="eft-table-viewport cu-table-wrap">
+                      <TableViewport className="cu-table-wrap">
                         <DataTable className="eft-table cu-table">
                           <thead>
                             <tr>
@@ -909,7 +915,7 @@ export default function TeamDetailsPage() {
                             })}
                           </tbody>
                         </DataTable>
-                      </div>
+                      </TableViewport>
                     )}
                   </>
                 )}

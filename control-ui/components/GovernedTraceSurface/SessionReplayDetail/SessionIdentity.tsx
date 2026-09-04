@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { GovernedTraceSessionDetail } from '@lib/governedTrace'
@@ -112,7 +112,7 @@ export function SessionIdentity({ detail }: { detail: GovernedTraceSessionDetail
           <h2 id="trace-session-runs">Runs</h2>
           <span>{detail.runs.length} loaded</span>
         </div>
-        <div className="eft-table-viewport cu-table-wrap">
+        <TableViewport className="cu-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band cu-trace-detail-table">
             <thead>
               <TableHeaderRow columns={SESSION_RUN_COLUMNS} />
@@ -143,7 +143,7 @@ export function SessionIdentity({ detail }: { detail: GovernedTraceSessionDetail
               ) : null}
             </tbody>
           </DataTable>
-        </div>
+        </TableViewport>
       </section>
     </>
   )

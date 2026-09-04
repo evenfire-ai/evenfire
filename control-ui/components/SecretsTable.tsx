@@ -6,6 +6,7 @@ import {
   DataTable,
   TableHeaderCell,
   TableStateRow,
+  TableViewport,
   useTableSort,
 } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
@@ -529,7 +530,7 @@ export function SecretsTable({
         )}
 
         {scope === 'llm' ? (
-          <div className="eft-table-viewport cu-table-wrap">
+          <TableViewport className="cu-table-wrap">
             <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
@@ -613,9 +614,9 @@ export function SecretsTable({
                 )}
               </tbody>
             </DataTable>
-          </div>
+          </TableViewport>
         ) : scope === 'mcp' ? (
-          <div className="eft-table-viewport cu-table-wrap">
+          <TableViewport className="cu-table-wrap">
             <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
@@ -693,9 +694,9 @@ export function SecretsTable({
                 )}
               </tbody>
             </DataTable>
-          </div>
+          </TableViewport>
         ) : (
-          <div className="eft-table-viewport cu-table-wrap">
+          <TableViewport className="cu-table-wrap">
             <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
@@ -843,7 +844,7 @@ export function SecretsTable({
                 )}
               </tbody>
             </DataTable>
-          </div>
+          </TableViewport>
         )}
 
         {scope === 'mcp' ? (

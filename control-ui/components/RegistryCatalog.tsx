@@ -3,7 +3,13 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { DataTable, TableRow, TableStateRow, TruncatedText } from '@clerum/frontend-components'
+import {
+  DataTable,
+  TableRow,
+  TableStateRow,
+  TableViewport,
+  TruncatedText,
+} from '@clerum/frontend-components'
 import { FilterSelect } from '@components/FilterSelect'
 import { MarketplaceTabs } from '@components/MarketplaceTabs'
 import { type RowActionMenuItem, RowActionsMenu } from '@components/RowActionsMenu'
@@ -255,7 +261,7 @@ export default function RegistryCatalog() {
         />
         <MarketplaceTabs active="connectors" />
         {error ? <div className="cu-banner cu-banner--error">Error: {error}</div> : null}
-        <div className="eft-table-viewport cu-table-wrap cu-marketplace-table-wrap">
+        <TableViewport className="cu-table-wrap cu-marketplace-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band cu-marketplace-table">
             <thead>
               <TableHeaderRow columns={columns} />
@@ -380,7 +386,7 @@ export default function RegistryCatalog() {
               )}
             </tbody>
           </DataTable>
-        </div>
+        </TableViewport>
       </div>
       {removeTarget ? (
         <div

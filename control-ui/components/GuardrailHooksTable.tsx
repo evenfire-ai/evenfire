@@ -2,7 +2,7 @@
 
 import React, { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-components'
+import { DataTable, TableStateRow, TableViewport, useTableSort } from '@clerum/frontend-components'
 import { RowActionsMenu } from '@components/RowActionsMenu'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { LlmHookStatus } from '../lib/api'
@@ -201,7 +201,7 @@ export function GuardrailHooksTable({
           />
         }
       />
-      <div className="eft-table-viewport cu-table-wrap cu-guardrails-table-wrap">
+      <TableViewport className="cu-table-wrap cu-guardrails-table-wrap">
         <DataTable className="eft-table cu-table cu-table--header-band cu-guardrails-table">
           <thead>
             <TableHeaderRow columns={columns} />
@@ -285,7 +285,7 @@ export function GuardrailHooksTable({
             )}
           </tbody>
         </DataTable>
-      </div>
+      </TableViewport>
     </div>
   )
 }

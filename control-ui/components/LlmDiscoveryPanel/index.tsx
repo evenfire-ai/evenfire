@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-components'
+import { DataTable, TableStateRow, TableViewport, useTableSort } from '@clerum/frontend-components'
 import { LlmProviderIcon } from '@components/LlmProviderIcon'
 import { IconModels } from '@components/Sidebar/icons'
 import { TableHeaderRow } from '@components/TableHeaderRow'
@@ -354,7 +354,7 @@ export function LlmDiscoveryPanel({
           </div>
         ) : null}
 
-        <div className="eft-table-viewport cu-table-wrap cu-table-wrap--sticky-header">
+        <TableViewport className="cu-table-wrap cu-table-wrap--sticky-header">
           <DataTable className="eft-table cu-table cu-table--header-band cu-llm-review-table">
             <thead>
               <TableHeaderRow columns={reviewColumns} />
@@ -412,7 +412,7 @@ export function LlmDiscoveryPanel({
               )}
             </tbody>
           </DataTable>
-        </div>
+        </TableViewport>
       </div>
     </>
   )

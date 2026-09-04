@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
@@ -400,7 +400,7 @@ export function GovernedTraceSurface({
               matchingCount={visibleEvents.length}
               windowLabel={traceWindowLabel(timeWindow)}
             />
-            <div className="eft-table-viewport cu-table-wrap cu-table-wrap--sticky-header">
+            <TableViewport className="cu-table-wrap cu-table-wrap--sticky-header">
               <DataTable className="eft-table cu-table cu-table--header-band">
                 <thead>
                   <TableHeaderRow columns={TRACE_COLUMNS} />
@@ -448,7 +448,7 @@ export function GovernedTraceSurface({
                   ) : null}
                 </tbody>
               </DataTable>
-            </div>
+            </TableViewport>
           </>
         )}
         {family === 'infrastructure_telemetry' && !loading ? (

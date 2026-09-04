@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { FileUploadModal } from '@components/FileUploadModal'
 import { RowActionsMenu } from '@components/RowActionsMenu'
 import { CONTROL_ROUTES } from '@constants/routes'
@@ -363,7 +363,7 @@ export default function SharedFileSystemDetailsPage() {
                 </button>
               </div>
             </div>
-            <div className="eft-table-viewport cu-table-wrap">
+            <TableViewport className="cu-table-wrap">
               <DataTable className="eft-table cu-table">
                 <thead>
                   <TableHeaderRow columns={FILE_COLUMNS} />
@@ -372,7 +372,7 @@ export default function SharedFileSystemDetailsPage() {
                   <SkeletonTableRows columns={FILE_COLUMNS.length} rows={5} />
                 </tbody>
               </DataTable>
-            </div>
+            </TableViewport>
           </div>
         </div>
       </DashboardLayout>
@@ -548,7 +548,7 @@ export default function SharedFileSystemDetailsPage() {
               files here to upload.
             </div>
           ) : (
-            <div className="eft-table-viewport cu-table-wrap">
+            <TableViewport className="cu-table-wrap">
               <DataTable className="eft-table cu-table">
                 <thead>
                   <TableHeaderRow columns={FILE_COLUMNS} />
@@ -636,7 +636,7 @@ export default function SharedFileSystemDetailsPage() {
                   )}
                 </tbody>
               </DataTable>
-            </div>
+            </TableViewport>
           )}
         </div>
       </div>

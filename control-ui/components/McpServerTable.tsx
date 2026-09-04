@@ -1,7 +1,13 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable, TableRow, TableStateRow, TruncatedText } from '@clerum/frontend-components'
+import {
+  DataTable,
+  TableRow,
+  TableStateRow,
+  TableViewport,
+  TruncatedText,
+} from '@clerum/frontend-components'
 import { canAssignConnectorToContext } from '../lib/connectorOAuthAccess'
 import type {
   ConnectorAgentBinding,
@@ -319,7 +325,7 @@ export function McpServerTable({
         }
       />
       {detailContent ? <div className="cu-card__body">{detailContent}</div> : null}
-      <div className="eft-table-viewport cu-table-wrap cu-connectors-table-wrap">
+      <TableViewport className="cu-table-wrap cu-connectors-table-wrap">
         <DataTable className="eft-table cu-table cu-table--header-band cu-connectors-table">
           <thead>
             <TableHeaderRow columns={columns} />
@@ -426,7 +432,7 @@ export function McpServerTable({
             )}
           </tbody>
         </DataTable>
-      </div>
+      </TableViewport>
       {serverKeyAddingAgents
         ? (() => {
             const row = rows.find(candidate => candidate.key === serverKeyAddingAgents)

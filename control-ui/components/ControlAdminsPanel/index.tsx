@@ -6,6 +6,7 @@ import {
   DataTable,
   TableHeaderCell,
   TableStateRow,
+  TableViewport,
   useTableSort,
 } from '@clerum/frontend-components'
 import { useAuth } from '@components/AuthContext'
@@ -361,7 +362,7 @@ export function ControlAdminsPanel({
     <div className="cu-profile-section">
       {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
       {showInvitationsTable ? (
-        <div className="eft-table-viewport cu-table-wrap cu-table-wrap--border-top">
+        <TableViewport className="cu-table-wrap cu-table-wrap--border-top">
           <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <tr>
@@ -430,10 +431,10 @@ export function ControlAdminsPanel({
               )}
             </tbody>
           </DataTable>
-        </div>
+        </TableViewport>
       ) : null}
-      <div
-        className={`eft-table-viewport cu-table-wrap cu-table-wrap--border-top${
+      <TableViewport
+        className={`cu-table-wrap cu-table-wrap--border-top${
           showInvitationsTable ? ' cu-table-wrap--section-gap' : ''
         }`}
       >
@@ -597,7 +598,7 @@ export function ControlAdminsPanel({
             )}
           </tbody>
         </DataTable>
-      </div>
+      </TableViewport>
       {confirmDialog}
     </div>
   )

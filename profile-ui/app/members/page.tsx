@@ -7,6 +7,7 @@ import {
   RowActionMenu,
   TableHeaderCell,
   TableStateRow,
+  TableViewport,
   useTableSort,
 } from '@clerum/frontend-components'
 import { useAuth } from '@components/AuthContext'
@@ -187,7 +188,7 @@ export default function MembersPage() {
                   <h2 className="section-title">Pending invitations</h2>
                 </div>
               </div>
-              <div className="eft-table-viewport">
+              <TableViewport>
                 <DataTable className="eft-table eft-table--wide">
                   <thead>
                     <tr>
@@ -251,12 +252,12 @@ export default function MembersPage() {
                     )}
                   </tbody>
                 </DataTable>
-              </div>
+              </TableViewport>
             </section>
           ) : null}
 
           <section className="section members-section">
-            <div className="eft-table-viewport">
+            <TableViewport>
               <DataTable className="eft-table eft-table--wide">
                 <thead>
                   <tr>
@@ -347,7 +348,7 @@ export default function MembersPage() {
                   )}
                 </tbody>
               </DataTable>
-            </div>
+            </TableViewport>
           </section>
 
           {confirmDialog}

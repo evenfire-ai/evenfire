@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useEffect, useRef, useState } from 'react'
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
 import { Button, Field, FormSection, TextInput } from '@components/ui'
@@ -526,7 +526,7 @@ export function UpdateConnectorCredentials({
     >
       {confirmDialog}
 
-      <div className="eft-table-viewport cu-table-wrap">
+      <TableViewport className="cu-table-wrap">
         <DataTable className="eft-table cu-table">
           <thead>
             <tr>
@@ -547,7 +547,7 @@ export function UpdateConnectorCredentials({
             ))}
           </tbody>
         </DataTable>
-      </div>
+      </TableViewport>
 
       {/* `noValidate`: the browser's own required-field bubble would fire
           before handleSubmit and replace the aggregate message that actually

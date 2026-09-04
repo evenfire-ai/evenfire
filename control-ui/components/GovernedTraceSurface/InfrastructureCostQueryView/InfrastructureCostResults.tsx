@@ -8,7 +8,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import type { InfrastructureCostResponse, InfrastructureCostSelection } from '@lib/governedTrace'
@@ -137,7 +137,7 @@ function CostRunRateForecast({ response }: { response: InfrastructureCostRespons
         <span className="cu-trace-cost-section-title">Historical run-rate forecast</span>
         <span className="cu-trace-cost-chip">Directional</span>
       </div>
-      <div className="eft-table-viewport cu-table-wrap">
+      <TableViewport className="cu-table-wrap">
         <DataTable className="eft-table cu-table cu-table--header-band">
           <thead>
             <tr>
@@ -179,7 +179,7 @@ function CostRunRateForecast({ response }: { response: InfrastructureCostRespons
             ))}
           </tbody>
         </DataTable>
-      </div>
+      </TableViewport>
       <div className="cu-trace-cost-forecast__warning" role="status">
         This extrapolates persisted daily patterns. Provisioned estimates capture replica/runtime
         changes and resource requests, not measured CPU or memory utilization. GCP billed patterns
@@ -364,7 +364,7 @@ function ComponentsTable({
     <section className="cu-trace-cost-components">
       <span className="cu-trace-cost-section-title">{title}</span>
       {components.length ? (
-        <div className="eft-table-viewport cu-table-wrap">
+        <TableViewport className="cu-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <TableHeaderRow columns={COST_COMPONENT_COLUMNS} />
@@ -395,7 +395,7 @@ function ComponentsTable({
               ))}
             </tbody>
           </DataTable>
-        </div>
+        </TableViewport>
       ) : (
         <div className="cu-empty cu-empty--compact">No component rows returned for this basis.</div>
       )}

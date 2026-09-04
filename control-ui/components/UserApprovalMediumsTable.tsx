@@ -1,7 +1,7 @@
 'use client'
 
 import React from 'react'
-import { DataTable, RowActionMenu } from '@clerum/frontend-components'
+import { DataTable, RowActionMenu, TableViewport } from '@clerum/frontend-components'
 import type { WorkflowApprovalMediumAccount } from '../lib/workflowApprovalMediums'
 
 function formatAccount(account: WorkflowApprovalMediumAccount): string {
@@ -27,7 +27,7 @@ export function UserApprovalMediumsTable({
   onRevoke: (accountId: string) => void
 }) {
   return (
-    <div className="eft-table-viewport cu-table-wrap">
+    <TableViewport className="cu-table-wrap">
       <DataTable className="eft-table cu-table">
         <thead>
           <tr>
@@ -94,6 +94,6 @@ export function UserApprovalMediumsTable({
           )}
         </tbody>
       </DataTable>
-    </div>
+    </TableViewport>
   )
 }

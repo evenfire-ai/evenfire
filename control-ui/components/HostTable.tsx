@@ -1,7 +1,13 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { DataTable, TableRow, TableStateRow, useTableSort } from '@clerum/frontend-components'
+import {
+  DataTable,
+  TableRow,
+  TableStateRow,
+  TableViewport,
+  useTableSort,
+} from '@clerum/frontend-components'
 import { getProviderLabel } from '../lib/llm'
 import { ConnectorCountHoverCard } from './ConnectorCountCell'
 import type { HostItem, HostRef } from './HostTable.types'
@@ -164,7 +170,7 @@ export function HostTable({
           />
         }
       />
-      <div className="eft-table-viewport cu-table-wrap">
+      <TableViewport className="cu-table-wrap">
         <DataTable className="eft-table cu-table cu-table--header-band">
           <thead>
             <TableHeaderRow columns={hostColumns} />
@@ -264,7 +270,7 @@ export function HostTable({
             )}
           </tbody>
         </DataTable>
-      </div>
+      </TableViewport>
     </div>
   )
 }

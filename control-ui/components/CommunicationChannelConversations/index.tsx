@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { DataTable, RowActionMenu } from '@clerum/frontend-components'
+import { DataTable, RowActionMenu, TableViewport } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { formatCommunicationChannelConfirmedAt } from '@lib/communicationChannels'
 import type {
@@ -67,7 +67,7 @@ export function CommunicationChannelConversationsTable({
     return <div className="cu-empty cu-empty--compact">{emptyLabel}</div>
   }
   return (
-    <div className="eft-table-viewport cu-table-wrap">
+    <TableViewport className="cu-table-wrap">
       <DataTable className="eft-table cu-table cu-channel-conversations-table">
         <thead>
           <tr>
@@ -128,6 +128,6 @@ export function CommunicationChannelConversationsTable({
           })}
         </tbody>
       </DataTable>
-    </div>
+    </TableViewport>
   )
 }

@@ -2,7 +2,7 @@
 
 import React, { useCallback, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { RowActionsMenu } from '@components/RowActionsMenu'
 import { useToast } from '@components/Toast'
@@ -106,7 +106,7 @@ export function HostGuardrailsSection({
           ) : null}
         </div>
 
-        <div className="eft-table-viewport cu-table-wrap">
+        <TableViewport className="cu-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <tr>
@@ -163,7 +163,7 @@ export function HostGuardrailsSection({
               )}
             </tbody>
           </DataTable>
-        </div>
+        </TableViewport>
       </div>
 
       {confirmDialog}

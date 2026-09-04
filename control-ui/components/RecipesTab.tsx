@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-components'
+import { DataTable, TableStateRow, TableViewport, useTableSort } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { DEFAULT_WORKFLOW_RECIPE_NAMESPACE } from '@constants/workflowRecipes'
 import type { WorkflowRecipeResource } from '../lib/api'
@@ -131,7 +131,7 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
       />
       {error ? <div className="cu-banner cu-banner--error cu-table-error">{error}</div> : null}
 
-      <div className="eft-table-viewport cu-table-wrap">
+      <TableViewport className="cu-table-wrap">
         <DataTable className="eft-table cu-table cu-table--header-band cu-installed-plugins-table">
           <thead>
             <TableHeaderRow columns={columns} />
@@ -188,7 +188,7 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
             )}
           </tbody>
         </DataTable>
-      </div>
+      </TableViewport>
     </div>
   )
 }

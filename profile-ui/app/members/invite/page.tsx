@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable, RowActionMenu } from '@clerum/frontend-components'
+import { DataTable, RowActionMenu, TableViewport } from '@clerum/frontend-components'
 import { AuthGate } from '@components/AuthGate'
 import { Button } from '@components/Button'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
@@ -273,7 +273,7 @@ function PermissionTable({
   onRoleChange: (team: ManageableTeam, role: Role) => void
 }) {
   return (
-    <div className="eft-table-viewport">
+    <TableViewport>
       <DataTable className="eft-table eft-table--wide">
         <thead>
           <tr>
@@ -330,6 +330,6 @@ function PermissionTable({
           })}
         </tbody>
       </DataTable>
-    </div>
+    </TableViewport>
   )
 }

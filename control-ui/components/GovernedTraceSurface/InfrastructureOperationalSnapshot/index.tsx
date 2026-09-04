@@ -10,7 +10,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import type { GovernedTraceEvent } from '@lib/governedTrace'
@@ -254,7 +254,7 @@ export function InfrastructureOperationalSnapshot({
           </div>
         </div>
       ) : null}
-      <div className="eft-table-viewport cu-table-wrap">
+      <TableViewport className="cu-table-wrap">
         <DataTable className="eft-table cu-table cu-table--header-band">
           <thead>
             <TableHeaderRow columns={COLUMNS} />
@@ -322,7 +322,7 @@ export function InfrastructureOperationalSnapshot({
             ) : null}
           </tbody>
         </DataTable>
-      </div>
+      </TableViewport>
     </section>
   )
 }

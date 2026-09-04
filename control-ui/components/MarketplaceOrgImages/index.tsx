@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-components'
+import { DataTable, TableStateRow, TableViewport, useTableSort } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { type OrgImage, listOrgImages } from '../../lib/api'
 import {
@@ -132,7 +132,7 @@ export function MarketplaceOrgImages({
             .
           </p>
         ) : null}
-        <div className="eft-table-viewport cu-table-wrap">
+        <TableViewport className="cu-table-wrap">
           <DataTable className="eft-table cu-table">
             <thead>
               <TableHeaderRow columns={columns} />
@@ -194,7 +194,7 @@ export function MarketplaceOrgImages({
               )}
             </tbody>
           </DataTable>
-        </div>
+        </TableViewport>
         {view.kind === 'ready' && rows.length > 0 ? (
           <p className="cu-muted-note cu-muted-note--spaced">
             A push can still be rejected if the credential lacks publish permission or the org has

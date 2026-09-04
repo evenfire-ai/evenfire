@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { DataTable, TableStateRow, useTableSort } from '@clerum/frontend-components'
+import { DataTable, TableStateRow, TableViewport, useTableSort } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type CreateRegistryApiKeyInput,
@@ -264,7 +264,7 @@ export default function RegistryApiKeysPanel({
           </p>
         ) : null}
         {view.kind === 'loading' || view.kind === 'error' || view.kind === 'ready' ? (
-          <div className="eft-table-viewport cu-table-wrap">
+          <TableViewport className="cu-table-wrap">
             <DataTable className="eft-table cu-table">
               <thead>
                 <TableHeaderRow columns={columns} />
@@ -327,7 +327,7 @@ export default function RegistryApiKeysPanel({
                 )}
               </tbody>
             </DataTable>
-          </div>
+          </TableViewport>
         ) : null}
       </div>
     </>

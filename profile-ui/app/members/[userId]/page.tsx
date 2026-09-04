@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { DataTable, RowActionMenu } from '@clerum/frontend-components'
+import { DataTable, RowActionMenu, TableViewport } from '@clerum/frontend-components'
 import { useAuth } from '@components/AuthContext'
 import { AuthGate } from '@components/AuthGate'
 import { Button } from '@components/Button'
@@ -221,7 +221,7 @@ export default function MemberDetailsPage() {
                   </p>
                 </div>
               </div>
-              <div className="eft-table-viewport">
+              <TableViewport>
                 <DataTable className="eft-table eft-table--wide">
                   <thead>
                     <tr>
@@ -302,7 +302,7 @@ export default function MemberDetailsPage() {
                     ) : null}
                   </tbody>
                 </DataTable>
-              </div>
+              </TableViewport>
               {editableTeams.length === 0 && !memberIsSelf ? (
                 <p className="body-copy">No editable teams are available for this member.</p>
               ) : null}

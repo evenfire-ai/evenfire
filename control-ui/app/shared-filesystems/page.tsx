@@ -7,6 +7,7 @@ import {
   RowActionMenu,
   TableRow,
   TableStateRow,
+  TableViewport,
   useTableSort,
 } from '@clerum/frontend-components'
 import { DashboardLayout } from '@components/DashboardLayout'
@@ -237,7 +238,7 @@ export default function SharedFileSystemsPage() {
           </div>
         ) : null}
 
-        <div className="eft-table-viewport cu-table-wrap">
+        <TableViewport className="cu-table-wrap">
           <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <TableHeaderRow columns={columns} />
@@ -327,7 +328,7 @@ export default function SharedFileSystemsPage() {
               )}
             </tbody>
           </DataTable>
-        </div>
+        </TableViewport>
       </div>
 
       {deleteTarget ? (
