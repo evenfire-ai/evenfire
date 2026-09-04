@@ -86,7 +86,10 @@ describe("copy rollback and ambiguous commit outcomes", () => {
 
   it("treats an exact fully published ambiguous commit as success after the request is aborted", async () => {
     const fixture = copyFixture({ ambiguity: "full", abortOnAmbiguity: true });
-    await expect(fixture.writes.copy(fixture.input)).resolves.toMatchObject({ objectCount: 4 });
+    await expect(fixture.writes.copy(fixture.input)).resolves.toMatchObject({
+      objectCount: 4,
+      root: { updatedAt: "2026-01-01T00:00:00.000Z" },
+    });
     expect(fixture.input.signal?.aborted).toBe(true);
     expect(fixture.db.manifests.size).toBe(0);
     expect(fixture.blobs.deletes).toEqual([]);
