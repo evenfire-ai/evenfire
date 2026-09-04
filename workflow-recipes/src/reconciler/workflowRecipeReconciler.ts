@@ -2167,72 +2167,107 @@ export class WorkflowRecipeReconciler {
             resourceInstances: recipe.status.resourceInstances,
           }
         : undefined
-      await this.bindCodexReconcileContext(recipe, approvalScopeRecipeName)
-      const result = await this.workflowReconciler.reconcile(
-        name,
-        recipe.metadata.uid ?? '',
-        ns,
-        workflowRuntimeSpec,
-        inboundStatus,
-        workflowResolvedInputs,
-        approvalScopeRecipeName,
-        recipe.metadata.labels?.[WORKFLOW_RUN_ID_LABEL],
-        recipe.metadata.labels?.['clerum.io/workflow-team-id'],
-        recipe.metadata.labels?.[WORKFLOW_ACTOR_ID_LABEL],
-        recipe.metadata.labels?.[WORKFLOW_ACTOR_TYPE_LABEL]
-      )
-      if (coordinatorGfsPolicyCanOpen && !result.skipStatusPatch && result.phase !== 'failed') {
-        await this.ensureCoordinatorGfsNetworkPolicyIfEnabled(recipe)
-      } else if (result.phase === 'failed' || !coordinatorGfsPolicyCanOpen) {
-        await this.revokeCoordinatorGfsNetworkPolicy(recipe)
-      }
-      return {
-        phase: result.phase as RecipePhase,
-        message: result.message,
-        workloadStatuses: [],
-        workflowPhase: result.workflowPhase,
-        clearWorkflowExecution: result.clearWorkflowExecution,
-        workflowConditions: result.workflowConditions,
-        workloadConditions: workflowWorkloadConditions,
-        pluginWorkloadSdkBootstrapProof: result.pluginWorkloadSdkBootstrapProof,
-        pluginWorkloadSdkPolicyPending: result.pluginWorkloadSdkPolicyPending,
-        // Thread the inner reconciler's transient-skip up so the watcher leaves
-        // status untouched and requeues instead of patching a false failure.
-        skipStatusPatch:
-          result.skipStatusPatch &&
-          !(
-            workflowNetworkPolicyReapProjection?.condition &&
-            workflowNetworkPolicyReapProjection.condition.status !== 'False'
-          ),
-        // Requeue on a timer when the workflow reconcile is either (a) a
-        // transient skip, or (b) still bringing up infra (phase === 'deploying',
-        // e.g. waiting on the output anchor/prepare pod). The controller watches
-        // only the CR, not the Pods it creates, so a Pod reaching Succeeded
-        // fires no CR MODIFIED event — without this timer the run wedges at
-        // phase=deploying forever (mcp-host pod never created) and dbRunProcessor
-        // logs "orphaned running run reclaimed" every reclaim tick. Terminal /
-        // active / failed results keep `undefined` so steady-state does not
-        // requeue.
-        //
-        // Priority: a transient ERROR (skipStatusPatch) wins over PROGRESS
-        // (deploying). The error path keeps exponential backoff; the progress
-        // path requeues at a FIXED interval (requeueFixedInterval) so a run
-        // advancing through its deploying sub-phases does NOT inherit the
-        // transient-error backoff curve — exponential growth there would
-        // degrade the poll cadence toward the 60s cap and re-expose the 240s
-        // mcp-host readiness deadline this requeue exists to beat (see §5 and
-        // requeueFixedInterval doc).
-        requeueAfterMs: result.skipStatusPatch
-          ? TRANSIENT_REQUEUE_BASE_MS
-          : result.phase === 'deploying' || result.pluginWorkloadSdkPolicyPending
-            ? WORKFLOW_PROGRESS_REQUEUE_BASE_MS
-            : undefined,
-        requeueFixedInterval:
-          !result.skipStatusPatch &&
-          (result.phase === 'deploying' || result.pluginWorkloadSdkPolicyPending === true),
-        internalDependencyConditions: workflowInternalDependencyConditions,
-        networkPolicyReapProjection: workflowNetworkPolicyReapProjection,
-        secretOwnershipConditions: workflowSecretOwnershipConditions,
+      try {
+        await this.bindCodexReconcileContext(recipe, approvalScopeRecipeName)
+        const result = await this.workflowReconciler.reconcile(
+          name,
+          recipe.metadata.uid ?? '',
+          ns,
+          workflowRuntimeSpec,
+          inboundStatus,
+          workflowResolvedInputs,
+          approvalScopeRecipeName,
+          recipe.metadata.labels?.[WORKFLOW_RUN_ID_LABEL],
+          recipe.metadata.labels?.['clerum.io/workflow-team-id'],
+          recipe.metadata.labels?.[WORKFLOW_ACTOR_ID_LABEL],
+          recipe.metadata.labels?.[WORKFLOW_ACTOR_TYPE_LABEL]
+        )
+        if (coordinatorGfsPolicyCanOpen && !result.skipStatusPatch && result.phase !== 'failed') {
+          await this.ensureCoordinatorGfsNetworkPolicyIfEnabled(recipe)
+        } else if (result.phase === 'failed' || !coordinatorGfsPolicyCanOpen) {
+          await this.revokeCoordinatorGfsNetworkPolicy(recipe)
+        }
+        return {
+          phase: result.phase as RecipePhase,
+          message: result.message,
+          workloadStatuses: [],
+          workflowPhase: result.workflowPhase,
+          clearWorkflowExecution: result.clearWorkflowExecution,
+          workflowConditions: result.workflowConditions,
+          workloadConditions: workflowWorkloadConditions,
+          pluginWorkloadSdkBootstrapProof: result.pluginWorkloadSdkBootstrapProof,
+          pluginWorkloadSdkPolicyPending: result.pluginWorkloadSdkPolicyPending,
+          // Thread the inner reconciler's transient-skip up so the watcher leaves
+          // status untouched and requeues instead of patching a false failure.
+          skipStatusPatch:
+            result.skipStatusPatch &&
+            !(
+              workflowNetworkPolicyReapProjection?.condition &&
+              workflowNetworkPolicyReapProjection.condition.status !== 'False'
+            ),
+          // Requeue on a timer when the workflow reconcile is either (a) a
+          // transient skip, or (b) still bringing up infra (phase === 'deploying',
+          // e.g. waiting on the output anchor/prepare pod). The controller watches
+          // only the CR, not the Pods it creates, so a Pod reaching Succeeded
+          // fires no CR MODIFIED event — without this timer the run wedges at
+          // phase=deploying forever (mcp-host pod never created) and dbRunProcessor
+          // logs "orphaned running run reclaimed" every reclaim tick. Terminal /
+          // active / failed results keep `undefined` so steady-state does not
+          // requeue.
+          //
+          // Priority: a transient ERROR (skipStatusPatch) wins over PROGRESS
+          // (deploying). The error path keeps exponential backoff; the progress
+          // path requeues at a FIXED interval (requeueFixedInterval) so a run
+          // advancing through its deploying sub-phases does NOT inherit the
+          // transient-error backoff curve — exponential growth there would
+          // degrade the poll cadence toward the 60s cap and re-expose the 240s
+          // mcp-host readiness deadline this requeue exists to beat (see §5 and
+          // requeueFixedInterval doc).
+          requeueAfterMs: result.skipStatusPatch
+            ? TRANSIENT_REQUEUE_BASE_MS
+            : result.phase === 'deploying' || result.pluginWorkloadSdkPolicyPending
+              ? WORKFLOW_PROGRESS_REQUEUE_BASE_MS
+              : undefined,
+          requeueFixedInterval:
+            !result.skipStatusPatch &&
+            (result.phase === 'deploying' || result.pluginWorkloadSdkPolicyPending === true),
+          internalDependencyConditions: workflowInternalDependencyConditions,
+          networkPolicyReapProjection: workflowNetworkPolicyReapProjection,
+          secretOwnershipConditions: workflowSecretOwnershipConditions,
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (isRetryableInfraError(error)) {
+          return {
+            phase: currentPhase,
+            message: recipe.status?.message ?? '',
+            workloadStatuses: (recipe.status?.workloads ?? []).map(workload => ({
+              id: workload.id,
+              phase: workload.phase,
+              ready: workload.ready ?? false,
+              message: workload.message,
+            })),
+            skipStatusPatch: !this.workflowFastPathReapConditionNeedsPatch(
+              recipe,
+              workflowNetworkPolicyReapProjection?.condition
+            ),
+            requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+            internalDependencyConditions: workflowInternalDependencyConditions,
+            networkPolicyReapProjection: workflowNetworkPolicyReapProjection,
+            secretOwnershipConditions: workflowSecretOwnershipConditions,
+            workloadConditions: workflowWorkloadConditions,
+          }
+        }
+        return {
+          phase: 'failed',
+          message,
+          workloadStatuses: [],
+          workflowPhase: 'failed',
+          internalDependencyConditions: workflowInternalDependencyConditions,
+          networkPolicyReapProjection: workflowNetworkPolicyReapProjection,
+          secretOwnershipConditions: workflowSecretOwnershipConditions,
+          workloadConditions: workflowWorkloadConditions,
+        }
       }
     }
 
@@ -4498,12 +4533,32 @@ export class WorkflowRecipeReconciler {
 
     if (pass.laneError !== undefined) {
       const message =
-        pass.laneError instanceof Error ? pass.laneError.message : String(pass.laneError)
+        pass.laneError instanceof Error
+          ? pass.laneError.message
+          : typeof (pass.laneError as { message?: unknown })?.message === 'string'
+            ? (pass.laneError as { message: string }).message
+            : `NetworkPolicy reconciliation failed${
+                getErrorCode(pass.laneError) === undefined
+                  ? ''
+                  : ` with HTTP ${getErrorCode(pass.laneError)}`
+              }`
       if (pass.laneError instanceof RetryableReconcileError) {
         return {
           phase: 'degraded',
           message,
           workloadStatuses: baseResult.workloadStatuses,
+          internalDependencyConditions,
+          networkPolicyReapProjection: projection,
+          requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+        }
+      }
+      if (isRetryableInfraError(pass.laneError)) {
+        return {
+          ...baseResult,
+          // A raw Kubernetes/socket failure is infrastructure, not a workflow
+          // lifecycle transition. Preserve the fast-path phase and status while
+          // scheduling a full retry; never derive workflowExecution=failed.
+          skipStatusPatch: true,
           internalDependencyConditions,
           networkPolicyReapProjection: projection,
           requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
@@ -4726,6 +4781,10 @@ export class WorkflowRecipeReconciler {
           name: policyName,
           namespace: ns,
         })
+        // The object may have changed after the no-op/ownership read and before
+        // create returned 409. Revalidate the exact second read so generation N
+        // cannot borrow N+1's resourceVersion and replace its newer policy.
+        this.assertNetworkPolicyOwnership(policy, existing, ns)
         policy.metadata!.resourceVersion = existing.metadata?.resourceVersion
         return this.networkingApi.replaceNamespacedNetworkPolicy({
           name: policyName,
