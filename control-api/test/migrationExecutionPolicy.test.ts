@@ -29,6 +29,11 @@ const FRESH_TABLE_INDEXES = Object.freeze([
   'invitation_delivery_commands_invitation_idx',
 ])
 
+const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
+  '0107_llm_provider_attempts_sdk_link',
+  '0108_llm_provider_attempts_sdk_link_on_delete_set_null',
+] as const)
+
 describe('D34 migration execution policy', () => {
   it('freezes the owner-approved timeout and Job values', () => {
     expect(MIGRATION_EXECUTION_POLICY).toEqual({
@@ -225,10 +230,16 @@ describe('D34 PR1 migration runner', () => {
       return { rows: [], rowCount: 0 }
     })
     const applied: string[] = []
-    const migrations = PR1_MIGRATION_VERSIONS.map(version => ({
-      version,
-      apply: vi.fn(async () => undefined),
-    }))
+    const migrations = [
+      ...DEV_POST_0106_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => undefined),
+      })),
+      ...PR1_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => undefined),
+      })),
+    ]
 
     await applyPendingPr1Migrations({
       db,
@@ -239,30 +250,37 @@ describe('D34 PR1 migration runner', () => {
       },
     })
 
-    expect(applied).toEqual(PR1_MIGRATION_VERSIONS)
-    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(7)
-    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(7)
+    expect(applied).toEqual([...DEV_POST_0106_MIGRATION_VERSIONS, ...PR1_MIGRATION_VERSIONS])
+    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(9)
+    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(9)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
   })
 
   it('stops after a failed version and rolls back only that version', async () => {
     const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
     const applyOrder: string[] = []
-    const migrations = PR1_MIGRATION_VERSIONS.map(version => ({
-      version,
-      legacyVersions: [`legacy_${version}`],
-      apply: vi.fn(async () => {
-        applyOrder.push(version)
-        if (version === PR1_MIGRATION_VERSIONS[3]) throw new Error('boom')
-      }),
-    }))
+    const migrations = [
+      ...DEV_POST_0106_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => undefined),
+      })),
+      ...PR1_MIGRATION_VERSIONS.map(version => ({
+        version,
+        legacyVersions: [`legacy_${version}`],
+        apply: vi.fn(async () => {
+          applyOrder.push(version)
+          if (version === PR1_MIGRATION_VERSIONS[3]) throw new Error('boom')
+        }),
+      })),
+    ]
     await expect(
       applyPendingPr1Migrations({
         db: { query },
         migrations,
-        appliedVersions: new Set(
-          PR1_ONLINE_INDEX_PLAN.map(index => `legacy_${index.migrationVersion}`)
-        ),
+        appliedVersions: new Set([
+          ...DEV_POST_0106_MIGRATION_VERSIONS,
+          ...PR1_ONLINE_INDEX_PLAN.map(index => `legacy_${index.migrationVersion}`),
+        ]),
         recordMigration: async () => undefined,
       })
     ).rejects.toThrow('boom')
@@ -275,6 +293,7 @@ describe('D34 PR1 migration runner', () => {
       applyPendingPr1Migrations({
         db: { query: vi.fn() },
         migrations: [
+          ...DEV_POST_0106_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn() })),
           ...PR1_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn() })),
           { version: '010d_unclassified', apply: vi.fn() },
         ],
@@ -284,23 +303,54 @@ describe('D34 PR1 migration runner', () => {
     ).rejects.toThrow('Unclassified post-0106 migrations')
   })
 
-  it('does not classify dev-owned post-0106 migrations as PR1 migration work', async () => {
-    const recordMigration = vi.fn()
+  it('applies classified dev-owned post-0106 migrations before PR1 migrations', async () => {
+    const indexStates = new Map<string, Record<string, unknown>>()
+    const db = {
+      query: vi.fn(async (sql: string, values?: unknown[]) => {
+        if (sql.includes('FROM pg_class index_rel')) {
+          const state = indexStates.get(String(values?.[0]))
+          return { rows: state ? [state] : [], rowCount: state ? 1 : 0 }
+        }
+        if (sql.startsWith('CREATE INDEX CONCURRENTLY')) {
+          const entry = PR1_ONLINE_INDEX_PLAN.find(index => sql === index.createSql)
+          if (entry) {
+            indexStates.set(entry.name, {
+              table_name: entry.table,
+              indisunique: Boolean(entry.unique),
+              indisvalid: true,
+              definition: sql,
+            })
+          }
+        }
+        return { rows: [], rowCount: 0 }
+      }),
+    }
+    const applyOrder: string[] = []
+    const recorded: string[] = []
     await applyPendingPr1Migrations({
-      db: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) },
+      db,
       migrations: [
-        { version: '0107_llm_provider_attempts_sdk_link', apply: vi.fn() },
-        { version: '0108_llm_provider_attempts_sdk_link_on_delete_set_null', apply: vi.fn() },
+        ...DEV_POST_0106_MIGRATION_VERSIONS.map(version => ({
+          version,
+          apply: vi.fn(async () => {
+            applyOrder.push(version)
+          }),
+        })),
         ...PR1_MIGRATION_VERSIONS.map(version => ({
           version,
-          apply: vi.fn(async () => undefined),
+          apply: vi.fn(async () => {
+            applyOrder.push(version)
+          }),
         })),
       ],
-      appliedVersions: new Set(PR1_MIGRATION_VERSIONS),
-      recordMigration,
+      appliedVersions: new Set(),
+      recordMigration: async (_db, version) => {
+        recorded.push(version)
+      },
     })
 
-    expect(recordMigration).not.toHaveBeenCalled()
+    expect(applyOrder).toEqual([...DEV_POST_0106_MIGRATION_VERSIONS, ...PR1_MIGRATION_VERSIONS])
+    expect(recorded).toEqual(applyOrder)
   })
 })
 

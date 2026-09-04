@@ -16,6 +16,11 @@ const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set([
   '0108_llm_provider_attempts_sdk_link_on_delete_set_null',
 ])
 
+const CLASSIFIED_POST_0106_MIGRATION_VERSIONS = Object.freeze([
+  ...NON_PR1_POST_0106_MIGRATION_VERSIONS,
+  ...PR1_MIGRATION_VERSIONS,
+] as const)
+
 export type MigrationDescriptor = {
   version: string
   legacyVersions?: readonly string[]
@@ -71,15 +76,16 @@ export async function applyPendingPr1Migrations({
     )
   }
 
-  for (const version of PR1_MIGRATION_VERSIONS) {
+  for (const version of CLASSIFIED_POST_0106_MIGRATION_VERSIONS) {
     const migration = byVersion.get(version)
-    if (!migration) throw new Error(`Missing registered PR1 migration: ${version}`)
+    if (!migration) throw new Error(`Missing registered post-0106 migration: ${version}`)
     if (appliedVersions.has(version)) continue
 
+    const isPr1Migration = expected.has(version)
     const acceptedLegacyVersion = migration.legacyVersions?.find(alias =>
       appliedVersions.has(alias)
     )
-    if (!acceptedLegacyVersion) {
+    if (isPr1Migration && !acceptedLegacyVersion) {
       await preparePr1Migration(db, version)
     }
 
