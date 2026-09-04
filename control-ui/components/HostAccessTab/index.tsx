@@ -9,15 +9,22 @@ import { SelectionModal } from '@components/SelectionModal'
 import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { applyAgentAccessCompatibilityUpdate } from '@lib/agentAccessCompatibility'
 import {
   getAdminTeamAgents,
+  getAdminTeamContexts,
   getAdminTeams,
   getAdminUserAgents,
+  getAdminUserContexts,
   getAdminUsers,
   getAgentTeams,
   getAgentUsers,
+  getContexts,
+  getHosts,
   updateAdminTeamAgents,
+  updateAdminTeamContexts,
   updateAdminUserAgents,
+  updateAdminUserContexts,
 } from '@lib/api'
 import type {
   AccessSubTab,
@@ -129,19 +136,38 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
     [allTeams, teamIdsWithAccess]
   )
 
+  async function loadCompatibilityResources() {
+    const [contextsData, hostsData] = await Promise.all([getContexts(), getHosts()])
+    return {
+      contexts: Array.isArray(contextsData.items) ? contextsData.items : [],
+      hosts: Array.isArray(hostsData.items) ? hostsData.items : [],
+    }
+  }
+
   async function grantUserAccess() {
     if (selectedUserIdsToGrant.length === 0) return
     setBusy(true)
     setError('')
     try {
+      const compatibility = await loadCompatibilityResources()
       await Promise.all(
         selectedUserIdsToGrant.map(async userId => {
           const current = await getAdminUserAgents(userId)
           const next = Array.from(new Set([...(current.agentNames || []), hostName]))
-          await updateAdminUserAgents(userId, next, [
-            ...(current.agentNames || []),
-            ...(current.deletedAgentNames || []),
-          ])
+          await applyAgentAccessCompatibilityUpdate({
+            ...compatibility,
+            loadCurrentContextIds: async () => {
+              const contexts = await getAdminUserContexts(userId)
+              return Array.isArray(contexts.contextIds) ? contexts.contextIds : []
+            },
+            nextGrantedAgentNames: next,
+            updateAgents: agentNames =>
+              updateAdminUserAgents(userId, agentNames, [
+                ...(current.agentNames || []),
+                ...(current.deletedAgentNames || []),
+              ]),
+            updateContexts: contextIds => updateAdminUserContexts(userId, contextIds),
+          })
         })
       )
       const grantedUserIds = selectedUserIdsToGrant
@@ -176,12 +202,23 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
     setBusy(true)
     setError('')
     try {
+      const compatibility = await loadCompatibilityResources()
       const current = await getAdminUserAgents(userId)
       const next = (current.agentNames || []).filter(name => name !== hostName)
-      await updateAdminUserAgents(userId, next, [
-        ...(current.agentNames || []),
-        ...(current.deletedAgentNames || []),
-      ])
+      await applyAgentAccessCompatibilityUpdate({
+        ...compatibility,
+        loadCurrentContextIds: async () => {
+          const contexts = await getAdminUserContexts(userId)
+          return Array.isArray(contexts.contextIds) ? contexts.contextIds : []
+        },
+        nextGrantedAgentNames: next,
+        updateAgents: agentNames =>
+          updateAdminUserAgents(userId, agentNames, [
+            ...(current.agentNames || []),
+            ...(current.deletedAgentNames || []),
+          ]),
+        updateContexts: contextIds => updateAdminUserContexts(userId, contextIds),
+      })
       if (!mountedRef.current) return
       const removedUser = usersWithAccess.find(u => u.id === userId)
       setUsersWithAccess(prev => prev.filter(u => u.id !== userId))
@@ -201,14 +238,25 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
     setBusy(true)
     setError('')
     try {
+      const compatibility = await loadCompatibilityResources()
       await Promise.all(
         selectedTeamIdsToGrant.map(async teamId => {
           const current = await getAdminTeamAgents(teamId)
           const next = Array.from(new Set([...(current.agentNames || []), hostName]))
-          await updateAdminTeamAgents(teamId, next, [
-            ...(current.agentNames || []),
-            ...(current.deletedAgentNames || []),
-          ])
+          await applyAgentAccessCompatibilityUpdate({
+            ...compatibility,
+            loadCurrentContextIds: async () => {
+              const contexts = await getAdminTeamContexts(teamId)
+              return Array.isArray(contexts.contextIds) ? contexts.contextIds : []
+            },
+            nextGrantedAgentNames: next,
+            updateAgents: agentNames =>
+              updateAdminTeamAgents(teamId, agentNames, [
+                ...(current.agentNames || []),
+                ...(current.deletedAgentNames || []),
+              ]),
+            updateContexts: contextIds => updateAdminTeamContexts(teamId, contextIds),
+          })
         })
       )
       const grantedTeamIds = selectedTeamIdsToGrant
@@ -243,12 +291,23 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
     setBusy(true)
     setError('')
     try {
+      const compatibility = await loadCompatibilityResources()
       const current = await getAdminTeamAgents(teamId)
       const next = (current.agentNames || []).filter(name => name !== hostName)
-      await updateAdminTeamAgents(teamId, next, [
-        ...(current.agentNames || []),
-        ...(current.deletedAgentNames || []),
-      ])
+      await applyAgentAccessCompatibilityUpdate({
+        ...compatibility,
+        loadCurrentContextIds: async () => {
+          const contexts = await getAdminTeamContexts(teamId)
+          return Array.isArray(contexts.contextIds) ? contexts.contextIds : []
+        },
+        nextGrantedAgentNames: next,
+        updateAgents: agentNames =>
+          updateAdminTeamAgents(teamId, agentNames, [
+            ...(current.agentNames || []),
+            ...(current.deletedAgentNames || []),
+          ]),
+        updateContexts: contextIds => updateAdminTeamContexts(teamId, contextIds),
+      })
       if (!mountedRef.current) return
       const removedTeam = teamsWithAccess.find(t => t.id === teamId)
       setTeamsWithAccess(prev => prev.filter(team => team.id !== teamId))

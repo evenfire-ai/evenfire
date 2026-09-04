@@ -27,17 +27,23 @@ vi.mock('../Sidebar', () => ({
 vi.mock('@lib/api', () => ({
   apiGet: vi.fn(),
   apiSend: vi.fn(),
+  getAdminTeamContexts: vi.fn(),
   getAdminTeamAgents: vi.fn(),
   getAdminTeams: vi.fn(),
+  getAdminUserContexts: vi.fn(),
   getAdminUserAgents: vi.fn(),
   getAdminUsers: vi.fn(),
   getAgentTeams: vi.fn(),
   getAgentUsers: vi.fn(),
+  getContexts: vi.fn(),
   getHost: vi.fn(),
   getHostDetailBundle: vi.fn(),
+  getHosts: vi.fn(),
   getLlmModels: vi.fn().mockResolvedValue({ rows: [] }),
   isSilentApiError: vi.fn().mockReturnValue(false),
+  updateAdminTeamContexts: vi.fn(),
   updateAdminTeamAgents: vi.fn(),
+  updateAdminUserContexts: vi.fn(),
   updateAdminUserAgents: vi.fn(),
 }))
 
@@ -68,6 +74,23 @@ describe('HostAccessTab — extracted access behavior', () => {
     ;(api.getAgentTeams as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       items: [],
     })
+    ;(api.getContexts as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      items: [
+        { metadata: { name: 'foo-context' }, spec: { contextId: 'foo-context' } },
+        { metadata: { name: 'unowned-context' }, spec: { contextId: 'unowned-context' } },
+      ],
+    })
+    ;(api.getHosts as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      items: [{ metadata: { name: 'foo' }, spec: { contextRef: 'foo-context' } }],
+    })
+    ;(api.getAdminUserContexts as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      contextIds: ['unowned-context'],
+    })
+    ;(api.getAdminTeamContexts as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      contextIds: ['unowned-context'],
+    })
+    ;(api.updateAdminUserContexts as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({})
+    ;(api.updateAdminTeamContexts as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({})
   })
 
   it('renders Members by default and lists existing members', async () => {
@@ -122,9 +145,16 @@ describe('HostAccessTab — extracted access behavior', () => {
     await waitFor(() => {
       expect(api.updateAdminUserAgents).toHaveBeenCalledWith('u2', ['foo'], expect.any(Array))
     })
+    expect(api.updateAdminUserContexts).toHaveBeenCalledWith('u2', [
+      'foo-context',
+      'unowned-context',
+    ])
   })
 
   it('revokes member access after confirm dialog approval', async () => {
+    ;(api.getAdminUserContexts as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      contextIds: ['foo-context', 'unowned-context'],
+    })
     ;(api.getAdminUserAgents as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       agentNames: ['foo'],
       deletedAgentNames: [],
@@ -145,5 +175,63 @@ describe('HostAccessTab — extracted access behavior', () => {
     await waitFor(() => {
       expect(api.updateAdminUserAgents).toHaveBeenCalledWith('u1', [], expect.any(Array))
     })
+    expect(api.updateAdminUserContexts).toHaveBeenCalledWith('u1', ['unowned-context'])
+  })
+
+  it('grants team access with the Context compatibility write', async () => {
+    ;(api.getAgentTeams as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ items: [] })
+    ;(api.getAdminTeamAgents as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      agentNames: [],
+      deletedAgentNames: [],
+    })
+    ;(api.updateAdminTeamAgents as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({})
+
+    render(<HostAccessTab hostName="foo" />)
+
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('tab', { name: 'Teams' }))
+    fireEvent.click(screen.getByRole('button', { name: /Add team/i }))
+
+    const dialog = await waitFor(() => screen.getByRole('dialog', { name: /Add team/i }))
+    fireEvent.click(screen.getByRole('option', { name: 'Platform' }))
+    fireEvent.click(dialog.querySelector('button.cu-btn--primary') as HTMLButtonElement)
+
+    await waitFor(() => {
+      expect(api.updateAdminTeamAgents).toHaveBeenCalledWith('t1', ['foo'], expect.any(Array))
+    })
+    expect(api.updateAdminTeamContexts).toHaveBeenCalledWith('t1', [
+      'foo-context',
+      'unowned-context',
+    ])
+  })
+
+  it('revokes team access with the Context compatibility write', async () => {
+    ;(api.getAgentTeams as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      items: [{ id: 't1', name: 'Platform', memberCount: 3 }],
+    })
+    ;(api.getAdminTeamContexts as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      contextIds: ['foo-context', 'unowned-context'],
+    })
+    ;(api.getAdminTeamAgents as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      agentNames: ['foo'],
+      deletedAgentNames: [],
+    })
+    ;(api.updateAdminTeamAgents as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({})
+
+    render(<HostAccessTab hostName="foo" />)
+
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('tab', { name: 'Teams' }))
+    await waitFor(() => expect(screen.getByText('Platform')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Platform' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke access' }))
+
+    const confirmDialog = await screen.findByRole('alertdialog')
+    fireEvent.click(confirmDialog.querySelector('button.cu-btn--danger') as HTMLButtonElement)
+
+    await waitFor(() => {
+      expect(api.updateAdminTeamAgents).toHaveBeenCalledWith('t1', [], expect.any(Array))
+    })
+    expect(api.updateAdminTeamContexts).toHaveBeenCalledWith('t1', ['unowned-context'])
   })
 })

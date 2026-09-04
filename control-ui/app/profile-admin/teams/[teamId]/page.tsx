@@ -17,12 +17,14 @@ import { TeamRolePermissionEditor } from '@components/TeamRolePermissionEditor'
 import { useToast } from '@components/Toast'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { partitionVisibleAccess } from '@lib/accessVisibility'
+import { applyAgentAccessCompatibilityUpdate } from '@lib/agentAccessCompatibility'
 import { getAgentDisplayName } from '@lib/agentName'
 import { InviteMemberDialog } from '../../../../components/InviteMemberDialog'
 import { IconUsers } from '../../../../components/Sidebar/icons'
 import { IconCheck, IconMoreHorizontal, IconX } from '../../../../components/icons'
 import {
   AdminTeamPendingInvitation,
+  ContextResource,
   HostResource,
   TeamMember,
   addAdminTeamMember,
@@ -183,6 +185,7 @@ export default function TeamDetailsPage() {
   const [showAddAgent, setShowAddAgent] = useState(false)
 
   const [availableContextIds, setAvailableContextIds] = useState<string[]>([])
+  const [contextResources, setContextResources] = useState<ContextResource[]>([])
   const [assignedContextIds, setAssignedContextIds] = useState<string[]>([])
   const [deletedContextIds, setDeletedContextIds] = useState<string[]>([])
   const [hosts, setHosts] = useState<HostResource[]>([])
@@ -266,6 +269,9 @@ export default function TeamDetailsPage() {
           .map(item => contextIdFromResource(item as never))
           .filter(Boolean)
           .sort((a, b) => a.localeCompare(b))
+        setContextResources(
+          Array.isArray(contextsData.items) ? (contextsData.items as ContextResource[]) : []
+        )
         const hostNames = Array.from(
           new Set(
             (hostsData.items || [])
@@ -473,14 +479,34 @@ export default function TeamDetailsPage() {
     setError('')
     try {
       const normalized = Array.from(new Set(next.map(v => v.trim()).filter(Boolean)))
-      const updated = await updateAdminTeamAgents(teamId, normalized, observedAgentNames)
-      const partition = partitionVisibleAccess(
-        updated.agentNames || [],
+      const [updatedAgents, updatedContexts] = await applyAgentAccessCompatibilityUpdate({
+        contexts: contextResources,
+        hosts,
+        loadCurrentContextIds: async () => {
+          const current = await getAdminTeamContexts(teamId)
+          return Array.isArray(current.contextIds) ? current.contextIds : []
+        },
+        nextGrantedAgentNames: normalized,
+        updateAgents: agentNames => updateAdminTeamAgents(teamId, agentNames, observedAgentNames),
+        updateContexts: contextIds => updateAdminTeamContexts(teamId, contextIds),
+      })
+      const agentPartition = partitionVisibleAccess(
+        updatedAgents.agentNames || [],
         hostNameOptions,
-        updated.deletedAgentNames || []
+        updatedAgents.deletedAgentNames || []
       )
-      setAssignedAgentNames(partition.active)
-      setObservedAgentNames([...(updated.agentNames || []), ...(updated.deletedAgentNames || [])])
+      const contextPartition = partitionVisibleAccess(
+        updatedContexts.contextIds || [],
+        availableContextIds,
+        updatedContexts.deletedContextIds || []
+      )
+      setAssignedAgentNames(agentPartition.active)
+      setObservedAgentNames([
+        ...(updatedAgents.agentNames || []),
+        ...(updatedAgents.deletedAgentNames || []),
+      ])
+      setAssignedContextIds(contextPartition.active)
+      setDeletedContextIds(contextPartition.deleted)
       setSelectedAgentNamesToAdd([])
       showToast(message, { tone: 'success' })
     } catch (e) {
