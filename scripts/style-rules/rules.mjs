@@ -21,6 +21,7 @@ const MOTIONLESS_HOVER_PROPS = new Set(['filter', 'transform'])
 const DESKTOP_UI_PREFIX = 'desktop-app/ui/'
 const WEB_APP_PREFIXES = ['control-ui/', 'profile-ui/']
 const WEB_APP_SOURCE_EXTENSIONS = ['.js', '.jsx', '.ts', '.tsx']
+const WEB_APP_STYLE_EXTENSIONS = ['.css']
 const WEB_APP_NON_PRODUCTION_SEGMENTS = [
   '/__tests__/',
   '/e2e/',
@@ -106,6 +107,12 @@ function isWebProductionSource(file) {
   return !WEB_APP_NON_PRODUCTION_SEGMENTS.some(segment => file.includes(segment))
 }
 
+function isWebProductionStyle(file) {
+  if (!WEB_APP_PREFIXES.some(prefix => file.startsWith(prefix))) return false
+  if (!WEB_APP_STYLE_EXTENSIONS.some(extension => file.endsWith(extension))) return false
+  return !WEB_APP_NON_PRODUCTION_SEGMENTS.some(segment => file.includes(segment))
+}
+
 function collectHoverMotionViolations(line, lineNumber) {
   const violations = []
   for (const declarationText of line.split(';')) {
@@ -151,7 +158,7 @@ export const rules = [
     description:
       'Control UI and Profile UI production views must render standardized table viewports through TableViewport.',
     applies(file) {
-      return isWebProductionSource(file)
+      return isWebProductionSource(file) || isWebProductionStyle(file)
     },
     check({ lines }) {
       const violations = []

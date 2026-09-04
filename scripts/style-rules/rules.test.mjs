@@ -37,6 +37,8 @@ test('requires the shared viewport boundary in application production source', (
 
   assert.equal(violationsFor('control-ui/components/Results.tsx', direct).length, 1)
   assert.equal(violationsFor('profile-ui/app/members/page.tsx', direct).length, 1)
+  assert.equal(violationsFor('control-ui/app/globals.css', '.eft-table-viewport {}').length, 1)
+  assert.equal(violationsFor('profile-ui/app/globals.css', '.eft-table-viewport {}').length, 1)
   assert.deepEqual(violationsFor('control-ui/components/Results.tsx', shared), [])
   assert.deepEqual(violationsFor('packages/frontend-components/src/index.tsx', direct), [])
   assert.deepEqual(violationsFor('control-ui/components/__tests__/Results.test.tsx', direct), [])
