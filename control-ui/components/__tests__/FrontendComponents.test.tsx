@@ -209,4 +209,22 @@ describe('shared frontend components', () => {
     expect(onDelete).toHaveBeenCalledOnce()
     expect(screen.queryByRole('menu')).not.toBeInTheDocument()
   })
+
+  it('disables the trigger when every row action is unavailable', () => {
+    const onDelete = vi.fn()
+    render(
+      <RowActionMenu
+        ariaLabel="Actions for Alpha"
+        actions={[
+          { key: 'delete', label: 'Delete', danger: true, disabled: true, onSelect: onDelete },
+        ]}
+      />
+    )
+
+    const trigger = screen.getByRole('button', { name: 'Actions for Alpha' })
+    expect(trigger).toBeDisabled()
+    fireEvent.click(trigger)
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    expect(onDelete).not.toHaveBeenCalled()
+  })
 })

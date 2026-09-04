@@ -394,11 +394,16 @@ export function RowActionMenu({
   const menuRef = useRef<HTMLDivElement>(null)
   const initialFocusRef = useRef<'first' | 'last'>('first')
   const [position, setPosition] = useState<{ left: number; top: number } | null>(null)
+  const triggerDisabled = actions.every(action => action.disabled)
 
   const close = useCallback((restoreFocus = false) => {
     setOpen(false)
     if (restoreFocus) triggerRef.current?.focus()
   }, [])
+
+  useEffect(() => {
+    if (triggerDisabled && open) close()
+  }, [close, open, triggerDisabled])
 
   useEffect(() => {
     if (!open) return
@@ -453,6 +458,7 @@ export function RowActionMenu({
         aria-haspopup="menu"
         aria-label={ariaLabel}
         className="eft-row-actions__trigger"
+        disabled={triggerDisabled}
         onClick={event => {
           event.stopPropagation()
           initialFocusRef.current = 'first'
