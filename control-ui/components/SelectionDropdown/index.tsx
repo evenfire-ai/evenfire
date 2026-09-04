@@ -14,6 +14,7 @@ function optionMatches(option: SelectionDropdownOption, query: string): boolean 
 }
 
 export function SelectionDropdown({
+  ariaLabel,
   className,
   disabled = false,
   emptyLabel = 'No options available.',
@@ -25,6 +26,7 @@ export function SelectionDropdown({
   onSearchQueryChange,
   options,
   placeholder,
+  searchable = true,
   searchPlaceholder = 'Search...',
   selectionLabel = 'Selected',
   showSelectedChips = true,
@@ -70,13 +72,13 @@ export function SelectionDropdown({
   }, [inline, open])
 
   useEffect(() => {
-    if (menuVisible) {
+    if (menuVisible && searchable) {
       window.setTimeout(() => searchRef.current?.focus(), 0)
     } else {
       setQuery('')
       onSearchQueryChange?.('')
     }
-  }, [menuVisible, onSearchQueryChange])
+  }, [menuVisible, onSearchQueryChange, searchable])
 
   function toggleOption(optionValue: string) {
     if (multiple) {
@@ -115,6 +117,7 @@ export function SelectionDropdown({
             'cu-selection-dropdown__button',
             selectedOptions.length === 0 && 'cu-selection-dropdown__button--placeholder'
           )}
+          aria-label={ariaLabel}
           aria-expanded={open}
           aria-haspopup="listbox"
           aria-invalid={invalid || undefined}
@@ -151,20 +154,22 @@ export function SelectionDropdown({
 
       {menuVisible ? (
         <div className="cu-selection-dropdown__menu">
-          <input
-            id={inline ? id : undefined}
-            ref={searchRef}
-            className="cu-selection-dropdown__search"
-            value={query}
-            onChange={event => {
-              const nextQuery = event.target.value
-              setQuery(nextQuery)
-              onSearchQueryChange?.(nextQuery)
-            }}
-            placeholder={searchPlaceholder}
-            aria-label={searchPlaceholder}
-            disabled={disabled}
-          />
+          {searchable ? (
+            <input
+              id={inline ? id : undefined}
+              ref={searchRef}
+              className="cu-selection-dropdown__search"
+              value={query}
+              onChange={event => {
+                const nextQuery = event.target.value
+                setQuery(nextQuery)
+                onSearchQueryChange?.(nextQuery)
+              }}
+              placeholder={searchPlaceholder}
+              aria-label={searchPlaceholder}
+              disabled={disabled}
+            />
+          ) : null}
           <div
             className="cu-selection-dropdown__list"
             role="listbox"

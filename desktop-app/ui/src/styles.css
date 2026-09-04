@@ -15870,16 +15870,22 @@ pre {
   gap: var(--space-1);
 }
 
-.da-gfs-grant-list__role.ui-control {
+.da-gfs-grant-list__role {
   width: 112px;
+  flex: 0 0 112px;
+}
+
+.da-gfs-grant-list__role .ui-dropdown-select__trigger.ui-button {
   min-height: 32px;
+  padding-inline: var(--space-2);
   border-color: transparent;
   background: transparent;
+  color: var(--text);
   font-weight: var(--font-weight-medium);
 }
 
-.da-gfs-grant-list__role.ui-control:hover,
-.da-gfs-grant-list__role.ui-control:focus {
+.da-gfs-grant-list__role .ui-dropdown-select__trigger.ui-button:hover:enabled,
+.da-gfs-grant-list__role .ui-dropdown-select__trigger.ui-button[aria-expanded='true'] {
   border-color: var(--control-border);
   background: var(--control-bg-strong);
 }
@@ -15899,7 +15905,7 @@ pre {
 }
 
 .da-gfs-grant-list__revoke.ui-icon-button {
-  color: var(--danger);
+  color: var(--text);
   border-color: transparent;
   background: transparent;
   font-size: var(--font-size-sm);
@@ -15910,7 +15916,7 @@ pre {
 .da-gfs-grant-list__revoke.ui-icon-button:focus-visible {
   border-color: transparent;
   background: transparent;
-  color: var(--danger);
+  color: var(--text);
 }
 
 @media (max-width: 940px) {

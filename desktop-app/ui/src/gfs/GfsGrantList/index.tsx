@@ -1,4 +1,4 @@
-import { Badge, IconButton, SelectInput, StatusBanner } from '@components/Common'
+import { DropdownSelect, IconButton, StatusBanner } from '@components/Common'
 import type {
   GfsAgentSubjectOption,
   GfsDelegationSubjectOption,
@@ -41,6 +41,11 @@ function roleForPermissions(permissions: string[]): GfsAccessRole {
     ? 'editor'
     : 'read'
 }
+
+const ROLE_OPTIONS = [
+  { value: 'read', label: 'Read' },
+  { value: 'editor', label: 'Editor' },
+]
 
 export function GfsGrantList({
   items,
@@ -101,27 +106,17 @@ export function GfsGrantList({
                       </span>
                     </span>
                     <span className="da-gfs-grant-list__meta">
-                      <SelectInput
-                        aria-label={`Access role for ${label}`}
+                      <DropdownSelect
+                        ariaLabel={`Access role for ${label}`}
                         className="da-gfs-grant-list__role"
-                        dense
                         disabled={updatingRole || !onChangeRole}
-                        onChange={event =>
-                          void onChangeRole?.(
-                            item,
-                            label,
-                            event.currentTarget.value as GfsAccessRole
-                          )
-                        }
+                        onChange={value => void onChangeRole?.(item, label, value as GfsAccessRole)}
+                        options={ROLE_OPTIONS}
+                        placeholder="Role"
                         value={roleForPermissions(item.permissions)}
-                      >
-                        <option value="read">Read</option>
-                        <option value="editor">Editor</option>
-                      </SelectInput>
-                      {item.inherit ? <Badge tone="accent">Includes contents</Badge> : null}
+                      />
                     </span>
                     <IconButton
-                      color="danger"
                       className="da-gfs-grant-list__revoke"
                       data-testid={`gfs-revoke-grant-${item.id}`}
                       disabled={revoking}
@@ -155,12 +150,8 @@ export function GfsGrantList({
                       <span className="da-gfs-grant-list__role-label">
                         {roleForPermissions(item.permissions) === 'editor' ? 'Editor' : 'Read'}
                       </span>
-                      {item.includeDescendants ? (
-                        <Badge tone="accent">Includes contents</Badge>
-                      ) : null}
                     </span>
                     <IconButton
-                      color="danger"
                       className="da-gfs-grant-list__revoke"
                       data-testid={`gfs-revoke-share-${item.id}`}
                       disabled={revokingShare || !onRevokeShare}

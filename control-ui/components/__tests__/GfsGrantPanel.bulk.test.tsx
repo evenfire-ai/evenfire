@@ -82,9 +82,8 @@ async function chooseSubjects(...names: string[]) {
 }
 
 function selectPermission(name: string) {
-  fireEvent.change(screen.getByRole('combobox', { name: 'Access role for selected recipients' }), {
-    target: { value: name === 'Read' ? 'read' : 'editor' },
-  })
+  fireEvent.click(screen.getByRole('button', { name: 'Access role for selected recipients' }))
+  fireEvent.click(screen.getByRole('option', { name: name === 'Read' ? 'Read' : 'Editor' }))
 }
 
 async function submit(action: 'Share') {
@@ -148,8 +147,8 @@ describe('GfsGrantPanel bulk access', () => {
     expect(within(existing).getByText('Ada Lovelace')).toBeTruthy()
     expect(within(existing).getByText('Direct grant · user')).toBeTruthy()
     expect(
-      within(existing).getByRole('combobox', { name: 'Access role for Ada Lovelace' })
-    ).toHaveValue('editor')
+      within(existing).getByRole('button', { name: 'Access role for Ada Lovelace' })
+    ).toHaveTextContent('Editor')
     expect(within(existing).getByText('X')).toBeTruthy()
     expect(
       within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
@@ -187,9 +186,10 @@ describe('GfsGrantPanel bulk access', () => {
     mockPutGfsGrant.mockResolvedValue(successfulMutation(userSubject))
     renderPanel()
 
-    const role = await screen.findByRole('combobox', { name: 'Access role for Ada Lovelace' })
-    expect((role as HTMLSelectElement).value).toBe('editor')
-    fireEvent.change(role, { target: { value: 'read' } })
+    const role = await screen.findByRole('button', { name: 'Access role for Ada Lovelace' })
+    expect(role).toHaveTextContent('Editor')
+    fireEvent.click(role)
+    fireEvent.click(screen.getByRole('option', { name: 'Read' }))
 
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenCalledWith({
@@ -202,12 +202,8 @@ describe('GfsGrantPanel bulk access', () => {
     )
     await waitFor(() =>
       expect(
-        (
-          screen.getByRole('combobox', {
-            name: 'Access role for Ada Lovelace',
-          }) as HTMLSelectElement
-        ).value
-      ).toBe('read')
+        screen.getByRole('button', { name: 'Access role for Ada Lovelace' })
+      ).toHaveTextContent('Read')
     )
   })
 
@@ -359,8 +355,8 @@ describe('GfsGrantPanel bulk access', () => {
 
     expect(screen.getByText(/use read\/write access only/i)).toBeTruthy()
     expect(
-      screen.getByRole('combobox', { name: 'Access role for selected recipients' })
-    ).toHaveValue('editor')
+      screen.getByRole('button', { name: 'Access role for selected recipients' })
+    ).toHaveTextContent('Editor')
     await submit('Share')
 
     await waitFor(() =>
@@ -390,8 +386,8 @@ describe('GfsGrantPanel bulk access', () => {
     expect(screen.getByRole('button', { name: 'Share' })).toBeEnabled()
     expect(screen.getByRole('checkbox', { name: /Include contents/ })).toBeChecked()
     expect(
-      screen.getByRole('combobox', { name: 'Access role for selected recipients' })
-    ).toHaveValue('read')
+      screen.getByRole('button', { name: 'Access role for selected recipients' })
+    ).toHaveTextContent('Read')
   })
 
   it('keeps operator singular and prevents mixing it with bulk subjects', async () => {
@@ -436,15 +432,13 @@ describe('GfsGrantPanel bulk access', () => {
     expect(screen.getByRole('button', { name: 'Remove Ada Lovelace' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Remove Research' })).toBeTruthy()
     expect(
-      screen.getByRole('combobox', { name: 'Access role for selected recipients' })
-    ).toHaveValue('editor')
+      screen.getByRole('button', { name: 'Access role for selected recipients' })
+    ).toHaveTextContent('Editor')
 
     await submit('Share')
     await waitFor(() => expect(mockPutGfsGrant).toHaveBeenCalledTimes(2))
     expect(screen.queryByRole('button', { name: 'Remove Ada Lovelace' })).toBeNull()
-    expect(
-      screen.queryByRole('combobox', { name: 'Access role for selected recipients' })
-    ).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Access role for selected recipients' })).toBeNull()
   })
 
   it('does not duplicate the machine code when the server message matches it', async () => {
@@ -474,8 +468,8 @@ describe('GfsGrantPanel bulk access', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Remove chatllm (Stateful)' }))
 
     expect(
-      screen.getByRole('combobox', { name: 'Access role for selected recipients' })
-    ).toHaveValue('editor')
+      screen.getByRole('button', { name: 'Access role for selected recipients' })
+    ).toHaveTextContent('Editor')
     selectPermission('Read')
   })
 

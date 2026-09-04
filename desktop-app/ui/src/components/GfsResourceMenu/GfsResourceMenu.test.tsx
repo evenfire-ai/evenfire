@@ -16,6 +16,7 @@ describe('GfsResourceMenu', () => {
         onDelete={vi.fn()}
         onManage={onManage}
         onPreview={vi.fn()}
+        onReplace={vi.fn()}
         resourceName="report.txt"
       />
     )
@@ -36,8 +37,8 @@ describe('GfsResourceMenu', () => {
     const menu = screen.getByRole('menu', { name: 'Actions for report.txt' })
     expect(menu.tagName).toBe('DIV')
     expect(menu.classList.contains('da-gfs-resource-menu__panel')).toBe(true)
-    expect(menu.querySelectorAll('[role="separator"]')).toHaveLength(1)
-    expect(menu.querySelectorAll('.ui-menu-item__icon')).toHaveLength(3)
+    expect(menu.querySelectorAll('[role="separator"]')).toHaveLength(2)
+    expect(menu.querySelectorAll('.ui-menu-item__icon')).toHaveLength(4)
     const shareItem = within(menu).getByRole('menuitem', { name: 'Share' })
     expect(shareItem.getAttribute('aria-haspopup')).toBe('menu')
     expect(shareItem.getAttribute('aria-expanded')).toBe('false')
@@ -46,6 +47,7 @@ describe('GfsResourceMenu', () => {
     ).toBe('M5 7a4 4 0 1 0 8 0a4 4 0 0 0 -8 0')
     expect(within(menu).queryByRole('menuitem', { name: 'Copy link' })).toBeNull()
     expect(within(menu).getByRole('menuitem', { name: 'Preview' })).toBeTruthy()
+    expect(within(menu).getByRole('menuitem', { name: 'Replace file' })).toBeTruthy()
 
     fireEvent.click(shareItem)
     const shareMenu = screen.getByRole('menu', { name: 'Share options for report.txt' })

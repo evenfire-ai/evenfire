@@ -94,9 +94,8 @@ async function openSubjectPicker() {
 }
 
 function selectPermission(label: string) {
-  fireEvent.change(screen.getByRole('combobox', { name: 'Access role for selected recipients' }), {
-    target: { value: label === 'Read' ? 'read' : 'editor' },
-  })
+  fireEvent.click(screen.getByRole('button', { name: 'Access role for selected recipients' }))
+  fireEvent.click(screen.getByRole('option', { name: label === 'Read' ? 'Read' : 'Editor' }))
 }
 
 async function openResourceMenu(resourceName: string) {

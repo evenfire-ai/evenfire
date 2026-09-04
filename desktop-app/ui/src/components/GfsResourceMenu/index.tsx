@@ -14,6 +14,7 @@ import {
   IconPlus,
   IconShare,
   IconTrash,
+  IconUpload,
 } from '@components/SidebarNav/icons'
 import type { GfsResourceMenuProps } from './types'
 
@@ -53,6 +54,7 @@ export function GfsResourceMenu({
   onDownload,
   onRename,
   onMove,
+  onReplace,
 }: GfsResourceMenuProps) {
   const [open, setOpen] = useState(false)
   const [shareOpen, setShareOpen] = useState(false)
@@ -61,6 +63,7 @@ export function GfsResourceMenu({
   const submenuRef = useRef<HTMLDivElement | null>(null)
   const shareTriggerRef = useRef<HTMLButtonElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const replaceInputRef = useRef<HTMLInputElement | null>(null)
   const [panelPosition, setPanelPosition] = useState<{ left: number; top: number } | null>(null)
   const [submenuPosition, setSubmenuPosition] = useState<{ left: number; top: number } | null>(null)
   const closeMenu = useCallback(() => {
@@ -267,7 +270,15 @@ export function GfsResourceMenu({
       menuAction('rename', 'Rename', <IconEdit />, onRename),
       menuAction('move', 'Move to…', <IconContexts />, onMove),
     ].filter(isMenuAction),
-    [menuAction('download', 'Download', <IconDownload />, onDownload)].filter(isMenuAction),
+    [
+      menuAction('download', 'Download', <IconDownload />, onDownload),
+      menuAction(
+        'replace',
+        'Replace file',
+        <IconUpload />,
+        onReplace ? () => replaceInputRef.current?.click() : undefined
+      ),
+    ].filter(isMenuAction),
     [menuAction('delete', 'Delete', <IconTrash />, onDelete, { color: 'danger' })].filter(
       isMenuAction
     ),
@@ -381,6 +392,21 @@ export function GfsResourceMenu({
             document.body
           )
         : null}
+      {onReplace ? (
+        <input
+          aria-label={`Replace ${resourceName}`}
+          className="visually-hidden"
+          ref={replaceInputRef}
+          type="file"
+          onChange={event => {
+            const file = event.currentTarget.files?.[0]
+            event.currentTarget.value = ''
+            if (!file) return
+            closeMenu()
+            onReplace(file)
+          }}
+        />
+      ) : null}
     </span>
   )
 }

@@ -1220,8 +1220,11 @@ describe('FilesPage', () => {
     renderFilesPage(pushToast)
 
     await openManageDialog('report.txt')
+    const manageDialog = screen.getByRole('dialog', { name: 'Share file report.txt' })
+    expect(within(manageDialog).queryByRole('button', { name: 'Replace file' })).toBeNull()
+    await chooseManageAction('report.txt', 'Replace file')
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Replace file'), {
+      fireEvent.change(screen.getByLabelText('Replace report.txt'), {
         target: {
           files: [new File(['replacement'], 'report.txt', { type: 'text/plain' })],
         },
@@ -1893,9 +1896,8 @@ describe('FilesPage', () => {
 
     renderFilesPage(pushToast)
     await openManageDialog('Team folder')
-    fireEvent.change(await screen.findByRole('combobox', { name: 'Access role for chatllm' }), {
-      target: { value: 'editor' },
-    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Access role for chatllm' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
 
     await waitFor(() =>
       expect(grant).toHaveBeenCalledWith(['host:1st:mcp-host/chatllm'], ['read', 'write'], true)
@@ -1946,7 +1948,7 @@ describe('FilesPage', () => {
     await openManageDialog('Team folder')
 
     const shareRow = await screen.findByTestId('gfs-access-row-share-share-1')
-    expect(shareRow.textContent).toContain('Includes contents')
+    expect(shareRow.textContent).not.toContain('Includes contents')
     fireEvent.click(screen.getByRole('button', { name: 'Revoke shared access for user-9' }))
 
     await waitFor(() => expect(revokeShare).toHaveBeenCalledWith('share-1'))

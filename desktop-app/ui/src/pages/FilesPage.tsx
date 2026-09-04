@@ -257,7 +257,6 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const dragSessionRef = useRef(0)
   const manageReturnCrumbsRef = useRef<GfsCrumb[] | null>(null)
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
-  const replaceInputRef = useRef<HTMLInputElement | null>(null)
   const uploadNameReservationsRef = useRef(new Map<string, Set<string>>())
   const queryClient = useQueryClient()
   const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen })
@@ -1627,21 +1626,16 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                             }
                           : undefined
                       }
+                      onReplace={
+                        currentIsFile && canWriteCurrent
+                          ? file => void handleReplaceCurrentFile(file)
+                          : undefined
+                      }
                     />
                   </span>
                 )}
               </span>
               <span className="da-gfs-manage-dialog__top-actions">
-                {currentIsFile && canWriteCurrent ? (
-                  <Button
-                    loading={ctrl.mutating}
-                    onClick={() => replaceInputRef.current?.click()}
-                    size="sm"
-                    variant="outline"
-                  >
-                    Replace file
-                  </Button>
-                ) : null}
                 <IconButton
                   autoFocus
                   label="Close share dialog"
@@ -1653,20 +1647,6 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                 </IconButton>
               </span>
             </header>
-
-            {currentIsFile && canWriteCurrent ? (
-              <input
-                aria-label="Replace file"
-                className="visually-hidden"
-                ref={replaceInputRef}
-                type="file"
-                onChange={event => {
-                  const file = event.currentTarget.files?.[0]
-                  event.currentTarget.value = ''
-                  void handleReplaceCurrentFile(file)
-                }}
-              />
-            ) : null}
 
             <div className="da-gfs-manage-dialog__body">
               {currentIsFolder && canWriteCurrent && createFolderOpen ? (

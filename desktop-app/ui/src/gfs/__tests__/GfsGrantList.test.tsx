@@ -44,7 +44,7 @@ function shareItem(overrides: Partial<GfsShareListItem>): GfsShareListItem {
 }
 
 describe('GfsGrantList', () => {
-  it('renders resolved subject labels, grouped roles, and the inherit badge', () => {
+  it('renders resolved subject labels, grouped roles, and revoke controls', () => {
     render(
       <GfsGrantList
         agents={agents}
@@ -64,13 +64,9 @@ describe('GfsGrantList', () => {
 
     const agentRow = screen.getByText('Chat LLM').closest('li')!
     expect(
-      (
-        within(agentRow).getByRole('combobox', {
-          name: 'Access role for Chat LLM',
-        }) as HTMLSelectElement
-      ).value
-    ).toBe('editor')
-    expect(within(agentRow).getByText('Includes contents')).toBeTruthy()
+      within(agentRow).getByRole('button', { name: 'Access role for Chat LLM' }).textContent
+    ).toContain('Editor')
+    expect(within(agentRow).queryByText('Includes contents')).toBeNull()
     expect(within(agentRow).getByText('X')).toBeTruthy()
     expect(
       within(agentRow).getByRole('button', { name: 'Revoke access for Chat LLM' }).className
@@ -78,12 +74,8 @@ describe('GfsGrantList', () => {
 
     const userRow = screen.getByText('Test Two').closest('li')!
     expect(
-      (
-        within(userRow).getByRole('combobox', {
-          name: 'Access role for Test Two',
-        }) as HTMLSelectElement
-      ).value
-    ).toBe('read')
+      within(userRow).getByRole('button', { name: 'Access role for Test Two' }).textContent
+    ).toContain('Read')
     expect(within(userRow).queryByText('Includes contents')).toBeNull()
 
     // Unresolvable subject ids stay visible as raw ids — never hidden.
@@ -135,9 +127,8 @@ describe('GfsGrantList', () => {
       />
     )
 
-    fireEvent.change(screen.getByRole('combobox', { name: 'Access role for Test Two' }), {
-      target: { value: 'editor' },
-    })
+    fireEvent.click(screen.getByRole('button', { name: 'Access role for Test Two' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
     expect(onChangeRole).toHaveBeenCalledWith(item, 'Test Two', 'editor')
   })
 
@@ -158,7 +149,7 @@ describe('GfsGrantList', () => {
 
     const shareRow = screen.getByTestId('gfs-access-row-share-share-1')
     expect(within(shareRow).getByText('Share · team')).toBeTruthy()
-    expect(within(shareRow).getByText('Includes contents')).toBeTruthy()
+    expect(within(shareRow).queryByText('Includes contents')).toBeNull()
     fireEvent.click(
       within(shareRow).getByRole('button', { name: 'Revoke shared access for Core Team' })
     )

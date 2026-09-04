@@ -9,6 +9,7 @@ export type SelectionDropdownOption = {
 }
 
 export type SelectionDropdownProps = {
+  ariaLabel?: string
   className?: string
   id?: string
   options: SelectionDropdownOption[]
@@ -22,6 +23,7 @@ export type SelectionDropdownProps = {
   selectionLabel?: string
   multiple?: boolean
   inline?: boolean
+  searchable?: boolean
   invalid?: boolean
   showSelectedChips?: boolean
 }

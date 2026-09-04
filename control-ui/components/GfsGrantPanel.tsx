@@ -3,10 +3,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { GfsSubjectPicker } from '@components/GfsSubjectPicker'
+import { SelectionDropdown } from '@components/SelectionDropdown'
 import type { SelectionDropdownOption } from '@components/SelectionDropdown/types'
-import { IconFolder } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
-import { Button, CheckboxField, SelectInput } from '@components/ui'
+import { Button, CheckboxField } from '@components/ui'
 import { GFS_MAX_BULK_SUBJECTS } from '@constants/gfsGrantSubjects'
 import {
   type AdminUser,
@@ -62,6 +62,11 @@ const OPERATOR_OPTION: SelectionDropdownOption = {
   description: 'Intrinsic cluster operator',
   badge: 'Operator',
 }
+
+const ROLE_OPTIONS: SelectionDropdownOption[] = [
+  { value: 'read', label: 'Read' },
+  { value: 'editor', label: 'Editor' },
+]
 
 export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Element {
   const { showToast } = useToast()
@@ -355,16 +360,18 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
           value={selectedValues}
         />
         {subjectValid ? (
-          <SelectInput
-            aria-label="Access role for selected recipients"
+          <SelectionDropdown
+            ariaLabel="Access role for selected recipients"
             className="cu-gfs-role-select"
             disabled={actionPending}
-            onChange={event => setRole(event.currentTarget.value as AccessRole)}
-            value={role}
-          >
-            <option value="read">Read</option>
-            <option value="editor">Editor</option>
-          </SelectInput>
+            multiple={false}
+            onChange={next => setRole((next[0] ?? 'read') as AccessRole)}
+            options={ROLE_OPTIONS}
+            placeholder="Role"
+            searchable={false}
+            showSelectedChips={false}
+            value={[role]}
+          />
         ) : null}
       </div>
       {selectionError ? (
@@ -438,8 +445,6 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
             <ul className="cu-gfs-existing-access__list" aria-label="Resource access">
               {existingAccess.map(item => {
                 const label = subjectLabel(item)
-                const coversDescendants =
-                  item.kind === 'grant' ? item.inherit : item.includeDescendants
                 return (
                   <li
                     className="cu-gfs-existing-access__item"
@@ -455,30 +460,25 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                     </span>
                     <span className="cu-gfs-existing-access__meta">
                       {item.kind === 'grant' ? (
-                        <SelectInput
-                          aria-label={`Access role for ${label}`}
+                        <SelectionDropdown
+                          ariaLabel={`Access role for ${label}`}
                           className="cu-gfs-existing-access__role"
-                          compact
                           disabled={actionPending}
-                          onChange={event =>
-                            void updateAccessRole(item, event.currentTarget.value as AccessRole)
+                          multiple={false}
+                          onChange={next =>
+                            void updateAccessRole(item, (next[0] ?? 'read') as AccessRole)
                           }
-                          value={roleForPermissions(item.permissions)}
-                        >
-                          <option value="read">Read</option>
-                          <option value="editor">Editor</option>
-                        </SelectInput>
+                          options={ROLE_OPTIONS}
+                          placeholder="Role"
+                          searchable={false}
+                          showSelectedChips={false}
+                          value={[roleForPermissions(item.permissions)]}
+                        />
                       ) : (
                         <span className="cu-gfs-existing-access__role-label">
                           {roleForPermissions(item.permissions) === 'editor' ? 'Editor' : 'Read'}
                         </span>
                       )}
-                      {coversDescendants ? (
-                        <span className="cu-gfs-existing-access__inherit">
-                          <IconFolder />
-                          Includes contents
-                        </span>
-                      ) : null}
                     </span>
                     <Button
                       aria-label={`Remove ${item.kind} access for ${label}`}

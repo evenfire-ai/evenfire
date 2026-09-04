@@ -13476,11 +13476,24 @@ button.cu-gfs-tree__button:focus-visible,
   grid-template-columns: minmax(0, 1fr);
 }
 
-.cu-gfs-role-select.cu-input {
+.cu-gfs-role-select {
   min-width: 8.5rem;
+}
+
+.cu-gfs-role-select .cu-selection-dropdown__button {
   min-height: 2.875rem;
   background-color: var(--cu-bg-elevated);
   font-weight: 500;
+}
+
+.cu-gfs-role-select .cu-selection-dropdown__option,
+.cu-gfs-existing-access__role .cu-selection-dropdown__option {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.cu-gfs-role-select .cu-selection-dropdown__option-leading,
+.cu-gfs-existing-access__role .cu-selection-dropdown__option-leading {
+  display: none;
 }
 
 .cu-gfs-subject-picker,
@@ -13838,16 +13851,21 @@ button.cu-gfs-tree__button:focus-visible,
   gap: var(--cu-space-1);
 }
 
-.cu-gfs-existing-access__role.cu-input {
+.cu-gfs-existing-access__role {
   width: 7rem;
+  flex: 0 0 7rem;
+}
+
+.cu-gfs-existing-access__role .cu-selection-dropdown__button {
   min-height: 2rem;
   border-color: transparent;
   background-color: transparent;
+  color: var(--cu-text);
   font-weight: 500;
 }
 
-.cu-gfs-existing-access__role.cu-input:hover,
-.cu-gfs-existing-access__role.cu-input:focus {
+.cu-gfs-existing-access__role .cu-selection-dropdown__button:hover,
+.cu-gfs-existing-access__role .cu-selection-dropdown__button[aria-expanded='true'] {
   border-color: var(--cu-border);
   background-color: var(--cu-bg-elevated);
 }
@@ -13866,8 +13884,7 @@ button.cu-gfs-tree__button:focus-visible,
   gap: var(--cu-space-1);
 }
 
-.cu-gfs-existing-access__permission,
-.cu-gfs-existing-access__inherit {
+.cu-gfs-existing-access__permission {
   display: inline-flex;
   align-items: center;
   min-height: 1.25rem;
@@ -13884,19 +13901,6 @@ button.cu-gfs-tree__button:focus-visible,
   color: var(--cu-text-muted);
 }
 
-.cu-gfs-existing-access__inherit {
-  gap: calc(var(--cu-space-1) / 2);
-  border: 1px solid rgba(var(--cu-success-rgb), 0.24);
-  background: rgba(var(--cu-success-rgb), 0.055);
-  color: var(--cu-success);
-}
-
-.cu-gfs-existing-access__inherit svg {
-  width: var(--cu-space-2);
-  height: var(--cu-space-2);
-  flex: 0 0 var(--cu-space-2);
-}
-
 .cu-gfs-existing-access__item > .cu-btn {
   flex: 0 0 auto;
   white-space: nowrap;
@@ -13909,7 +13913,7 @@ button.cu-gfs-tree__button:focus-visible,
   border: 0;
   border-radius: 999px;
   background: transparent;
-  color: var(--cu-danger);
+  color: var(--cu-text);
   font-size: 0.9rem;
   font-weight: 700;
   line-height: 1;
@@ -13918,7 +13922,7 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-existing-access__revoke.cu-btn:hover:not(:disabled) {
   border-color: transparent;
   background: transparent;
-  color: var(--cu-danger-hover);
+  color: var(--cu-text);
 }
 
 .cu-gfs-existing-access__revoke.cu-btn:focus-visible {
