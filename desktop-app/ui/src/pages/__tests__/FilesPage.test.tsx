@@ -226,6 +226,45 @@ describe('FilesPage', () => {
     expect(screen.queryByRole('tab')).toBeNull()
   })
 
+  it('shows share and rename row actions when the resource permissions allow them', () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'report.txt',
+          kind: 'file',
+          path: '/report.txt',
+          version: 1,
+          bytes: 12,
+          permissions: ['read', 'write', 'manage_acl'],
+        },
+      ],
+    })
+
+    renderFilesPage()
+
+    const row = screen.getByRole('button', { name: 'Open report.txt' }).closest('.da-grid__row')
+    expect(row).not.toBeNull()
+    expect(within(row!).getByRole('button', { name: 'Share report.txt' })).toBeTruthy()
+    expect(within(row!).getByRole('button', { name: 'Download report.txt' })).toBeTruthy()
+    expect(within(row!).getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
+    expect(
+      Array.from(row!.querySelectorAll('.da-gfs-list__actions button')).map(button =>
+        button.getAttribute('aria-label')
+      )
+    ).toEqual([
+      'Share report.txt',
+      'Download report.txt',
+      'Rename report.txt',
+      'Options for report.txt',
+    ])
+  })
+
   it('orders directories before files, both alphabetically by name', async () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),

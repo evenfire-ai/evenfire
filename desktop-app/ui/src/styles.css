@@ -14127,7 +14127,7 @@ pre {
 .da-gfs-list__actions {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: var(--space-2);
   justify-self: end;
 }
@@ -15916,6 +15916,10 @@ pre {
   .da-gfs-drive__grid .da-grid__head,
   .da-gfs-drive__grid .da-grid__row {
     grid-template-columns: calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) 4.5rem;
+  }
+
+  .da-gfs-list__actions {
+    flex-wrap: wrap;
   }
 
   .da-gfs-drive__size-column,

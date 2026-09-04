@@ -22,6 +22,8 @@ import {
   IconConnectors,
   IconContexts,
   IconDownload,
+  IconEdit,
+  IconShare,
   IconUpload,
 } from '@components/SidebarNav/icons'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
@@ -1262,7 +1264,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
               className="da-grid da-gfs-drive__grid"
               style={{
                 '--da-grid-cols':
-                  'calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) minmax(4.5rem, auto) 4.5rem',
+                  'calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) minmax(4.5rem, auto) 9.5rem',
               }}
             >
               <div className="da-grid__head">
@@ -1374,6 +1376,16 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                         {formatSharedFileSize(resource.bytes)}
                       </span>
                       <span className="da-gfs-list__actions da-grid__cell da-grid__cell--right">
+                        {rowCanManage(resource) ? (
+                          <IconButton
+                            label={`Share ${resource.name || resource.drive}`}
+                            onClick={() => openManage(resource)}
+                            size="sm"
+                            variant="ghost"
+                          >
+                            <IconShare width={16} height={16} />
+                          </IconButton>
+                        ) : null}
                         {resource.kind === 'file' ? (
                           <IconButton
                             label={`Download ${resource.name}`}
@@ -1383,6 +1395,16 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                             disabled={resource.readable === false}
                           >
                             <IconDownload width={16} height={16} />
+                          </IconButton>
+                        ) : null}
+                        {rowCanRename(resource) ? (
+                          <IconButton
+                            label={`Rename ${resource.name || resource.drive}`}
+                            onClick={() => openRenameTarget(resource)}
+                            size="sm"
+                            variant="ghost"
+                          >
+                            <IconEdit width={16} height={16} />
                           </IconButton>
                         ) : null}
                         <GfsResourceMenu
