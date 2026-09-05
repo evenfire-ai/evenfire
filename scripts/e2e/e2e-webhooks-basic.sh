@@ -138,7 +138,9 @@ CREATED=1
 # ─── Phase 2: create signing-secret ─────────────────────────────────
 header "Phase 2 — provision signing-secret Secret"
 if kctl -n "$GATEWAY_NS" create secret generic "$SECRET_NAME" \
-    --from-literal="${SECRET_KEY}=${SECRET_VALUE}" --dry-run=client -o json | wrc_create_owned; then
+    --from-literal="${SECRET_KEY}=${SECRET_VALUE}" --dry-run=client -o json |
+    jq --arg recipe "$RECIPE_NAME" '.metadata.labels["clerum.io/owner-recipe"]=$recipe' |
+    wrc_create_owned; then
   ok "Secret $SECRET_NAME/$SECRET_KEY created in $GATEWAY_NS"
 else
   fail "Secret create failed"

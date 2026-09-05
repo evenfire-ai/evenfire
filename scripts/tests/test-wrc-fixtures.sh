@@ -230,4 +230,60 @@ must_reject wrc_reap_port_forward
 [[ -e "$TEST_ROOT/port-forward.pid" && "$WRC_PORT_FORWARD_PID" == 99999 ]]
 echo 'PASS: cleanup preserves records with a different PID or process start'
 
+# Execute the real webhook Secret preparation, not a copy of its jq expression.
+# The synthetic value only proves data stays out of the ownership ledger.
+sed -n '/^header "Phase 2 /,/^# .*Phase 3/p' \
+  "$ROOT/scripts/e2e/e2e-webhooks-basic.sh" | sed '$d' > "$TEST_ROOT/webhook-secret-phase.sh"
+
+check_webhook_secret_phase() (
+  local phase_file=$1
+  reset_fixture
+  GATEWAY_NS=sandbox-recipes
+  RECIPE_NAME=e2e-hook-contract123
+  SECRET_NAME=e2e-hook-secret-contract123
+  SECRET_KEY=signing-secret
+  SECRET_VALUE=unit-fixture-only
+  header() { :; }
+  ok() { :; }
+  fail() { printf '%s\n' "$*" >&2; }
+  kctl() {
+    case "$1" in
+      -n)
+        [[ "$*" == "-n $GATEWAY_NS create secret generic $SECRET_NAME --from-literal=$SECRET_KEY=$SECRET_VALUE --dry-run=client -o json" ]] || return 1
+        jq -n --arg ns "$GATEWAY_NS" --arg name "$SECRET_NAME" \
+          --arg key "$SECRET_KEY" --arg value "$SECRET_VALUE" \
+          '{apiVersion:"v1",kind:"Secret",metadata:{name:$name,namespace:$ns,
+            labels:{"existing-label":"preserved"}},data:{($key):($value|@base64)}}'
+        ;;
+      create)
+        [[ "$*" == 'create --request-timeout=30s -f - -o json' ]] || return 1
+        [[ ! -e "$TEST_ROOT/live.json" ]] || return 1
+        jq '.metadata.uid="created-uid"' > "$TEST_ROOT/live.json"
+        cat "$TEST_ROOT/live.json"
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  [[ -s "$phase_file" ]] || return 1
+  # shellcheck disable=SC1090
+  source "$phase_file" || return 1
+  if ! jq -e --arg recipe "$RECIPE_NAME" --arg run "$E2E_RUN_ID" \
+    '.kind=="Secret" and .metadata.namespace=="sandbox-recipes" and
+      .metadata.labels["clerum.io/owner-recipe"]==$recipe and
+      .metadata.labels["e2e.clerum.io/run"]==$run and
+      .metadata.labels["existing-label"]=="preserved"' "$TEST_ROOT/live.json" >/dev/null; then
+    echo 'FAIL: webhook signing Secret is not recipe-owned at creation' >&2
+    return 1
+  fi
+  jq -e --arg recipe "$RECIPE_NAME" '.metadata.uid=="created-uid" and
+    .metadata.labels["clerum.io/owner-recipe"]==$recipe and
+    (has("data")|not) and (has("stringData")|not)' "$WRC_FIXTURE_LEDGER" >/dev/null
+)
+
+check_webhook_secret_phase "$TEST_ROOT/webhook-secret-phase.sh"
+echo 'PASS: actual webhook Secret creation preserves recipe ownership and records metadata only'
+sed '/clerum.io\/owner-recipe/d' "$TEST_ROOT/webhook-secret-phase.sh" > "$TEST_ROOT/webhook-secret-without-owner.sh"
+must_reject check_webhook_secret_phase "$TEST_ROOT/webhook-secret-without-owner.sh"
+echo 'PASS: removing webhook Secret ownership from the actual producer fails the contract'
+
 echo 'WRC_FIXTURES_CONTRACT_PASS'
