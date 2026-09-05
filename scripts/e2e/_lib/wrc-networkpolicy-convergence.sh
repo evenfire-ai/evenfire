@@ -293,13 +293,16 @@ wrc_http_probe() {
     errors=$(mktemp) || exit 21
     trap '\''rm -f "$errors"'\'' EXIT HUP INT TERM
     printf "WRC_NP_BEGIN|%s\n" "$nonce"
-    response=$(printf "GET / HTTP/1.0\r\nHost: e2e\r\nConnection: close\r\n\r\n" | nc -w "$seconds" "$host" "$port" 2>"$errors")
+    # BusyBox nc is silent on connect timeout unless verbose mode is enabled.
+    # Keep stderr private and require a connection-specific diagnostic: neither
+    # a silent exit nor a timeout after connecting proves NetworkPolicy denial.
+    response=$(printf "GET / HTTP/1.0\r\nHost: e2e\r\nConnection: close\r\n\r\n" | nc -v -w "$seconds" "$host" "$port" 2>"$errors")
     status=$?
     if [ "$status" -eq 0 ] && printf "%s" "$response" | grep -Eq "^HTTP/1\.[01] [2345][0-9][0-9]"; then
       printf "WRC_NP_END|%s|http|" "$nonce"
       printf "%s" "$response" | base64 | tr -d "\n"
       printf "\n"
-    elif [ "$status" -ne 0 ] && [ -z "$response" ] && grep -Eqi "timed out|timeout" "$errors"; then
+    elif [ "$status" -eq 1 ] && [ -z "$response" ] && grep -Eqi "connect(ion)? .*timed out" "$errors"; then
       printf "WRC_NP_END|%s|timeout|\n" "$nonce"
     else
       exit 22

@@ -67,7 +67,13 @@ esac
 case "$PROBE_SCENARIO" in
   http) printf 'HTTP/1.0 200 OK\r\n\r\nfixture-business-signal' ;;
   http-403) printf 'HTTP/1.0 403 Forbidden\r\n\r\nfixture-auth-denied' ;;
-  timeout) printf 'nc: connect timed out\n' >&2; exit 1 ;;
+  # BusyBox 1.36.1 was observed to time out silently without -v. Exercise the
+  # real CLI seam: a fabricated timeout message used to hide this runtime bug.
+  timeout)
+    case " $* " in *' -v '*) printf 'nc: fixture (fixture:8080): Connection timed out\n' >&2 ;; esac
+    exit 1 ;;
+  silent-error) exit 1 ;;
+  read-timeout) printf 'nc: fixture (fixture:8080) open\nnc: net timeout\n' >&2; exit 1 ;;
   refused) printf 'nc: Connection refused\n' >&2; exit 1 ;;
   empty) exit 0 ;;
   malformed) printf 'not an HTTP response' ;;
@@ -153,7 +159,7 @@ expect_reject 'HTTP authorization rejection as NetworkPolicy denial' probe_block
 PROBE_SCENARIO=timeout
 expect_pass 'completed remote connection timeout as a network observation' probe_blocked
 expect_reject 'timeout as an allowed route' probe_allowed
-for PROBE_SCENARIO in empty malformed refused; do
+for PROBE_SCENARIO in empty malformed refused silent-error read-timeout; do
   expect_reject "remote $PROBE_SCENARIO response as NetworkPolicy denial" probe_blocked
 done
 PROBE_SCENARIO=http

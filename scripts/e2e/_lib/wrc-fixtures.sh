@@ -76,37 +76,69 @@ wrc_delete_owned() {
 }
 
 wrc_capture_recipe_children() {
-  local ns=$1 name=$2 uid=$3 target objects
+  local ns=$1 name=$2 uid=$3 target objects parent owned candidates='[]' selected
+  owned="$(jq -sc --arg ns "$ns" --arg name "$name" --arg uid "$uid" '
+    [.[] | select(.kind=="WorkflowRecipe" and .metadata.namespace==$ns
+      and .metadata.name==$name and .metadata.uid==$uid)] | last // empty' "$WRC_FIXTURE_LEDGER")" || return 1
+  [[ -n "$owned" ]] || return 1
+  parent="$(kctl get workflowrecipe "$name" -n "$ns" --ignore-not-found --request-timeout=30s -o json)" || return 1
+  # An absent parent cannot authorize new label-based discovery. Its previously
+  # recorded children can still be deleted by their immutable UID on a retry.
+  [[ -n "$parent" ]] || return 0
+  jq -e --argjson owned "$owned" '.metadata.uid==$owned.metadata.uid and
+    ((.metadata.labels // {}) | contains($owned.metadata.labels))' <<< "$parent" >/dev/null || {
+      echo "Recipe ownership changed before child capture: $ns/$name" >&2; return 1;
+    }
   for target in "$ns" sandbox-ui; do
     objects="$(kctl get deployment,service,configmap,networkpolicy -n "$target" --request-timeout=30s -o json)" || return 1
     # Cross-namespace UI resources cannot have recipe ownerReferences. WRC's
     # complete recipe namespace/name labels bind those to our collision-free CR.
-    jq -c --arg uid "$uid" --arg ns "$ns" --arg name "$name" '.items[] |
+    selected="$(jq -c --arg uid "$uid" --arg ns "$ns" --arg name "$name" '[.items[] |
       select(any(.metadata.ownerReferences[]?; .uid==$uid) or
         (.metadata.labels["clerum.io/recipe-namespace"]==$ns and
          .metadata.labels["clerum.io/recipe-name"]==$name) or
         (.metadata.namespace==$ns and
          .metadata.labels["clerum.io/managed-by"]=="workflow-recipes" and
-         .metadata.labels["clerum.io/recipe"]==$name))' <<< "$objects" |
-      while IFS= read -r object; do printf '%s\n' "$object" | wrc_record_owned || return 1; done || return 1
+         .metadata.labels["clerum.io/recipe"]==$name))
+      | {apiVersion,kind,metadata:{name:.metadata.name,namespace:.metadata.namespace,
+          uid:.metadata.uid,labels:(.metadata.labels // {})}}]' <<< "$objects")" || return 1
+    candidates="$(jq -cn --argjson previous "$candidates" --argjson selected "$selected" '$previous + $selected')" || return 1
   done
+  # Keep discovery provisional until the same parent is observed after the
+  # inventory. Otherwise a replacement recipe could lend us its children's UIDs.
+  parent="$(kctl get workflowrecipe "$name" -n "$ns" --ignore-not-found --request-timeout=30s -o json)" || return 1
+  [[ -n "$parent" ]] && jq -e --argjson owned "$owned" '.metadata.uid==$owned.metadata.uid and
+    ((.metadata.labels // {}) | contains($owned.metadata.labels))' <<< "$parent" >/dev/null || {
+      echo "Recipe ownership changed during child capture: $ns/$name" >&2; return 1;
+    }
+  jq -c '.[]' <<< "$candidates" |
+    while IFS= read -r object; do printf '%s\n' "$object" | wrc_record_owned || return 1; done
 }
 
 wrc_cleanup_owned() {
-  local status=0 ns kind name uid
+  local status=0 ns kind name uid parents records
+  # Parse before process substitutions, so a truncated/corrupt ledger cannot
+  # look like an empty successful cleanup.
+  parents="$(jq -sc '[.[] | select(.kind=="WorkflowRecipe")]
+    | unique_by([.metadata.namespace,.metadata.name])' "$WRC_FIXTURE_LEDGER")" || return 1
   # Capture generated resources before deleting recipes, including the UI
   # namespace where Kubernetes cannot garbage-collect a cross-namespace owner.
   while IFS=$'\t' read -r ns name uid; do
     [[ -n "$name" ]] || continue
-    wrc_capture_recipe_children "$ns" "$name" "$uid" || status=1
-  done < <(jq -r 'select(.kind=="WorkflowRecipe") | [.metadata.namespace,.metadata.name,.metadata.uid]|@tsv' "$WRC_FIXTURE_LEDGER")
-  # Recipes first stops reconciliation from recreating children during cleanup.
+    wrc_capture_recipe_children "$ns" "$name" "$uid" || return 1
+  done < <(jq -r '.[] | [.metadata.namespace,.metadata.name,.metadata.uid]|@tsv' <<< "$parents")
+  # Every parent must be removed before any child cleanup. A failed parent
+  # ownership check or deletion must not be followed by destructive side effects.
+  while IFS=$'\t' read -r ns name; do
+    [[ -n "$name" ]] || continue
+    wrc_delete_owned "$ns" WorkflowRecipe "$name" || return 1
+  done < <(jq -r '.[] | [.metadata.namespace,.metadata.name]|@tsv' <<< "$parents")
+  records="$(jq -sc 'map(select(.kind!="WorkflowRecipe"))
+    | unique_by([.kind,.metadata.namespace,.metadata.name])' "$WRC_FIXTURE_LEDGER")" || return 1
   while IFS=$'\t' read -r ns kind name; do
     [[ -n "$name" ]] || continue
     wrc_delete_owned "$ns" "$kind" "$name" || status=1
-  done < <(jq -sr 'unique_by([.kind,.metadata.namespace,.metadata.name]) |
-    sort_by(if .kind=="WorkflowRecipe" then 0 else 1 end)[] |
-    [.metadata.namespace,.kind,.metadata.name]|@tsv' "$WRC_FIXTURE_LEDGER")
+  done < <(jq -r '.[] | [.metadata.namespace,.kind,.metadata.name]|@tsv' <<< "$records")
   return "$status"
 }
 

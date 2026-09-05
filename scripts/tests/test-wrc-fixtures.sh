@@ -28,6 +28,10 @@ kctl() {
       ;;
     get)
       [[ "$MODE" != read-error ]] || return 1
+      if [[ "$2" == workflowrecipe ]]; then
+        cat "$TEST_ROOT/parent.json"
+        return
+      fi
       if [[ "$2" == deployment,service,configmap,networkpolicy ]]; then
         cat "$TEST_ROOT/children.json"
         return
@@ -129,8 +133,10 @@ jq -n '{items:[
   {apiVersion:"networking.k8s.io/v1",kind:"NetworkPolicy",metadata:{name:"foreign",namespace:"sandbox-recipes",uid:"foreign1",labels:{"clerum.io/managed-by":"workflow-recipes","clerum.io/recipe":"another"}}},
   {apiVersion:"v1",kind:"Service",metadata:{name:"foreign-ns",namespace:"sandbox-ui",uid:"foreign2",labels:{"clerum.io/recipe-namespace":"other-namespace","clerum.io/recipe-name":"fixture"}}}
 ]}' > "$TEST_ROOT/children.json"
+jq -n '{apiVersion:"clerum.io/v1alpha1",kind:"WorkflowRecipe",metadata:{name:"fixture",namespace:"sandbox-recipes",uid:"recipe-uid",labels:{"e2e.clerum.io/run":"contract123"}}}' > "$TEST_ROOT/parent.json"
+wrc_record_owned < "$TEST_ROOT/parent.json"
 wrc_capture_recipe_children sandbox-recipes fixture recipe-uid
-jq -se 'map(.metadata.name)|unique|sort == ["cross-ns","owned","ownerless"]' "$WRC_FIXTURE_LEDGER" >/dev/null
+jq -se 'map(select(.kind!="WorkflowRecipe")|.metadata.name)|unique|sort == ["cross-ns","owned","ownerless"]' "$WRC_FIXTURE_LEDGER" >/dev/null
 echo 'PASS: generated ownerless/cross-namespace children captured without foreign resources'
 
 # Validate rejected IDs before any fixture directory or cluster operation.

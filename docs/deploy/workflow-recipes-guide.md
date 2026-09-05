@@ -388,7 +388,9 @@ Negative controls first prove reachability from the same probe with a narrow tem
 permission, remove only that permission, observe a remotely executed connection timeout,
 and prove reachability again. Complementary permissions isolate ingress from egress.
 An exec, authorization, missing-tool or malformed-response error fails the test instead
-of counting as a policy denial. Condition-based polling accommodates CNI propagation.
+of counting as a policy denial. Silent failures and read timeouts after a connection
+opens are also errors; only a connection-timeout diagnostic counts as denial.
+Condition-based polling accommodates CNI propagation.
 
 Every no-churn observation begins before the parent trigger. It requires the exact
 UID/generation completion receipt, every policy/family no-op witness, unchanged policy
@@ -398,7 +400,10 @@ resourceVersion does not change. Exact API-call counts are asserted separately i
 tests; the runtime logs are not a substitute for exhaustive Kubernetes audit accounting.
 
 Fixtures use unique run IDs, collision-safe creation, UID-preconditioned deletion and
-owned dynamic port-forwards. Cleanup never enrolls an existing sample by name, and a
+owned dynamic port-forwards. Generated children are enrolled only while the same owned
+parent UID is verified before and after discovery; parent absence permits cleanup of
+previously recorded child UIDs only. A failed parent deletion stops child cleanup.
+Cleanup never enrolls an existing sample by name, and a
 cleanup failure fails the suite. `E2E_KEEP_RESOURCES=1` explicitly retains run
 resources for inspection, while still stopping owned port-forwards.
 

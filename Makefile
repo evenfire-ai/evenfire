@@ -1108,6 +1108,7 @@ test-wrc-networkpolicy-contracts: ## Run hermetic WRC NetworkPolicy runner, prob
 	bash scripts/tests/test-wrc-networkpolicy-live-convergence-e2e.sh
 	bash scripts/tests/test-wrc-networkpolicy-probe-contract.sh
 	bash scripts/tests/test-wrc-fixtures.sh
+	bash scripts/tests/test-wrc-fixtures-parent-ownership.sh
 
 .PHONY: test-e2e-codex-subscription-network-boundary
 test-e2e-codex-subscription-network-boundary: ## Codex LLM proxy NetworkPolicy boundary (exit 3 before deploy)
